@@ -175,6 +175,224 @@ static double * ensure_double_scratch_buffer(double ** buffer, size_t * capacity
         : NULL;
 }
 
+static int ensure_histogram_match_scratch(dualiso_full20bit_scratch_t * scratch,
+                                          size_t pixel_count,
+                                          size_t sample_count,
+                                          size_t highlight_count)
+{
+    if (!scratch)
+    {
+        return 0;
+    }
+
+    if (scratch->histogram_match_dark
+        && scratch->histogram_match_bright
+        && scratch->histogram_match_tmp
+        && scratch->histogram_match_hi_dark
+        && scratch->histogram_match_hi_bright
+        && scratch->histogram_match_pixel_capacity >= pixel_count
+        && scratch->histogram_match_sample_capacity >= sample_count
+        && scratch->histogram_match_highlight_capacity >= highlight_count)
+    {
+        return 1;
+    }
+
+    int * next_dark = (int *)malloc(pixel_count * sizeof(int));
+    int * next_bright = (int *)malloc(pixel_count * sizeof(int));
+    int * next_tmp = (int *)malloc(sample_count * sizeof(int));
+    int * next_hi_dark = (int *)malloc(highlight_count * sizeof(int));
+    int * next_hi_bright = (int *)malloc(highlight_count * sizeof(int));
+
+    if (!next_dark || !next_bright || !next_tmp || !next_hi_dark || !next_hi_bright)
+    {
+        free(next_dark);
+        free(next_bright);
+        free(next_tmp);
+        free(next_hi_dark);
+        free(next_hi_bright);
+        return 0;
+    }
+
+    free(scratch->histogram_match_dark);
+    free(scratch->histogram_match_bright);
+    free(scratch->histogram_match_tmp);
+    free(scratch->histogram_match_hi_dark);
+    free(scratch->histogram_match_hi_bright);
+
+    scratch->histogram_match_dark = next_dark;
+    scratch->histogram_match_bright = next_bright;
+    scratch->histogram_match_tmp = next_tmp;
+    scratch->histogram_match_hi_dark = next_hi_dark;
+    scratch->histogram_match_hi_bright = next_hi_bright;
+    scratch->histogram_match_pixel_capacity = pixel_count;
+    scratch->histogram_match_sample_capacity = sample_count;
+    scratch->histogram_match_highlight_capacity = highlight_count;
+    return 1;
+}
+
+static void assign_amaze_plane_rows(float ** rows, float * storage, size_t row_count, size_t row_width)
+{
+    for (size_t i = 0; i < row_count; ++i)
+    {
+        rows[i] = storage + i * row_width;
+    }
+}
+
+static int ensure_amaze_interpolation_scratch(dualiso_full20bit_scratch_t * scratch,
+                                              size_t row_count,
+                                              size_t row_width,
+                                              size_t pixel_count,
+                                              size_t thread_count)
+{
+    if (!scratch)
+    {
+        return 0;
+    }
+
+    if (thread_count == 0)
+    {
+        thread_count = 1;
+    }
+
+    if (scratch->amaze_row_capacity < row_count
+        || scratch->amaze_row_width < row_width
+        || !scratch->amaze_squeezed
+        || !scratch->amaze_rawData_rows
+        || !scratch->amaze_red_rows
+        || !scratch->amaze_green_rows
+        || !scratch->amaze_blue_rows
+        || !scratch->amaze_rawData_storage
+        || !scratch->amaze_red_storage
+        || !scratch->amaze_green_storage
+        || !scratch->amaze_blue_storage)
+    {
+        const size_t plane_cell_count = row_count * row_width;
+        int * next_squeezed = (int *)malloc(row_count * sizeof(int));
+        float ** next_raw_rows = (float **)malloc(row_count * sizeof(float *));
+        float ** next_red_rows = (float **)malloc(row_count * sizeof(float *));
+        float ** next_green_rows = (float **)malloc(row_count * sizeof(float *));
+        float ** next_blue_rows = (float **)malloc(row_count * sizeof(float *));
+        float * next_raw_storage = (float *)malloc(plane_cell_count * sizeof(float));
+        float * next_red_storage = (float *)malloc(plane_cell_count * sizeof(float));
+        float * next_green_storage = (float *)malloc(plane_cell_count * sizeof(float));
+        float * next_blue_storage = (float *)malloc(plane_cell_count * sizeof(float));
+
+        if (!next_squeezed
+            || !next_raw_rows
+            || !next_red_rows
+            || !next_green_rows
+            || !next_blue_rows
+            || !next_raw_storage
+            || !next_red_storage
+            || !next_green_storage
+            || !next_blue_storage)
+        {
+            free(next_squeezed);
+            free(next_raw_rows);
+            free(next_red_rows);
+            free(next_green_rows);
+            free(next_blue_rows);
+            free(next_raw_storage);
+            free(next_red_storage);
+            free(next_green_storage);
+            free(next_blue_storage);
+            return 0;
+        }
+
+        assign_amaze_plane_rows(next_raw_rows, next_raw_storage, row_count, row_width);
+        assign_amaze_plane_rows(next_red_rows, next_red_storage, row_count, row_width);
+        assign_amaze_plane_rows(next_green_rows, next_green_storage, row_count, row_width);
+        assign_amaze_plane_rows(next_blue_rows, next_blue_storage, row_count, row_width);
+
+        free(scratch->amaze_squeezed);
+        free(scratch->amaze_rawData_rows);
+        free(scratch->amaze_red_rows);
+        free(scratch->amaze_green_rows);
+        free(scratch->amaze_blue_rows);
+        free(scratch->amaze_rawData_storage);
+        free(scratch->amaze_red_storage);
+        free(scratch->amaze_green_storage);
+        free(scratch->amaze_blue_storage);
+
+        scratch->amaze_squeezed = next_squeezed;
+        scratch->amaze_rawData_rows = next_raw_rows;
+        scratch->amaze_red_rows = next_red_rows;
+        scratch->amaze_green_rows = next_green_rows;
+        scratch->amaze_blue_rows = next_blue_rows;
+        scratch->amaze_rawData_storage = next_raw_storage;
+        scratch->amaze_red_storage = next_red_storage;
+        scratch->amaze_green_storage = next_green_storage;
+        scratch->amaze_blue_storage = next_blue_storage;
+        scratch->amaze_row_capacity = row_count;
+        scratch->amaze_row_width = row_width;
+    }
+
+    if (!ensure_reusable_scratch_buffer((void **)&scratch->amaze_gray,
+                                        &scratch->amaze_pixel_capacity,
+                                        pixel_count,
+                                        sizeof(uint32_t)))
+    {
+        return 0;
+    }
+
+    if (!ensure_reusable_scratch_buffer((void **)&scratch->amaze_edge_direction,
+                                        &scratch->amaze_pixel_capacity,
+                                        pixel_count,
+                                        sizeof(uint8_t)))
+    {
+        return 0;
+    }
+
+    if (scratch->amaze_thread_capacity < thread_count
+        || !scratch->amaze_startchunk_y
+        || !scratch->amaze_endchunk_y
+        || !scratch->amaze_thread_id
+        || !scratch->amaze_arguments)
+    {
+        int * next_startchunk_y = (int *)malloc(thread_count * sizeof(int));
+        int * next_endchunk_y = (int *)malloc(thread_count * sizeof(int));
+        pthread_t * next_thread_id = (pthread_t *)malloc(thread_count * sizeof(pthread_t));
+        amazeinfo_t * next_amaze_arguments = (amazeinfo_t *)malloc(thread_count * sizeof(amazeinfo_t));
+
+        if (!next_startchunk_y || !next_endchunk_y || !next_thread_id || !next_amaze_arguments)
+        {
+            free(next_startchunk_y);
+            free(next_endchunk_y);
+            free(next_thread_id);
+            free(next_amaze_arguments);
+            return 0;
+        }
+
+        free(scratch->amaze_startchunk_y);
+        free(scratch->amaze_endchunk_y);
+        free(scratch->amaze_thread_id);
+        free(scratch->amaze_arguments);
+
+        scratch->amaze_startchunk_y = next_startchunk_y;
+        scratch->amaze_endchunk_y = next_endchunk_y;
+        scratch->amaze_thread_id = next_thread_id;
+        scratch->amaze_arguments = next_amaze_arguments;
+        scratch->amaze_thread_capacity = thread_count;
+    }
+
+    return 1;
+}
+
+static uint16_t * ensure_alias_aux_scratch(dualiso_full20bit_scratch_t * scratch, size_t pixel_count)
+{
+    if (!scratch)
+    {
+        return NULL;
+    }
+
+    return ensure_reusable_scratch_buffer((void **)&scratch->alias_aux,
+                                          &scratch->alias_aux_capacity,
+                                          pixel_count,
+                                          sizeof(uint16_t))
+        ? scratch->alias_aux
+        : NULL;
+}
+
 void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
 {
     if (!scratch)
@@ -193,6 +411,27 @@ void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
     free(scratch->alias_map);
     free(scratch->over_aux);
     free(scratch->mix_curve);
+    free(scratch->histogram_match_dark);
+    free(scratch->histogram_match_bright);
+    free(scratch->histogram_match_tmp);
+    free(scratch->histogram_match_hi_dark);
+    free(scratch->histogram_match_hi_bright);
+    free(scratch->amaze_squeezed);
+    free(scratch->amaze_rawData_rows);
+    free(scratch->amaze_red_rows);
+    free(scratch->amaze_green_rows);
+    free(scratch->amaze_blue_rows);
+    free(scratch->amaze_rawData_storage);
+    free(scratch->amaze_red_storage);
+    free(scratch->amaze_green_storage);
+    free(scratch->amaze_blue_storage);
+    free(scratch->amaze_gray);
+    free(scratch->amaze_edge_direction);
+    free(scratch->amaze_startchunk_y);
+    free(scratch->amaze_endchunk_y);
+    free(scratch->amaze_thread_id);
+    free(scratch->amaze_arguments);
+    free(scratch->alias_aux);
     memset(scratch, 0, sizeof(*scratch));
 }
 
@@ -991,7 +1230,7 @@ static int _match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, 
     
     /* select highlights used to find the slope (ISO) */
     /* (98th percentile => up to 2% highlights) */
-    int hi_nmax = nmax/50;
+    int hi_nmax = MAX(nmax/50, 1);
     int hi_n = 0;
     int* hi_dark = malloc(hi_nmax * sizeof(hi_dark[0]));
     int* hi_bright = malloc(hi_nmax * sizeof(hi_bright[0]));
@@ -1093,7 +1332,13 @@ static int _match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, 
     return 1;
 }
 
-static void match_by_histogram(struct raw_info raw_info, uint32_t * raw_buffer_32, double * ev_correction, int * black_delta, int * white_darkened, int * is_bright)
+static void match_by_histogram(struct raw_info raw_info,
+                               uint32_t * raw_buffer_32,
+                               double * ev_correction,
+                               int * black_delta,
+                               int * white_darkened,
+                               int * is_bright,
+                               dualiso_full20bit_scratch_t * scratch)
 {
     /* guess ISO - find the factor and the offset for matching the bright and dark images */
     int black20 = raw_info.black_level;
@@ -1108,8 +1353,17 @@ static void match_by_histogram(struct raw_info raw_info, uint32_t * raw_buffer_3
     int y0 = raw_info.active_area.y1 + 2;
 
     /* quick interpolation for matching */
-    int* dark   = malloc(w * h * sizeof(dark[0]));
-    int* bright = malloc(w * h * sizeof(bright[0]));
+    const size_t pixel_count = (size_t)w * (size_t)h;
+    int nmax = (w+2) * (h+2) / 9;   /* downsample by 3x3 for speed */
+    int hi_nmax = nmax/50;
+
+    if (!ensure_histogram_match_scratch(scratch, pixel_count, (size_t)nmax, (size_t)hi_nmax))
+    {
+        return;
+    }
+
+    int * dark = scratch->histogram_match_dark;
+    int * bright = scratch->histogram_match_bright;
     memset(dark, 0, w * h * sizeof(dark[0]));
     memset(bright, 0, w * h * sizeof(bright[0]));
 
@@ -1143,8 +1397,7 @@ static void match_by_histogram(struct raw_info raw_info, uint32_t * raw_buffer_3
      * - low percentiles are likely affected by noise (this process is essentially a histogram matching)
      * - as ad-hoc as it looks, it's the only method that passed all the test samples so far.
      */
-    int nmax = (w+2) * (h+2) / 9;   /* downsample by 3x3 for speed */
-    int * tmp = malloc(nmax * sizeof(tmp[0]));
+    int * tmp = scratch->histogram_match_tmp;
 
     /* median_bright */
     int n = 0;
@@ -1179,10 +1432,9 @@ static void match_by_histogram(struct raw_info raw_info, uint32_t * raw_buffer_3
 
     /* select highlights used to find the slope (ISO) */
     /* (98th percentile => up to 2% highlights) */
-    int hi_nmax = nmax/50;
     int hi_n = 0;
-    int* hi_dark = malloc(hi_nmax * sizeof(hi_dark[0]));
-    int* hi_bright = malloc(hi_nmax * sizeof(hi_bright[0]));
+    int* hi_dark = scratch->histogram_match_hi_dark;
+    int* hi_bright = scratch->histogram_match_hi_bright;
 
     for (int y = y0; y < h-2; y += 3)
     {
@@ -1227,17 +1479,21 @@ static void match_by_histogram(struct raw_info raw_info, uint32_t * raw_buffer_3
         }
     }
 
-    free(hi_dark); hi_dark = 0;
-    free(hi_bright); hi_bright = 0;
-    free(tmp); tmp = 0;
-    free(dark);
-    free(bright);
-
     *ev_correction = log2(1/a);
     *black_delta = b * 16;
 }
 
-static int match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, int dark_frame, int iso1, int iso2, int * auto_correction, double * ev_correction, int * black_delta, int * white_darkened, int * is_bright)
+static int match_exposures(struct raw_info raw_info,
+                           uint32_t * raw_buffer_32,
+                           int dark_frame,
+                           int iso1,
+                           int iso2,
+                           int * auto_correction,
+                           double * ev_correction,
+                           int * black_delta,
+                           int * white_darkened,
+                           int * is_bright,
+                           dualiso_full20bit_scratch_t * scratch)
 {
     int black = raw_info.black_level;
     int white = MIN(raw_info.white_level, *white_darkened);
@@ -1270,7 +1526,7 @@ static int match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, i
     }
     else if (*auto_correction == -2)
     {
-        match_by_histogram(raw_info, raw_buffer_32, &_ev_correction, &_black_delta, white_darkened, is_bright);
+        match_by_histogram(raw_info, raw_buffer_32, &_ev_correction, &_black_delta, white_darkened, is_bright, scratch);
     }
 
     if (*ev_correction != 1)
@@ -1471,29 +1727,33 @@ static void* demosaic_wrapper(void* arg) {
     return NULL;
 }
 
-static inline void amaze_interpolate(struct raw_info raw_info, uint32_t * raw_buffer_32, uint32_t* dark, uint32_t* bright, int black, int white, int white_darkened, int * is_bright, int threads)
+static inline void amaze_interpolate(struct raw_info raw_info,
+                                     uint32_t * raw_buffer_32,
+                                     uint32_t* dark,
+                                     uint32_t* bright,
+                                     int black,
+                                     int white,
+                                     int white_darkened,
+                                     int * is_bright,
+                                     int threads,
+                                     dualiso_full20bit_scratch_t * scratch)
 {
     int w = raw_info.width;
     int h = raw_info.height;
-    
-    int* squeezed = malloc(h * sizeof(int));
-    memset(squeezed, 0, h * sizeof(int));
-    
-    float** rawData = malloc(h * sizeof(rawData[0]));
-    float** red     = malloc(h * sizeof(red[0]));
-    float** green   = malloc(h * sizeof(green[0]));
-    float** blue    = malloc(h * sizeof(blue[0]));
-    
-    #pragma omp parallel for
-    for (int i = 0; i < h; i++)
+    int wx = w + 16;
+
+    if (!ensure_amaze_interpolation_scratch(scratch, (size_t)h, (size_t)wx, (size_t)w * (size_t)h, (size_t)threads))
     {
-        int wx = w + 16;
-        rawData[i] =   malloc(wx * sizeof(rawData[0][0]));
-        memset(rawData[i], 0, wx * sizeof(rawData[0][0]));
-        red[i]     = malloc(wx * sizeof(red[0][0]));
-        green[i]   = malloc(wx * sizeof(green[0][0]));
-        blue[i]    = malloc(wx * sizeof(blue[0][0]));
+        return;
     }
+
+    int* squeezed = scratch->amaze_squeezed;
+    float** rawData = scratch->amaze_rawData_rows;
+    float** red = scratch->amaze_red_rows;
+    float** green = scratch->amaze_green_rows;
+    float** blue = scratch->amaze_blue_rows;
+    memset(squeezed, 0, h * sizeof(int));
+    memset(scratch->amaze_rawData_storage, 0, (size_t)h * (size_t)wx * sizeof(float));
     
     /* squeeze the dark image by deleting fields from the bright exposure */
     int yh = -1;
@@ -1547,8 +1807,8 @@ static inline void amaze_interpolate(struct raw_info raw_info, uint32_t * raw_bu
     }
 
     // Multithreaded debayer
-    int* startchunk_y = malloc(threads * sizeof(int));
-    int* endchunk_y = malloc(threads * sizeof(int));
+    int* startchunk_y = scratch->amaze_startchunk_y;
+    int* endchunk_y = scratch->amaze_endchunk_y;
 
     int chunk_height = h / threads;
     chunk_height -= chunk_height % 2;
@@ -1565,8 +1825,8 @@ static inline void amaze_interpolate(struct raw_info raw_info, uint32_t * raw_bu
     }
     endchunk_y[threads-1] = h;
 
-    pthread_t* thread_id = malloc(threads * sizeof(pthread_t));
-    amazeinfo_t* amaze_arguments = malloc(threads * sizeof(amazeinfo_t));
+    pthread_t* thread_id = (pthread_t*)scratch->amaze_thread_id;
+    amazeinfo_t* amaze_arguments = (amazeinfo_t*)scratch->amaze_arguments;
 
     for (int thread = 0; thread < threads; ++thread) {
         amaze_arguments[thread] = (amazeinfo_t) {
@@ -1587,11 +1847,6 @@ static inline void amaze_interpolate(struct raw_info raw_info, uint32_t * raw_bu
         pthread_join(thread_id[thread], NULL);
     }
 
-    free(startchunk_y);
-    free(endchunk_y);
-    free(thread_id);
-    free(amaze_arguments);
-    
     /* undo green channel scaling and clamp the other channels */
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
@@ -1608,7 +1863,7 @@ static inline void amaze_interpolate(struct raw_info raw_info, uint32_t * raw_bu
 #endif
     //~ printf("Grayscale...\n");
     /* convert to grayscale and de-squeeze for easier processing */
-    uint32_t * gray = malloc(w * h * sizeof(gray[0]));
+    uint32_t * gray = scratch->amaze_gray;
 
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
@@ -1616,7 +1871,7 @@ static inline void amaze_interpolate(struct raw_info raw_info, uint32_t * raw_bu
             gray[x + y*w] = green[squeezed[y]][x]/2 + red[squeezed[y]][x]/4 + blue[squeezed[y]][x]/4;
     
     
-    uint8_t* edge_direction = malloc(w * h * sizeof(edge_direction[0]));
+    uint8_t* edge_direction = scratch->amaze_edge_direction;
     int d0 = COUNT(edge_directions)/2;
 
     #pragma omp parallel for collapse(2)
@@ -1774,22 +2029,6 @@ static inline void amaze_interpolate(struct raw_info raw_info, uint32_t * raw_bu
     }
     UNLOCK(ev2raw_mutex)
     
-    #pragma omp parallel for
-    for (int i = 0; i < h; i++)
-    {
-        free(rawData[i]);
-        free(red[i]);
-        free(green[i]);
-        free(blue[i]);
-    }
-    
-    free(squeezed); squeezed = 0;
-    free(rawData); rawData = 0;
-    free(red); red = 0;
-    free(green); green = 0;
-    free(blue); blue = 0;
-    free(gray); gray = 0;
-    free(edge_direction);
 }
 
 static inline void mean23_interpolate(struct raw_info raw_info, uint32_t * raw_buffer_32, uint32_t* dark, uint32_t* bright, int black, int white, int white_darkened, int * is_bright)
@@ -1945,7 +2184,15 @@ static inline void fullres_reconstruction(struct raw_info raw_info, uint32_t * f
     }
 }
 
-static inline void build_alias_map(struct raw_info raw_info, uint16_t* alias_map, uint32_t* fullres_smooth, uint32_t* halfres_smooth, uint32_t* bright, int dark_noise, int black, int * raw2ev)
+static inline void build_alias_map(struct raw_info raw_info,
+                                   uint16_t* alias_map,
+                                   uint32_t* fullres_smooth,
+                                   uint32_t* halfres_smooth,
+                                   uint32_t* bright,
+                                   int dark_noise,
+                                   int black,
+                                   int * raw2ev,
+                                   dualiso_full20bit_scratch_t * scratch)
 {
     if(!alias_map) return;
     
@@ -1956,7 +2203,11 @@ static inline void build_alias_map(struct raw_info raw_info, uint16_t* alias_map
 #ifndef STDOUT_SILENT
     printf("Building alias map...\n");
 #endif
-    uint16_t* alias_aux = malloc(w * h * sizeof(uint16_t));
+    uint16_t* alias_aux = ensure_alias_aux_scratch(scratch, (size_t)w * (size_t)h);
+    if (!alias_aux)
+    {
+        return;
+    }
     
     /* build the aliasing maps (where it's likely to get aliasing) */
     /* do this by comparing fullres and halfres images */
@@ -2055,7 +2306,6 @@ static inline void build_alias_map(struct raw_info raw_info, uint16_t* alias_map
         }
     }
     
-    free(alias_aux);
 }
 
 #define CHROMA_SMOOTH_TYPE uint32_t
@@ -2210,7 +2460,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
         }
         if(alias_map)
         {
-            build_alias_map(raw_info, alias_map, fullres_smooth, halfres_smooth, bright, dark_noise, black, raw2ev);
+            build_alias_map(raw_info, alias_map, fullres_smooth, halfres_smooth, bright, dark_noise, black, raw2ev, scratch);
         }
     }
     UNLOCK(ev2raw_mutex)
@@ -2499,7 +2749,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     //~ printf("Exposure matching...\n");
     /* estimate ISO difference between bright and dark exposures */
     int white_darkened = white_bright;
-    int expo_matched = match_exposures(raw_info, raw_buffer_32, dark_frame, iso1, iso2, auto_correction, ev_correction, black_delta, &white_darkened, is_bright);
+    int expo_matched = match_exposures(raw_info, raw_buffer_32, dark_frame, iso1, iso2, auto_correction, ev_correction, black_delta, &white_darkened, is_bright, scratch);
     double corr_ev = ABS(*ev_correction);
 
 #ifndef STDOUT_SILENT
@@ -2527,7 +2777,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 
     if (interp_method == 0)
     {
-        amaze_interpolate(raw_info, raw_buffer_32, dark, bright, black, white, white_darkened, is_bright, threads);
+        amaze_interpolate(raw_info, raw_buffer_32, dark, bright, black, white, white_darkened, is_bright, threads, scratch);
     }
     else
     {

@@ -225,6 +225,168 @@ TEST(DualIsoPipeline, HeadlessDualIsoFull20BitReusesOuterScratchAcrossFrames)
     ASSERT_TRUE(first_over_aux == scratch->over_aux);
 }
 
+TEST(DualIsoPipeline, HeadlessDualIsoHistogramMatchScratchReusesHelperBuffersAcrossFrames)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    fixture.receipt().setDualIso(1);
+    fixture.receipt().setDualIsoInterpolation(1);
+    fixture.receipt().setDualIsoAliasMap(0);
+    fixture.receipt().setDualIsoFrBlending(0);
+    fixture.receipt().setChromaSmooth(0);
+
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    fixture.video()->llrawproc->diso_auto_correction = -2;
+    fixture.video()->llrawproc->diso_ev_correction = 1;
+    fixture.video()->llrawproc->diso_black_delta = -1;
+
+    dualiso_full20bit_scratch_t * const scratch = &fixture.video()->llrawproc->diso_full20bit_scratch;
+    ASSERT_EQ(static_cast<size_t>(0), scratch->histogram_match_pixel_capacity);
+    ASSERT_EQ(static_cast<size_t>(0), scratch->histogram_match_sample_capacity);
+    ASSERT_EQ(static_cast<size_t>(0), scratch->histogram_match_highlight_capacity);
+    ASSERT_TRUE(scratch->histogram_match_dark == nullptr);
+    ASSERT_TRUE(scratch->histogram_match_bright == nullptr);
+    ASSERT_TRUE(scratch->histogram_match_tmp == nullptr);
+    ASSERT_TRUE(scratch->histogram_match_hi_dark == nullptr);
+    ASSERT_TRUE(scratch->histogram_match_hi_bright == nullptr);
+
+    const std::vector<uint16_t> frame0 = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame0.empty());
+
+    const size_t first_pixel_capacity = scratch->histogram_match_pixel_capacity;
+    const size_t first_sample_capacity = scratch->histogram_match_sample_capacity;
+    const size_t first_highlight_capacity = scratch->histogram_match_highlight_capacity;
+    int * const first_dark = scratch->histogram_match_dark;
+    int * const first_bright = scratch->histogram_match_bright;
+    int * const first_tmp = scratch->histogram_match_tmp;
+    int * const first_hi_dark = scratch->histogram_match_hi_dark;
+    int * const first_hi_bright = scratch->histogram_match_hi_bright;
+
+    ASSERT_TRUE(first_pixel_capacity >= static_cast<size_t>(fixture.width()) * static_cast<size_t>(fixture.height()));
+    ASSERT_TRUE(first_sample_capacity > 0);
+    ASSERT_TRUE(first_highlight_capacity > 0);
+    ASSERT_TRUE(first_dark != nullptr);
+    ASSERT_TRUE(first_bright != nullptr);
+    ASSERT_TRUE(first_tmp != nullptr);
+    ASSERT_TRUE(first_hi_dark != nullptr);
+    ASSERT_TRUE(first_hi_bright != nullptr);
+
+    const std::vector<uint16_t> frame1 = fixture.renderFrame16(1, 1);
+    ASSERT_TRUE(!frame1.empty());
+
+    ASSERT_EQ(first_pixel_capacity, scratch->histogram_match_pixel_capacity);
+    ASSERT_EQ(first_sample_capacity, scratch->histogram_match_sample_capacity);
+    ASSERT_EQ(first_highlight_capacity, scratch->histogram_match_highlight_capacity);
+    ASSERT_TRUE(first_dark == scratch->histogram_match_dark);
+    ASSERT_TRUE(first_bright == scratch->histogram_match_bright);
+    ASSERT_TRUE(first_tmp == scratch->histogram_match_tmp);
+    ASSERT_TRUE(first_hi_dark == scratch->histogram_match_hi_dark);
+    ASSERT_TRUE(first_hi_bright == scratch->histogram_match_hi_bright);
+}
+
+TEST(DualIsoPipeline, HeadlessDualIsoAmazeAliasMapScratchReusesHelperBuffersAcrossFrames)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    fixture.receipt().setDualIso(1);
+    fixture.receipt().setDualIsoInterpolation(0);
+    fixture.receipt().setDualIsoAliasMap(1);
+    fixture.receipt().setDualIsoFrBlending(1);
+    fixture.receipt().setChromaSmooth(0);
+
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    dualiso_full20bit_scratch_t * const scratch = &fixture.video()->llrawproc->diso_full20bit_scratch;
+    ASSERT_EQ(static_cast<size_t>(0), scratch->amaze_row_capacity);
+    ASSERT_EQ(static_cast<size_t>(0), scratch->amaze_row_width);
+    ASSERT_EQ(static_cast<size_t>(0), scratch->amaze_pixel_capacity);
+    ASSERT_EQ(static_cast<size_t>(0), scratch->amaze_thread_capacity);
+    ASSERT_EQ(static_cast<size_t>(0), scratch->alias_aux_capacity);
+    ASSERT_TRUE(scratch->amaze_squeezed == nullptr);
+    ASSERT_TRUE(scratch->amaze_rawData_rows == nullptr);
+    ASSERT_TRUE(scratch->amaze_rawData_storage == nullptr);
+    ASSERT_TRUE(scratch->amaze_gray == nullptr);
+    ASSERT_TRUE(scratch->amaze_edge_direction == nullptr);
+    ASSERT_TRUE(scratch->alias_aux == nullptr);
+
+    const std::vector<uint16_t> frame0 = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame0.empty());
+
+    const size_t first_row_capacity = scratch->amaze_row_capacity;
+    const size_t first_row_width = scratch->amaze_row_width;
+    const size_t first_pixel_capacity = scratch->amaze_pixel_capacity;
+    const size_t first_thread_capacity = scratch->amaze_thread_capacity;
+    const size_t first_alias_aux_capacity = scratch->alias_aux_capacity;
+    int * const first_squeezed = scratch->amaze_squeezed;
+    float ** const first_raw_rows = scratch->amaze_rawData_rows;
+    float ** const first_red_rows = scratch->amaze_red_rows;
+    float ** const first_green_rows = scratch->amaze_green_rows;
+    float ** const first_blue_rows = scratch->amaze_blue_rows;
+    float * const first_raw_storage = scratch->amaze_rawData_storage;
+    float * const first_red_storage = scratch->amaze_red_storage;
+    float * const first_green_storage = scratch->amaze_green_storage;
+    float * const first_blue_storage = scratch->amaze_blue_storage;
+    uint32_t * const first_gray = scratch->amaze_gray;
+    uint8_t * const first_edge_direction = scratch->amaze_edge_direction;
+    int * const first_startchunk_y = scratch->amaze_startchunk_y;
+    int * const first_endchunk_y = scratch->amaze_endchunk_y;
+    void * const first_thread_id = scratch->amaze_thread_id;
+    void * const first_arguments = scratch->amaze_arguments;
+    uint16_t * const first_alias_aux = scratch->alias_aux;
+
+    ASSERT_TRUE(first_row_capacity >= static_cast<size_t>(fixture.height()));
+    ASSERT_TRUE(first_row_width >= static_cast<size_t>(fixture.width() + 16));
+    ASSERT_TRUE(first_pixel_capacity >= static_cast<size_t>(fixture.width()) * static_cast<size_t>(fixture.height()));
+    ASSERT_TRUE(first_thread_capacity >= 1);
+    ASSERT_TRUE(first_alias_aux_capacity >= static_cast<size_t>(fixture.width()) * static_cast<size_t>(fixture.height()));
+    ASSERT_TRUE(first_squeezed != nullptr);
+    ASSERT_TRUE(first_raw_rows != nullptr);
+    ASSERT_TRUE(first_red_rows != nullptr);
+    ASSERT_TRUE(first_green_rows != nullptr);
+    ASSERT_TRUE(first_blue_rows != nullptr);
+    ASSERT_TRUE(first_raw_storage != nullptr);
+    ASSERT_TRUE(first_red_storage != nullptr);
+    ASSERT_TRUE(first_green_storage != nullptr);
+    ASSERT_TRUE(first_blue_storage != nullptr);
+    ASSERT_TRUE(first_gray != nullptr);
+    ASSERT_TRUE(first_edge_direction != nullptr);
+    ASSERT_TRUE(first_startchunk_y != nullptr);
+    ASSERT_TRUE(first_endchunk_y != nullptr);
+    ASSERT_TRUE(first_thread_id != nullptr);
+    ASSERT_TRUE(first_arguments != nullptr);
+    ASSERT_TRUE(first_alias_aux != nullptr);
+
+    const std::vector<uint16_t> frame1 = fixture.renderFrame16(1, 1);
+    ASSERT_TRUE(!frame1.empty());
+
+    ASSERT_EQ(first_row_capacity, scratch->amaze_row_capacity);
+    ASSERT_EQ(first_row_width, scratch->amaze_row_width);
+    ASSERT_EQ(first_pixel_capacity, scratch->amaze_pixel_capacity);
+    ASSERT_EQ(first_thread_capacity, scratch->amaze_thread_capacity);
+    ASSERT_EQ(first_alias_aux_capacity, scratch->alias_aux_capacity);
+    ASSERT_TRUE(first_squeezed == scratch->amaze_squeezed);
+    ASSERT_TRUE(first_raw_rows == scratch->amaze_rawData_rows);
+    ASSERT_TRUE(first_red_rows == scratch->amaze_red_rows);
+    ASSERT_TRUE(first_green_rows == scratch->amaze_green_rows);
+    ASSERT_TRUE(first_blue_rows == scratch->amaze_blue_rows);
+    ASSERT_TRUE(first_raw_storage == scratch->amaze_rawData_storage);
+    ASSERT_TRUE(first_red_storage == scratch->amaze_red_storage);
+    ASSERT_TRUE(first_green_storage == scratch->amaze_green_storage);
+    ASSERT_TRUE(first_blue_storage == scratch->amaze_blue_storage);
+    ASSERT_TRUE(first_gray == scratch->amaze_gray);
+    ASSERT_TRUE(first_edge_direction == scratch->amaze_edge_direction);
+    ASSERT_TRUE(first_startchunk_y == scratch->amaze_startchunk_y);
+    ASSERT_TRUE(first_endchunk_y == scratch->amaze_endchunk_y);
+    ASSERT_TRUE(first_thread_id == scratch->amaze_thread_id);
+    ASSERT_TRUE(first_arguments == scratch->amaze_arguments);
+    ASSERT_TRUE(first_alias_aux == scratch->alias_aux);
+}
+
 TEST(DualIsoPipeline, HeadlessDualIsoSolvedAutoMatchStateStaysStableAcrossFrames)
 {
     MlvPipelineFixture fixture;

@@ -23,6 +23,7 @@
 #define _dualiso_h
 
 #include <sys/types.h>
+#include <stdint.h>
 #include "../raw.h"
 
 typedef struct
@@ -48,6 +49,38 @@ typedef struct
     double * mix_curve;
     size_t pixel_capacity;
     size_t mix_curve_capacity;
+
+    int * histogram_match_dark;
+    int * histogram_match_bright;
+    int * histogram_match_tmp;
+    int * histogram_match_hi_dark;
+    int * histogram_match_hi_bright;
+    size_t histogram_match_pixel_capacity;
+    size_t histogram_match_sample_capacity;
+    size_t histogram_match_highlight_capacity;
+
+    int * amaze_squeezed;
+    float ** amaze_rawData_rows;
+    float ** amaze_red_rows;
+    float ** amaze_green_rows;
+    float ** amaze_blue_rows;
+    float * amaze_rawData_storage;
+    float * amaze_red_storage;
+    float * amaze_green_storage;
+    float * amaze_blue_storage;
+    uint32_t * amaze_gray;
+    uint8_t * amaze_edge_direction;
+    int * amaze_startchunk_y;
+    int * amaze_endchunk_y;
+    void * amaze_thread_id;
+    void * amaze_arguments;
+    size_t amaze_row_capacity;
+    size_t amaze_row_width;
+    size_t amaze_pixel_capacity;
+    size_t amaze_thread_capacity;
+
+    uint16_t * alias_aux;
+    size_t alias_aux_capacity;
 } dualiso_full20bit_scratch_t;
 
 int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch);
