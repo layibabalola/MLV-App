@@ -7,5 +7,7 @@
   "scopeslabel.raw_histogram": "565903fcc702375ad911ba2af00074c24e3d7edd5bea66bec133ad9cada5fdf5",
   "scopeslabel.raw_waveform": "54c995f20e7fd2509497ea1d86afe2f1ca8d6aae9977d7b0f50fd636233953b9",
   "scopeslabel.raw_parade": "c12a9617892424201b84df5ae71e5f3f639136c349e5daf4dff484969b4fb0e0",
-  "scopeslabel.raw_vectorscope": "c3e689b41b9905a2f70e90d626a2a9756d7cd980678db715b978e9c4ea019469"
+  "scopeslabel.raw_vectorscope": "c3e689b41b9905a2f70e90d626a2a9756d7cd980678db715b978e9c4ea019469",
+  "scopeslabel.raw_waveform.signature": "cce64076a8452233c6011c31166f1514284c94fe5430d8637235553017239f38",
+  "scopeslabel.raw_parade.signature": "cce64076a8452233c6011c31166f1514284c94fe5430d8637235553017239f38"
 }

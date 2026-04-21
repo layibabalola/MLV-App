@@ -19,7 +19,6 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QPalette>
-#include <QPainter>
 #include <QtTest/QtTest>
 
 #include <cstring>
