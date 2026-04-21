@@ -52,6 +52,21 @@ void CRBFilterPlain::reserveMemory(int max_width, int max_height, int channels)
     if(!(max_height >= 10 && max_height < 10000))return;
     if(!(channels >= 1 && channels <= 4))return;
 
+	if (m_left_pass_color
+        && m_left_pass_factor
+        && m_right_pass_color
+        && m_right_pass_factor
+        && m_down_pass_color
+        && m_down_pass_factor
+        && m_up_pass_color
+        && m_up_pass_factor
+        && m_reserve_channels == channels
+        && m_reserve_width >= max_width
+        && m_reserve_height >= max_height)
+    {
+        return;
+    }
+
 	releaseMemory();
 
 	m_reserve_width = max_width;
@@ -200,6 +215,26 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
     if(!(m_reserve_width >= width)) return;
     if(!(m_reserve_height >= height)) return;
 
+    const int width_height = width * height;
+    const int width_height_channel = width_height * channel;
+
+#pragma omp parallel for
+    for( int i = 0; i < width_height_channel; i++ )
+    {
+        m_left_pass_color[i] = 0.f;
+        m_right_pass_color[i] = 0.f;
+        m_down_pass_color[i] = 0.f;
+        m_up_pass_color[i] = 0.f;
+    }
+#pragma omp parallel for
+    for( int i = 0; i < width_height; i++ )
+    {
+        m_left_pass_factor[i] = 0.f;
+        m_right_pass_factor[i] = 0.f;
+        m_down_pass_factor[i] = 0.f;
+        m_up_pass_factor[i] = 0.f;
+    }
+
     // compute a lookup table
     float alpha_f = static_cast<float>(exp(-sqrt(2.0) / (sigma_spatial * QX_DEF_U16_MAX)));
     float inv_alpha_f = 1.f - alpha_f;
@@ -313,7 +348,6 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
         const float* right_pass_color = m_right_pass_color;
         const float* right_pass_factor = m_right_pass_factor;
 
-        int width_height = width * height;
 #pragma omp parallel for
         for (int i = 0; i < width_height; i++)
         {
@@ -434,7 +468,6 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
         const float* up_pass_color = m_up_pass_color;
         const float* up_pass_factor = m_up_pass_factor;
 
-        int width_height = width * height;
 #pragma omp parallel for
         for (int i = 0; i < width_height; i++)
         {

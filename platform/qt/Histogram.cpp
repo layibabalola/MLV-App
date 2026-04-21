@@ -8,6 +8,7 @@
 #include "Histogram.h"
 #include "math.h"
 #include <QPainter>
+#include <algorithm>
 
 #define HEIGHT 140
 #define WIDTH 511 //511 = 8bit * 2 - 1
@@ -31,14 +32,60 @@ QImage Histogram::getHistogramFromImg( QImage *img )
     uint32_t tableG[256] = {0};
     uint32_t tableB[256] = {0};
 
-    //Count
-    for( int y = 0; y < img->height(); y++ )
+    auto countRgb888 = [&]( const QImage &rgbImage )
     {
-        for( int x = 0; x < img->width(); x++ )
+        for( int y = 0; y < rgbImage.height(); y++ )
         {
-            tableR[ img->pixelColor( x, y ).red() ]++;
-            tableG[ img->pixelColor( x, y ).green() ]++;
-            tableB[ img->pixelColor( x, y ).blue() ]++;
+            const uint8_t *line = rgbImage.constScanLine( y );
+            for( int x = 0; x < rgbImage.width(); x++ )
+            {
+                tableR[line[0]]++;
+                tableG[line[1]]++;
+                tableB[line[2]]++;
+                line += 3;
+            }
+        }
+    };
+
+    switch( img->format() )
+    {
+        case QImage::Format_RGB888:
+            countRgb888( *img );
+            break;
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 14, 0 )
+        case QImage::Format_BGR888:
+            for( int y = 0; y < img->height(); y++ )
+            {
+                const uint8_t *line = img->constScanLine( y );
+                for( int x = 0; x < img->width(); x++ )
+                {
+                    tableR[line[2]]++;
+                    tableG[line[1]]++;
+                    tableB[line[0]]++;
+                    line += 3;
+                }
+            }
+            break;
+#endif
+        case QImage::Format_RGB32:
+        case QImage::Format_ARGB32:
+        case QImage::Format_ARGB32_Premultiplied:
+            for( int y = 0; y < img->height(); y++ )
+            {
+                const QRgb *line = reinterpret_cast<const QRgb *>( img->constScanLine( y ) );
+                for( int x = 0; x < img->width(); x++ )
+                {
+                    tableR[qRed( line[x] )]++;
+                    tableG[qGreen( line[x] )]++;
+                    tableB[qBlue( line[x] )]++;
+                }
+            }
+            break;
+        default:
+        {
+            const QImage rgbImage = img->convertToFormat( QImage::Format_RGB888 );
+            countRgb888( rgbImage );
+            break;
         }
     }
     //Highest Value
@@ -66,23 +113,21 @@ QImage Histogram::getHistogramFromImg( QImage *img )
         //"Real" points
         for( uint8_t y = 0; y < HEIGHT; y++ )
         {
-            QColor color = QColor( Qt::black );
-            if( tableR[x] >= ( uint32_t )( HEIGHT - y ) ) color.setRed( 255 );
-            if( tableG[x] >= ( uint32_t )( HEIGHT - y ) ) color.setGreen( 255 );
-            if( tableB[x] >= ( uint32_t )( HEIGHT - y ) ) color.setBlue( 255 );
-            m_pHistogram->setPixelColor( x * 2, y, color );
+            uint8_t *pixel = m_pHistogram->scanLine( y ) + ( x * 2 * 3 );
+            pixel[0] = ( tableR[x] >= ( uint32_t )( HEIGHT - y ) ) ? 255 : 0;
+            pixel[1] = ( tableG[x] >= ( uint32_t )( HEIGHT - y ) ) ? 255 : 0;
+            pixel[2] = ( tableB[x] >= ( uint32_t )( HEIGHT - y ) ) ? 255 : 0;
         }
 
         //Interpolation
-        if( x < 255 )
+        if( x > 0 && x < 255 )
         {
             for( uint8_t y = 0; y < HEIGHT; y++ )
             {
-                QColor color = QColor( Qt::black );
-                if( ( ( tableR[x] + tableR[x-1] ) >> 1 ) >= ( uint32_t )( HEIGHT - y ) ) color.setRed( 255 );
-                if( ( ( tableG[x] + tableG[x-1] ) >> 1 ) >= ( uint32_t )( HEIGHT - y ) ) color.setGreen( 255 );
-                if( ( ( tableB[x] + tableB[x-1] ) >> 1 ) >= ( uint32_t )( HEIGHT - y ) ) color.setBlue( 255 );
-                m_pHistogram->setPixelColor( ( x * 2 ) - 1, y, color );
+                uint8_t *pixel = m_pHistogram->scanLine( y ) + ( ( ( x * 2 ) - 1 ) * 3 );
+                pixel[0] = ( ( ( tableR[x] + tableR[x-1] ) >> 1 ) >= ( uint32_t )( HEIGHT - y ) ) ? 255 : 0;
+                pixel[1] = ( ( ( tableG[x] + tableG[x-1] ) >> 1 ) >= ( uint32_t )( HEIGHT - y ) ) ? 255 : 0;
+                pixel[2] = ( ( ( tableB[x] + tableB[x-1] ) >> 1 ) >= ( uint32_t )( HEIGHT - y ) ) ? 255 : 0;
             }
         }
     }

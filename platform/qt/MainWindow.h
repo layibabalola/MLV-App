@@ -17,6 +17,8 @@
 #include <QThreadPool>
 #include <QProcess>
 #include <QVector>
+#include <QImage>
+#include <QPixmap>
 #include <QGraphicsPixmapItem>
 #include <QCloseEvent>
 #include <QXmlStreamWriter>
@@ -444,6 +446,28 @@ private slots:
     void on_lineEditTransferFunction_textChanged(const QString &arg1);
 
 private:
+    struct DisplayPreviewCacheEntry
+    {
+        bool valid = false;
+        bool zoomFit = false;
+        bool betterResizer = false;
+        bool zebras = false;
+        bool gpuScaling = false;
+        uint64_t frameIndex = 0;
+        uint64_t signature = 0;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        int sceneWidth = 0;
+        int sceneHeight = 0;
+        int imageWidth = 0;
+        int imageHeight = 0;
+        int transformationMode = 0;
+        int devicePixelRatioMilli = 0;
+        uint8_t underOver = 0;
+        QImage image;
+        QPixmap pixmap;
+    };
+
     Ui::MainWindow *ui;
     InfoDialog *m_pInfoDialog;
     StatusDialog *m_pStatusDialog;
@@ -472,6 +496,7 @@ private:
     DoubleClickLabel *m_pTcLabel;
     bool m_tcModeDuration;
     uint8_t *m_pRawImage;
+    uint16_t *m_pRawImage16;
     uint32_t m_cacheSizeMB;
     uint8_t m_codecProfile;
     uint8_t m_codecOption;
@@ -503,7 +528,11 @@ private:
     bool m_zoomTo100Center;
     bool m_zoomModeChanged;
     bool m_playbackStopped;
+    bool m_dualIsoPlaybackPreviewActive;
     bool m_inClipDeleteProcess;
+    bool m_renderThreadUsing16BitPreview;
+    uint32_t m_displayPreviewCacheNextSlot;
+    DisplayPreviewCacheEntry m_displayPreviewCache[8];
     QString m_lastExportPath;
     QString m_lastSessionFileName;
     QString m_lastMlvOpenFileName;
@@ -536,6 +565,8 @@ private:
     int askToSaveCurrentSession( void );
     void openSession(QString fileNameSession );
     void saveSession( QString fileName );
+    void applyEffectiveDualIsoPlaybackSettings( void );
+    void invalidateDisplayPreviewCache( void );
     void readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings *receipt , int version);
     void writeXmlElementsToFile( QXmlStreamWriter *xmlWriter, ReceiptSettings *receipt );
     void deleteSession( void );
@@ -552,8 +583,9 @@ private:
     void setPreviewMode( void );
     double getFramerate( void );
     void paintAudioTrack( void );
-    uint8_t drawZebras( void );
+    uint8_t drawZebras( QImage *image );
     void drawFrameNumberLabel( void );
+    bool shouldUseGpu16PreviewPath( void ) const;
     void setToolButtonFocusPixels( int index );
     void setToolButtonFocusPixelsIntMethod( int index );
     void setToolButtonBadPixels( int index );

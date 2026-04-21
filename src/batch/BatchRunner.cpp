@@ -3,6 +3,7 @@
 #include "BatchLogger.h"
 #include "ReceiptLoader.h"
 #include "ReceiptApplier.h"
+#include "WorkerThreadCount.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -242,7 +243,7 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     processingObject_t *processingObject = initProcessingObject();
     setMlvProcessing( mlvObject, processingObject );
     disableMlvCaching( mlvObject );
-    setMlvCpuCores( mlvObject, QThread::idealThreadCount() );
+    setMlvCpuCores( mlvObject, mlvappEffectiveWorkerThreadCount() );
 
     uint32_t totalFrames = getMlvFrames( mlvObject );
     BatchLogger::out(QStringLiteral("[BATCH] FILE %1 frames=%2\n").arg( baseName ).arg( totalFrames ));

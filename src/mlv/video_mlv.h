@@ -93,6 +93,11 @@ void mark_mlv_uncached(mlvObject_t * video);
 /* Clears cache by freeing then reallocating (RAM usage down until frames written) */
 void clear_mlv_cache(mlvObject_t * video);
 
+/* Cache window helpers */
+int mlv_frame_in_cache_window(mlvObject_t * video, uint64_t frameIndex);
+uint64_t mlv_cache_slot_for_frame(mlvObject_t * video, uint64_t frameIndex);
+void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex);
+
 /* Returns 1 on success, or 0 if all are cached */
 int find_mlv_frame_to_cache(mlvObject_t * video, uint64_t *index); /* Outputs to *index */
 

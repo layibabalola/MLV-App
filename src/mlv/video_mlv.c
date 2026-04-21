@@ -15,6 +15,7 @@
 #endif
 
 #include "video_mlv.h"
+#include "../debug/StageTiming.h"
 #include "audio_mlv.h"
 
 #include "raw.h"
@@ -66,6 +67,493 @@ static uint64_t file_get_pos(FILE *stream)
 #else
 #define FMT_SIZE "%zu"
 #endif
+
+#define MLV_FNV1A_OFFSET_BASIS UINT64_C(14695981039346656037)
+#define MLV_FNV1A_PRIME UINT64_C(1099511628211)
+
+static uint64_t mlv_hash_bytes(uint64_t hash, const void * data, size_t size)
+{
+    const uint8_t * bytes = (const uint8_t *)data;
+    if (!bytes || !size)
+    {
+        return hash;
+    }
+
+    for (size_t i = 0; i < size; ++i)
+    {
+        hash ^= bytes[i];
+        hash *= MLV_FNV1A_PRIME;
+    }
+    return hash;
+}
+
+static uint64_t mlv_hash_c_string(uint64_t hash, const char * value)
+{
+    if (!value)
+    {
+        return mlv_hash_bytes(hash, "", 1);
+    }
+
+    return mlv_hash_bytes(hash, value, strlen(value) + 1);
+}
+
+static uint64_t mlv_hash_sampled_bytes(uint64_t hash, const void * data, size_t size)
+{
+    const uint8_t * bytes = (const uint8_t *)data;
+    const size_t sample_count = 64;
+    if (!bytes || !size)
+    {
+        return hash;
+    }
+
+    hash = mlv_hash_bytes(hash, &size, sizeof(size));
+    if (size <= sample_count)
+    {
+        return mlv_hash_bytes(hash, data, size);
+    }
+
+    for (size_t sample = 0; sample < sample_count; ++sample)
+    {
+        size_t offset = (sample * (size - 1)) / (sample_count - 1);
+        hash = mlv_hash_bytes(hash, bytes + offset, 1);
+    }
+
+    return hash;
+}
+
+static uint64_t mlv_hash_pixel_map(uint64_t hash, const pixel_map * map)
+{
+    if (!map)
+    {
+        return mlv_hash_bytes(hash, "", 1);
+    }
+
+    hash = mlv_hash_bytes(hash, &map->type, sizeof(map->type));
+    hash = mlv_hash_bytes(hash, &map->count, sizeof(map->count));
+    hash = mlv_hash_bytes(hash, &map->capacity, sizeof(map->capacity));
+    if (map->pixels && map->count)
+    {
+        hash = mlv_hash_bytes(hash, map->pixels, map->count * sizeof(pixel_xy));
+    }
+    return hash;
+}
+
+static uint64_t mlv_hash_filter_object(uint64_t hash, const filterObject_t * filter)
+{
+    if (!filter)
+    {
+        return mlv_hash_bytes(hash, "", 1);
+    }
+
+    hash = mlv_hash_bytes(hash, &filter->strength, sizeof(filter->strength));
+    hash = mlv_hash_bytes(hash, &filter->filter_option, sizeof(filter->filter_option));
+    hash = mlv_hash_bytes(hash, filter->processed, sizeof(filter->processed));
+    hash = mlv_hash_bytes(hash, filter->original, sizeof(filter->original));
+    return hash;
+}
+
+static uint64_t mlv_hash_lut(uint64_t hash, const lut_t * lut)
+{
+    if (!lut)
+    {
+        return mlv_hash_bytes(hash, "", 1);
+    }
+
+    hash = mlv_hash_bytes(hash, lut->title, sizeof(lut->title));
+    hash = mlv_hash_bytes(hash, &lut->dimension, sizeof(lut->dimension));
+    hash = mlv_hash_bytes(hash, lut->domain_min, sizeof(lut->domain_min));
+    hash = mlv_hash_bytes(hash, lut->domain_max, sizeof(lut->domain_max));
+    hash = mlv_hash_bytes(hash, &lut->is3d, sizeof(lut->is3d));
+    hash = mlv_hash_bytes(hash, &lut->intensity, sizeof(lut->intensity));
+
+    if (lut->cube && lut->dimension)
+    {
+        uint64_t cube_entries = lut->is3d
+            ? (uint64_t)lut->dimension * lut->dimension * lut->dimension * 3
+            : (uint64_t)lut->dimension * 3;
+        if (cube_entries <= (uint64_t)SIZE_MAX / sizeof(float))
+        {
+            hash = mlv_hash_sampled_bytes(hash, lut->cube, (size_t)cube_entries * sizeof(float));
+        }
+    }
+
+    return hash;
+}
+
+static uint64_t mlv_hash_llrawproc_state(uint64_t hash, const llrawprocObject_t * llrawproc)
+{
+    if (!llrawproc)
+    {
+        return mlv_hash_bytes(hash, "", 1);
+    }
+
+    hash = mlv_hash_bytes(hash, &llrawproc->fix_raw, sizeof(llrawproc->fix_raw));
+    hash = mlv_hash_bytes(hash, &llrawproc->vertical_stripes, sizeof(llrawproc->vertical_stripes));
+    hash = mlv_hash_bytes(hash, &llrawproc->compute_stripes, sizeof(llrawproc->compute_stripes));
+    hash = mlv_hash_bytes(hash, &llrawproc->focus_pixels, sizeof(llrawproc->focus_pixels));
+    hash = mlv_hash_bytes(hash, &llrawproc->fpi_method, sizeof(llrawproc->fpi_method));
+    hash = mlv_hash_bytes(hash, &llrawproc->fpm_status, sizeof(llrawproc->fpm_status));
+    hash = mlv_hash_bytes(hash, &llrawproc->bad_pixels, sizeof(llrawproc->bad_pixels));
+    hash = mlv_hash_bytes(hash, &llrawproc->bps_method, sizeof(llrawproc->bps_method));
+    hash = mlv_hash_bytes(hash, &llrawproc->bpi_method, sizeof(llrawproc->bpi_method));
+    hash = mlv_hash_bytes(hash, &llrawproc->bpm_status, sizeof(llrawproc->bpm_status));
+    hash = mlv_hash_bytes(hash, &llrawproc->chroma_smooth, sizeof(llrawproc->chroma_smooth));
+    hash = mlv_hash_bytes(hash, &llrawproc->pattern_noise, sizeof(llrawproc->pattern_noise));
+    hash = mlv_hash_bytes(hash, &llrawproc->deflicker_target, sizeof(llrawproc->deflicker_target));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_validity, sizeof(llrawproc->diso_validity));
+    hash = mlv_hash_bytes(hash, &llrawproc->dual_iso, sizeof(llrawproc->dual_iso));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso1, sizeof(llrawproc->diso1));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso2, sizeof(llrawproc->diso2));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_auto_correction, sizeof(llrawproc->diso_auto_correction));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_ev_correction, sizeof(llrawproc->diso_ev_correction));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_black_delta, sizeof(llrawproc->diso_black_delta));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_averaging, sizeof(llrawproc->diso_averaging));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_alias_map, sizeof(llrawproc->diso_alias_map));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_frblending, sizeof(llrawproc->diso_frblending));
+    hash = mlv_hash_bytes(hash, &llrawproc->dark_frame, sizeof(llrawproc->dark_frame));
+    hash = mlv_hash_bytes(hash, &llrawproc->dng_bit_depth, sizeof(llrawproc->dng_bit_depth));
+    hash = mlv_hash_bytes(hash, &llrawproc->dng_black_level, sizeof(llrawproc->dng_black_level));
+    hash = mlv_hash_bytes(hash, &llrawproc->dng_white_level, sizeof(llrawproc->dng_white_level));
+    hash = mlv_hash_c_string(hash, llrawproc->dark_frame_filename);
+    hash = mlv_hash_bytes(hash, &llrawproc->dark_frame_hdr, sizeof(llrawproc->dark_frame_hdr));
+    hash = mlv_hash_bytes(hash, &llrawproc->dark_frame_size, sizeof(llrawproc->dark_frame_size));
+    if (llrawproc->dark_frame_data && llrawproc->dark_frame_size)
+    {
+        hash = mlv_hash_bytes(hash, llrawproc->dark_frame_data, llrawproc->dark_frame_size);
+    }
+    hash = mlv_hash_pixel_map(hash, &llrawproc->focus_pixel_map);
+    hash = mlv_hash_pixel_map(hash, &llrawproc->bad_pixel_map);
+    return hash;
+}
+
+static uint64_t mlv_processed_frame_signature(mlvObject_t * video, uint64_t frameIndex)
+{
+    uint64_t hash = MLV_FNV1A_OFFSET_BASIS;
+    processingObject_t * processing = video ? video->processing : NULL;
+
+    hash = mlv_hash_bytes(hash, &frameIndex, sizeof(frameIndex));
+    if (!video)
+    {
+        return hash;
+    }
+
+    hash = mlv_hash_bytes(hash, &video->use_amaze, sizeof(video->use_amaze));
+    hash = mlv_hash_bytes(hash, &video->ca_red, sizeof(video->ca_red));
+    hash = mlv_hash_bytes(hash, &video->ca_blue, sizeof(video->ca_blue));
+    hash = mlv_hash_bytes(hash, &video->RAWI.raw_info.black_level, sizeof(video->RAWI.raw_info.black_level));
+    hash = mlv_hash_bytes(hash, &video->RAWI.raw_info.white_level, sizeof(video->RAWI.raw_info.white_level));
+    hash = mlv_hash_llrawproc_state(hash, video->llrawproc);
+
+    if (!processing)
+    {
+        return hash;
+    }
+
+    hash = mlv_hash_bytes(hash, &processing->exr_mode, sizeof(processing->exr_mode));
+    hash = mlv_hash_bytes(hash, &processing->AgX, sizeof(processing->AgX));
+    hash = mlv_hash_bytes(hash, &processing->filter_on, sizeof(processing->filter_on));
+    hash = mlv_hash_filter_object(hash, processing->filter);
+    hash = mlv_hash_bytes(hash, &processing->lut_on, sizeof(processing->lut_on));
+    hash = mlv_hash_lut(hash, processing->lut);
+    hash = mlv_hash_bytes(hash, &processing->wbFindActive, sizeof(processing->wbFindActive));
+    hash = mlv_hash_bytes(hash, &processing->wbR, sizeof(processing->wbR));
+    hash = mlv_hash_bytes(hash, &processing->wbG, sizeof(processing->wbG));
+    hash = mlv_hash_bytes(hash, &processing->wbB, sizeof(processing->wbB));
+    if (processing->image_profile)
+    {
+        hash = mlv_hash_bytes(hash, &processing->image_profile->gamma_power, sizeof(processing->image_profile->gamma_power));
+        hash = mlv_hash_bytes(hash, &processing->image_profile->tonemap_function, sizeof(processing->image_profile->tonemap_function));
+        hash = mlv_hash_bytes(hash, &processing->image_profile->allow_creative_adjustments, sizeof(processing->image_profile->allow_creative_adjustments));
+        hash = mlv_hash_bytes(hash, &processing->image_profile->colour_gamut, sizeof(processing->image_profile->colour_gamut));
+        hash = mlv_hash_c_string(hash, processing->image_profile->transfer_function);
+    }
+    else
+    {
+        hash = mlv_hash_bytes(hash, "", 1);
+    }
+    hash = mlv_hash_bytes(hash, &processing->black_level, sizeof(processing->black_level));
+    hash = mlv_hash_bytes(hash, &processing->white_level, sizeof(processing->white_level));
+    hash = mlv_hash_bytes(hash, &processing->highlight_reconstruction, sizeof(processing->highlight_reconstruction));
+    hash = mlv_hash_bytes(hash, &processing->highest_green, sizeof(processing->highest_green));
+    hash = mlv_hash_bytes(hash, &processing->highest_green_gradient, sizeof(processing->highest_green_gradient));
+    hash = mlv_hash_bytes(hash, &processing->highest_green_diso, sizeof(processing->highest_green_diso));
+    hash = mlv_hash_bytes(hash, &processing->highest_green_gradient_diso, sizeof(processing->highest_green_gradient_diso));
+    hash = mlv_hash_bytes(hash, processing->gcurve_y, sizeof(processing->gcurve_y));
+    hash = mlv_hash_bytes(hash, processing->gcurve_r, sizeof(processing->gcurve_r));
+    hash = mlv_hash_bytes(hash, processing->gcurve_g, sizeof(processing->gcurve_g));
+    hash = mlv_hash_bytes(hash, processing->gcurve_b, sizeof(processing->gcurve_b));
+    hash = mlv_hash_bytes(hash, processing->hue_vs_hue, sizeof(processing->hue_vs_hue));
+    hash = mlv_hash_bytes(hash, processing->hue_vs_saturation, sizeof(processing->hue_vs_saturation));
+    hash = mlv_hash_bytes(hash, processing->hue_vs_luma, sizeof(processing->hue_vs_luma));
+    hash = mlv_hash_bytes(hash, processing->luma_vs_saturation, sizeof(processing->luma_vs_saturation));
+    hash = mlv_hash_bytes(hash, &processing->hue_vs_hue_used, sizeof(processing->hue_vs_hue_used));
+    hash = mlv_hash_bytes(hash, &processing->hue_vs_saturation_used, sizeof(processing->hue_vs_saturation_used));
+    hash = mlv_hash_bytes(hash, &processing->hue_vs_luma_used, sizeof(processing->hue_vs_luma_used));
+    hash = mlv_hash_bytes(hash, &processing->luma_vs_saturation_used, sizeof(processing->luma_vs_saturation_used));
+    hash = mlv_hash_bytes(hash, &processing->toning_dry, sizeof(processing->toning_dry));
+    hash = mlv_hash_bytes(hash, processing->toning_wet, sizeof(processing->toning_wet));
+    hash = mlv_hash_bytes(hash, processing->cam_matrix, sizeof(processing->cam_matrix));
+    hash = mlv_hash_bytes(hash, processing->cam_matrix_A, sizeof(processing->cam_matrix_A));
+    hash = mlv_hash_bytes(hash, processing->proper_wb_matrix, sizeof(processing->proper_wb_matrix));
+    hash = mlv_hash_bytes(hash, processing->final_matrix, sizeof(processing->final_matrix));
+    hash = mlv_hash_bytes(hash, &processing->cs_zone.use_cs, sizeof(processing->cs_zone.use_cs));
+    hash = mlv_hash_bytes(hash, &processing->cs_zone.chroma_blur_radius, sizeof(processing->cs_zone.chroma_blur_radius));
+    hash = mlv_hash_bytes(hash, &processing->shadows_highlights.highlights, sizeof(processing->shadows_highlights.highlights));
+    hash = mlv_hash_bytes(hash, &processing->shadows_highlights.shadows, sizeof(processing->shadows_highlights.shadows));
+    hash = mlv_hash_bytes(hash, &processing->kelvin, sizeof(processing->kelvin));
+    hash = mlv_hash_bytes(hash, &processing->wb_tint, sizeof(processing->wb_tint));
+    hash = mlv_hash_bytes(hash, &processing->exposure_stops, sizeof(processing->exposure_stops));
+    hash = mlv_hash_bytes(hash, &processing->saturation, sizeof(processing->saturation));
+    hash = mlv_hash_bytes(hash, &processing->vibrance, sizeof(processing->vibrance));
+    hash = mlv_hash_bytes(hash, &processing->contrast, sizeof(processing->contrast));
+    hash = mlv_hash_bytes(hash, &processing->pivot, sizeof(processing->pivot));
+    hash = mlv_hash_bytes(hash, &processing->clarity, sizeof(processing->clarity));
+    hash = mlv_hash_bytes(hash, &processing->light_contrast_factor, sizeof(processing->light_contrast_factor));
+    hash = mlv_hash_bytes(hash, &processing->light_contrast_range, sizeof(processing->light_contrast_range));
+    hash = mlv_hash_bytes(hash, &processing->dark_contrast_factor, sizeof(processing->dark_contrast_factor));
+    hash = mlv_hash_bytes(hash, &processing->dark_contrast_range, sizeof(processing->dark_contrast_range));
+    hash = mlv_hash_bytes(hash, &processing->highlight_hue, sizeof(processing->highlight_hue));
+    hash = mlv_hash_bytes(hash, &processing->midtone_hue, sizeof(processing->midtone_hue));
+    hash = mlv_hash_bytes(hash, &processing->shadow_hue, sizeof(processing->shadow_hue));
+    hash = mlv_hash_bytes(hash, &processing->highlight_sat, sizeof(processing->highlight_sat));
+    hash = mlv_hash_bytes(hash, &processing->midtone_sat, sizeof(processing->midtone_sat));
+    hash = mlv_hash_bytes(hash, &processing->shadow_sat, sizeof(processing->shadow_sat));
+    hash = mlv_hash_bytes(hash, &processing->gamma_power, sizeof(processing->gamma_power));
+    hash = mlv_hash_bytes(hash, &processing->lighten, sizeof(processing->lighten));
+    hash = mlv_hash_bytes(hash, &processing->sharpen, sizeof(processing->sharpen));
+    hash = mlv_hash_bytes(hash, &processing->sharpen_bias, sizeof(processing->sharpen_bias));
+    hash = mlv_hash_bytes(hash, &processing->sh_masking, sizeof(processing->sh_masking));
+    hash = mlv_hash_bytes(hash, processing->wb_multipliers, sizeof(processing->wb_multipliers));
+    hash = mlv_hash_bytes(hash, &processing->transformation, sizeof(processing->transformation));
+    if (processing->dual_iso)
+    {
+        hash = mlv_hash_bytes(hash, processing->dual_iso, sizeof(*processing->dual_iso));
+    }
+    else
+    {
+        hash = mlv_hash_bytes(hash, "", 1);
+    }
+    hash = mlv_hash_bytes(hash, &processing->denoiserWindow, sizeof(processing->denoiserWindow));
+    hash = mlv_hash_bytes(hash, &processing->denoiserStrength, sizeof(processing->denoiserStrength));
+    hash = mlv_hash_bytes(hash, &processing->rbfDenoiserLuma, sizeof(processing->rbfDenoiserLuma));
+    hash = mlv_hash_bytes(hash, &processing->rbfDenoiserChroma, sizeof(processing->rbfDenoiserChroma));
+    hash = mlv_hash_bytes(hash, &processing->rbfDenoiserRange, sizeof(processing->rbfDenoiserRange));
+    hash = mlv_hash_bytes(hash, &processing->grainStrength, sizeof(processing->grainStrength));
+    hash = mlv_hash_bytes(hash, &processing->grainLumaWeight, sizeof(processing->grainLumaWeight));
+    hash = mlv_hash_bytes(hash, &processing->gradient_exposure_stops, sizeof(processing->gradient_exposure_stops));
+    hash = mlv_hash_bytes(hash, &processing->gradient_contrast, sizeof(processing->gradient_contrast));
+    hash = mlv_hash_bytes(hash, &processing->gradient_enable, sizeof(processing->gradient_enable));
+    if (processing->gradient_mask)
+    {
+        size_t mask_pixels = (size_t)getMlvWidth(video) * (size_t)getMlvHeight(video);
+        hash = mlv_hash_sampled_bytes(hash, processing->gradient_mask, mask_pixels * sizeof(uint16_t));
+    }
+    else
+    {
+        hash = mlv_hash_bytes(hash, "", 1);
+    }
+    hash = mlv_hash_bytes(hash, &processing->vignette_strength, sizeof(processing->vignette_strength));
+    if (processing->vignette_mask)
+    {
+        size_t mask_pixels = (size_t)getMlvWidth(video) * (size_t)getMlvHeight(video);
+        hash = mlv_hash_sampled_bytes(hash, processing->vignette_mask, mask_pixels * sizeof(float));
+    }
+    else
+    {
+        hash = mlv_hash_bytes(hash, "", 1);
+    }
+    hash = mlv_hash_bytes(hash, &processing->use_cam_matrix, sizeof(processing->use_cam_matrix));
+    hash = mlv_hash_bytes(hash, &processing->colour_gamut, sizeof(processing->colour_gamut));
+    hash = mlv_hash_bytes(hash, &processing->tonemap_function, sizeof(processing->tonemap_function));
+    hash = mlv_hash_bytes(hash, &processing->colour_space_tag, sizeof(processing->colour_space_tag));
+    hash = mlv_hash_bytes(hash, &processing->allow_creative_adjustments, sizeof(processing->allow_creative_adjustments));
+    hash = mlv_hash_bytes(hash, &processing->ca_desaturate, sizeof(processing->ca_desaturate));
+    hash = mlv_hash_bytes(hash, &processing->ca_radius, sizeof(processing->ca_radius));
+    hash = mlv_hash_bytes(hash, &processing->transfer_split, sizeof(processing->transfer_split));
+    hash = mlv_hash_bytes(hash, &processing->transfer_split_value, sizeof(processing->transfer_split_value));
+    hash = mlv_hash_c_string(hash, processing->transfer_function_string);
+    hash = mlv_hash_c_string(hash, processing->transfer_function_string_formatted);
+
+    return hash;
+}
+
+static int mlv_ensure_reusable_buffer(void ** buffer,
+                                      uint64_t * capacity_elements,
+                                      uint64_t required_elements,
+                                      size_t element_size)
+{
+    if (required_elements == 0)
+    {
+        return 1;
+    }
+
+    if (*buffer && (*capacity_elements >= required_elements))
+    {
+        return 1;
+    }
+
+    if (required_elements > ((uint64_t)SIZE_MAX / element_size))
+    {
+        return 0;
+    }
+
+    void * resized = realloc(*buffer, (size_t)required_elements * element_size);
+    if (!resized)
+    {
+        return 0;
+    }
+
+    *buffer = resized;
+    *capacity_elements = required_elements;
+    return 1;
+}
+
+static uint16_t * mlv_ensure_u16_buffer(uint16_t ** buffer, uint64_t * capacity_words, uint64_t required_words)
+{
+    if (!mlv_ensure_reusable_buffer((void **)buffer, capacity_words, required_words, sizeof(uint16_t)))
+    {
+        return NULL;
+    }
+    return *buffer;
+}
+
+static uint8_t * mlv_ensure_u8_buffer(uint8_t ** buffer, uint64_t * capacity_bytes, uint64_t required_bytes)
+{
+    if (!mlv_ensure_reusable_buffer((void **)buffer, capacity_bytes, required_bytes, sizeof(uint8_t)))
+    {
+        return NULL;
+    }
+    return *buffer;
+}
+
+static void mlv_reset_processed_frame_8bit_cache(mlvObject_t * video)
+{
+    video->current_processed_frame_8bit_active = 0;
+    video->current_processed_frame_8bit_signature = 0;
+    video->current_processed_frame_8bit = 0;
+    video->current_processed_frame_8bit_threads = 0;
+    video->processed_8bit_cache_next_slot = 0;
+    memset(video->processed_8bit_cache_active, 0, sizeof(video->processed_8bit_cache_active));
+    memset(video->processed_8bit_cache_frame, 0, sizeof(video->processed_8bit_cache_frame));
+    memset(video->processed_8bit_cache_threads, 0, sizeof(video->processed_8bit_cache_threads));
+    memset(video->processed_8bit_cache_signature, 0, sizeof(video->processed_8bit_cache_signature));
+}
+
+static uint8_t * mlv_processed_frame_8bit_cache_slot(mlvObject_t * video, uint32_t slot, uint64_t rgb_frame_size)
+{
+    if (!video->rgb_processed_current_frame_8bit
+        || slot >= MLV_PROCESSED_8BIT_CACHE_SLOTS)
+    {
+        return NULL;
+    }
+
+    uint64_t offset = (uint64_t)slot * rgb_frame_size;
+    if (rgb_frame_size != 0 && offset / rgb_frame_size != slot)
+    {
+        return NULL;
+    }
+    if (video->rgb_processed_current_frame_8bit_bytes < offset + rgb_frame_size)
+    {
+        return NULL;
+    }
+
+    return video->rgb_processed_current_frame_8bit + offset;
+}
+
+static int mlv_find_processed_frame_8bit_cache_slot(mlvObject_t * video,
+                                                    uint64_t frameIndex,
+                                                    int threads,
+                                                    uint64_t signature)
+{
+    for (uint32_t slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot)
+    {
+        if (video->processed_8bit_cache_active[slot]
+            && video->processed_8bit_cache_frame[slot] == frameIndex
+            && video->processed_8bit_cache_threads[slot] == threads
+            && video->processed_8bit_cache_signature[slot] == signature)
+        {
+            return (int)slot;
+        }
+    }
+
+    return -1;
+}
+
+static uint8_t * mlv_prepare_processed_frame_8bit_cache(mlvObject_t * video,
+                                                        uint64_t rgb_frame_size)
+{
+    uint64_t total_bytes = rgb_frame_size * MLV_PROCESSED_8BIT_CACHE_SLOTS;
+    if (rgb_frame_size != 0 && total_bytes / rgb_frame_size != MLV_PROCESSED_8BIT_CACHE_SLOTS)
+    {
+        mlv_reset_processed_frame_8bit_cache(video);
+        return NULL;
+    }
+
+    uint64_t previous_capacity = video->rgb_processed_current_frame_8bit_bytes;
+    uint8_t * cache = mlv_ensure_u8_buffer(&video->rgb_processed_current_frame_8bit,
+                                           &video->rgb_processed_current_frame_8bit_bytes,
+                                           total_bytes);
+    if (!cache)
+    {
+        mlv_reset_processed_frame_8bit_cache(video);
+        return NULL;
+    }
+
+    if (previous_capacity != video->rgb_processed_current_frame_8bit_bytes)
+    {
+        mlv_reset_processed_frame_8bit_cache(video);
+    }
+
+    return cache;
+}
+
+static void mlv_store_processed_frame_8bit_cache(mlvObject_t * video,
+                                                 uint64_t frameIndex,
+                                                 int threads,
+                                                 uint64_t signature,
+                                                 const uint8_t * frame_data,
+                                                 uint64_t rgb_frame_size)
+{
+    uint8_t * cache = mlv_prepare_processed_frame_8bit_cache(video, rgb_frame_size);
+    if (!cache)
+    {
+        return;
+    }
+
+    int slot = mlv_find_processed_frame_8bit_cache_slot(video, frameIndex, threads, signature);
+    if (slot < 0)
+    {
+        slot = (int)video->processed_8bit_cache_next_slot;
+        video->processed_8bit_cache_next_slot = (video->processed_8bit_cache_next_slot + 1) % MLV_PROCESSED_8BIT_CACHE_SLOTS;
+    }
+
+    uint8_t * slot_buffer = mlv_processed_frame_8bit_cache_slot(video, (uint32_t)slot, rgb_frame_size);
+    if (!slot_buffer)
+    {
+        mlv_reset_processed_frame_8bit_cache(video);
+        return;
+    }
+
+    memcpy(slot_buffer, frame_data, (size_t)rgb_frame_size);
+    video->processed_8bit_cache_active[slot] = 1;
+    video->processed_8bit_cache_frame[slot] = frameIndex;
+    video->processed_8bit_cache_threads[slot] = threads;
+    video->processed_8bit_cache_signature[slot] = signature;
+
+    video->current_processed_frame_8bit_active = 1;
+    video->current_processed_frame_8bit = frameIndex;
+    video->current_processed_frame_8bit_threads = threads;
+    video->current_processed_frame_8bit_signature = signature;
+}
+
+static float * mlv_ensure_float_buffer(float ** buffer, uint64_t * capacity_pixels, uint64_t required_pixels)
+{
+    if (!mlv_ensure_reusable_buffer((void **)buffer, capacity_pixels, required_pixels, sizeof(float)))
+    {
+        return NULL;
+    }
+    return *buffer;
+}
 
 static int seek_to_next_known_block(FILE * in_file)
 {
@@ -379,21 +867,38 @@ int getMlvRawFrameUint16(mlvObject_t * video, uint64_t frameIndex, uint16_t * un
  * Output image's pixels will be in range 0-65535 as if it is 16 bit integers */
 void getMlvRawFrameFloat(mlvObject_t * video, uint64_t frameIndex, float * outputFrame)
 {
+    const double total_start = mlv_stage_timing_now();
     int pixels_count = video->RAWI.xRes * video->RAWI.yRes;
+    pthread_mutex_lock(&video->cache_mutex);
 
     /* Memory buffer for decompressed or bit unpacked RAW data */
     size_t unpacked_frame_size = pixels_count * 2;
-    uint16_t * unpacked_frame = (uint16_t *)malloc( unpacked_frame_size );
-
-    if(getMlvRawFrameUint16(video, frameIndex, unpacked_frame))
+    uint16_t * unpacked_frame = mlv_ensure_u16_buffer(&video->raw_unpacked_temp_frame,
+                                                      &video->raw_unpacked_temp_frame_words,
+                                                      pixels_count);
+    if (!unpacked_frame)
     {
         memset(outputFrame, 0, pixels_count * sizeof(float));
-        free(unpacked_frame);
+        pthread_mutex_unlock(&video->cache_mutex);
+        mlv_stage_timing_note("raw_float_total", frameIndex, total_start);
         return;
     }
 
+    const double unpack_start = mlv_stage_timing_now();
+    if(getMlvRawFrameUint16(video, frameIndex, unpacked_frame))
+    {
+        memset(outputFrame, 0, pixels_count * sizeof(float));
+        pthread_mutex_unlock(&video->cache_mutex);
+        mlv_stage_timing_note("raw_uint16", frameIndex, unpack_start);
+        mlv_stage_timing_note("raw_float_total", frameIndex, total_start);
+        return;
+    }
+    mlv_stage_timing_note("raw_uint16", frameIndex, unpack_start);
+
     /* apply low level raw processing to the unpacked_frame */
+    const double llraw_start = mlv_stage_timing_now();
     applyLLRawProcObject(video, unpacked_frame, unpacked_frame_size);
+    mlv_stage_timing_note("llrawproc", frameIndex, llraw_start);
 
     /* high quality dualiso buffer consists of real 16 bit values, no converting needed */
     int shift_val = (llrpHQDualIso(video)) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
@@ -405,7 +910,8 @@ void getMlvRawFrameFloat(mlvObject_t * video, uint64_t frameIndex, float * outpu
         outputFrame[i] = (float)(unpacked_frame[i] << shift_val);
     }
 
-    free(unpacked_frame);
+    pthread_mutex_unlock(&video->cache_mutex);
+    mlv_stage_timing_note("raw_float_total", frameIndex, total_start);
 }
 
 void setMlvProcessing(mlvObject_t * video, processingObject_t * processing)
@@ -414,6 +920,7 @@ void setMlvProcessing(mlvObject_t * video, processingObject_t * processing)
 
     /* Easy bit */
     video->processing = processing;
+    resetMlvCachedFrame(video);
 
     /* Link dual_iso value, because it is needed */
     video->processing->dual_iso = &video->llrawproc->dual_iso;
@@ -487,6 +994,9 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
     int frame_size = width * height * sizeof(uint16_t) * 3;
+    uint64_t pixels_count = (uint64_t)width * height;
+    mlv_cache_ensure_window(video, frameIndex);
+    int cache_window_active = mlv_frame_in_cache_window(video, frameIndex);
 
     /* If frame was requested last time and is sitting in the "current" frame cache */
     if ( video->cached_frames[frameIndex] == MLV_FRAME_NOT_CACHED
@@ -500,18 +1010,23 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
     {
         case MLV_FRAME_IS_CACHED:
         {
-            memcpy(outputFrame, video->rgb_raw_frames[frameIndex], frame_size);
-            break;
+            if (cache_window_active)
+            {
+                memcpy(outputFrame, video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)], frame_size);
+                break;
+            }
+            video->cached_frames[frameIndex] = MLV_FRAME_NOT_CACHED;
+            /* fall through */
         }
 
-        /* Else cache it or store in the 'current frame' */
         case MLV_FRAME_NOT_CACHED:
         {
             /* If it is within the cache range, request for it to be cached */
-            if (isMlvObjectCaching(video) && frameIndex < getMlvRawCacheLimitFrames(video))
+            if (cache_window_active)
             {
                 video->cache_next = frameIndex;
             }
+            /* fall through */
         }
 
         case MLV_FRAME_BEING_CACHED:
@@ -519,17 +1034,30 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
             if (doesMlvAlwaysUseAmaze(video) && isMlvObjectCaching(video))
             {
                 while (video->cached_frames[frameIndex] != MLV_FRAME_IS_CACHED) usleep(100);
-                memcpy(outputFrame, video->rgb_raw_frames[frameIndex], frame_size);
+                if (mlv_frame_in_cache_window(video, frameIndex))
+                {
+                    memcpy(outputFrame, video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)], frame_size);
+                    break;
+                }
             }
-            else
+
+            float * raw_frame = mlv_ensure_float_buffer(&video->raw_debayer_temp_frame,
+                                                        &video->raw_debayer_temp_frame_pixels,
+                                                        pixels_count);
+            uint16_t * current_frame = mlv_ensure_u16_buffer(&video->rgb_raw_current_frame,
+                                                             &video->rgb_raw_current_frame_words,
+                                                             pixels_count * 3);
+            if (!raw_frame || !current_frame)
             {
-                float * raw_frame = malloc(width * height * sizeof(float));
-                get_mlv_raw_frame_debayered(video, frameIndex, raw_frame, video->rgb_raw_current_frame, doesMlvAlwaysUseAmaze(video));
-                free(raw_frame);
-                memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
-                video->current_cached_frame_active = 1;
-                video->current_cached_frame = frameIndex;
+                memset(outputFrame, 0, frame_size);
+                video->current_cached_frame_active = 0;
+                break;
             }
+
+            get_mlv_raw_frame_debayered(video, frameIndex, raw_frame, current_frame, doesMlvAlwaysUseAmaze(video));
+            memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
+            video->current_cached_frame_active = 1;
+            video->current_cached_frame = frameIndex;
             break;
         }
     }
@@ -539,48 +1067,165 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
  * it may have minor artifacts (though I haven't found them yet) */
 void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame, int threads)
 {
+    const double total_start = mlv_stage_timing_now();
     /* Useful */
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
 
     /* Size of RAW frame */
-    int rgb_frame_size = height * width * 3;
+    uint64_t rgb_frame_size = (uint64_t)height * width * 3;
+    uint64_t requested_signature = mlv_processed_frame_signature(video, frameIndex);
+
+    if (video->current_processed_frame_active
+        && video->current_processed_frame == frameIndex
+        && video->current_processed_frame_threads == threads
+        && video->current_processed_frame_signature == requested_signature
+        && video->rgb_processed_current_frame)
+    {
+        if (outputFrame != video->rgb_processed_current_frame)
+        {
+            memcpy(outputFrame, video->rgb_processed_current_frame, (size_t)rgb_frame_size * sizeof(uint16_t));
+        }
+        mlv_stage_timing_note("processed16_total", frameIndex, total_start);
+        return;
+    }
 
     /* Unprocessed debayered frame (RGB) */
-    uint16_t * unprocessed_frame = malloc( rgb_frame_size * sizeof(uint16_t) );
+    uint16_t * unprocessed_frame = mlv_ensure_u16_buffer(&video->rgb_processed_temp_frame,
+                                                         &video->rgb_processed_temp_frame_words,
+                                                         rgb_frame_size);
+    if (!unprocessed_frame)
+    {
+        memset(outputFrame, 0, (size_t)rgb_frame_size * sizeof(uint16_t));
+        video->current_processed_frame_active = 0;
+        mlv_stage_timing_note("processed16_total", frameIndex, total_start);
+        return;
+    }
 
     /* Get the raw data in B&W */
+    const double debayer_start = mlv_stage_timing_now();
     getMlvRawFrameDebayered(video, frameIndex, unprocessed_frame);
+    mlv_stage_timing_note("debayered_frame", frameIndex, debayer_start);
 
     /* Do processing.......... */
+    const double processing_start = mlv_stage_timing_now();
     applyProcessingObject( video->processing,
                            width, height,
                            unprocessed_frame,
                            outputFrame,
                            threads, 1, frameIndex );
+    mlv_stage_timing_note("processing", frameIndex, processing_start);
 
-    free(unprocessed_frame);
+    const uint64_t final_signature = mlv_processed_frame_signature(video, frameIndex);
+
+    uint16_t * processed_cache = mlv_ensure_u16_buffer(&video->rgb_processed_current_frame,
+                                                       &video->rgb_processed_current_frame_words,
+                                                       rgb_frame_size);
+    if (processed_cache)
+    {
+        if (outputFrame != processed_cache)
+        {
+            memcpy(processed_cache, outputFrame, (size_t)rgb_frame_size * sizeof(uint16_t));
+        }
+        video->current_processed_frame_active = 1;
+        video->current_processed_frame = frameIndex;
+        video->current_processed_frame_threads = threads;
+        video->current_processed_frame_signature = final_signature;
+    }
+    else
+    {
+        video->current_processed_frame_active = 0;
+        video->current_processed_frame_signature = 0;
+    }
+
+    mlv_stage_timing_note("processed16_total", frameIndex, total_start);
 }
 
 /* Get a processed frame in 8 bit */
 void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * outputFrame, int threads)
 {
+    const double total_start = mlv_stage_timing_now();
     /* Size of RAW frame */
-    int rgb_frame_size = getMlvWidth(video) * getMlvHeight(video) * 3;
+    uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
+    uint16_t * processed_frame = NULL;
+    uint64_t requested_signature = mlv_processed_frame_signature(video, frameIndex);
 
-    /* Processed frame (RGB) */
-    uint16_t * processed_frame = malloc( rgb_frame_size * sizeof(uint16_t) );
+    int cached_slot = mlv_find_processed_frame_8bit_cache_slot(video, frameIndex, threads, requested_signature);
+    if (cached_slot >= 0)
+    {
+        uint8_t * cached_frame = mlv_processed_frame_8bit_cache_slot(video, (uint32_t)cached_slot, rgb_frame_size);
+        if (cached_frame)
+        {
+            if (outputFrame != cached_frame)
+            {
+                memcpy(outputFrame, cached_frame, (size_t)rgb_frame_size);
+            }
+            video->current_processed_frame_8bit_active = 1;
+            video->current_processed_frame_8bit = frameIndex;
+            video->current_processed_frame_8bit_threads = threads;
+            video->current_processed_frame_8bit_signature = requested_signature;
+            mlv_stage_timing_note("processed8_total", frameIndex, total_start);
+            return;
+        }
 
+        mlv_reset_processed_frame_8bit_cache(video);
+    }
+
+    if (video->current_processed_frame_active
+        && video->current_processed_frame == frameIndex
+        && video->current_processed_frame_threads == threads
+        && video->current_processed_frame_signature == requested_signature
+        && video->rgb_processed_current_frame)
+    {
+        processed_frame = video->rgb_processed_current_frame;
+    }
+    else
+    {
+        processed_frame = mlv_ensure_u16_buffer(&video->rgb_processed_current_frame,
+                                                &video->rgb_processed_current_frame_words,
+                                                rgb_frame_size);
+        if (!processed_frame)
+        {
+            memset(outputFrame, 0, (size_t)rgb_frame_size);
+            video->current_processed_frame_active = 0;
+            mlv_reset_processed_frame_8bit_cache(video);
+            mlv_stage_timing_note("processed8_total", frameIndex, total_start);
+            return;
+        }
+    }
+
+    const double processed16_start = mlv_stage_timing_now();
     getMlvProcessedFrame16(video, frameIndex, processed_frame, threads);
+    mlv_stage_timing_note("processed16_for_8bit", frameIndex, processed16_start);
+
+    if (video->current_processed_frame_active
+        && video->current_processed_frame == frameIndex
+        && video->current_processed_frame_threads == threads
+        && video->current_processed_frame_signature == mlv_processed_frame_signature(video, frameIndex)
+        && video->rgb_processed_current_frame)
+    {
+        processed_frame = video->rgb_processed_current_frame;
+    }
 
     /* Copy (and 8-bitize) */
+    const double convert_start = mlv_stage_timing_now();
     #pragma omp parallel for
-    for (int i = 0; i < rgb_frame_size; ++i)
+    for (uint64_t i = 0; i < rgb_frame_size; ++i)
     {
         outputFrame[i] = processed_frame[i] >> 8;
     }
+    mlv_stage_timing_note("processed16_to_8bit", frameIndex, convert_start);
 
-    free(processed_frame);
+    mlv_store_processed_frame_8bit_cache(video,
+                                         frameIndex,
+                                         threads,
+                                         video->current_processed_frame_active
+                                             ? video->current_processed_frame_signature
+                                             : mlv_processed_frame_signature(video, frameIndex),
+                                         outputFrame,
+                                         rgb_frame_size);
+
+    mlv_stage_timing_note("processed8_total", frameIndex, total_start);
 }
 
 /* To initialise mlv object with a clip
@@ -626,6 +1271,13 @@ mlvObject_t * initMlvObject()
     video->rgb_raw_frames = NULL;
     video->rgb_raw_current_frame = NULL;
     video->cached_frames = NULL;
+    video->raw_unpacked_temp_frame = NULL;
+    video->raw_debayer_temp_frame = NULL;
+    video->rgb_processed_temp_frame = NULL;
+    video->rgb_processed_current_frame = NULL;
+    video->rgb_processed_current_frame_8bit = NULL;
+    video->current_processed_frame_signature = 0;
+    mlv_reset_processed_frame_8bit_cache(video);
     /* All frames in one block of memory for least mallocing during usage */
     video->cache_memory_block = NULL;
     /* Path (so separate cache threads can have their own FILE*s) */
@@ -690,6 +1342,11 @@ void freeMlvObject(mlvObject_t * video)
     }
     if(video->rgb_raw_frames) free(video->rgb_raw_frames);
     if(video->rgb_raw_current_frame) free(video->rgb_raw_current_frame);
+    if(video->raw_unpacked_temp_frame) free(video->raw_unpacked_temp_frame);
+    if(video->raw_debayer_temp_frame) free(video->raw_debayer_temp_frame);
+    if(video->rgb_processed_temp_frame) free(video->rgb_processed_temp_frame);
+    if(video->rgb_processed_current_frame) free(video->rgb_processed_current_frame);
+    if(video->rgb_processed_current_frame_8bit) free(video->rgb_processed_current_frame_8bit);
     if(video->cache_memory_block) free(video->cache_memory_block);
     if(video->path) free(video->path);
     freeLLRawProcObject(video);
@@ -1790,7 +2447,8 @@ short_cut:
 
     /* For frame cache */
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * video->frames );
-    video->rgb_raw_current_frame = (uint16_t *)malloc( getMlvWidth(video) * getMlvHeight(video) * 3 * sizeof(uint16_t) );
+    video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
+    video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), video->frames );
 
     isMlvActive(video) = 5;
@@ -2214,7 +2872,8 @@ preview_out:
 
     /* For frame cache */
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * video->frames );
-    video->rgb_raw_current_frame = (uint16_t *)malloc( getMlvWidth(video) * getMlvHeight(video) * 3 * sizeof(uint16_t) );
+    video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
+    video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), video->frames );
 
     isMlvActive(video) = 1;

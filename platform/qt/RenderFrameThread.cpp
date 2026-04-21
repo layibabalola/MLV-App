@@ -6,6 +6,7 @@
  */
 
 #include "RenderFrameThread.h"
+#include "debug/StageTiming.h"
 #include <QDebug>
 
 //Constructor
@@ -15,6 +16,8 @@ RenderFrameThread::RenderFrameThread()
     m_initialized = false;
     m_renderFrame = false;
     m_frameReady = false;
+    m_pRawImage16 = nullptr;
+    m_use16BitOutput = false;
 }
 
 //Destructor
@@ -24,20 +27,22 @@ RenderFrameThread::~RenderFrameThread()
 }
 
 //Init all objects
-void RenderFrameThread::init(mlvObject_t *pMlvObject, uint8_t *pRawImage)
+void RenderFrameThread::init(mlvObject_t *pMlvObject, uint8_t *pRawImage, uint16_t *pRawImage16)
 {
     m_mutex.lock();
     m_frameReady = false;
     m_pMlvObject = pMlvObject;
     m_pRawImage = pRawImage;
+    m_pRawImage16 = pRawImage16;
     m_mutex.unlock();
 }
 
 //Start rendering
-void RenderFrameThread::renderFrame(uint32_t frameNumber)
+void RenderFrameThread::renderFrame(uint32_t frameNumber, bool use16BitOutput)
 {
     m_mutex.lock();
     m_frameNumber = frameNumber;
+    m_use16BitOutput = use16BitOutput;
     m_renderFrame = true;
     m_frameReady = false;
     m_mutex.unlock();
@@ -93,7 +98,16 @@ void RenderFrameThread::run(void)
 //render the picture
 void RenderFrameThread::drawFrame()
 {
-    //Get frame from library
-    getMlvProcessedFrame8( m_pMlvObject, m_frameNumber, m_pRawImage, QThread::idealThreadCount() );
+    const double render_start = mlv_stage_timing_now();
+    if ( m_use16BitOutput && m_pRawImage16 )
+    {
+        getMlvProcessedFrame16( m_pMlvObject, m_frameNumber, m_pRawImage16, QThread::idealThreadCount() );
+        mlv_stage_timing_note("render_thread_draw16", m_frameNumber, render_start);
+    }
+    else
+    {
+        getMlvProcessedFrame8( m_pMlvObject, m_frameNumber, m_pRawImage, QThread::idealThreadCount() );
+        mlv_stage_timing_note("render_thread_draw", m_frameNumber, render_start);
+    }
     emit frameReady();
 }

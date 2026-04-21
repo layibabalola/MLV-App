@@ -46,6 +46,22 @@ int rgbToGray(uint16_t *rgb, uint16_t **gray, int buffer_size) {
     return gray_size;
 }
 
+int rgbToGrayInto(uint16_t *rgb, uint16_t *gray, int buffer_size) {
+    int gray_size = buffer_size / 3;
+
+    uint16_t *p_rgb = rgb;
+    uint16_t *p_gray = gray;
+
+    for(int i=0; i<gray_size; i++) {
+        *p_gray = 0.30*p_rgb[0] + 0.59*p_rgb[1] + 0.11*p_rgb[2];
+
+        p_rgb += 3;
+        p_gray++;
+    }
+
+    return gray_size;
+}
+
 /*
  * Make the operation memory for iterative convolution
  */
@@ -94,13 +110,11 @@ void itConv(uint16_t *buffer, int buffer_size, int width, int *op, uint16_t **re
     // Allocate memory for result
     *res = malloc(sizeof(uint16_t) * buffer_size);
 
-    // Temporary memory for each pixel operation
-    uint16_t op_mem[SOBEL_OP_SIZE];
-    memset(op_mem, 0, SOBEL_OP_SIZE);
-
     // Make convolution for every pixel
 #pragma omp parallel for
     for(int i=0; i<buffer_size; i++) {
+        uint16_t op_mem[SOBEL_OP_SIZE];
+        memset(op_mem, 0, sizeof(op_mem));
         // Make op_mem
         makeOpMem(buffer, buffer_size, width, i, op_mem);
 
@@ -113,6 +127,16 @@ void itConv(uint16_t *buffer, int buffer_size, int width, int *op, uint16_t **re
          * value was to be stored because the next time it is used the value is
          * squared.
          */
+    }
+}
+
+void itConvInto(uint16_t *buffer, int buffer_size, int width, int *op, uint16_t *res) {
+    #pragma omp parallel for
+    for(int i=0; i<buffer_size; i++) {
+        uint16_t op_mem[SOBEL_OP_SIZE];
+        memset(op_mem, 0, sizeof(op_mem));
+        makeOpMem(buffer, buffer_size, width, i, op_mem);
+        res[i] = (uint16_t) abs(convolution(op_mem, op, SOBEL_OP_SIZE));
     }
 }
 
@@ -134,6 +158,16 @@ void contour(uint16_t *sobel_h, uint16_t *sobel_v, int gray_size, uint16_t **con
     }
 }
 
+void contourInto(uint16_t *sobel_h, uint16_t *sobel_v, int gray_size, uint16_t *contour_img) {
+    #pragma omp parallel for
+    for(int i=0; i<gray_size; i++) {
+        int res = sqrt(pow(sobel_h[i], 2) + pow(sobel_v[i], 2));
+        if( res > 65535 ) res = 65535;
+        if( res < 0 ) res = 0;
+        contour_img[i] = (uint16_t) res;
+    }
+}
+
 int sobelFilter(uint16_t *rgb, uint16_t **gray, uint16_t **sobel_h_res, uint16_t **sobel_v_res, uint16_t **contour_img, int width, int height) {
     int sobel_h[] = {-1, 0, 1, -2, 0, 2, -1, 0, 1},
         sobel_v[] = {1, 2, 1, 0, 0, 0, -1, -2, -1};
@@ -149,6 +183,26 @@ int sobelFilter(uint16_t *rgb, uint16_t **gray, uint16_t **sobel_h_res, uint16_t
 
     // Calculate contour matrix
     contour(*sobel_h_res, *sobel_v_res, gray_size, contour_img);
+
+    return gray_size;
+}
+
+int sobelFilterInto(uint16_t *rgb,
+                    uint16_t *gray,
+                    uint16_t *sobel_h_res,
+                    uint16_t *sobel_v_res,
+                    uint16_t *contour_img,
+                    int width,
+                    int height) {
+    int sobel_h[] = {-1, 0, 1, -2, 0, 2, -1, 0, 1},
+        sobel_v[] = {1, 2, 1, 0, 0, 0, -1, -2, -1};
+
+    int rgb_size = width * height * 3;
+    int gray_size = rgbToGrayInto(rgb, gray, rgb_size);
+
+    itConvInto(gray, gray_size, width, sobel_h, sobel_h_res);
+    itConvInto(gray, gray_size, width, sobel_v, sobel_v_res);
+    contourInto(sobel_h_res, sobel_v_res, gray_size, contour_img);
 
     return gray_size;
 }

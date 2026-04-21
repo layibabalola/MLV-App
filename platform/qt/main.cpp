@@ -10,6 +10,7 @@
 #include "../../src/batch/BatchContext.h"
 #include "../../src/batch/BatchRunner.h"
 #include "../../src/batch/BatchLogger.h"
+#include "../../src/batch/MlvTrim.h"
 
 #include <QCommandLineParser>
 #include <QTextStream>
@@ -23,6 +24,15 @@ static bool hasBatchFlag(int argc, char *argv[])
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--batch") == 0) return true;
+    }
+    return false;
+}
+
+static bool hasTrimMlvFlag(int argc, char *argv[])
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--trim-mlv") == 0) return true;
     }
     return false;
 }
@@ -141,6 +151,7 @@ static int runBatch(QCoreApplication &app)
 int main(int argc, char *argv[])
 {
     bool batch = hasBatchFlag(argc, argv);
+    bool trim_mlv = hasTrimMlvFlag(argc, argv);
 
     MyApplication a(argc, argv);
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
@@ -156,6 +167,12 @@ int main(int argc, char *argv[])
          * because internal export code may touch widgets/fonts. */
         a.setQuitOnLastWindowClosed(false);
         return runBatch(a);
+    }
+
+    if (trim_mlv)
+    {
+        a.setQuitOnLastWindowClosed(false);
+        return MlvTrim::run(a);
     }
 
     /* Normal GUI mode — unchanged */

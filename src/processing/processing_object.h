@@ -4,6 +4,7 @@
 #include "image_profile.h"
 #include "filter/filter.h"
 #include "cube_lut.h"
+#include "denoiser/denoiser_2d_median.h"
 
 #include "tinyexpr/tinyexpr.h"
 
@@ -182,6 +183,7 @@ typedef struct {
     /* 2D Median Denoiser */
     uint8_t    denoiserWindow;
     uint8_t    denoiserStrength;
+    denoise_2d_median_context_t * denoiser_context;
 
     /* RBF Denoiser */
     uint8_t    rbfDenoiserLuma;
@@ -216,6 +218,13 @@ typedef struct {
     /* CA filter */
     uint8_t ca_desaturate; /* Range 0..100 */
     uint8_t ca_radius; /* Range 0.. */
+
+    /* Reusable sharpening-mask scratch, sized to width*height pixels */
+    uint16_t * sharpen_mask_gray;
+    uint16_t * sharpen_mask_sobel_h;
+    uint16_t * sharpen_mask_sobel_v;
+    uint16_t * sharpen_mask_contour;
+    size_t sharpen_mask_capacity;
 
     /* Transfer function */
     uint8_t transfer_split; /* Boolean */

@@ -101,16 +101,48 @@ void free_luts(int * raw2ev, int * ev2raw)
     }
 }
 
-void chroma_smooth(int method, uint16_t * image_data, int width, int height, int black, int white, int * raw2ev, int * ev2raw)
+static int chroma_smooth_ensure_capacity(chroma_smooth_scratch_t * scratch, size_t pixel_count)
+{
+    if( !scratch ) return 0;
+    if( scratch->capacity >= pixel_count && scratch->buffer ) return 1;
+
+    uint16_t * resized = (uint16_t *)realloc(scratch->buffer, pixel_count * sizeof(uint16_t));
+    if( !resized ) return 0;
+
+    scratch->buffer = resized;
+    scratch->capacity = pixel_count;
+    return 1;
+}
+
+void chroma_smooth(int method,
+                   uint16_t * image_data,
+                   int width,
+                   int height,
+                   int black,
+                   int white,
+                   int * raw2ev,
+                   int * ev2raw,
+                   chroma_smooth_scratch_t * scratch)
 {
     if(raw2ev == NULL) return;
-    
-    uint16_t * buf = (uint16_t *)malloc(width*height*sizeof(uint16_t));
-    if (!buf)
+
+    const size_t pixel_count = (size_t)width * (size_t)height;
+    uint16_t * buf = NULL;
+    chroma_smooth_scratch_t local_scratch = { 0 };
+    chroma_smooth_scratch_t * active_scratch = scratch ? scratch : &local_scratch;
+
+    if( !chroma_smooth_ensure_capacity(active_scratch, pixel_count) )
     {
-        return;
+        if( scratch ) return;
+
+        buf = (uint16_t *)malloc(pixel_count * sizeof(uint16_t));
+        if( !buf ) return;
+        active_scratch->buffer = buf;
+        active_scratch->capacity = pixel_count;
     }
-    memcpy(buf, image_data, width*height*sizeof(uint16_t));
+
+    buf = active_scratch->buffer;
+    memcpy(buf, image_data, pixel_count * sizeof(uint16_t));
     
     switch (method) {
         case 2:
@@ -130,7 +162,12 @@ void chroma_smooth(int method, uint16_t * image_data, int width, int height, int
             break;
     }
     
-    free(buf);
+    if( !scratch )
+    {
+        free(active_scratch->buffer);
+        active_scratch->buffer = NULL;
+        active_scratch->capacity = 0;
+    }
 }
 
 /* find color of the raw pixel */

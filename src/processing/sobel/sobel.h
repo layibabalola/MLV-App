@@ -21,12 +21,24 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int  rgbToGray   (uint16_t *rgb, uint16_t **gray, int buffer_size);
+int  rgbToGrayInto(uint16_t *rgb, uint16_t *gray, int buffer_size);
 void makeOpMem   (uint16_t *buffer, int buffer_size, int width, int cindex, uint16_t *op_mem);
 int  convolution (uint16_t *X, int *Y, int c_size);
 void itConv      (uint16_t *buffer, int buffer_size, int width, int *op, uint16_t **res);
+void itConvInto  (uint16_t *buffer, int buffer_size, int width, int *op, uint16_t *res);
 void contour     (uint16_t *sobel_h, uint16_t *sobel_v, int gray_size, uint16_t **contour_img);
+void contourInto (uint16_t *sobel_h, uint16_t *sobel_v, int gray_size, uint16_t *contour_img);
 int  sobelFilter (uint16_t *rgb, uint16_t **gray, uint16_t **sobel_h_res, uint16_t **sobel_v_res, uint16_t **contour_img, int width, int height);
+int  sobelFilterInto(uint16_t *rgb, uint16_t *gray, uint16_t *sobel_h_res, uint16_t *sobel_v_res, uint16_t *contour_img, int width, int height);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 

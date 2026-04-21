@@ -20,8 +20,9 @@ public:
     RenderFrameThread();
     ~RenderFrameThread();
     void init( mlvObject_t *pMlvObject,
-          uint8_t *pRawImage );
-    void renderFrame( uint32_t frameNumber );
+          uint8_t *pRawImage,
+          uint16_t *pRawImage16 );
+    void renderFrame( uint32_t frameNumber, bool use16BitOutput = false );
     bool isFrameReady( void );
     bool isIdle( void );
     void stop( void );
@@ -35,10 +36,12 @@ private:
     QMutex m_mutex;
     mlvObject_t *m_pMlvObject;
     uint8_t *m_pRawImage;
+    uint16_t *m_pRawImage16;
     bool m_initialized;
     bool m_stop;
     bool m_renderFrame;
     bool m_frameReady;
+    bool m_use16BitOutput;
     uint32_t m_frameNumber;
 
     void run( void );

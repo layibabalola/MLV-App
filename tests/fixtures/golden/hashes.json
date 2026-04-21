@@ -1,0 +1,8 @@
+{
+  "frame_compare.identical_u16": "c021b01e2cc79633eb37f155991ccaedef1ff02b0e84923adc1dfb1f4101802b",
+  "frame_compare.off_by_one_u8": "41ab76cd219df4183e9bdc7ce97997209acccf427a0524cfd57b5cdcb1a6b38d",
+  "receipt.fast_proxy": "09764a496b1f11625f6e5d8579482a535db27a133567981474fc4716cdef622d",
+  "receipt.fast_proxy_rcd": "81f7f2b11714dab48966e26bfeffeee93922bccac63b741c6d0838aa0697f141",
+  "receipt_applier.fast_proxy_fingerprint": "1dbb8355aa3bd889cf3cd2c4008da3d13ded46b4367e0106937c6fe0a1e78391",
+  "receipt_applier.preview_dual_iso": "418fe2740c3d5bceb97f54e1bfb1a2cb9dc898cd51a9bce7fbfb6b636048ddcd"
+}

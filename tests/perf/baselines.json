@@ -1,0 +1,105 @@
+{
+    "absolute_guards": {
+        "large_dual_iso.full16.average_ms.max": 15000,
+        "large_dual_iso.full8.average_ms.max": 5000,
+        "large_dual_iso.preview16.average_ms.max": 15000,
+        "large_dual_iso.preview8.average_ms.max": 5000,
+        "tiny_dual_iso.full16.average_ms.max": 5000,
+        "tiny_dual_iso.full8.average_ms.max": 1000,
+        "tiny_dual_iso.preview16.average_ms.max": 5000,
+        "tiny_dual_iso.preview8.average_ms.max": 1000
+    },
+    "default_regression_pct": 15,
+    "profiles": {
+        "auto.windows.x86_64.93c1151a315d": {
+            "captured_at_utc": "2026-04-21T06:38:55Z",
+            "iterations": 10,
+            "label": "Auto local baseline (Windows 10 Version 22H2, x86_64, Qt 6.10.2)",
+            "results": {
+                "large_dual_iso.full16": {
+                    "average_ms": 225.15729000000002,
+                    "fps": 4.441339651938429,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 275.7628,
+                    "median_ms": 213.7068,
+                    "min_ms": 198.6858
+                },
+                "large_dual_iso.full8": {
+                    "average_ms": 103.90710000000001,
+                    "fps": 9.623981421866262,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 352.0358,
+                    "median_ms": 17.85285,
+                    "min_ms": 6.3166
+                },
+                "large_dual_iso.preview16": {
+                    "average_ms": 166.61763,
+                    "fps": 6.001765839545311,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 173.902,
+                    "median_ms": 166.1924,
+                    "min_ms": 162.5776
+                },
+                "large_dual_iso.preview16_speedup_vs_full16": 1.3513413316465972,
+                "large_dual_iso.preview8": {
+                    "average_ms": 6.2970299999999995,
+                    "fps": 158.80502395573788,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 7.1849,
+                    "median_ms": 6.2247,
+                    "min_ms": 5.7742
+                },
+                "large_dual_iso.preview8_speedup_vs_full8": 16.500969504671254,
+                "threads": 1,
+                "tiny_dual_iso.full16": {
+                    "average_ms": 210.49096000000003,
+                    "fps": 4.750797848990759,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 222.7353,
+                    "median_ms": 209.4398,
+                    "min_ms": 203.2107
+                },
+                "tiny_dual_iso.full8": {
+                    "average_ms": 26.21609,
+                    "fps": 38.144513541111586,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 211.4659,
+                    "median_ms": 5.66255,
+                    "min_ms": 5.387
+                },
+                "tiny_dual_iso.preview16": {
+                    "average_ms": 185.9812,
+                    "fps": 5.376887556376666,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 236.124,
+                    "median_ms": 176.77935,
+                    "min_ms": 163.648
+                },
+                "tiny_dual_iso.preview16_speedup_vs_full16": 1.1317862235537788,
+                "tiny_dual_iso.preview8": {
+                    "average_ms": 5.827139999999998,
+                    "fps": 171.61077303788826,
+                    "frames": 10,
+                    "iterations": 10,
+                    "max_ms": 7,
+                    "median_ms": 5.67925,
+                    "min_ms": 5.4462
+                },
+                "tiny_dual_iso.preview8_speedup_vs_full8": 4.498963470930852
+            },
+            "threads": 1
+        }
+    },
+    "relative_guards": {
+        "large_dual_iso.preview16_speedup_vs_full16.min": 1.05,
+        "tiny_dual_iso.preview16_speedup_vs_full16.min": 1.05
+    },
+    "schema": 2
+}

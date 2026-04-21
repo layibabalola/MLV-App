@@ -43,11 +43,244 @@
 #define LOCK(x) static pthread_mutex_t x = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&x);
 #define UNLOCK(x) pthread_mutex_unlock(&(x));
 
-//this is just meant to be fast
-int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int diso_check)
+static int preview_pattern_index(int iso_pattern)
 {
-    //compute the median of the green channel for each multiple of 4 rows
-    uint16_t median[4];
+    const int pattern = ABS(iso_pattern);
+    return (pattern >= 1 && pattern <= 4) ? pattern : 0;
+}
+
+static int set_preview_histograms_from_pattern(int iso_pattern,
+                                               struct histogram ** hist,
+                                               uint16_t * dark_row_start,
+                                               struct histogram ** hist_lo,
+                                               struct histogram ** hist_hi)
+{
+    switch(preview_pattern_index(iso_pattern))
+    {
+    case 1:
+        *dark_row_start = 2;
+        *hist_lo = hist[2];
+        *hist_hi = hist[0];
+        return 1;
+    case 2:
+        *dark_row_start = 1;
+        *hist_lo = hist[1];
+        *hist_hi = hist[0];
+        return 1;
+    case 3:
+        *dark_row_start = 0;
+        *hist_lo = hist[0];
+        *hist_hi = hist[2];
+        return 1;
+    case 4:
+        *dark_row_start = 3;
+        *hist_lo = hist[0];
+        *hist_hi = hist[2];
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int preview_pattern_from_dark_row_start(uint16_t dark_row_start)
+{
+    switch(dark_row_start)
+    {
+    case 0: return -3;
+    case 1: return -2;
+    case 2: return -1;
+    case 3: return -4;
+    default: return 0;
+    }
+}
+
+static int ensure_preview_scratch_capacity(dualiso_preview_scratch_t * scratch, size_t data_size)
+{
+    if (!scratch)
+    {
+        return 0;
+    }
+
+    if (scratch->data_capacity >= data_size &&
+        scratch->data_x &&
+        scratch->data_y &&
+        scratch->data_w)
+    {
+        return 1;
+    }
+
+    int * next_data_x = (int *)malloc(data_size * sizeof(scratch->data_x[0]));
+    int * next_data_y = (int *)malloc(data_size * sizeof(scratch->data_y[0]));
+    double * next_data_w = (double *)malloc(data_size * sizeof(scratch->data_w[0]));
+
+    if (!next_data_x || !next_data_y || !next_data_w)
+    {
+        free(next_data_x);
+        free(next_data_y);
+        free(next_data_w);
+        return 0;
+    }
+
+    free(scratch->data_x);
+    free(scratch->data_y);
+    free(scratch->data_w);
+    scratch->data_x = next_data_x;
+    scratch->data_y = next_data_y;
+    scratch->data_w = next_data_w;
+    scratch->data_capacity = data_size;
+    return 1;
+}
+
+static int ensure_reusable_scratch_buffer(void ** buffer,
+                                          size_t * capacity,
+                                          size_t required_count,
+                                          size_t element_size)
+{
+    if (!buffer || !capacity)
+    {
+        return 0;
+    }
+
+    if (*buffer && *capacity >= required_count)
+    {
+        return 1;
+    }
+
+    if (required_count == 0)
+    {
+        return 1;
+    }
+
+    if (element_size != 0 && required_count > (SIZE_MAX / element_size))
+    {
+        return 0;
+    }
+
+    void * next = malloc(required_count * element_size);
+    if (!next)
+    {
+        return 0;
+    }
+
+    free(*buffer);
+    *buffer = next;
+    *capacity = required_count;
+    return 1;
+}
+
+static double * ensure_double_scratch_buffer(double ** buffer, size_t * capacity, size_t required_count)
+{
+    return ensure_reusable_scratch_buffer((void **)buffer, capacity, required_count, sizeof(double))
+        ? *buffer
+        : NULL;
+}
+
+void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
+{
+    if (!scratch)
+    {
+        return;
+    }
+
+    free(scratch->raw_buffer_32);
+    free(scratch->dark);
+    free(scratch->bright);
+    free(scratch->fullres);
+    free(scratch->halfres);
+    free(scratch->fullres_smooth);
+    free(scratch->halfres_smooth);
+    free(scratch->overexposed);
+    free(scratch->alias_map);
+    free(scratch->over_aux);
+    free(scratch->mix_curve);
+    memset(scratch, 0, sizeof(*scratch));
+}
+
+static int ensure_full20bit_pixel_capacity(dualiso_full20bit_scratch_t * scratch, size_t pixel_count)
+{
+    if (!scratch)
+    {
+        return 0;
+    }
+
+    if (scratch->pixel_capacity >= pixel_count
+        && scratch->raw_buffer_32
+        && scratch->dark
+        && scratch->bright
+        && scratch->fullres
+        && scratch->halfres
+        && scratch->fullres_smooth
+        && scratch->halfres_smooth
+        && scratch->overexposed
+        && scratch->alias_map
+        && scratch->over_aux)
+    {
+        return 1;
+    }
+
+    uint32_t * next_raw = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    uint32_t * next_dark = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    uint32_t * next_bright = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    uint32_t * next_fullres = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    uint32_t * next_halfres = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    uint32_t * next_fullres_smooth = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    uint32_t * next_halfres_smooth = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    uint16_t * next_overexposed = (uint16_t *)malloc(pixel_count * sizeof(uint16_t));
+    uint16_t * next_alias_map = (uint16_t *)malloc(pixel_count * sizeof(uint16_t));
+    uint16_t * next_over_aux = (uint16_t *)malloc(pixel_count * sizeof(uint16_t));
+
+    if (!next_raw
+        || !next_dark
+        || !next_bright
+        || !next_fullres
+        || !next_halfres
+        || !next_fullres_smooth
+        || !next_halfres_smooth
+        || !next_overexposed
+        || !next_alias_map
+        || !next_over_aux)
+    {
+        free(next_raw);
+        free(next_dark);
+        free(next_bright);
+        free(next_fullres);
+        free(next_halfres);
+        free(next_fullres_smooth);
+        free(next_halfres_smooth);
+        free(next_overexposed);
+        free(next_alias_map);
+        free(next_over_aux);
+        return 0;
+    }
+
+    free(scratch->raw_buffer_32);
+    free(scratch->dark);
+    free(scratch->bright);
+    free(scratch->fullres);
+    free(scratch->halfres);
+    free(scratch->fullres_smooth);
+    free(scratch->halfres_smooth);
+    free(scratch->overexposed);
+    free(scratch->alias_map);
+    free(scratch->over_aux);
+
+    scratch->raw_buffer_32 = next_raw;
+    scratch->dark = next_dark;
+    scratch->bright = next_bright;
+    scratch->fullres = next_fullres;
+    scratch->halfres = next_halfres;
+    scratch->fullres_smooth = next_fullres_smooth;
+    scratch->halfres_smooth = next_halfres_smooth;
+    scratch->overexposed = next_overexposed;
+    scratch->alias_map = next_alias_map;
+    scratch->over_aux = next_over_aux;
+    scratch->pixel_capacity = pixel_count;
+    return 1;
+}
+
+//this is just meant to be fast
+int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch)
+{
     struct histogram * hist[4];
     struct histogram * hist_hi = NULL;
     struct histogram * hist_lo = NULL;
@@ -60,61 +293,71 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
         hist_add(hist[y % 4], &(image_data[y * width + (y + 1) % 2]), width - (y + 1) % 2, 3);
     }
     
-    for(int i = 0; i < 4; i++)
+    uint16_t dark_row_start = UINT16_MAX;
+    const int cached_pattern = iso_pattern ? *iso_pattern : 0;
+    if( !set_preview_histograms_from_pattern(cached_pattern, hist, &dark_row_start, &hist_lo, &hist_hi) )
     {
-        median[i] = hist_median(hist[i]);
-    }
-    
-    uint16_t dark_row_start = -1;
-    if((median[2] - black) > ((median[0] - black) * 2) &&
-       (median[2] - black) > ((median[1] - black) * 2) &&
-       (median[3] - black) > ((median[0] - black) * 2) &&
-       (median[3] - black) > ((median[1] - black) * 2))
-    {
-        dark_row_start = 0;
-        hist_lo = hist[0];
-        hist_hi = hist[2];
-    }
-    else if((median[0] - black) > ((median[1] - black) * 2) &&
-            (median[0] - black) > ((median[2] - black) * 2) &&
-            (median[3] - black) > ((median[1] - black) * 2) &&
-            (median[3] - black) > ((median[2] - black) * 2))
-    {
-        dark_row_start = 1;
-        hist_lo = hist[1];
-        hist_hi = hist[0];
-    }
-    else if((median[0] - black) > ((median[2] - black) * 2) &&
-            (median[0] - black) > ((median[3] - black) * 2) &&
-            (median[1] - black) > ((median[2] - black) * 2) &&
-            (median[1] - black) > ((median[3] - black) * 2))
-    {
-        dark_row_start = 2;
-        hist_lo = hist[2];
-        hist_hi = hist[0];
-    }
-    else if((median[1] - black) > ((median[0] - black) * 2) &&
-            (median[1] - black) > ((median[3] - black) * 2) &&
-            (median[2] - black) > ((median[0] - black) * 2) &&
-            (median[2] - black) > ((median[3] - black) * 2))
-    {
-        dark_row_start = 3;
-        hist_lo = hist[0];
-        hist_hi = hist[2];
-    }
-    else
-    {
-#ifndef STDOUT_SILENT
-        err_printf("\nCould not detect dual ISO interlaced lines\n");
-#endif
-
+        uint16_t median[4];
         for(int i = 0; i < 4; i++)
         {
-            hist_destroy(hist[i]);
+            median[i] = hist_median(hist[i]);
         }
-        return 0;
+
+        if((median[2] - black) > ((median[0] - black) * 2) &&
+           (median[2] - black) > ((median[1] - black) * 2) &&
+           (median[3] - black) > ((median[0] - black) * 2) &&
+           (median[3] - black) > ((median[1] - black) * 2))
+        {
+            dark_row_start = 0;
+            hist_lo = hist[0];
+            hist_hi = hist[2];
+        }
+        else if((median[0] - black) > ((median[1] - black) * 2) &&
+                (median[0] - black) > ((median[2] - black) * 2) &&
+                (median[3] - black) > ((median[1] - black) * 2) &&
+                (median[3] - black) > ((median[2] - black) * 2))
+        {
+            dark_row_start = 1;
+            hist_lo = hist[1];
+            hist_hi = hist[0];
+        }
+        else if((median[0] - black) > ((median[2] - black) * 2) &&
+                (median[0] - black) > ((median[3] - black) * 2) &&
+                (median[1] - black) > ((median[2] - black) * 2) &&
+                (median[1] - black) > ((median[3] - black) * 2))
+        {
+            dark_row_start = 2;
+            hist_lo = hist[2];
+            hist_hi = hist[0];
+        }
+        else if((median[1] - black) > ((median[0] - black) * 2) &&
+                (median[1] - black) > ((median[3] - black) * 2) &&
+                (median[2] - black) > ((median[0] - black) * 2) &&
+                (median[2] - black) > ((median[3] - black) * 2))
+        {
+            dark_row_start = 3;
+            hist_lo = hist[0];
+            hist_hi = hist[2];
+        }
+        else
+        {
+#ifndef STDOUT_SILENT
+            err_printf("\nCould not detect dual ISO interlaced lines\n");
+#endif
+
+            for(int i = 0; i < 4; i++)
+            {
+                hist_destroy(hist[i]);
+            }
+            return 0;
+        }
+
+        if( iso_pattern )
+        {
+            *iso_pattern = preview_pattern_from_dark_row_start(dark_row_start);
+        }
     }
-    
+
     if(diso_check)
     {
 #ifndef STDOUT_SILENT
@@ -131,9 +374,40 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
     /* compare the two histograms and plot the curve between the two exposures (dark as a function of bright) */
     const int min_pix = 100;                                /* extract a data point every N image pixels */
     int data_size = (width * height / min_pix + 1);                  /* max number of data points */
-    int* data_x = (int *)malloc(data_size * sizeof(data_x[0]));
-    int* data_y = (int *)malloc(data_size * sizeof(data_y[0]));
-    double* data_w = (double *)malloc(data_size * sizeof(data_w[0]));
+    int* data_x = NULL;
+    int* data_y = NULL;
+    double* data_w = NULL;
+    const int using_scratch = scratch && ensure_preview_scratch_capacity(scratch, data_size);
+
+    if( using_scratch )
+    {
+        data_x = scratch->data_x;
+        data_y = scratch->data_y;
+        data_w = scratch->data_w;
+    }
+    else
+    {
+        data_x = (int *)malloc(data_size * sizeof(data_x[0]));
+        data_y = (int *)malloc(data_size * sizeof(data_y[0]));
+        data_w = (double *)malloc(data_size * sizeof(data_w[0]));
+    }
+
+    if (!data_x || !data_y || !data_w)
+    {
+        for(int i = 0; i < 4; i++)
+        {
+            hist_destroy(hist[i]);
+        }
+
+        if (!using_scratch)
+        {
+            free(data_x);
+            free(data_y);
+            free(data_w);
+        }
+        return 0;
+    }
+
     int data_num = 0;
     
     int acc_lo = 0;
@@ -194,9 +468,12 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
     double a = (mxy - mx*my) / (mx2 - mx*mx);
     double b = my - a * mx;
     
-    free(data_w);
-    free(data_y);
-    free(data_x);
+    if (!using_scratch)
+    {
+        free(data_w);
+        free(data_y);
+        free(data_x);
+    }
 
     for(int i = 0; i < 4; i++)
     {
@@ -1051,12 +1328,14 @@ static int match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, i
     return 1;
 }
 
-static inline uint32_t * convert_to_20bit(struct raw_info raw_info, uint16_t * image_data)
+static inline uint32_t * convert_to_20bit(struct raw_info raw_info, uint16_t * image_data, uint32_t * raw_buffer_32)
 {
     int w = raw_info.width;
     int h = raw_info.height;
-    /* promote from 14 to 20 bits (original raw buffer holds 14-bit values stored as uint16_t) */
-    uint32_t * raw_buffer_32 = malloc(w * h * sizeof(raw_buffer_32[0]));
+    if (!raw_buffer_32)
+    {
+        return NULL;
+    }
     
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
@@ -1819,7 +2098,7 @@ static inline void hdr_chroma_smooth(struct raw_info raw_info, uint32_t * input,
     }
 }
 
-static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres, uint32_t* halfres_smooth, uint16_t* alias_map, uint32_t* dark, uint32_t* bright, uint16_t * overexposed, int dark_noise, uint32_t white_darkened, double corr_ev, double lowiso_dr, uint32_t black, uint32_t white, int chroma_smooth_method)
+static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres, uint32_t* halfres_smooth, uint16_t* alias_map, uint32_t* dark, uint32_t* bright, uint16_t * overexposed, int dark_noise, uint32_t white_darkened, double corr_ev, double lowiso_dr, uint32_t black, uint32_t white, int chroma_smooth_method, dualiso_full20bit_scratch_t * scratch)
 {
     int w = raw_info.width;
     int h = raw_info.height;
@@ -1862,7 +2141,13 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
 #endif
     /* mixing curve */
     double max_ev = log2(white/64 - black/64);
-    double * mix_curve = malloc((1<<20) * sizeof(double));
+    double * mix_curve = scratch
+        ? ensure_double_scratch_buffer(&scratch->mix_curve, &scratch->mix_curve_capacity, (1u << 20))
+        : NULL;
+    if (!mix_curve)
+    {
+        return 0;
+    }
     
     #pragma omp parallel for
     for (int i = 0; i < 1<<20; i++)
@@ -1940,7 +2225,11 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     }
     
     /* "blur" the overexposed map */
-    uint16_t* over_aux = malloc(w * h * sizeof(uint16_t));
+    uint16_t* over_aux = scratch ? scratch->over_aux : NULL;
+    if (!over_aux)
+    {
+        return 0;
+    }
     memcpy(over_aux, overexposed, w * h * sizeof(uint16_t));
     
     #pragma omp parallel for collapse(2)
@@ -1961,9 +2250,6 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
             0;
         }
     }
-    
-    free(over_aux); over_aux = 0;
-    free(mix_curve);
     
     return 1;
 }
@@ -2082,7 +2368,7 @@ static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * imag
             raw_set_pixel_20to16_rand(x, y, raw_buffer_32[x + y*w]);
 }
 
-int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads)
+int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch)
 {
     int w = raw_info.width;
     int h = raw_info.height;
@@ -2155,9 +2441,18 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     double noise_std[4];
     double dark_noise, bright_noise, dark_noise_ev, bright_noise_ev;
     double noise_avg = compute_noise(raw_info, image_data, noise_std, &dark_noise, &bright_noise, &dark_noise_ev, &bright_noise_ev);
+
+    if (!ensure_full20bit_pixel_capacity(scratch, (size_t)w * (size_t)h))
+    {
+        return 0;
+    }
     
     /* promote from 14 to 20 bits (original raw buffer holds 14-bit values stored as uint16_t) */
-    uint32_t * raw_buffer_32 = convert_to_20bit(raw_info, image_data);
+    uint32_t * raw_buffer_32 = convert_to_20bit(raw_info, image_data, scratch->raw_buffer_32);
+    if (!raw_buffer_32)
+    {
+        return 0;
+    }
     
     /* we have now switched to 20-bit, update noise numbers */
     dark_noise *= 64;
@@ -2166,18 +2461,18 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     bright_noise_ev += 6;
     
     /* dark and bright exposures, interpolated */
-    uint32_t* dark   = malloc(w * h * sizeof(uint32_t));
-    uint32_t* bright = malloc(w * h * sizeof(uint32_t));
+    uint32_t* dark = scratch->dark;
+    uint32_t* bright = scratch->bright;
     memset(dark, 0, w * h * sizeof(uint32_t));
     memset(bright, 0, w * h * sizeof(uint32_t));
     
     /* fullres image (minimizes aliasing) */
-    uint32_t* fullres = malloc(w * h * sizeof(uint32_t));
+    uint32_t* fullres = scratch->fullres;
     memset(fullres, 0, w * h * sizeof(uint32_t));
     uint32_t* fullres_smooth = fullres;
     
     /* halfres image (minimizes noise and banding) */
-    uint32_t* halfres = malloc(w * h * sizeof(uint32_t));
+    uint32_t* halfres = scratch->halfres;
     memset(halfres, 0, w * h * sizeof(uint32_t));
     uint32_t* halfres_smooth = halfres;
     
@@ -2185,19 +2480,19 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     {
         if (use_fullres)
         {
-            fullres_smooth = malloc(w * h * sizeof(uint32_t));
+            fullres_smooth = scratch->fullres_smooth;
         }
-        halfres_smooth = malloc(w * h * sizeof(uint32_t));
+        halfres_smooth = scratch->halfres_smooth;
     }
     
     /* overexposure map */
-    uint16_t * overexposed = malloc(w * h * sizeof(uint16_t));
+    uint16_t * overexposed = scratch->overexposed;
     memset(overexposed, 0, w * h * sizeof(uint16_t));
     
     uint16_t* alias_map = NULL;
     if (use_alias_map)
     {
-        alias_map = malloc(w * h * sizeof(uint16_t));
+        alias_map = scratch->alias_map;
         memset(alias_map, 0, w * h * sizeof(uint16_t));
     }
     
@@ -2243,7 +2538,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 
     if (use_fullres) fullres_reconstruction(raw_info, fullres, dark, bright, white_darkened, is_bright);
 
-    if (mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, chroma_smooth_method))
+    if (mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, chroma_smooth_method, scratch))
     {
         /* let's check the ideal noise levels (on the halfres image, which in black areas is identical to the bright one) */
 #ifndef STDOUT_SILENT
@@ -2274,16 +2569,6 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         raw_info.height++;
         h++;
     }
-    
-    free(dark);
-    free(bright);
-    free(fullres);
-    free(halfres);
-    free(alias_map);
-    free(overexposed);
-    free(raw_buffer_32);
-    if (fullres_smooth && fullres_smooth != fullres) free(fullres_smooth);
-    if (halfres_smooth && halfres_smooth != halfres) free(halfres_smooth);
     
     return ret;
 }

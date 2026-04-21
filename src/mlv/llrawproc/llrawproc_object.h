@@ -25,6 +25,8 @@
 #include <sys/types.h>
 #include "pixelproc.h"
 #include "stripes.h"
+#include "dualiso.h"
+#include "patternnoise.h"
 #include "../mlv.h"
 
 /* Low level raw processing object */
@@ -44,13 +46,15 @@ typedef struct
     int chroma_smooth;    // chroma smooth, 2 = cs2x2, 3 cs3x3, 5 = cs5x5
     int pattern_noise;    // fix pattern noise (0, 1)
     int deflicker_target; // deflicker value
+    chroma_smooth_scratch_t chroma_smooth_scratch;
+    pattern_noise_scratch_t pattern_noise_scratch;
 
     int diso_validity;    // Dual iso status:
                           // 0 = not valid (no DISO block found, can be older dual iso clip),
                           // 1 = forced (forced to be processed as dual iso when older dual iso clip w/o DISO block is loaded),
                           // 2 = valid (DISO block is found, means this is real dual iso clip)
 
-    int dual_iso;         // use dualiso processing, 0 = do not use, 1 = full 20 bit processing
+    int dual_iso;         // use dualiso processing, 0 = do not use, 1 = full 20 bit processing, 2 = preview processing
     int diso1;
     int diso2;
     int diso_pattern;
@@ -66,6 +70,8 @@ typedef struct
     int diso_alias_map;   // flag for Alias Map switchin on/off
     int diso_frblending;  // flag for Fullres Blending switching on/off
     int dark_frame;       // flag for Dark Frame subtraction mode 0 = off, 1 = ext, 2 = int
+    dualiso_preview_scratch_t diso_preview_scratch;
+    dualiso_full20bit_scratch_t diso_full20bit_scratch;
 
     /* cDNG bit depth and black/white levels */
     int dng_bit_depth;

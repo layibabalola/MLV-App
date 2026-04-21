@@ -24,6 +24,11 @@
 /* pixel map type */
 enum { PIX_FOCUS, PIX_BAD };
 
+typedef struct {
+    uint16_t * buffer;
+    size_t capacity;
+} chroma_smooth_scratch_t;
+
 /* pixel struct */
 typedef struct {
     int x;
@@ -45,7 +50,15 @@ int * get_ev2raw(int black);
 void free_luts(int * raw2ev, int * ev2raw);
 
 /* do chroma smoothing with methods: 2x2, 3x3 and 5x5 */
-void chroma_smooth(int method, uint16_t * image_data, int width, int height, int black, int white, int * raw2ev, int * ev2raw);
+void chroma_smooth(int method,
+                   uint16_t * image_data,
+                   int width,
+                   int height,
+                   int black,
+                   int white,
+                   int * raw2ev,
+                   int * ev2raw,
+                   chroma_smooth_scratch_t * scratch);
 
 /* fix focus raw pixels */
 void fix_focus_pixels(pixel_map * focus_pixel_map,

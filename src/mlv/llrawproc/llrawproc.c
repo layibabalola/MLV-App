@@ -192,6 +192,12 @@ void freeLLRawProcObject(mlvObject_t * video)
     df_free_filename(video);
     df_free(video);
     free_luts(video->llrawproc->raw2ev, video->llrawproc->ev2raw);
+    free(video->llrawproc->chroma_smooth_scratch.buffer);
+    free_pattern_noise_scratch(&video->llrawproc->pattern_noise_scratch);
+    free(video->llrawproc->diso_preview_scratch.data_x);
+    free(video->llrawproc->diso_preview_scratch.data_y);
+    free(video->llrawproc->diso_preview_scratch.data_w);
+    free_dualiso_full20bit_scratch(&video->llrawproc->diso_full20bit_scratch);
     free_pixel_maps(&(video->llrawproc->focus_pixel_map), &(video->llrawproc->bad_pixel_map));
     free(video->llrawproc);
 }
@@ -303,7 +309,12 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
 #ifndef STDOUT_SILENT
         printf("Fixing pattern noise... ");
 #endif
-        fix_pattern_noise((int16_t *)raw_image_buff, video->RAWI.xRes, video->RAWI.yRes, raw_info.white_level, 0);
+        fix_pattern_noise((int16_t *)raw_image_buff,
+                          video->RAWI.xRes,
+                          video->RAWI.yRes,
+                          raw_info.white_level,
+                          0,
+                          &video->llrawproc->pattern_noise_scratch);
 #ifndef STDOUT_SILENT
         printf("Done\n\n");
 #endif
@@ -348,20 +359,45 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
         /* dual iso processing */
         if (video->llrawproc->dual_iso == 1) // Full 20bit processing mode
         {
+            int * auto_correction_ptr = &video->llrawproc->diso_auto_correction;
+            double * ev_correction_ptr = &video->llrawproc->diso_ev_correction;
+            int * black_delta_ptr = &video->llrawproc->diso_black_delta;
+            int explicit_auto_correction = 0;
+            double explicit_ev_correction = video->llrawproc->diso_ev_correction;
+            int explicit_black_delta = video->llrawproc->diso_black_delta;
+            const int has_explicit_auto_match =
+                (video->llrawproc->diso_auto_correction < 0) &&
+                (video->llrawproc->diso_ev_correction != 1) &&
+                (video->llrawproc->diso_black_delta != -1);
+
+            if( has_explicit_auto_match )
+            {
+                auto_correction_ptr = &explicit_auto_correction;
+                ev_correction_ptr = &explicit_ev_correction;
+                black_delta_ptr = &explicit_black_delta;
+            }
+
             diso_get_full20bit(raw_info,
                                raw_image_buff,
                                video->llrawproc->dark_frame,
                                video->llrawproc->diso1,
                                video->llrawproc->diso2,
                                &video->llrawproc->diso_pattern,
-                               &video->llrawproc->diso_auto_correction,
-                               &video->llrawproc->diso_ev_correction,
-                               &video->llrawproc->diso_black_delta,
+                               auto_correction_ptr,
+                               ev_correction_ptr,
+                               black_delta_ptr,
                                video->llrawproc->diso_averaging,
                                video->llrawproc->diso_alias_map,
                                video->llrawproc->diso_frblending,
                                video->llrawproc->chroma_smooth,
-                               video->cpu_cores);
+                               video->cpu_cores,
+                               &video->llrawproc->diso_full20bit_scratch);
+
+            if( has_explicit_auto_match )
+            {
+                video->llrawproc->diso_ev_correction = explicit_ev_correction;
+                video->llrawproc->diso_black_delta = explicit_black_delta;
+            }
 
             /* for full20bit set diso levels and bit depth to 16 bit, needed for cDNG export */
             int bits_shift = 16 - raw_info.bits_per_pixel;
@@ -426,7 +462,6 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
             video->llrawproc->raw2ev = get_raw2ev(raw_info.black_level);
             video->llrawproc->ev2raw = get_ev2raw(raw_info.black_level);
         }
-        /*
         else if (video->llrawproc->dual_iso == 2) // Preview mode
         {
             diso_get_preview(raw_image_buff,
@@ -434,9 +469,10 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
                              raw_info.height,
                              raw_info.black_level,
                              raw_info.white_level,
-                             0); // dual iso check mode is off
+                             &video->llrawproc->diso_pattern,
+                             0,
+                             &video->llrawproc->diso_preview_scratch); // dual iso check mode is off
         }
-        */
     }
 
     /* do chroma smoothing */
@@ -452,7 +488,8 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
                       raw_info.black_level,
                       raw_info.white_level,
                       video->llrawproc->raw2ev,
-                      video->llrawproc->ev2raw);
+                      video->llrawproc->ev2raw,
+                      &video->llrawproc->chroma_smooth_scratch);
     }
 
     /* undo 14bit conversion of uncompressed 10/12bit raw data, except when 20bit dual iso processing is active */

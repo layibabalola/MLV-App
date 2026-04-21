@@ -85,6 +85,35 @@ void free_image_buffer(processing_buffer_t * buffer)
     free(buffer);
 }
 
+static int ensure_processing_u16_scratch(uint16_t ** buffer, size_t * capacity, size_t required)
+{
+    if( !buffer || !capacity ) return 0;
+    if( *capacity >= required && *buffer ) return 1;
+
+    uint16_t * resized = realloc(*buffer, required * sizeof(uint16_t));
+    if( !resized ) return 0;
+
+    *buffer = resized;
+    *capacity = required;
+    return 1;
+}
+
+static int ensure_sharpen_mask_scratch(processingObject_t * processing, size_t pixel_count)
+{
+    return ensure_processing_u16_scratch(&processing->sharpen_mask_gray,
+                                         &processing->sharpen_mask_capacity,
+                                         pixel_count)
+        && ensure_processing_u16_scratch(&processing->sharpen_mask_sobel_h,
+                                         &processing->sharpen_mask_capacity,
+                                         pixel_count)
+        && ensure_processing_u16_scratch(&processing->sharpen_mask_sobel_v,
+                                         &processing->sharpen_mask_capacity,
+                                         pixel_count)
+        && ensure_processing_u16_scratch(&processing->sharpen_mask_contour,
+                                         &processing->sharpen_mask_capacity,
+                                         pixel_count);
+}
+
 
 processingObject_t * initProcessingObject()
 {
@@ -517,7 +546,13 @@ void applyProcessingObject( processingObject_t * processing,
     /* Denoiser must render on complete image, because of 2D median border problem */
     if( processing->denoiserStrength > 0 )
     {
-        denoise_2D_median( outputImage, imageX, imageY, processing->denoiserWindow, processing->denoiserStrength );
+        denoise_2D_median_with_context(
+            outputImage,
+            imageX,
+            imageY,
+            processing->denoiserWindow,
+            processing->denoiserStrength,
+            &processing->denoiser_context);
     }
 
     /* Recursive bilateral filtering (developed by Qingxiong Yang) must render on complete image, because of border problems */
@@ -590,7 +625,24 @@ void applyProcessingObject( processingObject_t * processing,
              *sobel_h_res,
              *sobel_v_res,
              *contour_img;
-        if( processing->sh_masking > 0 ) sobelFilter( inputImage, &gray, &sobel_h_res, &sobel_v_res, &contour_img, imageX, imageY );
+        int release_sobel_scratch = 0;
+        if( processing->sh_masking > 0 )
+        {
+            const size_t pixel_count = (size_t)imageX * (size_t)imageY;
+            if( ensure_sharpen_mask_scratch(processing, pixel_count) )
+            {
+                gray = processing->sharpen_mask_gray;
+                sobel_h_res = processing->sharpen_mask_sobel_h;
+                sobel_v_res = processing->sharpen_mask_sobel_v;
+                contour_img = processing->sharpen_mask_contour;
+                sobelFilterInto(inputImage, gray, sobel_h_res, sobel_v_res, contour_img, imageX, imageY);
+            }
+            else
+            {
+                sobelFilter(inputImage, &gray, &sobel_h_res, &sobel_v_res, &contour_img, imageX, imageY);
+                release_sobel_scratch = 1;
+            }
+        }
 
         /* Avoid gaps in pixels if skipping pixels during sharpen */
         if (sharp_skip != 1) memcpy(outputImage, inputImage, img_s * sizeof(uint16_t));
@@ -669,7 +721,7 @@ void applyProcessingObject( processingObject_t * processing,
         //memcpy(outputImage, inputImage, rl * sizeof(uint16_t));
         //memcpy(outputImage + (rl*(imageY-1)), inputImage + (rl*(imageY-1)), rl * sizeof(uint16_t));
 
-        if( processing->sh_masking > 0 )
+        if( processing->sh_masking > 0 && release_sobel_scratch )
         {
             if( gray ) free( gray );
             if( sobel_h_res ) free( sobel_h_res );
@@ -1716,6 +1768,10 @@ void freeProcessingObject(processingObject_t * processing)
 {
     if(processing->gradient_mask) free(processing->gradient_mask);
     if(processing->vignette_mask) free(processing->vignette_mask);
+    if(processing->sharpen_mask_gray) free(processing->sharpen_mask_gray);
+    if(processing->sharpen_mask_sobel_h) free(processing->sharpen_mask_sobel_h);
+    if(processing->sharpen_mask_sobel_v) free(processing->sharpen_mask_sobel_v);
+    if(processing->sharpen_mask_contour) free(processing->sharpen_mask_contour);
     freeFilterObject(processing->filter);
     free_lut(processing->lut);
     for (int i = 8; i >= 0; --i) free(processing->pre_calc_matrix[i]);
@@ -1723,6 +1779,7 @@ void freeProcessingObject(processingObject_t * processing)
     for (int i = 6; i >= 0; --i) free(processing->cs_zone.pre_calc_rgb_to_YCbCr[i]);
     for (int i = 3; i >= 0; --i) free(processing->cs_zone.pre_calc_YCbCr_to_rgb[i]);
     free_image_buffer(processing->shadows_highlights.blur_image);
+    denoise_2D_median_release(&processing->denoiser_context);
     free(processing);
 }
 

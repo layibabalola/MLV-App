@@ -34,8 +34,8 @@
 #define getMlvVersion(video) (video)->MLVI.versionString
 #define getMlvBlackLevel(video) (video)->RAWI.raw_info.black_level
 #define getMlvWhiteLevel(video) (video)->RAWI.raw_info.white_level
-#define setMlvBlackLevel(video, blackLevel) (video)->RAWI.raw_info.black_level = (blackLevel)
-#define setMlvWhiteLevel(video, whiteLevel) (video)->RAWI.raw_info.white_level = (whiteLevel)
+#define setMlvBlackLevel(video, blackLevel) do { (video)->RAWI.raw_info.black_level = (blackLevel); resetMlvCachedFrame(video); } while(0)
+#define setMlvWhiteLevel(video, whiteLevel) do { (video)->RAWI.raw_info.white_level = (whiteLevel); resetMlvCachedFrame(video); } while(0)
 #define getMlvOriginalBlackLevel(video) (video)->original_black_level
 #define getMlvOriginalWhiteLevel(video) (video)->original_white_level
 #define getMlvIso(video) (video)->EXPO.isoValue
@@ -78,31 +78,37 @@
 #define getMlvCpuCores(video) (video)->cpu_cores
 
 /* Use setMlvAlwaysUseAmaze() to always get AMaZE frames, for best quality always */
-#define setMlvAlwaysUseAmaze(video) (video)->use_amaze = 1; (video)->current_cached_frame_active = 0
+#define setMlvAlwaysUseAmaze(video) do { (video)->use_amaze = 1; resetMlvCachedFrame(video); } while(0)
 /* Or this one for speed/ultimate playback performance, will give AMaZE if it is in cache, 
  * or bilinear if cached AMaZE frame is not avalible in cache */
-#define setMlvDontAlwaysUseAmaze(video) (video)->use_amaze = 0; (video)->current_cached_frame_active = 0
+#define setMlvDontAlwaysUseAmaze(video) do { (video)->use_amaze = 0; resetMlvCachedFrame(video); } while(0)
 /* Use the non debayer for best speed + no quality :-P */
-#define setMlvUseNoneDebayer(video) (video)->use_amaze = 2; (video)->current_cached_frame_active = 0
+#define setMlvUseNoneDebayer(video) do { (video)->use_amaze = 2; resetMlvCachedFrame(video); } while(0)
 /* Use the easy debayer for best speed + a little quality */
-#define setMlvUseSimpleDebayer(video) (video)->use_amaze = 3; (video)->current_cached_frame_active = 0
+#define setMlvUseSimpleDebayer(video) do { (video)->use_amaze = 3; resetMlvCachedFrame(video); } while(0)
 /* Use the LMMSE debayer */
-#define setMlvUseLmmseDebayer(video) (video)->use_amaze = 4; (video)->current_cached_frame_active = 0
+#define setMlvUseLmmseDebayer(video) do { (video)->use_amaze = 4; resetMlvCachedFrame(video); } while(0)
 /* Use the IGV debayer */
-#define setMlvUseIgvDebayer(video) (video)->use_amaze = 5; (video)->current_cached_frame_active = 0
+#define setMlvUseIgvDebayer(video) do { (video)->use_amaze = 5; resetMlvCachedFrame(video); } while(0)
 /* Use the AHD debayer */
-#define setMlvUseAhdDebayer(video) (video)->use_amaze = 6; (video)->current_cached_frame_active = 0
+#define setMlvUseAhdDebayer(video) do { (video)->use_amaze = 6; resetMlvCachedFrame(video); } while(0)
 /* Use the RCD debayer */
-#define setMlvUseRcdDebayer(video) (video)->use_amaze = 7; (video)->current_cached_frame_active = 0
+#define setMlvUseRcdDebayer(video) do { (video)->use_amaze = 7; resetMlvCachedFrame(video); } while(0)
 /* Use the DCB debayer */
-#define setMlvUseDcbDebayer(video) (video)->use_amaze = 8; (video)->current_cached_frame_active = 0
+#define setMlvUseDcbDebayer(video) do { (video)->use_amaze = 8; resetMlvCachedFrame(video); } while(0)
 
 /* Set CA correction parameters */
-#define setMlvCaCorrectionRed(video, value) (video)->ca_red = (value)
-#define setMlvCaCorrectionBlue(video, value) (video)->ca_blue = (value)
+#define setMlvCaCorrectionRed(video, value) do { (video)->ca_red = (value); resetMlvCachedFrame(video); } while(0)
+#define setMlvCaCorrectionBlue(video, value) do { (video)->ca_blue = (value); resetMlvCachedFrame(video); } while(0)
 
 /* Reset the current cached frame. Needed if a raw correction parameter changed */
-#define resetMlvCachedFrame(video) (video)->current_cached_frame_active = 0
+#define resetMlvCachedFrame(video) do { \
+    (video)->current_cached_frame_active = 0; \
+    (video)->current_processed_frame_active = 0; \
+    (video)->current_processed_frame_signature = 0; \
+    (video)->current_processed_frame_8bit_active = 0; \
+    (video)->current_processed_frame_8bit_signature = 0; \
+} while(0)
 
 /* This is pretty much private */
 #define doesMlvAlwaysUseAmaze(video) (video)->use_amaze

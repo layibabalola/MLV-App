@@ -7,6 +7,7 @@
 
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
+#include "debug/StageTiming.h"
 #include "math.h"
 
 #include <QMessageBox>
@@ -38,6 +39,9 @@
 #endif
 
 #include "SystemMemory.h"
+#include "DualIsoPlaybackPolicy.h"
+#include "GpuDisplayViewport.h"
+#include "batch/WorkerThreadCount.h"
 #include "ExportSettingsDialog.h"
 #include "EditSliderValueDialog.h"
 #include "DarkStyle.h"
@@ -64,6 +68,7 @@
 #include "batch/BatchPrompts.h"
 #include "batch/BatchLogger.h"
 #include <QElapsedTimer>
+#include <vector>
 
 /* spaceTag argument options: ffmpeg color space tag number compliant */
 #define SPACETAG_REC709   1   /* rec709 color space */
@@ -97,6 +102,20 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #define SESSION_ACTIVE_CLIP_ROW      m_pModel->activeRow()
 #define SET_ACTIVE_CLIP_IDX(index)   m_pModel->setActiveRow(index)
 #define SESSION_EMPTY                m_pModel->rowCount(QModelIndex())==0
+
+namespace
+{
+static void convert_rgb16_to_rgb8(const uint16_t * source, uint8_t * destination, int pixelCount)
+{
+    if( !source || !destination || pixelCount <= 0 ) return;
+
+    #pragma omp parallel for
+    for( int i = 0; i < pixelCount * 3; ++i )
+    {
+        destination[i] = static_cast<uint8_t>( source[i] >> 8 );
+    }
+}
+}
 
 //Constructor
 MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
@@ -132,7 +151,11 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     m_zoomModeChanged = false;
     m_tryToSyncAudio = false;
     m_playbackStopped = false;
+    m_dualIsoPlaybackPreviewActive = false;
     m_inClipDeleteProcess = false;
+    m_renderThreadUsing16BitPreview = false;
+    m_displayPreviewCacheNextSlot = 0;
+    invalidateDisplayPreviewCache();
 
 #ifdef STDOUT_SILENT
     //QtNetwork: shut up please!
@@ -247,6 +270,8 @@ MainWindow::~MainWindow()
     delete m_pGradientElement;
     delete m_pStatusDialog;
     delete m_pInfoDialog;
+    if( m_pRawImage16 ) free( m_pRawImage16 );
+    if( m_pRawImage ) free( m_pRawImage );
     delete ui;
 }
 
@@ -603,6 +628,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 void MainWindow::drawFrame( void )
 {
     m_frameStillDrawing = true;
+    m_renderThreadUsing16BitPreview = shouldUseGpu16PreviewPath();
 
     //enable low level raw fixes (if wanted)
     if( ui->checkBoxRawFixEnable->isChecked() ) m_pMlvObject->llrawproc->fix_raw = 1;
@@ -611,7 +637,7 @@ void MainWindow::drawFrame( void )
     if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
     {
         //If we are in playback, dropmode, we calculated the exact frame to sync the timeline
-        m_pRenderThread->renderFrame( m_newPosDropMode );
+        m_pRenderThread->renderFrame( m_newPosDropMode, m_renderThreadUsing16BitPreview );
 
         //Draw TimeCode
         if( !m_tcModeDuration )
@@ -627,7 +653,7 @@ void MainWindow::drawFrame( void )
     else
     {
         //Else we render the frame which is selected by the slider
-        m_pRenderThread->renderFrame( ui->horizontalSliderPosition->value() );
+        m_pRenderThread->renderFrame( ui->horizontalSliderPosition->value(), m_renderThreadUsing16BitPreview );
 
         //Draw TimeCode
         if( !m_tcModeDuration )
@@ -747,6 +773,8 @@ int MainWindow::openMlvForPreview(QString fileName)
     int imageSize = getMlvWidth( m_pMlvObject ) * getMlvHeight( m_pMlvObject ) * 3;
     if( m_pRawImage ) free( m_pRawImage );
     m_pRawImage = ( uint8_t* )malloc( imageSize );
+    if( m_pRawImage16 ) free( m_pRawImage16 );
+    m_pRawImage16 = ( uint16_t* )malloc( static_cast<size_t>(imageSize) * sizeof( uint16_t ) );
 
     m_fileLoaded = true;
 
@@ -919,9 +947,11 @@ int MainWindow::openMlv( QString fileName )
     int imageSize = getMlvWidth( m_pMlvObject ) * getMlvHeight( m_pMlvObject ) * 3;
     if( m_pRawImage ) free( m_pRawImage );
     m_pRawImage = ( uint8_t* )malloc( imageSize );
+    if( m_pRawImage16 ) free( m_pRawImage16 );
+    m_pRawImage16 = ( uint16_t* )malloc( static_cast<size_t>(imageSize) * sizeof( uint16_t ) );
 
     //Init Render Thread
-    m_pRenderThread->init( m_pMlvObject, m_pRawImage );
+    m_pRenderThread->init( m_pMlvObject, m_pRawImage, m_pRawImage16 );
 
     //Calculate shutter flavors :)
     float shutterSpeed = 1000000.0f / (float)(getMlvShutter( m_pMlvObject ));
@@ -1298,6 +1328,7 @@ void MainWindow::initGui( void )
     m_pScene = new GraphicsPickerScene( this );
     m_pScene->addItem( m_pGraphicsItem );
     ui->graphicsView->setScene( m_pScene );
+    GpuDisplayViewport::installOn( ui->graphicsView );
     ui->graphicsView->show();
     connect( ui->graphicsView, SIGNAL( customContextMenuRequested(QPoint) ), this, SLOT( pictureCustomContextMenuRequested(QPoint) ) );
     connect( m_pScene, SIGNAL( wbPicked(int,int) ), this, SLOT( whiteBalancePicked(int,int) ) );
@@ -1544,6 +1575,7 @@ void MainWindow::initLib( void )
     }
 
     m_pRawImage = NULL;
+    m_pRawImage16 = NULL;
 }
 
 //Read some settings from registry
@@ -2842,7 +2874,7 @@ ProcessResult MainWindow::exportCdngSequence(
     /* Render one frame for raw correction init */
     uint32_t frameSize = getMlvWidth( mlvObject ) * getMlvHeight( mlvObject ) * 3;
     uint16_t *imgBuffer = (uint16_t *)malloc( frameSize * sizeof( uint16_t ) );
-    getMlvProcessedFrame16( mlvObject, 0, imgBuffer, QThread::idealThreadCount() );
+    getMlvProcessedFrame16( mlvObject, 0, imgBuffer, mlvappEffectiveWorkerThreadCount() );
     free( imgBuffer );
 
     /* --- Frame export loop (cutIn/cutOut are 1-based) --- */
@@ -4472,6 +4504,8 @@ void MainWindow::deleteSession()
 
     //Set Labels black
     ui->labelScope->setScope( NULL, 0, 0, false, false, ScopesLabel::None );
+    invalidateDisplayPreviewCache();
+    GpuDisplayViewport::clearPresentedImage( ui->graphicsView, m_pGraphicsItem );
     m_pGraphicsItem->setPixmap( QPixmap( ":/IMG/IMG/TransDummy.png" ) );
     m_pScene->setSceneRect( 0, 0, 10, 10 );
 
@@ -5188,6 +5222,7 @@ int MainWindow::showFileInEditor(int row)
 
     //Stop Playback
     ui->actionPlay->setChecked( false );
+    applyEffectiveDualIsoPlaybackSettings();
     //Save slider receipt
     if( !ACTIVE_RECEIPT->wasNeverLoaded() && !m_inClipDeleteProcess ) setReceipt( ACTIVE_RECEIPT );
     //Save new position in session
@@ -5512,41 +5547,65 @@ void MainWindow::paintAudioTrack( void )
 }
 
 //Draw Zebras, return: 1=under, 2=over, 3=under+over, 0=okay
-uint8_t MainWindow::drawZebras()
+uint8_t MainWindow::drawZebras(QImage *image)
 {
     uint8_t underOver = 0;
 
     //If option not checked we do nothing
     if( !ui->actionShowZebras->isChecked() ) return underOver;
 
-    //Get image
-    QImage image = m_pGraphicsItem->pixmap().toImage();
-    //Each pixel
-    for( int y = 0; y < image.height(); y++ )
+    if( !image ) return underOver;
+
+    for( int y = 0; y < image->height(); y++ )
     {
-        for( int x = 0; x < image.width(); x++ )
+        uchar * line = image->scanLine( y );
+        for( int x = 0; x < image->width(); x++ )
         {
-            QColor pixel = image.pixelColor( x, y );
+            uchar * pixel = line + (x * 3);
+            const int maxChannel = qMax(pixel[0], qMax(pixel[1], pixel[2]));
+            const int minChannel = qMin(pixel[0], qMin(pixel[1], pixel[2]));
+            const int lightness = (maxChannel + minChannel) / 2;
             //Overexposed
-            if( pixel.lightness() >= 252 )
+            if( lightness >= 252 )
             {
                 //Set color red
-                image.setPixelColor( x, y, Qt::red );
+                pixel[0] = 255;
+                pixel[1] = 0;
+                pixel[2] = 0;
                 underOver |= 0x02;
             }
             //Underexposed
-            if( pixel.lightness() <= 3 )
+            if( lightness <= 3 )
             {
                 //Set color blue
-                image.setPixelColor( x, y, Qt::blue );
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 255;
                 underOver |= 0x01;
             }
         }
     }
-    //Set image with zebras to viewer
-    m_pGraphicsItem->setPixmap( QPixmap::fromImage( image ) );
 
     return underOver;
+}
+
+void MainWindow::invalidateDisplayPreviewCache( void )
+{
+    m_displayPreviewCacheNextSlot = 0;
+    for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
+    {
+        entry = DisplayPreviewCacheEntry();
+    }
+}
+
+bool MainWindow::shouldUseGpu16PreviewPath( void ) const
+{
+    if( !GpuDisplayViewport::isInstalledOn( ui->graphicsView ) ) return false;
+    if( ui->actionShowHistogram->isChecked() ) return false;
+    if( ui->actionShowWaveFormMonitor->isChecked() ) return false;
+    if( ui->actionShowParade->isChecked() ) return false;
+    if( ui->actionShowVectorScope->isChecked() ) return false;
+    return true;
 }
 
 //Write the frame number into the label
@@ -6850,6 +6909,7 @@ void MainWindow::on_actionExport_triggered()
 {
     //Stop playback if active
     ui->actionPlay->setChecked( false );
+    applyEffectiveDualIsoPlaybackSettings();
 
     //Save slider receipt
     setReceipt( ACTIVE_RECEIPT );
@@ -7075,6 +7135,8 @@ void MainWindow::on_actionExport_triggered()
 //Export actual frame as 16bit png
 void MainWindow::on_actionExportCurrentFrame_triggered()
 {
+    ui->actionPlay->setChecked( false );
+    applyEffectiveDualIsoPlaybackSettings();
     SingleFrameExportDialog *exportDialog = new SingleFrameExportDialog( this,
                                                                          m_pMlvObject,
                                                                          ACTIVE_RECEIPT->fileName(),
@@ -8682,6 +8744,42 @@ void MainWindow::on_actionPlay_triggered(bool checked)
     }
 }
 
+void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
+{
+    if( !m_fileLoaded ) return;
+
+    const DualIsoPlaybackRuntimeSettings settings = effectiveDualIsoPlaybackRuntimeSettings(
+                ui->actionPlay->isChecked(),
+                ui->checkBoxRawFixEnable->isChecked(),
+                llrpGetDualIsoValidity( m_pMlvObject ),
+                toolButtonDualIsoCurrentIndex(),
+                toolButtonDualIsoInterpolationCurrentIndex(),
+                toolButtonDualIsoAliasMapCurrentIndex(),
+                toolButtonDualIsoFullresBlendingCurrentIndex() );
+
+    const bool changed = (m_dualIsoPlaybackPreviewActive != settings.previewOverrideActive)
+                      || (llrpGetDualIsoMode( m_pMlvObject ) != settings.mode)
+                      || (llrpGetDualIsoInterpolationMethod( m_pMlvObject ) != settings.interpolation)
+                      || (llrpGetDualIsoAliasMapMode( m_pMlvObject ) != settings.aliasMap)
+                      || (llrpGetDualIsoFullResBlendingMode( m_pMlvObject ) != settings.fullResBlending);
+
+    if( !changed ) return;
+
+    llrpSetDualIsoMode( m_pMlvObject, settings.mode );
+    llrpSetDualIsoInterpolationMethod( m_pMlvObject, settings.interpolation );
+    llrpSetDualIsoAliasMapMode( m_pMlvObject, settings.aliasMap );
+    llrpSetDualIsoFullResBlendingMode( m_pMlvObject, settings.fullResBlending );
+    processingSetBlackAndWhiteLevel( m_pMlvObject->processing,
+                                     getMlvBlackLevel( m_pMlvObject ),
+                                     getMlvWhiteLevel( m_pMlvObject ),
+                                     getMlvBitdepth( m_pMlvObject ) );
+    llrpResetDngBWLevels( m_pMlvObject );
+    resetMlvCache( m_pMlvObject );
+    resetMlvCachedFrame( m_pMlvObject );
+    m_frameChanged = true;
+    m_dualIsoPlaybackPreviewActive = settings.previewOverrideActive;
+}
+
 //Play button toggled (by program)
 void MainWindow::on_actionPlay_toggled(bool checked)
 {
@@ -8689,6 +8787,7 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     if( !checked ) m_playbackStopped = true;
 
     selectDebayerAlgorithm();
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //Zebras en-/disabled -> redraw
@@ -8871,15 +8970,7 @@ void MainWindow::toolButtonDualIsoChanged( void )
 
     if( !m_fileLoaded ) return;
 
-    //Set dualIso mode
-    llrpSetDualIsoMode( m_pMlvObject, toolButtonDualIsoCurrentIndex() );
-    //Reset processing black and white levels
-    processingSetBlackAndWhiteLevel( m_pMlvObject->processing, getMlvBlackLevel( m_pMlvObject ), getMlvWhiteLevel( m_pMlvObject ), getMlvBitdepth( m_pMlvObject ) );
-    //Reset diso levels to mlv raw levels
-    llrpResetDngBWLevels( m_pMlvObject );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 void MainWindow::on_DualIsoPatternComboBox_currentIndexChanged(int index)
@@ -8935,28 +9026,19 @@ void MainWindow::on_toolButtonDualIsoMatchExposures2_clicked()
 //DualISO Interpolation changed
 void MainWindow::toolButtonDualIsoInterpolationChanged( void )
 {
-    llrpSetDualIsoInterpolationMethod( m_pMlvObject, toolButtonDualIsoInterpolationCurrentIndex() );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //DualISO Alias Map changed
 void MainWindow::toolButtonDualIsoAliasMapChanged( void )
 {
-    llrpSetDualIsoAliasMapMode( m_pMlvObject, toolButtonDualIsoAliasMapCurrentIndex() );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //DualISO Fullres Blending changed
 void MainWindow::toolButtonDualIsoFullresBlendingChanged( void )
 {
-    llrpSetDualIsoFullResBlendingMode( m_pMlvObject, toolButtonDualIsoFullresBlendingCurrentIndex() );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //Darkframe Subtraction On/Off changed
@@ -9143,6 +9225,7 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     ui->label_RawWhiteVal->setEnabled( checked );
     on_horizontalSliderRawBlack_valueChanged( ui->horizontalSliderRawBlack->value() );
     on_horizontalSliderRawWhite_valueChanged( ui->horizontalSliderRawWhite->value() );
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //En-/disable all LUT processing
@@ -9551,7 +9634,39 @@ void MainWindow::exportAbort( void )
 //Draw the frame when render thread is ready
 void MainWindow::drawFrameReady()
 {
+    const uint64_t display_frame = ui->actionDropFrameMode->isChecked()
+        ? static_cast<uint64_t>(m_newPosDropMode)
+        : static_cast<uint64_t>(ui->horizontalSliderPosition->value());
+    const double display_start = mlv_stage_timing_now();
+    const bool gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    const bool gpuScalingActive = gpuViewportInstalled;
+    const bool zoomFitEnabled = ui->actionZoomFit->isChecked();
+    const bool zebrasEnabled = ui->actionShowZebras->isChecked();
+    const bool betterResizerEnabled = ui->actionBetterResizer->isChecked();
+    const bool scopeVisualizationEnabled =
+        ui->actionShowHistogram->isChecked()
+        || ui->actionShowWaveFormMonitor->isChecked()
+        || ui->actionShowParade->isChecked()
+        || ui->actionShowVectorScope->isChecked();
+    const bool gpu16PreviewActive =
+        gpuViewportInstalled
+        && m_renderThreadUsing16BitPreview
+        && !scopeVisualizationEnabled;
+    const bool useGpuImagePresentation = gpuScalingActive && !gpu16PreviewActive;
+    const int sourceWidth = getMlvWidth( m_pMlvObject );
+    const int sourceHeight = getMlvHeight( m_pMlvObject );
+    const double stretchX = getHorizontalStretchFactor(false);
+    const double stretchY = getVerticalStretchFactor(false);
     Qt::TransformationMode mode = Qt::FastTransformation;
+    QImage displayImage;
+    bool displayImageOwnsData = false;
+    QPixmap cachedPixmap;
+    bool cachedPixmapAvailable = false;
+    bool framePresentedByViewport = false;
+    uint8_t underOver = 0;
+    const uint8_t * rgb8DisplaySource = m_pRawImage;
+    int sceneWidth = sourceWidth;
+    int sceneHeight = sourceHeight;
     if( !ui->actionPlay->isChecked()
      || ui->actionUseNoneDebayer->isChecked()
      || ui->actionCaching->isChecked() )
@@ -9559,7 +9674,7 @@ void MainWindow::drawFrameReady()
         mode = Qt::SmoothTransformation;
     }
 
-    if( ui->actionZoomFit->isChecked() )
+    if( zoomFitEnabled )
     {
         //Some math to have the picture exactly in the frame
         int actWidth;
@@ -9574,77 +9689,22 @@ void MainWindow::drawFrameReady()
             actWidth = ui->graphicsView->width();
             actHeight = ui->graphicsView->height();
         }
-        int desWidth = actWidth;
-        int desHeight = actWidth * getMlvHeight(m_pMlvObject) / getMlvWidth(m_pMlvObject) * getVerticalStretchFactor(false) / getHorizontalStretchFactor(false);
-        if( desHeight > actHeight )
+        sceneWidth = actWidth;
+        sceneHeight = actWidth * sourceHeight / sourceWidth * stretchY / stretchX;
+        if( sceneHeight > actHeight )
         {
-            desHeight = actHeight;
-            desWidth = actHeight * getMlvWidth(m_pMlvObject) / getMlvHeight(m_pMlvObject) / getVerticalStretchFactor(false) * getHorizontalStretchFactor(false);
+            sceneHeight = actHeight;
+            sceneWidth = actHeight * sourceWidth / sourceHeight / stretchY * stretchX;
         }
-
-        //Get Picture
-
-
-        QPixmap pic = QPixmap::fromImage( QImage( ( unsigned char *) m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), QImage::Format_RGB888 )
-                                          .scaled( desWidth * devicePixelRatio(),
-                                                   desHeight * devicePixelRatio(),
-                                                   Qt::IgnoreAspectRatio, mode) );
-        //Set Picture to Retina
-        pic.setDevicePixelRatio( devicePixelRatio() );
-        //Bring frame to GUI (fit to window)
-        m_pGraphicsItem->setPixmap( pic );
-        //Set Scene
-        m_pScene->setSceneRect( 0, 0, desWidth, desHeight );
     }
     else
     {
-        //Bring frame to GUI (100%)
-        if( getVerticalStretchFactor(false) == 1.0
-         && getHorizontalStretchFactor(false) == 1.0 ) //Fast mode for 1.0 stretch factor
-        {
-            m_pGraphicsItem->setPixmap( QPixmap::fromImage( QImage( ( unsigned char *) m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), QImage::Format_RGB888 ) ) );
-            m_pScene->setSceneRect( 0, 0, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject) );
-        }
-        else
-        {
-            QPixmap pixmap;
-            //Qvir resize
-            if( mode == Qt::SmoothTransformation && ui->actionBetterResizer->isChecked() )
-            {
-                uint8_t *scaledPic = (uint8_t*)malloc( 3 * getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false)
-                                                         * getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false)
-                                                         * sizeof( uint8_t ) );
-                avir_scale_thread_pool scaling_pool;
-                avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
-                avir::CImageResizerParamsUltra roptions;
-                avir::CImageResizer<> image_resizer( 8, 0, roptions );
-                image_resizer.resizeImage( m_pRawImage,
-                                           getMlvWidth(m_pMlvObject),
-                                           getMlvHeight(m_pMlvObject), 0,
-                                           scaledPic,
-                                           getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false),
-                                           getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false),
-                                           3, 0, &vars );
-                pixmap = QPixmap::fromImage( QImage( ( unsigned char *) scaledPic,
-                                                     getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false),
-                                                     getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false),
-                                                     QImage::Format_RGB888 ) );
-                free( scaledPic );
-            }
-            //Qt resize
-            else
-            {
-                pixmap = QPixmap::fromImage( QImage( ( unsigned char *) m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), QImage::Format_RGB888 )
-                                             .scaled( getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false),
-                                                      getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false),
-                                                      Qt::IgnoreAspectRatio, mode) );
-            }
-            m_pGraphicsItem->setPixmap( pixmap );
-            m_pScene->setSceneRect( 0, 0, getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false), getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false) );
-        }
+        sceneWidth = sourceWidth * stretchX;
+        sceneHeight = sourceHeight * stretchY;
     }
 
-    // Set sliders after dual ISO processing
+    m_pScene->setSceneRect( 0, 0, sceneWidth, sceneHeight );
+
     if( toolButtonDualIsoCurrentIndex() == 1 )
     {
         ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 );
@@ -9656,7 +9716,6 @@ void MainWindow::drawFrameReady()
             ui->DualIsoPatternComboBox->blockSignals( true );
             ui->DualIsoPatternComboBox->setCurrentIndex(m_pMlvObject->llrawproc->diso_pattern);
             ui->DualIsoPatternComboBox->blockSignals( false );
-            //printf("DISO pattern: %d\n", m_pMlvObject->llrawproc->diso_pattern);
         }
 
         if( m_pMlvObject->llrawproc->diso_auto_correction < 0 )
@@ -9678,42 +9737,215 @@ void MainWindow::drawFrameReady()
             }
 
             m_pMlvObject->llrawproc->diso_auto_correction = -m_pMlvObject->llrawproc->diso_auto_correction;
-
-            //printf("DISO: %d, %.2f, %d\n", m_pMlvObject->llrawproc->diso_auto_correction, m_pMlvObject->llrawproc->diso_ev_correction, m_pMlvObject->llrawproc->diso_black_delta);
         }
     }
 
-    //Add zebras on the image
-    uint8_t underOver = drawZebras();
+    const uint64_t display_signature =
+        m_pMlvObject->current_processed_frame_8bit_active
+            ? m_pMlvObject->current_processed_frame_8bit_signature
+            : (m_pMlvObject->current_processed_frame_active
+                ? m_pMlvObject->current_processed_frame_signature
+                : display_frame);
+    const int devicePixelRatioMilli = static_cast<int>( devicePixelRatioF() * 1000.0 + 0.5 );
+    const int transformationMode = (mode == Qt::SmoothTransformation) ? 1 : 0;
+    GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
+    if( useGpuImagePresentation )
+    {
+        if( mode == Qt::FastTransformation )
+        {
+            gpuPresentationOptions.samplingMode = GpuDisplayViewport::SamplingNearest;
+        }
+        else if( betterResizerEnabled )
+        {
+            gpuPresentationOptions.samplingMode = GpuDisplayViewport::SamplingBicubic;
+        }
+        else
+        {
+            gpuPresentationOptions.samplingMode = GpuDisplayViewport::SamplingLinear;
+        }
+    }
+    gpuPresentationOptions.showZebras = zebrasEnabled;
+
+    if( gpu16PreviewActive )
+    {
+        framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
+                                                                    m_pGraphicsItem,
+                                                                    m_pRawImage16,
+                                                                    sourceWidth,
+                                                                    sourceHeight,
+                                                                    gpuPresentationOptions );
+        if( !framePresentedByViewport )
+        {
+            static std::vector<uint8_t> gpu16FallbackRgb8;
+            gpu16FallbackRgb8.resize( static_cast<size_t>(sourceWidth) * static_cast<size_t>(sourceHeight) * 3u );
+            convert_rgb16_to_rgb8( m_pRawImage16, gpu16FallbackRgb8.data(), sourceWidth * sourceHeight );
+            rgb8DisplaySource = gpu16FallbackRgb8.data();
+        }
+    }
+
+    if( !framePresentedByViewport )
+    {
+        for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
+        {
+            if( !entry.valid ) continue;
+            if( entry.frameIndex != display_frame ) continue;
+            if( entry.signature != display_signature ) continue;
+            if( entry.sourceWidth != sourceWidth || entry.sourceHeight != sourceHeight ) continue;
+            if( entry.sceneWidth != sceneWidth || entry.sceneHeight != sceneHeight ) continue;
+            if( entry.zoomFit != zoomFitEnabled ) continue;
+            if( entry.betterResizer != betterResizerEnabled ) continue;
+            if( entry.zebras != zebrasEnabled ) continue;
+            if( entry.gpuScaling != useGpuImagePresentation ) continue;
+            if( entry.transformationMode != transformationMode ) continue;
+            if( entry.devicePixelRatioMilli != devicePixelRatioMilli ) continue;
+
+            displayImage = entry.image;
+            displayImageOwnsData = true;
+            underOver = entry.underOver;
+            cachedPixmap = entry.pixmap;
+            cachedPixmapAvailable = !entry.pixmap.isNull();
+            break;
+        }
+    }
+
+    if( displayImage.isNull() && !framePresentedByViewport )
+    {
+        if( useGpuImagePresentation )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else if( zoomFitEnabled )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 )
+                               .scaled( sceneWidth * devicePixelRatioF(),
+                                        sceneHeight * devicePixelRatioF(),
+                                        Qt::IgnoreAspectRatio, mode);
+            displayImageOwnsData = true;
+        }
+        else if( stretchY == 1.0 && stretchX == 1.0 )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else if( mode == Qt::SmoothTransformation && betterResizerEnabled )
+        {
+            static avir_scale_thread_pool scaling_pool;
+            static avir::CImageResizerParamsUltra roptions;
+            static avir::CImageResizer<> image_resizer( 8, 0, roptions );
+            static std::vector<uint8_t> scaledPic;
+            scaledPic.resize( static_cast<size_t>(sceneWidth) * static_cast<size_t>(sceneHeight) * 3u );
+            avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
+            image_resizer.resizeImage( rgb8DisplaySource,
+                                       sourceWidth,
+                                       sourceHeight, 0,
+                                       scaledPic.data(),
+                                       sceneWidth,
+                                       sceneHeight,
+                                       3, 0, &vars );
+            displayImage = QImage( scaledPic.data(),
+                                   sceneWidth,
+                                   sceneHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 )
+                               .scaled( sceneWidth,
+                                        sceneHeight,
+                                        Qt::IgnoreAspectRatio, mode);
+            displayImageOwnsData = true;
+        }
+
+        if( zebrasEnabled && !displayImageOwnsData )
+        {
+            displayImage = displayImage.copy();
+            displayImageOwnsData = true;
+        }
+
+        underOver = drawZebras( &displayImage );
+
+        DisplayPreviewCacheEntry & cacheEntry =
+            m_displayPreviewCache[m_displayPreviewCacheNextSlot % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]))];
+        m_displayPreviewCacheNextSlot = (m_displayPreviewCacheNextSlot + 1) % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]));
+        cacheEntry = DisplayPreviewCacheEntry();
+        cacheEntry.valid = true;
+        cacheEntry.zoomFit = zoomFitEnabled;
+        cacheEntry.betterResizer = betterResizerEnabled;
+        cacheEntry.zebras = zebrasEnabled;
+        cacheEntry.gpuScaling = useGpuImagePresentation;
+        cacheEntry.frameIndex = display_frame;
+        cacheEntry.signature = display_signature;
+        cacheEntry.sourceWidth = sourceWidth;
+        cacheEntry.sourceHeight = sourceHeight;
+        cacheEntry.sceneWidth = sceneWidth;
+        cacheEntry.sceneHeight = sceneHeight;
+        cacheEntry.imageWidth = displayImage.width();
+        cacheEntry.imageHeight = displayImage.height();
+        cacheEntry.transformationMode = transformationMode;
+        cacheEntry.devicePixelRatioMilli = devicePixelRatioMilli;
+        cacheEntry.underOver = underOver;
+        cacheEntry.image = displayImage.copy();
+        if( !useGpuImagePresentation )
+        {
+            cacheEntry.pixmap = QPixmap::fromImage( cacheEntry.image );
+            if( zoomFitEnabled ) cacheEntry.pixmap.setDevicePixelRatio( devicePixelRatioF() );
+        }
+
+        displayImage = cacheEntry.image;
+        cachedPixmap = cacheEntry.pixmap;
+        cachedPixmapAvailable = !cacheEntry.pixmap.isNull();
+    }
+
+    if( !framePresentedByViewport
+     && !GpuDisplayViewport::presentImage( ui->graphicsView, m_pGraphicsItem, displayImage, gpuPresentationOptions ) )
+    {
+        QPixmap pic = cachedPixmapAvailable ? cachedPixmap : QPixmap::fromImage( displayImage );
+        if( zoomFitEnabled && pic.devicePixelRatio() == 1.0 )
+        {
+            pic.setDevicePixelRatio( devicePixelRatioF() );
+        }
+        m_pGraphicsItem->setPixmap( pic );
+    }
 
     if( ui->actionShowEditArea->isChecked() )
     {
-        //Bring over/under to histogram
+        const double scopes_start = mlv_stage_timing_now();
         bool under = false;
         bool over = false;
         if( ( underOver & 0x01 ) == 0x01 ) under = true;
         if( ( underOver & 0x02 ) == 0x02 ) over = true;
 
-        //GetHistogram
         if( ui->actionShowHistogram->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeHistogram );
         }
-        //Waveform
         else if( ui->actionShowWaveFormMonitor->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeWaveForm );
         }
-        //Parade
         else if( ui->actionShowParade->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeRgbParade);
         }
-        //VectorScope
         else if( ui->actionShowVectorScope->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeVectorScope );
         }
+        mlv_stage_timing_note("drawFrameReady.scopes", display_frame, scopes_start);
     }
     
     //Drawing ready, next frame can be rendered
@@ -9766,12 +9998,14 @@ void MainWindow::drawFrameReady()
     if( m_playbackStopped == true )
     {
         selectDebayerAlgorithm();
+        applyEffectiveDualIsoPlaybackSettings();
         m_playbackStopped = false;
     }
 
     //Reset delete clip action as enabled
     ui->actionDeleteSelectedClips->setEnabled( true );
 
+    mlv_stage_timing_note("drawFrameReady.total", display_frame, display_start);
     emit frameReady();
 }
 

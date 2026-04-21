@@ -45,6 +45,96 @@ _a > _b ? _a : _b; })
 #define COERCE(x,lo,hi) MAX(MIN((x),(hi)),(lo))
 #define COUNT(x)        ((int)(sizeof(x)/sizeof((x)[0])))
 
+#define FIXPN_FULL_RES_PLANES 7
+#define FIXPN_HALF_RES_PLANES 8
+
+enum {
+    FIXPN_FULL_RAW_T = 0,
+    FIXPN_FULL_AVG_G = 1,
+    FIXPN_FULL_DIF_RG = 2,
+    FIXPN_FULL_DIF_BG = 3,
+    FIXPN_FULL_NOISE = 4,
+    FIXPN_FULL_MASK = 5,
+    FIXPN_FULL_HGRAD = 6
+};
+
+static int pattern_noise_ensure_buffer(void ** buffer, size_t * capacity, size_t required_elements, size_t element_size)
+{
+    if (required_elements == 0)
+    {
+        return 1;
+    }
+
+    if (*buffer && (*capacity >= required_elements))
+    {
+        return 1;
+    }
+
+    if (required_elements > (((size_t)-1) / element_size))
+    {
+        return 0;
+    }
+
+    void * resized = realloc(*buffer, required_elements * element_size);
+    if (!resized)
+    {
+        return 0;
+    }
+
+    *buffer = resized;
+    *capacity = required_elements;
+    return 1;
+}
+
+static int pattern_noise_prepare(pattern_noise_scratch_t * scratch, int w, int h)
+{
+    size_t full_pixels = (size_t)w * h;
+    size_t half_pixels = (size_t)(w / 2) * (size_t)(h / 2);
+    size_t max_half = MAX((size_t)(w / 2), (size_t)(h / 2));
+    size_t int_scratch = max_half * 2;
+
+    return pattern_noise_ensure_buffer((void **)&scratch->full_res_planes,
+                                       &scratch->full_res_capacity,
+                                       full_pixels * FIXPN_FULL_RES_PLANES,
+                                       sizeof(scratch->full_res_planes[0]))
+        && pattern_noise_ensure_buffer((void **)&scratch->half_res_planes,
+                                       &scratch->half_res_capacity,
+                                       half_pixels * FIXPN_HALF_RES_PLANES,
+                                       sizeof(scratch->half_res_planes[0]))
+        && pattern_noise_ensure_buffer((void **)&scratch->int_scratch,
+                                       &scratch->int_scratch_capacity,
+                                       int_scratch,
+                                       sizeof(scratch->int_scratch[0]));
+}
+
+static int16_t * pattern_noise_full_plane(pattern_noise_scratch_t * scratch, int plane_index, size_t plane_pixels)
+{
+    return scratch->full_res_planes + ((size_t)plane_index * plane_pixels);
+}
+
+static int16_t * pattern_noise_half_plane(pattern_noise_scratch_t * scratch, int plane_index, size_t plane_pixels)
+{
+    return scratch->half_res_planes + ((size_t)plane_index * plane_pixels);
+}
+
+void free_pattern_noise_scratch(pattern_noise_scratch_t * scratch)
+{
+    if (!scratch)
+    {
+        return;
+    }
+
+    free(scratch->full_res_planes);
+    free(scratch->half_res_planes);
+    free(scratch->int_scratch);
+    scratch->full_res_planes = NULL;
+    scratch->half_res_planes = NULL;
+    scratch->int_scratch = NULL;
+    scratch->full_res_capacity = 0;
+    scratch->half_res_capacity = 0;
+    scratch->int_scratch_capacity = 0;
+}
+
 /* out = a - b */
 static void subtract(int16_t * a, int16_t * b, int16_t * out, int w, int h)
 {
@@ -92,7 +182,8 @@ static void horizontal_gradient(int16_t * in, int16_t * out, int w, int h)
 static void horizontal_edge_aware_blur_rggb(
                                             int16_t * in_r,  int16_t * in_g1,  int16_t * in_g2,  int16_t * in_b,
                                             int16_t * out_r, int16_t * out_g1, int16_t * out_g2, int16_t * out_b,
-                                            int w, int h, int strength, int thr)
+                                            int w, int h, int strength, int thr,
+                                            pattern_noise_scratch_t * scratch)
 {
     #define NMAX 128
     int16_t g1[NMAX];
@@ -110,9 +201,10 @@ static void horizontal_edge_aware_blur_rggb(
     strength /= 2;
     
     /* precompute average green, red-green and blue-green */
-    int16_t * avg_g  = malloc(w * h * sizeof(avg_g[0]));
-    int16_t * dif_rg = malloc(w * h * sizeof(dif_rg[0]));
-    int16_t * dif_bg = malloc(w * h * sizeof(dif_bg[0]));
+    size_t full_pixels = (size_t)w * h;
+    int16_t * avg_g  = pattern_noise_full_plane(scratch, FIXPN_FULL_AVG_G, full_pixels);
+    int16_t * dif_rg = pattern_noise_full_plane(scratch, FIXPN_FULL_DIF_RG, full_pixels);
+    int16_t * dif_bg = pattern_noise_full_plane(scratch, FIXPN_FULL_DIF_BG, full_pixels);
     average(in_g1, in_g2, avg_g, w, h);
     subtract(in_r, avg_g, dif_rg, w, h);
     subtract(in_b, avg_g, dif_bg, w, h);
@@ -179,29 +271,26 @@ static void horizontal_edge_aware_blur_rggb(
             prev_xr = xr;
         }
     }
-    
-    free(avg_g);
-    free(dif_rg);
-    free(dif_bg);
 }
 
 /* Find and apply a scalar offset to each column, to reduce pattern noise */
 /* original: input and output */
 /* denoised: input only */
-static void fix_column_noise(int16_t * original, int16_t * denoised, int w, int h, int white)
+static void fix_column_noise(int16_t * original, int16_t * denoised, int w, int h, int white, pattern_noise_scratch_t * scratch)
 {
     /* let's say the difference between original and denoised is mostly noise */
-    int16_t * noise = malloc(w * h * sizeof(noise[0]));
+    size_t full_pixels = (size_t)w * h;
+    int16_t * noise = pattern_noise_full_plane(scratch, FIXPN_FULL_NOISE, full_pixels);
     subtract(original, denoised, noise, w, h);
     
     /* from this noise, keep the FPN part (constant offset for each line/column) */
-    int* col_offsets = malloc(w * sizeof(col_offsets[0]));
-    int* noise_row = malloc(MAX(w,h) * sizeof(noise_row[0]));
+    int* col_offsets = scratch->int_scratch;
+    int* noise_row = scratch->int_scratch + w;
     int  noise_row_num = 0;
     
     /* certain areas will give false readings, mask them out */
-    int16_t * mask  = malloc(w * h * sizeof(mask[0]));
-    int16_t * hgrad = malloc(w * h * sizeof(mask[0]));
+    int16_t * mask  = pattern_noise_full_plane(scratch, FIXPN_FULL_MASK, full_pixels);
+    int16_t * hgrad = pattern_noise_full_plane(scratch, FIXPN_FULL_HGRAD, full_pixels);
     
     horizontal_gradient(original, hgrad, w, h);
 
@@ -283,11 +372,6 @@ static void fix_column_noise(int16_t * original, int16_t * denoised, int w, int 
     }
     
 end:
-    free(noise);
-    free(col_offsets);
-    free(noise_row);
-    free(mask);
-    free(hgrad);
 }
 
 /* extract a color channel from a Bayer image */
@@ -320,17 +404,18 @@ static void set_channel(int16_t * out, int16_t * in, int w, int h, int dx, int d
     }
 }
 
-static void fix_column_noise_rggb(int16_t * raw, int w, int h, int white)
+static void fix_column_noise_rggb(int16_t * raw, int w, int h, int white, pattern_noise_scratch_t * scratch)
 {
+    size_t half_pixels = (size_t)(w / 2) * (size_t)(h / 2);
     /* assume Bayer order [RGGB] */
-    int16_t * r        = malloc(w/2 * h/2 * sizeof(r[0]));   /* red channel (bottom left) */
-    int16_t * g1       = malloc(w/2 * h/2 * sizeof(r[0]));   /* top-left green */
-    int16_t * g2       = malloc(w/2 * h/2 * sizeof(r[0]));   /* bottom-right green */
-    int16_t * b        = malloc(w/2 * h/2 * sizeof(r[0]));   /* blue channel (top right) */
-    int16_t * rs       = malloc(w/2 * h/2 * sizeof(r[0]));   /* r  after smoothing */
-    int16_t * g1s      = malloc(w/2 * h/2 * sizeof(r[0]));   /* g1 after smoothing */
-    int16_t * g2s      = malloc(w/2 * h/2 * sizeof(r[0]));   /* g2 after smoothing */
-    int16_t * bs       = malloc(w/2 * h/2 * sizeof(r[0]));   /* b  after smoothing */
+    int16_t * r        = pattern_noise_half_plane(scratch, 0, half_pixels);   /* red channel (bottom left) */
+    int16_t * g1       = pattern_noise_half_plane(scratch, 1, half_pixels);   /* top-left green */
+    int16_t * g2       = pattern_noise_half_plane(scratch, 2, half_pixels);   /* bottom-right green */
+    int16_t * b        = pattern_noise_half_plane(scratch, 3, half_pixels);   /* blue channel (top right) */
+    int16_t * rs       = pattern_noise_half_plane(scratch, 4, half_pixels);   /* r  after smoothing */
+    int16_t * g1s      = pattern_noise_half_plane(scratch, 5, half_pixels);   /* g1 after smoothing */
+    int16_t * g2s      = pattern_noise_half_plane(scratch, 6, half_pixels);   /* g2 after smoothing */
+    int16_t * bs       = pattern_noise_half_plane(scratch, 7, half_pixels);   /* b  after smoothing */
     
     /* extract half-res color channels from Bayer data */
     extract_channel(raw, r,  w, h, 0, 0);
@@ -340,33 +425,41 @@ static void fix_column_noise_rggb(int16_t * raw, int w, int h, int white)
     
     /* strong horizontal denoising (1-D median blur on G, R-G and B-G, stop on edge */
     /* (this step takes a lot of time) */
-    horizontal_edge_aware_blur_rggb(r, g1, g2, b, rs, g1s, g2s, bs, w/2, h/2, 50, 500);
+    horizontal_edge_aware_blur_rggb(r, g1, g2, b, rs, g1s, g2s, bs, w/2, h/2, 50, 500, scratch);
     
     /* after blurring horizontally, the difference reveals vertical FPN */
-    fix_column_noise(r,  rs,  w/2, h/2, white);
-    fix_column_noise(g1, g1s, w/2, h/2, white);
-    fix_column_noise(g2, g2s, w/2, h/2, white);
-    fix_column_noise(b,  bs,  w/2, h/2, white);
+    fix_column_noise(r,  rs,  w/2, h/2, white, scratch);
+    fix_column_noise(g1, g1s, w/2, h/2, white, scratch);
+    fix_column_noise(g2, g2s, w/2, h/2, white, scratch);
+    fix_column_noise(b,  bs,  w/2, h/2, white, scratch);
     
     /* commit changes */
     set_channel(raw, r,  w, h, 0, 0);
     set_channel(raw, g1, w, h, 1, 0);
     set_channel(raw, g2, w, h, 0, 1);
     set_channel(raw, b,  w, h, 1, 1);
-    
-    /* cleanup */
-    free(r);
-    free(g1);
-    free(g2);
-    free(b);
-    free(rs);
-    free(g1s);
-    free(g2s);
-    free(bs);
 }
 
-void fix_pattern_noise(int16_t * raw, int w, int h, int white, int debug_flags)
+void fix_pattern_noise(int16_t * raw, int w, int h, int white, int debug_flags, pattern_noise_scratch_t * scratch)
 {
+    pattern_noise_scratch_t local_scratch = {0};
+    int using_local_scratch = 0;
+
+    if (!scratch)
+    {
+        scratch = &local_scratch;
+        using_local_scratch = 1;
+    }
+
+    if (!pattern_noise_prepare(scratch, w, h))
+    {
+        if (using_local_scratch)
+        {
+            free_pattern_noise_scratch(scratch);
+        }
+        return;
+    }
+
     g_debug_flags = debug_flags;
     
     /* fix vertical noise, then transpose and repeat for the horizontal one */
@@ -374,16 +467,21 @@ void fix_pattern_noise(int16_t * raw, int w, int h, int white, int debug_flags)
     /* note: when debugging, we process only one direction */
     if (!g_debug_flags || !(g_debug_flags & FIXPN_DBG_ROWNOISE))
     {
-        fix_column_noise_rggb(raw, w, h, white);
+        fix_column_noise_rggb(raw, w, h, white, scratch);
     }
     
     if (!g_debug_flags || (g_debug_flags & FIXPN_DBG_ROWNOISE))
     {
         /* transpose, process just like before, then transpose back */
-        int16_t * raw_t = malloc(w * h * sizeof(raw[0]));
+        size_t full_pixels = (size_t)w * h;
+        int16_t * raw_t = pattern_noise_full_plane(scratch, FIXPN_FULL_RAW_T, full_pixels);
         transpose(raw, raw_t, w, h);
-        fix_column_noise_rggb(raw_t, h, w, white);
+        fix_column_noise_rggb(raw_t, h, w, white, scratch);
         transpose(raw_t, raw, h, w);
-        free(raw_t);
+    }
+
+    if (using_local_scratch)
+    {
+        free_pattern_noise_scratch(scratch);
     }
 }

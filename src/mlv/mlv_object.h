@@ -16,6 +16,7 @@
 #define MLV_FRAME_NOT_CACHED 0
 #define MLV_FRAME_IS_CACHED 1
 #define MLV_FRAME_BEING_CACHED 2
+#define MLV_PROCESSED_8BIT_CACHE_SLOTS 8
 
 /* Struct of index of video and audio frames for quick access */
 typedef struct
@@ -145,8 +146,9 @@ typedef struct {
     uint64_t cache_limit_mb; /* How many MB of frames can be cached... 
      * Debayered frames are cached with 16 bit channel bitdepth (48bpp) */
 
-    /* Not used, cache always starts at frame zero... for now */
+    /* Windowed cache start frame and generation used to invalidate in-flight work when it shifts */
     uint64_t cache_start_frame;
+    uint32_t cache_generation;
 
     uint8_t * cached_frames; /* Basically an array with as many elements as frames, cache states are defined above */
     uint16_t ** rgb_raw_frames; /* Pointers to 16bit cached RGB frames */
@@ -155,6 +157,34 @@ typedef struct {
     int current_cached_frame_active;
     uint64_t current_cached_frame; int times_requested;
     uint16_t * rgb_raw_current_frame;
+    uint64_t rgb_raw_current_frame_words;
+
+    /* Reusable hot-path buffers to avoid per-frame malloc/free churn during playback */
+    uint16_t * raw_unpacked_temp_frame;
+    uint64_t raw_unpacked_temp_frame_words;
+    float * raw_debayer_temp_frame;
+    uint64_t raw_debayer_temp_frame_pixels;
+    uint16_t * rgb_processed_temp_frame;
+    uint64_t rgb_processed_temp_frame_words;
+
+    /* A single processed frame cache for the exact frame + thread-count path */
+    int current_processed_frame_active;
+    uint64_t current_processed_frame;
+    int current_processed_frame_threads;
+    uint64_t current_processed_frame_signature;
+    uint16_t * rgb_processed_current_frame;
+    uint64_t rgb_processed_current_frame_words;
+    int current_processed_frame_8bit_active;
+    uint64_t current_processed_frame_8bit;
+    int current_processed_frame_8bit_threads;
+    uint64_t current_processed_frame_8bit_signature;
+    uint8_t * rgb_processed_current_frame_8bit;
+    uint64_t rgb_processed_current_frame_8bit_bytes;
+    uint8_t processed_8bit_cache_active[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    uint64_t processed_8bit_cache_frame[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    int processed_8bit_cache_threads[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    uint64_t processed_8bit_cache_signature[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    uint32_t processed_8bit_cache_next_slot;
 
     /* Massive block of memory for all frames that will be cached, pointers in rgb_raw_frames will point within here, 
      * using one big block block to try and avoid fragmentation (I feel that may be one of the causes of growth) */

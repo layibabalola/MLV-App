@@ -7,6 +7,15 @@
 
 #include "WaveFormMonitor.h"
 
+namespace
+{
+static inline uint8_t clampWaveformChannel( uint32_t value, double factor )
+{
+    const double scaledValue = value * factor;
+    return scaledValue > 255.0 ? 255 : static_cast<uint8_t>( scaledValue );
+}
+}
+
 //The higher this values, the higher the performance
 //The lower this values, the higher the quality
 //We skip only columns, because it is really ugly if not...
@@ -48,15 +57,10 @@ QImage WaveFormMonitor::getWaveFormMonitorFromRaw(uint8_t *m_pRawImage, uint16_t
 
         for( uint16_t y = 0; y <= 255; y++ )
         {
-            //Paint
-            QColor color = QColor( Qt::black );
-            if( ( tableR[255 - y] * factor ) > 255 ) color.setRed( 255 );
-            else color.setRed( tableR[255 - y] * factor );
-            if( ( tableG[255 - y] * factor ) > 255 ) color.setGreen( 255 );
-            else color.setGreen( tableG[255 - y] * factor );
-            if( ( tableB[255 - y] * factor ) > 255 ) color.setBlue( 255 );
-            else color.setBlue( tableB[255 - y] * factor );
-            m_pWaveForm->setPixelColor( x / MERGE, y, color );
+            uint8_t *pixel = m_pWaveForm->scanLine( y ) + ( ( x / MERGE ) * 3 );
+            pixel[0] = clampWaveformChannel( tableR[255 - y], factor );
+            pixel[1] = clampWaveformChannel( tableG[255 - y], factor );
+            pixel[2] = clampWaveformChannel( tableB[255 - y], factor );
 
             //Reset
             tableR[255 - y] = 0;
@@ -89,21 +93,20 @@ QImage WaveFormMonitor::getParadeFromRaw(uint8_t *m_pRawImage, uint16_t width, u
 
         for( uint16_t y = 0; y <= 255; y++ )
         {
-            //Paint
-            QColor color = QColor( Qt::black );
-            if( ( tableR[255 - y] * factor ) > 255 ) color.setRed( 255 );
-            else color.setRed( tableR[255 - y] * factor );
-            m_pWaveForm->setPixelColor( ( x / MERGE / 3 ), y, color );
+            uint8_t *redPixel = m_pWaveForm->scanLine( y ) + ( ( x / MERGE / 3 ) * 3 );
+            redPixel[0] = clampWaveformChannel( tableR[255 - y], factor );
+            redPixel[1] = 0;
+            redPixel[2] = 0;
 
-            color = QColor( Qt::black );
-            if( ( tableG[255 - y] * factor ) > 255 ) color.setGreen( 255 );
-            else color.setGreen( tableG[255 - y] * factor );
-            m_pWaveForm->setPixelColor( ( x / MERGE / 3 )+( width / MERGE / 3 ), y, color );
+            uint8_t *greenPixel = m_pWaveForm->scanLine( y ) + ( ( ( x / MERGE / 3 ) + ( width / MERGE / 3 ) ) * 3 );
+            greenPixel[0] = 0;
+            greenPixel[1] = clampWaveformChannel( tableG[255 - y], factor );
+            greenPixel[2] = 0;
 
-            color = QColor( Qt::black );
-            if( ( tableB[255 - y] * factor ) > 255 ) color.setBlue( 255 );
-            else color.setBlue( tableB[255 - y] * factor );
-            m_pWaveForm->setPixelColor( ( x / MERGE / 3 )+( width * 2 / MERGE / 3 ), y, color );
+            uint8_t *bluePixel = m_pWaveForm->scanLine( y ) + ( ( ( x / MERGE / 3 ) + ( width * 2 / MERGE / 3 ) ) * 3 );
+            bluePixel[0] = 0;
+            bluePixel[1] = 0;
+            bluePixel[2] = clampWaveformChannel( tableB[255 - y], factor );
 
             //Reset
             tableR[255 - y] = 0;
