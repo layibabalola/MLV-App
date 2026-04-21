@@ -10,6 +10,7 @@ SOURCES += \
     $$REPO_ROOT/platform/qt/ColorToolButton.cpp \
     $$REPO_ROOT/platform/qt/GpuDisplayViewport.cpp \
     $$REPO_ROOT/platform/qt/Histogram.cpp \
+    $$REPO_ROOT/platform/qt/ScopesLabel.cpp \
     $$REPO_ROOT/platform/qt/VectorScope.cpp \
     $$REPO_ROOT/platform/qt/WaveFormMonitor.cpp \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
@@ -21,6 +22,7 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/ColorToolButton.h \
     $$REPO_ROOT/platform/qt/GpuDisplayViewport.h \
     $$REPO_ROOT/platform/qt/Histogram.h \
+    $$REPO_ROOT/platform/qt/ScopesLabel.h \
     $$REPO_ROOT/platform/qt/VectorScope.h \
     $$REPO_ROOT/platform/qt/WaveFormMonitor.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \

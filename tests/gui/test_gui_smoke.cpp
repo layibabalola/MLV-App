@@ -1,6 +1,7 @@
 #include "../../platform/qt/ColorToolButton.h"
 #include "../../platform/qt/GpuDisplayViewport.h"
 #include "../../platform/qt/Histogram.h"
+#include "../../platform/qt/ScopesLabel.h"
 #include "../../platform/qt/VectorScope.h"
 #include "../../platform/qt/WaveFormMonitor.h"
 #include "../common/image_regression.h"
@@ -18,6 +19,7 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QPalette>
+#include <QPainter>
 #include <QtTest/QtTest>
 
 #include <cstring>
@@ -253,6 +255,69 @@ QImage trim_rounding_border(const QImage &image, const QSize &expected_size)
     return trimmed;
 }
 
+QImage normalize_scope_pixmap(const QPixmap &pixmap)
+{
+    QImage image = pixmap.toImage();
+    const QSize logical_size = pixmap.deviceIndependentSize().toSize();
+    if (logical_size.isValid() && logical_size != image.size()) {
+        image = image.scaled(logical_size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    }
+    return image_regression::normalize_rgb888(image);
+}
+
+QImage quantize_rgb888(const QImage &image, int quantum)
+{
+    QImage quantized = image_regression::normalize_rgb888(image);
+    if (quantum <= 1) {
+        return quantized;
+    }
+
+    for (int y = 0; y < quantized.height(); ++y) {
+        uint8_t *line = quantized.scanLine(y);
+        for (int x = 0; x < quantized.width(); ++x) {
+            uint8_t *pixel = line + (x * 3);
+            for (int channel = 0; channel < 3; ++channel) {
+                pixel[channel] = static_cast<uint8_t>((pixel[channel] / quantum) * quantum);
+            }
+        }
+    }
+
+    return quantized;
+}
+
+QImage make_scopeslabel_signature(const QImage &image)
+{
+    const QRect compare_rect(8, 4, image.width() - 16, image.height() - 8);
+    QImage cropped = image.copy(compare_rect);
+    cropped = cropped.scaled(64, 20, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    return quantize_rgb888(cropped, 64);
+}
+
+QImage render_scopes_label_output(const std::vector<uint8_t> &raw,
+                                  int width,
+                                  int height,
+                                  bool under,
+                                  bool over,
+                                  ScopesLabel::ScopeType type)
+{
+    ScopesLabel label;
+    label.resize(511, 160);
+
+    label.setScope(const_cast<uint8_t *>(raw.data()),
+                   static_cast<uint16_t>(width),
+                   static_cast<uint16_t>(height),
+                   under,
+                   over,
+                   type);
+
+    const QPixmap pixmap = label.pixmap();
+    if (pixmap.isNull()) {
+        return QImage();
+    }
+
+    return normalize_scope_pixmap(pixmap);
+}
+
 QGraphicsView *make_presenter_view(QGraphicsScene &scene,
                                    QGraphicsPixmapItem *item,
                                    const QSize &pattern_size)
@@ -272,8 +337,9 @@ void assert_expected_hash(const QMap<QString, QString> &expected_hashes,
                           const QString &key,
                           const QImage &image)
 {
-    QVERIFY2(expected_hashes.contains(key), qPrintable(QStringLiteral("Missing golden hash for key %1").arg(key)));
     const QString actual_hash = QString::fromStdString(image_regression::sha256_rgb888(image));
+    QVERIFY2(expected_hashes.contains(key),
+             qPrintable(QStringLiteral("Missing golden hash for key %1 (actual=%2)").arg(key, actual_hash)));
     QCOMPARE(actual_hash, expected_hashes.value(key));
 }
 
@@ -294,6 +360,10 @@ private slots:
     void histogramRegressionMatchesGolden();
     void vectorScopeRegressionMatchesGolden();
     void waveformRegressionMatchesGolden();
+    void scopesLabelDispatchesRawHistogramExactly();
+    void scopesLabelDispatchesRawWaveformExactly();
+    void scopesLabelDispatchesRawParadeExactly();
+    void scopesLabelDispatchesRawVectorScopeExactly();
 };
 
 void GuiSmokeTest::checkedStateUpdatesPalette()
@@ -600,9 +670,51 @@ void GuiSmokeTest::waveformRegressionMatchesGolden()
     assert_expected_hash(expected_hashes, QStringLiteral("scope.waveform.synthetic_raw"), image);
 }
 
+void GuiSmokeTest::scopesLabelDispatchesRawHistogramExactly()
+{
+    const QMap<QString, QString> expected_hashes = load_expected_hashes();
+    const std::vector<uint8_t> raw = make_scope_raw_pattern(16, 8);
+    const QImage actual = render_scopes_label_output(raw, 16, 8, true, true, ScopesLabel::ScopeHistogram);
+    QVERIFY(!actual.isNull());
+    assert_expected_hash(expected_hashes, QStringLiteral("scopeslabel.raw_histogram"), actual);
+}
+
+void GuiSmokeTest::scopesLabelDispatchesRawWaveformExactly()
+{
+    const QMap<QString, QString> expected_hashes = load_expected_hashes();
+    const std::vector<uint8_t> raw = make_scope_raw_pattern(16, 8);
+    const QImage actual = render_scopes_label_output(raw, 16, 8, false, false, ScopesLabel::ScopeWaveForm);
+    QVERIFY(!actual.isNull());
+    assert_expected_hash(expected_hashes,
+                         QStringLiteral("scopeslabel.raw_waveform.signature"),
+                         make_scopeslabel_signature(actual));
+}
+
+void GuiSmokeTest::scopesLabelDispatchesRawParadeExactly()
+{
+    const QMap<QString, QString> expected_hashes = load_expected_hashes();
+    const std::vector<uint8_t> raw = make_scope_raw_pattern(16, 8);
+    const QImage actual = render_scopes_label_output(raw, 16, 8, false, false, ScopesLabel::ScopeRgbParade);
+    QVERIFY(!actual.isNull());
+    assert_expected_hash(expected_hashes,
+                         QStringLiteral("scopeslabel.raw_parade.signature"),
+                         make_scopeslabel_signature(actual));
+}
+
+void GuiSmokeTest::scopesLabelDispatchesRawVectorScopeExactly()
+{
+    const QMap<QString, QString> expected_hashes = load_expected_hashes();
+    const std::vector<uint8_t> raw = make_scope_raw_pattern(16, 8);
+    const QImage actual = render_scopes_label_output(raw, 16, 8, false, false, ScopesLabel::ScopeVectorScope);
+    QVERIFY(!actual.isNull());
+    assert_expected_hash(expected_hashes, QStringLiteral("scopeslabel.raw_vectorscope"), actual);
+}
+
 int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
+    qputenv("QT_SCALE_FACTOR", QByteArrayLiteral("1"));
+    qputenv("QT_SCREEN_SCALE_FACTORS", QByteArrayLiteral("1"));
     QApplication app(argc, argv);
 
     GuiSmokeTest test;
