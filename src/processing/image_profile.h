@@ -1,6 +1,8 @@
 #ifndef _image_profile_h_
 #define _image_profile_h_
 
+#include <stdint.h>
+
 /* Image profile structure */
 typedef struct image_profile_t {
     double gamma_power; /* 1.0=linear/do nothing, 2.2~=sRGB, 2.0=rec.709 */

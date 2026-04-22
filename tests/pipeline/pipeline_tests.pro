@@ -1,6 +1,6 @@
 include(../common/test_defaults.pri)
 
-QT += core
+QT += core gui opengl
 
 TEMPLATE = app
 TARGET = pipeline_tests
@@ -12,6 +12,8 @@ SOURCES += \
     $$REPO_ROOT/tests/common/frame_compare.cpp \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
     $$REPO_ROOT/tests/common/repo_paths.cpp \
+    $$REPO_ROOT/platform/qt/GpuDebayer.cpp \
+    $$REPO_ROOT/platform/qt/GpuPreviewProcessing.cpp \
     $$REPO_ROOT/platform/qt/ReceiptSettings.cpp \
     $$REPO_ROOT/src/debayer/amaze_demosaic.c \
     $$REPO_ROOT/src/debayer/debayer.c \
@@ -71,8 +73,12 @@ SOURCES += \
     $$REPO_ROOT/src/librtprocess/src/postprocess/hilite_recon.cc \
     $$REPO_ROOT/src/librtprocess/src/preprocess/CA_correct.cc \
     $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.cpp \
+    $$REPO_ROOT/tests/pipeline/backend_parametric_fixture.cpp \
     $$REPO_ROOT/tests/pipeline/test_main.cpp \
     $$REPO_ROOT/tests/pipeline/test_dual_iso_pipeline.cpp \
+    $$REPO_ROOT/tests/pipeline/test_gpu_preview_processing.cpp \
+    $$REPO_ROOT/tests/pipeline/test_backend_parametric_shell.cpp \
+    $$REPO_ROOT/tests/pipeline/test_backend_parametric_debayer_shell.cpp \
     $$REPO_ROOT/tests/pipeline/test_processing_filters.cpp
 
 HEADERS += \
@@ -82,7 +88,10 @@ HEADERS += \
     $$REPO_ROOT/tests/common/frame_compare.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h \
-    $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.h
+    $$REPO_ROOT/platform/qt/GpuDebayer.h \
+    $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
+    $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.h \
+    $$REPO_ROOT/tests/pipeline/backend_parametric_fixture.h
 
 win32{
     QMAKE_CFLAGS += -O2 -fopenmp -mssse3 -msse3 -msse2 -msse -D_FILE_OFFSET_BITS=64 -std=c99 -ftree-vectorize

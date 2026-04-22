@@ -87,6 +87,17 @@ void applyProcessingObject( processingObject_t * processing,
                             uint16_t * __restrict inputImage, 
                             uint16_t * __restrict outputImage,
                             int threads, int imageChanged, uint64_t frameIndex );
+double processingGetLastSetupMilliseconds(void);
+double processingGetLastShadowsHighlightsPrepMilliseconds(void);
+double processingGetLastHighestGreenMilliseconds(void);
+double processingGetLastCoreMilliseconds(void);
+double processingGetLastDenoiseMilliseconds(void);
+double processingGetLastRbfMilliseconds(void);
+double processingGetLastCaMilliseconds(void);
+double processingGetLastCoreLevelsMilliseconds(void);
+double processingGetLastCoreColorMilliseconds(void);
+double processingGetLastCoreCreativeMilliseconds(void);
+double processingGetLastCoreOutputMilliseconds(void);
 
 /* This is for EXR output, works exactly the same as applyprocessing object,
  * except output is float and ready for EXR export. */

@@ -82,3 +82,34 @@ std::string frame_compare_summary(const frame_compare_result_t & result)
            << ";exceeding=" << result.pixels_exceeding_tolerance;
     return stream.str();
 }
+
+frame_tolerance_verdict_t evaluate_frame_tolerance(const frame_compare_result_t & result,
+                                                   std::size_t total_samples,
+                                                   uint16_t max_abs_diff_threshold,
+                                                   double max_mismatch_fraction)
+{
+    frame_tolerance_verdict_t verdict;
+    verdict.observed_max_abs_diff = result.max_abs_diff;
+    verdict.observed_mismatch_fraction = total_samples == 0
+        ? 0.0
+        : static_cast<double>(result.pixels_exceeding_tolerance) /
+          static_cast<double>(total_samples);
+
+    const bool max_ok = result.max_abs_diff <= max_abs_diff_threshold;
+    const bool frac_ok = verdict.observed_mismatch_fraction <= max_mismatch_fraction;
+    verdict.passed = max_ok && frac_ok;
+
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(6);
+    stream << "max_abs_diff=" << result.max_abs_diff
+           << " (threshold=" << max_abs_diff_threshold << ", "
+           << (max_ok ? "ok" : "exceeded") << ");"
+           << "mismatch_fraction=" << verdict.observed_mismatch_fraction
+           << " (threshold=" << max_mismatch_fraction << ", "
+           << (frac_ok ? "ok" : "exceeded") << ");"
+           << "total_samples=" << total_samples
+           << ";pixels_exceeding=" << result.pixels_exceeding_tolerance;
+    verdict.detail = stream.str();
+    return verdict;
+}

@@ -14,6 +14,15 @@ inline void force_single_threaded_pipeline()
     QThreadPool::globalInstance()->setMaxThreadCount(1);
 }
 
+inline void prefer_desktop_opengl_on_windows()
+{
+#ifdef Q_OS_WIN
+    if (qEnvironmentVariableIsEmpty("QT_OPENGL")) {
+        qputenv("QT_OPENGL", QByteArrayLiteral("desktop"));
+    }
+#endif
+}
+
 } // namespace test_runtime
 
 #endif

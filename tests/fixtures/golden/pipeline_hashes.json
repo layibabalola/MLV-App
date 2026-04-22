@@ -1,8 +1,17 @@
 {
+  "tiny_dual_iso.debayer.amaze.cpu.frame0": "7a9d3091ee7b5876e02d6308cad6e598394465d4141ef27fb93207e66ed32c34",
+  "tiny_dual_iso.debayer.bilinear.cpu.frame0": "33b328ae810bb74ae48c7ed2d94aa543266a6c4e5000424e02ef219d388eaee0",
   "tiny_dual_iso.full16.frame0": "dfd6a6e8e025ac6f6d997f9a5b193e5816e86816cd21766c4a3f07cb8fc99ed6",
-  "tiny_dual_iso.full16.frame1": "08f65ea5e6bd252ae77968f43ecf43651f2dbb5e205e723f295885fde9ef4687",
-  "tiny_dual_iso.preview16.frame0": "0b47f10f0bc33f4b792027d928d1bdf5e8df9e5c7716090226bb0a1ea9772fc4",
-  "tiny_dual_iso.preview16.frame1": "05d5a7841199d781b299a6a9bef6bfec1bfac869bda94e5de2e692b959d75a4b",
-  "tiny_dual_iso.preview16_vs_full_psnr.frame0": "8.9036",
-  "tiny_dual_iso.preview16_vs_full_psnr.frame1": "11.1749"
+  "tiny_dual_iso.full16.frame1": "1b2f970c7a5586aa0bc780e24e888a9c8ccc7616b9299e9cb88569fea2393ab9",
+  "tiny_dual_iso.gpu_preview_subset.exposure_0_75.frame0": "d4bf0df55340a482f5d3c7ff5ad2a0cbe2592c90a6479cde81f0175b9f517c05",
+  "tiny_dual_iso.gpu_preview_subset.exposure_0_75.signature.frame0": "2270930978597723434",
+  "tiny_dual_iso.gpu_preview_subset.frame0": "464e747e6c6efdc1c3c63278e51b8b15c91b2e4bd2c8771fc22525391a94e3ea",
+  "tiny_dual_iso.gpu_preview_subset.frame1": "3c6071daf82039e78be7184d7f72e3c31b627b72150fa60c390fd9f1f4d0c628",
+  "tiny_dual_iso.gpu_preview_subset.signature.frame0": "9630102517886493269",
+  "tiny_dual_iso.gpu_preview_subset.signature.frame1": "9630102517886493269",
+  "tiny_dual_iso.preview16.frame0": "1ae7e257ab3aa7a7e84354ab1f8259a552e1abb87a79291f625f4aa05b825d32",
+  "tiny_dual_iso.preview16.frame1": "36a2af860114762f478d381e73b05c3d42285cfa033c1d7c56959e9b4d8523e0",
+  "tiny_dual_iso.preview16_vs_full_psnr.frame0": "11.8065",
+  "tiny_dual_iso.preview16_vs_full_psnr.frame1": "11.8260",
+  "tiny_dual_iso.preview_processing.cpu.frame0": "464e747e6c6efdc1c3c63278e51b8b15c91b2e4bd2c8771fc22525391a94e3ea"
 }

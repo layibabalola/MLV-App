@@ -6,6 +6,7 @@
 #include "../../src/batch/ReceiptApplier.h"
 
 #include <QByteArray>
+#include <pthread.h>
 
 MlvPipelineFixture::MlvPipelineFixture()
     : m_video(nullptr)
@@ -126,6 +127,20 @@ std::vector<uint16_t> MlvPipelineFixture::renderFrame16(uint64_t frame_index, in
     return frame;
 }
 
+std::vector<float> MlvPipelineFixture::renderRawFrameFloat(uint64_t frame_index) const
+{
+    std::vector<float> frame(static_cast<std::size_t>(width()) * static_cast<std::size_t>(height()));
+    getMlvRawFrameFloat(m_video, frame_index, frame.data());
+    return frame;
+}
+
+std::vector<uint16_t> MlvPipelineFixture::renderDebayeredFrame16(uint64_t frame_index) const
+{
+    std::vector<uint16_t> frame(static_cast<std::size_t>(width()) * static_cast<std::size_t>(height()) * 3u);
+    getMlvRawFrameDebayered(m_video, frame_index, frame.data());
+    return frame;
+}
+
 std::vector<uint8_t> MlvPipelineFixture::renderFrame8(uint64_t frame_index, int threads) const
 {
     std::vector<uint8_t> frame(static_cast<std::size_t>(width()) * static_cast<std::size_t>(height()) * 3u);
@@ -141,4 +156,26 @@ int MlvPipelineFixture::width() const
 int MlvPipelineFixture::height() const
 {
     return getMlvHeight( m_video );
+}
+
+const llrawprocWorkerState_t * MlvPipelineFixture::currentLlrawprocWorker() const
+{
+    if (!m_video || !m_video->llrawproc_workers || !m_video->llrawproc_worker_capacity) {
+        return nullptr;
+    }
+
+    const pthread_t current_thread = pthread_self();
+    const llrawprocWorkerState_t * match = nullptr;
+
+    pthread_mutex_lock(&m_video->llrawproc_worker_mutex);
+    for (uint32_t index = 0; index < m_video->llrawproc_worker_capacity; ++index) {
+        const llrawprocWorkerState_t * candidate = &m_video->llrawproc_workers[index];
+        if (candidate->in_use && pthread_equal(candidate->thread_id, current_thread)) {
+            match = candidate;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&m_video->llrawproc_worker_mutex);
+
+    return match;
 }

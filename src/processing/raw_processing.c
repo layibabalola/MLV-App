@@ -5,6 +5,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <ctype.h>
+#include <omp.h>
 #include "blur_threaded.h"
 #include "tinyexpr/tinyexpr.h"
 #if defined(__linux) || defined(__APPLE__)
@@ -34,6 +35,25 @@
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 #define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
 #define LIMIT16(X) MAX(MIN(X, 65535), 0)
+
+#if defined(_MSC_VER)
+#define MLV_PROCESSING_THREAD_LOCAL __declspec(thread)
+#else
+#define MLV_PROCESSING_THREAD_LOCAL __thread
+#endif
+
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_setup_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_prep_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_highest_green_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_denoise_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_rbf_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_ca_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_levels_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_capture_core_breakdown = 0;
 
 /* Thank you to https://gist.github.com/MrLixm/946c1b59cce8b74e948e75618583ce8d */
 double agx_compressed_matrix[9] = {
@@ -451,6 +471,19 @@ void applyProcessingObject( processingObject_t * processing,
                             uint16_t * __restrict outputImage,
                             int threads, int imageChanged, uint64_t frameIndex )
 {
+    g_processing_last_setup_ms = 0.0;
+    g_processing_last_shadows_highlights_prep_ms = 0.0;
+    g_processing_last_highest_green_ms = 0.0;
+    g_processing_last_core_ms = 0.0;
+    g_processing_last_denoise_ms = 0.0;
+    g_processing_last_rbf_ms = 0.0;
+    g_processing_last_ca_ms = 0.0;
+    g_processing_last_core_levels_ms = 0.0;
+    g_processing_last_core_color_ms = 0.0;
+    g_processing_last_core_creative_ms = 0.0;
+    g_processing_last_core_output_ms = 0.0;
+
+    const double setup_start = omp_get_wtime();
     /* Do transformation */
     get_frame_transformed(processing, inputImage, imageX, imageY);
 
@@ -460,6 +493,7 @@ void applyProcessingObject( processingObject_t * processing,
     uint32_t randomseed2 = ((uint32_t *)inputImage)[1] ^ ((uint32_t *)(inputImage+img_s/2))[0] ^ frameIndex;
     uint32_t randomseed3 = ((uint32_t *)inputImage)[2] ^ ((uint32_t *)(inputImage+img_s/3))[0] ^ frameIndex;
     uint32_t randomseed4 = ((uint32_t *)inputImage)[3] ^ ((uint32_t *)(inputImage+img_s/4))[0] ^ frameIndex;
+    g_processing_last_setup_ms = (omp_get_wtime() - setup_start) * 1000.0;
 
     /* Resize image buffer to make sure its right size */
     if (imageChanged) buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
@@ -467,6 +501,7 @@ void applyProcessingObject( processingObject_t * processing,
     if (imageChanged) memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
 
     /* If shadows/highlights off don't do anything. Maybe this blurring bit could b multithreaded I need to think */
+    const double shadows_highlights_start = omp_get_wtime();
     if( ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
      || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
      || ( processing->clarity <= -0.01 || processing->clarity >= 0.01 ) )
@@ -495,17 +530,27 @@ void applyProcessingObject( processingObject_t * processing,
             for (int i = 0; i < img_s; ++i) img[i] = processing->pre_calc_levels[ img[i] ];
         }
     }
+    g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
 
     /* Analyse dual iso frame to find highest green for highlight reconstruction */
-    analyse_frame_highest_green( processing, imageX, imageY, inputImage );
+    if( processing->highlight_reconstruction )
+    {
+        const double highest_green_start = omp_get_wtime();
+        analyse_frame_highest_green( processing, imageX, imageY, inputImage );
+        g_processing_last_highest_green_ms = (omp_get_wtime() - highest_green_start) * 1000.0;
+    }
 
     /* If threads is 1, no threads are needed */
+    const double core_start = omp_get_wtime();
     if (threads == 1)
     {
+        g_processing_capture_core_breakdown = 1;
         apply_processing_object(processing, imageX, imageY, inputImage, outputImage, get_buffer(processing->shadows_highlights.blur_image), processing->gradient_mask, processing->vignette_mask);
+        g_processing_capture_core_breakdown = 0;
     }
     else
     {
+        g_processing_capture_core_breakdown = 0;
         apply_processing_parameters_t * params = alloca(sizeof(apply_processing_parameters_t) * threads);
 
         /* All chunks this height except possibly slightly longer last one */
@@ -542,10 +587,12 @@ void applyProcessingObject( processingObject_t * processing,
             pthread_join(threadid[t], NULL);
         }
     }
+    g_processing_last_core_ms = (omp_get_wtime() - core_start) * 1000.0;
 
     /* Denoiser must render on complete image, because of 2D median border problem */
     if( processing->denoiserStrength > 0 )
     {
+        const double denoise_start = omp_get_wtime();
         denoise_2D_median_with_context(
             outputImage,
             imageX,
@@ -553,11 +600,13 @@ void applyProcessingObject( processingObject_t * processing,
             processing->denoiserWindow,
             processing->denoiserStrength,
             &processing->denoiser_context);
+        g_processing_last_denoise_ms = (omp_get_wtime() - denoise_start) * 1000.0;
     }
 
     /* Recursive bilateral filtering (developed by Qingxiong Yang) must render on complete image, because of border problems */
     if( processing->rbfDenoiserLuma > 0 || processing->rbfDenoiserChroma > 0 )
     {
+        const double rbf_start = omp_get_wtime();
         int img_s = imageX * imageY * 3;
         memcpy( inputImage, outputImage, img_s * sizeof(uint16_t) );
         recursive_bf_wrap(
@@ -582,15 +631,18 @@ void applyProcessingObject( processingObject_t * processing,
             outputImage[i+2] = outputImage[i+2]*outC + inputImage[i+2]*inC;
         }
         convert_YCbCr_to_rgb_omp(outputImage, img_s, processing->cs_zone.pre_calc_YCbCr_to_rgb);
+        g_processing_last_rbf_ms = (omp_get_wtime() - rbf_start) * 1000.0;
     }
     /* RGB CA&ColorMoiree Removal */
     if( processing->ca_desaturate > 0 )
     {
+        const double ca_start = omp_get_wtime();
         int img_s = imageX * imageY * 3;
         memcpy( inputImage, outputImage, img_s * sizeof(uint16_t) );
         CACorrection(imageX, imageY, inputImage, outputImage,
                      (uint16_t)(100-processing->ca_desaturate)<<9,
                      processing->ca_radius);
+        g_processing_last_ca_ms = (omp_get_wtime() - ca_start) * 1000.0;
     }
 
 
@@ -770,6 +822,17 @@ static float Reinhard_for_colour(float x) { return (x < 0.5f) ? x : (ReinhardTon
 static float Reinhard_for_blue(float x) { return (x < 0.7f) ? x : (ReinhardTonemap_f((x-0.7f)/0.3f)*0.3f+0.7f); }
 
 /* A private part of the processing machine */
+static int processing_can_use_basic_matrix_fast_path(const processingObject_t * processing)
+{
+    return processing->use_cam_matrix > 0
+        && !processing->allow_creative_adjustments
+        && !processing->highlight_reconstruction
+        && !processing->gradient_enable
+        && processing->vignette_strength == 0
+        && !processing->exr_mode
+        && !processing->AgX;
+}
+
 void apply_processing_object( processingObject_t * processing,
                               int imageX, int imageY, 
                               uint16_t * __restrict inputImage, 
@@ -790,220 +853,71 @@ void apply_processing_object( processingObject_t * processing,
     float * vm = vignetteMask;
     float * vmpix = vm;
 
+    const int use_basic_matrix_fast_path = processing_can_use_basic_matrix_fast_path(processing);
+
     /* For Y calculation */
-    float rgb_to_Y[3]; {
+    float rgb_to_Y[3] = {0.0f, 0.0f, 0.0f};
+    if( use_basic_matrix_fast_path || ( processing->use_cam_matrix > 0 && !processing->exr_mode ) )
+    {
         double inversemat[9];
         invertMatrix(colour_gamuts[processing->colour_gamut], inversemat);
         for (int i = 0; i < 3; ++i) rgb_to_Y[i] = inversemat[3+i];
     }
 
     double agx_inverse_matrix[9];
-    invertMatrix(agx_compressed_matrix, agx_inverse_matrix);
+    if( processing->AgX )
+    {
+        invertMatrix(agx_compressed_matrix, agx_inverse_matrix);
+    }
 
     /* In case of camera matrix */
     //double (* tone_mapping_function)(double) = tonemap_functions[processing->tonemap_function];
 
+    const int capture_breakdown = g_processing_capture_core_breakdown;
+    const double levels_start = capture_breakdown ? omp_get_wtime() : 0.0;
     /* Apply some precalcuolated settings */
     for (int i = 0; i < img_s; ++i)
     {
         /* Black + white level */
         img[i] = processing->pre_calc_levels[ img[i] ];
     }
-
-    /* white balance & exposure & highlights & gamma & highlight reconstruction */
-    for (uint16_t * pix = img, * bpix = blurImage, *gmpix = gm; pix < img_end; pix += 3, bpix += 3, gmpix++)
+    if( capture_breakdown )
     {
-        double expo_correction = 1.0;
-        double expo_correction_gradient = 1.0;
+        g_processing_last_core_levels_ms = (omp_get_wtime() - levels_start) * 1000.0;
+    }
 
-        /* Vignette correction */
-        if( processing->vignette_strength != 0 )
+    const double color_start = capture_breakdown ? omp_get_wtime() : 0.0;
+    /* white balance & exposure & highlights & gamma & highlight reconstruction */
+    if( use_basic_matrix_fast_path )
+    {
+        int32_t * pm0 = pm[0];
+        int32_t * pm4 = pm[4];
+        int32_t * pm8 = pm[8];
+        uint16_t * pre_calc_gamma = processing->pre_calc_gamma;
+        double * proper_wb_matrix = processing->proper_wb_matrix;
+        const float rgb_to_y0 = rgb_to_Y[0];
+        const float rgb_to_y1 = rgb_to_Y[1];
+        const float rgb_to_y2 = rgb_to_Y[2];
+
+        for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
-            vmpix++;
-            if( vmpix < processing->vignette_end )  /* just safety - sometimes parameters may change faster than processing */
-            {
-                expo_correction *= pow( 1.0 + ( vmpix[0] * processing->vignette_strength / 128.0 ), 4 );
-            }
-        }
-
-        if (processing->allow_creative_adjustments)
-        {
-            /* shadows & highlights, clarity part 1 */
-            if( ( processing->shadows_highlights.shadows    <= -0.01 || processing->shadows_highlights.shadows    >= 0.01 )
-            || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
-            || ( processing->clarity                       <= -0.01 || processing->clarity                       >= 0.01 ) )
-            {
-                /* Blur pixLZ */
-                int32_t bval = ( ((pm[0][bpix[0]] /* + pm[1][bpix[1]] + pm[2][bpix[2]] */) << 2)
-                            + ((/* pm[3][bpix[0]] + */ pm[4][bpix[1]] /* + pm[5][bpix[2]] */) * 11)
-                            +  (/* pm[6][bpix[0]] + pm[7][bpix[1]] + */ pm[8][bpix[2]]) ) >> 4;
-
-                if( processing->clarity <= -0.01 || processing->clarity >= 0.01 )
-                {
-                    /* clarity part 1 */
-                    double factor = processing->clarity_curve[LIMIT16(bval)];
-                    expo_correction /= (factor * factor);
-                }
-                if( ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
-                || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 ) )
-                {
-                    /* highlight exposure factor */
-                    expo_correction *= processing->shadows_highlights.shadow_highlight_curve[LIMIT16(bval)];
-                }
-            }
-
-            /* Contrast on untouched pixel */
-            if( ( processing->contrast          <= -0.01 || processing->contrast          >= 0.01 )
-            || ( processing->clarity           <= -0.01 || processing->clarity           >= 0.01 )
-            || ( processing->gradient_contrast <= -0.01 || processing->gradient_contrast >= 0.01 ) )
-            {
-                int32_t cval = ( ((pm[0][pix[0]] /* + pm[1][pix[1]] + pm[2][pix[2]] */) << 2)
-                             + ((/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */) * 11)
-                             +  (/* pm[6][pix[0]] + pm[7][pix[1]] + */ pm[8][pix[2]]) ) >> 4;
-
-                if( processing->clarity <= -0.01 || processing->clarity >= 0.01 )
-                {
-                    /* clarity part 2 */
-                    double factor = processing->clarity_curve[LIMIT16(cval)];
-                    expo_correction *= factor * factor;
-                }
-                if( processing->contrast <= -0.01 || processing->contrast >= 0.01 )
-                {
-                    /* contrast factor */
-                    expo_correction *= processing->contrast_curve[LIMIT16(cval)];
-                }
-                if( processing->gradient_contrast <= -0.01 || processing->gradient_contrast >= 0.01 )
-                {
-                    /* gradient contrast factor */
-                    expo_correction_gradient *= processing->gradient_contrast_curve[LIMIT16(cval)];
-                }
-            }
-        }
-
-        /* white balance & exposure */
-        float pix0 = (pm[0][pix[0]] /* + pm[1][pix[1]] + pm[2][pix[2]] */)*expo_correction;
-        float pix1 = (/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */)*expo_correction;
-        float pix2 = (/* pm[6][pix[0]] + pm[7][pix[1]] + */ pm[8][pix[2]])*expo_correction;
-        float tmp1 = (/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */);
-
-        /* Gradient variables and part 1 */
-        float pixg[3];
-        if( processing->gradient_enable && gmpix[0] != 0 &&
-          ( ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
-         || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 ) ) )
-        {
-            /* do the same for gradient as for the pic itself, but before the values are overwritten */
-            /* white balance & exposure */
-            float pix0g = (pmg[0][pix[0]] /* + pmg[1][pix[1]] + pmg[2][pix[2]] */) * expo_correction * expo_correction_gradient;
-            float pix1g = (/* pmg[3][pix[0]] + */ pmg[4][pix[1]] /* + pmg[5][pix[2]] */) * expo_correction * expo_correction_gradient;
-            float pix2g = (/* pmg[6][pix[0]] + pmg[7][pix[1]] */ + pmg[8][pix[2]]) * expo_correction * expo_correction_gradient;
-            float tmp1g = (/* pmg[3][pix[0]] + */ pmg[4][pix[1]] /* + pmg[5][pix[2]] */);
-
-            pixg[0] = LIMIT16(pix0g);
-            pixg[1] = LIMIT16(pix1g);
-            pixg[2] = LIMIT16(pix2g);
-            tmp1g   = LIMIT16(tmp1g);
-
-            /* Now highlight reconstruction for gradient layer*/
-            if (processing->highlight_reconstruction)
-            {
-                if(*processing->dual_iso != 0)
-                {
-                    /* Check if its the range of highest green value possible */
-                    /* the range makes it cleaner against pink noise */
-                    if (tmp1g >= LIMIT16( processing->highest_green_gradient_diso - 5000 ) && tmp1g <= LIMIT16( processing->highest_green_gradient_diso + 5000 ))
-                    {
-                        if( pixg[1] < 1.1*pixg[0] && pixg[1] < pixg[2] )
-                        {
-                            pixg[1] = (pixg[0] + pixg[2]) / 2;
-                        }
-                    }
-                }
-                else
-                {
-                    /* Check if its the highest green value possible */
-                    if (tmp1g == processing->highest_green_gradient)
-                    {
-                        pixg[1] = (pixg[0] + pixg[2]) / 2;
-                    }
-                }
-            }
-        }
-
-        pix[0] = LIMIT16(pix0);
-        pix[1] = LIMIT16(pix1);
-        pix[2] = LIMIT16(pix2);
-        tmp1   = LIMIT16(tmp1);
-
-        /* Now highlight reconstruction */
-        if (processing->highlight_reconstruction)
-        {
-            if(*processing->dual_iso != 0)
-            {
-                /* Check if its the range of highest green value possible */
-                /* the range makes it cleaner against pink noise */
-                if (tmp1 >= LIMIT16( processing->highest_green_diso - 5000 ) && tmp1 <= LIMIT16( processing->highest_green_diso + 5000 ))
-                {
-                    if( pix[1] < 1.1*pix[0] && pix[1] < pix[2] )
-                    {
-                        pix[1] = (pix[0] + pix[2]) / 2;
-                    }
-                }
-            }
-            else
-            {
-                /* Check if its the highest green value possible */
-                if (tmp1 == processing->highest_green)
-                {
-                    pix[1] = (pix[0] + pix[2]) / 2;
-                }
-                /* Aggressive mode */
-                /*if (tmp1b >= processing->highest_green - 15000 && tmp1b <= processing->highest_green)
-                {
-                    if( pix[1] < 1.1*pix[0] && pix[1] < pix[2] )
-                    {
-                        pix[1] = (pix[0] + pix[2]) / 2;
-                    }
-                }*/
-            }
-        }
-
-        /* I really don't like how this if is in a big loop :(( */
-        if( processing->use_cam_matrix > 0 )
-        {
-            /* WB correction */
-            float pix0b = pix[0], pix1b = pix[1], pix2b = pix[2];
+            float pix0 = pm0[pix[0]];
+            float pix1 = pm4[pix[1]];
+            float pix2 = pm8[pix[2]];
             float result[3];
-            result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
-            result[1] = pix0b * processing->proper_wb_matrix[3] + pix1b * processing->proper_wb_matrix[4] + pix2b * processing->proper_wb_matrix[5];
-            result[2] = pix0b * processing->proper_wb_matrix[6] + pix1b * processing->proper_wb_matrix[7] + pix2b * processing->proper_wb_matrix[8];
+            result[0] = pix0 * proper_wb_matrix[0] + pix1 * proper_wb_matrix[1] + pix2 * proper_wb_matrix[2];
+            result[1] = pix0 * proper_wb_matrix[3] + pix1 * proper_wb_matrix[4] + pix2 * proper_wb_matrix[5];
+            result[2] = pix0 * proper_wb_matrix[6] + pix1 * proper_wb_matrix[7] + pix2 * proper_wb_matrix[8];
 
-            // if (result[2] < 0 || result[0] < 0 || result[1] < 0)
-            // {
-            //     /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
-            //     float Y = rgb_to_Y[0] * result[0]
-            //             + rgb_to_Y[1] * result[1]
-            //             + rgb_to_Y[2] * result[2];
-
-            //     float min_channel = MIN(MIN(result[0],result[1]),result[2]);
-
-            //     float multiplier = Y / (Y - min_channel);
-
-            //     for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * multiplier + Y; 
-            // }
-
-            if (!processing->exr_mode)
             {
-                /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
-                float Y = rgb_to_Y[0] * result[0]
-                        + rgb_to_Y[1] * result[1]
-                        + rgb_to_Y[2] * result[2];
-
-                //float max_channel = MAX(MAX(result[0],result[1]),result[2]);
+                float Y = rgb_to_y0 * result[0]
+                        + rgb_to_y1 * result[1]
+                        + rgb_to_y2 * result[2];
                 float min_channel = MIN(MIN(result[0],result[1]),result[2]);
 
                 float result2[3];
-                for (int i = 0; i < 3; ++i) {
+                for (int i = 0; i < 3; ++i)
+                {
                     float Y_to_min_channel = (Y - result[i]) / Y;
                     float tonemapped;
                     if (i == 1)
@@ -1013,67 +927,197 @@ void apply_processing_object( processingObject_t * processing,
                     else
                         tonemapped = Reinhard_for_blue(Y_to_min_channel);
 
-                    result2[i] = /* (result[i] - Y) * */ -(tonemapped * Y)+Y;
+                    result2[i] = -(tonemapped * Y) + Y;
                 }
 
                 float desaturate_factor = (Y - MIN(MIN(result2[0],result2[1]),result2[2])) / (Y - min_channel);
-
                 if (Y <= 0.0f) desaturate_factor = 1;
-
-                /* Fade out to not do it above 5100K */
-                // int mixfac = (processing->kelvin-2900) / 2200.0;
-                // mixfac = MAX(MIN(1.0, mixfac), 0.0);
-                // desaturate_factor = desaturate_factor*(1.0f-mixfac) + mixfac;
 
                 for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * desaturate_factor + Y;
             }
 
-
-            if (processing->AgX)
-            {
-                // Clip. Just in case other footprint compression did not happen.
-                for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
-                // AgX compress chroma through matrix.
-                double * m = agx_compressed_matrix;
-                pix[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
-                pix[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
-                pix[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
-            }
-            else
-            {
-                pix[0] = LIMIT16(result[0]);
-                pix[1] = LIMIT16(result[1]);
-                pix[2] = LIMIT16(result[2]);
-            }
+            pix[0] = pre_calc_gamma[LIMIT16((uint32_t)result[0])];
+            pix[1] = pre_calc_gamma[LIMIT16((uint32_t)result[1])];
+            pix[2] = pre_calc_gamma[LIMIT16((uint32_t)result[2])];
         }
-
-        /* Gamma and expo correction (shadows&highlights, contrast, clarity) */
-        for( int i = 0; i < 3; i++ )
+    }
+    else
+    {
+        for (uint16_t * pix = img, * bpix = blurImage, *gmpix = gm; pix < img_end; pix += 3, bpix += 3, gmpix++)
         {
-            pix[i] = processing->pre_calc_gamma[ LIMIT16((uint32_t)pix[i]) ]; /* Not float-> int is done here */
-        }
+            double expo_correction = 1.0;
+            double expo_correction_gradient = 1.0;
 
-        /* Gradient part 2 & blending */
-        if( processing->gradient_enable && gmpix[0] != 0 &&
-          ( ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
-         || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 ) ) )
-        {
-            /* WB correction gradient layer*/
+            /* Vignette correction */
+            if( processing->vignette_strength != 0 )
+            {
+                vmpix++;
+                if( vmpix < processing->vignette_end )  /* just safety - sometimes parameters may change faster than processing */
+                {
+                    expo_correction *= pow( 1.0 + ( vmpix[0] * processing->vignette_strength / 128.0 ), 4 );
+                }
+            }
+
+            if (processing->allow_creative_adjustments)
+            {
+                /* shadows & highlights, clarity part 1 */
+                if( ( processing->shadows_highlights.shadows    <= -0.01 || processing->shadows_highlights.shadows    >= 0.01 )
+                || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
+                || ( processing->clarity                       <= -0.01 || processing->clarity                       >= 0.01 ) )
+                {
+                    /* Blur pixLZ */
+                    int32_t bval = ( ((pm[0][bpix[0]] /* + pm[1][bpix[1]] + pm[2][bpix[2]] */) << 2)
+                                + ((/* pm[3][bpix[0]] + */ pm[4][bpix[1]] /* + pm[5][bpix[2]] */) * 11)
+                                +  (/* pm[6][bpix[0]] + pm[7][bpix[1]] + */ pm[8][bpix[2]]) ) >> 4;
+
+                    if( processing->clarity <= -0.01 || processing->clarity >= 0.01 )
+                    {
+                        /* clarity part 1 */
+                        double factor = processing->clarity_curve[LIMIT16(bval)];
+                        expo_correction /= (factor * factor);
+                    }
+                    if( ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
+                    || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 ) )
+                    {
+                        /* highlight exposure factor */
+                        expo_correction *= processing->shadows_highlights.shadow_highlight_curve[LIMIT16(bval)];
+                    }
+                }
+
+                /* Contrast on untouched pixel */
+                if( ( processing->contrast          <= -0.01 || processing->contrast          >= 0.01 )
+                || ( processing->clarity           <= -0.01 || processing->clarity           >= 0.01 )
+                || ( processing->gradient_contrast <= -0.01 || processing->gradient_contrast >= 0.01 ) )
+                {
+                    int32_t cval = ( ((pm[0][pix[0]] /* + pm[1][pix[1]] + pm[2][pix[2]] */) << 2)
+                                 + ((/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */) * 11)
+                                 +  (/* pm[6][pix[0]] + pm[7][pix[1]] + */ pm[8][pix[2]]) ) >> 4;
+
+                    if( processing->clarity <= -0.01 || processing->clarity >= 0.01 )
+                    {
+                        /* clarity part 2 */
+                        double factor = processing->clarity_curve[LIMIT16(cval)];
+                        expo_correction *= factor * factor;
+                    }
+                    if( processing->contrast <= -0.01 || processing->contrast >= 0.01 )
+                    {
+                        /* contrast factor */
+                        expo_correction *= processing->contrast_curve[LIMIT16(cval)];
+                    }
+                    if( processing->gradient_contrast <= -0.01 || processing->gradient_contrast >= 0.01 )
+                    {
+                        /* gradient contrast factor */
+                        expo_correction_gradient *= processing->gradient_contrast_curve[LIMIT16(cval)];
+                    }
+                }
+            }
+
+            /* white balance & exposure */
+            float pix0 = (pm[0][pix[0]] /* + pm[1][pix[1]] + pm[2][pix[2]] */)*expo_correction;
+            float pix1 = (/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */)*expo_correction;
+            float pix2 = (/* pm[6][pix[0]] + pm[7][pix[1]] + */ pm[8][pix[2]])*expo_correction;
+            float tmp1 = (/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */);
+
+            /* Gradient variables and part 1 */
+            float pixg[3];
+            if( processing->gradient_enable && gmpix[0] != 0 &&
+              ( ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
+             || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 ) ) )
+            {
+                /* do the same for gradient as for the pic itself, but before the values are overwritten */
+                /* white balance & exposure */
+                float pix0g = (pmg[0][pix[0]] /* + pmg[1][pix[1]] + pmg[2][pix[2]] */) * expo_correction * expo_correction_gradient;
+                float pix1g = (/* pmg[3][pix[0]] + */ pmg[4][pix[1]] /* + pmg[5][pix[2]] */) * expo_correction * expo_correction_gradient;
+                float pix2g = (/* pmg[6][pix[0]] + pmg[7][pix[1]] */ + pmg[8][pix[2]]) * expo_correction * expo_correction_gradient;
+                float tmp1g = (/* pmg[3][pix[0]] + */ pmg[4][pix[1]] /* + pmg[5][pix[2]] */);
+
+                pixg[0] = LIMIT16(pix0g);
+                pixg[1] = LIMIT16(pix1g);
+                pixg[2] = LIMIT16(pix2g);
+                tmp1g   = LIMIT16(tmp1g);
+
+                /* Now highlight reconstruction for gradient layer*/
+                if (processing->highlight_reconstruction)
+                {
+                    if(*processing->dual_iso != 0)
+                    {
+                        /* Check if its the range of highest green value possible */
+                        /* the range makes it cleaner against pink noise */
+                        if (tmp1g >= LIMIT16( processing->highest_green_gradient_diso - 5000 ) && tmp1g <= LIMIT16( processing->highest_green_gradient_diso + 5000 ))
+                        {
+                            if( pixg[1] < 1.1*pixg[0] && pixg[1] < pixg[2] )
+                            {
+                                pixg[1] = (pixg[0] + pixg[2]) / 2;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        /* Check if its the highest green value possible */
+                        if (tmp1g == processing->highest_green_gradient)
+                        {
+                            pixg[1] = (pixg[0] + pixg[2]) / 2;
+                        }
+                    }
+                }
+            }
+
+            pix[0] = LIMIT16(pix0);
+            pix[1] = LIMIT16(pix1);
+            pix[2] = LIMIT16(pix2);
+            tmp1   = LIMIT16(tmp1);
+
+            /* Now highlight reconstruction */
+            if (processing->highlight_reconstruction)
+            {
+                if(*processing->dual_iso != 0)
+                {
+                    /* Check if its the range of highest green value possible */
+                    /* the range makes it cleaner against pink noise */
+                    if (tmp1 >= LIMIT16( processing->highest_green_diso - 5000 ) && tmp1 <= LIMIT16( processing->highest_green_diso + 5000 ))
+                    {
+                        if( pix[1] < 1.1*pix[0] && pix[1] < pix[2] )
+                        {
+                            pix[1] = (pix[0] + pix[2]) / 2;
+                        }
+                    }
+                }
+                else
+                {
+                    /* Check if its the highest green value possible */
+                    if (tmp1 == processing->highest_green)
+                    {
+                        pix[1] = (pix[0] + pix[2]) / 2;
+                    }
+                    /* Aggressive mode */
+                    /*if (tmp1b >= processing->highest_green - 15000 && tmp1b <= processing->highest_green)
+                    {
+                        if( pix[1] < 1.1*pix[0] && pix[1] < pix[2] )
+                        {
+                            pix[1] = (pix[0] + pix[2]) / 2;
+                        }
+                    }*/
+                }
+            }
+
+            /* I really don't like how this if is in a big loop :(( */
             if( processing->use_cam_matrix > 0 )
             {
-                float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
-                double result[3];
+                /* WB correction */
+                float pix0b = pix[0], pix1b = pix[1], pix2b = pix[2];
+                float result[3];
                 result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
                 result[1] = pix0b * processing->proper_wb_matrix[3] + pix1b * processing->proper_wb_matrix[4] + pix2b * processing->proper_wb_matrix[5];
                 result[2] = pix0b * processing->proper_wb_matrix[6] + pix1b * processing->proper_wb_matrix[7] + pix2b * processing->proper_wb_matrix[8];
+
                 if (!processing->exr_mode)
                 {
                     /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
                     float Y = rgb_to_Y[0] * result[0]
                             + rgb_to_Y[1] * result[1]
                             + rgb_to_Y[2] * result[2];
-                    //float max_channel = MAX(MAX(result[0],result[1]),result[2]);
                     float min_channel = MIN(MIN(result[0],result[1]),result[2]);
+
                     float result2[3];
                     for (int i = 0; i < 3; ++i) {
                         float Y_to_min_channel = (Y - result[i]) / Y;
@@ -1084,46 +1128,116 @@ void apply_processing_object( processingObject_t * processing,
                             tonemapped = Reinhard_for_colour(Y_to_min_channel);
                         else
                             tonemapped = Reinhard_for_blue(Y_to_min_channel);
-                        result2[i] = /* (result[i] - Y) * */ -(tonemapped * Y)+Y;
+
+                        result2[i] = -(tonemapped * Y)+Y;
                     }
+
                     float desaturate_factor = (Y - MIN(MIN(result2[0],result2[1]),result2[2])) / (Y - min_channel);
+
                     if (Y <= 0.0f) desaturate_factor = 1;
-                    for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * desaturate_factor + Y; 
+
+                    for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * desaturate_factor + Y;
                 }
 
-
-                /* obligatory code duplication */
                 if (processing->AgX)
                 {
                     // Clip. Just in case other footprint compression did not happen.
                     for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
                     // AgX compress chroma through matrix.
                     double * m = agx_compressed_matrix;
-                    pixg[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
-                    pixg[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
-                    pixg[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                    pix[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
+                    pix[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
+                    pix[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
                 }
                 else
                 {
-                    pixg[0] = LIMIT16(result[0]);
-                    pixg[1] = LIMIT16(result[1]);
-                    pixg[2] = LIMIT16(result[2]);
+                    pix[0] = LIMIT16(result[0]);
+                    pix[1] = LIMIT16(result[1]);
+                    pix[2] = LIMIT16(result[2]);
                 }
             }
 
-            /* Gamma and expo correction (shadows&highlights, contrast, clarity) gradient layer*/
+            /* Gamma and expo correction (shadows&highlights, contrast, clarity) */
             for( int i = 0; i < 3; i++ )
             {
-                pixg[i] = processing->pre_calc_gamma_gradient[ LIMIT16((uint32_t)pixg[i]) ];
+                pix[i] = processing->pre_calc_gamma[ LIMIT16((uint32_t)pix[i]) ]; /* Not float-> int is done here */
             }
 
-            /* Blending using the mask */
-            pix[0] = gmpix[0] / 65535.0 * pixg[0] + (65535 - gmpix[0]) / 65535.0 * pix[0];
-            pix[1] = gmpix[0] / 65535.0 * pixg[1] + (65535 - gmpix[0]) / 65535.0 * pix[1];
-            pix[2] = gmpix[0] / 65535.0 * pixg[2] + (65535 - gmpix[0]) / 65535.0 * pix[2];
+            /* Gradient part 2 & blending */
+            if( processing->gradient_enable && gmpix[0] != 0 &&
+              ( ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
+             || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 ) ) )
+            {
+                /* WB correction gradient layer*/
+                if( processing->use_cam_matrix > 0 )
+                {
+                    float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
+                    double result[3];
+                    result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
+                    result[1] = pix0b * processing->proper_wb_matrix[3] + pix1b * processing->proper_wb_matrix[4] + pix2b * processing->proper_wb_matrix[5];
+                    result[2] = pix0b * processing->proper_wb_matrix[6] + pix1b * processing->proper_wb_matrix[7] + pix2b * processing->proper_wb_matrix[8];
+                    if (!processing->exr_mode)
+                    {
+                        /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
+                        float Y = rgb_to_Y[0] * result[0]
+                                + rgb_to_Y[1] * result[1]
+                                + rgb_to_Y[2] * result[2];
+                        float min_channel = MIN(MIN(result[0],result[1]),result[2]);
+                        float result2[3];
+                        for (int i = 0; i < 3; ++i) {
+                            float Y_to_min_channel = (Y - result[i]) / Y;
+                            float tonemapped;
+                            if (i == 1)
+                                tonemapped = ReinhardTonemap_f(Y_to_min_channel);
+                            if (i == 0)
+                                tonemapped = Reinhard_for_colour(Y_to_min_channel);
+                            else
+                                tonemapped = Reinhard_for_blue(Y_to_min_channel);
+                            result2[i] = -(tonemapped * Y)+Y;
+                        }
+                        float desaturate_factor = (Y - MIN(MIN(result2[0],result2[1]),result2[2])) / (Y - min_channel);
+                        if (Y <= 0.0f) desaturate_factor = 1;
+                        for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * desaturate_factor + Y; 
+                    }
+
+                    /* obligatory code duplication */
+                    if (processing->AgX)
+                    {
+                        // Clip. Just in case other footprint compression did not happen.
+                        for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
+                        // AgX compress chroma through matrix.
+                        double * m = agx_compressed_matrix;
+                        pixg[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
+                        pixg[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
+                        pixg[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                    }
+                    else
+                    {
+                        pixg[0] = LIMIT16(result[0]);
+                        pixg[1] = LIMIT16(result[1]);
+                        pixg[2] = LIMIT16(result[2]);
+                    }
+                }
+
+                /* Gamma and expo correction (shadows&highlights, contrast, clarity) gradient layer*/
+                for( int i = 0; i < 3; i++ )
+                {
+                    pixg[i] = processing->pre_calc_gamma_gradient[ LIMIT16((uint32_t)pixg[i]) ];
+                }
+
+                /* Blending using the mask */
+                pix[0] = gmpix[0] / 65535.0 * pixg[0] + (65535 - gmpix[0]) / 65535.0 * pix[0];
+                pix[1] = gmpix[0] / 65535.0 * pixg[1] + (65535 - gmpix[0]) / 65535.0 * pix[1];
+                pix[2] = gmpix[0] / 65535.0 * pixg[2] + (65535 - gmpix[0]) / 65535.0 * pix[2];
+            }
         }
     }
+    if( capture_breakdown )
+    {
+        g_processing_last_core_color_ms = (omp_get_wtime() - color_start) * 1000.0;
+    }
 
+    const double creative_start = capture_breakdown ? omp_get_wtime() : 0.0;
     //Code for HueVs...
     if( (processing->allow_creative_adjustments )
      && ( processing->hue_vs_luma_used
@@ -1305,7 +1419,12 @@ void apply_processing_object( processingObject_t * processing,
             pix[2] = LIMIT16(as_float[0]*m[6]+as_float[1]*m[7]+as_float[2]*m[8]);
         }
     }
+    if( capture_breakdown )
+    {
+        g_processing_last_core_creative_ms = (omp_get_wtime() - creative_start) * 1000.0;
+    }
 
+    const double output_start = capture_breakdown ? omp_get_wtime() : 0.0;
     memcpy(outputImage, inputImage, img_s * sizeof(uint16_t));
 
     if (processing->lut_on)
@@ -1317,6 +1436,65 @@ void apply_processing_object( processingObject_t * processing,
     {
         applyFilterObject(processing->filter, imageX, imageY, outputImage);
     }
+    if( capture_breakdown )
+    {
+        g_processing_last_core_output_ms = (omp_get_wtime() - output_start) * 1000.0;
+    }
+}
+
+double processingGetLastSetupMilliseconds(void)
+{
+    return g_processing_last_setup_ms;
+}
+
+double processingGetLastShadowsHighlightsPrepMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_prep_ms;
+}
+
+double processingGetLastHighestGreenMilliseconds(void)
+{
+    return g_processing_last_highest_green_ms;
+}
+
+double processingGetLastCoreMilliseconds(void)
+{
+    return g_processing_last_core_ms;
+}
+
+double processingGetLastDenoiseMilliseconds(void)
+{
+    return g_processing_last_denoise_ms;
+}
+
+double processingGetLastRbfMilliseconds(void)
+{
+    return g_processing_last_rbf_ms;
+}
+
+double processingGetLastCaMilliseconds(void)
+{
+    return g_processing_last_ca_ms;
+}
+
+double processingGetLastCoreLevelsMilliseconds(void)
+{
+    return g_processing_last_core_levels_ms;
+}
+
+double processingGetLastCoreColorMilliseconds(void)
+{
+    return g_processing_last_core_color_ms;
+}
+
+double processingGetLastCoreCreativeMilliseconds(void)
+{
+    return g_processing_last_core_creative_ms;
+}
+
+double processingGetLastCoreOutputMilliseconds(void)
+{
+    return g_processing_last_core_output_ms;
 }
 
 /* Pass frame buffer and do the transform on it */

@@ -3,6 +3,7 @@
 
 #include "../../platform/qt/ReceiptSettings.h"
 #include "../../src/mlv_include.h"
+#include "../../src/mlv/llrawproc/llrawproc_object.h"
 
 #include <QString>
 #include <vector>
@@ -18,11 +19,14 @@ public:
     bool loadReceipt(const QString & relative_path, QString * error_message);
     bool applyReceipt(QString * error_message);
 
+    std::vector<float> renderRawFrameFloat(uint64_t frame_index) const;
+    std::vector<uint16_t> renderDebayeredFrame16(uint64_t frame_index) const;
     std::vector<uint16_t> renderFrame16(uint64_t frame_index, int threads = 1) const;
     std::vector<uint8_t> renderFrame8(uint64_t frame_index, int threads = 1) const;
 
     int width() const;
     int height() const;
+    const llrawprocWorkerState_t * currentLlrawprocWorker() const;
 
     mlvObject_t * video() const { return m_video; }
     processingObject_t * processing() const { return m_processing; }

@@ -3,7 +3,7 @@
 #include "../common/test_artifacts.h"
 #include "../common/test_runtime.h"
 
-#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -37,19 +37,58 @@ static bool compare_against_golden(const QString & golden_path, std::string * er
         expected.emplace(it.key().toStdString(), it.value().toString().toStdString());
     }
 
-    if (expected != test_artifacts::all()) {
-        if (error_message) {
-            *error_message = "Golden artifact mismatch: " + golden_path.toStdString();
+    const auto & actual = test_artifacts::all();
+
+    auto is_optional_gpu_key = [](const std::string & key) -> bool
+    {
+        return key.find(".gpu.") != std::string::npos;
+    };
+
+    for (const auto & expected_entry : expected) {
+        const auto actual_it = actual.find(expected_entry.first);
+        if (actual_it == actual.end()) {
+            if (is_optional_gpu_key(expected_entry.first)) {
+                continue;
+            }
+            if (error_message) {
+                *error_message = "Golden artifact missing actual key: " + expected_entry.first;
+            }
+            return false;
         }
-        return false;
+        if (actual_it->second != expected_entry.second) {
+            if (error_message) {
+                *error_message = "Golden artifact mismatch at key: " + expected_entry.first;
+            }
+            return false;
+        }
     }
+
+    for (const auto & actual_entry : actual) {
+        if (expected.find(actual_entry.first) == expected.end()) {
+            if (error_message) {
+                *error_message = "Golden artifact contains unexpected key: " + actual_entry.first;
+            }
+            return false;
+        }
+    }
+
     return true;
 }
 
 int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
-    QCoreApplication app(argc, argv);
+    test_runtime::prefer_desktop_opengl_on_windows();
+#ifdef Q_OS_WIN
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("windows"));
+    }
+#else
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
+    }
+#endif
+    QGuiApplication app(argc, argv);
 
     std::string hash_output_path;
     QString golden_input_path;
