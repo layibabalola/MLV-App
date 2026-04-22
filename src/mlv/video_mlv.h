@@ -46,6 +46,7 @@ void disableMlvCaching(mlvObject_t * video);
 void enableMlvCaching(mlvObject_t * video);
 /* Reset cache, to recache all frames, clears simgle frame cache too */
 void resetMlvCache(mlvObject_t * video);
+void invalidateMlvProcessedPreviewCache(mlvObject_t * video);
 /* For setting how much can be cached - "MegaBytes" == MebiBytes (thanks dmilligan) */
 void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit);
 void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit);
@@ -61,6 +62,51 @@ void findMlvWhiteBalance(mlvObject_t * video, uint64_t frameIndex, int posX, int
  * as it may have minor artifacts (though I haven't found them yet) */
 void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * outputFrame, int threads);
 void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame, int threads);
+double getMlvLastRawUint16Milliseconds(void);
+double getMlvLastRawUint16DiskReadMilliseconds(void);
+double getMlvLastRawUint16DecompressMilliseconds(void);
+double getMlvLastRawUint16DecompressPrepareMilliseconds(void);
+double getMlvLastRawUint16DecompressExecuteMilliseconds(void);
+int getMlvLastRawUint16Lj92Pred6SplitActive(void);
+int getMlvLastRawUint16Lj92Pred6SplitRequested(void);
+int getMlvLastRawUint16Lj92GenericSplitActive(void);
+int getMlvLastRawUint16Lj92GenericSplitRequested(void);
+int getMlvLastRawUint16Lj92Pred1FastPathActive(void);
+int getMlvLastRawUint16Lj92Pred1FastPathMeasurementRequested(void);
+int getMlvLastRawUint16Lj92Pred1FastPathMeasurementActive(void);
+int getMlvLastRawUint16Lj92Pred1FastPathEligible(void);
+int getMlvLastRawUint16Lj92ScanComponentCount(void);
+int getMlvLastRawUint16Lj92WriteLength(void);
+int getMlvLastRawUint16Lj92ExpectedWriteLength(void);
+int getMlvLastRawUint16Lj92SkipLength(void);
+int getMlvLastRawUint16Lj92LinearizeActive(void);
+int getMlvLastRawUint16Lj92ComponentCount(void);
+int getMlvLastRawUint16Lj92Predictor(void);
+double getMlvLastRawUint16Lj92Pred6TotalMilliseconds(void);
+double getMlvLastRawUint16Lj92Pred6BitstreamMilliseconds(void);
+double getMlvLastRawUint16Lj92Pred6PredictorMilliseconds(void);
+double getMlvLastRawUint16Lj92GenericTotalMilliseconds(void);
+double getMlvLastRawUint16Lj92GenericBitstreamMilliseconds(void);
+double getMlvLastRawUint16Lj92GenericPredictorMilliseconds(void);
+double getMlvLastRawUint16Lj92Pred1FastPathTotalMilliseconds(void);
+double getMlvLastRawUint16Lj92Pred1FastPathBitstreamMilliseconds(void);
+double getMlvLastRawUint16Lj92Pred1FastPathPredictorMilliseconds(void);
+double getMlvLastRawUint16UnpackMilliseconds(void);
+double getMlvLastRawUint16CopyMilliseconds(void);
+int getMlvLastRawUint16PrefetchHit(void);
+double getMlvLastLlrawprocMilliseconds(void);
+double getMlvLastRawFloatConvertMilliseconds(void);
+double getMlvLastDebayeredFrameMilliseconds(void);
+void resetMlvLastDebayerStageMilliseconds(void);
+double getMlvLastDebayerWbPrepareMilliseconds(void);
+double getMlvLastDebayerCaMilliseconds(void);
+double getMlvLastDebayerKernelMilliseconds(void);
+double getMlvLastDebayerWbUndoMilliseconds(void);
+double getMlvLastProcessingMilliseconds(void);
+double getMlvLastProcessed16TotalMilliseconds(void);
+double getMlvLastProcessed16For8BitMilliseconds(void);
+double getMlvLastProcessed16To8BitMilliseconds(void);
+double getMlvLastProcessed8TotalMilliseconds(void);
 
 /* Unpacks the bits of a frame to get a bayer B&W image (without black level correction)
  * Needs memory to return to, sized: sizeof(float) * getMlvHeight(urvid) * getMlvWidth(urvid)
@@ -97,6 +143,10 @@ void clear_mlv_cache(mlvObject_t * video);
 int mlv_frame_in_cache_window(mlvObject_t * video, uint64_t frameIndex);
 uint64_t mlv_cache_slot_for_frame(mlvObject_t * video, uint64_t frameIndex);
 void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex);
+void mlv_cache_request_playback_preroll(mlvObject_t * video,
+                                        uint64_t currentFrame,
+                                        uint64_t lastFrameInclusive,
+                                        uint64_t lookaheadFrames);
 
 /* Returns 1 on success, or 0 if all are cached */
 int find_mlv_frame_to_cache(mlvObject_t * video, uint64_t *index); /* Outputs to *index */

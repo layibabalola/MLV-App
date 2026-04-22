@@ -4,6 +4,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <time.h>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+#if defined(__WIN32)
+#include <windows.h>
+#endif
 
 #include "video_mlv.h"
 #include "../debayer/debayer.h"
@@ -16,16 +23,82 @@
 #define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
 #define LIMIT16(X) MAX(MIN(X, 65535), 0)
 
+#if defined(_MSC_VER)
+#define MLV_DEBAYER_THREAD_LOCAL __declspec(thread)
+#else
+#define MLV_DEBAYER_THREAD_LOCAL __thread
+#endif
+
+static MLV_DEBAYER_THREAD_LOCAL double g_mlv_last_debayer_wb_prepare_ms = 0.0;
+static MLV_DEBAYER_THREAD_LOCAL double g_mlv_last_debayer_ca_ms = 0.0;
+static MLV_DEBAYER_THREAD_LOCAL double g_mlv_last_debayer_kernel_ms = 0.0;
+static MLV_DEBAYER_THREAD_LOCAL double g_mlv_last_debayer_wb_undo_ms = 0.0;
+
+static double mlv_debayer_timing_now_seconds(void)
+{
+#if defined(_OPENMP)
+    return omp_get_wtime();
+#elif defined(__WIN32)
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)frequency.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
+#endif
+}
+
 #ifndef STDOUT_SILENT
 #define DEBUG(CODE) CODE
 #else
 #define DEBUG(CODE)
 #endif
 
-static void mlv_invalidate_processed_preview_cache(mlvObject_t * video)
+void resetMlvLastDebayerStageMilliseconds(void)
+{
+    g_mlv_last_debayer_wb_prepare_ms = 0.0;
+    g_mlv_last_debayer_ca_ms = 0.0;
+    g_mlv_last_debayer_kernel_ms = 0.0;
+    g_mlv_last_debayer_wb_undo_ms = 0.0;
+}
+
+double getMlvLastDebayerWbPrepareMilliseconds(void)
+{
+    return g_mlv_last_debayer_wb_prepare_ms;
+}
+
+double getMlvLastDebayerCaMilliseconds(void)
+{
+    return g_mlv_last_debayer_ca_ms;
+}
+
+double getMlvLastDebayerKernelMilliseconds(void)
+{
+    return g_mlv_last_debayer_kernel_ms;
+}
+
+double getMlvLastDebayerWbUndoMilliseconds(void)
+{
+    return g_mlv_last_debayer_wb_undo_ms;
+}
+
+void invalidateMlvProcessedPreviewCache(mlvObject_t * video)
 {
     video->current_processed_frame_active = 0;
+    video->current_processed_frame = 0;
+    video->current_processed_frame_threads = 0;
     video->current_processed_frame_signature = 0;
+    video->processed_16bit_cache_next_slot = 0;
+    for (uint32_t slot = 0; slot < MLV_PROCESSED_16BIT_CACHE_SLOTS; ++slot)
+    {
+        video->processed_16bit_cache_active[slot] = 0;
+        video->processed_16bit_cache_frame[slot] = 0;
+        video->processed_16bit_cache_threads[slot] = 0;
+        video->processed_16bit_cache_signature[slot] = 0;
+    }
     video->current_processed_frame_8bit_active = 0;
     video->current_processed_frame_8bit_signature = 0;
     video->current_processed_frame_8bit = 0;
@@ -224,10 +297,91 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
     }
 }
 
+void mlv_cache_request_playback_preroll(mlvObject_t * video,
+                                        uint64_t currentFrame,
+                                        uint64_t lastFrameInclusive,
+                                        uint64_t lookaheadFrames)
+{
+    if (!isMlvActive(video)
+        || video->stop_caching
+        || getMlvRawCacheLimitFrames(video) == 0
+        || getMlvFrames(video) == 0)
+    {
+        return;
+    }
+
+    const uint64_t maxFrame = getMlvFrames(video) - 1;
+    if (currentFrame > maxFrame) currentFrame = maxFrame;
+    if (lastFrameInclusive > maxFrame) lastFrameInclusive = maxFrame;
+    if (lastFrameInclusive < currentFrame) lastFrameInclusive = currentFrame;
+
+    uint64_t targetFrame = currentFrame;
+    if (lookaheadFrames > 0 && currentFrame < lastFrameInclusive)
+    {
+        const uint64_t remaining = lastFrameInclusive - currentFrame;
+        targetFrame = currentFrame + MIN(lookaheadFrames, remaining);
+    }
+
+    mlv_cache_ensure_window(video, targetFrame);
+
+    uint64_t requestFrame = 0;
+    int haveRequest = 0;
+
+    pthread_mutex_lock(&video->g_mutexFind);
+    uint64_t requestStart = currentFrame;
+    if (requestStart < lastFrameInclusive)
+    {
+        requestStart++;
+    }
+
+    for (uint64_t frame = requestStart; frame <= targetFrame; ++frame)
+    {
+        if (mlv_frame_in_cache_window(video, frame)
+            && video->cached_frames[frame] == MLV_FRAME_NOT_CACHED)
+        {
+            requestFrame = frame;
+            haveRequest = 1;
+            break;
+        }
+    }
+
+    if (!haveRequest
+        && currentFrame > 0
+        && currentFrame <= lastFrameInclusive
+        && mlv_frame_in_cache_window(video, currentFrame)
+        && video->cached_frames[currentFrame] == MLV_FRAME_NOT_CACHED)
+    {
+        requestFrame = currentFrame;
+        haveRequest = 1;
+    }
+
+    if (haveRequest)
+    {
+        video->cache_next = requestFrame;
+    }
+    pthread_mutex_unlock(&video->g_mutexFind);
+
+    int shouldWakeWorkers = 0;
+    if (haveRequest && !video->stop_caching && video->cpu_cores > 0)
+    {
+        pthread_mutex_lock(&video->g_mutexCount);
+        shouldWakeWorkers = (video->cache_thread_count == 0);
+        pthread_mutex_unlock(&video->g_mutexCount);
+    }
+
+    if (shouldWakeWorkers)
+    {
+        for (int i = 0; i < video->cpu_cores; ++i)
+        {
+            add_mlv_cache_thread(video);
+        }
+    }
+}
+
 void resetMlvCache(mlvObject_t * video)
 {
     resetMlvCachedFrame(video);
-    mlv_invalidate_processed_preview_cache(video);
+    invalidateMlvProcessedPreviewCache(video);
     mark_mlv_uncached(video);
 }
 
@@ -353,7 +507,7 @@ void mark_mlv_uncached(mlvObject_t * video)
     pthread_mutex_lock( &video->g_mutexFind );
     video->cache_generation++;
     video->cache_next = 0;
-    mlv_invalidate_processed_preview_cache(video);
+    invalidateMlvProcessedPreviewCache(video);
     for (uint64_t i = 0; i < getMlvFrames(video); ++i)
     {
         video->cached_frames[i] = MLV_FRAME_NOT_CACHED;
@@ -538,12 +692,15 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
     /* WB conversion for ideal debayer result, not for bilinear, easy and non debayer */
     if( !( debayer_type == 0 || debayer_type == 2 || debayer_type == 3 ) )
     {
+        const double wb_prepare_start = mlv_debayer_timing_now_seconds();
         wb_convert(&wb_info, temp_memory, width, height, getMlvBlackLevel(video));
+        g_mlv_last_debayer_wb_prepare_ms = (mlv_debayer_timing_now_seconds() - wb_prepare_start) * 1000.0;
 
         /* CA correction, multithreaded, not for bilinear, easy and non debayer because not visible and slow */
         if( video->ca_red <= -0.1 || video->ca_red >= 0.1
          || video->ca_blue <= -0.1 || video->ca_blue >= 0.1 )
         {
+            const double ca_start = mlv_debayer_timing_now_seconds();
             /* 2d array for CA correction */
             float ** __restrict imagefloat2d = (float **)malloc(height * sizeof(float *));
             for (int y = 0; y < height; ++y) imagefloat2d[y] = (float *)(temp_memory+(y*width));
@@ -555,10 +712,12 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
 
             lrtpCaCorrect( imagefloat2d, 0, 0, width, height,
                            0, 0, video->ca_red, video->ca_blue, 0 );
+            g_mlv_last_debayer_ca_ms = (mlv_debayer_timing_now_seconds() - ca_start) * 1000.0;
         }
     }
 
     /* Debayer */
+    const double debayer_kernel_start = mlv_debayer_timing_now_seconds();
     if (/*debayer_type == 1 ||*/ debayer_type == 4 || debayer_type == 5 || /*debayer_type == 6 ||*/ debayer_type == 7 || debayer_type == 8)
     {
         //AMaZE and AHD disabled from librtprocess because of bad artifacts
@@ -582,8 +741,13 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
         /* Debayer quickly (bilinearly) */
         debayerBasic(output_frame, temp_memory, width, height, 1);
     }
+    g_mlv_last_debayer_kernel_ms = (mlv_debayer_timing_now_seconds() - debayer_kernel_start) * 1000.0;
 
     /* WB conversion undo for ideal debayer result */
     if( !( debayer_type == 0 || debayer_type == 2 || debayer_type == 3 ) )
+    {
+        const double wb_undo_start = mlv_debayer_timing_now_seconds();
         wb_undo(&wb_info, output_frame, width, height, getMlvBlackLevel(video));
+        g_mlv_last_debayer_wb_undo_ms = (mlv_debayer_timing_now_seconds() - wb_undo_start) * 1000.0;
+    }
 }

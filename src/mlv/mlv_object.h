@@ -17,6 +17,8 @@
 #define MLV_FRAME_IS_CACHED 1
 #define MLV_FRAME_BEING_CACHED 2
 #define MLV_PROCESSED_8BIT_CACHE_SLOTS 8
+#define MLV_PROCESSED_16BIT_CACHE_SLOTS 2
+#define MLV_RAW_UINT16_PREFETCH_SLOTS 4
 
 /* Struct of index of video and audio frames for quick access */
 typedef struct
@@ -116,6 +118,10 @@ typedef struct {
     /* Image processing object pointer (it is to be made separately) */
     processingObject_t * processing;
     llrawprocObject_t * llrawproc;
+    pthread_mutex_t llrawproc_mutex;
+    pthread_mutex_t llrawproc_worker_mutex;
+    llrawprocWorkerState_t * llrawproc_workers;
+    uint32_t llrawproc_worker_capacity;
 
     /* Restricted lossless raw data bit depth */
     int lossless_bpp;
@@ -128,7 +134,6 @@ typedef struct {
     int is_caching;
     int cache_thread_count; /* Total active cache threads */
     uint64_t cache_next; /* Like a cache request (any non-zero frame) */
-    pthread_mutex_t cache_mutex;
     /* Will be set to 1 for cache threads to stop (probably only by freeMlvObject) */
     int stop_caching;
 
@@ -160,8 +165,6 @@ typedef struct {
     uint64_t rgb_raw_current_frame_words;
 
     /* Reusable hot-path buffers to avoid per-frame malloc/free churn during playback */
-    uint16_t * raw_unpacked_temp_frame;
-    uint64_t raw_unpacked_temp_frame_words;
     float * raw_debayer_temp_frame;
     uint64_t raw_debayer_temp_frame_pixels;
     uint16_t * rgb_processed_temp_frame;
@@ -174,6 +177,13 @@ typedef struct {
     uint64_t current_processed_frame_signature;
     uint16_t * rgb_processed_current_frame;
     uint64_t rgb_processed_current_frame_words;
+    uint16_t * rgb_processed_frame_cache_16bit;
+    uint64_t rgb_processed_frame_cache_16bit_words;
+    uint8_t processed_16bit_cache_active[MLV_PROCESSED_16BIT_CACHE_SLOTS];
+    uint64_t processed_16bit_cache_frame[MLV_PROCESSED_16BIT_CACHE_SLOTS];
+    int processed_16bit_cache_threads[MLV_PROCESSED_16BIT_CACHE_SLOTS];
+    uint64_t processed_16bit_cache_signature[MLV_PROCESSED_16BIT_CACHE_SLOTS];
+    uint32_t processed_16bit_cache_next_slot;
     int current_processed_frame_8bit_active;
     uint64_t current_processed_frame_8bit;
     int current_processed_frame_8bit_threads;
@@ -189,6 +199,25 @@ typedef struct {
     /* Massive block of memory for all frames that will be cached, pointers in rgb_raw_frames will point within here, 
      * using one big block block to try and avoid fragmentation (I feel that may be one of the causes of growth) */
     uint16_t * cache_memory_block;
+
+    /* Small raw uint16 decode-ahead ring for playback */
+    pthread_mutex_t raw_uint16_prefetch_mutex;
+    pthread_cond_t raw_uint16_prefetch_cond;
+    pthread_t raw_uint16_prefetch_thread;
+    int raw_uint16_prefetch_thread_started;
+    int raw_uint16_prefetch_stop;
+    int raw_uint16_prefetch_request_pending;
+    int raw_uint16_prefetch_worker_busy;
+    uint64_t raw_uint16_prefetch_request_frame;
+    uint64_t raw_uint16_prefetch_last_request_frame;
+    uint32_t raw_uint16_prefetch_generation;
+    uint16_t * raw_uint16_prefetch_cache;
+    uint64_t raw_uint16_prefetch_cache_words;
+    uint64_t raw_uint16_prefetch_slot_words;
+    uint8_t raw_uint16_prefetch_slot_state[MLV_RAW_UINT16_PREFETCH_SLOTS];
+    uint64_t raw_uint16_prefetch_slot_frame[MLV_RAW_UINT16_PREFETCH_SLOTS];
+    uint32_t raw_uint16_prefetch_slot_generation[MLV_RAW_UINT16_PREFETCH_SLOTS];
+    uint32_t raw_uint16_prefetch_next_slot;
 
     /* How many cores, will not neccesarily determine number of threads made in any case, but helps */
     int cpu_cores; /* Default 4 */

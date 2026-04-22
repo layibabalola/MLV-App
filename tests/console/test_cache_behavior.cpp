@@ -21,6 +21,18 @@ static std::unique_ptr<mlvObject_t> make_cache_test_video(std::vector<uint8_t> *
     video->cached_frames = cache_states->data();
     video->current_cached_frame_active = 1;
     video->current_processed_frame_active = 1;
+    video->current_processed_frame = 9;
+    video->current_processed_frame_threads = 3;
+    video->current_processed_frame_signature = 33;
+    video->processed_16bit_cache_active[0] = 1;
+    video->processed_16bit_cache_active[1] = 1;
+    video->processed_16bit_cache_frame[0] = 2;
+    video->processed_16bit_cache_frame[1] = 3;
+    video->processed_16bit_cache_threads[0] = 1;
+    video->processed_16bit_cache_threads[1] = 2;
+    video->processed_16bit_cache_signature[0] = 111;
+    video->processed_16bit_cache_signature[1] = 222;
+    video->processed_16bit_cache_next_slot = 1;
     video->current_processed_frame_8bit_active = 1;
     video->processed_8bit_cache_active[0] = 1;
     video->processed_8bit_cache_active[1] = 1;
@@ -42,7 +54,8 @@ static std::unique_ptr<mlvObject_t> make_cache_test_video(std::vector<uint8_t> *
 
     pthread_mutex_init(&video->g_mutexFind, nullptr);
     pthread_mutex_init(&video->g_mutexCount, nullptr);
-    pthread_mutex_init(&video->cache_mutex, nullptr);
+    pthread_mutex_init(&video->llrawproc_mutex, nullptr);
+    pthread_mutex_init(&video->llrawproc_worker_mutex, nullptr);
 
     return video;
 }
@@ -51,7 +64,8 @@ static void destroy_cache_test_video(mlvObject_t * video)
 {
     pthread_mutex_destroy(&video->g_mutexFind);
     pthread_mutex_destroy(&video->g_mutexCount);
-    pthread_mutex_destroy(&video->cache_mutex);
+    pthread_mutex_destroy(&video->llrawproc_mutex);
+    pthread_mutex_destroy(&video->llrawproc_worker_mutex);
     free(video->rgb_raw_frames);
     free(video->cache_memory_block);
 }
@@ -70,8 +84,18 @@ TEST(CacheBehavior, ResetMlvCacheClearsStatesAndCurrentCachedFrame)
 
     ASSERT_EQ(0, video->current_cached_frame_active);
     ASSERT_EQ(0, video->current_processed_frame_active);
+    ASSERT_EQ(static_cast<uint64_t>(0), video->current_processed_frame);
+    ASSERT_EQ(0, video->current_processed_frame_threads);
+    ASSERT_EQ(static_cast<uint64_t>(0), video->current_processed_frame_signature);
     ASSERT_EQ(0, video->current_processed_frame_8bit_active);
+    ASSERT_EQ(static_cast<unsigned int>(0), static_cast<unsigned int>(video->processed_16bit_cache_next_slot));
     ASSERT_EQ(static_cast<unsigned int>(0), static_cast<unsigned int>(video->processed_8bit_cache_next_slot));
+    for (int slot = 0; slot < MLV_PROCESSED_16BIT_CACHE_SLOTS; ++slot) {
+        ASSERT_EQ(static_cast<unsigned int>(0), static_cast<unsigned int>(video->processed_16bit_cache_active[slot]));
+        ASSERT_EQ(static_cast<unsigned long long>(0), static_cast<unsigned long long>(video->processed_16bit_cache_frame[slot]));
+        ASSERT_EQ(0, video->processed_16bit_cache_threads[slot]);
+        ASSERT_EQ(static_cast<unsigned long long>(0), static_cast<unsigned long long>(video->processed_16bit_cache_signature[slot]));
+    }
     for (int slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot) {
         ASSERT_EQ(static_cast<unsigned int>(0), static_cast<unsigned int>(video->processed_8bit_cache_active[slot]));
         ASSERT_EQ(static_cast<unsigned long long>(0), static_cast<unsigned long long>(video->processed_8bit_cache_frame[slot]));
@@ -210,6 +234,57 @@ TEST(CacheBehavior, EnsureWindowCanShiftWhenCachingThreadsAreIdle)
     ASSERT_EQ(static_cast<unsigned long long>(1), static_cast<unsigned long long>(video->cache_start_frame));
     ASSERT_TRUE(mlv_frame_in_cache_window(video.get(), 2));
     ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED), static_cast<unsigned int>(cache_states[0]));
+
+    destroy_cache_test_video(video.get());
+}
+
+TEST(CacheBehavior, PlaybackPrerollRequestsFirstFutureUncachedFrame)
+{
+    std::vector<uint8_t> cache_states = {
+        MLV_FRAME_IS_CACHED,
+        MLV_FRAME_IS_CACHED,
+        MLV_FRAME_IS_CACHED,
+        MLV_FRAME_NOT_CACHED,
+        MLV_FRAME_IS_CACHED,
+        MLV_FRAME_NOT_CACHED
+    };
+    auto video = make_cache_test_video(&cache_states);
+    video->cache_limit_frames = 4;
+    video->cache_start_frame = 2;
+    video->stop_caching = 0;
+    video->cpu_cores = 0;
+
+    mlv_cache_request_playback_preroll(video.get(), 2, 5, 2);
+
+    ASSERT_EQ(static_cast<unsigned long long>(3), static_cast<unsigned long long>(video->cache_next));
+    uint64_t index = 999;
+    ASSERT_TRUE(find_mlv_frame_to_cache(video.get(), &index));
+    ASSERT_EQ(static_cast<unsigned long long>(3), static_cast<unsigned long long>(index));
+
+    destroy_cache_test_video(video.get());
+}
+
+TEST(CacheBehavior, PlaybackPrerollSlidesWindowTowardLookahead)
+{
+    std::vector<uint8_t> cache_states = {
+        MLV_FRAME_IS_CACHED,
+        MLV_FRAME_IS_CACHED,
+        MLV_FRAME_NOT_CACHED,
+        MLV_FRAME_NOT_CACHED,
+        MLV_FRAME_NOT_CACHED,
+        MLV_FRAME_NOT_CACHED
+    };
+    auto video = make_cache_test_video(&cache_states);
+    video->cache_limit_frames = 2;
+    video->cache_start_frame = 0;
+    video->stop_caching = 0;
+    video->cpu_cores = 0;
+
+    mlv_cache_request_playback_preroll(video.get(), 1, 4, 2);
+
+    ASSERT_EQ(static_cast<unsigned long long>(2), static_cast<unsigned long long>(video->cache_start_frame));
+    ASSERT_TRUE(mlv_frame_in_cache_window(video.get(), 3));
+    ASSERT_EQ(static_cast<unsigned long long>(2), static_cast<unsigned long long>(video->cache_next));
 
     destroy_cache_test_video(video.get());
 }
