@@ -4,7 +4,7 @@
 #
 #-------------------------------------------------
 
-QT       += core gui multimedia
+QT       += core gui multimedia opengl
 greaterThan(QT_MAJOR_VERSION, 5): QT += openglwidgets
 
 win32{
@@ -143,6 +143,8 @@ SOURCES += \
     RenameDialog.cpp \
     SessionModel.cpp \
     Updater/Updater.cpp \
+    GpuPreviewProcessing.cpp \
+    GpuDebayer.cpp \
     GpuDisplayViewport.cpp \
         main.cpp \
         MainWindow.cpp \
@@ -260,6 +262,8 @@ INCLUDEPATH += $$PWD/../../src
 macx: SOURCES += ../cocoa/avf_lib/avf_lib.m
 
 HEADERS += MainWindow.h \
+           GpuDebayer.h \
+           GpuPreviewProcessing.h \
     GpuDisplayViewport.h \
     ../../src/debayer/debayer.h \
     ../../src/debayer/helpersse2.h \
