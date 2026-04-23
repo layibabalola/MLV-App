@@ -79,6 +79,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTimer>
+#include <algorithm>
 #include <atomic>
 #include <vector>
 
@@ -126,6 +127,120 @@ static void convert_rgb16_to_rgb8(const uint16_t * source, uint8_t * destination
     {
         destination[i] = static_cast<uint8_t>( source[i] >> 8 );
     }
+}
+
+static QImage build_fast_playback_scaled_image(const uint8_t * source,
+                                               int sourceWidth,
+                                               int sourceHeight,
+                                               int targetWidth,
+                                               int targetHeight,
+                                               std::vector<uint8_t> & scaledBuffer)
+{
+    struct FastPlaybackScaleCache
+    {
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        int targetWidth = 0;
+        int targetHeight = 0;
+        std::vector<int> xOffsets;
+        std::vector<int> yOffsets;
+    };
+
+    static FastPlaybackScaleCache cache;
+
+    if( !source
+     || sourceWidth <= 0
+     || sourceHeight <= 0
+     || targetWidth <= 0
+     || targetHeight <= 0 )
+    {
+        return QImage();
+    }
+
+    const size_t targetPixels =
+        static_cast<size_t>( targetWidth ) * static_cast<size_t>( targetHeight );
+    scaledBuffer.resize( targetPixels * 3u );
+
+    if( cache.sourceWidth != sourceWidth
+     || cache.sourceHeight != sourceHeight
+     || cache.targetWidth != targetWidth
+     || cache.targetHeight != targetHeight )
+    {
+        cache.sourceWidth = sourceWidth;
+        cache.sourceHeight = sourceHeight;
+        cache.targetWidth = targetWidth;
+        cache.targetHeight = targetHeight;
+        cache.xOffsets.resize( static_cast<size_t>( targetWidth ) );
+        cache.yOffsets.resize( static_cast<size_t>( targetHeight ) );
+
+        for( int x = 0; x < targetWidth; ++x )
+        {
+            const int srcX = std::min( sourceWidth - 1,
+                                       static_cast<int>(
+                                           ( static_cast<uint64_t>( x ) * static_cast<uint64_t>( sourceWidth ) )
+                                           / static_cast<uint64_t>( targetWidth ) ) );
+            cache.xOffsets[static_cast<size_t>( x )] = srcX * 3;
+        }
+
+        for( int y = 0; y < targetHeight; ++y )
+        {
+            const int srcY = std::min( sourceHeight - 1,
+                                       static_cast<int>(
+                                           ( static_cast<uint64_t>( y ) * static_cast<uint64_t>( sourceHeight ) )
+                                           / static_cast<uint64_t>( targetHeight ) ) );
+            cache.yOffsets[static_cast<size_t>( y )] = srcY * sourceWidth * 3;
+        }
+    }
+
+    for( int y = 0; y < targetHeight; ++y )
+    {
+        const uint8_t * srcRow =
+            source + static_cast<size_t>( cache.yOffsets[static_cast<size_t>( y )] );
+        uint8_t * dstRow =
+            scaledBuffer.data() + static_cast<size_t>( y ) * static_cast<size_t>( targetWidth ) * 3u;
+
+        int x = 0;
+        for( ; x + 3 < targetWidth; x += 4 )
+        {
+            const uint8_t * srcPixel0 =
+                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x )] );
+            const uint8_t * srcPixel1 =
+                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x + 1 )] );
+            const uint8_t * srcPixel2 =
+                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x + 2 )] );
+            const uint8_t * srcPixel3 =
+                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x + 3 )] );
+            uint8_t * dstPixel = dstRow + static_cast<size_t>( x ) * 3u;
+
+            dstPixel[0] = srcPixel0[0];
+            dstPixel[1] = srcPixel0[1];
+            dstPixel[2] = srcPixel0[2];
+            dstPixel[3] = srcPixel1[0];
+            dstPixel[4] = srcPixel1[1];
+            dstPixel[5] = srcPixel1[2];
+            dstPixel[6] = srcPixel2[0];
+            dstPixel[7] = srcPixel2[1];
+            dstPixel[8] = srcPixel2[2];
+            dstPixel[9] = srcPixel3[0];
+            dstPixel[10] = srcPixel3[1];
+            dstPixel[11] = srcPixel3[2];
+        }
+
+        for( ; x < targetWidth; ++x )
+        {
+            const uint8_t * srcPixel =
+                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x )] );
+            uint8_t * dstPixel = dstRow + static_cast<size_t>( x ) * 3u;
+            dstPixel[0] = srcPixel[0];
+            dstPixel[1] = srcPixel[1];
+            dstPixel[2] = srcPixel[2];
+        }
+    }
+
+    return QImage( scaledBuffer.data(),
+                   targetWidth,
+                   targetHeight,
+                   QImage::Format_RGB888 );
 }
 
 static const char * playback_profile_scope_name(MainWindow::PlaybackProfileScope scope)
@@ -448,15 +563,12 @@ void MainWindow::timerFrameEvent( void )
         {
             return;
         }
-        //else fast playback priority -> frame n+1 will be calculated as soon as frame n is ready
-        connect( this, SIGNAL(frameReady()), this, SLOT(timerFrameEvent()) );
+        // Fast playback priority: record that we want another frame as soon as the
+        // current one is presented, without paying repeated signal connect churn.
+        m_playbackFrameAdvancePending = true;
         return;
     }
-    else
-    {
-        //disconnect the link from above again
-        disconnect( this, SIGNAL(frameReady()), this, SLOT(timerFrameEvent()) );
-    }
+    m_playbackFrameAdvancePending = false;
     if( !m_exportQueue.empty() ) return;
 
     //Time measurement
@@ -479,7 +591,7 @@ void MainWindow::timerFrameEvent( void )
     if( m_frameChanged && !m_dontDraw && !m_inOpeningProcess )
     {
         m_frameChanged = false; //first do this, if there are changes between rendering
-        drawFrame();
+        drawFrame( !m_skipImmediateTimecodeLabel );
         //Allow interaction while playback
         //qApp->processEvents();
 
@@ -545,6 +657,12 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 
     if( m_fileLoaded )
     {
+        if( m_pRenderThread )
+        {
+            m_pRenderThread->lock();
+            m_pRenderThread->unlock();
+        }
+        while( m_frameStillDrawing ) qApp->processEvents();
         drawFrame();
         if( ui->checkBoxGradientEnable->isChecked() && ui->groupBoxLinearGradient->isChecked() )
         {
@@ -1023,8 +1141,50 @@ QString MainWindow::playbackProcessingLabel( void ) const
         : QStringLiteral("receipt");
 }
 
+void MainWindow::queuePresentationRequest( const PresentationRequestContext &context )
+{
+    m_pendingPresentationRequests.push_back( context );
+    while( m_pendingPresentationRequests.size() > 8 )
+    {
+        m_pendingPresentationRequests.pop_front();
+    }
+}
+
+bool MainWindow::consumePresentationRequest( uint64_t requestSerial,
+                                             PresentationRequestContext *context )
+{
+    if( m_pendingPresentationRequests.empty() ) return false;
+
+    size_t matchedIndex = m_pendingPresentationRequests.size();
+    for( size_t i = 0; i < m_pendingPresentationRequests.size(); ++i )
+    {
+        if( m_pendingPresentationRequests[i].requestSerial == requestSerial )
+        {
+            matchedIndex = i;
+            break;
+        }
+    }
+
+    if( matchedIndex == m_pendingPresentationRequests.size() )
+    {
+        while( !m_pendingPresentationRequests.empty()
+            && m_pendingPresentationRequests.front().requestSerial < requestSerial )
+        {
+            m_pendingPresentationRequests.pop_front();
+        }
+        return false;
+    }
+
+    if( context ) *context = m_pendingPresentationRequests[matchedIndex];
+    const std::deque<PresentationRequestContext>::difference_type eraseCount =
+        static_cast<std::deque<PresentationRequestContext>::difference_type>( matchedIndex + 1 );
+    m_pendingPresentationRequests.erase( m_pendingPresentationRequests.begin(),
+                                         m_pendingPresentationRequests.begin() + eraseCount );
+    return true;
+}
+
 //Draw a raw picture to the gui -> start render thread
-void MainWindow::drawFrame( void )
+void MainWindow::drawFrame( bool updateTimecodeLabel )
 {
     m_frameStillDrawing = true;
     Qt::TransformationMode transformationMode = Qt::FastTransformation;
@@ -1086,6 +1246,18 @@ void MainWindow::drawFrame( void )
             m_lastQueuedGpuPreviewProcessingConfig;
     }
 
+    const uint64_t requestSerial = m_nextRenderRequestSerial++;
+    PresentationRequestContext requestContext;
+    requestContext.requestSerial = requestSerial;
+    requestContext.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
+    requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
+    requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
+    requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
+    requestContext.gpuPreviewPolicy = renderPolicy;
+    requestContext.gpuPresentationOptions = m_lastQueuedGpuPresentationOptions;
+    requestContext.gpuPreviewProcessingConfig = m_lastQueuedGpuPreviewProcessingConfig;
+    requestContext.playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
+
     RenderFrameThread::OutputMode renderOutputMode = RenderFrameThread::OutputProcessed8;
     if( m_renderThreadUsingGpuPreviewProcessing || m_renderThreadUsingCpuPreviewProcessing )
     {
@@ -1114,37 +1286,28 @@ void MainWindow::drawFrame( void )
     if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
     {
         //If we are in playback, dropmode, we calculated the exact frame to sync the timeline
+        requestContext.frameNumber = static_cast<uint32_t>( requestedFrame );
+        queuePresentationRequest( requestContext );
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
-                                      m_renderThreadUsingGpuBilinearDebayer );
+                                      m_renderThreadUsingGpuBilinearDebayer,
+                                      requestSerial );
 
         //Draw TimeCode
-        if( !m_tcModeDuration )
-        {
-            QPixmap pic = QPixmap::fromImage( m_pTimeCodeImage->getTimeCodeLabel( m_newPosDropMode, getFramerate() ).scaled( 200 * devicePixelRatio(),
-                                                                                              30 * devicePixelRatio(),
-                                                                                              Qt::IgnoreAspectRatio, Qt::SmoothTransformation) );
-
-            pic.setDevicePixelRatio( devicePixelRatio() );
-            m_pTcLabel->setPixmap( pic );
-        }
+        if( updateTimecodeLabel && !m_tcModeDuration ) updateTimeCodeLabelForFrame( m_newPosDropMode );
     }
     else
     {
         //Else we render the frame which is selected by the slider
+        requestContext.frameNumber = static_cast<uint32_t>( requestedFrame );
+        queuePresentationRequest( requestContext );
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
-                                      m_renderThreadUsingGpuBilinearDebayer );
+                                      m_renderThreadUsingGpuBilinearDebayer,
+                                      requestSerial );
 
         //Draw TimeCode
-        if( !m_tcModeDuration )
-        {
-            QPixmap pic = QPixmap::fromImage( m_pTimeCodeImage->getTimeCodeLabel( ui->horizontalSliderPosition->value(), getFramerate() ).scaled( 200 * devicePixelRatio(),
-                                                                                              30 * devicePixelRatio(),
-                                                                                              Qt::IgnoreAspectRatio, Qt::SmoothTransformation) );
-            pic.setDevicePixelRatio( devicePixelRatio() );
-            m_pTcLabel->setPixmap( pic );
-        }
+        if( updateTimecodeLabel && !m_tcModeDuration ) updateTimeCodeLabelForFrame( ui->horizontalSliderPosition->value() );
     }
 }
 
@@ -1303,8 +1466,12 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     {
         if( failureReason ) failureReason->clear();
 
+        const bool previousDontDraw = m_dontDraw;
+        m_dontDraw = true;
         ui->horizontalSliderPosition->setValue( frameIndex );
         qApp->processEvents( QEventLoop::AllEvents );
+        m_dontDraw = previousDontDraw;
+        m_playbackFrameAdvancePending = false;
 
         QEventLoop loop;
         QTimer timeout;
@@ -1385,33 +1552,51 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             QJsonObject sample;
             sample.insert( QStringLiteral("sample_index"), sampleIndex );
             sample.insert( QStringLiteral("requested_frame"), frameIndex );
-            sample.insert( QStringLiteral("completed_frame"), ui->horizontalSliderPosition->value() );
+            sample.insert( QStringLiteral("completed_frame"),
+                           m_lastPresentedRequestContextValid
+                               ? static_cast<int>(m_lastPresentedRequestContext.frameNumber)
+                               : ui->horizontalSliderPosition->value() );
             sample.insert( QStringLiteral("request_ns"), requestNs );
             sample.insert( QStringLiteral("completion_ns"), completionNs );
             sample.insert( QStringLiteral("latency_ms"), static_cast<double>( completionNs - requestNs ) / 1000000.0 );
-            sample.insert( QStringLiteral("gpu16_preview_active"), m_renderThreadUsing16BitPreview );
-            sample.insert( QStringLiteral("gpu_preview_processing_active"), m_renderThreadUsingGpuPreviewProcessing );
+            sample.insert( QStringLiteral("gpu16_preview_active"),
+                           m_lastPresentedRequestContextValid
+                               ? m_lastPresentedRequestContext.renderThreadUsing16BitPreview
+                               : m_renderThreadUsing16BitPreview );
+            sample.insert( QStringLiteral("gpu_preview_processing_active"),
+                           m_lastPresentedRequestContextValid
+                               ? m_lastPresentedRequestContext.renderThreadUsingGpuPreviewProcessing
+                               : m_renderThreadUsingGpuPreviewProcessing );
             const bool playbackProcessingSubsetActive =
-                m_renderThreadUsingCpuPreviewProcessing
-                || m_renderThreadUsingGpuPreviewProcessing;
+                (m_lastPresentedRequestContextValid
+                    ? m_lastPresentedRequestContext.renderThreadUsingCpuPreviewProcessing
+                    : m_renderThreadUsingCpuPreviewProcessing)
+                || (m_lastPresentedRequestContextValid
+                    ? m_lastPresentedRequestContext.renderThreadUsingGpuPreviewProcessing
+                    : m_renderThreadUsingGpuPreviewProcessing);
             sample.insert( QStringLiteral("playback_processing_subset_active"),
                            playbackProcessingSubsetActive );
             playbackProcessingSubsetObserved = playbackProcessingSubsetObserved
                 || playbackProcessingSubsetActive;
             playbackProcessingSupported = playbackProcessingSupported
-                || m_lastQueuedGpuPreviewProcessingConfig.enabled;
+                || (m_lastPresentedRequestContextValid
+                    ? m_lastPresentedRequestContext.gpuPreviewProcessingConfig.enabled
+                    : m_lastQueuedGpuPreviewProcessingConfig.enabled);
             if( playbackProcessingReason.isEmpty()
-             || (playbackProcessingReason == QStringLiteral("current processing settings are supported")
-                 && !m_lastQueuedPlaybackProcessingReason.isEmpty()) )
+              || (playbackProcessingReason == QStringLiteral("current processing settings are supported")
+                 && !(m_lastPresentedRequestContextValid
+                        ? m_lastPresentedRequestContext.playbackProcessingReason
+                        : m_lastQueuedPlaybackProcessingReason).isEmpty()) )
             {
-                playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
+                playbackProcessingReason = m_lastPresentedRequestContextValid
+                    ? m_lastPresentedRequestContext.playbackProcessingReason
+                    : m_lastQueuedPlaybackProcessingReason;
             }
             sample.insert( QStringLiteral("gpu_bilinear_debayer_active"),
-                           m_pRenderThread && m_pRenderThread->lastFrameUsedGpuBilinearDebayer() );
-            if( m_pRenderThread )
+                           m_lastPresentedFrameUsedGpuBilinearDebayer );
             {
-                const QString gpuBilinearRenderer = m_pRenderThread->lastGpuBilinearRendererDescription();
-                const QString gpuBilinearFallbackReason = m_pRenderThread->lastGpuBilinearFallbackReason();
+                const QString gpuBilinearRenderer = m_lastPresentedGpuBilinearRendererDescription;
+                const QString gpuBilinearFallbackReason = m_lastPresentedGpuBilinearFallbackReason;
                 if( !gpuBilinearFallbackReason.isEmpty() )
                 {
                     sample.insert( QStringLiteral("gpu_bilinear_debayer_renderer"),
@@ -1439,25 +1624,28 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                            static_cast<double>( completionNs - effectiveEngineNs ) / 1000000.0 );
             sample.insert( QStringLiteral("draw_frame_ready_queue_ms"),
                            m_lastDrawFrameReadyQueueMs );
+            sample.insert( QStringLiteral("draw_frame_ready_scene_ms"),
+                           m_lastDrawFrameReadySceneMs );
+            sample.insert( QStringLiteral("draw_frame_ready_image_ms"),
+                           m_lastDrawFrameReadyImageMs );
+            sample.insert( QStringLiteral("draw_frame_ready_present_ms"),
+                           m_lastDrawFrameReadyPresentMs );
+            sample.insert( QStringLiteral("draw_frame_ready_scopes_ms"),
+                           m_lastDrawFrameReadyScopesMs );
+            sample.insert( QStringLiteral("draw_frame_ready_overlay_ms"),
+                           m_lastDrawFrameReadyOverlayMs );
             sample.insert( QStringLiteral("draw_frame_ready_total_ms"),
                            m_lastDrawFrameReadyTotalMs );
             sample.insert( QStringLiteral("engine_latency_direct_measured"),
                            engineNs >= 0 );
             sample.insert( QStringLiteral("dual_iso_preview_histogram_ms"),
-                           m_pRenderThread
-                               ? m_pRenderThread->lastDualIsoPreviewHistogramMilliseconds()
-                               : 0.0 );
+                           m_lastPresentedDualIsoPreviewHistogramMs );
             sample.insert( QStringLiteral("dual_iso_preview_regression_ms"),
-                           m_pRenderThread
-                               ? m_pRenderThread->lastDualIsoPreviewRegressionMilliseconds()
-                               : 0.0 );
+                           m_lastPresentedDualIsoPreviewRegressionMs );
             sample.insert( QStringLiteral("dual_iso_preview_rowscale_ms"),
-                           m_pRenderThread
-                               ? m_pRenderThread->lastDualIsoPreviewRowscaleMilliseconds()
-                               : 0.0 );
-            if( m_pRenderThread )
+                           m_lastPresentedDualIsoPreviewRowscaleMs );
             {
-                const QJsonObject stageTimingTelemetry = m_pRenderThread->lastStageTimingTelemetry();
+                const QJsonObject stageTimingTelemetry = m_lastPresentedStageTimingTelemetry;
                 for( auto it = stageTimingTelemetry.constBegin();
                      it != stageTimingTelemetry.constEnd();
                      ++it )
@@ -1966,7 +2154,20 @@ int MainWindow::openMlv( QString fileName )
     m_pRawImage16 = ( uint16_t* )malloc( static_cast<size_t>(imageSize) * sizeof( uint16_t ) );
 
     //Init Render Thread
-    m_pRenderThread->init( m_pMlvObject, m_pRawImage, m_pRawImage16 );
+    m_pRenderThread->init( m_pMlvObject,
+                           getMlvWidth( m_pMlvObject ),
+                           getMlvHeight( m_pMlvObject ) );
+    m_pendingPresentationRequests.clear();
+    m_lastPresentedRequestContext = PresentationRequestContext();
+    m_lastPresentedRequestContextValid = false;
+    m_lastPresentedRequestSerial = 0;
+    m_lastPresentedFrameUsedGpuBilinearDebayer = false;
+    m_lastPresentedGpuBilinearFallbackReason.clear();
+    m_lastPresentedGpuBilinearRendererDescription.clear();
+    m_lastPresentedDualIsoPreviewHistogramMs = 0.0;
+    m_lastPresentedDualIsoPreviewRegressionMs = 0.0;
+    m_lastPresentedDualIsoPreviewRowscaleMs = 0.0;
+    m_lastPresentedStageTimingTelemetry = QJsonObject();
 
     //Calculate shutter flavors :)
     float shutterSpeed = 1000000.0f / (float)(getMlvShutter( m_pMlvObject ));
@@ -6660,6 +6861,8 @@ uint8_t MainWindow::drawZebras(QImage *image)
 void MainWindow::invalidateDisplayPreviewCache( void )
 {
     m_displayPreviewCacheNextSlot = 0;
+    m_lastDisplaySceneWidth = -1;
+    m_lastDisplaySceneHeight = -1;
     for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
     {
         entry = DisplayPreviewCacheEntry();
@@ -6713,18 +6916,30 @@ bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
 }
 
 //Write the frame number into the label
-void MainWindow::drawFrameNumberLabel( void )
+void MainWindow::drawFrameNumberLabel( int frameIndex )
 {
     if( m_fileLoaded )
     {
+        const int shownFrame = (frameIndex >= 0)
+            ? frameIndex
+            : ui->horizontalSliderPosition->value();
         m_pFrameNumber->setText( tr( "Frame %1/%2" )
-                                 .arg( ui->horizontalSliderPosition->value() + 1 )
+                                 .arg( shownFrame + 1 )
                                  .arg( ui->horizontalSliderPosition->maximum() + 1 ) );
     }
     else
     {
         m_pFrameNumber->setText( tr( "Frame 0/0" ) );
     }
+}
+
+void MainWindow::updateTimeCodeLabelForFrame( int frameIndex )
+{
+    QPixmap pic = QPixmap::fromImage( m_pTimeCodeImage->getTimeCodeLabel( frameIndex, getFramerate() ).scaled( 200 * devicePixelRatio(),
+                                                                                                                  30 * devicePixelRatio(),
+                                                                                                                  Qt::IgnoreAspectRatio, Qt::SmoothTransformation) );
+    pic.setDevicePixelRatio( devicePixelRatio() );
+    m_pTcLabel->setPixmap( pic );
 }
 
 //Set Toolbuttons Focus Pixels
@@ -10813,18 +11028,54 @@ void MainWindow::exportAbort( void )
 //Draw the frame when render thread is ready
 void MainWindow::drawFrameReady()
 {
-    const uint64_t display_frame = ui->actionDropFrameMode->isChecked()
-        ? static_cast<uint64_t>(m_newPosDropMode)
-        : static_cast<uint64_t>(ui->horizontalSliderPosition->value());
+    RenderFrameThread::ReadyFrame readyFrame;
+    PresentationRequestContext requestContext;
+    const bool haveReadyFrame =
+        m_pRenderThread && m_pRenderThread->acquireLatestReadyFrame( &readyFrame );
+    if( !haveReadyFrame )
+    {
+        m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+        return;
+    }
+
+    if( !consumePresentationRequest( readyFrame.requestSerial, &requestContext ) )
+    {
+        requestContext.requestSerial = readyFrame.requestSerial;
+        requestContext.frameNumber = readyFrame.frameNumber;
+        requestContext.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
+        requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
+        requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
+        requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
+        requestContext.gpuPreviewPolicy = m_lastQueuedGpuPreviewPolicy;
+        requestContext.gpuPresentationOptions = m_lastQueuedGpuPresentationOptions;
+        requestContext.gpuPreviewProcessingConfig = m_lastQueuedGpuPreviewProcessingConfig;
+        requestContext.playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
+    }
+
+    m_lastPresentedRequestSerial = readyFrame.requestSerial;
+    m_lastPresentedRequestContext = requestContext;
+    m_lastPresentedRequestContextValid = true;
+    m_lastPresentedFrameUsedGpuBilinearDebayer = readyFrame.usedGpuBilinearDebayer;
+    m_lastPresentedGpuBilinearFallbackReason = readyFrame.gpuBilinearFallbackReason;
+    m_lastPresentedGpuBilinearRendererDescription = readyFrame.gpuBilinearRendererDescription;
+    m_lastPresentedDualIsoPreviewHistogramMs = readyFrame.dualIsoPreviewHistogramMs;
+    m_lastPresentedDualIsoPreviewRegressionMs = readyFrame.dualIsoPreviewRegressionMs;
+    m_lastPresentedDualIsoPreviewRowscaleMs = readyFrame.dualIsoPreviewRowscaleMs;
+    m_lastPresentedStageTimingTelemetry = readyFrame.stageTimingTelemetry;
+
+    const uint64_t display_frame = readyFrame.frameNumber;
     const double display_start = mlv_stage_timing_now();
     m_lastDrawFrameReadyQueueMs = 0.0;
-    if( m_pRenderThread )
+    m_lastDrawFrameReadySceneMs = 0.0;
+    m_lastDrawFrameReadyImageMs = 0.0;
+    m_lastDrawFrameReadyPresentMs = 0.0;
+    m_lastDrawFrameReadyScopesMs = 0.0;
+    m_lastDrawFrameReadyOverlayMs = 0.0;
+    if( readyFrame.frameReadyEmitStageTime > 0.0
+     && display_start >= readyFrame.frameReadyEmitStageTime )
     {
-        const double render_emit_stage_time = m_pRenderThread->lastFrameReadyEmitStageTime();
-        if( render_emit_stage_time > 0.0 && display_start >= render_emit_stage_time )
-        {
-            m_lastDrawFrameReadyQueueMs = (display_start - render_emit_stage_time) * 1000.0;
-        }
+        m_lastDrawFrameReadyQueueMs =
+            (display_start - readyFrame.frameReadyEmitStageTime) * 1000.0;
     }
     const bool gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     const bool zoomFitEnabled = ui->actionZoomFit->isChecked();
@@ -10841,7 +11092,8 @@ void MainWindow::drawFrameReady()
     bool cachedPixmapAvailable = false;
     bool framePresentedByViewport = false;
     uint8_t underOver = 0;
-    const uint8_t * rgb8DisplaySource = m_pRawImage;
+    const uint8_t * rgb8DisplaySource = readyFrame.rawImage8;
+    const uint16_t * rgb16DisplaySource = readyFrame.rawImage16;
     int sceneWidth = sourceWidth;
     int sceneHeight = sourceHeight;
     if( !ui->actionPlay->isChecked()
@@ -10851,21 +11103,33 @@ void MainWindow::drawFrameReady()
         mode = Qt::SmoothTransformation;
     }
 
-    MainWindowGpuPreviewPolicyState gpuPreviewPolicy = m_lastQueuedGpuPreviewPolicy;
+    MainWindowGpuPreviewPolicyState gpuPreviewPolicy = requestContext.gpuPreviewPolicy;
     gpuPreviewPolicy.gpuViewportInstalled = gpuViewportInstalled;
 
     const bool gpu16PreviewActive = mainWindowUsesGpu16PreviewPresentation( gpuPreviewPolicy );
     const bool gpuPreviewProcessingActive = mainWindowUsesGpuPreviewProcessing( gpuPreviewPolicy );
     const bool cpuPreviewProcessingActive =
-        m_renderThreadUsingCpuPreviewProcessing
-        && m_lastQueuedGpuPreviewProcessingConfig.enabled;
+        requestContext.renderThreadUsingCpuPreviewProcessing
+        && requestContext.gpuPreviewProcessingConfig.enabled;
     const bool useGpuImagePresentation = mainWindowUsesGpuImagePresentation( gpuPreviewPolicy );
     const bool useGpuShaderZebras = mainWindowUsesGpuShaderZebraProcessing( gpuPreviewPolicy );
     GpuPreviewProcessingConfig gpuPreviewProcessingConfig =
         (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
-            ? m_lastQueuedGpuPreviewProcessingConfig
+            ? requestContext.gpuPreviewProcessingConfig
             : GpuPreviewProcessingConfig();
+    const bool advancePlaybackNow = ui->actionPlay->isChecked();
 
+    m_playbackFrameAdvancePending = false;
+    if( advancePlaybackNow )
+    {
+        m_skipImmediateTimecodeLabel = true;
+        m_frameStillDrawing = false;
+        timerFrameEvent();
+        m_frameStillDrawing = true;
+        m_skipImmediateTimecodeLabel = false;
+    }
+
+    const double scene_start = mlv_stage_timing_now();
     if( zoomFitEnabled )
     {
         //Some math to have the picture exactly in the frame
@@ -10895,40 +11159,44 @@ void MainWindow::drawFrameReady()
         sceneHeight = sourceHeight * stretchY;
     }
 
-    m_pScene->setSceneRect( 0, 0, sceneWidth, sceneHeight );
+    if( m_lastDisplaySceneWidth != sceneWidth
+     || m_lastDisplaySceneHeight != sceneHeight )
+    {
+        m_pScene->setSceneRect( 0, 0, sceneWidth, sceneHeight );
+        m_lastDisplaySceneWidth = sceneWidth;
+        m_lastDisplaySceneHeight = sceneHeight;
+    }
+    m_lastDrawFrameReadySceneMs = (mlv_stage_timing_now() - scene_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.scene", display_frame, m_lastDrawFrameReadySceneMs);
 
     if( toolButtonDualIsoCurrentIndex() > 0 )
     {
         ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 );
 
-        if( m_pMlvObject->llrawproc->diso_pattern < 0 )
+        if( readyFrame.dualIsoPattern < 0 )
         {
-            m_pMlvObject->llrawproc->diso_pattern = -m_pMlvObject->llrawproc->diso_pattern;
-
             ui->DualIsoPatternComboBox->blockSignals( true );
-            ui->DualIsoPatternComboBox->setCurrentIndex(m_pMlvObject->llrawproc->diso_pattern);
+            ui->DualIsoPatternComboBox->setCurrentIndex( -readyFrame.dualIsoPattern );
             ui->DualIsoPatternComboBox->blockSignals( false );
         }
 
-        if( toolButtonDualIsoCurrentIndex() == 1 && m_pMlvObject->llrawproc->diso_auto_correction < 0 )
+        if( toolButtonDualIsoCurrentIndex() == 1 && readyFrame.dualIsoAutoCorrection < 0 )
         {
-            if( m_pMlvObject->llrawproc->diso_ev_correction != 1 )
+            if( readyFrame.dualIsoEvCorrection != 1.0 )
             {
                 ui->horizontalSliderDualIsoEvCorrection->blockSignals( true );
-                ui->horizontalSliderDualIsoEvCorrection->setValue( (m_pMlvObject->llrawproc->diso_ev_correction * 200) - 0.5 );
+                ui->horizontalSliderDualIsoEvCorrection->setValue( (readyFrame.dualIsoEvCorrection * 200) - 0.5 );
                 ui->horizontalSliderDualIsoEvCorrection->blockSignals( false );
-                ui->DualIsoEvCorrectionVal->setText( QString("%1").arg( m_pMlvObject->llrawproc->diso_ev_correction, 0, 'f', 2 ) );
+                ui->DualIsoEvCorrectionVal->setText( QString("%1").arg( readyFrame.dualIsoEvCorrection, 0, 'f', 2 ) );
             }
 
-            if( m_pMlvObject->llrawproc->diso_black_delta != -1 )
+            if( readyFrame.dualIsoBlackDelta != -1 )
             {
                 ui->horizontalSliderDualIsoBlackDelta->blockSignals( true );
-                ui->horizontalSliderDualIsoBlackDelta->setValue( m_pMlvObject->llrawproc->diso_black_delta );
+                ui->horizontalSliderDualIsoBlackDelta->setValue( readyFrame.dualIsoBlackDelta );
                 ui->horizontalSliderDualIsoBlackDelta->blockSignals( false );
-                ui->DualIsoBlackDeltaVal->setText( QString("%1").arg( m_pMlvObject->llrawproc->diso_black_delta ) );
+                ui->DualIsoBlackDeltaVal->setText( QString("%1").arg( readyFrame.dualIsoBlackDelta ) );
             }
-
-            m_pMlvObject->llrawproc->diso_auto_correction = -m_pMlvObject->llrawproc->diso_auto_correction;
         }
     }
 
@@ -10939,16 +11207,17 @@ void MainWindow::drawFrameReady()
         playbackProcessingSubsetActive
             ? (gpuPreviewProcessingConfig.signature
                 ^ display_frame
-                ^ (m_renderThreadUsingGpuBilinearDebayer ? 0x9d77d4e5cbd18b01ull : 0ull))
-            : (m_pMlvObject->current_processed_frame_8bit_active
-            ? m_pMlvObject->current_processed_frame_8bit_signature
-            : (m_pMlvObject->current_processed_frame_active
-                ? m_pMlvObject->current_processed_frame_signature
+                ^ (requestContext.renderThreadUsingGpuBilinearDebayer ? 0x9d77d4e5cbd18b01ull : 0ull))
+            : (readyFrame.processedFrame8Active
+            ? readyFrame.processedFrame8Signature
+            : (readyFrame.processedFrame16Active
+                ? readyFrame.processedFrame16Signature
                 : display_frame));
     const int devicePixelRatioMilli = static_cast<int>( devicePixelRatioF() * 1000.0 + 0.5 );
     const int transformationMode = (mode == Qt::SmoothTransformation) ? 1 : 0;
+    const bool displayPreviewCachingAllowed = !playbackPolicyActive();
     GpuDisplayViewport::PresentationOptions gpuPresentationOptions =
-        m_lastQueuedGpuPresentationOptions;
+        requestContext.gpuPresentationOptions;
     gpuPresentationOptions.showZebras = gpuPreviewPolicy.zebrasEnabled;
     if( gpuPreviewProcessingActive ) gpuPresentationOptions.previewProcessing = gpuPreviewProcessingConfig;
 
@@ -10956,7 +11225,7 @@ void MainWindow::drawFrameReady()
     {
         framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
                                                                     m_pGraphicsItem,
-                                                                    m_pRawImage16,
+                                                                    rgb16DisplaySource,
                                                                     sourceWidth,
                                                                     sourceHeight,
                                                                     gpuPresentationOptions );
@@ -10970,7 +11239,7 @@ void MainWindow::drawFrameReady()
             {
                 gpu16FallbackProcessed.resize( pixelCount * 3u );
                 gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
-                                                       m_pRawImage16,
+                                                       rgb16DisplaySource,
                                                        gpu16FallbackProcessed.data(),
                                                        static_cast<int>(pixelCount) );
                 convert_rgb16_to_rgb8( gpu16FallbackProcessed.data(),
@@ -10979,7 +11248,7 @@ void MainWindow::drawFrameReady()
             }
             else
             {
-                convert_rgb16_to_rgb8( m_pRawImage16, gpu16FallbackRgb8.data(), sourceWidth * sourceHeight );
+                convert_rgb16_to_rgb8( rgb16DisplaySource, gpu16FallbackRgb8.data(), sourceWidth * sourceHeight );
             }
             rgb8DisplaySource = gpu16FallbackRgb8.data();
         }
@@ -10992,7 +11261,7 @@ void MainWindow::drawFrameReady()
         cpuPreviewProcessed.resize( pixelCount * 3u );
         cpuPreviewRgb8.resize( pixelCount * 3u );
         gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
-                                               m_pRawImage16,
+                                               rgb16DisplaySource,
                                                cpuPreviewProcessed.data(),
                                                static_cast<int>(pixelCount) );
         convert_rgb16_to_rgb8( cpuPreviewProcessed.data(),
@@ -11001,7 +11270,7 @@ void MainWindow::drawFrameReady()
         rgb8DisplaySource = cpuPreviewRgb8.data();
     }
 
-    if( !framePresentedByViewport )
+    if( displayPreviewCachingAllowed && !framePresentedByViewport )
     {
         for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
         {
@@ -11026,14 +11295,34 @@ void MainWindow::drawFrameReady()
         }
     }
 
+    const double image_start = mlv_stage_timing_now();
     if( displayImage.isNull() && !framePresentedByViewport )
     {
+        const bool playbackFastScalingActive =
+            playbackPolicyActive()
+            && !useGpuImagePresentation
+            && mode == Qt::FastTransformation;
         if( useGpuImagePresentation )
         {
             displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
                                    sourceWidth,
                                    sourceHeight,
                                    QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else if( zoomFitEnabled && playbackFastScalingActive )
+        {
+            static std::vector<uint8_t> fastPlaybackScaledPic;
+            const int scaledWidth =
+                std::max( 1, qRound( sceneWidth * devicePixelRatioF() ) );
+            const int scaledHeight =
+                std::max( 1, qRound( sceneHeight * devicePixelRatioF() ) );
+            displayImage = build_fast_playback_scaled_image( rgb8DisplaySource,
+                                                             sourceWidth,
+                                                             sourceHeight,
+                                                             scaledWidth,
+                                                             scaledHeight,
+                                                             fastPlaybackScaledPic );
             displayImageOwnsData = false;
         }
         else if( zoomFitEnabled )
@@ -11103,38 +11392,44 @@ void MainWindow::drawFrameReady()
             underOver = drawZebras( &displayImage );
         }
 
-        DisplayPreviewCacheEntry & cacheEntry =
-            m_displayPreviewCache[m_displayPreviewCacheNextSlot % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]))];
-        m_displayPreviewCacheNextSlot = (m_displayPreviewCacheNextSlot + 1) % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]));
-        cacheEntry = DisplayPreviewCacheEntry();
-        cacheEntry.valid = true;
-        cacheEntry.zoomFit = zoomFitEnabled;
-        cacheEntry.betterResizer = betterResizerEnabled;
-        cacheEntry.zebras = zebrasEnabled;
-        cacheEntry.gpuScaling = useGpuImagePresentation;
-        cacheEntry.frameIndex = display_frame;
-        cacheEntry.signature = display_signature;
-        cacheEntry.sourceWidth = sourceWidth;
-        cacheEntry.sourceHeight = sourceHeight;
-        cacheEntry.sceneWidth = sceneWidth;
-        cacheEntry.sceneHeight = sceneHeight;
-        cacheEntry.imageWidth = displayImage.width();
-        cacheEntry.imageHeight = displayImage.height();
-        cacheEntry.transformationMode = transformationMode;
-        cacheEntry.devicePixelRatioMilli = devicePixelRatioMilli;
-        cacheEntry.underOver = underOver;
-        cacheEntry.image = displayImage.copy();
-        if( !useGpuImagePresentation )
+        if( displayPreviewCachingAllowed )
         {
-            cacheEntry.pixmap = QPixmap::fromImage( cacheEntry.image );
-            if( zoomFitEnabled ) cacheEntry.pixmap.setDevicePixelRatio( devicePixelRatioF() );
+            DisplayPreviewCacheEntry & cacheEntry =
+                m_displayPreviewCache[m_displayPreviewCacheNextSlot % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]))];
+            m_displayPreviewCacheNextSlot = (m_displayPreviewCacheNextSlot + 1) % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]));
+            cacheEntry = DisplayPreviewCacheEntry();
+            cacheEntry.valid = true;
+            cacheEntry.zoomFit = zoomFitEnabled;
+            cacheEntry.betterResizer = betterResizerEnabled;
+            cacheEntry.zebras = zebrasEnabled;
+            cacheEntry.gpuScaling = useGpuImagePresentation;
+            cacheEntry.frameIndex = display_frame;
+            cacheEntry.signature = display_signature;
+            cacheEntry.sourceWidth = sourceWidth;
+            cacheEntry.sourceHeight = sourceHeight;
+            cacheEntry.sceneWidth = sceneWidth;
+            cacheEntry.sceneHeight = sceneHeight;
+            cacheEntry.imageWidth = displayImage.width();
+            cacheEntry.imageHeight = displayImage.height();
+            cacheEntry.transformationMode = transformationMode;
+            cacheEntry.devicePixelRatioMilli = devicePixelRatioMilli;
+            cacheEntry.underOver = underOver;
+            cacheEntry.image = displayImage.copy();
+            if( !useGpuImagePresentation )
+            {
+                cacheEntry.pixmap = QPixmap::fromImage( cacheEntry.image );
+                if( zoomFitEnabled ) cacheEntry.pixmap.setDevicePixelRatio( devicePixelRatioF() );
+            }
+
+            displayImage = cacheEntry.image;
+            cachedPixmap = cacheEntry.pixmap;
+            cachedPixmapAvailable = !cacheEntry.pixmap.isNull();
         }
-
-        displayImage = cacheEntry.image;
-        cachedPixmap = cacheEntry.pixmap;
-        cachedPixmapAvailable = !cacheEntry.pixmap.isNull();
     }
+    m_lastDrawFrameReadyImageMs = (mlv_stage_timing_now() - image_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
 
+    const double present_start = mlv_stage_timing_now();
     if( !framePresentedByViewport
      && !GpuDisplayViewport::presentImage( ui->graphicsView, m_pGraphicsItem, displayImage, gpuPresentationOptions ) )
     {
@@ -11154,6 +11449,8 @@ void MainWindow::drawFrameReady()
         }
         m_pGraphicsItem->setPixmap( pic );
     }
+    m_lastDrawFrameReadyPresentMs = (mlv_stage_timing_now() - present_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.present", display_frame, m_lastDrawFrameReadyPresentMs);
 
     if( ui->actionShowEditArea->isChecked() )
     {
@@ -11165,26 +11462,25 @@ void MainWindow::drawFrameReady()
 
         if( ui->actionShowHistogram->isChecked() )
         {
-            ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeHistogram );
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeHistogram );
         }
         else if( ui->actionShowWaveFormMonitor->isChecked() )
         {
-            ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeWaveForm );
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeWaveForm );
         }
         else if( ui->actionShowParade->isChecked() )
         {
-            ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeRgbParade);
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeRgbParade);
         }
         else if( ui->actionShowVectorScope->isChecked() )
         {
-            ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeVectorScope );
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeVectorScope );
         }
-        mlv_stage_timing_note("drawFrameReady.scopes", display_frame, scopes_start);
+        m_lastDrawFrameReadyScopesMs = (mlv_stage_timing_now() - scopes_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("drawFrameReady.scopes", display_frame, m_lastDrawFrameReadyScopesMs);
     }
     
-    //Drawing ready, next frame can be rendered
-    m_frameStillDrawing = false;
-
+    const double overlay_start = mlv_stage_timing_now();
     //Sync Audio
     if( m_tryToSyncAudio && ui->actionAudioOutput->isChecked() && ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
     {
@@ -11195,7 +11491,11 @@ void MainWindow::drawFrameReady()
     }
 
     //And show the user which frame we show
-    drawFrameNumberLabel();
+    drawFrameNumberLabel( static_cast<int>(display_frame) );
+    if( !m_tcModeDuration )
+    {
+        updateTimeCodeLabelForFrame( static_cast<int>(display_frame) );
+    }
 
     //Set frame to the middle
     if( m_zoomTo100Center )
@@ -11239,9 +11539,13 @@ void MainWindow::drawFrameReady()
     //Reset delete clip action as enabled
     ui->actionDeleteSelectedClips->setEnabled( true );
 
+    m_lastDrawFrameReadyOverlayMs = (mlv_stage_timing_now() - overlay_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.overlay", display_frame, m_lastDrawFrameReadyOverlayMs);
     m_lastDrawFrameReadyTotalMs = (mlv_stage_timing_now() - display_start) * 1000.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.total", display_frame, m_lastDrawFrameReadyTotalMs);
     notePlayToFirstFramePresentation( display_frame );
+    if( m_pRenderThread ) m_pRenderThread->releasePresentedFrame();
+    m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
     emit frameReady();
 }
 

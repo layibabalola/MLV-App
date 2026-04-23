@@ -79,6 +79,7 @@ static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_for_8bit_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_to_8bit_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed8_total_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL int g_mlv_last_processed8_direct_path_active = 0;
+static MLV_STAGE_THREAD_LOCAL int g_mlv_last_processed8_prefetch_hit = 0;
 
 static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 {
@@ -116,6 +117,10 @@ static uint64_t file_get_pos(FILE *stream)
 #define MLV_RAW_UINT16_PREFETCH_READY 1
 #define MLV_RAW_UINT16_PREFETCH_DECODING 2
 #define MLV_RAW_UINT16_PREFETCH_LOOKAHEAD 2
+#define MLV_PROCESSED_8BIT_PREFETCH_EMPTY 0
+#define MLV_PROCESSED_8BIT_PREFETCH_READY 1
+#define MLV_PROCESSED_8BIT_PREFETCH_RENDERING 2
+#define MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD 2
 
 #if defined(_MSC_VER)
 #define MLV_THREAD_LOCAL __declspec(thread)
@@ -168,6 +173,26 @@ static int mlv_raw_uint16_prefetch_enabled(void)
     }
 
     const char * value = getenv("MLVAPP_EXPERIMENTAL_RAW_UINT16_PREFETCH");
+    enabled =
+        (value
+         && value[0] != '\0'
+         && strcmp(value, "0") != 0
+         && strcasecmp(value, "false") != 0
+         && strcasecmp(value, "off") != 0)
+            ? 1
+            : 0;
+    return enabled;
+}
+
+static int mlv_processed8_prefetch_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled >= 0)
+    {
+        return enabled;
+    }
+
+    const char * value = getenv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
     enabled =
         (value
          && value[0] != '\0'
@@ -312,6 +337,7 @@ static uint64_t mlv_hash_llrawproc_state(uint64_t hash, const llrawprocObject_t 
     hash = mlv_hash_bytes(hash, &llrawproc->dual_iso, sizeof(llrawproc->dual_iso));
     hash = mlv_hash_bytes(hash, &llrawproc->diso1, sizeof(llrawproc->diso1));
     hash = mlv_hash_bytes(hash, &llrawproc->diso2, sizeof(llrawproc->diso2));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_pattern, sizeof(llrawproc->diso_pattern));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_auto_correction, sizeof(llrawproc->diso_auto_correction));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_ev_correction, sizeof(llrawproc->diso_ev_correction));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_black_delta, sizeof(llrawproc->diso_black_delta));
@@ -334,12 +360,11 @@ static uint64_t mlv_hash_llrawproc_state(uint64_t hash, const llrawprocObject_t 
     return hash;
 }
 
-static uint64_t mlv_processed_frame_signature(mlvObject_t * video, uint64_t frameIndex)
+static uint64_t mlv_processed_frame_state_signature(mlvObject_t * video)
 {
     uint64_t hash = MLV_FNV1A_OFFSET_BASIS;
     processingObject_t * processing = video ? video->processing : NULL;
 
-    hash = mlv_hash_bytes(hash, &frameIndex, sizeof(frameIndex));
     if (!video)
     {
         return hash;
@@ -485,6 +510,19 @@ static uint64_t mlv_processed_frame_signature(mlvObject_t * video, uint64_t fram
     return hash;
 }
 
+static uint64_t mlv_processed_frame_signature_from_state(uint64_t stateSignature,
+                                                         uint64_t frameIndex)
+{
+    return mlv_hash_bytes(stateSignature, &frameIndex, sizeof(frameIndex));
+}
+
+static uint64_t mlv_processed_frame_signature(mlvObject_t * video, uint64_t frameIndex)
+{
+    return mlv_processed_frame_signature_from_state(
+        mlv_processed_frame_state_signature(video),
+        frameIndex);
+}
+
 static int mlv_ensure_reusable_buffer(void ** buffer,
                                       uint64_t * capacity_elements,
                                       uint64_t required_elements,
@@ -532,6 +570,13 @@ static uint16_t * mlv_ensure_thread_u16_buffer(uint64_t required_words)
     return mlv_ensure_u16_buffer(&tls_buffer, &tls_capacity_words, required_words);
 }
 
+static uint16_t * mlv_ensure_thread_rgb_u16_buffer(uint64_t required_words)
+{
+    static MLV_THREAD_LOCAL uint16_t * tls_buffer = NULL;
+    static MLV_THREAD_LOCAL uint64_t tls_capacity_words = 0;
+    return mlv_ensure_u16_buffer(&tls_buffer, &tls_capacity_words, required_words);
+}
+
 static uint8_t * mlv_ensure_u8_buffer(uint8_t ** buffer, uint64_t * capacity_bytes, uint64_t required_bytes)
 {
     if (!mlv_ensure_reusable_buffer((void **)buffer, capacity_bytes, required_bytes, sizeof(uint8_t)))
@@ -539,6 +584,13 @@ static uint8_t * mlv_ensure_u8_buffer(uint8_t ** buffer, uint64_t * capacity_byt
         return NULL;
     }
     return *buffer;
+}
+
+static uint8_t * mlv_ensure_thread_u8_buffer(uint64_t required_bytes)
+{
+    static MLV_THREAD_LOCAL uint8_t * tls_buffer = NULL;
+    static MLV_THREAD_LOCAL uint64_t tls_capacity_bytes = 0;
+    return mlv_ensure_u8_buffer(&tls_buffer, &tls_capacity_bytes, required_bytes);
 }
 
 static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, uint16_t * unpackedFrame);
@@ -929,7 +981,7 @@ static void mlv_store_processed_frame_16bit_cache(mlvObject_t * video,
     video->processed_16bit_cache_signature[slot] = signature;
 }
 
-static void mlv_reset_processed_frame_8bit_cache(mlvObject_t * video)
+static void mlv_reset_processed_frame_8bit_cache_locked(mlvObject_t * video)
 {
     video->current_processed_frame_8bit_active = 0;
     video->current_processed_frame_8bit_signature = 0;
@@ -940,6 +992,14 @@ static void mlv_reset_processed_frame_8bit_cache(mlvObject_t * video)
     memset(video->processed_8bit_cache_frame, 0, sizeof(video->processed_8bit_cache_frame));
     memset(video->processed_8bit_cache_threads, 0, sizeof(video->processed_8bit_cache_threads));
     memset(video->processed_8bit_cache_signature, 0, sizeof(video->processed_8bit_cache_signature));
+    memset(video->processed_8bit_cache_state, 0, sizeof(video->processed_8bit_cache_state));
+    memset(video->processed_8bit_cache_prefetched, 0, sizeof(video->processed_8bit_cache_prefetched));
+    memset(video->processed_8bit_cache_generation, 0, sizeof(video->processed_8bit_cache_generation));
+}
+
+static void mlv_reset_processed_frame_8bit_cache(mlvObject_t * video)
+{
+    mlv_reset_processed_frame_8bit_cache_locked(video);
 }
 
 static uint8_t * mlv_processed_frame_8bit_cache_slot(mlvObject_t * video, uint32_t slot, uint64_t rgb_frame_size)
@@ -963,17 +1023,35 @@ static uint8_t * mlv_processed_frame_8bit_cache_slot(mlvObject_t * video, uint32
     return video->rgb_processed_current_frame_8bit + offset;
 }
 
-static int mlv_find_processed_frame_8bit_cache_slot(mlvObject_t * video,
-                                                    uint64_t frameIndex,
-                                                    int threads,
-                                                    uint64_t signature)
+static int mlv_processed_frame_8bit_cache_slot_matches_locked(mlvObject_t * video,
+                                                              uint32_t slot,
+                                                              uint64_t frameIndex,
+                                                              int threads,
+                                                              uint64_t signature,
+                                                              uint32_t generation)
+{
+    return slot < MLV_PROCESSED_8BIT_CACHE_SLOTS
+        && video->processed_8bit_cache_frame[slot] == frameIndex
+        && video->processed_8bit_cache_threads[slot] == threads
+        && video->processed_8bit_cache_signature[slot] == signature
+        && video->processed_8bit_cache_generation[slot] == generation;
+}
+
+static int mlv_find_processed_frame_8bit_cache_slot_locked(mlvObject_t * video,
+                                                           uint64_t frameIndex,
+                                                           int threads,
+                                                           uint64_t signature)
 {
     for (uint32_t slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot)
     {
         if (video->processed_8bit_cache_active[slot]
-            && video->processed_8bit_cache_frame[slot] == frameIndex
-            && video->processed_8bit_cache_threads[slot] == threads
-            && video->processed_8bit_cache_signature[slot] == signature)
+            && video->processed_8bit_cache_state[slot] == MLV_PROCESSED_8BIT_PREFETCH_READY
+            && mlv_processed_frame_8bit_cache_slot_matches_locked(video,
+                                                                  slot,
+                                                                  frameIndex,
+                                                                  threads,
+                                                                  signature,
+                                                                  video->processed8_prefetch_generation))
         {
             return (int)slot;
         }
@@ -982,13 +1060,63 @@ static int mlv_find_processed_frame_8bit_cache_slot(mlvObject_t * video,
     return -1;
 }
 
-static uint8_t * mlv_prepare_processed_frame_8bit_cache(mlvObject_t * video,
-                                                        uint64_t rgb_frame_size)
+static int mlv_processed_frame_8bit_cache_contains_locked(mlvObject_t * video,
+                                                          uint64_t frameIndex,
+                                                          int threads,
+                                                          uint64_t signature,
+                                                          uint32_t generation)
+{
+    for (uint32_t slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot)
+    {
+        if (mlv_processed_frame_8bit_cache_slot_matches_locked(video,
+                                                               slot,
+                                                               frameIndex,
+                                                               threads,
+                                                               signature,
+                                                               generation)
+            && (video->processed_8bit_cache_state[slot] == MLV_PROCESSED_8BIT_PREFETCH_READY
+                || video->processed_8bit_cache_state[slot] == MLV_PROCESSED_8BIT_PREFETCH_RENDERING))
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int mlv_next_processed_frame_8bit_cache_slot_locked(mlvObject_t * video)
+{
+    for (uint32_t offset = 0; offset < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++offset)
+    {
+        uint32_t slot = (video->processed_8bit_cache_next_slot + offset) % MLV_PROCESSED_8BIT_CACHE_SLOTS;
+        if (video->processed_8bit_cache_state[slot] == MLV_PROCESSED_8BIT_PREFETCH_RENDERING
+            && !video->processed_8bit_cache_active[slot]
+            && video->processed_8bit_cache_frame[slot] == 0
+            && video->processed_8bit_cache_threads[slot] == 0
+            && video->processed_8bit_cache_signature[slot] == 0)
+        {
+            video->processed_8bit_cache_state[slot] = MLV_PROCESSED_8BIT_PREFETCH_EMPTY;
+            video->processed_8bit_cache_prefetched[slot] = 0;
+            video->processed_8bit_cache_generation[slot] = 0;
+        }
+
+        if (video->processed_8bit_cache_state[slot] != MLV_PROCESSED_8BIT_PREFETCH_RENDERING)
+        {
+            video->processed_8bit_cache_next_slot = (slot + 1) % MLV_PROCESSED_8BIT_CACHE_SLOTS;
+            return (int)slot;
+        }
+    }
+
+    return -1;
+}
+
+static uint8_t * mlv_prepare_processed_frame_8bit_cache_locked(mlvObject_t * video,
+                                                               uint64_t rgb_frame_size)
 {
     uint64_t total_bytes = rgb_frame_size * MLV_PROCESSED_8BIT_CACHE_SLOTS;
     if (rgb_frame_size != 0 && total_bytes / rgb_frame_size != MLV_PROCESSED_8BIT_CACHE_SLOTS)
     {
-        mlv_reset_processed_frame_8bit_cache(video);
+        mlv_reset_processed_frame_8bit_cache_locked(video);
         return NULL;
     }
 
@@ -998,42 +1126,48 @@ static uint8_t * mlv_prepare_processed_frame_8bit_cache(mlvObject_t * video,
                                            total_bytes);
     if (!cache)
     {
-        mlv_reset_processed_frame_8bit_cache(video);
+        mlv_reset_processed_frame_8bit_cache_locked(video);
         return NULL;
     }
 
     if (previous_capacity != video->rgb_processed_current_frame_8bit_bytes)
     {
-        mlv_reset_processed_frame_8bit_cache(video);
+        mlv_reset_processed_frame_8bit_cache_locked(video);
     }
 
     return cache;
 }
 
-static void mlv_store_processed_frame_8bit_cache(mlvObject_t * video,
-                                                 uint64_t frameIndex,
-                                                 int threads,
-                                                 uint64_t signature,
-                                                 const uint8_t * frame_data,
-                                                 uint64_t rgb_frame_size)
+static void mlv_store_processed_frame_8bit_cache_locked(mlvObject_t * video,
+                                                        uint64_t frameIndex,
+                                                        int threads,
+                                                        uint64_t signature,
+                                                        const uint8_t * frame_data,
+                                                        uint64_t rgb_frame_size,
+                                                        int update_current_entry,
+                                                        int prefetched)
 {
-    uint8_t * cache = mlv_prepare_processed_frame_8bit_cache(video, rgb_frame_size);
+    uint8_t * cache = mlv_prepare_processed_frame_8bit_cache_locked(video, rgb_frame_size);
     if (!cache)
     {
         return;
     }
 
-    int slot = mlv_find_processed_frame_8bit_cache_slot(video, frameIndex, threads, signature);
+    int slot = mlv_find_processed_frame_8bit_cache_slot_locked(video, frameIndex, threads, signature);
     if (slot < 0)
     {
-        slot = (int)video->processed_8bit_cache_next_slot;
-        video->processed_8bit_cache_next_slot = (video->processed_8bit_cache_next_slot + 1) % MLV_PROCESSED_8BIT_CACHE_SLOTS;
+        slot = mlv_next_processed_frame_8bit_cache_slot_locked(video);
+    }
+
+    if (slot < 0)
+    {
+        return;
     }
 
     uint8_t * slot_buffer = mlv_processed_frame_8bit_cache_slot(video, (uint32_t)slot, rgb_frame_size);
     if (!slot_buffer)
     {
-        mlv_reset_processed_frame_8bit_cache(video);
+        mlv_reset_processed_frame_8bit_cache_locked(video);
         return;
     }
 
@@ -1042,11 +1176,401 @@ static void mlv_store_processed_frame_8bit_cache(mlvObject_t * video,
     video->processed_8bit_cache_frame[slot] = frameIndex;
     video->processed_8bit_cache_threads[slot] = threads;
     video->processed_8bit_cache_signature[slot] = signature;
+    video->processed_8bit_cache_state[slot] = MLV_PROCESSED_8BIT_PREFETCH_READY;
+    video->processed_8bit_cache_prefetched[slot] = prefetched != 0;
+    video->processed_8bit_cache_generation[slot] = video->processed8_prefetch_generation;
 
-    video->current_processed_frame_8bit_active = 1;
-    video->current_processed_frame_8bit = frameIndex;
-    video->current_processed_frame_8bit_threads = threads;
-    video->current_processed_frame_8bit_signature = signature;
+    if (update_current_entry)
+    {
+        video->current_processed_frame_8bit_active = 1;
+        video->current_processed_frame_8bit = frameIndex;
+        video->current_processed_frame_8bit_threads = threads;
+        video->current_processed_frame_8bit_signature = signature;
+    }
+}
+
+static void mlv_store_processed_frame_8bit_cache(mlvObject_t * video,
+                                                 uint64_t frameIndex,
+                                                 int threads,
+                                                 uint64_t signature,
+                                                 const uint8_t * frame_data,
+                                                 uint64_t rgb_frame_size,
+                                                 int update_current_entry,
+                                                 int prefetched)
+{
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    mlv_store_processed_frame_8bit_cache_locked(video,
+                                                frameIndex,
+                                                threads,
+                                                signature,
+                                                frame_data,
+                                                rgb_frame_size,
+                                                update_current_entry,
+                                                prefetched);
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+}
+
+static void mlv_copy_processed8_prefetch_processing_state(processingObject_t * dst,
+                                                          const processingObject_t * src)
+{
+    if (!dst || !src)
+    {
+        return;
+    }
+
+    dst->exr_mode = src->exr_mode;
+    dst->AgX = src->AgX;
+    dst->highlight_reconstruction = src->highlight_reconstruction;
+    dst->shadows_highlights.highlights = src->shadows_highlights.highlights;
+    dst->shadows_highlights.shadows = src->shadows_highlights.shadows;
+    dst->contrast = src->contrast;
+    dst->clarity = src->clarity;
+    dst->transformation = src->transformation;
+    dst->denoiserStrength = src->denoiserStrength;
+    dst->rbfDenoiserLuma = src->rbfDenoiserLuma;
+    dst->rbfDenoiserChroma = src->rbfDenoiserChroma;
+    dst->grainStrength = src->grainStrength;
+    dst->gradient_enable = src->gradient_enable;
+    dst->vignette_strength = src->vignette_strength;
+    dst->use_cam_matrix = src->use_cam_matrix;
+    dst->colour_gamut = src->colour_gamut;
+    dst->allow_creative_adjustments = src->allow_creative_adjustments;
+    dst->ca_desaturate = src->ca_desaturate;
+    dst->ca_radius = src->ca_radius;
+    dst->filter_on = src->filter_on;
+    dst->lut_on = src->lut_on;
+    dst->cs_zone.use_cs = src->cs_zone.use_cs;
+    dst->sharpen = src->sharpen;
+    memcpy(dst->proper_wb_matrix,
+           src->proper_wb_matrix,
+           sizeof(dst->proper_wb_matrix));
+    memcpy(dst->pre_calc_levels,
+           src->pre_calc_levels,
+           sizeof(dst->pre_calc_levels));
+    memcpy(dst->pre_calc_gamma,
+           src->pre_calc_gamma,
+           sizeof(dst->pre_calc_gamma));
+    memcpy(dst->pre_calc_curve_r,
+           src->pre_calc_curve_r,
+           sizeof(dst->pre_calc_curve_r));
+    memcpy(dst->gcurve_y, src->gcurve_y, sizeof(dst->gcurve_y));
+    memcpy(dst->gcurve_r, src->gcurve_r, sizeof(dst->gcurve_r));
+    memcpy(dst->gcurve_g, src->gcurve_g, sizeof(dst->gcurve_g));
+    memcpy(dst->gcurve_b, src->gcurve_b, sizeof(dst->gcurve_b));
+
+    for (int i = 0; i < 9; ++i)
+    {
+        if (dst->pre_calc_matrix[i] && src->pre_calc_matrix[i])
+        {
+            memcpy(dst->pre_calc_matrix[i],
+                   src->pre_calc_matrix[i],
+                   65536u * sizeof(*dst->pre_calc_matrix[i]));
+        }
+    }
+}
+
+static int mlv_processed_frame_8bit_cache_try_copy(mlvObject_t * video,
+                                                   uint64_t frameIndex,
+                                                   int threads,
+                                                   uint64_t signature,
+                                                   int allow_prefetched_hit,
+                                                   uint8_t * outputFrame,
+                                                   uint64_t rgb_frame_size,
+                                                   int * prefetched)
+{
+    int hit = 0;
+    if (prefetched)
+    {
+        *prefetched = 0;
+    }
+
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    int slot = mlv_find_processed_frame_8bit_cache_slot_locked(video, frameIndex, threads, signature);
+    if (slot >= 0)
+    {
+        uint8_t * cached_frame = mlv_processed_frame_8bit_cache_slot(video, (uint32_t)slot, rgb_frame_size);
+        if (cached_frame)
+        {
+            const int is_prefetched = video->processed_8bit_cache_prefetched[slot] != 0;
+            if (is_prefetched && !allow_prefetched_hit)
+            {
+                pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+                return 0;
+            }
+
+            if (outputFrame != cached_frame)
+            {
+                memcpy(outputFrame, cached_frame, (size_t)rgb_frame_size);
+            }
+            video->current_processed_frame_8bit_active = 1;
+            video->current_processed_frame_8bit = frameIndex;
+            video->current_processed_frame_8bit_threads = threads;
+            video->current_processed_frame_8bit_signature = signature;
+            if (prefetched)
+            {
+                *prefetched = is_prefetched;
+            }
+            hit = 1;
+        }
+        else
+        {
+            mlv_reset_processed_frame_8bit_cache_locked(video);
+        }
+    }
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+
+    return hit;
+}
+
+static void mlv_reset_processed8_prefetch_locked(mlvObject_t * video)
+{
+    video->processed8_prefetch_request_pending = 0;
+    video->processed8_prefetch_worker_busy = 0;
+    video->processed8_prefetch_request_frame = 0;
+    video->processed8_prefetch_request_threads = 0;
+    mlv_reset_processed_frame_8bit_cache_locked(video);
+}
+
+static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * video,
+                                                              processingObject_t * processing,
+                                                              int syncProcessingLevels,
+                                                              uint64_t frameIndex,
+                                                              uint8_t * outputFrame,
+                                                              int threads,
+                                                              int recordTelemetry);
+static int mlv_start_processed8_prefetch_thread(mlvObject_t * video);
+
+static void mlv_processed8_prefetch_note_request(mlvObject_t * video,
+                                                 uint64_t frameIndex,
+                                                 int threads,
+                                                 uint64_t stateSignature)
+{
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+
+    if (!video->processed8_prefetch_thread_started)
+    {
+        pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+        if (!mlv_start_processed8_prefetch_thread(video))
+        {
+            return;
+        }
+        pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    }
+
+    if ((video->processed8_prefetch_last_request_frame + 1 != frameIndex
+         && video->processed8_prefetch_last_request_frame != frameIndex)
+        || video->processed8_prefetch_last_request_threads != threads
+        || video->processed8_prefetch_last_state_signature != stateSignature)
+    {
+        ++video->processed8_prefetch_generation;
+        mlv_reset_processed8_prefetch_locked(video);
+        if (!video->processed8_prefetch_processing || !video->processing)
+        {
+            pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+            return;
+        }
+
+        mlv_copy_processed8_prefetch_processing_state(video->processed8_prefetch_processing,
+                                                      video->processing);
+    }
+    video->processed8_prefetch_last_request_frame = frameIndex;
+    video->processed8_prefetch_last_request_threads = threads;
+    video->processed8_prefetch_last_state_signature = stateSignature;
+    video->processed8_prefetch_request_frame = frameIndex;
+    video->processed8_prefetch_request_threads = threads;
+    video->processed8_prefetch_request_pending = 1;
+    pthread_cond_signal(&video->processed8_prefetch_cond);
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+}
+
+typedef struct
+{
+    mlvObject_t * video;
+    processingObject_t * processing;
+    uint64_t baseFrame;
+    int threads;
+    uint64_t stateSignature;
+    uint32_t generation;
+    uint64_t rgb_frame_size;
+    uint32_t offsetStart;
+    uint32_t offsetStep;
+} mlv_processed8_prefetch_task_t;
+
+static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_task_t * task)
+{
+    if (!task || !task->video || !task->processing)
+    {
+        return;
+    }
+
+    for (uint32_t offset = task->offsetStart;
+         offset <= MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD;
+         offset += task->offsetStep)
+    {
+        uint64_t targetFrame = task->baseFrame + offset;
+        if (targetFrame >= getMlvFrames(task->video))
+        {
+            break;
+        }
+
+        uint64_t targetSignature =
+            mlv_processed_frame_signature_from_state(task->stateSignature,
+                                                    targetFrame);
+
+        pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
+        if (task->video->processed8_prefetch_stop
+            || task->generation != task->video->processed8_prefetch_generation)
+        {
+            pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
+            break;
+        }
+
+        if (!mlv_prepare_processed_frame_8bit_cache_locked(task->video,
+                                                           task->rgb_frame_size))
+        {
+            pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
+            continue;
+        }
+
+        if (mlv_processed_frame_8bit_cache_contains_locked(task->video,
+                                                           targetFrame,
+                                                           task->threads,
+                                                           targetSignature,
+                                                           task->generation))
+        {
+            pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
+            continue;
+        }
+        pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
+
+        uint8_t * prefetchBuffer = mlv_ensure_thread_u8_buffer(task->rgb_frame_size);
+        if (!prefetchBuffer)
+        {
+            continue;
+        }
+
+        int renderOk = mlv_render_processed_frame8_direct_with_processing(
+            task->video,
+            task->processing,
+            0,
+            targetFrame,
+            prefetchBuffer,
+            task->threads,
+            0);
+
+        pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
+        if (renderOk
+            && !task->video->processed8_prefetch_stop
+            && task->generation == task->video->processed8_prefetch_generation
+            && !mlv_processed_frame_8bit_cache_contains_locked(task->video,
+                                                               targetFrame,
+                                                               task->threads,
+                                                               targetSignature,
+                                                               task->generation))
+        {
+            mlv_store_processed_frame_8bit_cache_locked(task->video,
+                                                        targetFrame,
+                                                        task->threads,
+                                                        targetSignature,
+                                                        prefetchBuffer,
+                                                        task->rgb_frame_size,
+                                                        0,
+                                                        1);
+        }
+        pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
+    }
+}
+
+static void * mlv_processed8_prefetch_thread_main(void * opaque)
+{
+    mlvObject_t * video = (mlvObject_t *)opaque;
+    const uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
+    processingObject_t * prefetchProcessing = initProcessingObject();
+
+    while (1)
+    {
+        pthread_mutex_lock(&video->processed8_prefetch_mutex);
+        while (!video->processed8_prefetch_stop
+               && !video->processed8_prefetch_request_pending)
+        {
+            pthread_cond_wait(&video->processed8_prefetch_cond, &video->processed8_prefetch_mutex);
+        }
+
+        if (video->processed8_prefetch_stop)
+        {
+            pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+            break;
+        }
+
+        if (!mlv_prepare_processed_frame_8bit_cache_locked(video, rgb_frame_size))
+        {
+            video->processed8_prefetch_request_pending = 0;
+            pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+            continue;
+        }
+
+        uint64_t baseFrame = video->processed8_prefetch_request_frame;
+        int threads = video->processed8_prefetch_request_threads;
+        uint64_t stateSignature = video->processed8_prefetch_last_state_signature;
+        uint32_t generation = video->processed8_prefetch_generation;
+        if (prefetchProcessing && video->processed8_prefetch_processing)
+        {
+            mlv_copy_processed8_prefetch_processing_state(prefetchProcessing,
+                                                          video->processed8_prefetch_processing);
+        }
+        video->processed8_prefetch_request_pending = 0;
+        video->processed8_prefetch_worker_busy = 1;
+        pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+
+        mlv_processed8_prefetch_task_t primaryTask = {
+            .video = video,
+            .processing = prefetchProcessing,
+            .baseFrame = baseFrame,
+            .threads = threads,
+            .stateSignature = stateSignature,
+            .generation = generation,
+            .rgb_frame_size = rgb_frame_size,
+            .offsetStart = 1,
+            .offsetStep = 1
+        };
+        mlv_processed8_prefetch_execute_task(&primaryTask);
+
+        pthread_mutex_lock(&video->processed8_prefetch_mutex);
+        video->processed8_prefetch_worker_busy = 0;
+        pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+    }
+
+    if (prefetchProcessing)
+    {
+        freeProcessingObject(prefetchProcessing);
+    }
+
+    return NULL;
+}
+
+static int mlv_start_processed8_prefetch_thread(mlvObject_t * video)
+{
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    if (video->processed8_prefetch_thread_started)
+    {
+        pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+        return 1;
+    }
+    video->processed8_prefetch_thread_started = 1;
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+
+    if (pthread_create(&video->processed8_prefetch_thread,
+                       NULL,
+                       mlv_processed8_prefetch_thread_main,
+                       video) != 0)
+    {
+        pthread_mutex_lock(&video->processed8_prefetch_mutex);
+        video->processed8_prefetch_thread_started = 0;
+        pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+        return 0;
+    }
+
+    return 1;
 }
 
 static float * mlv_ensure_float_buffer(float ** buffer, uint64_t * capacity_pixels, uint64_t required_pixels)
@@ -1056,6 +1580,13 @@ static float * mlv_ensure_float_buffer(float ** buffer, uint64_t * capacity_pixe
         return NULL;
     }
     return *buffer;
+}
+
+static float * mlv_ensure_thread_float_buffer(uint64_t required_pixels)
+{
+    static MLV_THREAD_LOCAL float * tls_buffer = NULL;
+    static MLV_THREAD_LOCAL uint64_t tls_capacity_pixels = 0;
+    return mlv_ensure_float_buffer(&tls_buffer, &tls_capacity_pixels, required_pixels);
 }
 
 static int seek_to_next_known_block(FILE * in_file)
@@ -1795,6 +2326,82 @@ static int mlv_can_use_direct_processed_frame8_path(mlvObject_t * video)
         && processingCanUseDirect8BitOutput(video->processing);
 }
 
+static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * video,
+                                                              processingObject_t * processing,
+                                                              int syncProcessingLevels,
+                                                              uint64_t frameIndex,
+                                                              uint8_t * outputFrame,
+                                                              int threads,
+                                                              int recordTelemetry)
+{
+    const uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
+    const uint64_t pixels_count = (uint64_t)getMlvWidth(video) * getMlvHeight(video);
+    float * raw_frame = mlv_ensure_thread_float_buffer(pixels_count);
+    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_frame_size);
+    if (!raw_frame || !unprocessed_frame || !processing)
+    {
+        memset(outputFrame, 0, (size_t)rgb_frame_size);
+        return 0;
+    }
+
+    const double processed16_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
+    const double debayer_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
+    get_mlv_raw_frame_debayered(video,
+                                frameIndex,
+                                raw_frame,
+                                unprocessed_frame,
+                                doesMlvAlwaysUseAmaze(video));
+    if (recordTelemetry)
+    {
+        g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    }
+
+    if (syncProcessingLevels)
+    {
+        mlv_sync_processing_black_white_levels(video);
+    }
+
+    const double processing_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
+    applyProcessingObject8(processing,
+                           getMlvWidth(video),
+                           getMlvHeight(video),
+                           unprocessed_frame,
+                           outputFrame,
+                           threads,
+                           1,
+                           frameIndex);
+    if (recordTelemetry)
+    {
+        g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
+        g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
+        g_mlv_last_processed16_for_8bit_ms = g_mlv_last_processed16_total_ms;
+        g_mlv_last_processed16_to_8bit_ms = 0.0;
+        g_mlv_last_processed8_direct_path_active = 1;
+        mlv_stage_timing_note_elapsed("processed16_total", frameIndex, g_mlv_last_processed16_total_ms);
+        mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
+        mlv_stage_timing_note_elapsed("processed16_to_8bit", frameIndex, g_mlv_last_processed16_to_8bit_ms);
+    }
+
+    return 1;
+}
+
+static int mlv_render_processed_frame8_direct(mlvObject_t * video,
+                                              uint64_t frameIndex,
+                                              uint8_t * outputFrame,
+                                              int threads,
+                                              int recordTelemetry)
+{
+    return mlv_render_processed_frame8_direct_with_processing(video,
+                                                              video ? video->processing : NULL,
+                                                              1,
+                                                              frameIndex,
+                                                              outputFrame,
+                                                              threads,
+                                                              recordTelemetry);
+}
+
 /* Get a processed frame in 16 bit, only use more than one thread for preview as
  * it may have minor artifacts (though I haven't found them yet) */
 void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame, int threads)
@@ -1945,88 +2552,69 @@ void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * o
     g_mlv_last_processed16_to_8bit_ms = 0.0;
     g_mlv_last_processed8_total_ms = 0.0;
     g_mlv_last_processed8_direct_path_active = 0;
+    g_mlv_last_processed8_prefetch_hit = 0;
     /* Size of RAW frame */
     uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     uint16_t * processed_frame = NULL;
-    uint64_t requested_signature = mlv_processed_frame_signature(video, frameIndex);
+    const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
+    const int processed8PrefetchActive =
+        direct8PathActive && mlv_processed8_prefetch_enabled();
+    uint64_t requested_state_signature = 0;
 
-    int cached_slot = mlv_find_processed_frame_8bit_cache_slot(video, frameIndex, threads, requested_signature);
-    if (cached_slot >= 0)
+    if (direct8PathActive)
     {
-        uint8_t * cached_frame = mlv_processed_frame_8bit_cache_slot(video, (uint32_t)cached_slot, rgb_frame_size);
-        if (cached_frame)
+        mlv_sync_processing_black_white_levels(video);
+        requested_state_signature = mlv_processed_frame_state_signature(video);
+        if (processed8PrefetchActive)
         {
-            if (outputFrame != cached_frame)
-            {
-                memcpy(outputFrame, cached_frame, (size_t)rgb_frame_size);
-            }
-            video->current_processed_frame_8bit_active = 1;
-            video->current_processed_frame_8bit = frameIndex;
-            video->current_processed_frame_8bit_threads = threads;
-            video->current_processed_frame_8bit_signature = requested_signature;
-            g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
-            mlv_stage_timing_note("processed8_total", frameIndex, total_start);
-            return;
+            mlv_processed8_prefetch_note_request(video,
+                                                frameIndex,
+                                                threads,
+                                                requested_state_signature);
         }
-
-        mlv_reset_processed_frame_8bit_cache(video);
     }
 
-    if (mlv_can_use_direct_processed_frame8_path(video))
+    uint64_t requested_signature = direct8PathActive
+        ? mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex)
+        : mlv_processed_frame_signature(video, frameIndex);
+
+    int prefetched_hit = 0;
+    if (mlv_processed_frame_8bit_cache_try_copy(video,
+                                                frameIndex,
+                                                threads,
+                                                requested_signature,
+                                                processed8PrefetchActive,
+                                                outputFrame,
+                                                rgb_frame_size,
+                                                &prefetched_hit))
     {
-        uint16_t * unprocessed_frame =
-            mlv_ensure_u16_buffer(&video->rgb_processed_temp_frame,
-                                  &video->rgb_processed_temp_frame_words,
-                                  rgb_frame_size);
-        if (!unprocessed_frame)
+        g_mlv_last_processed8_prefetch_hit = prefetched_hit;
+        g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
+        mlv_stage_timing_note("processed8_total", frameIndex, total_start);
+        return;
+    }
+
+    if (direct8PathActive)
+    {
+        if (!mlv_render_processed_frame8_direct(video, frameIndex, outputFrame, threads, 1))
         {
-            memset(outputFrame, 0, (size_t)rgb_frame_size);
+            pthread_mutex_lock(&video->processed8_prefetch_mutex);
             video->current_processed_frame_8bit_active = 0;
-            mlv_reset_processed_frame_8bit_cache(video);
+            mlv_reset_processed_frame_8bit_cache_locked(video);
+            pthread_mutex_unlock(&video->processed8_prefetch_mutex);
             g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
             mlv_stage_timing_note("processed8_total", frameIndex, total_start);
             return;
         }
-
-        const double processed16_start = mlv_stage_timing_now();
-        const double debayer_start = mlv_stage_timing_now();
-        getMlvRawFrameDebayered(video, frameIndex, unprocessed_frame);
-        g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
-        mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
-
-        mlv_sync_processing_black_white_levels(video);
-
-        const double processing_start = mlv_stage_timing_now();
-        applyProcessingObject8(video->processing,
-                               getMlvWidth(video),
-                               getMlvHeight(video),
-                               unprocessed_frame,
-                               outputFrame,
-                               threads,
-                               1,
-                               frameIndex);
-        g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
-        mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
-
-        g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
-        g_mlv_last_processed16_for_8bit_ms = g_mlv_last_processed16_total_ms;
-        g_mlv_last_processed16_to_8bit_ms = 0.0;
-        g_mlv_last_processed8_direct_path_active = 1;
-        mlv_stage_timing_note_elapsed("processed16_total", frameIndex, g_mlv_last_processed16_total_ms);
-        mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
-        mlv_stage_timing_note_elapsed("processed16_to_8bit", frameIndex, g_mlv_last_processed16_to_8bit_ms);
-
-        video->current_processed_frame_8bit_active = 1;
-        video->current_processed_frame_8bit = frameIndex;
-        video->current_processed_frame_8bit_threads = threads;
-        video->current_processed_frame_8bit_signature = requested_signature;
 
         mlv_store_processed_frame_8bit_cache(video,
                                              frameIndex,
                                              threads,
                                              requested_signature,
                                              outputFrame,
-                                             rgb_frame_size);
+                                             rgb_frame_size,
+                                             1,
+                                             0);
 
         g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
         mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
@@ -2050,7 +2638,9 @@ void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * o
         {
             memset(outputFrame, 0, (size_t)rgb_frame_size);
             video->current_processed_frame_active = 0;
-            mlv_reset_processed_frame_8bit_cache(video);
+            pthread_mutex_lock(&video->processed8_prefetch_mutex);
+            mlv_reset_processed_frame_8bit_cache_locked(video);
+            pthread_mutex_unlock(&video->processed8_prefetch_mutex);
             g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
             mlv_stage_timing_note("processed8_total", frameIndex, total_start);
             return;
@@ -2088,7 +2678,9 @@ void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * o
                                              ? video->current_processed_frame_signature
                                              : mlv_processed_frame_signature(video, frameIndex),
                                          outputFrame,
-                                         rgb_frame_size);
+                                         rgb_frame_size,
+                                         1,
+                                         0);
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
@@ -2299,6 +2891,11 @@ int getMlvLastProcessed8DirectPathActive(void)
     return g_mlv_last_processed8_direct_path_active;
 }
 
+int getMlvLastProcessed8PrefetchHit(void)
+{
+    return g_mlv_last_processed8_prefetch_hit;
+}
+
 /* To initialise mlv object with a clip
  * Two functions in one */
 mlvObject_t * initMlvObjectWithClip(char * mlvPath, int preview, int * err, char * error_message)
@@ -2360,10 +2957,23 @@ mlvObject_t * initMlvObject()
     pthread_mutex_init(&video->g_mutexCount, NULL);
     pthread_mutex_init(&video->llrawproc_mutex, NULL);
     pthread_mutex_init(&video->llrawproc_worker_mutex, NULL);
+    pthread_mutex_init(&video->processed8_prefetch_mutex, NULL);
+    pthread_cond_init(&video->processed8_prefetch_cond, NULL);
     pthread_mutex_init(&video->raw_uint16_prefetch_mutex, NULL);
     pthread_cond_init(&video->raw_uint16_prefetch_cond, NULL);
     video->llrawproc_workers = NULL;
     video->llrawproc_worker_capacity = 0;
+    video->processed8_prefetch_processing = initProcessingObject();
+    video->processed8_prefetch_thread_started = 0;
+    video->processed8_prefetch_stop = 0;
+    video->processed8_prefetch_request_pending = 0;
+    video->processed8_prefetch_worker_busy = 0;
+    video->processed8_prefetch_request_frame = 0;
+    video->processed8_prefetch_request_threads = 0;
+    video->processed8_prefetch_last_request_frame = 0;
+    video->processed8_prefetch_last_request_threads = 0;
+    video->processed8_prefetch_last_state_signature = 0;
+    video->processed8_prefetch_generation = 1;
     video->raw_uint16_prefetch_thread_started = 0;
     video->raw_uint16_prefetch_stop = 0;
     video->raw_uint16_prefetch_request_pending = 0;
@@ -2408,6 +3018,15 @@ void freeMlvObject(mlvObject_t * video)
     video->stop_caching = 1;
     while (video->cache_thread_count) usleep(100);
 
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    video->processed8_prefetch_stop = 1;
+    pthread_cond_broadcast(&video->processed8_prefetch_cond);
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+    if (video->processed8_prefetch_thread_started)
+    {
+        pthread_join(video->processed8_prefetch_thread, NULL);
+    }
+
     pthread_mutex_lock(&video->raw_uint16_prefetch_mutex);
     video->raw_uint16_prefetch_stop = 1;
     pthread_cond_broadcast(&video->raw_uint16_prefetch_cond);
@@ -2447,6 +3066,7 @@ void freeMlvObject(mlvObject_t * video)
     if(video->raw_uint16_prefetch_cache) free(video->raw_uint16_prefetch_cache);
     if(video->cache_memory_block) free(video->cache_memory_block);
     if(video->path) free(video->path);
+    if(video->processed8_prefetch_processing) freeProcessingObject(video->processed8_prefetch_processing);
     freeLLRawProcObject(video);
 
     /* Mutex things here... */
@@ -2457,6 +3077,8 @@ void freeMlvObject(mlvObject_t * video)
     pthread_mutex_destroy(&video->g_mutexCount);
     pthread_mutex_destroy(&video->llrawproc_mutex);
     pthread_mutex_destroy(&video->llrawproc_worker_mutex);
+    pthread_mutex_destroy(&video->processed8_prefetch_mutex);
+    pthread_cond_destroy(&video->processed8_prefetch_cond);
     pthread_mutex_destroy(&video->raw_uint16_prefetch_mutex);
     pthread_cond_destroy(&video->raw_uint16_prefetch_cond);
 

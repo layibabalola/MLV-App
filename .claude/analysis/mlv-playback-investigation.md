@@ -1,3 +1,199 @@
+## Safe Overlap + Fast-Scale Keep Point (2026-04-23, current)
+
+### Verified locally
+
+- The current safe keep-set on this branch is now narrower and more honest than the earlier overlap WIP.
+  - `platform/qt/RenderFrameThread.cpp` keeps the wait-condition worker wakeup plus the active-request snapshot, and now restores the old external exclusivity contract by making `RenderFrameThread::lock()` wait for true worker idleness before returning.
+  - `platform/qt/MainWindow.cpp` keeps the end-to-end `drawFrameReady()` split (`scene`, `image`, `present`, `scopes`, `overlay`), the scene-rect guard, playback display-preview-cache bypass, the post-`emit frameReady()` continuation boundary, the headless profiling determinism fix, and the fast playback scaler.
+  - `src/processing/raw_processing.c` now exposes `processingResetLastTimingTelemetry()` so cache-hit/direct-path samples stop reporting stale substage timings.
+- The fast playback scaler is now slightly cheaper in the common playback path.
+  - `platform/qt/MainWindow.cpp:132-212` now reuses precomputed `x`/`y` source-index maps for each `(sourceWidth, sourceHeight, targetWidth, targetHeight)` tuple instead of paying the divide/min math inside the inner pixel loop on every frame.
+- The render-thread correctness regression from the unlocked WIP is fixed for the kept path.
+  - `platform/qt/RenderFrameThread.h` / `platform/qt/RenderFrameThread.cpp` now make `lock()` wait until `!(m_renderFrame || m_renderingFrame)` before granting exclusive access again.
+  - `platform/qt/MainWindow.cpp:632-645` now waits for the in-flight frame to drain before `resizeEvent()` queues a replacement render, so a resize no longer stomps the shared display buffers before the queued `drawFrameReady()` consumes them.
+- Processed8 playback prefetch is now intentionally treated as experimental-only, not part of the kept default path.
+  - `src/mlv/video_mlv.c` now gates the worker behind `MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH`.
+  - The default path does not start that worker and does not accept prefetched hits unless the environment variable is explicitly enabled.
+  - The speculative lookahead is also reset back to `2` for the opt-in experiment path.
+- The processed-frame state signature had one real llrawproc hole independent of the prefetch decision.
+  - `src/mlv/video_mlv.c` now hashes `llrawproc->diso_pattern` inside `mlv_hash_llrawproc_state(...)`, so processed frame cache keys track that runtime state as well.
+- Fresh safe-path large Dual ISO artifacts with processed8 prefetch forced off live in:
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run1.json`
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run2.json`
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run3.json`
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run4.json`
+- Warm medians from those runs (discard `5`, `--threads 4`, `--frames 16`, `processed8_prefetch_hit = false` on all warm samples) are currently:
+  - run1: `cadence_ms 53.903`, `processed8_total_ms 39.000`, `render_thread_work_ms 39.000`, `draw_frame_ready_total_ms 14.000`
+  - run2: `cadence_ms 70.897`, `processed8_total_ms 48.000`, `render_thread_work_ms 48.000`, `draw_frame_ready_total_ms 17.000`
+  - run3: `cadence_ms 68.076`, `processed8_total_ms 47.000`, `render_thread_work_ms 47.000`, `draw_frame_ready_total_ms 16.000`
+  - run4: `cadence_ms 49.614`, `processed8_total_ms 37.000`, `render_thread_work_ms 37.000`, `draw_frame_ready_total_ms 12.000`
+- Honest safe claim after those reruns:
+  - the kept overlap/presentation work is still real; the low-end safe runs (`49.6-53.9 ms`) beat the older `59.299 ms` direct-8-bit baseline without relying on processed8 background rendering
+  - the result is not stable enough to claim `24 fps` on this VM yet; the safe path still misses the `41.708 ms` native budget and the run-to-run spread is wide
+  - the critical path is still structurally serialized: `render_thread_work_ms + draw_frame_ready_image_ms`, because the renderer and presenter still share a single live output buffer
+- Fresh current-tree validation after the kept overlap fixes, processed8 prefetch gate, `diso_pattern` hash fix, and updated scaffold assertions:
+  - plain `console_tests --check-golden`: `41 tests / 160 assertions / 17 skips / 0 failures`
+  - app-backed `console_tests --check-golden` with `platform/qt/build-codex-current/release/MLVApp.exe`: `41 tests / 750 assertions / 1 skip / 0 failures`
+  - `pipeline_tests --check-golden`: `46 tests / 526 assertions / 4 skips / 0 failures`
+
+### Cross-checked from prior analysis
+
+- The processed8 prefetch audit narrowed the real blocker.
+  - `src/mlv/video_mlv.c` already hashed `use_amaze`, `ca_red`, `ca_blue`, and most of `llrawproc`.
+  - The remaining correctness blocker is not â€œmissing all raw/debayer stateâ€ but rather â€œworker still renders against shared live per-frame/raw state.â€
+  - The concrete holes identified on the current code are:
+    - `llrawproc->diso_pattern` was missing from the hash and is now fixed
+    - per-frame `video->VIDF.panPosX` / `panPosY` are still read from shared live state during llrawproc interpolation, so processed8 prefetch is not field-safe enough to ship default-on without a real raw/VIDF snapshot
+- The presentation-side audit also confirmed the current hot UI bucket.
+  - On the safe path, `draw_frame_ready_present_ms` is effectively zero on the large preview runs above.
+  - The common-path UI cost is still `draw_frame_ready_image_ms`, not `setPixmap()` / viewport presentation.
+
+### Needs runtime profiling
+
+- The next honest performance step is a real front/back buffer handoff plus per-frame presentation metadata, so the cadence ceiling becomes `max(render_thread_work_ms, drawFrameReady_tail_ms)` instead of their sum.
+- If the branch still misses `24 fps` after that buffer/pipeline split, the next safe presentation trims to revisit are:
+  1. a cheaper fast-scaler execution model if the current OpenMP wakeup cost is part of the VM variance
+  2. cached scope backing images / grids when scopes are visible
+  3. zebra reduction folded into an existing RGB8 conversion/scale pass instead of a separate scan
+
+## Render/Present Handoff Audit (2026-04-23, current)
+
+### Verified locally
+
+- Playback is still explicitly serialized at the Qt handoff boundary.
+  - `timerFrameEvent()` bails out when `m_frameStillDrawing` is true and only records `m_playbackFrameAdvancePending` during playback (`platform/qt/MainWindow.cpp:533-545`).
+  - `drawFrame()` sets `m_frameStillDrawing = true` before queueing the worker request (`platform/qt/MainWindow.cpp:1119-1121`).
+  - `drawFrameReady()` clears it only after image build, present, scopes, overlay, `emit frameReady()`, and the optional next-frame kickoff (`platform/qt/MainWindow.cpp:11286-11405`).
+  - Resize/open paths also wait on `m_frameStillDrawing` and/or `RenderFrameThread::lock()` / `isIdle()` before touching render-owned state (`platform/qt/MainWindow.cpp:632-640`, `platform/qt/MainWindow.cpp:1868-1871`).
+- The concrete shared display buffers are the single `MainWindow::m_pRawImage` / `m_pRawImage16` allocations.
+  - They live on `MainWindow` (`platform/qt/MainWindow.h:561-562`), are passed into `RenderFrameThread::init(...)` (`platform/qt/RenderFrameThread.cpp:52-58`), and are stored as worker members (`platform/qt/RenderFrameThread.h:60-62`).
+  - The worker writes them in `RenderFrameThread::drawFrame()` through `getMlvProcessedFrame16(...)`, `getMlvRawFrameDebayered(...)`/GPU bilinear fallback, and `getMlvProcessedFrame8(...)` (`platform/qt/RenderFrameThread.cpp:233-312`).
+  - `drawFrameReady()` reads those same addresses for presentation and scopes via `rgb8DisplaySource = m_pRawImage`, `GpuDisplayViewport::presentRgb16(..., m_pRawImage16, ...)`, and `ui->labelScope->setScope( m_pRawImage, ...)` (`platform/qt/MainWindow.cpp:10957`, `11078-11085`, `11317-11331`).
+  - `GpuDisplayViewport::setPresentedImage(...)` / `setPresentedRgb16(...)` already copy into owned viewport storage (`platform/qt/GpuDisplayViewport.cpp:424-468`), so the current serialization blocker is not the viewport widget itself but the shared raw buffer that `drawFrameReady()` still borrows through no-copy `QImage` wrappers and scope generation.
+- The handoff metadata is also global, not per-frame.
+  - `drawFrame()` stores request-specific policy in `m_renderThreadUsing*` and `m_lastQueuedGpu*` members (`platform/qt/MainWindow.cpp:1149-1179`; `platform/qt/MainWindow.h:601-623`), then `drawFrameReady()` re-reads those shared members later (`platform/qt/MainWindow.cpp:10967-11080`).
+  - `RenderFrameThread::frameReady` carries no payload (`platform/qt/RenderFrameThread.h:55`; `platform/qt/MainWindow.cpp:417`), so the UI side has to pull "last frame" data from mutable shared fields.
+  - Worker-side per-frame telemetry and fallback data live in mutable `m_last*` members (`platform/qt/RenderFrameThread.h:75-87`, `platform/qt/RenderFrameThread.cpp:220-228`, `635-646`) and are later read from `MainWindow` (`platform/qt/MainWindow.cpp:10936`, `1506-1566`).
+- `drawFrameReady()` still derives presentation identity from live UI/MLV state instead of an immutable render result.
+  - The displayed frame number comes from `ui->horizontalSliderPosition` / `m_newPosDropMode`, not from the worker (`platform/qt/MainWindow.cpp:10924-10926`).
+  - The display cache key reads live `m_pMlvObject->current_processed_frame_8bit_signature` / `current_processed_frame_signature` (`platform/qt/MainWindow.cpp:11060-11069`), which the MLV pipeline updates when new processed results are produced (`src/mlv/video_mlv.c:2459-2462`, `2520-2523`, `1305-1308`).
+- There are real presentation-path state mutations that would race with overlapping render work.
+  - `drawFrameReady()` mutates `ACTIVE_RECEIPT` and `m_pMlvObject->llrawproc` for Dual ISO auto-correction publication (`platform/qt/MainWindow.cpp:11022-11053`).
+  - When playback stops, `drawFrameReady()` also restores debayer / Dual ISO runtime state via `selectDebayerAlgorithm()` and `applyEffectiveDualIsoPlaybackSettings()` (`platform/qt/MainWindow.cpp:11381-11386`), and that helper resets processing/cache state (`platform/qt/MainWindow.cpp:9978-9992`).
+- There is already an immutable-copy pattern in the paused preview cache, but playback deliberately bypasses it.
+  - `DisplayPreviewCacheEntry` stores copied `QImage`/`QPixmap` plus cache metadata (`platform/qt/MainWindow.h:520-531`).
+  - Playback disables that path with `displayPreviewCachingAllowed = !playbackPolicyActive()` (`platform/qt/MainWindow.cpp:11072`, `11249-11280`).
+- `MainWindow::resizeEvent()` is correct on the current safe path, but only because it still drains the single live handoff before redrawing.
+  - `platform/qt/MainWindow.cpp:632-640` waits for `RenderFrameThread::lock()` / `unlock()` and then spins on `m_frameStillDrawing` before calling `drawFrame()`.
+  - That is sufficient today because `m_frameStillDrawing` stays true until `drawFrameReady()` has finished consuming the shared output (`platform/qt/MainWindow.cpp:1121`, `11400`), and `RenderFrameThread::frameReady` still implies exactly one ready frame slot.
+  - Safe conclusion: there is no new resize race in the staged keep-set, but a future double-buffer design needs a real frame-generation / slot token so a stale pre-resize `frameReady` cannot present after the resize-triggered rerender.
+
+### Cross-checked from prior analysis
+
+- The earlier "single live output buffer" diagnosis is still right, but the exact serialization unit is broader: one live pixel-buffer pair plus one live "last frame/request" metadata bundle.
+- The Dual ISO UI-sync audit still matters here: if `drawFrameReady()` keeps mutating `llrawproc` / receipt state mid-presentation, safe overlap requires either a render-request state snapshot or deferring those writes until no render is in flight.
+- The current `resizeEvent()` drain is evidence that the existing code already assumes "at most one ready frame plus one buffer owner." Any double-buffer step needs to preserve that user-visible safety via explicit generations rather than by leaning on the old implicit singleton contract.
+
+### Needs runtime profiling
+
+- The smallest safe overlap experiment is a `RenderedFrameSnapshot` or front/back slot that owns:
+  - one pixel payload (`rgb8` or `rgb16`, depending on output mode)
+  - frame index
+  - render output mode
+  - presentation policy/config (`m_renderThreadUsing*`, `m_lastQueuedGpu*`)
+  - render telemetry / GPU fallback data now stored in `RenderFrameThread::m_last*`
+  - a stable display signature captured when the render finishes
+- The resize/stop/clip-switch paths should be re-audited after that handoff exists, with a specific check that stale queued `frameReady` deliveries can be dropped by generation instead of being inferred away by `m_frameStillDrawing`.
+- If that lands, the next honest check is whether cadence shifts toward `max(render_thread_work_ms, draw_frame_ready_total_ms)` without reintroducing UI/`llrawproc` mismatches.
+
+## Qt Playback Overlap WIP Audit (2026-04-23, current)
+
+### Verified locally
+
+- The new `timerFrameEvent() -> drawFrameReady()` continuation path in `platform/qt/MainWindow.cpp` changes ordering, not just scheduling.
+  - `platform/qt/MainWindow.cpp:11224-11230` now calls `timerFrameEvent()` synchronously from inside `drawFrameReady()` after scopes, but before audio sync, frame-number label updates, playback-stop restoration, `notePlayToFirstFramePresentation(...)`, and `emit frameReady()`.
+  - `timerFrameEvent()` immediately runs `playbackHandling(...)` at `platform/qt/MainWindow.cpp:463-464`, which can advance `ui->horizontalSliderPosition` / `m_newPosDropMode` via `platform/qt/MainWindow.cpp:2187-2223`, and may queue the next render via `drawFrame()` at `platform/qt/MainWindow.cpp:475-489` and `platform/qt/MainWindow.cpp:1024-1145`.
+  - Because `drawFrameNumberLabel()` reads `ui->horizontalSliderPosition->value()` at `platform/qt/MainWindow.cpp:6729-6735`, and audio sync uses `m_newPosDropMode` at `platform/qt/MainWindow.cpp:11235-11240`, the current frame can now be presented with next-frame metadata/audio state layered on top.
+- The continuation path also weakens the old `MainWindow::frameReady()` completion contract.
+  - `drawFrameReady()` now sets `m_frameStillDrawing = false`, immediately starts the next `timerFrameEvent()`/`drawFrame()` when pending, and only later emits `frameReady()` at `platform/qt/MainWindow.cpp:11223-11230` and `platform/qt/MainWindow.cpp:11290-11293`.
+  - Any observer treating `MainWindow::frameReady()` as “current frame done and no new render in flight yet” no longer gets that guarantee once playback continuation is active.
+- I did not find a direct headless-profiling break from this new continuation path itself.
+  - The continuation is gated on `ui->actionPlay->isChecked()` in `platform/qt/MainWindow.cpp:11224-11225`.
+  - Headless playback profiling uses `m_headlessPlaybackProfileUsePlaybackPolicy` while leaving `ui->actionPlay` false (`platform/qt/MainWindow.cpp:784-786`, `platform/qt/MainWindow.cpp:853-899`, `platform/qt/MainWindow.cpp:1148-1155`), so the synchronous continuation path should stay inactive during `runHeadlessPlaybackProfile(...)`.
+- The render-thread wait-condition rewrite is directionally fine, but it still emits `RenderFrameThread::frameReady()` while the worker owns `m_mutex`.
+  - `platform/qt/RenderFrameThread.cpp:155-166` holds `m_mutex` across `drawFrame()`, and `platform/qt/RenderFrameThread.cpp:599-606` emits `frameReady()` before the loop releases that mutex again.
+  - The current headless direct-connection lambda only stores an atomic timestamp, so it is safe today, but any future direct slot that calls back into `lastFrameReadyEmitStageTime()`, `isIdle()`, or other lock-taking getters would deadlock on this signal path.
+
+## Qt Playback Overlap Re-Audit (2026-04-23, current)
+
+### Verified locally
+
+- The queued post-frame boundary in `MainWindow::drawFrameReady()` fixes the earlier UI/audio ordering issue.
+  - `platform/qt/MainWindow.cpp:11282-11290` now emits `MainWindow::frameReady()` first, then posts the next `timerFrameEvent()` with `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`, so the old synchronous continuation bug is gone.
+- The `RenderFrameThread::frameReady()` emit is now out from under the mutex, but the render-thread rewrite still has two blocking correctness risks:
+  - `platform/qt/RenderFrameThread.cpp:164-166` unlocks before `drawFrame()`, while `platform/qt/RenderFrameThread.cpp:76-81` still lets `renderFrame(...)` overwrite shared request fields (`m_frameNumber`, `m_outputMode`, `m_useGpuBilinearDebayer`, `m_frameRequestStageTime`) under that same mutex.
+  - `drawFrame()` then reads those same fields without any local snapshot at `platform/qt/RenderFrameThread.cpp:181-205` and throughout the rest of the function.
+  - Safe conclusion: a second `renderFrame(...)` call can now race with an in-flight `drawFrame()` and change which frame / mode is being rendered mid-flight.
+- `RenderFrameThread::isIdle()` no longer reports actual worker idleness.
+  - `platform/qt/RenderFrameThread.cpp:95-100` still defines idle as `!m_renderFrame`.
+  - But `platform/qt/RenderFrameThread.cpp:164-166` now clears `m_renderFrame = false` before the expensive `drawFrame()` work starts.
+  - So `isIdle()` becomes true while the worker is still actively rendering.
+  - This is already relied on by GUI code to gate state mutation and teardown:
+    - `platform/qt/MainWindow.cpp:7536-7547`
+    - `platform/qt/MainWindow.cpp:7569-7580`
+    - `platform/qt/MainWindow.cpp:7587-7608`
+    - `platform/qt/MainWindow.cpp:7613-7618`
+    - `platform/qt/MainWindow.cpp:12247-12250`
+    - `platform/qt/MainWindow.cpp:1773-1776`
+  - Safe conclusion: callers can now reset caches, mutate llrawproc/processing state, or begin teardown while render-thread work is still using those structures.
+
+### Needs runtime profiling
+
+- Re-audit after the render thread either:
+  - snapshots all request fields into locals before unlocking, and
+  - introduces a real “worker busy” state for `isIdle()`, or delays clearing `m_renderFrame` until the render work actually completes.
+
+### Needs runtime profiling
+
+- If the overlap path is kept, move the continuation trigger to after the current frame’s overlay/state-finalization work, or split overlay work so any parts that read playback position/audio state stay ahead of the next-frame kickoff.
+- If `MainWindow::frameReady()` is still meant to mean “frame presentation is fully complete,” restore that ordering before more profiling is built on top of it.
+
+## Dual ISO Playback UI Sync Audit (2026-04-23, current)
+
+### Verified locally
+
+- The Dual ISO block inside `MainWindow::drawFrameReady()` is not purely read-only UI bookkeeping.
+  - `platform/qt/MainWindow.cpp:10900-10933` mixes three different kinds of work:
+    - receipt mutation: `ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 )` at `platform/qt/MainWindow.cpp:10902`
+    - llrawproc state normalization: `m_pMlvObject->llrawproc->diso_pattern = -m_pMlvObject->llrawproc->diso_pattern` at `platform/qt/MainWindow.cpp:10904-10907` and `m_pMlvObject->llrawproc->diso_auto_correction = -m_pMlvObject->llrawproc->diso_auto_correction` at `platform/qt/MainWindow.cpp:10931`
+    - widget reflection only: the `blockSignals(true)` / `setCurrentIndex(...)` / `setValue(...)` calls plus label text updates at `platform/qt/MainWindow.cpp:10908-10910` and `platform/qt/MainWindow.cpp:10917-10928`
+- The widget reflection sub-block is safe to defer from a render-state perspective.
+  - The combobox and sliders are updated with signals blocked, so they do not re-enter `on_DualIsoPatternComboBox_currentIndexChanged(...)`, `on_horizontalSliderDualIsoEvCorrection_valueChanged(...)`, or `on_horizontalSliderDualIsoBlackDelta_valueChanged(...)`.
+  - Those slots are the ones that actually mutate llrawproc state and invalidate caches: `platform/qt/MainWindow.cpp:7570-7596`, `platform/qt/MainWindow.cpp:7598-7619`, and `platform/qt/MainWindow.cpp:10155-10172`.
+- The receipt mutation in `drawFrameReady()` is not render-critical for the current frame, but it is not display-only either.
+  - `ReceiptSettings::setDualIsoAutoCorrected(...)` is just a field write in `platform/qt/ReceiptSettings.h:89`, and `drawFrameReady()` writes it every frame when Dual ISO is active.
+  - That field is later consumed by receipt application logic in `platform/qt/MainWindow.cpp:5801-5855` and mirrored in batch mode by `src/batch/ReceiptApplier.cpp:116-196`, where `dualIsoAutoCorrected()` decides whether the receipt should auto-resolve Dual ISO defaults or reuse explicit pattern / EV / black-delta values.
+  - Safe conclusion: skipping `ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 )` during playback would not change the pixels of the frame already being shown, but it could leave the active receipt stale for later reapplication, export, or clip switching.
+- The llrawproc writes in `drawFrameReady()` are stateful and should not be treated as mere UI sync.
+  - `diso_pattern` can be auto-discovered during preview processing. Preview accepts either sign via `ABS(iso_pattern)` in `src/mlv/llrawproc/dualiso.c:47-60`, so normalizing a negative value to positive in `drawFrameReady()` is not needed for the current preview frame itself.
+  - However, `diso_auto_correction` sign changes are not cosmetic. `drawFrameReady()` flips it positive after publishing the auto-matched EV / black-delta values to the sliders at `platform/qt/MainWindow.cpp:10913-10931`.
+  - The full Dual ISO path checks the sign to decide whether to publish or reuse auto-match values in `src/mlv/llrawproc/llrawproc.c:1006-1025`, and the GUI receipt setup also deliberately normalizes negative signs in `platform/qt/MainWindow.cpp:5796-5800`.
+  - Safe conclusion: skipping the whole `10900-10933` block would risk changing later Dual ISO behavior, not just the UI.
+- Nearby playback-policy code is also definitively stateful, not display bookkeeping.
+  - `platform/qt/MainWindow.cpp:9851-9885` (`applyEffectiveDualIsoPlaybackSettings`) writes `llrawproc` mode / interpolation / alias-map / full-res blending, resets black/white levels, resets caches, and marks `m_frameChanged = true`.
+  - `platform/qt/MainWindow.cpp:9942-9960` calls that helper on play toggles, and `platform/qt/MainWindow.cpp:11231-11236` calls it again when playback stops to restore the non-preview receipt/runtime state.
+
+### Cross-checked from prior analysis
+
+- The batch-side `ReceiptApplier` clone of the GUI Dual ISO logic confirms that `dualIsoAutoCorrected`, `diso_pattern`, `diso_ev_correction`, and `diso_black_delta` are part of the real processing contract, not just widget cosmetics.
+
+### Needs runtime profiling
+
+- If we want to save playback-time UI cost here, split the current block into:
+  - state publication/normalization that must remain (`ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 )`, the `llrawproc` sign normalization)
+  - widget reflection that can be throttled or deferred (`setCurrentIndex`, `setValue`, label text updates)
+- Measure that narrower split before deleting it. The full `drawFrameReady()` bucket is large enough that this may be worth doing, but only the widget-reflection subset is clearly safe to defer.
+
 ## Cadence Gap Split + Direct Processed8 Path (2026-04-23, current)
 
 ### Verified locally
@@ -1042,3 +1238,93 @@
 1. High impact / medium effort: keep the next decoder pass inside [src/mlv/liblj92/lj92.c](</C:/!Layi%20Wkspc/MLV-App/.claude/worktrees/festive-boyd/src/mlv/liblj92/lj92.c:740>), but use lower-overhead instrumentation or coarse counters before trusting another per-sample split.
 2. Medium impact / low effort: if we want the next actual optimization rather than more profiling, the cheapest remaining candidate is still bitstream/Huffman-side work in the predictor-1 path (forced inlining / local-state cleanup / wider LUT experimentation), but only after the measurement overhead story is cleaner.
 3. Medium impact / low effort: keep preroll as a measured UX helper (`~37 ms` first-frame win on this VM), but treat it separately from sustained-FPS decoder work.
+
+## `drawFrameReady()` presentation audit (2026-04-23, festive-boyd-integration)
+
+### Verified locally
+
+- Default playback still uses CPU-side zoom-fit scaling, not the experimental GPU viewport path.
+  - `ui->actionZoomFit` is enabled by default at `platform/qt/MainWindow.cpp:2414`.
+  - The OpenGL viewport is opt-in through `MLVAPP_EXPERIMENTAL_GL_VIEWPORT` at `platform/qt/GpuDisplayViewport.cpp:100` and `platform/qt/GpuDisplayViewport.cpp:105`.
+  - On the default path, `drawFrameReady()` falls into the playback fast-scaling branch at `platform/qt/MainWindow.cpp:11155`.
+- The hot presentation bucket is the image/scaling stage, not the pixmap handoff.
+  - The main image work sits in `platform/qt/MainWindow.cpp:11152` through `platform/qt/MainWindow.cpp:11280`.
+  - The final fallback presentation handoff is `QPixmap::fromImage(displayImage)` plus `m_pGraphicsItem->setPixmap(pic)` at `platform/qt/MainWindow.cpp:11299` through `platform/qt/MainWindow.cpp:11304`.
+  - Fresh playback-profile artifacts in `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run{1,2,3,4}.json` show warm `draw_frame_ready_image_ms` averages of `13.091`, `17.000`, `16.636`, and `12.727`, while `draw_frame_ready_present_ms` averages are `0`, `0`, `0.182`, and `0`.
+- The existing safe cache inside the default playback path is geometry-only.
+  - `build_fast_playback_scaled_image(...)` at `platform/qt/MainWindow.cpp:132` through `platform/qt/MainWindow.cpp:218` already memoizes `FastPlaybackScaleCache::xOffsets` and `FastPlaybackScaleCache::yOffsets` by `(sourceWidth, sourceHeight, targetWidth, targetHeight)`.
+- The full preview cache is intentionally disabled during playback today.
+  - `displayPreviewCachingAllowed = !playbackPolicyActive()` at `platform/qt/MainWindow.cpp:11072`.
+  - The reusable cache container is `DisplayPreviewCacheEntry` at `platform/qt/MainWindow.h:512`, stored in `m_displayPreviewCache[8]` at `platform/qt/MainWindow.h:627`.
+- Any playback cache must own its pixels before the next frame is queued.
+  - `drawFrameReady()` initially points `rgb8DisplaySource` at the live render buffer `m_pRawImage` at `platform/qt/MainWindow.cpp:10957`.
+  - The other reused staging buffers in this function are `fastPlaybackScaledPic` at `platform/qt/MainWindow.cpp:11169`, `gpu16FallbackProcessed` / `gpu16FallbackRgb8` at `platform/qt/MainWindow.cpp:11088`, and `cpuPreviewProcessed` / `cpuPreviewRgb8` at `platform/qt/MainWindow.cpp:11112`.
+  - The current non-playback cache is safe because it deep-copies into `cacheEntry.image = displayImage.copy()` at `platform/qt/MainWindow.cpp:11271` before building `cacheEntry.pixmap`.
+- A few state-caching trims are already present and are not the next place to spend effort.
+  - Scene-rect churn is already guarded by `m_lastDisplaySceneWidth` / `m_lastDisplaySceneHeight` at `platform/qt/MainWindow.cpp:11012` through `platform/qt/MainWindow.cpp:11018` and `platform/qt/MainWindow.h:625`.
+  - The smooth `QImage::scaled(...)` and AVIR branches at `platform/qt/MainWindow.cpp:11182` through `platform/qt/MainWindow.cpp:11220` are not the default playback branch because playback uses `Qt::FastTransformation` unless playback is off, none-debayer is enabled, or caching is enabled at `platform/qt/MainWindow.cpp:10960` through `platform/qt/MainWindow.cpp:10965`.
+
+### Cross-checked from prior analysis
+
+- The earlier safe-overlap note was directionally correct: the common UI-side cost is `draw_frame_ready_image_ms`, not `setPixmap()`.
+- The safest default-on presentation trims still sit ahead of `m_pGraphicsItem->setPixmap(...)`, inside scaling and image-ownership work.
+
+### Needs runtime profiling
+
+- `QPixmap::fromImage(displayImage)` at `platform/qt/MainWindow.cpp:11299` still deserves one targeted desktop run even though it is negligible on the current VM traces.
+- Zebra cost should stay separate from the default playback ranking because zebras are off by default.
+  - Scan-only path: `scanZebrasRgb8(...)` at `platform/qt/MainWindow.cpp:6702`.
+  - Mutating path: `drawZebras(...)` at `platform/qt/MainWindow.cpp:6724`.
+
+### Ranked next steps
+
+1. High impact / low-medium effort: keep optimizing `build_fast_playback_scaled_image(...)` at `platform/qt/MainWindow.cpp:132`.
+Safe caching opportunity: extend the existing geometry cache to precompute more target-to-source mapping than `xOffsets` / `yOffsets` alone, because this path is hit on default zoom-fit playback and still regenerates pixels every frame.
+2. Medium impact / low effort: add a playback-only exact-reuse cache for the last fully owned preview result, keyed by the same playback-visible state the current preview cache already uses at `platform/qt/MainWindow.cpp:11129` through `platform/qt/MainWindow.cpp:11141`.
+Exact fields to reuse: `frameIndex`, `signature`, `sourceWidth`, `sourceHeight`, `sceneWidth`, `sceneHeight`, `zoomFit`, `betterResizer`, `zebras`, `gpuScaling`, `transformationMode`, and `devicePixelRatioMilli`.
+Safety rule: only cache owned outputs equivalent to `displayImage.copy()` and `QPixmap::fromImage(cacheEntry.image)`. Do not cache borrowed wrappers over `m_pRawImage`, `m_pRawImage16`, `fastPlaybackScaledPic`, `gpu16FallbackRgb8`, or `cpuPreviewRgb8`.
+Likely payoff: repeated-frame or held-frame playback reuse, not steady-state unique-frame playback.
+3. Medium impact / low effort: if we want the lightest playback-safe trim before enabling any larger playback cache, add a one-entry `QPixmap` reuse path around `cachedPixmapAvailable` / `QPixmap::fromImage(...)` at `platform/qt/MainWindow.cpp:11299`.
+This keeps the same visible output while avoiding repeated image-to-pixmap conversion on exact replay of the last owned frame.
+4. Low-medium impact / low effort: keep using `m_lastDisplaySceneWidth` / `m_lastDisplaySceneHeight` as the model for safe invalidation.
+Any new playback cache should invalidate off the same geometry and presentation-key changes rather than broad playback state toggles.
+5. Low impact / low effort: treat zebra-result caching as optional and non-default.
+A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shader zebras are active, but it is not a default playback win.
+
+## Overlap follow-up experiments (2026-04-23, current keep)
+
+### Verified locally
+
+- The front/back `ReadyFrame` / `PresentationRequestContext` handoff remains the large real win and is still the foundation to keep.
+  - The best 4-run folder median from the overlap artifacts remains well below the pre-overlap `~59 ms` cadence keep point.
+  - Current kept profiling comparison:
+    - `.claude/profiling/20260423-frontback-overlap/`: `cadence_ms 45.1343`, `processed8_total_ms 33.9999`, `render_thread_work_ms 33.9999`, `draw_frame_ready_total_ms 11.0`, `draw_frame_ready_image_ms 10.5`, `presentation_overhead_ms 10.9745`
+    - `.claude/profiling/20260423-frontback-overlap-v5/`: `cadence_ms 44.6134`, `processed8_total_ms 33.5`, `render_thread_work_ms 34.0`, `draw_frame_ready_total_ms 11.0`, `draw_frame_ready_image_ms 10.0`, `presentation_overhead_ms 10.9452`
+- The best follow-up on top of the overlap handoff was smaller than hoped but still worth keeping.
+  - Current keep choice for `build_fast_playback_scaled_image(...)` in `platform/qt/MainWindow.cpp` is the serial row loop with 4-pixel unrolling.
+  - Honest claim: this trims the playback image path slightly on this VM, but it does not change the overall conclusion that we are still short of the `41.7 ms` realtime bar.
+- Several plausible follow-ups did not beat the kept overlap path and should stay out of the code:
+  - Flattened `pixelOffsets` scaler (`.claude/profiling/20260423-frontback-overlap-v3/`): `cadence_ms 51.4075`
+  - Early-slot-release copy experiment (`.claude/profiling/20260423-frontback-overlap-v4/`): `cadence_ms 47.1552`
+  - Direct-8 prefetch enabled (`.claude/profiling/20260423-frontback-overlap-v6-prefetch/`): `cadence_ms 53.0956`, with only `2/11` to `3/11` warm `processed8_prefetch_hit` frames per run
+- Thread-count selection is not the next honest lever on this VM.
+  - Existing sweep artifacts under `.claude/profiling/20260423-thread-sweep/` show a `4-8` thread plateau, not a hidden `2-3 ms` win from picking a different worker count.
+  - Safe conclusion: thread-count cleanup is worthwhile for consistency later, but it is not the step most likely to reach realtime on this clip.
+- Validation on the kept state is green after the last scaler keep decision:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - `pipeline_tests --check-golden`: `46/526/4/0`
+  - app-backed `console_tests --check-golden`: `41/750/1/0`
+
+### Cross-checked from prior analysis
+
+- The remaining dominant buckets are still `render_thread_work_ms` and `draw_frame_ready_image_ms`; the experiments above only changed how much each bucket contributes, not the ranking.
+- The direct-8 prefetch worker exists, but on this VM/receipt it is not hitting often enough to beat the simpler overlap keep state.
+
+### Ranked next steps
+
+1. Highest impact / medium effort: add a real third playback stage so UI image-build work is no longer paid on the same critical path as render completion.
+   Concrete target: detached scale/present preparation that can overlap with the next render instead of sitting inside `drawFrameReady()`.
+2. High impact / medium-high effort: deepen the playback queue beyond the single active request mailbox so `N+2` work can exist while `N+1` is already ready.
+   The current two-slot handoff is safe and useful, but it still does not give the worker a true future-frame queue.
+3. Medium impact / medium effort: if another structural stage still leaves us short, spend the next performance budget on post-decode processing, not more scaler/prefetch churn.
+   Best candidates remain the playback-only processing subset and then runtime-dispatched AVX2 on the surviving color-core / Dual ISO hot loops.

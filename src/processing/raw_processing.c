@@ -55,6 +55,21 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
 
+void processingResetLastTimingTelemetry(void)
+{
+    g_processing_last_setup_ms = 0.0;
+    g_processing_last_shadows_highlights_prep_ms = 0.0;
+    g_processing_last_highest_green_ms = 0.0;
+    g_processing_last_core_ms = 0.0;
+    g_processing_last_denoise_ms = 0.0;
+    g_processing_last_rbf_ms = 0.0;
+    g_processing_last_ca_ms = 0.0;
+    g_processing_last_core_levels_ms = 0.0;
+    g_processing_last_core_color_ms = 0.0;
+    g_processing_last_core_creative_ms = 0.0;
+    g_processing_last_core_output_ms = 0.0;
+}
+
 static void processing_core_timing_reset(processing_core_timing_t * timing)
 {
     if( !timing ) return;
@@ -490,17 +505,7 @@ void applyProcessingObject( processingObject_t * processing,
                             uint16_t * __restrict outputImage,
                             int threads, int imageChanged, uint64_t frameIndex )
 {
-    g_processing_last_setup_ms = 0.0;
-    g_processing_last_shadows_highlights_prep_ms = 0.0;
-    g_processing_last_highest_green_ms = 0.0;
-    g_processing_last_core_ms = 0.0;
-    g_processing_last_denoise_ms = 0.0;
-    g_processing_last_rbf_ms = 0.0;
-    g_processing_last_ca_ms = 0.0;
-    g_processing_last_core_levels_ms = 0.0;
-    g_processing_last_core_color_ms = 0.0;
-    g_processing_last_core_creative_ms = 0.0;
-    g_processing_last_core_output_ms = 0.0;
+    processingResetLastTimingTelemetry();
 
     const double setup_start = omp_get_wtime();
     /* Do transformation */
@@ -1673,17 +1678,7 @@ void applyProcessingObject8( processingObject_t * processing,
 {
     (void)frameIndex;
 
-    g_processing_last_setup_ms = 0.0;
-    g_processing_last_shadows_highlights_prep_ms = 0.0;
-    g_processing_last_highest_green_ms = 0.0;
-    g_processing_last_core_ms = 0.0;
-    g_processing_last_denoise_ms = 0.0;
-    g_processing_last_rbf_ms = 0.0;
-    g_processing_last_ca_ms = 0.0;
-    g_processing_last_core_levels_ms = 0.0;
-    g_processing_last_core_color_ms = 0.0;
-    g_processing_last_core_creative_ms = 0.0;
-    g_processing_last_core_output_ms = 0.0;
+    processingResetLastTimingTelemetry();
 
     if( !processing_can_use_direct_8bit_output(processing) )
     {

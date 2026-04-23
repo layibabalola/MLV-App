@@ -1,0 +1,395 @@
+profile-start
+open-begin
+[mlv-stage-timing] frame=0 stage=raw_uint16 ms=24.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_disk_read ms=3.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_decompress ms=21.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_decompress_execute ms=21.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=0 stage=llrawproc ms=0.000
+[mlv-stage-timing] frame=0 stage=raw_float_locked ms=24.000
+[mlv-stage-timing] frame=0 stage=raw_float_convert ms=7.000
+[mlv-stage-timing] frame=0 stage=raw_float_total ms=32.000
+open-complete
+receipt-begin
+receipt-complete
+playback-debayer-configured
+play-start-primed
+render-begin frame=0
+[mlv-stage-timing] frame=0 stage=raw_uint16 ms=18.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_disk_read ms=0.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_decompress ms=17.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_decompress_execute ms=17.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=0 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=0 stage=llrawproc ms=33.000
+[mlv-stage-timing] frame=0 stage=debayered_frame ms=55.000
+[mlv-stage-timing] frame=0 stage=processing ms=8.000
+[mlv-stage-timing] frame=0 stage=processed16_total ms=63.000
+[mlv-stage-timing] frame=0 stage=processed16_for_8bit ms=63.000
+[mlv-stage-timing] frame=0 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=0 stage=processed8_total ms=68.000
+[mlv-stage-timing] frame=0 stage=render_thread_draw ms=68.000
+[mlv-stage-timing] frame=0 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=0 stage=drawFrameReady.image ms=13.000
+[mlv-stage-timing] frame=0 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=0 stage=drawFrameReady.overlay ms=1.000
+[mlv-stage-timing] frame=0 stage=drawFrameReady.total ms=14.000
+render-complete frame=0
+render-begin frame=1
+[mlv-stage-timing] frame=1 stage=raw_uint16 ms=18.000
+[mlv-stage-timing] frame=1 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=1 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=1 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=1 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=1 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=1 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=1 stage=llrawproc ms=6.000
+[mlv-stage-timing] frame=1 stage=debayered_frame ms=27.000
+[mlv-stage-timing] frame=1 stage=processing ms=14.000
+[mlv-stage-timing] frame=1 stage=processed16_total ms=41.000
+[mlv-stage-timing] frame=1 stage=processed16_for_8bit ms=41.000
+[mlv-stage-timing] frame=1 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=1 stage=processed8_total ms=45.000
+[mlv-stage-timing] frame=1 stage=render_thread_draw ms=45.000
+[mlv-stage-timing] frame=1 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=1 stage=drawFrameReady.image ms=11.000
+[mlv-stage-timing] frame=1 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=1 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=1 stage=drawFrameReady.total ms=11.000
+render-complete frame=1
+render-begin frame=2
+[mlv-stage-timing] frame=2 stage=raw_uint16 ms=20.000
+[mlv-stage-timing] frame=2 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=2 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=2 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=2 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=2 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=2 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=2 stage=llrawproc ms=6.000
+[mlv-stage-timing] frame=2 stage=debayered_frame ms=30.000
+[mlv-stage-timing] frame=2 stage=processing ms=7.000
+[mlv-stage-timing] frame=2 stage=processed16_total ms=37.000
+[mlv-stage-timing] frame=2 stage=processed16_for_8bit ms=37.000
+[mlv-stage-timing] frame=2 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=2 stage=processed8_total ms=43.000
+[mlv-stage-timing] frame=2 stage=render_thread_draw ms=45.000
+[mlv-stage-timing] frame=2 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=2 stage=drawFrameReady.image ms=10.000
+[mlv-stage-timing] frame=2 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=2 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=2 stage=drawFrameReady.total ms=10.000
+render-complete frame=2
+render-begin frame=3
+[mlv-stage-timing] frame=3 stage=raw_uint16 ms=19.000
+[mlv-stage-timing] frame=3 stage=raw_uint16_disk_read ms=3.000
+[mlv-stage-timing] frame=3 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=3 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=3 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=3 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=3 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=3 stage=llrawproc ms=5.000
+[mlv-stage-timing] frame=3 stage=debayered_frame ms=27.000
+[mlv-stage-timing] frame=3 stage=processing ms=8.000
+[mlv-stage-timing] frame=3 stage=processed16_total ms=35.000
+[mlv-stage-timing] frame=3 stage=processed16_for_8bit ms=35.000
+[mlv-stage-timing] frame=3 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=3 stage=processed8_total ms=40.000
+[mlv-stage-timing] frame=3 stage=render_thread_draw ms=40.000
+[mlv-stage-timing] frame=3 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=3 stage=drawFrameReady.image ms=11.000
+[mlv-stage-timing] frame=3 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=3 stage=drawFrameReady.overlay ms=1.000
+[mlv-stage-timing] frame=3 stage=drawFrameReady.total ms=12.000
+render-complete frame=3
+render-begin frame=4
+[mlv-stage-timing] frame=4 stage=raw_uint16 ms=21.000
+[mlv-stage-timing] frame=4 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=4 stage=raw_uint16_decompress ms=18.000
+[mlv-stage-timing] frame=4 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=4 stage=raw_uint16_decompress_execute ms=18.000
+[mlv-stage-timing] frame=4 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=4 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=4 stage=llrawproc ms=5.000
+[mlv-stage-timing] frame=4 stage=debayered_frame ms=27.000
+[mlv-stage-timing] frame=4 stage=processing ms=7.000
+[mlv-stage-timing] frame=4 stage=processed16_total ms=34.000
+[mlv-stage-timing] frame=4 stage=processed16_for_8bit ms=34.000
+[mlv-stage-timing] frame=4 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=4 stage=processed8_total ms=39.000
+[mlv-stage-timing] frame=4 stage=render_thread_draw ms=39.000
+[mlv-stage-timing] frame=4 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=4 stage=drawFrameReady.image ms=11.000
+[mlv-stage-timing] frame=4 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=4 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=4 stage=drawFrameReady.total ms=11.000
+render-complete frame=4
+render-begin frame=5
+[mlv-stage-timing] frame=5 stage=raw_uint16 ms=17.000
+[mlv-stage-timing] frame=5 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=5 stage=raw_uint16_decompress ms=14.000
+[mlv-stage-timing] frame=5 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=5 stage=raw_uint16_decompress_execute ms=14.000
+[mlv-stage-timing] frame=5 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=5 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=5 stage=llrawproc ms=4.000
+[mlv-stage-timing] frame=5 stage=debayered_frame ms=23.000
+[mlv-stage-timing] frame=5 stage=processing ms=8.000
+[mlv-stage-timing] frame=5 stage=processed16_total ms=31.000
+[mlv-stage-timing] frame=5 stage=processed16_for_8bit ms=31.000
+[mlv-stage-timing] frame=5 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=5 stage=processed8_total ms=36.000
+[mlv-stage-timing] frame=5 stage=render_thread_draw ms=36.000
+[mlv-stage-timing] frame=5 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=5 stage=drawFrameReady.image ms=14.000
+[mlv-stage-timing] frame=5 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=5 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=5 stage=drawFrameReady.total ms=14.000
+render-complete frame=5
+render-begin frame=6
+[mlv-stage-timing] frame=6 stage=raw_uint16 ms=16.000
+[mlv-stage-timing] frame=6 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=6 stage=raw_uint16_decompress ms=14.000
+[mlv-stage-timing] frame=6 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=6 stage=raw_uint16_decompress_execute ms=14.000
+[mlv-stage-timing] frame=6 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=6 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=6 stage=llrawproc ms=6.000
+[mlv-stage-timing] frame=6 stage=debayered_frame ms=24.000
+[mlv-stage-timing] frame=6 stage=processing ms=7.000
+[mlv-stage-timing] frame=6 stage=processed16_total ms=31.000
+[mlv-stage-timing] frame=6 stage=processed16_for_8bit ms=31.000
+[mlv-stage-timing] frame=6 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=6 stage=processed8_total ms=37.000
+[mlv-stage-timing] frame=6 stage=render_thread_draw ms=37.000
+[mlv-stage-timing] frame=6 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=6 stage=drawFrameReady.image ms=12.000
+[mlv-stage-timing] frame=6 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=6 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=6 stage=drawFrameReady.total ms=12.000
+render-complete frame=6
+render-begin frame=7
+[mlv-stage-timing] frame=7 stage=raw_uint16 ms=16.000
+[mlv-stage-timing] frame=7 stage=raw_uint16_disk_read ms=0.000
+[mlv-stage-timing] frame=7 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=7 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=7 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=7 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=7 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=7 stage=llrawproc ms=6.000
+[mlv-stage-timing] frame=7 stage=debayered_frame ms=28.000
+[mlv-stage-timing] frame=7 stage=processing ms=13.000
+[mlv-stage-timing] frame=7 stage=processed16_total ms=41.000
+[mlv-stage-timing] frame=7 stage=processed16_for_8bit ms=41.000
+[mlv-stage-timing] frame=7 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=7 stage=processed8_total ms=47.000
+[mlv-stage-timing] frame=7 stage=render_thread_draw ms=47.000
+[mlv-stage-timing] frame=7 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=8 stage=raw_uint16 ms=19.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_disk_read ms=1.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_decompress ms=17.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_decompress_execute ms=17.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=7 stage=drawFrameReady.image ms=16.000
+[mlv-stage-timing] frame=7 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=7 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=7 stage=drawFrameReady.total ms=16.000
+render-complete frame=7
+render-begin frame=8
+[mlv-stage-timing] frame=8 stage=raw_uint16 ms=20.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_decompress ms=18.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_decompress_execute ms=18.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=8 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=8 stage=llrawproc ms=6.000
+[mlv-stage-timing] frame=8 stage=llrawproc ms=40.000
+[mlv-stage-timing] frame=8 stage=debayered_frame ms=29.000
+[mlv-stage-timing] frame=8 stage=processing ms=13.000
+[mlv-stage-timing] frame=8 stage=processed16_total ms=42.000
+[mlv-stage-timing] frame=8 stage=processed16_for_8bit ms=42.000
+[mlv-stage-timing] frame=8 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=8 stage=processed8_total ms=45.000
+[mlv-stage-timing] frame=8 stage=render_thread_draw ms=45.000
+[mlv-stage-timing] frame=8 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=8 stage=drawFrameReady.image ms=17.000
+[mlv-stage-timing] frame=8 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=9 stage=raw_uint16 ms=19.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_disk_read ms=3.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=8 stage=drawFrameReady.total ms=17.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_copy ms=0.000
+render-complete frame=8
+render-begin frame=9
+[mlv-stage-timing] frame=9 stage=llrawproc ms=9.000
+[mlv-stage-timing] frame=9 stage=raw_uint16 ms=17.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_decompress ms=14.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_decompress_execute ms=14.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=9 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=9 stage=llrawproc ms=8.000
+[mlv-stage-timing] frame=9 stage=debayered_frame ms=30.000
+[mlv-stage-timing] frame=9 stage=processing ms=9.000
+[mlv-stage-timing] frame=9 stage=processed16_total ms=39.000
+[mlv-stage-timing] frame=9 stage=processed16_for_8bit ms=39.000
+[mlv-stage-timing] frame=9 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=9 stage=processed8_total ms=43.000
+[mlv-stage-timing] frame=9 stage=render_thread_draw ms=43.000
+[mlv-stage-timing] frame=9 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=10 stage=raw_uint16 ms=20.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_decompress ms=17.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_decompress_execute ms=17.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=10 stage=llrawproc ms=8.000
+[mlv-stage-timing] frame=9 stage=drawFrameReady.image ms=15.000
+[mlv-stage-timing] frame=9 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=9 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=9 stage=drawFrameReady.total ms=15.000
+render-complete frame=9
+render-begin frame=10
+[mlv-stage-timing] frame=10 stage=raw_uint16 ms=19.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=10 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=11 stage=raw_uint16 ms=21.000
+[mlv-stage-timing] frame=11 stage=raw_uint16_disk_read ms=3.000
+[mlv-stage-timing] frame=11 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=11 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=11 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=11 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=11 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=10 stage=llrawproc ms=7.000
+[mlv-stage-timing] frame=10 stage=debayered_frame ms=31.000
+[mlv-stage-timing] frame=11 stage=llrawproc ms=8.000
+[mlv-stage-timing] frame=10 stage=processing ms=11.000
+[mlv-stage-timing] frame=10 stage=processed16_total ms=42.000
+[mlv-stage-timing] frame=10 stage=processed16_for_8bit ms=42.000
+[mlv-stage-timing] frame=10 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=10 stage=processed8_total ms=46.000
+[mlv-stage-timing] frame=10 stage=render_thread_draw ms=46.000
+[mlv-stage-timing] frame=10 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=10 stage=drawFrameReady.image ms=18.000
+[mlv-stage-timing] frame=10 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=10 stage=drawFrameReady.overlay ms=2.000
+[mlv-stage-timing] frame=10 stage=drawFrameReady.total ms=20.000
+render-complete frame=10
+render-begin frame=11
+[mlv-stage-timing] frame=11 stage=processed8_total ms=3.000
+[mlv-stage-timing] frame=11 stage=render_thread_draw ms=3.000
+[mlv-stage-timing] frame=11 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=12 stage=raw_uint16 ms=23.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_decompress ms=19.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_decompress_execute ms=19.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=12 stage=llrawproc ms=7.000
+[mlv-stage-timing] frame=11 stage=drawFrameReady.image ms=18.000
+[mlv-stage-timing] frame=11 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=11 stage=drawFrameReady.overlay ms=1.000
+[mlv-stage-timing] frame=11 stage=drawFrameReady.total ms=19.000
+render-complete frame=11
+render-begin frame=12
+[mlv-stage-timing] frame=12 stage=raw_uint16 ms=22.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_disk_read ms=3.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_decompress ms=18.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_decompress_execute ms=18.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=12 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=13 stage=raw_uint16 ms=20.000
+[mlv-stage-timing] frame=13 stage=raw_uint16_disk_read ms=3.000
+[mlv-stage-timing] frame=13 stage=raw_uint16_decompress ms=16.000
+[mlv-stage-timing] frame=13 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=13 stage=raw_uint16_decompress_execute ms=16.000
+[mlv-stage-timing] frame=13 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=13 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=12 stage=llrawproc ms=7.000
+[mlv-stage-timing] frame=12 stage=debayered_frame ms=33.000
+[mlv-stage-timing] frame=13 stage=llrawproc ms=11.000
+[mlv-stage-timing] frame=12 stage=processing ms=9.000
+[mlv-stage-timing] frame=12 stage=processed16_total ms=42.000
+[mlv-stage-timing] frame=12 stage=processed16_for_8bit ms=42.000
+[mlv-stage-timing] frame=12 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=12 stage=processed8_total ms=47.000
+[mlv-stage-timing] frame=12 stage=render_thread_draw ms=47.000
+[mlv-stage-timing] frame=12 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=12 stage=drawFrameReady.image ms=14.000
+[mlv-stage-timing] frame=12 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=12 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=12 stage=drawFrameReady.total ms=14.000
+render-complete frame=12
+render-begin frame=13
+[mlv-stage-timing] frame=13 stage=processed8_total ms=3.000
+[mlv-stage-timing] frame=13 stage=render_thread_draw ms=3.000
+[mlv-stage-timing] frame=13 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=14 stage=raw_uint16 ms=20.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_decompress ms=17.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_decompress_execute ms=17.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=13 stage=drawFrameReady.image ms=11.000
+[mlv-stage-timing] frame=13 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=13 stage=drawFrameReady.overlay ms=0.000
+[mlv-stage-timing] frame=13 stage=drawFrameReady.total ms=12.000
+render-complete frame=13
+render-begin frame=14
+[mlv-stage-timing] frame=14 stage=llrawproc ms=7.000
+[mlv-stage-timing] frame=14 stage=raw_uint16 ms=19.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_disk_read ms=3.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_decompress ms=15.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_decompress_execute ms=15.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=14 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=14 stage=llrawproc ms=6.000
+[mlv-stage-timing] frame=14 stage=debayered_frame ms=28.000
+[mlv-stage-timing] frame=15 stage=raw_uint16 ms=19.000
+[mlv-stage-timing] frame=15 stage=raw_uint16_disk_read ms=2.000
+[mlv-stage-timing] frame=15 stage=raw_uint16_decompress ms=15.000
+[mlv-stage-timing] frame=15 stage=raw_uint16_decompress_prepare ms=0.000
+[mlv-stage-timing] frame=15 stage=raw_uint16_decompress_execute ms=15.000
+[mlv-stage-timing] frame=15 stage=raw_uint16_unpack ms=0.000
+[mlv-stage-timing] frame=15 stage=raw_uint16_copy ms=0.000
+[mlv-stage-timing] frame=14 stage=processing ms=15.000
+[mlv-stage-timing] frame=14 stage=processed16_total ms=43.000
+[mlv-stage-timing] frame=14 stage=processed16_for_8bit ms=43.000
+[mlv-stage-timing] frame=14 stage=processed16_to_8bit ms=0.000
+[mlv-stage-timing] frame=14 stage=processed8_total ms=48.000
+[mlv-stage-timing] frame=14 stage=render_thread_draw ms=48.000
+[mlv-stage-timing] frame=14 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=15 stage=llrawproc ms=10.000
+[mlv-stage-timing] frame=14 stage=drawFrameReady.image ms=15.000
+[mlv-stage-timing] frame=14 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=14 stage=drawFrameReady.overlay ms=1.000
+[mlv-stage-timing] frame=14 stage=drawFrameReady.total ms=16.000
+render-complete frame=14
+render-begin frame=15
+[mlv-stage-timing] frame=15 stage=processed8_total ms=3.000
+[mlv-stage-timing] frame=15 stage=render_thread_draw ms=3.000
+[mlv-stage-timing] frame=15 stage=drawFrameReady.scene ms=0.000
+[mlv-stage-timing] frame=15 stage=drawFrameReady.image ms=12.000
+[mlv-stage-timing] frame=15 stage=drawFrameReady.present ms=0.000
+[mlv-stage-timing] frame=15 stage=drawFrameReady.overlay ms=1.000
+[mlv-stage-timing] frame=15 stage=drawFrameReady.total ms=14.000
+render-complete frame=15
+profile-complete

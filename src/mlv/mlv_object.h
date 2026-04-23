@@ -194,7 +194,24 @@ typedef struct {
     uint64_t processed_8bit_cache_frame[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     int processed_8bit_cache_threads[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint64_t processed_8bit_cache_signature[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    uint8_t processed_8bit_cache_state[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    uint8_t processed_8bit_cache_prefetched[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    uint32_t processed_8bit_cache_generation[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint32_t processed_8bit_cache_next_slot;
+    pthread_mutex_t processed8_prefetch_mutex;
+    pthread_cond_t processed8_prefetch_cond;
+    pthread_t processed8_prefetch_thread;
+    processingObject_t * processed8_prefetch_processing;
+    int processed8_prefetch_thread_started;
+    int processed8_prefetch_stop;
+    int processed8_prefetch_request_pending;
+    int processed8_prefetch_worker_busy;
+    uint64_t processed8_prefetch_request_frame;
+    int processed8_prefetch_request_threads;
+    uint64_t processed8_prefetch_last_request_frame;
+    int processed8_prefetch_last_request_threads;
+    uint64_t processed8_prefetch_last_state_signature;
+    uint32_t processed8_prefetch_generation;
 
     /* Massive block of memory for all frames that will be cached, pointers in rgb_raw_frames will point within here, 
      * using one big block block to try and avoid fragmentation (I feel that may be one of the causes of growth) */

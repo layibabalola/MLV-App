@@ -108,6 +108,7 @@ double getMlvLastProcessed16For8BitMilliseconds(void);
 double getMlvLastProcessed16To8BitMilliseconds(void);
 double getMlvLastProcessed8TotalMilliseconds(void);
 int getMlvLastProcessed8DirectPathActive(void);
+int getMlvLastProcessed8PrefetchHit(void);
 
 /* Unpacks the bits of a frame to get a bayer B&W image (without black level correction)
  * Needs memory to return to, sized: sizeof(float) * getMlvHeight(urvid) * getMlvWidth(urvid)

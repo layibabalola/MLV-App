@@ -1,5 +1,39 @@
 ## Testing Scaffold Notes
 
+### Safe Overlap Keep-Set + Expanded Playback Telemetry Assertions (2026-04-23)
+
+#### Verified locally
+
+- The playback-profile scaffold now covers the widened safe overlap split, not just the earlier direct-8-bit activation seam.
+  - `tests/console/test_clip_golden.cpp` now asserts presence and numeric validity for:
+    - `draw_frame_ready_scene_ms`
+    - `draw_frame_ready_image_ms`
+    - `draw_frame_ready_present_ms`
+    - `draw_frame_ready_scopes_ms`
+    - `draw_frame_ready_overlay_ms`
+    - `processed8_prefetch_hit`
+- The app-backed playback-profile checks stayed green after the render-thread exclusivity repair and the processed8 prefetch gate.
+  - Fresh validation on the current keep-set:
+    - plain `console_tests --check-golden`: `41 tests / 160 assertions / 17 skips / 0 failures`
+    - app-backed `console_tests --check-golden` with `platform/qt/build-codex-current/release/MLVApp.exe`: `41 tests / 750 assertions / 1 skip / 0 failures`
+    - `pipeline_tests --check-golden`: `46 tests / 526 assertions / 4 skips / 0 failures`
+- The new safe-path profiling artifacts for the large Dual ISO preview receipt are:
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run1.json`
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run2.json`
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run3.json`
+  - `.claude/profiling/20260423-safe-overlap-fastscale/large_dual_iso_preview_t4_safe_run4.json`
+- Those artifacts also confirm that the kept path does not rely on processed8 background rendering.
+  - All warm samples in the current keep-set reruns reported `processed8_prefetch_hit = false`.
+
+#### Cross-checked from prior analysis
+
+- The processed8 prefetch worker is still useful as an experiment seam, but the scaffold should not assume it is part of the default path.
+  - Default coverage should stay focused on the safe direct-8-bit path and the Qt-side cadence split until the prefetch path has a real raw/VIDF snapshot.
+
+#### Needs runtime profiling
+
+- After a real front/back render-buffer handoff lands, extend the app-backed scaffold again so it asserts the new overlap metadata on the completed-frame slot instead of the current shared-buffer seam.
+
 ### Cadence-Gap Telemetry + Activated Direct Processed8 Path (2026-04-23)
 
 #### Verified locally
@@ -382,3 +416,14 @@
   - the generic split is useful for relative shape only
   - because it times inside the per-sample decode loop, it perturbs absolute decoder `ms`
   - do not use the split-enabled artifact itself as a sustained-FPS benchmark
+
+### Overlap keep revalidation (2026-04-23, current)
+
+- Revalidated the current kept playback state after the front/back overlap handoff and final fast-scaler keep decision.
+- Fresh green local result on the kept state:
+  - `console_tests --check-golden`: `41 tests / 160 assertions / 17 skips / 0 failures`
+  - `pipeline_tests --check-golden`: `46 tests / 526 assertions / 4 skips / 0 failures`
+  - app-backed `console_tests --check-golden`: `41 tests / 750 assertions / 1 skip / 0 failures`
+- Practical scaffold takeaway:
+  - the playback overlap work is now covered by the same console + pipeline + app-backed profile contracts that already pinned the direct-8-bit path
+  - follow-up playback experiments should keep using those three checks before claiming any new cadence win

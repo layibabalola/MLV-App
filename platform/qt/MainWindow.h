@@ -44,6 +44,7 @@
 #include "ReceiptCopyMaskDialog.h"
 #include "QRecentFilesMenu.h"
 #include "batch/BatchTypes.h"
+#include <deque>
 #include <functional>
 
 namespace Ui {
@@ -531,6 +532,20 @@ private:
         QPixmap pixmap;
     };
 
+    struct PresentationRequestContext
+    {
+        uint64_t requestSerial = 0;
+        uint32_t frameNumber = 0;
+        bool renderThreadUsing16BitPreview = false;
+        bool renderThreadUsingGpuPreviewProcessing = false;
+        bool renderThreadUsingGpuBilinearDebayer = false;
+        bool renderThreadUsingCpuPreviewProcessing = false;
+        MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
+        GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
+        GpuPreviewProcessingConfig gpuPreviewProcessingConfig;
+        QString playbackProcessingReason;
+    };
+
     Ui::MainWindow *ui;
     InfoDialog *m_pInfoDialog;
     StatusDialog *m_pStatusDialog;
@@ -592,6 +607,8 @@ private:
     bool m_zoomModeChanged;
     bool m_playbackStopped;
     bool m_dualIsoPlaybackPreviewActive;
+    bool m_playbackFrameAdvancePending = false;
+    bool m_skipImmediateTimecodeLabel = false;
     bool m_playToFirstFramePending = false;
     bool m_playToFirstFrameTargetFrameValid = false;
     bool m_lastPlayToFirstFrameValid = false;
@@ -605,8 +622,15 @@ private:
     double m_playToFirstFrameStartSeconds = 0.0;
     double m_lastPlayToFirstFrameMs = 0.0;
     double m_lastDrawFrameReadyQueueMs = 0.0;
+    double m_lastDrawFrameReadySceneMs = 0.0;
+    double m_lastDrawFrameReadyImageMs = 0.0;
+    double m_lastDrawFrameReadyPresentMs = 0.0;
+    double m_lastDrawFrameReadyScopesMs = 0.0;
+    double m_lastDrawFrameReadyOverlayMs = 0.0;
     double m_lastDrawFrameReadyTotalMs = 0.0;
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
+    uint64_t m_nextRenderRequestSerial = 1;
+    uint64_t m_lastPresentedRequestSerial = 0;
     GpuPreviewProcessingBackendRequest m_gpuPreviewProcessingBackendRequest =
         GpuPreviewProcessingBackendRequest::Auto;
     GpuBilinearDebayerBackendRequest m_gpuBilinearDebayerBackendRequest =
@@ -615,7 +639,19 @@ private:
     GpuDisplayViewport::PresentationOptions m_lastQueuedGpuPresentationOptions;
     GpuPreviewProcessingConfig m_lastQueuedGpuPreviewProcessingConfig;
     QString m_lastQueuedPlaybackProcessingReason;
+    std::deque<PresentationRequestContext> m_pendingPresentationRequests;
+    PresentationRequestContext m_lastPresentedRequestContext;
+    bool m_lastPresentedRequestContextValid = false;
+    bool m_lastPresentedFrameUsedGpuBilinearDebayer = false;
+    QString m_lastPresentedGpuBilinearFallbackReason;
+    QString m_lastPresentedGpuBilinearRendererDescription;
+    double m_lastPresentedDualIsoPreviewHistogramMs = 0.0;
+    double m_lastPresentedDualIsoPreviewRegressionMs = 0.0;
+    double m_lastPresentedDualIsoPreviewRowscaleMs = 0.0;
+    QJsonObject m_lastPresentedStageTimingTelemetry;
     uint32_t m_displayPreviewCacheNextSlot;
+    int m_lastDisplaySceneWidth = -1;
+    int m_lastDisplaySceneHeight = -1;
     DisplayPreviewCacheEntry m_displayPreviewCache[8];
     QString m_lastExportPath;
     QString m_lastSessionFileName;
@@ -632,7 +668,10 @@ private:
     QSortFilterProxyModel* m_pProxyModel;
     QItemSelectionModel* m_pSelectionModel;
     int m_lastClipBeforeExport;
-    void drawFrame( void );
+    void drawFrame( bool updateTimecodeLabel = true );
+    void queuePresentationRequest( const PresentationRequestContext &context );
+    bool consumePresentationRequest( uint64_t requestSerial,
+                                     PresentationRequestContext *context );
     bool playbackPolicyActive( void ) const;
     void applyPlaybackDebayerSelection( void );
     void setPlaybackProfileDebayerRequest(
@@ -682,7 +721,8 @@ private:
     double getFramerate( void );
     void paintAudioTrack( void );
     uint8_t drawZebras( QImage *image );
-    void drawFrameNumberLabel( void );
+    void drawFrameNumberLabel( int frameIndex = -1 );
+    void updateTimeCodeLabelForFrame( int frameIndex );
     bool shouldUseGpu16PreviewPath( void ) const;
     bool shouldUseGpuPreviewProcessingPath( void ) const;
     bool shouldUseGpuBilinearDebayerPath( void ) const;

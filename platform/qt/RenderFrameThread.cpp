@@ -21,20 +21,32 @@ RenderFrameThread::RenderFrameThread()
     m_stop = false;
     m_initialized = false;
     m_renderFrame = false;
+    m_renderingFrame = false;
     m_frameReady = false;
-    m_pRawImage16 = nullptr;
+    m_pMlvObject = nullptr;
     m_outputMode = OutputProcessed8;
     m_useGpuBilinearDebayer = false;
+    m_frameNumber = 0;
+    m_frameRequestSerial = 0;
+    m_activeOutputMode = OutputProcessed8;
+    m_activeUseGpuBilinearDebayer = false;
+    m_activeFrameNumber = 0;
+    m_activeFrameRequestSerial = 0;
     m_loggedGpuBilinearSuccess = false;
     m_lastFrameUsedGpuBilinearDebayer = false;
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
     m_frameRequestStageTime = 0.0;
+    m_activeFrameRequestStageTime = 0.0;
     m_lastRenderThreadQueueWaitMs = 0.0;
     m_lastRenderThreadWorkMs = 0.0;
     m_lastRenderThreadTotalMs = 0.0;
     m_lastFrameReadyEmitStageTime = 0.0;
+    m_imageWidth = 0;
+    m_imageHeight = 0;
+    m_renderingSlotIndex = -1;
+    m_presentingSlotIndex = -1;
 }
 
 //Destructor
@@ -44,14 +56,22 @@ RenderFrameThread::~RenderFrameThread()
 }
 
 //Init all objects
-void RenderFrameThread::init(mlvObject_t *pMlvObject, uint8_t *pRawImage, uint16_t *pRawImage16)
+void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageHeight)
 {
-    m_mutex.lock();
+    QMutexLocker locker(&m_mutex);
     m_frameReady = false;
     m_pMlvObject = pMlvObject;
-    m_pRawImage = pRawImage;
-    m_pRawImage16 = pRawImage16;
+    m_imageWidth = imageWidth;
+    m_imageHeight = imageHeight;
     m_useGpuBilinearDebayer = false;
+    m_frameNumber = 0;
+    m_frameRequestSerial = 0;
+    m_activeUseGpuBilinearDebayer = false;
+    m_activeFrameNumber = 0;
+    m_activeFrameRequestSerial = 0;
+    m_activeOutputMode = OutputProcessed8;
+    m_renderingSlotIndex = -1;
+    m_presentingSlotIndex = -1;
     m_lastFrameUsedGpuBilinearDebayer = false;
     m_lastGpuBilinearFallbackReason.clear();
     m_lastGpuBilinearRendererDescription.clear();
@@ -59,45 +79,113 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, uint8_t *pRawImage, uint16
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
     m_frameRequestStageTime = 0.0;
+    m_activeFrameRequestStageTime = 0.0;
     m_lastRenderThreadQueueWaitMs = 0.0;
     m_lastRenderThreadWorkMs = 0.0;
     m_lastRenderThreadTotalMs = 0.0;
     m_lastFrameReadyEmitStageTime = 0.0;
     m_gpuBilinearDebayerRawFrame.clear();
-    m_mutex.unlock();
+    const size_t pixelCount =
+        static_cast<size_t>(qMax(0, imageWidth)) * static_cast<size_t>(qMax(0, imageHeight));
+    const size_t rgbPixelCount = pixelCount * 3u;
+    for( FrameSlot &slot : m_frameSlots )
+    {
+        slot.rawImage8.assign( rgbPixelCount, 0u );
+        slot.rawImage16.assign( rgbPixelCount, 0u );
+        slot.resetMetadata();
+    }
 }
 
 //Start rendering
 void RenderFrameThread::renderFrame(uint32_t frameNumber,
                                     OutputMode outputMode,
-                                    bool useGpuBilinearDebayer)
+                                    bool useGpuBilinearDebayer,
+                                    uint64_t requestSerial)
 {
-    m_mutex.lock();
+    QMutexLocker locker(&m_mutex);
     m_frameNumber = frameNumber;
     m_outputMode = outputMode;
     m_useGpuBilinearDebayer = useGpuBilinearDebayer;
+    m_frameRequestSerial = requestSerial;
     m_renderFrame = true;
-    m_frameReady = false;
     m_frameRequestStageTime = mlv_stage_timing_now();
-    m_mutex.unlock();
+    m_waitCondition.wakeOne();
 }
 
 //Is rendering finished?
 bool RenderFrameThread::isFrameReady()
 {
-    m_mutex.lock();
-    bool retVal = m_frameReady;
-    m_mutex.unlock();
-    return retVal;
+    QMutexLocker locker(&m_mutex);
+    return m_frameReady;
 }
 
 //Returns if there is a frame in the pipeline...
 bool RenderFrameThread::isIdle()
 {
-    m_mutex.lock();
-    bool retVal = m_renderFrame;
-    m_mutex.unlock();
-    return !retVal;
+    QMutexLocker locker(&m_mutex);
+    return !(m_renderFrame || m_renderingFrame);
+}
+
+bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
+{
+    QMutexLocker locker(&m_mutex);
+    const int readySlotIndex = findLatestReadySlotLocked();
+    if( readySlotIndex < 0 )
+    {
+        m_frameReady = false;
+        return false;
+    }
+
+    if( m_presentingSlotIndex >= 0 )
+    {
+        releaseSlotLocked( m_presentingSlotIndex );
+        m_presentingSlotIndex = -1;
+    }
+
+    FrameSlot &slot = m_frameSlots[readySlotIndex];
+    slot.ready = false;
+    slot.presenting = true;
+    m_presentingSlotIndex = readySlotIndex;
+    m_frameReady = (findLatestReadySlotLocked() >= 0);
+    copySlotTelemetryLocked( slot );
+    m_waitCondition.wakeAll();
+
+    if( frame )
+    {
+        frame->rawImage8 = slot.rawImage8.empty() ? nullptr : slot.rawImage8.data();
+        frame->rawImage16 = slot.rawImage16.empty() ? nullptr : slot.rawImage16.data();
+        frame->frameNumber = slot.frameNumber;
+        frame->requestSerial = slot.requestSerial;
+        frame->outputMode = slot.outputMode;
+        frame->usedGpuBilinearDebayer = slot.usedGpuBilinearDebayer;
+        frame->gpuBilinearFallbackReason = slot.gpuBilinearFallbackReason;
+        frame->gpuBilinearRendererDescription = slot.gpuBilinearRendererDescription;
+        frame->dualIsoPreviewHistogramMs = slot.dualIsoPreviewHistogramMs;
+        frame->dualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
+        frame->dualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
+        frame->frameReadyEmitStageTime = slot.frameReadyEmitStageTime;
+        frame->processedFrame8Active = slot.processedFrame8Active;
+        frame->processedFrame8Signature = slot.processedFrame8Signature;
+        frame->processedFrame16Active = slot.processedFrame16Active;
+        frame->processedFrame16Signature = slot.processedFrame16Signature;
+        frame->dualIsoPattern = slot.dualIsoPattern;
+        frame->dualIsoAutoCorrection = slot.dualIsoAutoCorrection;
+        frame->dualIsoEvCorrection = slot.dualIsoEvCorrection;
+        frame->dualIsoBlackDelta = slot.dualIsoBlackDelta;
+        frame->stageTimingTelemetry = slot.stageTimingTelemetry;
+    }
+    return true;
+}
+
+void RenderFrameThread::releasePresentedFrame()
+{
+    QMutexLocker locker(&m_mutex);
+    if( m_presentingSlotIndex >= 0 )
+    {
+        releaseSlotLocked( m_presentingSlotIndex );
+        m_presentingSlotIndex = -1;
+        m_waitCondition.wakeAll();
+    }
 }
 
 bool RenderFrameThread::lastFrameUsedGpuBilinearDebayer() const
@@ -144,10 +232,23 @@ double RenderFrameThread::lastFrameReadyEmitStageTime() const
 //Stop the thread
 void RenderFrameThread::stop()
 {
-    m_mutex.lock();
+    QMutexLocker locker(&m_mutex);
     m_stop = true;
+    m_waitCondition.wakeAll();
+}
+
+void RenderFrameThread::lock()
+{
+    m_mutex.lock();
+    while( m_renderFrame || m_renderingFrame )
+    {
+        m_waitCondition.wait(&m_mutex);
+    }
+}
+
+void RenderFrameThread::unlock()
+{
     m_mutex.unlock();
-    this->thread()->quit();
 }
 
 //Main loop of the thread
@@ -156,69 +257,161 @@ void RenderFrameThread::run(void)
     m_mutex.lock();
     while( !m_stop )
     {
-        if( m_renderFrame )
+        while( !m_stop
+            && ( !m_renderFrame || findFreeSlotLocked() < 0 ) )
         {
-            drawFrame();
-            m_renderFrame = false;
-            m_frameReady = true;
+            m_waitCondition.wait(&m_mutex);
         }
+        if( m_stop ) break;
+
+        const int slotIndex = findFreeSlotLocked();
+        if( slotIndex < 0 )
+        {
+            continue;
+        }
+
+        m_activeFrameNumber = m_frameNumber;
+        m_activeOutputMode = m_outputMode;
+        m_activeUseGpuBilinearDebayer = m_useGpuBilinearDebayer;
+        m_activeFrameRequestSerial = m_frameRequestSerial;
+        m_activeFrameRequestStageTime = m_frameRequestStageTime;
+        m_renderFrame = false;
+        m_renderingFrame = true;
+        m_renderingSlotIndex = slotIndex;
         m_mutex.unlock();
-        msleep(1);
+        drawFrame( slotIndex );
+        m_mutex.lock();
+        m_renderingFrame = false;
+        m_renderingSlotIndex = -1;
+        for( int i = 0; i < static_cast<int>(m_frameSlots.size()); ++i )
+        {
+            if( i == slotIndex ) continue;
+            if( m_frameSlots[i].ready && !m_frameSlots[i].presenting )
+            {
+                releaseSlotLocked( i );
+            }
+        }
+        m_frameSlots[slotIndex].ready = true;
+        m_frameReady = true;
+        m_waitCondition.wakeAll();
+        m_mutex.unlock();
+        emit frameReady();
         m_mutex.lock();
     }
     m_stop = false;
     m_mutex.unlock();
 }
 
-//render the picture
-void RenderFrameThread::drawFrame()
+int RenderFrameThread::findLatestReadySlotLocked() const
 {
-    const double render_start = mlv_stage_timing_now();
+    int readySlotIndex = -1;
+    uint64_t latestRequestSerial = 0;
+    for( int i = 0; i < static_cast<int>(m_frameSlots.size()); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( readySlotIndex < 0 || slot.requestSerial >= latestRequestSerial )
+        {
+            readySlotIndex = i;
+            latestRequestSerial = slot.requestSerial;
+        }
+    }
+    return readySlotIndex;
+}
+
+int RenderFrameThread::findFreeSlotLocked() const
+{
+    for( int i = 0; i < static_cast<int>(m_frameSlots.size()); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( i == m_renderingSlotIndex ) continue;
+        if( slot.ready || slot.presenting ) continue;
+        return i;
+    }
+    return -1;
+}
+
+void RenderFrameThread::releaseSlotLocked( int slotIndex )
+{
+    if( slotIndex < 0 || slotIndex >= static_cast<int>(m_frameSlots.size()) ) return;
+    FrameSlot &slot = m_frameSlots[slotIndex];
+    slot.ready = false;
+    slot.presenting = false;
+}
+
+void RenderFrameThread::copySlotTelemetryLocked( const FrameSlot &slot )
+{
+    m_lastFrameUsedGpuBilinearDebayer = slot.usedGpuBilinearDebayer;
+    m_lastGpuBilinearFallbackReason = slot.gpuBilinearFallbackReason;
+    m_lastGpuBilinearRendererDescription = slot.gpuBilinearRendererDescription;
+    m_lastDualIsoPreviewHistogramMs = slot.dualIsoPreviewHistogramMs;
+    m_lastDualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
+    m_lastDualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
+    m_lastFrameReadyEmitStageTime = slot.frameReadyEmitStageTime;
+    m_lastStageTimingTelemetry = slot.stageTimingTelemetry;
     m_lastRenderThreadQueueWaitMs =
-        (m_frameRequestStageTime > 0.0 && render_start >= m_frameRequestStageTime)
-            ? (render_start - m_frameRequestStageTime) * 1000.0
+        slot.stageTimingTelemetry.value( QStringLiteral("render_thread_queue_wait_ms") ).toDouble();
+    m_lastRenderThreadWorkMs =
+        slot.stageTimingTelemetry.value( QStringLiteral("render_thread_work_ms") ).toDouble();
+    m_lastRenderThreadTotalMs =
+        slot.stageTimingTelemetry.value( QStringLiteral("render_thread_total_ms") ).toDouble();
+}
+
+//render the picture
+void RenderFrameThread::drawFrame( int slotIndex )
+{
+    FrameSlot &slot = m_frameSlots[slotIndex];
+    slot.resetMetadata();
+    slot.frameNumber = m_activeFrameNumber;
+    slot.requestSerial = m_activeFrameRequestSerial;
+    slot.outputMode = m_activeOutputMode;
+
+    const double render_start = mlv_stage_timing_now();
+    const uint32_t frameNumber = slot.frameNumber;
+    const OutputMode outputMode = slot.outputMode;
+    const bool useGpuBilinearDebayer = m_activeUseGpuBilinearDebayer;
+    const double frameRequestStageTime = m_activeFrameRequestStageTime;
+    const double renderThreadQueueWaitMs =
+        (frameRequestStageTime > 0.0 && render_start >= frameRequestStageTime)
+            ? (render_start - frameRequestStageTime) * 1000.0
             : 0.0;
+
     mlv_stage_timing_reset_snapshot();
-    m_lastFrameUsedGpuBilinearDebayer = false;
-    m_lastGpuBilinearRendererDescription.clear();
-    m_lastDualIsoPreviewHistogramMs = 0.0;
-    m_lastDualIsoPreviewRegressionMs = 0.0;
-    m_lastDualIsoPreviewRowscaleMs = 0.0;
-    m_lastRenderThreadWorkMs = 0.0;
-    m_lastRenderThreadTotalMs = 0.0;
-    m_lastFrameReadyEmitStageTime = 0.0;
-    m_lastStageTimingTelemetry = QJsonObject();
-    if ( !m_useGpuBilinearDebayer )
+    if ( !useGpuBilinearDebayer )
     {
-        m_lastGpuBilinearFallbackReason.clear();
+        slot.gpuBilinearFallbackReason.clear();
     }
-    if ( m_outputMode == OutputProcessed16 && m_pRawImage16 )
+
+    if ( outputMode == OutputProcessed16 && !slot.rawImage16.empty() )
     {
-        getMlvProcessedFrame16( m_pMlvObject, m_frameNumber, m_pRawImage16, mlvappEffectiveWorkerThreadCount() );
-        m_lastDualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
-        m_lastDualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
-        m_lastDualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
-        mlv_stage_timing_note("render_thread_draw16", m_frameNumber, render_start);
+        getMlvProcessedFrame16( m_pMlvObject,
+                                frameNumber,
+                                slot.rawImage16.data(),
+                                mlvappEffectiveWorkerThreadCount() );
+        slot.dualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
+        slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
+        slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
+        mlv_stage_timing_note("render_thread_draw16", frameNumber, render_start);
     }
-    else if ( m_outputMode == OutputDebayered16 && m_pRawImage16 )
+    else if ( outputMode == OutputDebayered16 && !slot.rawImage16.empty() )
     {
         bool usedGpuBilinearDebayer = false;
         bool renderedDebayeredFrame = false;
-        if ( m_useGpuBilinearDebayer && m_pMlvObject )
+        if ( useGpuBilinearDebayer && m_pMlvObject )
         {
             const int width = getMlvWidth( m_pMlvObject );
             const int height = getMlvHeight( m_pMlvObject );
             const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
             m_gpuBilinearDebayerRawFrame.resize( pixelCount );
             getMlvRawFrameFloat( m_pMlvObject,
-                                 m_frameNumber,
+                                 frameNumber,
                                  m_gpuBilinearDebayerRawFrame.data() );
 
             QString gpuReason;
             QString rendererDescription;
             usedGpuBilinearDebayer =
                 gpuBilinearDebayerApplyGpuOffscreen( m_gpuBilinearDebayerRawFrame.data(),
-                                                     m_pRawImage16,
+                                                     slot.rawImage16.data(),
                                                      width,
                                                      height,
                                                      &gpuReason,
@@ -226,9 +419,9 @@ void RenderFrameThread::drawFrame()
             if ( usedGpuBilinearDebayer )
             {
                 renderedDebayeredFrame = true;
-                m_lastFrameUsedGpuBilinearDebayer = true;
-                m_lastGpuBilinearFallbackReason.clear();
-                m_lastGpuBilinearRendererDescription = rendererDescription;
+                slot.usedGpuBilinearDebayer = true;
+                slot.gpuBilinearFallbackReason.clear();
+                slot.gpuBilinearRendererDescription = rendererDescription;
                 if ( !m_loggedGpuBilinearSuccess )
                 {
                     qInfo() << "Experimental GPU bilinear debayer enabled for the debayered-16 preview path"
@@ -240,14 +433,14 @@ void RenderFrameThread::drawFrame()
             }
             else
             {
-                debayerBasic( m_pRawImage16,
+                debayerBasic( slot.rawImage16.data(),
                               m_gpuBilinearDebayerRawFrame.data(),
                               width,
                               height,
                               1 );
                 renderedDebayeredFrame = true;
-                m_lastFrameUsedGpuBilinearDebayer = false;
-                m_lastGpuBilinearRendererDescription = rendererDescription;
+                slot.usedGpuBilinearDebayer = false;
+                slot.gpuBilinearRendererDescription = rendererDescription;
                 const QString previousFallbackReason = m_lastGpuBilinearFallbackReason;
                 if ( !gpuReason.isEmpty()
                   && gpuReason != previousFallbackReason )
@@ -259,23 +452,26 @@ void RenderFrameThread::drawFrame()
                         << (rendererDescription.isEmpty() ? QStringLiteral("unknown") : rendererDescription)
                         << ").";
                 }
-                m_lastGpuBilinearFallbackReason = gpuReason;
+                slot.gpuBilinearFallbackReason = gpuReason;
             }
         }
 
         if ( !renderedDebayeredFrame )
         {
-            getMlvRawFrameDebayered( m_pMlvObject, m_frameNumber, m_pRawImage16 );
+            getMlvRawFrameDebayered( m_pMlvObject, frameNumber, slot.rawImage16.data() );
         }
-        mlv_stage_timing_note("render_thread_draw16_debayered", m_frameNumber, render_start);
+        mlv_stage_timing_note("render_thread_draw16_debayered", frameNumber, render_start);
     }
-    else
+    else if( !slot.rawImage8.empty() )
     {
-        getMlvProcessedFrame8( m_pMlvObject, m_frameNumber, m_pRawImage, mlvappEffectiveWorkerThreadCount() );
-        m_lastDualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
-        m_lastDualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
-        m_lastDualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
-        mlv_stage_timing_note("render_thread_draw", m_frameNumber, render_start);
+        getMlvProcessedFrame8( m_pMlvObject,
+                               frameNumber,
+                               slot.rawImage8.data(),
+                               mlvappEffectiveWorkerThreadCount() );
+        slot.dualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
+        slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
+        slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
+        mlv_stage_timing_note("render_thread_draw", frameNumber, render_start);
     }
 
     const double rawUint16Ms = getMlvLastRawUint16Milliseconds();
@@ -354,9 +550,9 @@ void RenderFrameThread::drawFrame()
         llrawprocChromaSmoothMs;
     const double llrawprocOtherMs = qMax( 0.0, llrawprocMs - llrawprocKnownMs );
     const double dualIsoPreviewTotalMs =
-        m_lastDualIsoPreviewHistogramMs +
-        m_lastDualIsoPreviewRegressionMs +
-        m_lastDualIsoPreviewRowscaleMs;
+        slot.dualIsoPreviewHistogramMs +
+        slot.dualIsoPreviewRegressionMs +
+        slot.dualIsoPreviewRowscaleMs;
     const double rawFloatConvertMs = getMlvLastRawFloatConvertMilliseconds();
     const double debayerWbPrepareMs = getMlvLastDebayerWbPrepareMilliseconds();
     const double debayerCaMs = getMlvLastDebayerCaMilliseconds();
@@ -431,178 +627,189 @@ void RenderFrameThread::drawFrame()
     const double processingCoreOtherMs =
         qMax( 0.0, processingCoreMs - processingCoreKnownMs );
 
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_ms"),
-                                       rawUint16Ms );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_disk_read_ms"),
-                                       rawUint16DiskReadMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_decompress_ms"),
-                                       rawUint16DecompressMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_decompress_prepare_ms"),
-                                       rawUint16DecompressPrepareMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_decompress_execute_ms"),
-                                       rawUint16DecompressExecuteMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_split_active"),
-                                       rawUint16Lj92Pred6SplitActive != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_split_requested"),
-                                       rawUint16Lj92Pred6SplitRequested != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_split_active"),
-                                       rawUint16Lj92GenericSplitActive != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_split_requested"),
-                                       rawUint16Lj92GenericSplitRequested != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_active"),
-                                       rawUint16Lj92Pred1FastPathActive != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_measurement_requested"),
-                                       rawUint16Lj92Pred1FastPathMeasurementRequested != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_measurement_active"),
-                                       rawUint16Lj92Pred1FastPathMeasurementActive != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_eligible"),
-                                       rawUint16Lj92Pred1FastPathEligible != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_scan_component_count"),
-                                       rawUint16Lj92ScanComponentCount );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_component_count"),
-                                       rawUint16Lj92ComponentCount );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_write_length"),
-                                       rawUint16Lj92WriteLength );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_expected_write_length"),
-                                       rawUint16Lj92ExpectedWriteLength );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_skip_length"),
-                                       rawUint16Lj92SkipLength );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_linearize_active"),
-                                       rawUint16Lj92LinearizeActive != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_predictor"),
-                                       rawUint16Lj92Predictor );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_total_ms"),
-                                       rawUint16Lj92Pred6TotalMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_bitstream_ms"),
-                                       rawUint16Lj92Pred6BitstreamMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_predictor_ms"),
-                                       rawUint16Lj92Pred6PredictorMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_other_ms"),
-                                       rawUint16Lj92Pred6OtherMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_total_ms"),
-                                       rawUint16Lj92GenericTotalMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_bitstream_ms"),
-                                       rawUint16Lj92GenericBitstreamMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_predictor_ms"),
-                                       rawUint16Lj92GenericPredictorMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_other_ms"),
-                                       rawUint16Lj92GenericOtherMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_total_ms"),
-                                       rawUint16Lj92Pred1FastPathTotalMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_bitstream_ms"),
-                                       rawUint16Lj92Pred1FastPathBitstreamMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_predictor_ms"),
-                                       rawUint16Lj92Pred1FastPathPredictorMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_other_ms"),
-                                       rawUint16Lj92Pred1FastPathOtherMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_unpack_ms"),
-                                       rawUint16UnpackMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_copy_ms"),
-                                       rawUint16CopyMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_prefetch_hit"),
-                                       rawUint16PrefetchHit != 0 );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_uint16_other_ms"),
-                                       rawUint16OtherMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_ms"),
-                                       llrawprocMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_total_ms"),
-                                       llrpGetLastTotalMilliseconds() );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_dark_frame_ms"),
-                                       llrawprocDarkFrameMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_vertical_stripes_ms"),
-                                       llrawprocVerticalStripesMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_focus_pixels_ms"),
-                                       llrawprocFocusPixelsMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_bad_pixels_ms"),
-                                       llrawprocBadPixelsMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_pattern_noise_ms"),
-                                       llrawprocPatternNoiseMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_dual_iso_ms"),
-                                       llrawprocDualIsoMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_chroma_smooth_ms"),
-                                       llrawprocChromaSmoothMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("llrawproc_other_ms"),
-                                       llrawprocOtherMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_total_ms"),
-                                        dualIsoPreviewTotalMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_histogram_ms"),
-                                        m_lastDualIsoPreviewHistogramMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_regression_ms"),
-                                        m_lastDualIsoPreviewRegressionMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_rowscale_ms"),
-                                        m_lastDualIsoPreviewRowscaleMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("debayered_frame_ms"),
-                                        getMlvLastDebayeredFrameMilliseconds() );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("raw_float_convert_ms"),
-                                       rawFloatConvertMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("debayer_exclusive_ms"),
-                                       debayerExclusiveMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("debayer_wb_prepare_ms"),
-                                       debayerWbPrepareMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("debayer_ca_ms"),
-                                       debayerCaMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("debayer_kernel_ms"),
-                                       debayerKernelMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("debayer_wb_undo_ms"),
-                                       debayerWbUndoMs );
-    m_lastStageTimingTelemetry.insert(
-        QStringLiteral("debayer_pipeline_other_ms"),
-        debayerPipelineOtherMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_ms"),
-                                       processingMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_setup_ms"),
-                                       processingSetupMs );
-    m_lastStageTimingTelemetry.insert(
-        QStringLiteral("processing_shadows_highlights_prep_ms"),
-        processingShadowsHighlightsPrepMs );
-    m_lastStageTimingTelemetry.insert(
-        QStringLiteral("processing_highest_green_ms"),
-        processingHighestGreenMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_core_ms"),
-                                       processingCoreMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_denoise_ms"),
-                                       processingDenoiseMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_rbf_ms"),
-                                       processingRbfMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_ca_ms"),
-                                       processingCaMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_other_ms"),
-                                       processingOtherMs );
-    m_lastStageTimingTelemetry.insert(
-        QStringLiteral("processing_core_levels_ms"),
-        processingCoreLevelsMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processing_core_color_ms"),
-                                       processingCoreColorMs );
-    m_lastStageTimingTelemetry.insert(
-        QStringLiteral("processing_core_creative_ms"),
-        processingCoreCreativeMs );
-    m_lastStageTimingTelemetry.insert(
-        QStringLiteral("processing_core_output_ms"),
-        processingCoreOutputMs );
-    m_lastStageTimingTelemetry.insert(
-        QStringLiteral("processing_core_other_ms"),
-        processingCoreOtherMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processed16_total_ms"),
-                                       getMlvLastProcessed16TotalMilliseconds() );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processed16_for_8bit_ms"),
-                                       getMlvLastProcessed16For8BitMilliseconds() );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processed16_to_8bit_ms"),
-                                       getMlvLastProcessed16To8BitMilliseconds() );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processed8_total_ms"),
-                                       getMlvLastProcessed8TotalMilliseconds() );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_active"),
-                                       getMlvLastProcessed8DirectPathActive() != 0 );
-    m_lastRenderThreadWorkMs = (mlv_stage_timing_now() - render_start) * 1000.0;
-    m_lastRenderThreadTotalMs =
-        (m_frameRequestStageTime > 0.0 && mlv_stage_timing_now() >= m_frameRequestStageTime)
-            ? (mlv_stage_timing_now() - m_frameRequestStageTime) * 1000.0
-            : m_lastRenderThreadWorkMs;
-    m_lastFrameReadyEmitStageTime = mlv_stage_timing_now();
-    m_lastStageTimingTelemetry.insert( QStringLiteral("render_thread_queue_wait_ms"),
-                                       m_lastRenderThreadQueueWaitMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("render_thread_work_ms"),
-                                       m_lastRenderThreadWorkMs );
-    m_lastStageTimingTelemetry.insert( QStringLiteral("render_thread_total_ms"),
-                                       m_lastRenderThreadTotalMs );
-    emit frameReady();
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_ms"),
+                                      rawUint16Ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_disk_read_ms"),
+                                      rawUint16DiskReadMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_decompress_ms"),
+                                      rawUint16DecompressMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_decompress_prepare_ms"),
+                                      rawUint16DecompressPrepareMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_decompress_execute_ms"),
+                                      rawUint16DecompressExecuteMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_split_active"),
+                                      rawUint16Lj92Pred6SplitActive != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_split_requested"),
+                                      rawUint16Lj92Pred6SplitRequested != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_split_active"),
+                                      rawUint16Lj92GenericSplitActive != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_split_requested"),
+                                      rawUint16Lj92GenericSplitRequested != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_active"),
+                                      rawUint16Lj92Pred1FastPathActive != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_measurement_requested"),
+                                      rawUint16Lj92Pred1FastPathMeasurementRequested != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_measurement_active"),
+                                      rawUint16Lj92Pred1FastPathMeasurementActive != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_eligible"),
+                                      rawUint16Lj92Pred1FastPathEligible != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_scan_component_count"),
+                                      rawUint16Lj92ScanComponentCount );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_component_count"),
+                                      rawUint16Lj92ComponentCount );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_write_length"),
+                                      rawUint16Lj92WriteLength );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_expected_write_length"),
+                                      rawUint16Lj92ExpectedWriteLength );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_skip_length"),
+                                      rawUint16Lj92SkipLength );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_linearize_active"),
+                                      rawUint16Lj92LinearizeActive != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_predictor"),
+                                      rawUint16Lj92Predictor );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_total_ms"),
+                                      rawUint16Lj92Pred6TotalMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_bitstream_ms"),
+                                      rawUint16Lj92Pred6BitstreamMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_predictor_ms"),
+                                      rawUint16Lj92Pred6PredictorMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred6_other_ms"),
+                                      rawUint16Lj92Pred6OtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_total_ms"),
+                                      rawUint16Lj92GenericTotalMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_bitstream_ms"),
+                                      rawUint16Lj92GenericBitstreamMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_predictor_ms"),
+                                      rawUint16Lj92GenericPredictorMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_generic_other_ms"),
+                                      rawUint16Lj92GenericOtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_total_ms"),
+                                      rawUint16Lj92Pred1FastPathTotalMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_bitstream_ms"),
+                                      rawUint16Lj92Pred1FastPathBitstreamMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_predictor_ms"),
+                                      rawUint16Lj92Pred1FastPathPredictorMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_lj92_pred1_fast_path_other_ms"),
+                                      rawUint16Lj92Pred1FastPathOtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_unpack_ms"),
+                                      rawUint16UnpackMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_copy_ms"),
+                                      rawUint16CopyMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_prefetch_hit"),
+                                      rawUint16PrefetchHit != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_other_ms"),
+                                      rawUint16OtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_ms"),
+                                      llrawprocMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_total_ms"),
+                                      llrpGetLastTotalMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_dark_frame_ms"),
+                                      llrawprocDarkFrameMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_vertical_stripes_ms"),
+                                      llrawprocVerticalStripesMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_focus_pixels_ms"),
+                                      llrawprocFocusPixelsMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_bad_pixels_ms"),
+                                      llrawprocBadPixelsMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_pattern_noise_ms"),
+                                      llrawprocPatternNoiseMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_dual_iso_ms"),
+                                      llrawprocDualIsoMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_chroma_smooth_ms"),
+                                      llrawprocChromaSmoothMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_other_ms"),
+                                      llrawprocOtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_total_ms"),
+                                      dualIsoPreviewTotalMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_histogram_ms"),
+                                      slot.dualIsoPreviewHistogramMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_regression_ms"),
+                                      slot.dualIsoPreviewRegressionMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_preview_rowscale_ms"),
+                                      slot.dualIsoPreviewRowscaleMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayered_frame_ms"),
+                                      getMlvLastDebayeredFrameMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_float_convert_ms"),
+                                      rawFloatConvertMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_exclusive_ms"),
+                                      debayerExclusiveMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_wb_prepare_ms"),
+                                      debayerWbPrepareMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_ca_ms"),
+                                      debayerCaMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_kernel_ms"),
+                                      debayerKernelMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_wb_undo_ms"),
+                                      debayerWbUndoMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_pipeline_other_ms"),
+                                      debayerPipelineOtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_ms"),
+                                      processingMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_setup_ms"),
+                                      processingSetupMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_prep_ms"),
+                                      processingShadowsHighlightsPrepMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_highest_green_ms"),
+                                      processingHighestGreenMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_ms"),
+                                      processingCoreMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_denoise_ms"),
+                                      processingDenoiseMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_rbf_ms"),
+                                      processingRbfMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_ca_ms"),
+                                      processingCaMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_other_ms"),
+                                      processingOtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_levels_ms"),
+                                      processingCoreLevelsMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_ms"),
+                                      processingCoreColorMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_ms"),
+                                      processingCoreCreativeMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_output_ms"),
+                                      processingCoreOutputMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_other_ms"),
+                                      processingCoreOtherMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed16_total_ms"),
+                                      getMlvLastProcessed16TotalMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed16_for_8bit_ms"),
+                                      getMlvLastProcessed16For8BitMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed16_to_8bit_ms"),
+                                      getMlvLastProcessed16To8BitMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed8_total_ms"),
+                                      getMlvLastProcessed8TotalMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_active"),
+                                      getMlvLastProcessed8DirectPathActive() != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed8_prefetch_hit"),
+                                      getMlvLastProcessed8PrefetchHit() != 0 );
+
+    slot.processedFrame8Active =
+        m_pMlvObject && m_pMlvObject->current_processed_frame_8bit_active;
+    slot.processedFrame8Signature =
+        m_pMlvObject ? m_pMlvObject->current_processed_frame_8bit_signature : 0;
+    slot.processedFrame16Active =
+        m_pMlvObject && m_pMlvObject->current_processed_frame_active;
+    slot.processedFrame16Signature =
+        m_pMlvObject ? m_pMlvObject->current_processed_frame_signature : 0;
+    if( m_pMlvObject && m_pMlvObject->llrawproc )
+    {
+        slot.dualIsoPattern = m_pMlvObject->llrawproc->diso_pattern;
+        slot.dualIsoAutoCorrection = m_pMlvObject->llrawproc->diso_auto_correction;
+        slot.dualIsoEvCorrection = m_pMlvObject->llrawproc->diso_ev_correction;
+        slot.dualIsoBlackDelta = m_pMlvObject->llrawproc->diso_black_delta;
+    }
+
+    const double renderThreadWorkMs = (mlv_stage_timing_now() - render_start) * 1000.0;
+    const double renderThreadTotalMs =
+        (frameRequestStageTime > 0.0 && mlv_stage_timing_now() >= frameRequestStageTime)
+            ? (mlv_stage_timing_now() - frameRequestStageTime) * 1000.0
+            : renderThreadWorkMs;
+    slot.frameReadyEmitStageTime = mlv_stage_timing_now();
+    slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_queue_wait_ms"),
+                                      renderThreadQueueWaitMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_work_ms"),
+                                      renderThreadWorkMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_total_ms"),
+                                      renderThreadTotalMs );
 }

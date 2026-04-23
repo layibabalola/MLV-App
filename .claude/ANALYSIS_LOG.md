@@ -323,3 +323,47 @@
     - plain console: `41 / 160 / 17 / 0`
     - app-backed console with fresh `MLVApp.exe`: `41 / 726 / 1 / 0`
     - pipeline: `46 / 526 / 4 / 0`
+  - audited the Dual ISO sync inside `platform/qt/MainWindow.cpp:10900-10933` before treating it as skippable playback UI work:
+    - the combobox / slider `blockSignals(true)` updates at `10908-10910` and `10917-10928` are safe widget reflection only
+    - but the same block also mutates real state via `ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 )` at `10902` and llrawproc sign normalization at `10904-10907` / `10931`
+    - safe conclusion: do not skip the whole block during playback; only a narrower “widget reflection only” split is clearly safe to defer
+  - re-audited the updated Qt-side playback-overlap WIP after the queued post-frame boundary / unlocked `frameReady` changes:
+    - the previous synchronous `drawFrameReady() -> timerFrameEvent()` ordering bug is fixed by the new queued invoke after `emit frameReady()`
+    - two blocking risks remain in `RenderFrameThread.cpp`:
+      - `run()` now unlocks before `drawFrame()`, but `renderFrame()` can still overwrite `m_frameNumber`, `m_outputMode`, `m_useGpuBilinearDebayer`, and `m_frameRequestStageTime` while `drawFrame()` is reading them
+      - `isIdle()` still reports `!m_renderFrame`, but `run()` now clears `m_renderFrame` before the expensive render work starts, so GUI callers can treat the worker as idle while it is still rendering
+- 2026-04-23: kept the safe subset of the Qt overlap work and explicitly pushed the rest back behind an experiment gate
+  - restored the old exclusive-access contract in `platform/qt/RenderFrameThread.cpp` / `.h` by making `RenderFrameThread::lock()` wait for true idleness again; `resizeEvent()` now also waits for the in-flight frame to drain before queuing a replacement render
+  - kept the `drawFrameReady()` sub-bucket telemetry, scene-rect guard, playback display-cache bypass, headless determinism fix, and the fast playback scaler; the scaler now reuses precomputed source-index maps for each `(source,target)` size
+  - gated processed8 background prefetch behind `MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH` and reset its lookahead back to `2`; default kept path now records `processed8_prefetch_hit = false`
+  - fixed one real processed-frame signature hole by hashing `llrawproc->diso_pattern` in `src/mlv/video_mlv.c`
+  - fresh safe-path artifacts live in `.claude/profiling/20260423-safe-overlap-fastscale/`
+    - run1 warm medians: `cadence_ms 53.903`, `processed8_total_ms 39.000`, `render_thread_work_ms 39.000`, `draw_frame_ready_total_ms 14.000`
+    - run2 warm medians: `cadence_ms 70.897`, `processed8_total_ms 48.000`, `render_thread_work_ms 48.000`, `draw_frame_ready_total_ms 17.000`
+    - run3 warm medians: `cadence_ms 68.076`, `processed8_total_ms 47.000`, `render_thread_work_ms 47.000`, `draw_frame_ready_total_ms 16.000`
+    - run4 warm medians: `cadence_ms 49.614`, `processed8_total_ms 37.000`, `render_thread_work_ms 37.000`, `draw_frame_ready_total_ms 12.000`
+  - safe conclusion: low-end runs beat the earlier `59.299 ms` direct-8-bit baseline without relying on processed8 prefetch, but the current safe path is still too variable and still above the native `41.708 ms` realtime budget on this VM
+  - current structural blocker is now clear: cadence is still serialized through a single live output buffer, so the next honest step is a front/back render-buffer plus per-frame presentation-metadata handoff
+  - fresh validation after the kept block:
+    - plain console: `41 / 160 / 17 / 0`
+    - app-backed console with fresh `MLVApp.exe`: `41 / 750 / 1 / 0`
+    - pipeline: `46 / 526 / 4 / 0`
+## 2026-04-23 - overlap follow-up matrix and current keep
+
+- Rebuilt and iterated on the new front/back playback handoff in the integration worktree.
+- Best kept measured state remains the overlap handoff plus the serial/unrolled fast playback scaler in `platform/qt/MainWindow.cpp`.
+- Folder-level warm medians from the large Dual ISO `t4` VM path:
+  - `20260423-frontback-overlap`: `cadence_ms 45.1343`, `processed8_total_ms 33.9999`, `render_thread_work_ms 33.9999`, `draw_frame_ready_total_ms 11.0`
+  - `20260423-frontback-overlap-v5`: `cadence_ms 44.6134`, `processed8_total_ms 33.5`, `render_thread_work_ms 34.0`, `draw_frame_ready_total_ms 11.0`
+- Follow-up experiments that did **not** beat the keep:
+  - flattened `pixelOffsets` scaler (`v3`): `cadence_ms 51.4075`
+  - early-slot-release copy experiment (`v4`): `cadence_ms 47.1552`
+  - direct-8 prefetch enabled (`v6-prefetch`): `cadence_ms 53.0956`, only `2/11` to `3/11` warm prefetch hits per run
+- Honest status:
+  - this closes the gap from the old `~59 ms` keep point to the mid-`44 ms` range on this VM
+  - it still misses the realtime bar of `41.7 ms`
+  - the next meaningful win now needs another structural stage, not more opportunistic scaler/prefetch churn
+- Revalidated on the kept state:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - `pipeline_tests --check-golden`: `46/526/4/0`
+  - app-backed `console_tests --check-golden`: `41/750/1/0`

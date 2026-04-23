@@ -88,6 +88,7 @@ void applyProcessingObject( processingObject_t * processing,
                             uint16_t * __restrict outputImage,
                             int threads, int imageChanged, uint64_t frameIndex );
 int processingCanUseDirect8BitOutput(const processingObject_t * processing);
+void processingResetLastTimingTelemetry(void);
 void applyProcessingObject8( processingObject_t * processing,
                              int imageX, int imageY,
                              uint16_t * __restrict inputImage,

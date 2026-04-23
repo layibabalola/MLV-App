@@ -389,6 +389,11 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("engine_latency_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("presentation_overhead_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_queue_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_scene_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_image_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_present_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_scopes_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_overlay_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_total_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_histogram_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_regression_ms")));
@@ -429,6 +434,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("processed16_to_8bit_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processed8_total_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processed8_direct_path_active")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("processed8_prefetch_hit")));
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_queue_wait_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_work_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_total_ms")));
@@ -469,8 +475,14 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("processed16_to_8bit_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("processed8_total_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_queue_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_scene_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_image_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_present_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_scopes_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_overlay_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_total_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("processed8_direct_path_active")).isBool());
+        ASSERT_TRUE(sample.value(QStringLiteral("processed8_prefetch_hit")).isBool());
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_queue_wait_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_work_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_total_ms")).toDouble() >= 0.0);
