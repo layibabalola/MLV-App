@@ -23,9 +23,58 @@
 #define _llrawproc_object_h
 
 #include <sys/types.h>
+#include <pthread.h>
 #include "pixelproc.h"
 #include "stripes.h"
+#include "dualiso.h"
+#include "patternnoise.h"
 #include "../mlv.h"
+
+typedef struct
+{
+    int diso_pattern;
+    int diso_auto_correction;
+    double diso_ev_correction;
+    int diso_black_delta;
+    int dng_bit_depth;
+    int dng_black_level;
+    int dng_white_level;
+} llrawproc_runtime_state_t;
+
+typedef struct
+{
+    pthread_t thread_id;
+    int in_use;
+
+    int * raw2ev;
+    int * ev2raw;
+    int32_t prev_black_level;
+    pixel_map focus_pixel_map_copy;
+    pixel_map bad_pixel_map_copy;
+    uint32_t focus_pixel_map_version;
+    uint32_t bad_pixel_map_version;
+    uint16_t * dark_frame_data_copy;
+    uint32_t dark_frame_size;
+    uint32_t dark_frame_capacity;
+    uint32_t dark_frame_version;
+    mlv_dark_hdr_t dark_frame_hdr_copy;
+
+    chroma_smooth_scratch_t chroma_smooth_scratch;
+    pattern_noise_scratch_t pattern_noise_scratch;
+    vertical_stripes_scratch_t vertical_stripes_scratch;
+    dualiso_preview_scratch_t diso_preview_scratch;
+    dualiso_full20bit_scratch_t diso_full20bit_scratch;
+
+    int diso_pattern;
+    int diso_auto_correction;
+    double diso_ev_correction;
+    int diso_black_delta;
+
+    int dng_bit_depth;
+    int dng_black_level;
+    int dng_white_level;
+    llrawproc_runtime_state_t seeded_runtime_state;
+} llrawprocWorkerState_t;
 
 /* Low level raw processing object */
 typedef struct
@@ -44,13 +93,15 @@ typedef struct
     int chroma_smooth;    // chroma smooth, 2 = cs2x2, 3 cs3x3, 5 = cs5x5
     int pattern_noise;    // fix pattern noise (0, 1)
     int deflicker_target; // deflicker value
+    chroma_smooth_scratch_t chroma_smooth_scratch;
+    pattern_noise_scratch_t pattern_noise_scratch;
 
     int diso_validity;    // Dual iso status:
                           // 0 = not valid (no DISO block found, can be older dual iso clip),
                           // 1 = forced (forced to be processed as dual iso when older dual iso clip w/o DISO block is loaded),
                           // 2 = valid (DISO block is found, means this is real dual iso clip)
 
-    int dual_iso;         // use dualiso processing, 0 = do not use, 1 = full 20 bit processing
+    int dual_iso;         // use dualiso processing, 0 = do not use, 1 = full 20 bit processing, 2 = preview processing
     int diso1;
     int diso2;
     int diso_pattern;
@@ -66,6 +117,8 @@ typedef struct
     int diso_alias_map;   // flag for Alias Map switchin on/off
     int diso_frblending;  // flag for Fullres Blending switching on/off
     int dark_frame;       // flag for Dark Frame subtraction mode 0 = off, 1 = ext, 2 = int
+    dualiso_preview_scratch_t diso_preview_scratch;
+    dualiso_full20bit_scratch_t diso_full20bit_scratch;
 
     /* cDNG bit depth and black/white levels */
     int dng_bit_depth;
@@ -74,11 +127,14 @@ typedef struct
 
     /* external dark frame file name */
     char * dark_frame_filename;
+    char * dark_frame_loaded_filename;
+    int dark_frame_loaded_mode;
     /* external dark frame block header */
     mlv_dark_hdr_t dark_frame_hdr;
     /* external dark frame buffer pointer and its size */
     uint16_t * dark_frame_data;
     uint32_t dark_frame_size;
+    uint32_t dark_frame_version;
 
     /* LUTs */
     int * raw2ev;
@@ -90,6 +146,8 @@ typedef struct
     /* pixel maps */
     pixel_map focus_pixel_map;
     pixel_map bad_pixel_map;
+    uint32_t focus_pixel_map_version;
+    uint32_t bad_pixel_map_version;
 
     /* stripe corrections */
     stripes_correction stripe_corrections;

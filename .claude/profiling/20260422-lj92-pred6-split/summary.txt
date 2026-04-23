@@ -1,0 +1,17 @@
+LJ92 predictor telemetry
+large.predictors=
+1
+large.pred6_split_requested=
+True
+large.pred6_split_active_any=
+False
+large.decompress_execute_avg_ms=
+65.9999506814139
+tiny.predictor=
+1
+tiny.pred6_split_requested=
+True
+tiny.pred6_split_active=
+False
+tiny.decompress_execute_ms=
+29.000043869018555

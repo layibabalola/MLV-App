@@ -113,17 +113,28 @@ void ReceiptApplier::applyToMlv(ReceiptSettings *receipt,
     }
 
     /* Step 4: Handle auto-corrected vs non-auto-corrected dual ISO */
+    const int requestedDualIsoMode = receipt->dualIso();
     if( !receipt->dualIsoAutoCorrected() )
     {
-        receipt->setDualIso( 0 );
-
-        if( receipt->dualIsoForced() == DISO_VALID )
+        if( requestedDualIsoMode != 2 && receipt->dualIsoForced() == DISO_VALID )
         {
             /* Enable dual ISO if the two ISO levels actually differ */
             if( mlvObject->llrawproc->diso1 != mlvObject->llrawproc->diso2 )
             {
                 receipt->setDualIso( 1 );
             }
+            else
+            {
+                receipt->setDualIso( 0 );
+            }
+        }
+        else if( requestedDualIsoMode != 2 )
+        {
+            receipt->setDualIso( 0 );
+        }
+
+        if( receipt->dualIsoForced() == DISO_VALID || requestedDualIsoMode == 2 )
+        {
             mlvObject->llrawproc->diso_pattern = 0;
             mlvObject->llrawproc->diso_auto_correction = -1;
             mlvObject->llrawproc->diso_ev_correction = 1;

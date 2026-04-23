@@ -24,6 +24,11 @@
 /* pixel map type */
 enum { PIX_FOCUS, PIX_BAD };
 
+typedef struct {
+    uint16_t * buffer;
+    size_t capacity;
+} chroma_smooth_scratch_t;
+
 /* pixel struct */
 typedef struct {
     int x;
@@ -45,9 +50,34 @@ int * get_ev2raw(int black);
 void free_luts(int * raw2ev, int * ev2raw);
 
 /* do chroma smoothing with methods: 2x2, 3x3 and 5x5 */
-void chroma_smooth(int method, uint16_t * image_data, int width, int height, int black, int white, int * raw2ev, int * ev2raw);
+void chroma_smooth(int method,
+                   uint16_t * image_data,
+                   int width,
+                   int height,
+                   int black,
+                   int white,
+                   int * raw2ev,
+                   int * ev2raw,
+                   chroma_smooth_scratch_t * scratch);
 
 /* fix focus raw pixels */
+void prepare_focus_pixel_map(pixel_map * focus_pixel_map,
+                             int * fpm_status,
+                             uint32_t camera_id,
+                             int32_t raw_width,
+                             int32_t raw_height,
+                             int crop_rec,
+                             int unified_mode);
+void interpolate_focus_pixel_map(const pixel_map * focus_pixel_map,
+                                 uint16_t * image_data,
+                                 uint16_t width,
+                                 uint16_t height,
+                                 uint16_t pan_x,
+                                 uint16_t pan_y,
+                                 int average_method,
+                                 int dual_iso,
+                                 int * raw2ev,
+                                 int * ev2raw);
 void fix_focus_pixels(pixel_map * focus_pixel_map,
                       int * fpm_status,
                       uint16_t * image_data,
@@ -66,6 +96,30 @@ void fix_focus_pixels(pixel_map * focus_pixel_map,
                       int * ev2raw);
 
 /* fix all kind of bad raw pixels */
+int prepare_bad_pixel_map(pixel_map * bad_pixel_map,
+                          int * bpm_status,
+                          uint16_t * image_data,
+                          uint32_t camera_id,
+                          uint16_t width,
+                          uint16_t height,
+                          uint16_t pan_x,
+                          uint16_t pan_y,
+                          int32_t raw_width,
+                          int32_t raw_height,
+                          int32_t black_level,
+                          int bpm_mode,
+                          int search_method,
+                          int * raw2ev);
+void interpolate_bad_pixel_map(const pixel_map * bad_pixel_map,
+                               uint16_t * image_data,
+                               uint16_t width,
+                               uint16_t height,
+                               uint16_t pan_x,
+                               uint16_t pan_y,
+                               int average_method,
+                               int dual_iso,
+                               int * raw2ev,
+                               int * ev2raw);
 void fix_bad_pixels(pixel_map * bad_pixel_map,
                     int * bpm_status,
                     uint16_t * image_data,

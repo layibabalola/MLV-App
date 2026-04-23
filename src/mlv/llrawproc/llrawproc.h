@@ -29,6 +29,26 @@ void freeLLRawProcObject(mlvObject_t * video);
 
 /* all low level raw processing takes place here */
 void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size);
+double llrpGetLastSharedLockMilliseconds(void);
+double llrpGetLastDualIsoRefineLockMilliseconds(void);
+double llrpGetLastPublishLockMilliseconds(void);
+double llrpGetLastTotalMilliseconds(void);
+double llrpGetLastDarkFrameMilliseconds(void);
+double llrpGetLastVerticalStripesMilliseconds(void);
+double llrpGetLastFocusPixelsMilliseconds(void);
+double llrpGetLastBadPixelsMilliseconds(void);
+double llrpGetLastPatternNoiseMilliseconds(void);
+double llrpGetLastDualIsoMilliseconds(void);
+double llrpGetLastChromaSmoothMilliseconds(void);
+double llrpGetLastDualIsoPreviewHistogramMilliseconds(void);
+double llrpGetLastDualIsoPreviewRegressionMilliseconds(void);
+double llrpGetLastDualIsoPreviewRowscaleMilliseconds(void);
+void llrpResetDebugPixelMapCopyCount(void);
+uint64_t llrpGetDebugPixelMapCopyCount(void);
+void llrpResetDebugDarkFrameCopyCount(void);
+uint64_t llrpGetDebugDarkFrameCopyCount(void);
+void llrpResetDebugRuntimePublishCount(void);
+uint64_t llrpGetDebugRuntimePublishCount(void);
 
 /* Detect focus dot fix mode according to RAWC block info (binning + skipping) and camera ID
    Return value 0 = off, 1 = On, 2 = CropRec */

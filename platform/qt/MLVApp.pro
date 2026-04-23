@@ -4,7 +4,8 @@
 #
 #-------------------------------------------------
 
-QT       += core gui multimedia
+QT       += core gui multimedia opengl
+greaterThan(QT_MAJOR_VERSION, 5): QT += openglwidgets
 
 win32{
     greaterThan(QT_MAJOR_VERSION, 5): CONFIG   += c++17
@@ -134,12 +135,17 @@ linux-g++*{
     }
 }
 
+include(avx_optin.pri)
+
 ##############
 SOURCES += \
     ClipInformation.cpp \
     RenameDialog.cpp \
     SessionModel.cpp \
     Updater/Updater.cpp \
+    GpuPreviewProcessing.cpp \
+    GpuDebayer.cpp \
+    GpuDisplayViewport.cpp \
         main.cpp \
         MainWindow.cpp \
     ../../src/debayer/amaze_demosaic.c \
@@ -246,6 +252,7 @@ SOURCES += \
     ../../src/batch/BatchContext.cpp \
     ../../src/batch/BatchPrompts.cpp \
     ../../src/batch/BatchRunner.cpp \
+    ../../src/batch/MlvTrim.cpp \
     ../../src/batch/BatchLogger.cpp \
     ../../src/batch/ReceiptLoader.cpp \
     ../../src/batch/ReceiptApplier.cpp
@@ -256,6 +263,9 @@ INCLUDEPATH += $$PWD/../../src
 macx: SOURCES += ../cocoa/avf_lib/avf_lib.m
 
 HEADERS += MainWindow.h \
+           GpuDebayer.h \
+           GpuPreviewProcessing.h \
+    GpuDisplayViewport.h \
     ../../src/debayer/debayer.h \
     ../../src/debayer/helpersse2.h \
     ../../src/debayer/conv.h \
@@ -383,6 +393,7 @@ HEADERS += MainWindow.h \
     ../../src/batch/BatchContext.h \
     ../../src/batch/BatchPrompts.h \
     ../../src/batch/BatchRunner.h \
+    ../../src/batch/MlvTrim.h \
     ../../src/batch/BatchLogger.h \
     ../../src/batch/ReceiptLoader.h \
     ../../src/batch/ReceiptApplier.h
@@ -417,6 +428,7 @@ RESOURCES += \
 DISTFILES += \
     Info.plist \
     MLVAPP.ico \
+    GPUDisplayFoundation.md \
     darkstyle/darkstyle.qss \
     darkstyle/darkstyleOSX.qss \
     mlvapp.desktop

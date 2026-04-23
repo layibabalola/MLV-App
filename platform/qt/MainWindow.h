@@ -17,6 +17,8 @@
 #include <QThreadPool>
 #include <QProcess>
 #include <QVector>
+#include <QImage>
+#include <QPixmap>
 #include <QGraphicsPixmapItem>
 #include <QCloseEvent>
 #include <QXmlStreamWriter>
@@ -31,6 +33,8 @@
 #include "ReceiptSettings.h"
 #include "AudioPlayback.h"
 #include "GraphicsPickerScene.h"
+#include "MainWindowGpuPreviewPolicy.h"
+#include "GpuPreviewProcessing.h"
 #include "RenderFrameThread.h"
 #include "GradientElement.h"
 #include "CrossElement.h"
@@ -54,6 +58,64 @@ public:
     explicit MainWindow(int &argc, char **argv, QWidget *parent = 0);
     ~MainWindow();
 
+    enum class PlaybackProfileScope
+    {
+        None = 0,
+        Histogram,
+        Waveform,
+        Parade,
+        Vectorscope
+    };
+
+    enum class PlaybackProfileDebayerRequest
+    {
+        Auto = 0,
+        Receipt,
+        None,
+        Simple,
+        Bilinear,
+        LMMSE,
+        IGV,
+        AMaZE,
+        AHD,
+        RCD,
+        DCB,
+        AmazeCached
+    };
+
+    enum class PlaybackProfileProcessingRequest
+    {
+        Auto = 0,
+        Receipt,
+        Subset
+    };
+
+    struct PlaybackProfileOptions
+    {
+        QString inputPath;
+        QString receiptPath;
+        QString outputPath;
+        int startFrame = 0;
+        int frameCount = 0;
+        int workerThreads = 1;
+        bool forceWorkerThreads = true;
+        uint64_t rawCacheMB = 0;
+        int cacheCpuCores = 1;
+        bool zebras = false;
+        bool fastOpen = false;
+        bool showWindow = false;
+        bool waitForPaint = false;
+        PlaybackProfileScope scope = PlaybackProfileScope::None;
+        PlaybackProfileDebayerRequest playbackDebayer =
+            PlaybackProfileDebayerRequest::Auto;
+        PlaybackProfileProcessingRequest playbackProcessing =
+            PlaybackProfileProcessingRequest::Auto;
+        GpuPreviewProcessingBackendRequest gpuPreviewProcessingBackend =
+            GpuPreviewProcessingBackendRequest::Auto;
+        GpuBilinearDebayerBackendRequest gpuBilinearDebayerBackend =
+            GpuBilinearDebayerBackendRequest::Auto;
+    };
+
     /* Progress-only callback for exportCdngSequence.
      * framesDone:   frames completed so far (exported + skipped)
      * totalFrames:  total frames to export
@@ -76,6 +138,8 @@ public:
         bool audioExport,
         bool rawFixEnabled,
         ProgressCallback progressCallback = nullptr);
+
+    int runHeadlessPlaybackProfile(const PlaybackProfileOptions & options);
 
 protected:
     void timerEvent( QTimerEvent *t );
@@ -227,6 +291,7 @@ private slots:
     void on_actionAlwaysUseAMaZE_triggered();
     void on_actionCaching_triggered();
     void on_actionDontSwitchDebayerForPlayback_triggered();
+    void on_actionUseFastProcessingForPlayback_triggered();
     void on_actionExportSettings_triggered();
     void on_actionResetReceipt_triggered();
     void on_actionCopyRecept_triggered();
@@ -444,6 +509,28 @@ private slots:
     void on_lineEditTransferFunction_textChanged(const QString &arg1);
 
 private:
+    struct DisplayPreviewCacheEntry
+    {
+        bool valid = false;
+        bool zoomFit = false;
+        bool betterResizer = false;
+        bool zebras = false;
+        bool gpuScaling = false;
+        uint64_t frameIndex = 0;
+        uint64_t signature = 0;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        int sceneWidth = 0;
+        int sceneHeight = 0;
+        int imageWidth = 0;
+        int imageHeight = 0;
+        int transformationMode = 0;
+        int devicePixelRatioMilli = 0;
+        uint8_t underOver = 0;
+        QImage image;
+        QPixmap pixmap;
+    };
+
     Ui::MainWindow *ui;
     InfoDialog *m_pInfoDialog;
     StatusDialog *m_pStatusDialog;
@@ -472,6 +559,7 @@ private:
     DoubleClickLabel *m_pTcLabel;
     bool m_tcModeDuration;
     uint8_t *m_pRawImage;
+    uint16_t *m_pRawImage16;
     uint32_t m_cacheSizeMB;
     uint8_t m_codecProfile;
     uint8_t m_codecOption;
@@ -503,7 +591,30 @@ private:
     bool m_zoomTo100Center;
     bool m_zoomModeChanged;
     bool m_playbackStopped;
+    bool m_dualIsoPlaybackPreviewActive;
+    bool m_playToFirstFramePending = false;
+    bool m_playToFirstFrameTargetFrameValid = false;
+    bool m_lastPlayToFirstFrameValid = false;
+    bool m_lastPlayStartPrerollRequested = false;
     bool m_inClipDeleteProcess;
+    bool m_renderThreadUsing16BitPreview;
+    bool m_renderThreadUsingGpuPreviewProcessing;
+    bool m_renderThreadUsingGpuBilinearDebayer;
+    bool m_renderThreadUsingCpuPreviewProcessing = false;
+    int m_playToFirstFrameTargetFrame = -1;
+    double m_playToFirstFrameStartSeconds = 0.0;
+    double m_lastPlayToFirstFrameMs = 0.0;
+    bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
+    GpuPreviewProcessingBackendRequest m_gpuPreviewProcessingBackendRequest =
+        GpuPreviewProcessingBackendRequest::Auto;
+    GpuBilinearDebayerBackendRequest m_gpuBilinearDebayerBackendRequest =
+        GpuBilinearDebayerBackendRequest::Auto;
+    MainWindowGpuPreviewPolicyState m_lastQueuedGpuPreviewPolicy;
+    GpuDisplayViewport::PresentationOptions m_lastQueuedGpuPresentationOptions;
+    GpuPreviewProcessingConfig m_lastQueuedGpuPreviewProcessingConfig;
+    QString m_lastQueuedPlaybackProcessingReason;
+    uint32_t m_displayPreviewCacheNextSlot;
+    DisplayPreviewCacheEntry m_displayPreviewCache[8];
     QString m_lastExportPath;
     QString m_lastSessionFileName;
     QString m_lastMlvOpenFileName;
@@ -520,6 +631,17 @@ private:
     QItemSelectionModel* m_pSelectionModel;
     int m_lastClipBeforeExport;
     void drawFrame( void );
+    bool playbackPolicyActive( void ) const;
+    void applyPlaybackDebayerSelection( void );
+    void setPlaybackProfileDebayerRequest(
+        PlaybackProfileDebayerRequest request );
+    void setPlaybackProfileProcessingRequest(
+        PlaybackProfileProcessingRequest request );
+    void restorePlaybackDebayerSelection( const QString & label );
+    QString selectedPlaybackDebayerLabel( void ) const;
+    QString playbackDebayerLabel( void ) const;
+    QString selectedPlaybackProcessingLabel( void ) const;
+    QString playbackProcessingLabel( void ) const;
     void importNewMlv(QString fileName);
     int openMlvForPreview(QString fileName);
     int openMlv(QString fileName);
@@ -536,6 +658,11 @@ private:
     int askToSaveCurrentSession( void );
     void openSession(QString fileNameSession );
     void saveSession( QString fileName );
+    void applyEffectiveDualIsoPlaybackSettings( void );
+    void beginPlayToFirstFrameMeasurement( void );
+    void notePlayToFirstFramePresentation( int presentedFrame );
+    bool primePlaybackCacheOnPlayStart( void );
+    void invalidateDisplayPreviewCache( void );
     void readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings *receipt , int version);
     void writeXmlElementsToFile( QXmlStreamWriter *xmlWriter, ReceiptSettings *receipt );
     void deleteSession( void );
@@ -552,8 +679,11 @@ private:
     void setPreviewMode( void );
     double getFramerate( void );
     void paintAudioTrack( void );
-    uint8_t drawZebras( void );
+    uint8_t drawZebras( QImage *image );
     void drawFrameNumberLabel( void );
+    bool shouldUseGpu16PreviewPath( void ) const;
+    bool shouldUseGpuPreviewProcessingPath( void ) const;
+    bool shouldUseGpuBilinearDebayerPath( void ) const;
     void setToolButtonFocusPixels( int index );
     void setToolButtonFocusPixelsIntMethod( int index );
     void setToolButtonBadPixels( int index );

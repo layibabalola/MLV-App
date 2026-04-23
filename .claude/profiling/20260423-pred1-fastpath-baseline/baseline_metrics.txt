@@ -1,0 +1,15 @@
+Baseline configuration: large_dual_iso preview receipt, --frames 16, discard first 5 total frames, then compute medians over remaining samples with raw_uint16_ms > 0.
+
+Source-of-truth note: this summary was recomputed directly from the raw playback-profile JSON artifacts on 2026-04-23 after an earlier text-only copy used an inconsistent median aggregation.
+
+threads=1
+run1: warm_decode_samples=10, raw_uint16_ms=38.500, decompress_execute_ms=35.000, fast_path_total_ms=35.000, bitstream_ms=29.500, predictor_ms=6.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=32.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=27.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=10, raw_uint16_ms=32.500, decompress_execute_ms=31.000, fast_path_total_ms=31.000, bitstream_ms=29.500, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=32.500, decompress_execute_ms=31.000, fast_path_total_ms=31.000, bitstream_ms=29.500, predictor_ms=4.000, other_ms=0.000
+
+threads=4
+run1: warm_decode_samples=11, raw_uint16_ms=39.000, decompress_execute_ms=38.000, fast_path_total_ms=38.000, bitstream_ms=28.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=38.000, decompress_execute_ms=35.000, fast_path_total_ms=35.000, bitstream_ms=27.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=10, raw_uint16_ms=40.500, decompress_execute_ms=38.500, fast_path_total_ms=38.500, bitstream_ms=34.500, predictor_ms=5.500, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=39.000, decompress_execute_ms=38.000, fast_path_total_ms=38.000, bitstream_ms=28.000, predictor_ms=4.000, other_ms=0.000

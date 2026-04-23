@@ -1,0 +1,5 @@
+﻿perf_exe=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\tests\build-prof\perf\release\perf_tests.exe
+iterations=2
+baseline=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\tests\perf\baselines.json
+cold_8bit=False
+threads=1 json=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\.claude\profiling\wrapper-smoke\perf-thread1.json stage_log=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\.claude\profiling\wrapper-smoke\stage-thread1.log

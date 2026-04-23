@@ -12,6 +12,11 @@
 extern "C" {
 #endif
 
+namespace
+{
+thread_local CRBFilterPlain g_rbf_filter;
+}
+
 void recursive_bf_wrap(uint16_t * img_in,
         uint16_t * img_out,
         float sigma_spatial, float sigma_range,
@@ -30,10 +35,8 @@ void recursive_bf_wrap(uint16_t * img_in,
     else
     {
         //Ming version with better right boarder
-        CRBFilterPlain rbf;
-        rbf.reserveMemory( width, height, channel );
-        rbf.filter( img_in, img_out, sigma_spatial, sigma_range, width, height, channel );
-        rbf.releaseMemory();
+        g_rbf_filter.reserveMemory( width, height, channel );
+        g_rbf_filter.filter( img_in, img_out, sigma_spatial, sigma_range, width, height, channel );
     }
 }
 

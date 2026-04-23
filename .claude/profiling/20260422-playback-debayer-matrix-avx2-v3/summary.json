@@ -1,0 +1,42 @@
+[
+    {
+        "name":  "auto",
+        "exit_code":  0,
+        "avg_latency_ms":  144.796425,
+        "avg_cadence_ms":  125.44610000000002,
+        "warm_latency_ms":  124.56757142857143,
+        "effective":  "simple",
+        "uses_caching":  false,
+        "dual_iso_effective":  2
+    },
+    {
+        "name":  "bilinear",
+        "exit_code":  0,
+        "avg_latency_ms":  155.86612499999998,
+        "avg_cadence_ms":  140.41297142857144,
+        "warm_latency_ms":  136.22451428571426,
+        "effective":  "bilinear",
+        "uses_caching":  false,
+        "dual_iso_effective":  2
+    },
+    {
+        "name":  "simple",
+        "exit_code":  0,
+        "avg_latency_ms":  54.824337499999992,
+        "avg_cadence_ms":  172.13592857142856,
+        "warm_latency_ms":  35.054542857142856,
+        "effective":  "simple",
+        "uses_caching":  false,
+        "dual_iso_effective":  2
+    },
+    {
+        "name":  "amaze_cached",
+        "exit_code":  0,
+        "avg_latency_ms":  388.4401,
+        "avg_cadence_ms":  301.10575714285716,
+        "warm_latency_ms":  273.15882857142861,
+        "effective":  "amaze-cached",
+        "uses_caching":  true,
+        "dual_iso_effective":  2
+    }
+]

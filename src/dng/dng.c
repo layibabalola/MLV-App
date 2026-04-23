@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <pthread.h>
 
 #include "dng.h"
 #include "dng_tag_codes.h"
@@ -75,6 +76,13 @@ static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 }
 
 enum { IMG_SIZE_UNPACKED, IMG_SIZE_PACKED, IMG_SIZE_LOSLESS };
+
+static void apply_llrawproc_locked(mlvObject_t * mlv_data,
+                                   uint16_t * image_buf_unpacked,
+                                   uint64_t image_size_unpacked)
+{
+    applyLLRawProcObject(mlv_data, image_buf_unpacked, image_size_unpacked);
+}
 
 //MLV WB modes
 enum
@@ -676,12 +684,17 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             cfa_pattern = 0x02010100;   // RGGB
         }
 
-        /* tcReelName */
-        #ifdef _WIN32
-        char * reel_name = strrchr(mlv_data->path, '\\');
-        #else
-        char * reel_name = strrchr(mlv_data->path, '/');
-        #endif
+        /* tcReelName — pick the basename after the last path separator.
+         * Handle both '/' and '\\' on every platform because Qt / CLI
+         * paths on Windows often arrive with forward slashes. If we only
+         * checked one separator the wrong flavour leaked the whole
+         * absolute path into tcReelName and made DNG output
+         * host-path-dependent — see
+         * .claude/profiling/20260422-clipgolden-investigation/findings.md.
+         */
+        char * last_fwd = strrchr(mlv_data->path, '/');
+        char * last_bck = strrchr(mlv_data->path, '\\');
+        char * reel_name = (last_fwd > last_bck) ? last_fwd : last_bck;
         (!reel_name) ? (reel_name = mlv_data->path) : ++reel_name;
         char * ext_dot = strrchr(reel_name, '.');
         if(ext_dot) *ext_dot = '\000';
@@ -958,7 +971,7 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
         }
 
         /* apply low level raw processing to the unpacked_frame */
-        applyLLRawProcObject(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
+        apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
 
         if (dng_data->raw_output_state == COMPRESSED_RAW || dng_data->raw_output_state == COMPRESSED_ORIG)
         {
@@ -1008,7 +1021,7 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
                                            mlv_data->RAWI.raw_info.bits_per_pixel);
 
                 /* apply low level raw processing to the unpacked_frame */
-                applyLLRawProcObject(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
+                apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
@@ -1062,7 +1075,7 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
                                       mlv_data->RAWI.raw_info.bits_per_pixel);
 
                 /* apply low level raw processing to the unpacked_frame */
-                applyLLRawProcObject(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
+                apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {

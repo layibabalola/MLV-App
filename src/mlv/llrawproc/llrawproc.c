@@ -31,12 +31,400 @@
 #include "dualiso.h"
 #include "hist.h"
 #include "darkframe.h"
+#include "../../debug/StageTiming.h"
 #include "../../processing/raw_processing.h"
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define COERCE(x,lo,hi) MAX(MIN((x),(hi)),(lo))
 #define ABS(a) ((a) > 0 ? (a) : -(a))
+
+#if defined(_MSC_VER)
+#define MLV_THREAD_LOCAL __declspec(thread)
+#else
+#define MLV_THREAD_LOCAL __thread
+#endif
+
+static MLV_THREAD_LOCAL double g_llrawproc_last_shared_lock_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_dualiso_refine_lock_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_publish_lock_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_total_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_dark_frame_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_vertical_stripes_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_focus_pixels_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_bad_pixels_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_pattern_noise_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_dual_iso_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_chroma_smooth_ms = 0.0;
+static double g_llrawproc_last_preview_histogram_ms = 0.0;
+static double g_llrawproc_last_preview_regression_ms = 0.0;
+static double g_llrawproc_last_preview_rowscale_ms = 0.0;
+static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_pixel_map_copy_count = 0;
+static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_dark_frame_copy_count = 0;
+static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_runtime_publish_count = 0;
+
+static int llrawproc_worker_copy_pixel_map(pixel_map * destination,
+                                           const pixel_map * source)
+{
+    if (!destination || !source)
+    {
+        return 0;
+    }
+
+    destination->type = source->type;
+    destination->count = source->count;
+
+    if (!source->pixels || source->count == 0)
+    {
+        return 1;
+    }
+
+    if (destination->capacity < source->count)
+    {
+        pixel_xy * resized = realloc(destination->pixels, source->count * sizeof(pixel_xy));
+        if (!resized)
+        {
+            destination->count = 0;
+            return 0;
+        }
+        destination->pixels = resized;
+        destination->capacity = source->count;
+    }
+
+    memcpy(destination->pixels, source->pixels, source->count * sizeof(pixel_xy));
+    g_llrawproc_debug_pixel_map_copy_count++;
+    return 1;
+}
+
+static int llrawproc_worker_ensure_u16_copy(uint16_t ** destination,
+                                            uint32_t * capacity_bytes,
+                                            const uint16_t * source,
+                                            uint32_t source_bytes)
+{
+    if (!destination || !capacity_bytes)
+    {
+        return 0;
+    }
+
+    if (!source || source_bytes == 0)
+    {
+        return 1;
+    }
+
+    if (*capacity_bytes < source_bytes)
+    {
+        uint16_t * resized = realloc(*destination, source_bytes);
+        if (!resized)
+        {
+            return 0;
+        }
+        *destination = resized;
+        *capacity_bytes = source_bytes;
+    }
+
+    memcpy(*destination, source, source_bytes);
+    return 1;
+}
+
+static void llrawproc_free_worker_state(llrawprocWorkerState_t * worker)
+{
+    if (!worker) return;
+
+    free_luts(worker->raw2ev, worker->ev2raw);
+    worker->raw2ev = NULL;
+    worker->ev2raw = NULL;
+    worker->prev_black_level = -1;
+    free(worker->focus_pixel_map_copy.pixels);
+    memset(&worker->focus_pixel_map_copy, 0, sizeof(worker->focus_pixel_map_copy));
+    free(worker->bad_pixel_map_copy.pixels);
+    memset(&worker->bad_pixel_map_copy, 0, sizeof(worker->bad_pixel_map_copy));
+    worker->focus_pixel_map_version = 0;
+    worker->bad_pixel_map_version = 0;
+    free(worker->dark_frame_data_copy);
+    worker->dark_frame_data_copy = NULL;
+    worker->dark_frame_size = 0;
+    worker->dark_frame_capacity = 0;
+    worker->dark_frame_version = 0;
+    memset(&worker->dark_frame_hdr_copy, 0, sizeof(worker->dark_frame_hdr_copy));
+
+    free(worker->chroma_smooth_scratch.buffer);
+    worker->chroma_smooth_scratch.buffer = NULL;
+    worker->chroma_smooth_scratch.capacity = 0;
+
+    free_pattern_noise_scratch(&worker->pattern_noise_scratch);
+    free_vertical_stripes_scratch(&worker->vertical_stripes_scratch);
+
+    free(worker->diso_preview_scratch.data_x);
+    free(worker->diso_preview_scratch.data_y);
+    free(worker->diso_preview_scratch.data_w);
+    free(worker->diso_preview_scratch.output_image);
+    memset(&worker->diso_preview_scratch, 0, sizeof(worker->diso_preview_scratch));
+
+    free_dualiso_full20bit_scratch(&worker->diso_full20bit_scratch);
+    memset(&worker->diso_full20bit_scratch, 0, sizeof(worker->diso_full20bit_scratch));
+
+    worker->dng_bit_depth = 0;
+    worker->dng_black_level = 0;
+    worker->dng_white_level = 0;
+}
+
+static uint32_t llrawproc_next_version(uint32_t current_version)
+{
+    current_version++;
+    return current_version ? current_version : 1u;
+}
+
+static void llrawproc_bump_focus_map_version(llrawprocObject_t * shared)
+{
+    if (!shared) return;
+    shared->focus_pixel_map_version = llrawproc_next_version(shared->focus_pixel_map_version);
+}
+
+static void llrawproc_bump_bad_map_version(llrawprocObject_t * shared)
+{
+    if (!shared) return;
+    shared->bad_pixel_map_version = llrawproc_next_version(shared->bad_pixel_map_version);
+}
+
+static const pixel_map * llrawproc_worker_get_focus_map_copy(llrawprocWorkerState_t * worker,
+                                                             const llrawprocObject_t * shared)
+{
+    if (!worker || !shared || shared->fpm_status != 2)
+    {
+        return NULL;
+    }
+
+    if (worker->focus_pixel_map_version != shared->focus_pixel_map_version)
+    {
+        if (!llrawproc_worker_copy_pixel_map(&worker->focus_pixel_map_copy, &shared->focus_pixel_map))
+        {
+            return NULL;
+        }
+        worker->focus_pixel_map_version = shared->focus_pixel_map_version;
+    }
+
+    return &worker->focus_pixel_map_copy;
+}
+
+static const pixel_map * llrawproc_worker_get_bad_map_copy(llrawprocWorkerState_t * worker,
+                                                           const llrawprocObject_t * shared)
+{
+    if (!worker || !shared || shared->bpm_status != 2)
+    {
+        return NULL;
+    }
+
+    if (worker->bad_pixel_map_version != shared->bad_pixel_map_version)
+    {
+        if (!llrawproc_worker_copy_pixel_map(&worker->bad_pixel_map_copy, &shared->bad_pixel_map))
+        {
+            return NULL;
+        }
+        worker->bad_pixel_map_version = shared->bad_pixel_map_version;
+    }
+
+    return &worker->bad_pixel_map_copy;
+}
+
+static int llrawproc_worker_sync_dark_frame_copy(llrawprocWorkerState_t * worker,
+                                                 const llrawprocObject_t * shared)
+{
+    if (!worker || !shared)
+    {
+        return 0;
+    }
+
+    if (worker->dark_frame_version == shared->dark_frame_version)
+    {
+        return 1;
+    }
+
+    if (!shared->dark_frame_data || shared->dark_frame_size == 0)
+    {
+        worker->dark_frame_size = 0;
+        memset(&worker->dark_frame_hdr_copy, 0, sizeof(worker->dark_frame_hdr_copy));
+        worker->dark_frame_version = shared->dark_frame_version;
+        return 1;
+    }
+
+    if (!llrawproc_worker_ensure_u16_copy(&worker->dark_frame_data_copy,
+                                          &worker->dark_frame_capacity,
+                                          shared->dark_frame_data,
+                                          shared->dark_frame_size))
+    {
+        return 0;
+    }
+
+    worker->dark_frame_size = shared->dark_frame_size;
+    worker->dark_frame_hdr_copy = shared->dark_frame_hdr;
+    worker->dark_frame_version = shared->dark_frame_version;
+    g_llrawproc_debug_dark_frame_copy_count++;
+    return 1;
+}
+
+static void llrawproc_worker_reset_dng_bw_levels(llrawprocWorkerState_t * worker,
+                                                 const struct raw_info * raw_info)
+{
+    if (!worker || !raw_info) return;
+
+    worker->dng_bit_depth = raw_info->bits_per_pixel;
+    worker->dng_black_level = raw_info->black_level;
+    worker->dng_white_level = raw_info->white_level;
+}
+
+static llrawproc_runtime_state_t llrawproc_capture_worker_runtime_state(const llrawprocWorkerState_t * worker)
+{
+    llrawproc_runtime_state_t state = { 0 };
+    if (!worker) return state;
+
+    state.diso_pattern = worker->diso_pattern;
+    state.diso_auto_correction = worker->diso_auto_correction;
+    state.diso_ev_correction = worker->diso_ev_correction;
+    state.diso_black_delta = worker->diso_black_delta;
+    state.dng_bit_depth = worker->dng_bit_depth;
+    state.dng_black_level = worker->dng_black_level;
+    state.dng_white_level = worker->dng_white_level;
+    return state;
+}
+
+static llrawproc_runtime_state_t llrawproc_capture_shared_runtime_state(const llrawprocObject_t * shared)
+{
+    llrawproc_runtime_state_t state = { 0 };
+    if (!shared) return state;
+
+    state.diso_pattern = shared->diso_pattern;
+    state.diso_auto_correction = shared->diso_auto_correction;
+    state.diso_ev_correction = shared->diso_ev_correction;
+    state.diso_black_delta = shared->diso_black_delta;
+    state.dng_bit_depth = shared->dng_bit_depth;
+    state.dng_black_level = shared->dng_black_level;
+    state.dng_white_level = shared->dng_white_level;
+    return state;
+}
+
+static int llrawproc_runtime_state_equal(const llrawproc_runtime_state_t * lhs,
+                                         const llrawproc_runtime_state_t * rhs,
+                                         int compare_auto_correction)
+{
+    if (!lhs || !rhs) return 0;
+
+    if (lhs->diso_pattern != rhs->diso_pattern) return 0;
+    if (compare_auto_correction && lhs->diso_auto_correction != rhs->diso_auto_correction) return 0;
+    if (lhs->diso_ev_correction != rhs->diso_ev_correction) return 0;
+    if (lhs->diso_black_delta != rhs->diso_black_delta) return 0;
+    if (lhs->dng_bit_depth != rhs->dng_bit_depth) return 0;
+    if (lhs->dng_black_level != rhs->dng_black_level) return 0;
+    if (lhs->dng_white_level != rhs->dng_white_level) return 0;
+    return 1;
+}
+
+static void llrawproc_worker_ensure_luts(llrawprocWorkerState_t * worker, int32_t black_level)
+{
+    if (!worker) return;
+
+    if (worker->prev_black_level == black_level && worker->raw2ev && worker->ev2raw)
+    {
+        return;
+    }
+
+    free_luts(worker->raw2ev, worker->ev2raw);
+    worker->raw2ev = get_raw2ev(black_level);
+    worker->ev2raw = get_ev2raw(black_level);
+    worker->prev_black_level = black_level;
+}
+
+static llrawprocWorkerState_t * llrawproc_acquire_worker_state(mlvObject_t * video)
+{
+    if (!video) return NULL;
+
+    pthread_t thread_id = pthread_self();
+    llrawprocWorkerState_t * slot = NULL;
+
+    pthread_mutex_lock(&video->llrawproc_worker_mutex);
+
+    if (!video->llrawproc_workers)
+    {
+        const uint32_t initial_capacity = (uint32_t)MAX(video->cpu_cores + 4, 16);
+        video->llrawproc_workers = calloc(initial_capacity, sizeof(llrawprocWorkerState_t));
+        if (video->llrawproc_workers)
+        {
+            video->llrawproc_worker_capacity = initial_capacity;
+        }
+    }
+
+    for (uint32_t i = 0; i < video->llrawproc_worker_capacity; ++i)
+    {
+        if (video->llrawproc_workers[i].in_use
+         && pthread_equal(video->llrawproc_workers[i].thread_id, thread_id))
+        {
+            slot = &video->llrawproc_workers[i];
+            break;
+        }
+    }
+
+    if (!slot)
+    {
+        for (uint32_t i = 0; i < video->llrawproc_worker_capacity; ++i)
+        {
+            if (!video->llrawproc_workers[i].in_use)
+            {
+                slot = &video->llrawproc_workers[i];
+                memset(slot, 0, sizeof(*slot));
+                slot->in_use = 1;
+                slot->thread_id = thread_id;
+                slot->prev_black_level = -1;
+                break;
+            }
+        }
+    }
+
+    if (!slot)
+    {
+#ifndef STDOUT_SILENT
+        fprintf(stderr, "llrawproc: worker pool exhausted, using stack scratch for this call.\n");
+#endif
+    }
+
+    pthread_mutex_unlock(&video->llrawproc_worker_mutex);
+    return slot;
+}
+
+static void llrawproc_publish_worker_results(mlvObject_t * video,
+                                             const llrawproc_runtime_state_t * runtime_state,
+                                             int publish_auto_correction)
+{
+    if (!video || !video->llrawproc || !runtime_state) return;
+
+    video->llrawproc->diso_pattern = runtime_state->diso_pattern;
+    if (publish_auto_correction)
+    {
+        video->llrawproc->diso_auto_correction = runtime_state->diso_auto_correction;
+    }
+    video->llrawproc->diso_ev_correction = runtime_state->diso_ev_correction;
+    video->llrawproc->diso_black_delta = runtime_state->diso_black_delta;
+    video->llrawproc->dng_bit_depth = runtime_state->dng_bit_depth;
+    video->llrawproc->dng_black_level = runtime_state->dng_black_level;
+    video->llrawproc->dng_white_level = runtime_state->dng_white_level;
+    g_llrawproc_debug_runtime_publish_count++;
+}
+
+static void llrawproc_reset_force_bad_pixel_search(mlvObject_t * video, int bad_pixels)
+{
+    if (!video || !video->llrawproc || bad_pixels != 2) return;
+
+    const double reset_lock_start = mlv_stage_timing_now();
+    pthread_mutex_lock(&video->llrawproc_mutex);
+    if (video->llrawproc->bpm_status == 2)
+    {
+        video->llrawproc->bpm_status = 1;
+        video->llrawproc->bad_pixel_map.count = 0;
+    }
+    pthread_mutex_unlock(&video->llrawproc_mutex);
+    g_llrawproc_last_shared_lock_ms += (mlv_stage_timing_now() - reset_lock_start) * 1000.0;
+#ifndef STDOUT_SILENT
+    printf("Searching bad pixels for every frame\n");
+#endif
+}
 
 /* this is DNG feature only */
 static void deflicker(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size)
@@ -171,8 +559,11 @@ llrawprocObject_t * initLLRawProcObject()
     llrawproc->dark_frame = 0;
 
     llrawproc->dark_frame_filename = NULL;
+    llrawproc->dark_frame_loaded_filename = NULL;
+    llrawproc->dark_frame_loaded_mode = DF_OFF;
     llrawproc->dark_frame_data = NULL;
     llrawproc->dark_frame_size = 0;
+    llrawproc->dark_frame_version = 1;
 
     llrawproc->raw2ev = NULL;
     llrawproc->ev2raw = NULL;
@@ -181,8 +572,10 @@ llrawprocObject_t * initLLRawProcObject()
 
     llrawproc->focus_pixel_map.type = PIX_FOCUS;
     llrawproc->focus_pixel_map.pixels = NULL;
+    llrawproc->focus_pixel_map_version = 1;
     llrawproc->bad_pixel_map.type = PIX_BAD;
     llrawproc->bad_pixel_map.pixels = NULL;
+    llrawproc->bad_pixel_map_version = 1;
 
     return llrawproc;
 }
@@ -191,7 +584,29 @@ void freeLLRawProcObject(mlvObject_t * video)
 {
     df_free_filename(video);
     df_free(video);
+
+    if (video->llrawproc_workers)
+    {
+        for (uint32_t i = 0; i < video->llrawproc_worker_capacity; ++i)
+        {
+            if (video->llrawproc_workers[i].in_use)
+            {
+                llrawproc_free_worker_state(&video->llrawproc_workers[i]);
+            }
+        }
+        free(video->llrawproc_workers);
+        video->llrawproc_workers = NULL;
+        video->llrawproc_worker_capacity = 0;
+    }
+
     free_luts(video->llrawproc->raw2ev, video->llrawproc->ev2raw);
+    free(video->llrawproc->chroma_smooth_scratch.buffer);
+    free_pattern_noise_scratch(&video->llrawproc->pattern_noise_scratch);
+    free(video->llrawproc->diso_preview_scratch.data_x);
+    free(video->llrawproc->diso_preview_scratch.data_y);
+    free(video->llrawproc->diso_preview_scratch.data_w);
+    free(video->llrawproc->diso_preview_scratch.output_image);
+    free_dualiso_full20bit_scratch(&video->llrawproc->diso_full20bit_scratch);
     free_pixel_maps(&(video->llrawproc->focus_pixel_map), &(video->llrawproc->bad_pixel_map));
     free(video->llrawproc);
 }
@@ -199,266 +614,605 @@ void freeLLRawProcObject(mlvObject_t * video)
 /* all low level raw processing takes place here */
 void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size)
 {
-    /* if 'fix_raw == false' skip raw processing alltogether */
-    if(!video->llrawproc->fix_raw) return;
+    const double apply_start = mlv_stage_timing_now();
+    llrawprocObject_t * shared = video ? video->llrawproc : NULL;
+    llrawprocWorkerState_t stack_worker;
+    llrawprocWorkerState_t * worker = NULL;
+    int using_stack_worker = 0;
 
-    /* subtract dark frame if Ext or Int mode specified and df_init is successful */
-    if (!df_init(video))
+    g_llrawproc_last_shared_lock_ms = 0.0;
+    g_llrawproc_last_dualiso_refine_lock_ms = 0.0;
+    g_llrawproc_last_publish_lock_ms = 0.0;
+    g_llrawproc_last_total_ms = 0.0;
+    g_llrawproc_last_dark_frame_ms = 0.0;
+    g_llrawproc_last_vertical_stripes_ms = 0.0;
+    g_llrawproc_last_focus_pixels_ms = 0.0;
+    g_llrawproc_last_bad_pixels_ms = 0.0;
+    g_llrawproc_last_pattern_noise_ms = 0.0;
+    g_llrawproc_last_dual_iso_ms = 0.0;
+    g_llrawproc_last_chroma_smooth_ms = 0.0;
+    g_llrawproc_last_preview_histogram_ms = 0.0;
+    g_llrawproc_last_preview_regression_ms = 0.0;
+    g_llrawproc_last_preview_rowscale_ms = 0.0;
+    g_llrawproc_debug_pixel_map_copy_count = 0;
+    g_llrawproc_debug_dark_frame_copy_count = 0;
+    if (!video || !shared || !shared->fix_raw)
     {
-#ifndef STDOUT_SILENT
-        printf("Subtracting Dark Frame... ");
-#endif
-        df_subtract(video, raw_image_buff, raw_image_size);
-#ifndef STDOUT_SILENT
-        printf("Done\n\n");
-#endif
+        g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+        return;
     }
 
-    /* make copy of 'RAWI.raw_info' struct for subsequent modification */
-    struct raw_info raw_info = video->RAWI.raw_info;
+    double dark_frame_ms = 0.0;
+    double vertical_stripes_ms = 0.0;
+    double focus_pixels_ms = 0.0;
+    double bad_pixels_ms = 0.0;
+    double pattern_noise_ms = 0.0;
+    double dual_iso_ms = 0.0;
+    double chroma_smooth_ms = 0.0;
 
-    /* convert uncompressed 10/12bit raw data to 14bits for correct processing */
-    if(video->RAWI.raw_info.bits_per_pixel < 14)
+    memset(&stack_worker, 0, sizeof(stack_worker));
+    stack_worker.prev_black_level = -1;
+    worker = llrawproc_acquire_worker_state(video);
+    if (!worker)
+    {
+        worker = &stack_worker;
+        using_stack_worker = 1;
+    }
+
+    struct raw_info raw_info = video->RAWI.raw_info;
+    const int original_bits_per_pixel = video->RAWI.raw_info.bits_per_pixel;
+    const int x_res = video->RAWI.xRes;
+    const int y_res = video->RAWI.yRes;
+    const int camera_id = video->IDNT.cameraModel;
+    const int pan_pos_x = video->VIDF.panPosX;
+    const int pan_pos_y = video->VIDF.panPosY;
+    const int raw_width = video->RAWI.raw_info.width;
+    const int raw_height = video->RAWI.raw_info.height;
+    const int crop_rec_mode = (llrpDetectFocusDotFixMode(video) == 2) ? 1 : 0;
+    const int unified_mode = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) ? 5 : 0;
+
+    int focus_pixels = 0;
+    int fpi_method = 0;
+    int bad_pixels = 0;
+    int bps_method = 0;
+    int bpi_method = 0;
+    int chroma_smooth_mode = 0;
+    int pattern_noise_mode = 0;
+    int diso_validity = 0;
+    int dual_iso_mode = 0;
+    int diso1 = 0;
+    int diso2 = 0;
+    int diso_averaging = 0;
+    int diso_alias_map = 0;
+    int diso_frblending = 0;
+    int dark_frame_mode = 0;
+    int vertical_stripes_mode = 0;
+    int worker_diso_pattern = 0;
+    int worker_diso_auto_correction = 0;
+    double worker_diso_ev_correction = 0.0;
+    int worker_diso_black_delta = 0;
+    int apply_dark_frame_outside_lock = 0;
+    const uint16_t * dark_frame_data_for_subtraction = NULL;
+    uint32_t dark_frame_size_for_subtraction = 0;
+    uint32_t dark_frame_black_level = 0;
+    const pixel_map * focus_map_for_interpolation = NULL;
+    const pixel_map * bad_map_for_interpolation = NULL;
+    int focus_status_snapshot = 0;
+    int bad_status_snapshot = 0;
+    int focus_interpolate_outside_lock = 0;
+    int bad_interpolate_outside_lock = 0;
+    int bad_force_reset_after_interpolation = 0;
+    int apply_vertical_stripes_outside_lock = 0;
+    stripes_correction stripe_correction_snapshot = { 0 };
+    int compute_vertical_stripes_outside_lock = 0;
+    int claimed_vertical_stripes_request = 0;
+    int vertical_stripes_compute_succeeded = 0;
+
+    if (original_bits_per_pixel < 14)
     {
         make_14bit(raw_image_buff, raw_image_size, &raw_info);
     }
 
-    /* initialize dual iso black and white levels */
-    llrpResetDngBWLevels(video);
+    llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
+    llrawproc_worker_ensure_luts(worker, raw_info.black_level);
 
-    /* initialise or update the LUTs if the black level has changed */
-    if (video->llrawproc->prev_black_level != raw_info.black_level)
+    double shared_lock_start = mlv_stage_timing_now();
+    pthread_mutex_lock(&video->llrawproc_mutex);
+
+    if (!shared->fix_raw)
     {
-        free_luts(video->llrawproc->raw2ev, video->llrawproc->ev2raw);
-        video->llrawproc->raw2ev = get_raw2ev(raw_info.black_level);
-        video->llrawproc->ev2raw = get_ev2raw(raw_info.black_level);
-
-        video->llrawproc->prev_black_level = raw_info.black_level;
+        pthread_mutex_unlock(&video->llrawproc_mutex);
+        g_llrawproc_last_shared_lock_ms = (mlv_stage_timing_now() - shared_lock_start) * 1000.0;
+        g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+        if (using_stack_worker) llrawproc_free_worker_state(worker);
+        return;
     }
 
-    /* fix vertical stripes */
-    if (video->llrawproc->vertical_stripes)
+    if (!df_init(video))
     {
-        fix_vertical_stripes(&video->llrawproc->stripe_corrections,
+        const double dark_frame_start = mlv_stage_timing_now();
+        if (llrawproc_worker_sync_dark_frame_copy(worker, shared)
+         && worker->dark_frame_data_copy
+         && worker->dark_frame_size == raw_image_size)
+        {
+            apply_dark_frame_outside_lock = 1;
+            dark_frame_data_for_subtraction = worker->dark_frame_data_copy;
+            dark_frame_size_for_subtraction = worker->dark_frame_size;
+            dark_frame_black_level = worker->dark_frame_hdr_copy.black_level;
+        }
+        else
+        {
+#ifndef STDOUT_SILENT
+            printf("Subtracting Dark Frame... ");
+#endif
+            df_subtract(video, raw_image_buff, raw_image_size);
+#ifndef STDOUT_SILENT
+            printf("Done\n\n");
+#endif
+        }
+        dark_frame_ms += (mlv_stage_timing_now() - dark_frame_start) * 1000.0;
+    }
+
+    focus_pixels = shared->focus_pixels;
+    fpi_method = shared->fpi_method;
+    bad_pixels = shared->bad_pixels;
+    bps_method = shared->bps_method;
+    bpi_method = shared->bpi_method;
+    chroma_smooth_mode = shared->chroma_smooth;
+    pattern_noise_mode = shared->pattern_noise;
+    diso_validity = shared->diso_validity;
+    dual_iso_mode = shared->dual_iso;
+    diso1 = shared->diso1;
+    diso2 = shared->diso2;
+    diso_averaging = shared->diso_averaging;
+    diso_alias_map = shared->diso_alias_map;
+    diso_frblending = shared->diso_frblending;
+    worker_diso_pattern = shared->diso_pattern;
+    worker_diso_auto_correction = shared->diso_auto_correction;
+    worker_diso_ev_correction = shared->diso_ev_correction;
+    worker_diso_black_delta = shared->diso_black_delta;
+    worker->seeded_runtime_state = llrawproc_capture_shared_runtime_state(shared);
+    dark_frame_mode = shared->dark_frame;
+    vertical_stripes_mode = shared->vertical_stripes;
+
+    if (vertical_stripes_mode)
+    {
+        stripe_correction_snapshot = shared->stripe_corrections;
+        compute_vertical_stripes_outside_lock = (shared->compute_stripes || vertical_stripes_mode == 2);
+        if (shared->compute_stripes)
+        {
+            /* Claim the queued recompute before unlock so only one worker
+               solves/publishes a one-shot request. Forced mode still
+               recomputes every frame via vertical_stripes_mode == 2. */
+            claimed_vertical_stripes_request = 1;
+            shared->compute_stripes = 0;
+        }
+        if (!compute_vertical_stripes_outside_lock)
+        {
+            apply_vertical_stripes_outside_lock = stripe_correction_snapshot.correction_needed;
+        }
+    }
+
+    if (compute_vertical_stripes_outside_lock)
+    {
+        pthread_mutex_unlock(&video->llrawproc_mutex);
+        g_llrawproc_last_shared_lock_ms = (mlv_stage_timing_now() - shared_lock_start) * 1000.0;
+
+        const double vertical_stripes_start = mlv_stage_timing_now();
+        vertical_stripes_compute_succeeded = compute_vertical_stripes_correction_only(&stripe_correction_snapshot,
+                                                                                      raw_image_buff,
+                                                                                      raw_info.black_level,
+                                                                                      raw_info.white_level,
+                                                                                      raw_info.frame_size,
+                                                                                      x_res,
+                                                                                      y_res,
+                                                                                      vertical_stripes_mode,
+                                                                                      &worker->vertical_stripes_scratch);
+        vertical_stripes_ms += (mlv_stage_timing_now() - vertical_stripes_start) * 1000.0;
+
+        const double stripes_publish_lock_start = mlv_stage_timing_now();
+        pthread_mutex_lock(&video->llrawproc_mutex);
+        if (vertical_stripes_compute_succeeded)
+        {
+            shared->stripe_corrections = stripe_correction_snapshot;
+        }
+        else if (claimed_vertical_stripes_request)
+        {
+            shared->compute_stripes = 1;
+        }
+        const double stripes_publish_lock_end = mlv_stage_timing_now();
+        g_llrawproc_last_shared_lock_ms += (stripes_publish_lock_end - stripes_publish_lock_start) * 1000.0;
+        shared_lock_start = stripes_publish_lock_end;
+        stripe_correction_snapshot = shared->stripe_corrections;
+        apply_vertical_stripes_outside_lock = stripe_correction_snapshot.correction_needed;
+    }
+
+    if (focus_pixels)
+    {
+        const double focus_pixels_start = mlv_stage_timing_now();
+        if (shared->fpm_status < 2)
+        {
+            int crop_rec = crop_rec_mode ? 1 : (focus_pixels == 2);
+            prepare_focus_pixel_map(&shared->focus_pixel_map,
+                                    &shared->fpm_status,
+                                    camera_id,
+                                    raw_width,
+                                    raw_height,
+                                    crop_rec,
+                                    unified_mode);
+            llrawproc_bump_focus_map_version(shared);
+        }
+        focus_status_snapshot = shared->fpm_status;
+        if (focus_status_snapshot == 2)
+        {
+            focus_map_for_interpolation = llrawproc_worker_get_focus_map_copy(worker, shared);
+            focus_interpolate_outside_lock = (focus_map_for_interpolation != NULL);
+        }
+        else focus_interpolate_outside_lock = 0;
+        focus_pixels_ms += (mlv_stage_timing_now() - focus_pixels_start) * 1000.0;
+    }
+
+    if (bad_pixels)
+    {
+        const double bad_pixels_start = mlv_stage_timing_now();
+        if (shared->bpm_status < 2 || (shared->bpm_status == 2 && bad_pixels == 2))
+        {
+            bad_force_reset_after_interpolation = prepare_bad_pixel_map(&shared->bad_pixel_map,
+                                                                        &shared->bpm_status,
+                                                                        raw_image_buff,
+                                                                        camera_id,
+                                                                        x_res,
+                                                                        y_res,
+                                                                        pan_pos_x,
+                                                                        pan_pos_y,
+                                                                        raw_width,
+                                                                        raw_height,
+                                                                        raw_info.black_level,
+                                                                        bad_pixels,
+                                                                        bps_method,
+                                                                        worker->raw2ev);
+            llrawproc_bump_bad_map_version(shared);
+        }
+        bad_status_snapshot = shared->bpm_status;
+        if (bad_status_snapshot == 2)
+        {
+            bad_map_for_interpolation = llrawproc_worker_get_bad_map_copy(worker, shared);
+            bad_interpolate_outside_lock = (bad_map_for_interpolation != NULL);
+        }
+        else bad_interpolate_outside_lock = 0;
+        bad_pixels_ms += (mlv_stage_timing_now() - bad_pixels_start) * 1000.0;
+    }
+
+    pthread_mutex_unlock(&video->llrawproc_mutex);
+    g_llrawproc_last_shared_lock_ms += (mlv_stage_timing_now() - shared_lock_start) * 1000.0;
+
+    worker->diso_pattern = worker_diso_pattern;
+    worker->diso_auto_correction = worker_diso_auto_correction;
+    worker->diso_ev_correction = worker_diso_ev_correction;
+    worker->diso_black_delta = worker_diso_black_delta;
+
+    if (apply_dark_frame_outside_lock)
+    {
+        const double dark_frame_start = mlv_stage_timing_now();
+        df_subtract_snapshot(dark_frame_data_for_subtraction,
+                             dark_frame_size_for_subtraction,
+                             dark_frame_black_level,
+                             raw_info.bits_per_pixel,
                              raw_image_buff,
-                             raw_info.black_level,
-                             raw_info.white_level,
-                             raw_info.frame_size,
-                             video->RAWI.xRes,
-                             video->RAWI.yRes,
-                             video->llrawproc->vertical_stripes,
-                             &video->llrawproc->compute_stripes);
+                             raw_image_size);
+        dark_frame_ms += (mlv_stage_timing_now() - dark_frame_start) * 1000.0;
     }
 
-    /* fix focus pixels */
-    if (video->llrawproc->focus_pixels && video->llrawproc->fpm_status < 3)
+    if (apply_vertical_stripes_outside_lock)
     {
-        /* detect crop_rec mode */
-        int crop_rec = (llrpDetectFocusDotFixMode(video) == 2) ? 1 : (video->llrawproc->focus_pixels == 2);
-        /* if raw data is lossless set unified mode */
-        int unified_mode = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) ? 5 : 0;
-        fix_focus_pixels(&video->llrawproc->focus_pixel_map,
-                         &video->llrawproc->fpm_status,
-                         raw_image_buff,
-                         video->IDNT.cameraModel,
-                         video->RAWI.xRes,
-                         video->RAWI.yRes,
-                         video->VIDF.panPosX,
-                         video->VIDF.panPosY,
-                         video->RAWI.raw_info.width,
-                         video->RAWI.raw_info.height,
-                         crop_rec,
-                         unified_mode,
-                         video->llrawproc->fpi_method,
-                         (video->llrawproc->dual_iso),
-                         video->llrawproc->raw2ev,
-                         video->llrawproc->ev2raw);
+        const double vertical_stripes_start = mlv_stage_timing_now();
+        apply_vertical_stripes_correction_only(&stripe_correction_snapshot,
+                                               raw_image_buff,
+                                               raw_info.black_level,
+                                               raw_info.white_level,
+                                               x_res,
+                                               y_res);
+        vertical_stripes_ms += (mlv_stage_timing_now() - vertical_stripes_start) * 1000.0;
     }
 
-    /* fix bad pixels */
-    if (video->llrawproc->bad_pixels && video->llrawproc->bpm_status < 3)
+    if (focus_pixels && focus_interpolate_outside_lock && focus_status_snapshot == 2 && focus_map_for_interpolation)
     {
-        fix_bad_pixels(&video->llrawproc->bad_pixel_map,
-                       &video->llrawproc->bpm_status,
-                       raw_image_buff,
-                       video->IDNT.cameraModel,
-                       video->RAWI.xRes,
-                       video->RAWI.yRes,
-                       video->VIDF.panPosX,
-                       video->VIDF.panPosY,
-                       video->RAWI.raw_info.width,
-                       video->RAWI.raw_info.height,
-                       raw_info.black_level,
-                       video->llrawproc->bad_pixels,
-                       video->llrawproc->bps_method,
-                       video->llrawproc->bpi_method,
-                       (video->llrawproc->dual_iso),
-                       video->llrawproc->raw2ev,
-                       video->llrawproc->ev2raw);
+        const double focus_pixels_start = mlv_stage_timing_now();
+        interpolate_focus_pixel_map(focus_map_for_interpolation,
+                                    raw_image_buff,
+                                    x_res,
+                                    y_res,
+                                    pan_pos_x,
+                                    pan_pos_y,
+                                    fpi_method,
+                                    dual_iso_mode,
+                                    worker->raw2ev,
+                                    worker->ev2raw);
+        focus_pixels_ms += (mlv_stage_timing_now() - focus_pixels_start) * 1000.0;
     }
 
-    /* fix pattern noise */
-    if (!video->llrawproc->diso_validity && video->llrawproc->pattern_noise)
+    if (bad_pixels && bad_interpolate_outside_lock && bad_status_snapshot == 2 && bad_map_for_interpolation)
     {
+        const double bad_pixels_start = mlv_stage_timing_now();
+        interpolate_bad_pixel_map(bad_map_for_interpolation,
+                                  raw_image_buff,
+                                  x_res,
+                                  y_res,
+                                  pan_pos_x,
+                                  pan_pos_y,
+                                  bpi_method,
+                                  dual_iso_mode,
+                                  worker->raw2ev,
+                                  worker->ev2raw);
+        if (bad_force_reset_after_interpolation)
+        {
+            llrawproc_reset_force_bad_pixel_search(video, bad_pixels);
+        }
+        bad_pixels_ms += (mlv_stage_timing_now() - bad_pixels_start) * 1000.0;
+    }
+
+    if (!diso_validity && pattern_noise_mode)
+    {
+        const double pattern_noise_start = mlv_stage_timing_now();
 #ifndef STDOUT_SILENT
         printf("Fixing pattern noise... ");
 #endif
-        fix_pattern_noise((int16_t *)raw_image_buff, video->RAWI.xRes, video->RAWI.yRes, raw_info.white_level, 0);
+        fix_pattern_noise((int16_t *)raw_image_buff,
+                          x_res,
+                          y_res,
+                          raw_info.white_level,
+                          0,
+                          &worker->pattern_noise_scratch);
 #ifndef STDOUT_SILENT
         printf("Done\n\n");
 #endif
+        pattern_noise_ms += (mlv_stage_timing_now() - pattern_noise_start) * 1000.0;
     }
 
-    /* if dual iso valid/forced and processing is turned on */
-    if(video->llrawproc->diso_validity && video->llrawproc->dual_iso)
+    int publish_auto_correction = 1;
+
+    if (diso_validity && dual_iso_mode)
     {
-        raw_info.width = video->RAWI.xRes;
-        raw_info.height = video->RAWI.yRes;
-        raw_info.pitch = video->RAWI.xRes;
+        raw_info.width = x_res;
+        raw_info.height = y_res;
+        raw_info.pitch = x_res;
         raw_info.active_area.x1 = 0;
         raw_info.active_area.y1 = 0;
         raw_info.active_area.x2 = raw_info.width;
         raw_info.active_area.y2 = raw_info.height;
-        
-        /* detect if lossless raw data is restricted to imaginary 8-12bit levels */
+
         int restricted_lossless = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) && raw_info.white_level < 15000;
 
-        if(restricted_lossless)
+        if (restricted_lossless)
         {
+            const double dual_iso_start = mlv_stage_timing_now();
 #ifndef STDOUT_SILENT
             printf("\nScaling raw data range...\n");
             printf("Raw_Black = %d, Raw_White = %d <= BEFORE SCALING\n", raw_info.black_level, raw_info.white_level);
 #endif
-            int low_iso = MIN(video->llrawproc->diso1, video->llrawproc->diso2);
-            int high_iso = MAX(video->llrawproc->diso1, video->llrawproc->diso2);
-
+            int low_iso = MIN(diso1, diso2);
+            int high_iso = MAX(diso1, diso2);
             scale_restricted_range(&raw_info, raw_image_buff, low_iso, high_iso);
-
+            llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
 #ifndef STDOUT_SILENT
             printf("Raw_Black = %d, Raw_White = %d <= AFTER SCALING\n", raw_info.black_level, raw_info.white_level);
-            printf("\nChanging processing B/W levels...\n");
-            printf("Proc_Black = %d, Proc_White = %d <= BEFORE CHANGING\n", video->processing->black_level, video->processing->white_level);
 #endif
-            processingSetBlackAndWhiteLevel(video->processing, raw_info.black_level, raw_info.white_level, 14); // black and white levels are 14bit after scaling above
-#ifndef STDOUT_SILENT
-            printf("Proc_Black = %d, Proc_White = %d <= AFTER CHANGING\n", video->processing->black_level, video->processing->white_level);
-#endif
+            dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
         }
 
-        /* dual iso processing */
-        if (video->llrawproc->dual_iso == 1) // Full 20bit processing mode
+        if (dual_iso_mode == 1)
         {
+            const double dual_iso_start = mlv_stage_timing_now();
+            int explicit_auto_correction = 0;
+            double explicit_ev_correction = worker->diso_ev_correction;
+            int explicit_black_delta = worker->diso_black_delta;
+            const int has_explicit_auto_match =
+                (worker->diso_auto_correction < 0) &&
+                (worker->diso_ev_correction != 1) &&
+                (worker->diso_black_delta != -1);
+
+            int * auto_correction_ptr = has_explicit_auto_match
+                ? &explicit_auto_correction
+                : &worker->diso_auto_correction;
+            double * ev_correction_ptr = has_explicit_auto_match
+                ? &explicit_ev_correction
+                : &worker->diso_ev_correction;
+            int * black_delta_ptr = has_explicit_auto_match
+                ? &explicit_black_delta
+                : &worker->diso_black_delta;
+
+            publish_auto_correction = !has_explicit_auto_match;
+
             diso_get_full20bit(raw_info,
                                raw_image_buff,
-                               video->llrawproc->dark_frame,
-                               video->llrawproc->diso1,
-                               video->llrawproc->diso2,
-                               &video->llrawproc->diso_pattern,
-                               &video->llrawproc->diso_auto_correction,
-                               &video->llrawproc->diso_ev_correction,
-                               &video->llrawproc->diso_black_delta,
-                               video->llrawproc->diso_averaging,
-                               video->llrawproc->diso_alias_map,
-                               video->llrawproc->diso_frblending,
-                               video->llrawproc->chroma_smooth,
-                               video->cpu_cores);
+                               dark_frame_mode,
+                               diso1,
+                               diso2,
+                               &worker->diso_pattern,
+                               auto_correction_ptr,
+                               ev_correction_ptr,
+                               black_delta_ptr,
+                               diso_averaging,
+                               diso_alias_map,
+                               diso_frblending,
+                               chroma_smooth_mode,
+                               video->cpu_cores,
+                               &worker->diso_full20bit_scratch);
+            dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
 
-            /* for full20bit set diso levels and bit depth to 16 bit, needed for cDNG export */
-            int bits_shift = 16 - raw_info.bits_per_pixel;
-            video->llrawproc->dng_black_level = raw_info.black_level << bits_shift;
-            video->llrawproc->dng_white_level = raw_info.white_level << bits_shift;
-            video->llrawproc->dng_bit_depth = 16;
-
-            /* for dualiso blacklevel may have been changed. Correct values needed for following pixel fixes */
-            free_luts(video->llrawproc->raw2ev, video->llrawproc->ev2raw);
-            video->llrawproc->raw2ev = get_raw2ev(video->llrawproc->dng_black_level);
-            video->llrawproc->ev2raw = get_ev2raw(video->llrawproc->dng_black_level);
-
-            /* fix focus pixels */
-            if (video->llrawproc->focus_pixels && video->llrawproc->fpm_status < 3)
+            if (has_explicit_auto_match)
             {
-                /* detect crop_rec mode */
-                int crop_rec = (llrpDetectFocusDotFixMode(video) == 2) ? 1 : (video->llrawproc->focus_pixels == 2);
-                /* if raw data is lossless set unified mode */
-                int unified_mode = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) ? 5 : 0;
-                fix_focus_pixels(&video->llrawproc->focus_pixel_map,
-                                 &video->llrawproc->fpm_status,
-                                 raw_image_buff,
-                                 video->IDNT.cameraModel,
-                                 video->RAWI.xRes,
-                                 video->RAWI.yRes,
-                                 video->VIDF.panPosX,
-                                 video->VIDF.panPosY,
-                                 video->RAWI.raw_info.width,
-                                 video->RAWI.raw_info.height,
-                                 crop_rec,
-                                 unified_mode,
-                                 2,
-                                 0,
-                                 video->llrawproc->raw2ev,
-                                 video->llrawproc->ev2raw);
+                worker->diso_ev_correction = explicit_ev_correction;
+                worker->diso_black_delta = explicit_black_delta;
             }
 
-            /* fix bad pixels */
-            if (video->llrawproc->bad_pixels && video->llrawproc->bpm_status < 3)
             {
-                fix_bad_pixels(&video->llrawproc->bad_pixel_map,
-                               &video->llrawproc->bpm_status,
-                               raw_image_buff,
-                               video->IDNT.cameraModel,
-                               video->RAWI.xRes,
-                               video->RAWI.yRes,
-                               video->VIDF.panPosX,
-                               video->VIDF.panPosY,
-                               video->RAWI.raw_info.width,
-                               video->RAWI.raw_info.height,
-                               raw_info.black_level,
-                               video->llrawproc->bad_pixels,
-                               video->llrawproc->bps_method,
-                               2,
-                               0,
-                               video->llrawproc->raw2ev,
-                               video->llrawproc->ev2raw);
+                int bits_shift = 16 - raw_info.bits_per_pixel;
+                worker->dng_black_level = raw_info.black_level << bits_shift;
+                worker->dng_white_level = raw_info.white_level << bits_shift;
+                worker->dng_bit_depth = 16;
             }
 
-            /* revert LUTs */
-            free_luts(video->llrawproc->raw2ev, video->llrawproc->ev2raw);
-            video->llrawproc->raw2ev = get_raw2ev(raw_info.black_level);
-            video->llrawproc->ev2raw = get_ev2raw(raw_info.black_level);
+            llrawproc_worker_ensure_luts(worker, worker->dng_black_level);
+
+            const double refine_lock_start = mlv_stage_timing_now();
+            focus_status_snapshot = 0;
+            bad_status_snapshot = 0;
+            focus_interpolate_outside_lock = 0;
+            bad_interpolate_outside_lock = 0;
+            bad_force_reset_after_interpolation = 0;
+            focus_map_for_interpolation = NULL;
+            bad_map_for_interpolation = NULL;
+            pthread_mutex_lock(&video->llrawproc_mutex);
+            if (focus_pixels)
+            {
+                if (shared->fpm_status < 2)
+                {
+                    int crop_rec = crop_rec_mode ? 1 : (focus_pixels == 2);
+                    prepare_focus_pixel_map(&shared->focus_pixel_map,
+                                            &shared->fpm_status,
+                                            camera_id,
+                                            raw_width,
+                                            raw_height,
+                                            crop_rec,
+                                            unified_mode);
+                    llrawproc_bump_focus_map_version(shared);
+                }
+                focus_status_snapshot = shared->fpm_status;
+                if (focus_status_snapshot == 2)
+                {
+                    focus_map_for_interpolation = llrawproc_worker_get_focus_map_copy(worker, shared);
+                    focus_interpolate_outside_lock = (focus_map_for_interpolation != NULL);
+                }
+                else focus_interpolate_outside_lock = 0;
+            }
+
+            if (bad_pixels)
+            {
+                if (shared->bpm_status < 2 || (shared->bpm_status == 2 && bad_pixels == 2))
+                {
+                    bad_force_reset_after_interpolation = prepare_bad_pixel_map(&shared->bad_pixel_map,
+                                                                                &shared->bpm_status,
+                                                                                raw_image_buff,
+                                                                                camera_id,
+                                                                                x_res,
+                                                                                y_res,
+                                                                                pan_pos_x,
+                                                                                pan_pos_y,
+                                                                                raw_width,
+                                                                                raw_height,
+                                                                                raw_info.black_level,
+                                                                                bad_pixels,
+                                                                                bps_method,
+                                                                                worker->raw2ev);
+                    llrawproc_bump_bad_map_version(shared);
+                }
+                bad_status_snapshot = shared->bpm_status;
+                if (bad_status_snapshot == 2)
+                {
+                    bad_map_for_interpolation = llrawproc_worker_get_bad_map_copy(worker, shared);
+                    bad_interpolate_outside_lock = (bad_map_for_interpolation != NULL);
+                }
+                else bad_interpolate_outside_lock = 0;
+            }
+            pthread_mutex_unlock(&video->llrawproc_mutex);
+            g_llrawproc_last_dualiso_refine_lock_ms += (mlv_stage_timing_now() - refine_lock_start) * 1000.0;
+            g_llrawproc_last_shared_lock_ms += g_llrawproc_last_dualiso_refine_lock_ms;
+
+                if (focus_pixels && focus_interpolate_outside_lock && focus_status_snapshot == 2 && focus_map_for_interpolation)
+                {
+                    const double focus_pixels_start = mlv_stage_timing_now();
+                    interpolate_focus_pixel_map(focus_map_for_interpolation,
+                                                raw_image_buff,
+                                            x_res,
+                                            y_res,
+                                            pan_pos_x,
+                                            pan_pos_y,
+                                            2,
+                                            0,
+                                            worker->raw2ev,
+                                            worker->ev2raw);
+                    focus_pixels_ms += (mlv_stage_timing_now() - focus_pixels_start) * 1000.0;
+            }
+
+                if (bad_pixels && bad_interpolate_outside_lock && bad_status_snapshot == 2 && bad_map_for_interpolation)
+                {
+                    const double bad_pixels_start = mlv_stage_timing_now();
+                    interpolate_bad_pixel_map(bad_map_for_interpolation,
+                                              raw_image_buff,
+                                          x_res,
+                                          y_res,
+                                          pan_pos_x,
+                                          pan_pos_y,
+                                          2,
+                                          0,
+                                          worker->raw2ev,
+                                          worker->ev2raw);
+                    if (bad_force_reset_after_interpolation)
+                    {
+                        llrawproc_reset_force_bad_pixel_search(video, bad_pixels);
+                    }
+                    bad_pixels_ms += (mlv_stage_timing_now() - bad_pixels_start) * 1000.0;
+            }
+
+            llrawproc_worker_ensure_luts(worker, raw_info.black_level);
         }
-        /*
-        else if (video->llrawproc->dual_iso == 2) // Preview mode
+        else if (dual_iso_mode == 2)
         {
+            const double dual_iso_start = mlv_stage_timing_now();
             diso_get_preview(raw_image_buff,
                              raw_info.width,
                              raw_info.height,
                              raw_info.black_level,
                              raw_info.white_level,
-                             0); // dual iso check mode is off
+                             &worker->diso_pattern,
+                             0,
+                             &worker->diso_preview_scratch);
+            dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
+            g_llrawproc_last_preview_histogram_ms = worker->diso_preview_scratch.last_histogram_ms;
+            g_llrawproc_last_preview_regression_ms = worker->diso_preview_scratch.last_regression_ms;
+            g_llrawproc_last_preview_rowscale_ms = worker->diso_preview_scratch.last_rowscale_ms;
         }
-        */
     }
 
-    /* do chroma smoothing */
-    if (video->llrawproc->chroma_smooth && video->llrawproc->dual_iso != 1) // do not smooth 20bit dualiso raw
+    if (chroma_smooth_mode && dual_iso_mode != 1)
     {
+        const double chroma_smooth_start = mlv_stage_timing_now();
 #ifndef STDOUT_SILENT
-            printf("\nUsing chroma smooth method: '%dx%d'\n\n", video->llrawproc->chroma_smooth, video->llrawproc->chroma_smooth);
+        printf("\nUsing chroma smooth method: '%dx%d'\n\n", chroma_smooth_mode, chroma_smooth_mode);
 #endif
-        chroma_smooth(video->llrawproc->chroma_smooth,
+        chroma_smooth(chroma_smooth_mode,
                       raw_image_buff,
-                      video->RAWI.xRes,
-                      video->RAWI.yRes,
+                      x_res,
+                      y_res,
                       raw_info.black_level,
                       raw_info.white_level,
-                      video->llrawproc->raw2ev,
-                      video->llrawproc->ev2raw);
+                      worker->raw2ev,
+                      worker->ev2raw,
+                      &worker->chroma_smooth_scratch);
+        chroma_smooth_ms += (mlv_stage_timing_now() - chroma_smooth_start) * 1000.0;
     }
 
-    /* undo 14bit conversion of uncompressed 10/12bit raw data, except when 20bit dual iso processing is active */
-    if(video->RAWI.raw_info.bits_per_pixel < 14 && video->llrawproc->dual_iso != 1)
+    if (original_bits_per_pixel < 14 && dual_iso_mode != 1)
     {
         undo_14bit(raw_image_buff, raw_image_size, video->RAWI.raw_info.bits_per_pixel);
+    }
+
+    {
+        const llrawproc_runtime_state_t runtime_state = llrawproc_capture_worker_runtime_state(worker);
+        const int runtime_state_changed =
+            !llrawproc_runtime_state_equal(&runtime_state,
+                                           &worker->seeded_runtime_state,
+                                           publish_auto_correction);
+        if (runtime_state_changed)
+        {
+            const double publish_lock_start = mlv_stage_timing_now();
+            pthread_mutex_lock(&video->llrawproc_mutex);
+            llrawproc_publish_worker_results(video, &runtime_state, publish_auto_correction);
+            pthread_mutex_unlock(&video->llrawproc_mutex);
+            g_llrawproc_last_publish_lock_ms += (mlv_stage_timing_now() - publish_lock_start) * 1000.0;
+            g_llrawproc_last_shared_lock_ms += g_llrawproc_last_publish_lock_ms;
+        }
     }
 
     /* deflicker RAW data by changing 'tcBaselineExposure' tag in the exported DNG */
@@ -475,6 +1229,120 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
 #ifndef STDOUT_SILENT
     printf("raw_image_buff[1000] = %u, Proc_Black = %d, Proc_White = %d, Raw_Black = %d, Raw_White = %d <= THE END OF LLRAWPROC\n", raw_image_buff[1000], video->processing->black_level, video->processing->white_level, video->RAWI.raw_info.black_level, video->RAWI.raw_info.white_level);
 #endif
+
+    g_llrawproc_last_dark_frame_ms = dark_frame_ms;
+    g_llrawproc_last_vertical_stripes_ms = vertical_stripes_ms;
+    g_llrawproc_last_focus_pixels_ms = focus_pixels_ms;
+    g_llrawproc_last_bad_pixels_ms = bad_pixels_ms;
+    g_llrawproc_last_pattern_noise_ms = pattern_noise_ms;
+    g_llrawproc_last_dual_iso_ms = dual_iso_ms;
+    g_llrawproc_last_chroma_smooth_ms = chroma_smooth_ms;
+    g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+
+    if (using_stack_worker)
+    {
+        llrawproc_free_worker_state(worker);
+    }
+}
+
+double llrpGetLastSharedLockMilliseconds(void)
+{
+    return g_llrawproc_last_shared_lock_ms;
+}
+
+double llrpGetLastDualIsoRefineLockMilliseconds(void)
+{
+    return g_llrawproc_last_dualiso_refine_lock_ms;
+}
+
+double llrpGetLastPublishLockMilliseconds(void)
+{
+    return g_llrawproc_last_publish_lock_ms;
+}
+
+double llrpGetLastTotalMilliseconds(void)
+{
+    return g_llrawproc_last_total_ms;
+}
+
+double llrpGetLastDarkFrameMilliseconds(void)
+{
+    return g_llrawproc_last_dark_frame_ms;
+}
+
+double llrpGetLastVerticalStripesMilliseconds(void)
+{
+    return g_llrawproc_last_vertical_stripes_ms;
+}
+
+double llrpGetLastFocusPixelsMilliseconds(void)
+{
+    return g_llrawproc_last_focus_pixels_ms;
+}
+
+double llrpGetLastBadPixelsMilliseconds(void)
+{
+    return g_llrawproc_last_bad_pixels_ms;
+}
+
+double llrpGetLastPatternNoiseMilliseconds(void)
+{
+    return g_llrawproc_last_pattern_noise_ms;
+}
+
+double llrpGetLastDualIsoMilliseconds(void)
+{
+    return g_llrawproc_last_dual_iso_ms;
+}
+
+double llrpGetLastChromaSmoothMilliseconds(void)
+{
+    return g_llrawproc_last_chroma_smooth_ms;
+}
+
+double llrpGetLastDualIsoPreviewHistogramMilliseconds(void)
+{
+    return g_llrawproc_last_preview_histogram_ms;
+}
+
+double llrpGetLastDualIsoPreviewRegressionMilliseconds(void)
+{
+    return g_llrawproc_last_preview_regression_ms;
+}
+
+double llrpGetLastDualIsoPreviewRowscaleMilliseconds(void)
+{
+    return g_llrawproc_last_preview_rowscale_ms;
+}
+
+void llrpResetDebugPixelMapCopyCount(void)
+{
+    g_llrawproc_debug_pixel_map_copy_count = 0;
+}
+
+uint64_t llrpGetDebugPixelMapCopyCount(void)
+{
+    return g_llrawproc_debug_pixel_map_copy_count;
+}
+
+void llrpResetDebugDarkFrameCopyCount(void)
+{
+    g_llrawproc_debug_dark_frame_copy_count = 0;
+}
+
+uint64_t llrpGetDebugDarkFrameCopyCount(void)
+{
+    return g_llrawproc_debug_dark_frame_copy_count;
+}
+
+void llrpResetDebugRuntimePublishCount(void)
+{
+    g_llrawproc_debug_runtime_publish_count = 0;
+}
+
+uint64_t llrpGetDebugRuntimePublishCount(void)
+{
+    return g_llrawproc_debug_runtime_publish_count;
 }
 
 /* Detect focus dot fix mode according to RAWC block info (binning + skipping) and camera ID
@@ -527,7 +1395,9 @@ void llrpSetVerticalStripeMode(mlvObject_t * video, int value)
 
 void llrpComputeStripesOn(mlvObject_t * video)
 {
+    pthread_mutex_lock(&video->llrawproc_mutex);
     video->llrawproc->compute_stripes = 1;
+    pthread_mutex_unlock(&video->llrawproc_mutex);
 }
 
 int llrpGetFocusPixelMode(mlvObject_t * video)
@@ -718,24 +1588,39 @@ void llrpResetDngBWLevels(mlvObject_t * video)
 
 void llrpResetFpmStatus(mlvObject_t * video)
 {
+    pthread_mutex_lock(&video->llrawproc_mutex);
     reset_fpm_status(&(video->llrawproc->focus_pixel_map), &(video->llrawproc->fpm_status));
+    llrawproc_bump_focus_map_version(video->llrawproc);
+    pthread_mutex_unlock(&video->llrawproc_mutex);
 }
 
 void llrpResetBpmStatus(mlvObject_t * video)
 {
+    pthread_mutex_lock(&video->llrawproc_mutex);
     reset_bpm_status(&(video->llrawproc->bad_pixel_map), &(video->llrawproc->bpm_status));
+    llrawproc_bump_bad_map_version(video->llrawproc);
+    pthread_mutex_unlock(&video->llrawproc_mutex);
 }
 
 /* dark frame stuff */
 void llrpInitDarkFrameExtFileName(mlvObject_t * video, char * df_filename)
 {
+    pthread_mutex_lock(&video->llrawproc_mutex);
+    const int changed = !video->llrawproc->dark_frame_filename
+                     || strcmp(video->llrawproc->dark_frame_filename, df_filename) != 0;
     df_free_filename(video);
     df_init_filename(video, df_filename);
+    if (changed) df_free(video);
+    pthread_mutex_unlock(&video->llrawproc_mutex);
 }
 
 void llrpFreeDarkFrameExtFileName(mlvObject_t * video)
 {
+    pthread_mutex_lock(&video->llrawproc_mutex);
+    const int changed = video->llrawproc->dark_frame_filename != NULL;
     df_free_filename(video);
+    if (changed) df_free(video);
+    pthread_mutex_unlock(&video->llrawproc_mutex);
 }
 
 int llrpGetDarkFrameMode(mlvObject_t * video)
@@ -745,7 +1630,17 @@ int llrpGetDarkFrameMode(mlvObject_t * video)
 
 void llrpSetDarkFrameMode(mlvObject_t * video, int value)
 {
-    video->llrawproc->dark_frame = value;
+    pthread_mutex_lock(&video->llrawproc_mutex);
+    if (video->llrawproc->dark_frame != value)
+    {
+        video->llrawproc->dark_frame = value;
+        df_free(video);
+    }
+    else
+    {
+        video->llrawproc->dark_frame = value;
+    }
+    pthread_mutex_unlock(&video->llrawproc_mutex);
 }
 
 int llrpGetDarkFrameExtStatus(mlvObject_t * video)

@@ -1,0 +1,22 @@
+profile-start
+open-begin
+open-complete
+receipt-begin
+receipt-complete
+render-begin frame=0
+render-complete frame=0
+render-begin frame=1
+render-complete frame=1
+render-begin frame=2
+render-complete frame=2
+render-begin frame=3
+render-complete frame=3
+render-begin frame=4
+render-complete frame=4
+render-begin frame=5
+render-complete frame=5
+render-begin frame=6
+render-complete frame=6
+render-begin frame=7
+render-complete frame=7
+profile-complete

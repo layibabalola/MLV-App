@@ -221,6 +221,7 @@
     <addaction name="actionDropFrameMode"/>
     <addaction name="actionPlaybackPosition"/>
     <addaction name="menuDemosaicForPlayback"/>
+    <addaction name="actionUseFastProcessingForPlayback"/>
     <addaction name="actionBetterResizer"/>
     <addaction name="actionViewerBackgroundColor"/>
     <addaction name="separator"/>
@@ -636,14 +637,20 @@ QGroupBox::indicator:checked:disabled {
                           <verstretch>0</verstretch>
                          </sizepolicy>
                         </property>
-                        <property name="font">
-                         <font>
-                          <pointsize>10</pointsize>
-                         </font>
-                        </property>
-                        <property name="text">
-                         <string>Off</string>
-                        </property>
+                     <property name="font">
+                       <font>
+                        <pointsize>10</pointsize>
+                       </font>
+                     </property>
+                     <property name="toolTip">
+                      <string>Disable Dual ISO processing.</string>
+                     </property>
+                     <property name="statusTip">
+                      <string>Disable Dual ISO processing.</string>
+                     </property>
+                     <property name="text">
+                       <string>Off</string>
+                     </property>
                         <property name="checkable">
                          <bool>true</bool>
                         </property>
@@ -804,14 +811,20 @@ QGroupBox::indicator:checked:disabled {
                         <verstretch>0</verstretch>
                        </sizepolicy>
                       </property>
-                      <property name="font">
+                     <property name="font">
                        <font>
                         <pointsize>10</pointsize>
                        </font>
-                      </property>
-                      <property name="text">
+                     </property>
+                     <property name="toolTip">
+                      <string>Use full-quality Dual ISO processing. Slower than Preview mode.</string>
+                     </property>
+                     <property name="statusTip">
+                      <string>Use full-quality Dual ISO processing. Slower than Preview mode.</string>
+                     </property>
+                     <property name="text">
                        <string>On</string>
-                      </property>
+                     </property>
                       <property name="checkable">
                        <bool>true</bool>
                       </property>
@@ -1812,6 +1825,36 @@ QGroupBox::indicator:checked:disabled {
                       </property>
                       <property name="text">
                        <string>On</string>
+                      </property>
+                      <property name="checkable">
+                       <bool>true</bool>
+                      </property>
+                      <property name="autoExclusive">
+                       <bool>true</bool>
+                      </property>
+                     </widget>
+                    </item>
+                    <item>
+                     <widget class="ColorToolButton" name="toolButtonDualIsoPreview">
+                      <property name="sizePolicy">
+                       <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+                        <horstretch>0</horstretch>
+                        <verstretch>0</verstretch>
+                       </sizepolicy>
+                      </property>
+                      <property name="font">
+                       <font>
+                        <pointsize>10</pointsize>
+                       </font>
+                      </property>
+                      <property name="toolTip">
+                       <string>Preview mode trades quality for speed on Dual ISO clips.</string>
+                      </property>
+                      <property name="statusTip">
+                       <string>Preview mode trades quality for speed on Dual ISO clips.</string>
+                      </property>
+                      <property name="text">
+                       <string>Preview</string>
                       </property>
                       <property name="checkable">
                        <bool>true</bool>
@@ -10431,6 +10474,12 @@ QGroupBox::indicator:checked:disabled {
    <property name="text">
     <string>AMaZE Cached</string>
    </property>
+   <property name="toolTip">
+    <string>Playback mode that waits for cached AMaZE frames instead of falling back to bilinear.</string>
+   </property>
+   <property name="statusTip">
+    <string>Use cached AMaZE frames during playback for higher quality when the raw cache can keep up.</string>
+   </property>
   </action>
   <action name="actionShowAudioTrack">
    <property name="checkable">
@@ -10920,6 +10969,20 @@ QGroupBox::indicator:checked:disabled {
    </property>
    <property name="text">
     <string>Don't Switch Debayer for Playback</string>
+   </property>
+  </action>
+  <action name="actionUseFastProcessingForPlayback">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Use Fast Processing for Playback</string>
+   </property>
+   <property name="toolTip">
+    <string>Use the lightweight preview-processing subset while playing when the current grade is compatible.</string>
+   </property>
+   <property name="statusTip">
+    <string>Trade some playback grading fidelity for speed while the transport is running; full processing returns when paused.</string>
    </property>
   </action>
   <action name="actionTranscodeAndImport">
@@ -11625,6 +11688,22 @@ QGroupBox::indicator:checked:disabled {
     <hint type="destinationlabel">
      <x>599</x>
      <y>349</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>toolButtonDualIsoPreview</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>toolButtonDualIsoChanged()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>1188</x>
+     <y>796</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>1336</x>
+     <y>355</y>
     </hint>
    </hints>
   </connection>

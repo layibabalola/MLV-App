@@ -38,6 +38,56 @@ static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 #endif
 }
 
+static uint32_t df_next_version(uint32_t current_version)
+{
+    current_version++;
+    return current_version ? current_version : 1u;
+}
+
+static void df_bump_version(mlvObject_t * video)
+{
+    if (!video || !video->llrawproc) return;
+    video->llrawproc->dark_frame_version = df_next_version(video->llrawproc->dark_frame_version);
+}
+
+static void df_set_loaded_filename(mlvObject_t * video, const char * filename)
+{
+    if (!video || !video->llrawproc) return;
+
+    free(video->llrawproc->dark_frame_loaded_filename);
+    video->llrawproc->dark_frame_loaded_filename = NULL;
+
+    if (!filename) return;
+
+    const size_t filename_size = strlen(filename);
+    video->llrawproc->dark_frame_loaded_filename = calloc(filename_size + 1, 1);
+    if (video->llrawproc->dark_frame_loaded_filename)
+    {
+        memcpy(video->llrawproc->dark_frame_loaded_filename, filename, filename_size);
+    }
+}
+
+static int df_loaded_matches_request(const mlvObject_t * video)
+{
+    if (!video || !video->llrawproc) return 0;
+
+    const llrawprocObject_t * llrawproc = video->llrawproc;
+    if (!llrawproc->dark_frame_data || llrawproc->dark_frame_size == 0) return 0;
+
+    switch (llrawproc->dark_frame)
+    {
+        case DF_EXT:
+            return llrawproc->dark_frame_loaded_mode == DF_EXT
+                && llrawproc->dark_frame_filename
+                && llrawproc->dark_frame_loaded_filename
+                && strcmp(llrawproc->dark_frame_filename, llrawproc->dark_frame_loaded_filename) == 0;
+        case DF_INT:
+            return llrawproc->dark_frame_loaded_mode == DF_INT;
+        default:
+            return 0;
+    }
+}
+
 /* unload the darkframe mlv */
 static void df_unload( mlvObject_t* df_mlv )
 {
@@ -77,7 +127,8 @@ static void df_unload( mlvObject_t* df_mlv )
     if(df_mlv->main_file_mutex) free(df_mlv->main_file_mutex);
     pthread_mutex_destroy(&df_mlv->g_mutexFind);
     pthread_mutex_destroy(&df_mlv->g_mutexCount);
-    pthread_mutex_destroy(&df_mlv->cache_mutex);
+    pthread_mutex_destroy(&df_mlv->llrawproc_mutex);
+    pthread_mutex_destroy(&df_mlv->llrawproc_worker_mutex);
 }
 
 /* load dark frame from external averaged MLV file */
@@ -189,6 +240,9 @@ static int df_load_ext(mlvObject_t * video, char * error_message)
     video->llrawproc->dark_frame_size = df_mlv.RAWI.xRes * df_mlv.RAWI.yRes * 2;
     video->llrawproc->dark_frame_data = calloc(video->llrawproc->dark_frame_size + 4, 1);
     dng_unpack_image_bits(video->llrawproc->dark_frame_data, (uint16_t*)df_packed_buf, df_mlv.RAWI.xRes, df_mlv.RAWI.yRes, df_mlv.RAWI.raw_info.bits_per_pixel);
+    video->llrawproc->dark_frame_loaded_mode = DF_EXT;
+    df_set_loaded_filename(video, video->llrawproc->dark_frame_filename);
+    df_bump_version(video);
 #ifndef STDOUT_SILENT
     printf("DF: initialized Ext mode\n");
 #endif
@@ -233,6 +287,9 @@ static int df_load_int(mlvObject_t * video)
     video->llrawproc->dark_frame_size = video->DARK.xRes * video->DARK.yRes * 2;
     video->llrawproc->dark_frame_data = calloc(video->llrawproc->dark_frame_size + 4, 1);
     dng_unpack_image_bits(video->llrawproc->dark_frame_data, (uint16_t*)df_packed_buf, video->DARK.xRes, video->DARK.yRes, video->DARK.bits_per_pixel);
+    video->llrawproc->dark_frame_loaded_mode = DF_INT;
+    df_set_loaded_filename(video, NULL);
+    df_bump_version(video);
 #ifndef STDOUT_SILENT
     printf("DF: initialized Int mode\n");
 #endif
@@ -268,9 +325,32 @@ void df_subtract(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_imag
 #ifndef STDOUT_SILENT
     printf("Subtracting dark frame...'\n\n");
 #endif
-    uint16_t * dark_frame_data = video->llrawproc->dark_frame_data;
-    uint32_t black_level = video->llrawproc->dark_frame_hdr.black_level;
-    uint16_t white_level = (1 << video->RAWI.raw_info.bits_per_pixel) - 1;
+    df_subtract_snapshot(video->llrawproc->dark_frame_data,
+                         video->llrawproc->dark_frame_size,
+                         video->llrawproc->dark_frame_hdr.black_level,
+                         video->RAWI.raw_info.bits_per_pixel,
+                         raw_image_buff,
+                         raw_image_size);
+}
+
+void df_subtract_snapshot(const uint16_t * dark_frame_data,
+                          uint32_t dark_frame_size,
+                          uint32_t dark_frame_black_level,
+                          uint32_t raw_bits_per_pixel,
+                          uint16_t * raw_image_buff,
+                          size_t raw_image_size)
+{
+    if( !dark_frame_data || (raw_image_size != dark_frame_size) )
+    {
+#ifndef STDOUT_SILENT
+    printf("DF: subtracting is impossible, invalid dark frame'\n\n");
+#endif
+        return;
+    }
+#ifndef STDOUT_SILENT
+    printf("Subtracting dark frame...'\n\n");
+#endif
+    uint16_t white_level = (1 << raw_bits_per_pixel) - 1;
 
     uint32_t pixel_count = raw_image_size / 2;
 #pragma omp parallel for
@@ -279,7 +359,7 @@ void df_subtract(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_imag
         int32_t orig_val = raw_image_buff[i];
         int32_t dark_val = dark_frame_data[i];
 
-        raw_image_buff[i] = COERCE( orig_val - dark_val + black_level, 0, white_level );
+        raw_image_buff[i] = COERCE( orig_val - dark_val + dark_frame_black_level, 0, white_level );
     }
 }
 
@@ -300,8 +380,10 @@ int df_init(mlvObject_t * video)
     switch(video->llrawproc->dark_frame)
     {
         case DF_EXT:
+            if( df_loaded_matches_request(video) ) return 0;
             return df_load_ext(video, NULL);
         case DF_INT:
+            if( df_loaded_matches_request(video) ) return 0;
             return df_load_int(video);
         default:
             df_free(video);
@@ -312,6 +394,10 @@ int df_init(mlvObject_t * video)
 /* free all DF data */
 void df_free(mlvObject_t * video)
 {
+    const int had_state = video->llrawproc->dark_frame_data
+                       || video->llrawproc->dark_frame_loaded_filename
+                       || video->llrawproc->dark_frame_loaded_mode != DF_OFF;
+
     if(video->llrawproc->dark_frame_data)
     {
 #ifndef STDOUT_SILENT
@@ -322,4 +408,7 @@ void df_free(mlvObject_t * video)
         video->llrawproc->dark_frame_size = 0;
         memset(&video->llrawproc->dark_frame_hdr, 0, sizeof(mlv_dark_hdr_t));
     }
+    df_set_loaded_filename(video, NULL);
+    video->llrawproc->dark_frame_loaded_mode = DF_OFF;
+    if (had_state) df_bump_version(video);
 }

@@ -1,0 +1,8 @@
+{
+  "tiny_dual_iso.full16.frame0": "dfd6a6e8e025ac6f6d997f9a5b193e5816e86816cd21766c4a3f07cb8fc99ed6",
+  "tiny_dual_iso.full16.frame1": "08f65ea5e6bd252ae77968f43ecf43651f2dbb5e205e723f295885fde9ef4687",
+  "tiny_dual_iso.preview16.frame0": "1ae7e257ab3aa7a7e84354ab1f8259a552e1abb87a79291f625f4aa05b825d32",
+  "tiny_dual_iso.preview16.frame1": "36a2af860114762f478d381e73b05c3d42285cfa033c1d7c56959e9b4d8523e0",
+  "tiny_dual_iso.preview16_vs_full_psnr.frame0": "11.8065",
+  "tiny_dual_iso.preview16_vs_full_psnr.frame1": "3.5122"
+}

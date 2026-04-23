@@ -1,0 +1,28 @@
+Candidate 5: explicit zero-diff / unsigned-mask Huffman-side cleanup in nextdiff_fast(...).
+
+Configuration: large_dual_iso preview receipt, --frames 16, discard first 5 total frames, then compute medians over remaining samples with raw_uint16_ms > 0.
+
+Decision: REVERT. The candidate still beat the original baseline, but it regressed the kept candidate-1 state at both thread counts and did not earn a place in the stack.
+
+threads=1
+run1: warm_decode_samples=11, raw_uint16_ms=35.000, decompress_execute_ms=32.000, fast_path_total_ms=32.000, bitstream_ms=26.000, predictor_ms=5.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=31.000, decompress_execute_ms=29.000, fast_path_total_ms=29.000, bitstream_ms=26.000, predictor_ms=2.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=30.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=26.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=31.000, decompress_execute_ms=29.000, fast_path_total_ms=29.000, bitstream_ms=26.000, predictor_ms=3.000, other_ms=0.000
+
+threads=4
+run1: warm_decode_samples=11, raw_uint16_ms=31.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=25.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=31.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=24.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=30.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=27.000, predictor_ms=2.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=31.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=25.000, predictor_ms=4.000, other_ms=0.000
+
+Comparison points:
+vs corrected raw-JSON baseline:
+- threads=1: raw_uint16_ms 32.500 -> 31.000 (4.615% faster)
+- threads=4: raw_uint16_ms 39.000 -> 31.000 (20.513% faster)
+
+vs kept candidate-1 state:
+- threads=1: raw_uint16_ms 29.000 -> 31.000 (6.897% slower)
+- threads=4: raw_uint16_ms 29.000 -> 31.000 (6.896% slower)
+
+Conclusion: do not keep the standalone zero-diff cleanup as a performance change on this branch.

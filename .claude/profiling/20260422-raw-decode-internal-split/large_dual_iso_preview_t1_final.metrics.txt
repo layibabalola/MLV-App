@@ -1,0 +1,11 @@
+file=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\.claude\profiling\20260422-raw-decode-internal-split\large_dual_iso_preview_t1_final.json
+latency_ms=153.13
+raw_uint16_ms=25.43
+raw_uint16_disk_read_ms=1.29
+raw_uint16_decompress_ms=23.86
+raw_uint16_decompress_prepare_ms=0
+raw_uint16_decompress_execute_ms=23.86
+raw_uint16_other_ms=0.29
+processing_ms=30
+debayer_exclusive_ms=8.14
+llrawproc_ms=5

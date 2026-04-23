@@ -1,0 +1,332 @@
+{
+    "checks": {
+        "large_dual_iso.full16.average_ms.max": {
+            "current": 216.40816999999998,
+            "kind": "maximum",
+            "maximum": 15000,
+            "status": "pass"
+        },
+        "large_dual_iso.full16.median_ms": {
+            "baseline": 213.7068,
+            "current": 216.30315000000002,
+            "delta_pct": 1.2149122068179532,
+            "kind": "baseline_max",
+            "limit": 245.76281999999998,
+            "status": "pass"
+        },
+        "large_dual_iso.full8.average_ms.max": {
+            "current": 63.56938,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "large_dual_iso.preview16.average_ms.max": {
+            "current": 167.43138000000002,
+            "kind": "maximum",
+            "maximum": 15000,
+            "status": "pass"
+        },
+        "large_dual_iso.preview16.median_ms": {
+            "baseline": 166.1924,
+            "current": 166.7152,
+            "delta_pct": 0.3145751550612531,
+            "kind": "baseline_max",
+            "limit": 191.12125999999998,
+            "status": "pass"
+        },
+        "large_dual_iso.preview16_speedup_vs_full16.min": {
+            "current": 1.2925185828367416,
+            "kind": "minimum",
+            "required": 1.05,
+            "status": "pass"
+        },
+        "large_dual_iso.preview8.average_ms.max": {
+            "current": 4.32406,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.full16.average_ms.max": {
+            "current": 233.76955000000004,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.full16.median_ms": {
+            "baseline": 209.4398,
+            "current": 232.11849999999998,
+            "delta_pct": 10.828266642729794,
+            "kind": "baseline_max",
+            "limit": 240.85576999999998,
+            "status": "pass"
+        },
+        "tiny_dual_iso.full8.average_ms.max": {
+            "current": 25.389349999999997,
+            "kind": "maximum",
+            "maximum": 1000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.preview16.average_ms.max": {
+            "current": 170.87151999999998,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.preview16.median_ms": {
+            "baseline": 176.77935,
+            "current": 168.64425,
+            "delta_pct": -4.601838393454889,
+            "kind": "baseline_max",
+            "limit": 203.29625249999998,
+            "status": "pass"
+        },
+        "tiny_dual_iso.preview16_speedup_vs_full16.min": {
+            "current": 1.3681013079300757,
+            "kind": "minimum",
+            "required": 1.05,
+            "status": "pass"
+        },
+        "tiny_dual_iso.preview8.average_ms.max": {
+            "current": 5.20016,
+            "kind": "maximum",
+            "maximum": 1000,
+            "status": "pass"
+        }
+    },
+    "metadata": {
+        "baseline_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/perf/baselines.json",
+        "baseline_profile": "auto.windows.x86_64.93c1151a315d",
+        "baseline_profile_found": true,
+        "baseline_profile_label": "Auto local baseline (Windows 10 Version 22H2, x86_64, Qt 6.10.2)",
+        "baseline_profile_threads_match": true,
+        "baseline_regression_pct": 15,
+        "captured_at_utc": "2026-04-21T15:21:01Z",
+        "fixtures": [
+            {
+                "clip_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/clips/tiny_dual_iso.mlv",
+                "key": "tiny_dual_iso",
+                "label": "tiny Dual ISO",
+                "receipt_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+                "sample_frames": 2,
+                "total_frames": 2
+            },
+            {
+                "clip_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/clips/large_dual_iso.mlv",
+                "key": "large_dual_iso",
+                "label": "extra fixture (large_dual_iso.mlv)",
+                "receipt_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/receipts/large_dual_iso_hq.marxml",
+                "sample_frames": 8,
+                "total_frames": 16
+            }
+        ],
+        "iterations": 10,
+        "threads": 1,
+        "updated_baseline": false
+    },
+    "results": {
+        "large_dual_iso.full16": {
+            "average_ms": 216.40816999999998,
+            "cv_pct": 4.550753228668077,
+            "fps": 4.6208976306208775,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 237.9629,
+            "median_ms": 216.30315000000002,
+            "min_ms": 202.0792,
+            "samples_ms": [
+                220.9055,
+                214.1731,
+                218.4332,
+                237.9629,
+                225.2998,
+                208.1247,
+                202.0792,
+                207.1965,
+                210.8389,
+                219.0679
+            ],
+            "stddev_ms": 9.8482017833765,
+            "trimmed_average_ms": 215.50495
+        },
+        "large_dual_iso.full8": {
+            "average_ms": 63.56938,
+            "cv_pct": 141.70777508919412,
+            "fps": 15.73084400068083,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 204.8887,
+            "median_ms": 4.5276499999999995,
+            "min_ms": 4.3047,
+            "samples_ms": [
+                196.4493,
+                4.4792,
+                204.8887,
+                4.486,
+                4.5098,
+                4.3047,
+                4.3677,
+                202.0843,
+                5.5786,
+                4.5455
+            ],
+            "stddev_ms": 90.08275403599515,
+            "trimmed_average_ms": 53.31255
+        },
+        "large_dual_iso.preview16": {
+            "average_ms": 167.43138000000002,
+            "cv_pct": 1.838955491057438,
+            "fps": 5.972596056963754,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 174.9746,
+            "median_ms": 166.7152,
+            "min_ms": 163.3089,
+            "samples_ms": [
+                163.3089,
+                167.1606,
+                165.38,
+                166.8693,
+                174.9746,
+                166.5611,
+                169.8109,
+                164.8543,
+                166.4506,
+                168.9435
+            ],
+            "stddev_ms": 3.078988556263245,
+            "trimmed_average_ms": 167.0037875
+        },
+        "large_dual_iso.preview16_speedup_vs_full16": 1.2925185828367416,
+        "large_dual_iso.preview8": {
+            "average_ms": 4.32406,
+            "cv_pct": 5.087550098788395,
+            "fps": 231.26413602031423,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 4.6541,
+            "median_ms": 4.36135,
+            "min_ms": 3.8699,
+            "samples_ms": [
+                4.6541,
+                4.4673,
+                4.3231,
+                4.4619,
+                4.5529,
+                4.1595,
+                3.8699,
+                4.1632,
+                4.3996,
+                4.1891
+            ],
+            "stddev_ms": 0.21998871880166945,
+            "trimmed_average_ms": 4.339575
+        },
+        "large_dual_iso.preview8_speedup_vs_full8": 14.701317743047044,
+        "threads": 1,
+        "tiny_dual_iso.full16": {
+            "average_ms": 233.76955000000004,
+            "cv_pct": 9.39530877968686,
+            "fps": 4.2777170936077855,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 272.5434,
+            "median_ms": 232.11849999999998,
+            "min_ms": 197.3314,
+            "samples_ms": [
+                219.9549,
+                246.8574,
+                225.8586,
+                209.891,
+                263.0599,
+                272.5434,
+                238.3784,
+                239.3856,
+                224.4349,
+                197.3314
+            ],
+            "stddev_ms": 21.96337105538447,
+            "trimmed_average_ms": 233.47758750000003
+        },
+        "tiny_dual_iso.full8": {
+            "average_ms": 25.389349999999997,
+            "cv_pct": 245.17758827846455,
+            "fps": 39.386593197541494,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 212.1306,
+            "median_ms": 4.410399999999999,
+            "min_ms": 4.2436,
+            "samples_ms": [
+                212.1306,
+                4.4853,
+                4.6687,
+                4.2677,
+                4.3355,
+                4.2436,
+                5.6341,
+                4.3343,
+                4.2827,
+                5.511
+            ],
+            "stddev_ms": 62.24899600957833,
+            "trimmed_average_ms": 4.6899125
+        },
+        "tiny_dual_iso.preview16": {
+            "average_ms": 170.87151999999998,
+            "cv_pct": 5.73590492330871,
+            "fps": 5.852350350719653,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 195.1266,
+            "median_ms": 168.64425,
+            "min_ms": 158.4668,
+            "samples_ms": [
+                166.3554,
+                170.9331,
+                171.1505,
+                165.2501,
+                164.1632,
+                177.2333,
+                176.3192,
+                195.1266,
+                163.717,
+                158.4668
+            ],
+            "stddev_ms": 9.801027928212426,
+            "trimmed_average_ms": 169.39022500000002
+        },
+        "tiny_dual_iso.preview16_speedup_vs_full16": 1.3681013079300757,
+        "tiny_dual_iso.preview8": {
+            "average_ms": 5.20016,
+            "cv_pct": 13.459247996767926,
+            "fps": 192.30177532998982,
+            "frames": 10,
+            "iterations": 10,
+            "max_ms": 6.6553,
+            "median_ms": 5.018050000000001,
+            "min_ms": 4.4879,
+            "samples_ms": [
+                4.771,
+                6.3009,
+                5.144,
+                6.6553,
+                5.4167,
+                4.5469,
+                4.4879,
+                4.6428,
+                4.9078,
+                5.1283
+            ],
+            "stddev_ms": 0.699902430628727,
+            "trimmed_average_ms": 5.1072999999999995
+        },
+        "tiny_dual_iso.preview8_speedup_vs_full8": 4.882417079474477
+    },
+    "status": {
+        "absolute_ok": true,
+        "exit_ok": true,
+        "overall_ok": true,
+        "profile_ok": true,
+        "relative_ok": true
+    }
+}

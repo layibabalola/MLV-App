@@ -23,9 +23,77 @@
 #define _dualiso_h
 
 #include <sys/types.h>
+#include <stdint.h>
 #include "../raw.h"
 
-int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int diso_check);
-int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads);
+typedef struct
+{
+    int * data_x;
+    int * data_y;
+    double * data_w;
+    size_t data_capacity;
+    uint16_t * output_image;
+    size_t output_capacity;
+    double last_histogram_ms;
+    double last_regression_ms;
+    double last_rowscale_ms;
+} dualiso_preview_scratch_t;
+
+typedef struct
+{
+    uint32_t * raw_buffer_32;
+    uint32_t * dark;
+    uint32_t * bright;
+    uint32_t * fullres;
+    uint32_t * halfres;
+    uint32_t * fullres_smooth;
+    uint32_t * halfres_smooth;
+    uint16_t * overexposed;
+    uint16_t * alias_map;
+    uint16_t * over_aux;
+    double * mix_curve;
+    size_t pixel_capacity;
+    size_t mix_curve_capacity;
+
+    int * histogram_match_dark;
+    int * histogram_match_bright;
+    int * histogram_match_tmp;
+    int * histogram_match_hi_dark;
+    int * histogram_match_hi_bright;
+    size_t histogram_match_pixel_capacity;
+    size_t histogram_match_sample_capacity;
+    size_t histogram_match_highlight_capacity;
+
+    int * identify_histograms;
+    size_t identify_histogram_capacity;
+
+    int * amaze_squeezed;
+    float ** amaze_rawData_rows;
+    float ** amaze_red_rows;
+    float ** amaze_green_rows;
+    float ** amaze_blue_rows;
+    float * amaze_rawData_storage;
+    float * amaze_red_storage;
+    float * amaze_green_storage;
+    float * amaze_blue_storage;
+    uint32_t * amaze_gray;
+    uint8_t * amaze_edge_direction;
+    int * amaze_startchunk_y;
+    int * amaze_endchunk_y;
+    void * amaze_thread_id;
+    void * amaze_arguments;
+    size_t amaze_row_capacity;
+    size_t amaze_row_width;
+    size_t amaze_plane_cell_capacity;
+    size_t amaze_pixel_capacity;
+    size_t amaze_thread_capacity;
+
+    uint16_t * alias_aux;
+    size_t alias_aux_capacity;
+} dualiso_full20bit_scratch_t;
+
+int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch);
+int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch);
+void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch);
 
 #endif

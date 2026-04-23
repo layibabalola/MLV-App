@@ -1,0 +1,215 @@
+## 2026-04-22
+
+- Patched two app-backed playback-profile sample emission races in `platform/qt/MainWindow.cpp:1393-1419`.
+  - `gpu_bilinear_debayer_renderer` now falls back to `"unknown"` when a fallback reason is present before the renderer string arrives.
+  - `engine_completion_ns` / `engine_latency_ms` now always emit using `completionNs` as the fallback timing source, with `engine_latency_direct_measured` marking whether the direct signal was available.
+- Fresh app-backed `ClipGolden` reruns captured after rebuilding the app and console test binary were green in five consecutive recorded runs:
+  - `.claude/profiling/20260422-clipgolden-flake-fix/run_4.txt`
+  - `.claude/profiling/20260422-clipgolden-flake-fix/run_5.txt`
+  - `.claude/profiling/20260422-clipgolden-flake-fix/run_6.txt`
+  - `.claude/profiling/20260422-clipgolden-flake-fix/run_7.txt`
+  - `.claude/profiling/20260422-clipgolden-flake-fix/run_8.txt`
+- This reframes the prior test story:
+  - stale-binary hard failures were environmental, not product bugs
+  - the remaining issue was flaky telemetry emission, which is now patched in source
+- Added Dual ISO preview stage telemetry to `diso_get_preview()` and surfaced it in playback-profile samples.
+- Landed a serial out-of-place rowscale refactor using preview scratch output storage.
+- Fresh VM measurement for `large_dual_iso_preview.marxml` with CPU backend, single-threaded:
+  - average latency `159.87 ms`
+  - average cadence `140.74 ms`
+  - warm histogram `0.14 ms`
+  - warm regression `0.00 ms`
+  - warm rowscale `4.43 ms`
+- Practical conclusion: `diso_get_preview()` is no longer the dominant Dual ISO playback cost on this VM, so the next CPU pass should re-profile the whole frame before forcing an OMP rowscale pass.
+- Added outer-stage CPU playback telemetry for `raw_uint16`, `llrawproc`, `debayered_frame`, `processing`, and the main llrawproc sub-stages.
+- Fresh warm Dual ISO preview numbers on this VM now point at:
+  - `processing_ms` ~ `149.00 ms`
+  - `debayered_frame_ms` ~ `82.71 ms`
+  - `raw_uint16_ms` ~ `48.00 ms`
+  - `llrawproc_ms` ~ `16.71 ms`
+  - `dual_iso_preview_total_ms` ~ `8.00 ms`
+- Practical conclusion shifted again: for CPU-only Dual ISO preview playback on this VM, `processing` is now the dominant warm-frame cost, not `diso_get_preview()` and not total `llrawproc`.
+- Added exclusive debayer playback-profile telemetry (`raw_float_convert_ms`, `debayer_exclusive_ms`, `debayer_kernel_ms`, etc.) and fixed the console-runner link issue by switching `frame_caching.c` to a local non-OpenMP-required timing helper.
+- Exclusive timings confirmed the old inclusive `debayered_frame_ms` number was overstating pure debayer cost.
+- Landed a narrow `raw_processing.c` fast path for the common preview-playback receipt shape (no creative adjustments, no gradient, no highlight reconstruction, no vignette, no AgX, no EXR, camera matrix on) plus a gate that skips `analyse_frame_highest_green(...)` when highlight reconstruction is disabled.
+- Fresh green verification after that pass:
+  - `console_tests --check-golden`: `35 tests / 558 assertions / 0 skips / 0 failures`
+  - `pipeline_tests --check-golden`: `44 tests / 507 assertions / 4 skips / 0 failures`
+- Fresh warm metrics after the processing pass:
+  - default-thread playback: `latency_ms 128.65`, `raw_uint16_ms 37.71`, `processing_ms 24.14`, `debayer_exclusive_ms 14.71`, `llrawproc_ms 6.71`
+  - single-thread playback: `latency_ms 112.30`, `processing_ms 45.75`, `processing_core_color_ms 27.50`, `debayer_exclusive_ms 12.25`, `processing_highest_green_ms 0.00`
+- Controlled single-thread comparison for the same Dual ISO preview receipt on this VM:
+  - before processing fast path / highest-green gate: `193.19 ms` warm latency
+  - after: `112.30 ms` warm latency
+- Next ranked target on this VM is now `raw_uint16_ms` (read / decompress / bit-unpack / copy split), not Dual ISO preview and not pure debayer.
+- Added raw-uint16 sub-stage telemetry (`disk_read`, `decompress`, `unpack`, `copy`, `other`) to the playback-profile path and updated the app-backed console contract to require those fields.
+- Fresh green verification on the current branch:
+  - `console_tests --check-golden`: `35 tests / 586 assertions / 0 skips / 0 failures`
+  - `pipeline_tests --check-golden`: `44 tests / 507 assertions / 4 skips / 0 failures`
+- The raw split on `large_dual_iso_preview.marxml` changed the diagnosis:
+  - `raw_uint16_disk_read_ms` is only ~`1.3-3.0 ms`
+  - `raw_uint16_decompress_ms` is the real dominant raw leaf at ~`31-46 ms`
+  - `raw_uint16_unpack_ms` / `raw_uint16_copy_ms` are `0` on this compressed clip
+- Clean current VM thread matrix on the Dual ISO preview receipt:
+  - `t1`: `152.16 ms`
+  - `t2`: `121.70 ms`
+  - `t4`: `111.84 ms`
+  - `t8`: `158.73 ms`
+- Practical conclusion:
+  - `4` threads is the best local benchmark point on this VM for the current Dual ISO preview workload
+  - `8` threads regress, so future VM-local CPU passes should benchmark at `4` unless the host proves otherwise
+  - the next dominant investigation target is compressed raw decode, not disk I/O, not bit-unpack, and not deeper Dual ISO preview work
+- I also tested a thread-local raw read-buffer reuse candidate in `getMlvRawFrameUint16(...)` and reverted it in the same pass because it did not produce a clear measured win and introduced avoidable lifetime/sizing concerns.
+- Prototyped a raw `uint16` decode-ahead ring and measured it directly on the Dual ISO preview path.
+  - Warm samples showed foreground raw decode was effectively hidden (`raw_uint16_ms ~1.5 ms`, `prefetch_hit 7/7`) when the worker was enabled.
+  - End-to-end frame latency still regressed at the important VM points, so the prototype is now experimental-only behind `MLVAPP_EXPERIMENTAL_RAW_UINT16_PREFETCH`.
+- Added deeper compressed-decode telemetry:
+  - `raw_uint16_decompress_prepare_ms`
+  - `raw_uint16_decompress_execute_ms`
+- Current result: decoder setup/open is effectively `0 ms`; the remaining raw cost is almost entirely the LJ92 decode body.
+- Tried and reverted one LJ92 fast-path branch-hoist in `parsePred6`; it did not produce a trustworthy playback win in quick controlled samples, so only the decode telemetry remains from that pass.
+- Added a small play-start raw cache preroll helper:
+  - [src/mlv/frame_caching.c:302](</C:/!Layi%20Wkspc/MLV-App/.claude/worktrees/festive-boyd/src/mlv/frame_caching.c:302>)
+  - [platform/qt/MainWindow.cpp:9850](</C:/!Layi%20Wkspc/MLV-App/.claude/worktrees/festive-boyd/platform/qt/MainWindow.cpp:9850>)
+- This preroll is intentionally narrow:
+  - 2-frame lookahead
+  - only when cached AMaZE playback is already active
+  - non-blocking request through the existing cache worker path
+- Added cache regression coverage:
+  - `CacheBehavior.PlaybackPrerollRequestsFirstFutureUncachedFrame`
+  - `CacheBehavior.PlaybackPrerollSlidesWindowTowardLookahead`
+- Fresh verification:
+  - `console_tests --check-golden`: `37 tests / 160 assertions / 13 skips / 0 failures`
+  - `pipeline_tests --check-golden`: `44 tests / 507 assertions / 4 skips / 0 failures`
+  - `gui_tests`: `19 passed / 0 failed / 6 skipped`
+- No new runtime FPS claim yet for this preroll; it is a play-start UX improvement path that still needs a dedicated A/B measurement on the real UI path.
+- Late follow-up:
+  - refined `play_to_first_frame_ms` so it now tracks the first requested render after arming instead of the next arbitrary completion
+  - added `play_start_preroll_eligible` beside the stricter `play_start_preroll_active`
+  - verified current local state at `37 / 604 / 1 / 0` for app-backed console, `44 / 507 / 4 / 0` for pipeline, and `19 / 0 / 6` for GUI
+  - landed a first LJ92 local-state hoist in `parsePred6()` plus a compatibility fix for the dormant `SLOW_HUFF` branch
+  - the first-frame instrumentation is now trustworthy enough to use in future preroll A/Bs, but the preroll UX gain itself is still not claimed as measured
+- Latest follow-up:
+  - same-mode cached-AMaZE preroll A/B is now captured with the env gate
+  - preroll on: `play_to_first_frame_ms ~696 ms`
+  - preroll off: `play_to_first_frame_ms ~733 ms`
+  - first-frame delta on this VM is about `37 ms` in favor of preroll
+  - honest LJ92 predictor telemetry is now exported via:
+    - `raw_uint16_lj92_pred6_split_requested`
+    - `raw_uint16_lj92_predictor`
+  - both current Dual ISO fixtures report predictor `1`, so the pred6 split is requested but not applicable on them
+  - verified current local state at `39 / 644 / 1 / 0` for app-backed console and `44 / 507 / 4 / 0` for pipeline
+- 2026-04-23 follow-up:
+  - added predictor-1 / generic LJ92 split telemetry plus a helper that makes the app-backed clip-golden tests look at the first frame with real raw-decode telemetry instead of blindly using `frames[0]`
+  - fresh scaffold state is now `40 / 676 / 0 / 0` for console and `44 / 507 / 4 / 0` for pipeline
+  - the new predictor-1 split confirms current Dual ISO fixtures still decode with predictor `1`, not predictor `6`
+  - important caveat: the generic split is intrusive because it times inside the per-sample decode loop; use it as a relative shape probe, not a trustworthy absolute `ms` decoder benchmark
+  - also landed a generic-path local-state hoist (`parseScan()` now uses local `b/cnt/ix` with `nextdiff_fast(...)`)
+  - current VM replay samples for that hoist are noisy enough that I am not claiming a decisive sustained decode win yet; it remains a plausible small win that needs tighter repeat profiling
+- 2026-04-23 late-night follow-up:
+  - landed a narrow predictor-1 mono LJ92 fast path for the current hot decode shape in `src/mlv/liblj92/lj92.c` (predictor `1`, single component, no linearize table, `skiplen == 0`, contiguous output, generic split profiling off)
+  - rebuilt the Qt app plus pipeline target and revalidated current green state at `40 / 676 / 0 / 0` for console and `44 / 507 / 4 / 0` for pipeline
+  - fresh large-clip t1 playback-profile smoke artifact is `.claude/profiling/20260423-pred1-fast-path/large_dual_iso_preview_t1_pred1_fast_path.json`
+  - current VM warm smoke numbers from that artifact are about `47.78 ms` for `raw_uint16_decompress_execute_ms` and `50.11 ms` for `raw_uint16_ms`
+  - those numbers are still inside the previously documented noisy `~32.5-60.0 ms` post-hoist band, so this pass is recorded as green + aligned with the right hot path, but not yet a proven decoder throughput breakthrough
+- 2026-04-23 handoff refinement:
+  - updated the next-session execution plan so the overnight predictor-1 pass is fully specified
+  - the new handoff now requires separate coarse fast-path telemetry, repeated large-clip baseline runs (`3x` threads=`1`, `3x` threads=`4`), fixed warm-window rules, and explicit keep/revert thresholds (`<3%` noise, `3-5%` requires consistency, `>=5%` requires no meaningful threads=`4` regression)
+  - also clarified the practical build/runtime gate on this machine: prepend the Qt/MinGW toolchain to `PATH`, validate with fresh app-backed console coverage via `MLVAPP_PROFILE_EXE`, and do not commit at the end of the overnight pass
+- 2026-04-23 implementation follow-up:
+  - landed the separate predictor-1 fast-path measurement seam behind `MLVAPP_PRED1_FASTPATH_MEASUREMENT=1` and exported the new `raw_uint16_lj92_pred1_fast_path_*` playback-profile fields
+  - rebuilt the Qt app, console tests, and pipeline tests; current validation is green at `41 / 160 / 17 / 0` for plain console, `41 / 692 / 1 / 0` for app-backed console, and `44 / 507 / 4 / 0` for pipeline
+  - captured fresh smoke artifacts for both `tiny_dual_iso` and `large_dual_iso` preview receipts under `.claude/profiling/20260423-pred1-fastpath-measurement/`
+  - important new blocker: both smoke runs report predictor `1` and `measurement_requested = true`, but still show `raw_uint16_lj92_pred1_fast_path_active = false` and `measurement_active = false`, so the planned repeated baseline is not meaningful until that eligibility mismatch is explained
+- 2026-04-23 activation + baseline follow-up:
+  - resolved the predictor-1 activation blocker: the shipped Dual ISO LJ92 path is contiguous predictor `1` with `2` components, not the earlier assumed mono shape
+  - activation proof is now captured in:
+    - `.claude/profiling/20260423-pred1-fastpath-measurement/tiny_dual_iso_preview_t1_pred1_fastpath_measurement_activation_smoke.json`
+    - `.claude/profiling/20260423-pred1-fastpath-measurement/large_dual_iso_preview_t1_pred1_fastpath_measurement_activation_smoke.json`
+  - important implementation lesson: a first direct-output multi-component fast path regressed pipeline goldens; the final `parseScanPred1Fast(...)` preserves the generic row-buffer behavior and is now green
+  - strengthened the app-backed console contract so the predictor-1 measurement test now requires the fast path to be active on `tiny_dual_iso`
+  - rebuilt and revalidated final green state at:
+    - plain console: `41 / 160 / 17 / 0`
+    - app-backed console with fresh `MLVApp.exe`: `41 / 695 / 1 / 0`
+    - pipeline: `44 / 507 / 4 / 0`
+  - completed the Phase B repeated baseline on the fixed code under `.claude/profiling/20260423-pred1-fastpath-baseline/`
+  - fixed baseline rule for later candidate comparisons:
+    - `3x --threads 1`
+    - `3x --threads 4`
+    - `--frames 16`
+    - discard first `5`
+    - compute medians only from remaining warm samples with `raw_uint16_ms > 0`
+  - final median-of-run-medians on this VM:
+    - `threads=1`: `raw_uint16_ms 38.5`, `raw_uint16_decompress_execute_ms 35.0`, `pred1_fast_path_total_ms 35.0`, `bitstream_ms 29.5`, `predictor_ms 6.0`
+    - `threads=4`: `raw_uint16_ms 42.0`, `raw_uint16_decompress_execute_ms 42.0`, `pred1_fast_path_total_ms 42.0`, `bitstream_ms 34.5`, `predictor_ms 6.0`
+  - Phase C is now the next live seam; do not spend the next session re-debugging activation
+- 2026-04-23 candidate 1 keep follow-up:
+  - kept the first Phase C candidate in `src/mlv/liblj92/lj92.c`: hot/cold split of the active predictor-1 fast path, `LJ92_ALWAYS_INLINE` on `nextdiff_fast(...)`, and cached `data` pointer use in the second refill loop
+  - important bookkeeping correction: the earlier `baseline_metrics.txt` text copy used an inconsistent median aggregation, so the baseline was recomputed directly from the raw playback-profile JSON artifacts and that corrected raw-JSON summary is now the source of truth
+  - corrected Phase B median-of-run-medians on this VM:
+    - `threads=1`: `raw_uint16_ms 32.5`, `raw_uint16_decompress_execute_ms 31.0`, `pred1_fast_path_total_ms 31.0`, `bitstream_ms 29.5`, `predictor_ms 4.0`
+    - `threads=4`: `raw_uint16_ms 39.0`, `raw_uint16_decompress_execute_ms 38.0`, `pred1_fast_path_total_ms 38.0`, `bitstream_ms 28.0`, `predictor_ms 4.0`
+  - candidate 1 median-of-run-medians:
+    - `threads=1`: `raw_uint16_ms 29.0` (`10.770%` faster than corrected baseline)
+    - `threads=4`: `raw_uint16_ms 29.0` (`25.641%` faster than corrected baseline)
+  - all six candidate 1 runs kept the fast path active on every decode-active warm sample
+  - revalidated current green state after keeping candidate 1:
+    - plain console: `41 / 160 / 17 / 0`
+    - app-backed console with fresh `MLVApp.exe`: `41 / 695 / 1 / 0`
+    - pipeline: `44 / 507 / 4 / 0`
+  - the next queue item is now the bit-buffer refill split; do not spend another pass re-testing helper/inlining variants before trying that seam
+- 2026-04-23 candidate queue follow-up:
+  - tried candidate 2 (refill split), candidate 3 (pointer-walk loops), and candidate 4 (branch trimming), but reverted all three after measurement
+  - candidate 2 still beat the original baseline (`7.692%` faster at `threads=1`, `20.513%` faster at `threads=4`) but regressed the kept candidate-1 state (`3.449%` slower at `threads=1`, `6.896%` slower at `threads=4`)
+  - candidate 3 still beat the original baseline, but it was effectively flat at `threads=1` and `3.449%` slower at `threads=4` versus candidate 1
+  - candidate 4 was the closest near-threshold result: `3.448%` faster than candidate 1 at `threads=1` and unchanged at `threads=4`, but the repeat-level movement stayed mixed, so it did not clear the `3-5%` keep rule cleanly enough to survive
+  - current kept source state remains candidate 1 only
+  - rebuilt the kept state and re-ran the green gates at:
+    - plain console: `41 / 160 / 17 / 0`
+    - app-backed console with fresh `MLVApp.exe`: `41 / 695 / 1 / 0`
+    - pipeline: `44 / 507 / 4 / 0`
+  - the only queued decoder experiment left after this pass is the explicit Huffman / refill work; otherwise the honest next step is the final pivot profile and doc closeout
+- 2026-04-23 final Huffman/refill + pivot follow-up:
+  - tried candidate 5 (zero-diff cleanup) and reverted it after measurement; it still beat the corrected baseline (`4.615%` faster at `threads=1`, `20.513%` faster at `threads=4`) but regressed the kept candidate-1 state by about `6.9%` at both thread counts
+  - kept candidate 6 by widening `hufflut` entries so `nextdiff_fast(...)` can directly return a decoded `diff` when the current peek window already contains the whole symbol, while preserving the old refill / receive path as fallback
+  - final candidate 6 median-of-run-medians:
+    - `threads=1`: `raw_uint16_ms 18.0`, `raw_uint16_decompress_execute_ms 17.0`, `pred1_fast_path_total_ms 17.0`, `bitstream_ms 14.0`, `predictor_ms 3.0`
+    - `threads=4`: `raw_uint16_ms 18.0`, `raw_uint16_decompress_execute_ms 17.0`, `pred1_fast_path_total_ms 17.0`, `bitstream_ms 13.0`, `predictor_ms 3.0`
+  - candidate 6 improvements:
+    - versus corrected baseline: `44.615%` faster at `threads=1`, `53.846%` faster at `threads=4`
+    - versus kept candidate 1: `37.930%` faster at `threads=1`, `37.931%` faster at `threads=4`
+  - final pivot artifact is `.claude/profiling/20260423-pred1-fastpath-final-pivot/large_dual_iso_preview_t4_final_pivot.json`
+  - warm medians from that accepted-build pivot run:
+    - `latency_ms 77.952`
+    - `processed16_total_ms 53.0`
+    - `debayered_frame_ms 29.0`
+    - `processing_ms 18.0`
+    - `raw_uint16_ms 18.0`
+    - `pred1_fast_path_total_ms 16.0`
+  - pivot conclusion:
+    - decoder share is now about `23.091%` of warm playback latency
+    - measured LJ92 fast path share is about `20.525%`
+    - the next honest performance seam is post-decode processed16 / debayer work, not more predictor-1 LJ92 queue churn on this branch
+  - final green state on the kept build:
+    - plain console: `41 / 160 / 17 / 0`
+    - app-backed console with fresh `MLVApp.exe`: `41 / 695 / 1 / 0`
+    - pipeline: `44 / 507 / 4 / 0`
+  - final kept source state on this branch is candidate 1 plus candidate 6; candidates 2 through 5 are retained only as profiling artifacts
+
+## 2026-04-23
+
+- Investigated the `festive-boyd` worktree corruption incident and confirmed the failure mode was loss of linked-worktree admin metadata, not loss of checkout contents:
+  - `C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd` stayed intact
+  - `C:/!Layi Wkspc/MLV-App/.git/worktrees/festive-boyd` was missing
+  - the orphaned `.git` pointer still referenced that missing admin dir
+- The branch lineage was cross-checked in reflog:
+  - worktree/branch originally created from `master` on `2026-02-27 15:28:58 -0600`
+  - `refs/heads/claude/festive-boyd` was renamed to `refs/heads/feature/headless-batch-cdng` on `2026-02-28 03:09:49 -0600`
+- `festive-boyd-before-compare` was created later on `2026-04-22 07:43:50 -0500`; it should be treated as a separate comparison snapshot, not as proof that the compare step caused the corruption.
+- The earliest confirmed Git-blind failure against the orphaned tree in local Codex logs was on `2026-04-22 19:57:39 -0500`, which means the later Dual ISO optimization burst happened in a directory that no longer had valid Git admin state.
+- Recovery was completed by creating a fresh registered worktree at `C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd-recovered` on branch `festive-boyd` and transplanting the full orphaned tree contents into it.
+- Practical prevention for future long autonomous runs:
+  - check `git status --short` and `git worktree list --porcelain` before starting
+  - use `git worktree add`, `git worktree move`, and `git worktree remove` rather than manual directory copies or renames
+  - never manually clean `.git/worktrees/*` unless Git itself reports the entry as stale
+  - commit or tag a baseline before overnight profiling passes so a Git-blind directory cannot silently accumulate untracked work

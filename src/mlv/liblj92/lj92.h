@@ -58,6 +58,31 @@ int lj92_decode(lj92 lj,
                 uint16_t* target, int writeLength, int skipLength, // The image is written to target as a tile
                 uint16_t* linearize, int linearizeLength); // If not null, linearize the data using this table
 
+int lj92_get_last_pred6_split_active(void);
+int lj92_get_last_pred6_split_requested(void);
+int lj92_get_last_generic_split_active(void);
+int lj92_get_last_generic_split_requested(void);
+int lj92_get_last_pred1_fast_path_active(void);
+int lj92_get_last_pred1_fast_path_measurement_requested(void);
+int lj92_get_last_pred1_fast_path_measurement_active(void);
+int lj92_get_last_pred1_fast_path_eligible(void);
+int lj92_get_last_scan_component_count(void);
+int lj92_get_last_write_length(void);
+int lj92_get_last_expected_write_length(void);
+int lj92_get_last_skip_length(void);
+int lj92_get_last_linearize_active(void);
+int lj92_get_last_component_count(void);
+int lj92_get_last_predictor(void);
+double lj92_get_last_pred6_total_ms(void);
+double lj92_get_last_pred6_bitstream_ms(void);
+double lj92_get_last_pred6_predictor_ms(void);
+double lj92_get_last_generic_total_ms(void);
+double lj92_get_last_generic_bitstream_ms(void);
+double lj92_get_last_generic_predictor_ms(void);
+double lj92_get_last_pred1_fast_path_total_ms(void);
+double lj92_get_last_pred1_fast_path_bitstream_ms(void);
+double lj92_get_last_pred1_fast_path_predictor_ms(void);
+
 /*
  * Encode a grayscale image supplied as 16bit values within the given bitdepth
  * Read from tile in the image

@@ -1,0 +1,4 @@
+{"threads":1,"latency_ms":188.09245714285717,"raw_uint16_ms":50.999999046325684,"raw_uint16_decompress_ms":46.3333527247111,"llrawproc_ms":7.666667302449544,"debayer_exclusive_ms":16.83334509531657,"processing_ms":60.833374659220375}
+{"threads":2,"latency_ms":null,"raw_uint16_ms":null,"raw_uint16_decompress_ms":null,"llrawproc_ms":null,"debayer_exclusive_ms":null,"processing_ms":null}
+{"threads":4,"latency_ms":null,"raw_uint16_ms":null,"raw_uint16_decompress_ms":null,"llrawproc_ms":null,"debayer_exclusive_ms":null,"processing_ms":null}
+{"threads":8,"latency_ms":null,"raw_uint16_ms":null,"raw_uint16_decompress_ms":null,"llrawproc_ms":null,"debayer_exclusive_ms":null,"processing_ms":null}

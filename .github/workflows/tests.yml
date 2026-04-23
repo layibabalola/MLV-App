@@ -1,0 +1,121 @@
+name: Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/tests.yml"
+      - "tests/**"
+      - "src/**"
+      - "platform/qt/**"
+      - "AGENTS.md"
+      - ".claude/CLAUDE.md"
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/tests.yml"
+      - "tests/**"
+      - "src/**"
+      - "platform/qt/**"
+      - "AGENTS.md"
+      - ".claude/CLAUDE.md"
+
+jobs:
+  windows-scaffold:
+    name: Windows Scaffold
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: powershell
+
+    env:
+      QT_VERSION: 6.10.2
+      QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install aqtinstall
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "aqtinstall==3.3.*"
+
+      - name: Install Qt 6.10.2 + MinGW 13.1
+        run: |
+          python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
+          python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
+          Add-Content -Path $env:GITHUB_ENV -Value "QT_ROOT_DIR=$env:QT_OUTPUT_DIR\\$env:QT_VERSION\\mingw_64"
+          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\\Tools\\mingw1310_64"
+
+      - name: Build console_tests
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          New-Item -ItemType Directory -Force tests\build-ci-console | Out-Null
+          Push-Location tests\build-ci-console
+          & "$env:QT_ROOT_DIR\bin\qmake.exe" "..\console\console_tests.pro"
+          & "$env:MINGW_ROOT\bin\mingw32-make.exe" -j2
+          Pop-Location
+
+      - name: Run console_tests --check-golden
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          & "tests\build-ci-console\release\console_tests.exe" --check-golden
+
+      - name: Build pipeline_tests
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          New-Item -ItemType Directory -Force tests\build-ci-pipeline | Out-Null
+          Push-Location tests\build-ci-pipeline
+          & "$env:QT_ROOT_DIR\bin\qmake.exe" "..\pipeline\pipeline_tests.pro"
+          & "$env:MINGW_ROOT\bin\mingw32-make.exe" -j2
+          Pop-Location
+
+      - name: Run pipeline_tests --check-golden
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          & "tests\build-ci-pipeline\release\pipeline_tests.exe" --check-golden
+
+      # ------------------------------------------------------------------
+      # gui_tests: non-blocking pilot run (continue-on-error: true).
+      # After two consecutive greens on hosted runners, drop the
+      # continue-on-error flags and remove the "gui_tests stays outside
+      # that first CI cut" sentence from .claude/CLAUDE.md (see
+      # .claude/analysis/gui-tests-ci-remediation.md for the rollout plan).
+      # ------------------------------------------------------------------
+      - name: Build gui_tests
+        continue-on-error: true
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          New-Item -ItemType Directory -Force tests\build-ci-gui | Out-Null
+          Push-Location tests\build-ci-gui
+          & "$env:QT_ROOT_DIR\bin\qmake.exe" "..\gui\gui_tests.pro"
+          & "$env:MINGW_ROOT\bin\mingw32-make.exe" -j2
+          Pop-Location
+
+      - name: Run gui_tests (offscreen)
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_OPENGL: desktop
+          QT_QPA_PLATFORM_PLUGIN_PATH: ${{ env.QT_ROOT_DIR }}\plugins\platforms
+          QT_PLUGIN_PATH: ${{ env.QT_ROOT_DIR }}\plugins
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          & "tests\build-ci-gui\release\gui_tests.exe" -o gui_tests_output.txt,txt
+          $ec = $LASTEXITCODE
+          Get-Content gui_tests_output.txt
+          if ($ec -ne 0) { exit $ec }
+
+      - name: Upload gui_tests log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui_tests_output
+          path: gui_tests_output.txt

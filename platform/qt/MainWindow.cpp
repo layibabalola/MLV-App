@@ -7,6 +7,7 @@
 
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
+#include "debug/StageTiming.h"
 #include "math.h"
 
 #include <QMessageBox>
@@ -38,6 +39,12 @@
 #endif
 
 #include "SystemMemory.h"
+#include "DualIsoPlaybackPolicy.h"
+#include "GpuDebayer.h"
+#include "GpuDisplayViewport.h"
+#include "MainWindowGpuPreviewPolicy.h"
+#include "ZebraThresholds.h"
+#include "batch/WorkerThreadCount.h"
 #include "ExportSettingsDialog.h"
 #include "EditSliderValueDialog.h"
 #include "DarkStyle.h"
@@ -63,7 +70,17 @@
 #include "batch/BatchContext.h"
 #include "batch/BatchPrompts.h"
 #include "batch/BatchLogger.h"
+#include "batch/ReceiptLoader.h"
 #include <QElapsedTimer>
+#include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTimer>
+#include <atomic>
+#include <vector>
 
 /* spaceTag argument options: ffmpeg color space tag number compliant */
 #define SPACETAG_REC709   1   /* rec709 color space */
@@ -97,6 +114,166 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #define SESSION_ACTIVE_CLIP_ROW      m_pModel->activeRow()
 #define SET_ACTIVE_CLIP_IDX(index)   m_pModel->setActiveRow(index)
 #define SESSION_EMPTY                m_pModel->rowCount(QModelIndex())==0
+
+namespace
+{
+static void convert_rgb16_to_rgb8(const uint16_t * source, uint8_t * destination, int pixelCount)
+{
+    if( !source || !destination || pixelCount <= 0 ) return;
+
+    #pragma omp parallel for
+    for( int i = 0; i < pixelCount * 3; ++i )
+    {
+        destination[i] = static_cast<uint8_t>( source[i] >> 8 );
+    }
+}
+
+static const char * playback_profile_scope_name(MainWindow::PlaybackProfileScope scope)
+{
+    switch( scope )
+    {
+    case MainWindow::PlaybackProfileScope::Histogram:
+        return "histogram";
+    case MainWindow::PlaybackProfileScope::Waveform:
+        return "waveform";
+    case MainWindow::PlaybackProfileScope::Parade:
+        return "parade";
+    case MainWindow::PlaybackProfileScope::Vectorscope:
+        return "vectorscope";
+    case MainWindow::PlaybackProfileScope::None:
+    default:
+        return "none";
+    }
+}
+
+static const char * playback_profile_gpu_preview_backend_name(
+    GpuPreviewProcessingBackendRequest backend)
+{
+    switch (backend)
+    {
+    case GpuPreviewProcessingBackendRequest::Cpu:
+        return "cpu";
+    case GpuPreviewProcessingBackendRequest::Gpu:
+        return "gpu";
+    case GpuPreviewProcessingBackendRequest::Auto:
+    default:
+        return "auto";
+    }
+}
+
+static const char * playback_profile_gpu_bilinear_debayer_backend_name(
+    GpuBilinearDebayerBackendRequest backend)
+{
+    switch (backend)
+    {
+    case GpuBilinearDebayerBackendRequest::Cpu:
+        return "cpu";
+    case GpuBilinearDebayerBackendRequest::Gpu:
+        return "gpu";
+    case GpuBilinearDebayerBackendRequest::Auto:
+    default:
+        return "auto";
+    }
+}
+
+static const char * playback_profile_debayer_request_name(
+    MainWindow::PlaybackProfileDebayerRequest request)
+{
+    switch (request)
+    {
+    case MainWindow::PlaybackProfileDebayerRequest::Receipt:
+        return "receipt";
+    case MainWindow::PlaybackProfileDebayerRequest::None:
+        return "none";
+    case MainWindow::PlaybackProfileDebayerRequest::Simple:
+        return "simple";
+    case MainWindow::PlaybackProfileDebayerRequest::Bilinear:
+        return "bilinear";
+    case MainWindow::PlaybackProfileDebayerRequest::LMMSE:
+        return "lmmse";
+    case MainWindow::PlaybackProfileDebayerRequest::IGV:
+        return "igv";
+    case MainWindow::PlaybackProfileDebayerRequest::AMaZE:
+        return "amaze";
+    case MainWindow::PlaybackProfileDebayerRequest::AHD:
+        return "ahd";
+    case MainWindow::PlaybackProfileDebayerRequest::RCD:
+        return "rcd";
+    case MainWindow::PlaybackProfileDebayerRequest::DCB:
+        return "dcb";
+    case MainWindow::PlaybackProfileDebayerRequest::AmazeCached:
+        return "amaze-cached";
+    case MainWindow::PlaybackProfileDebayerRequest::Auto:
+    default:
+        return "auto";
+    }
+}
+
+static const char * playback_profile_processing_request_name(
+    MainWindow::PlaybackProfileProcessingRequest request)
+{
+    switch (request)
+    {
+    case MainWindow::PlaybackProfileProcessingRequest::Receipt:
+        return "receipt";
+    case MainWindow::PlaybackProfileProcessingRequest::Subset:
+        return "subset";
+    case MainWindow::PlaybackProfileProcessingRequest::Auto:
+    default:
+        return "auto";
+    }
+}
+
+static const uint64_t kPlaybackStartPrerollFrames = 2;
+
+static bool playback_start_preroll_disabled_by_environment()
+{
+    const QString value =
+        qEnvironmentVariable("MLVAPP_DISABLE_PLAY_START_PREROLL").trimmed();
+    return !value.isEmpty()
+        && value != QStringLiteral("0")
+        && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
+}
+
+class PlaybackPaintProbe : public QObject
+{
+public:
+    explicit PlaybackPaintProbe(QElapsedTimer * clock)
+        : m_clock(clock)
+    {
+    }
+
+    void arm(QEventLoop * loop, std::atomic<qint64> * paintNs)
+    {
+        m_loop = loop;
+        m_paintNs = paintNs;
+        m_armed = true;
+        if( m_paintNs ) m_paintNs->store(-1);
+    }
+
+protected:
+    bool eventFilter(QObject * watched, QEvent * event) override
+    {
+        Q_UNUSED(watched)
+        if( m_armed && event->type() == QEvent::Paint )
+        {
+            m_armed = false;
+            if( m_paintNs && m_clock )
+            {
+                m_paintNs->store(m_clock->nsecsElapsed());
+            }
+            if( m_loop ) m_loop->quit();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QElapsedTimer * m_clock = nullptr;
+    QEventLoop * m_loop = nullptr;
+    std::atomic<qint64> * m_paintNs = nullptr;
+    bool m_armed = false;
+};
+}
 
 //Constructor
 MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
@@ -132,7 +309,13 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     m_zoomModeChanged = false;
     m_tryToSyncAudio = false;
     m_playbackStopped = false;
+    m_dualIsoPlaybackPreviewActive = false;
     m_inClipDeleteProcess = false;
+    m_renderThreadUsing16BitPreview = false;
+    m_renderThreadUsingGpuPreviewProcessing = false;
+    m_renderThreadUsingGpuBilinearDebayer = false;
+    m_displayPreviewCacheNextSlot = 0;
+    invalidateDisplayPreviewCache();
 
 #ifdef STDOUT_SILENT
     //QtNetwork: shut up please!
@@ -247,6 +430,8 @@ MainWindow::~MainWindow()
     delete m_pGradientElement;
     delete m_pStatusDialog;
     delete m_pInfoDialog;
+    if( m_pRawImage16 ) free( m_pRawImage16 );
+    if( m_pRawImage ) free( m_pRawImage );
     delete ui;
 }
 
@@ -599,19 +784,339 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     return QWidget::eventFilter(watched, event);
 }
 
+bool MainWindow::playbackPolicyActive( void ) const
+{
+    return ui->actionPlay->isChecked() || m_headlessPlaybackProfileUsePlaybackPolicy;
+}
+
+void MainWindow::applyPlaybackDebayerSelection( void )
+{
+    if( ui->actionUseNoneDebayer->isChecked() )
+    {
+        setMlvUseNoneDebayer( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "None" ) );
+    }
+    else if( ui->actionUseSimpleDebayer->isChecked() )
+    {
+        setMlvUseSimpleDebayer( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "Simple" ) );
+    }
+    else if( ui->actionUseBilinear->isChecked() )
+    {
+        setMlvDontAlwaysUseAmaze( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "Bilinear" ) );
+    }
+    else if( ui->actionUseLmmseDebayer->isChecked() )
+    {
+        setMlvUseLmmseDebayer( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "LMMSE" ) );
+    }
+    else if( ui->actionUseIgvDebayer->isChecked() )
+    {
+        setMlvUseIgvDebayer( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "IGV" ) );
+    }
+    else if( ui->actionUseAhdDebayer->isChecked() )
+    {
+        setMlvUseAhdDebayer( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "AHD" ) );
+    }
+    else if( ui->actionUseRcdDebayer->isChecked() )
+    {
+        setMlvUseRcdDebayer( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "RCD" ) );
+    }
+    else if( ui->actionUseDcbDebayer->isChecked() )
+    {
+        setMlvUseDcbDebayer( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "DCB" ) );
+    }
+    else if( ui->actionAlwaysUseAMaZE->isChecked() )
+    {
+        setMlvAlwaysUseAmaze( m_pMlvObject );
+        disableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "AMaZE" ) );
+    }
+    else if( ui->actionCaching->isChecked() )
+    {
+        setMlvAlwaysUseAmaze( m_pMlvObject );
+        enableMlvCaching( m_pMlvObject );
+        m_pChosenDebayer->setText( tr( "AMaZE Cached" ) );
+    }
+}
+
+void MainWindow::setPlaybackProfileDebayerRequest(
+    PlaybackProfileDebayerRequest request )
+{
+    switch( request )
+    {
+    case PlaybackProfileDebayerRequest::Receipt:
+        ui->actionDontSwitchDebayerForPlayback->setChecked( true );
+        m_headlessPlaybackProfileUsePlaybackPolicy = false;
+        return;
+    case PlaybackProfileDebayerRequest::None:
+        ui->actionUseNoneDebayer->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::Simple:
+        ui->actionUseSimpleDebayer->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::Bilinear:
+        ui->actionUseBilinear->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::LMMSE:
+        ui->actionUseLmmseDebayer->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::IGV:
+        ui->actionUseIgvDebayer->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::AMaZE:
+        ui->actionAlwaysUseAMaZE->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::AHD:
+        ui->actionUseAhdDebayer->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::RCD:
+        ui->actionUseRcdDebayer->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::DCB:
+        ui->actionUseDcbDebayer->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::AmazeCached:
+        ui->actionCaching->setChecked( true );
+        break;
+    case PlaybackProfileDebayerRequest::Auto:
+    default:
+        break;
+    }
+
+    ui->actionDontSwitchDebayerForPlayback->setChecked( false );
+    m_headlessPlaybackProfileUsePlaybackPolicy = true;
+}
+
+void MainWindow::setPlaybackProfileProcessingRequest(
+    PlaybackProfileProcessingRequest request )
+{
+    switch( request )
+    {
+    case PlaybackProfileProcessingRequest::Receipt:
+        ui->actionUseFastProcessingForPlayback->setChecked( false );
+        break;
+    case PlaybackProfileProcessingRequest::Subset:
+        ui->actionUseFastProcessingForPlayback->setChecked( true );
+        break;
+    case PlaybackProfileProcessingRequest::Auto:
+    default:
+        break;
+    }
+}
+
+void MainWindow::restorePlaybackDebayerSelection( const QString & label )
+{
+    const QString normalized = label.trimmed().toLower();
+    if( normalized == QStringLiteral("receipt") )
+    {
+        ui->actionDontSwitchDebayerForPlayback->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("none") )
+    {
+        ui->actionUseNoneDebayer->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("simple") )
+    {
+        ui->actionUseSimpleDebayer->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("lmmse") )
+    {
+        ui->actionUseLmmseDebayer->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("igv") )
+    {
+        ui->actionUseIgvDebayer->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("amaze") )
+    {
+        ui->actionAlwaysUseAMaZE->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("ahd") )
+    {
+        ui->actionUseAhdDebayer->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("rcd") )
+    {
+        ui->actionUseRcdDebayer->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("dcb") )
+    {
+        ui->actionUseDcbDebayer->setChecked( true );
+    }
+    else if( normalized == QStringLiteral("amaze-cached") )
+    {
+        ui->actionCaching->setChecked( true );
+    }
+    else
+    {
+        ui->actionUseBilinear->setChecked( true );
+    }
+}
+
+QString MainWindow::selectedPlaybackDebayerLabel( void ) const
+{
+    if( ui->actionDontSwitchDebayerForPlayback->isChecked() )
+    {
+        return QStringLiteral("receipt");
+    }
+    if( ui->actionUseNoneDebayer->isChecked() ) return QStringLiteral("none");
+    if( ui->actionUseSimpleDebayer->isChecked() ) return QStringLiteral("simple");
+    if( ui->actionUseBilinear->isChecked() ) return QStringLiteral("bilinear");
+    if( ui->actionUseLmmseDebayer->isChecked() ) return QStringLiteral("lmmse");
+    if( ui->actionUseIgvDebayer->isChecked() ) return QStringLiteral("igv");
+    if( ui->actionUseAhdDebayer->isChecked() ) return QStringLiteral("ahd");
+    if( ui->actionUseRcdDebayer->isChecked() ) return QStringLiteral("rcd");
+    if( ui->actionUseDcbDebayer->isChecked() ) return QStringLiteral("dcb");
+    if( ui->actionAlwaysUseAMaZE->isChecked() ) return QStringLiteral("amaze");
+    if( ui->actionCaching->isChecked() ) return QStringLiteral("amaze-cached");
+    return QStringLiteral("bilinear");
+}
+
+QString MainWindow::playbackDebayerLabel( void ) const
+{
+    if( ui->actionDontSwitchDebayerForPlayback->isChecked() || !playbackPolicyActive() )
+    {
+        return QStringLiteral("receipt");
+    }
+    if( ui->actionUseNoneDebayer->isChecked() ) return QStringLiteral("none");
+    if( ui->actionUseSimpleDebayer->isChecked() ) return QStringLiteral("simple");
+    if( ui->actionUseBilinear->isChecked() ) return QStringLiteral("bilinear");
+    if( ui->actionUseLmmseDebayer->isChecked() ) return QStringLiteral("lmmse");
+    if( ui->actionUseIgvDebayer->isChecked() ) return QStringLiteral("igv");
+    if( ui->actionUseAhdDebayer->isChecked() ) return QStringLiteral("ahd");
+    if( ui->actionUseRcdDebayer->isChecked() ) return QStringLiteral("rcd");
+    if( ui->actionUseDcbDebayer->isChecked() ) return QStringLiteral("dcb");
+    if( ui->actionAlwaysUseAMaZE->isChecked() ) return QStringLiteral("amaze");
+    if( ui->actionCaching->isChecked() ) return QStringLiteral("amaze-cached");
+    return QStringLiteral("auto");
+}
+
+QString MainWindow::selectedPlaybackProcessingLabel( void ) const
+{
+    return ui->actionUseFastProcessingForPlayback->isChecked()
+        ? QStringLiteral("subset")
+        : QStringLiteral("receipt");
+}
+
+QString MainWindow::playbackProcessingLabel( void ) const
+{
+    if( !playbackPolicyActive() || !ui->actionUseFastProcessingForPlayback->isChecked() )
+    {
+        return QStringLiteral("receipt");
+    }
+    return (m_renderThreadUsingCpuPreviewProcessing || m_renderThreadUsingGpuPreviewProcessing)
+        ? QStringLiteral("subset")
+        : QStringLiteral("receipt");
+}
+
 //Draw a raw picture to the gui -> start render thread
 void MainWindow::drawFrame( void )
 {
     m_frameStillDrawing = true;
+    Qt::TransformationMode transformationMode = Qt::FastTransformation;
+    if( !playbackPolicyActive()
+     || ui->actionUseNoneDebayer->isChecked()
+     || ui->actionCaching->isChecked() )
+    {
+        transformationMode = Qt::SmoothTransformation;
+    }
+
+    MainWindowGpuPreviewPolicyState renderPolicy;
+    renderPolicy.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    renderPolicy.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
+    renderPolicy.gpuPreviewProcessingEnvironmentRequested =
+        gpuPreviewProcessingRequestedByEnvironment();
+    renderPolicy.gpuPreviewProcessingCompatible = gpuPreviewProcessingIsSupported( m_pProcessingObject );
+    renderPolicy.gpuBilinearDebayerBackendRequest = m_gpuBilinearDebayerBackendRequest;
+    renderPolicy.gpuBilinearDebayerEnvironmentRequested =
+        gpuBilinearDebayerRequestedByEnvironment();
+    renderPolicy.gpuBilinearDebayerCompatible =
+        m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) == 0;
+    renderPolicy.histogramEnabled = ui->actionShowHistogram->isChecked();
+    renderPolicy.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
+    renderPolicy.paradeEnabled = ui->actionShowParade->isChecked();
+    renderPolicy.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    renderPolicy.betterResizerEnabled = ui->actionBetterResizer->isChecked();
+    renderPolicy.zebrasEnabled = ui->actionShowZebras->isChecked();
+    renderPolicy.transformationMode = transformationMode;
+
+    m_renderThreadUsing16BitPreview = shouldUseGpu16PreviewPath();
+    m_renderThreadUsingGpuPreviewProcessing = shouldUseGpuPreviewProcessingPath();
+    m_renderThreadUsingGpuBilinearDebayer = shouldUseGpuBilinearDebayerPath();
+    m_renderThreadUsingCpuPreviewProcessing = false;
+    renderPolicy.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
+    renderPolicy.renderThreadUsingGpuProcessingPreview = m_renderThreadUsingGpuPreviewProcessing;
+    renderPolicy.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
+    m_lastQueuedGpuPreviewPolicy = renderPolicy;
+    m_lastQueuedGpuPresentationOptions =
+        mainWindowBuildGpuPresentationOptions( renderPolicy );
+    m_lastQueuedGpuPreviewProcessingConfig = GpuPreviewProcessingConfig();
+    m_lastQueuedPlaybackProcessingReason.clear();
+    const bool playbackProcessingSelected =
+        playbackPolicyActive() && ui->actionUseFastProcessingForPlayback->isChecked();
+    if( m_renderThreadUsingGpuPreviewProcessing || playbackProcessingSelected )
+    {
+        m_lastQueuedGpuPreviewProcessingConfig =
+            gpuPreviewProcessingBuildConfig( m_pProcessingObject,
+                                            &m_lastQueuedPlaybackProcessingReason );
+    }
+    if( playbackProcessingSelected
+     && !m_renderThreadUsingGpuPreviewProcessing
+     && m_lastQueuedGpuPreviewProcessingConfig.enabled )
+    {
+        m_renderThreadUsingCpuPreviewProcessing = true;
+    }
+    if( m_renderThreadUsingGpuPreviewProcessing )
+    {
+        m_lastQueuedGpuPresentationOptions.previewProcessing =
+            m_lastQueuedGpuPreviewProcessingConfig;
+    }
+
+    RenderFrameThread::OutputMode renderOutputMode = RenderFrameThread::OutputProcessed8;
+    if( m_renderThreadUsingGpuPreviewProcessing || m_renderThreadUsingCpuPreviewProcessing )
+    {
+        renderOutputMode = RenderFrameThread::OutputDebayered16;
+    }
+    else if( m_renderThreadUsing16BitPreview )
+    {
+        renderOutputMode = RenderFrameThread::OutputProcessed16;
+    }
 
     //enable low level raw fixes (if wanted)
     if( ui->checkBoxRawFixEnable->isChecked() ) m_pMlvObject->llrawproc->fix_raw = 1;
+
+    int requestedFrame = ui->horizontalSliderPosition->value();
+    if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
+    {
+        requestedFrame = m_newPosDropMode;
+    }
+    if( m_playToFirstFramePending && !m_playToFirstFrameTargetFrameValid )
+    {
+        m_playToFirstFrameTargetFrame = requestedFrame;
+        m_playToFirstFrameTargetFrameValid = true;
+    }
 
     //Get frame from library
     if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
     {
         //If we are in playback, dropmode, we calculated the exact frame to sync the timeline
-        m_pRenderThread->renderFrame( m_newPosDropMode );
+        m_pRenderThread->renderFrame( requestedFrame,
+                                      renderOutputMode,
+                                      m_renderThreadUsingGpuBilinearDebayer );
 
         //Draw TimeCode
         if( !m_tcModeDuration )
@@ -627,7 +1132,9 @@ void MainWindow::drawFrame( void )
     else
     {
         //Else we render the frame which is selected by the slider
-        m_pRenderThread->renderFrame( ui->horizontalSliderPosition->value() );
+        m_pRenderThread->renderFrame( requestedFrame,
+                                      renderOutputMode,
+                                      m_renderThreadUsingGpuBilinearDebayer );
 
         //Draw TimeCode
         if( !m_tcModeDuration )
@@ -639,6 +1146,536 @@ void MainWindow::drawFrame( void )
             m_pTcLabel->setPixmap( pic );
         }
     }
+}
+
+int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & options)
+{
+    QTextStream out(stdout);
+    QTextStream err(stderr);
+    m_headlessPlaybackProfileUsePlaybackPolicy = false;
+    m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
+    m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
+
+    if( options.inputPath.isEmpty() || options.outputPath.isEmpty() )
+    {
+        err << "[PROFILE] ERROR: input and output paths are required.\n";
+        return 2;
+    }
+
+    if( options.frameCount <= 0 )
+    {
+        err << "[PROFILE] ERROR: frameCount must be greater than zero.\n";
+        return 2;
+    }
+
+    const QFileInfo inputInfo(options.inputPath);
+    if( !inputInfo.exists() || !inputInfo.isFile() )
+    {
+        err << "[PROFILE] ERROR: input clip does not exist: " << options.inputPath << "\n";
+        return 3;
+    }
+
+    const QString outputPath = QDir::toNativeSeparators( options.outputPath );
+    const QFileInfo outputInfo(outputPath);
+    if( !outputInfo.dir().exists() && !QDir().mkpath( outputInfo.dir().absolutePath() ) )
+    {
+        err << "[PROFILE] ERROR: failed to create output directory: "
+            << outputInfo.dir().absolutePath() << "\n";
+        return 3;
+    }
+
+    const QString tracePath = outputPath + QStringLiteral(".trace.log");
+    auto trace = [&](const QString & message)
+    {
+        QFile traceFile(tracePath);
+        if( traceFile.open( QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text ) )
+        {
+            traceFile.write( message.toUtf8() );
+            traceFile.write( "\n" );
+        }
+    };
+
+    trace(QStringLiteral("profile-start"));
+
+    if( options.showWindow )
+    {
+        show();
+        qApp->processEvents( QEventLoop::AllEvents );
+        trace(QStringLiteral("window-shown"));
+    }
+    else
+    {
+        hide();
+    }
+
+    ui->actionFastOpen->setChecked( options.fastOpen );
+    trace(QStringLiteral("open-begin"));
+    importNewMlv( options.inputPath );
+    if( !m_pMlvObject || !m_fileLoaded )
+    {
+        err << "[PROFILE] ERROR: failed to open clip: " << options.inputPath << "\n";
+        trace(QStringLiteral("open-failed"));
+        return 4;
+    }
+    trace(QStringLiteral("open-complete"));
+
+    if( !options.receiptPath.isEmpty() )
+    {
+        trace(QStringLiteral("receipt-begin"));
+        ReceiptSettings receipt;
+        QString receiptError;
+        if( !ReceiptLoader::loadFromFile( options.receiptPath, &receipt, &receiptError ) )
+        {
+            err << "[PROFILE] ERROR: failed to load receipt: " << options.receiptPath << "\n";
+            if( !receiptError.isEmpty() ) err << "[PROFILE] DETAIL: " << receiptError << "\n";
+            trace(QStringLiteral("receipt-failed"));
+            return 5;
+        }
+
+        setSliders( &receipt, false );
+        m_frameChanged = true;
+        trace(QStringLiteral("receipt-complete"));
+    }
+
+    if( options.rawCacheMB > 0 )
+    {
+        setMlvCpuCores( m_pMlvObject, std::max( 1, options.cacheCpuCores ) );
+        m_pMlvObject->stop_caching = 0;
+        setMlvRawCacheLimitMegaBytes( m_pMlvObject, options.rawCacheMB );
+    }
+    else
+    {
+        setMlvCpuCores( m_pMlvObject, 1 );
+        m_pMlvObject->stop_caching = 1;
+        setMlvRawCacheLimitMegaBytes( m_pMlvObject, 0 );
+    }
+
+    restorePlaybackDebayerSelection( QStringLiteral("bilinear") );
+    setPlaybackProfileDebayerRequest( options.playbackDebayer );
+    ui->actionUseFastProcessingForPlayback->setChecked( false );
+    setPlaybackProfileProcessingRequest( options.playbackProcessing );
+    selectDebayerAlgorithm();
+    if( playbackDebayerLabel() == QStringLiteral("amaze-cached") )
+    {
+        // Let cache workers come up before we snapshot playback metadata or start timing.
+        for( int attempt = 0; attempt < 200 && !isMlvObjectCaching( m_pMlvObject ); ++attempt )
+        {
+            QCoreApplication::processEvents();
+            QThread::msleep( 10 );
+        }
+    }
+    applyEffectiveDualIsoPlaybackSettings();
+    trace(QStringLiteral("playback-debayer-configured"));
+
+    const bool scopesEnabled = options.scope != PlaybackProfileScope::None;
+    ui->actionShowEditArea->setChecked( scopesEnabled );
+    ui->actionShowHistogram->setChecked( options.scope == PlaybackProfileScope::Histogram );
+    ui->actionShowWaveFormMonitor->setChecked( options.scope == PlaybackProfileScope::Waveform );
+    ui->actionShowParade->setChecked( options.scope == PlaybackProfileScope::Parade );
+    ui->actionShowVectorScope->setChecked( options.scope == PlaybackProfileScope::Vectorscope );
+    ui->actionShowZebras->setChecked( options.zebras );
+    m_frameChanged = true;
+
+    const int totalFrames = getMlvFrames( m_pMlvObject );
+    const int startFrame = std::max( 0, options.startFrame );
+    if( startFrame >= totalFrames )
+    {
+        err << "[PROFILE] ERROR: start frame " << startFrame
+            << " exceeds clip length " << totalFrames << ".\n";
+        return 6;
+    }
+
+    const int measuredFrames = std::min( options.frameCount, totalFrames - startFrame );
+    QJsonArray frameSamples;
+    bool playbackProcessingSubsetObserved = false;
+    bool playbackProcessingSupported = false;
+    QString playbackProcessingReason;
+    QElapsedTimer monotonicClock;
+    monotonicClock.start();
+    qint64 previousCompletionNs = -1;
+    PlaybackPaintProbe paintProbe(&monotonicClock);
+    if( options.waitForPaint && ui->graphicsView && ui->graphicsView->viewport() )
+    {
+        ui->graphicsView->viewport()->installEventFilter(&paintProbe);
+    }
+
+    auto renderFrameIndex = [&](int frameIndex, int sampleIndex, bool warmup, QString * failureReason) -> bool
+    {
+        if( failureReason ) failureReason->clear();
+
+        ui->horizontalSliderPosition->setValue( frameIndex );
+        qApp->processEvents( QEventLoop::AllEvents );
+
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot( true );
+
+        bool frameCompleted = false;
+        std::atomic<qint64> engineCompletionNs(-1);
+        const qint64 requestNs = monotonicClock.nsecsElapsed();
+
+        QMetaObject::Connection engineReadyConnection = connect(
+            m_pRenderThread,
+            &RenderFrameThread::frameReady,
+            this,
+            [&]()
+            {
+                engineCompletionNs.store(monotonicClock.nsecsElapsed());
+            },
+            Qt::DirectConnection );
+        QMetaObject::Connection readyConnection = connect(
+            this,
+            &MainWindow::frameReady,
+            &loop,
+            [&]()
+            {
+                frameCompleted = true;
+                loop.quit();
+            } );
+        QMetaObject::Connection timeoutConnection = connect(
+            &timeout,
+            &QTimer::timeout,
+            &loop,
+            &QEventLoop::quit );
+
+        timeout.start( 300000 );
+        drawFrame();
+        loop.exec();
+
+        disconnect( engineReadyConnection );
+        disconnect( readyConnection );
+        disconnect( timeoutConnection );
+
+        if( !frameCompleted )
+        {
+            if( failureReason )
+            {
+                *failureReason = QStringLiteral("timed out waiting for frameReady() for frame %1").arg( frameIndex );
+            }
+            return false;
+        }
+
+        const qint64 completionNs = monotonicClock.nsecsElapsed();
+        qint64 paintCompletionNs = -1;
+        if( options.waitForPaint && ui->graphicsView && ui->graphicsView->viewport() )
+        {
+            QEventLoop paintLoop;
+            QTimer paintTimeout;
+            paintTimeout.setSingleShot(true);
+            QMetaObject::Connection paintTimeoutConnection = connect(
+                &paintTimeout,
+                &QTimer::timeout,
+                &paintLoop,
+                &QEventLoop::quit );
+            std::atomic<qint64> paintNs(-1);
+            paintProbe.arm(&paintLoop, &paintNs);
+            ui->graphicsView->viewport()->update();
+            paintTimeout.start(3000);
+            qApp->processEvents(QEventLoop::AllEvents);
+            if( paintNs.load() < 0 )
+            {
+                paintLoop.exec();
+            }
+            disconnect(paintTimeoutConnection);
+            paintCompletionNs = paintNs.load();
+        }
+
+        if( !warmup )
+        {
+            QJsonObject sample;
+            sample.insert( QStringLiteral("sample_index"), sampleIndex );
+            sample.insert( QStringLiteral("requested_frame"), frameIndex );
+            sample.insert( QStringLiteral("completed_frame"), ui->horizontalSliderPosition->value() );
+            sample.insert( QStringLiteral("request_ns"), requestNs );
+            sample.insert( QStringLiteral("completion_ns"), completionNs );
+            sample.insert( QStringLiteral("latency_ms"), static_cast<double>( completionNs - requestNs ) / 1000000.0 );
+            sample.insert( QStringLiteral("gpu16_preview_active"), m_renderThreadUsing16BitPreview );
+            sample.insert( QStringLiteral("gpu_preview_processing_active"), m_renderThreadUsingGpuPreviewProcessing );
+            const bool playbackProcessingSubsetActive =
+                m_renderThreadUsingCpuPreviewProcessing
+                || m_renderThreadUsingGpuPreviewProcessing;
+            sample.insert( QStringLiteral("playback_processing_subset_active"),
+                           playbackProcessingSubsetActive );
+            playbackProcessingSubsetObserved = playbackProcessingSubsetObserved
+                || playbackProcessingSubsetActive;
+            playbackProcessingSupported = playbackProcessingSupported
+                || m_lastQueuedGpuPreviewProcessingConfig.enabled;
+            if( playbackProcessingReason.isEmpty()
+             || (playbackProcessingReason == QStringLiteral("current processing settings are supported")
+                 && !m_lastQueuedPlaybackProcessingReason.isEmpty()) )
+            {
+                playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
+            }
+            sample.insert( QStringLiteral("gpu_bilinear_debayer_active"),
+                           m_pRenderThread && m_pRenderThread->lastFrameUsedGpuBilinearDebayer() );
+            if( m_pRenderThread )
+            {
+                const QString gpuBilinearRenderer = m_pRenderThread->lastGpuBilinearRendererDescription();
+                const QString gpuBilinearFallbackReason = m_pRenderThread->lastGpuBilinearFallbackReason();
+                if( !gpuBilinearFallbackReason.isEmpty() )
+                {
+                    sample.insert( QStringLiteral("gpu_bilinear_debayer_renderer"),
+                                   gpuBilinearRenderer.isEmpty()
+                                       ? QStringLiteral("unknown")
+                                       : gpuBilinearRenderer );
+                }
+                else if( !gpuBilinearRenderer.isEmpty() )
+                {
+                    sample.insert( QStringLiteral("gpu_bilinear_debayer_renderer"),
+                                   gpuBilinearRenderer );
+                }
+                if( !gpuBilinearFallbackReason.isEmpty() )
+                {
+                    sample.insert( QStringLiteral("gpu_bilinear_debayer_fallback_reason"),
+                                   gpuBilinearFallbackReason );
+                }
+            }
+            const qint64 engineNs = engineCompletionNs.load();
+            const qint64 effectiveEngineNs = (engineNs >= 0) ? engineNs : completionNs;
+            sample.insert( QStringLiteral("engine_completion_ns"), effectiveEngineNs );
+            sample.insert( QStringLiteral("engine_latency_ms"),
+                           static_cast<double>( effectiveEngineNs - requestNs ) / 1000000.0 );
+            sample.insert( QStringLiteral("presentation_overhead_ms"),
+                           static_cast<double>( completionNs - effectiveEngineNs ) / 1000000.0 );
+            sample.insert( QStringLiteral("engine_latency_direct_measured"),
+                           engineNs >= 0 );
+            sample.insert( QStringLiteral("dual_iso_preview_histogram_ms"),
+                           m_pRenderThread
+                               ? m_pRenderThread->lastDualIsoPreviewHistogramMilliseconds()
+                               : 0.0 );
+            sample.insert( QStringLiteral("dual_iso_preview_regression_ms"),
+                           m_pRenderThread
+                               ? m_pRenderThread->lastDualIsoPreviewRegressionMilliseconds()
+                               : 0.0 );
+            sample.insert( QStringLiteral("dual_iso_preview_rowscale_ms"),
+                           m_pRenderThread
+                               ? m_pRenderThread->lastDualIsoPreviewRowscaleMilliseconds()
+                               : 0.0 );
+            if( m_pRenderThread )
+            {
+                const QJsonObject stageTimingTelemetry = m_pRenderThread->lastStageTimingTelemetry();
+                for( auto it = stageTimingTelemetry.constBegin();
+                     it != stageTimingTelemetry.constEnd();
+                     ++it )
+                {
+                    sample.insert( it.key(), it.value() );
+                }
+            }
+            if( paintCompletionNs >= 0 )
+            {
+                sample.insert( QStringLiteral("paint_completion_ns"), paintCompletionNs );
+                sample.insert( QStringLiteral("paint_latency_ms"),
+                               static_cast<double>( paintCompletionNs - requestNs ) / 1000000.0 );
+                sample.insert( QStringLiteral("post_ui_paint_ms"),
+                               static_cast<double>( paintCompletionNs - completionNs ) / 1000000.0 );
+            }
+            if( previousCompletionNs >= 0 )
+            {
+                sample.insert( QStringLiteral("cadence_ms"), static_cast<double>( completionNs - previousCompletionNs ) / 1000000.0 );
+            }
+            frameSamples.push_back( sample );
+        }
+
+        previousCompletionNs = completionNs;
+        qApp->processEvents( QEventLoop::AllEvents );
+        return true;
+    };
+
+    QString renderFailure;
+    if( startFrame > 0 )
+    {
+        if( !renderFrameIndex( startFrame - 1, -1, true, &renderFailure ) )
+        {
+            err << "[PROFILE] ERROR: " << renderFailure << "\n";
+            trace(QStringLiteral("warmup-failed: ") + renderFailure);
+            return 7;
+        }
+        trace(QStringLiteral("warmup-complete"));
+    }
+
+    beginPlayToFirstFrameMeasurement();
+    m_lastPlayStartPrerollRequested = primePlaybackCacheOnPlayStart();
+    trace(QStringLiteral("play-start-primed"));
+
+    for( int i = 0; i < measuredFrames; ++i )
+    {
+        trace(QStringLiteral("render-begin frame=%1").arg(startFrame + i));
+        if( !renderFrameIndex( startFrame + i, i, false, &renderFailure ) )
+        {
+            err << "[PROFILE] ERROR: " << renderFailure << "\n";
+            trace(QStringLiteral("render-failed: ") + renderFailure);
+            return 7;
+        }
+        trace(QStringLiteral("render-complete frame=%1").arg(startFrame + i));
+    }
+
+    double latencySumMs = 0.0;
+    double cadenceSumMs = 0.0;
+    int cadenceCount = 0;
+    for( const QJsonValue & sampleValue : frameSamples )
+    {
+        const QJsonObject sample = sampleValue.toObject();
+        latencySumMs += sample.value( QStringLiteral("latency_ms") ).toDouble();
+        if( sample.contains( QStringLiteral("cadence_ms") ) )
+        {
+            cadenceSumMs += sample.value( QStringLiteral("cadence_ms") ).toDouble();
+            ++cadenceCount;
+        }
+    }
+
+    const GpuBilinearDebayerBackendAvailability gpuBilinearDebayerProbe =
+        gpuBilinearDebayerProbeBackend();
+    const int selectedDualIsoMode = toolButtonDualIsoCurrentIndex();
+    const DualIsoPlaybackRuntimeSettings dualIsoPlaybackSettings =
+        effectiveDualIsoPlaybackRuntimeSettings(
+            playbackPolicyActive(),
+            ui->checkBoxRawFixEnable->isChecked(),
+            llrpGetDualIsoValidity( m_pMlvObject ),
+            selectedDualIsoMode,
+            toolButtonDualIsoInterpolationCurrentIndex(),
+            toolButtonDualIsoAliasMapCurrentIndex(),
+            toolButtonDualIsoFullresBlendingCurrentIndex() );
+    const bool dualIsoPreviewRuntimeActive = (dualIsoPlaybackSettings.mode == 2);
+    const bool dualIsoPreviewOverrideActive =
+        dualIsoPreviewRuntimeActive && selectedDualIsoMode != 2;
+
+    QJsonObject metadata;
+    metadata.insert( QStringLiteral("captured_at_utc"), QDateTime::currentDateTimeUtc().toString( Qt::ISODate ) );
+    metadata.insert( QStringLiteral("input_clip"), inputInfo.absoluteFilePath() );
+    metadata.insert( QStringLiteral("receipt"), options.receiptPath.isEmpty() ? QString() : QFileInfo(options.receiptPath).absoluteFilePath() );
+    metadata.insert( QStringLiteral("output"), outputInfo.absoluteFilePath() );
+    metadata.insert( QStringLiteral("total_frames"), totalFrames );
+    metadata.insert( QStringLiteral("start_frame"), startFrame );
+    metadata.insert( QStringLiteral("measured_frames"), measuredFrames );
+    metadata.insert( QStringLiteral("worker_threads_request"),
+                     options.forceWorkerThreads
+                         ? QString::number( std::max( 1, options.workerThreads ) )
+                         : QStringLiteral("auto") );
+    metadata.insert( QStringLiteral("worker_threads_effective"),
+                     mlvappEffectiveWorkerThreadCount() );
+    metadata.insert( QStringLiteral("raw_cache_mb"), static_cast<qint64>( options.rawCacheMB ) );
+    metadata.insert( QStringLiteral("cache_cpu_cores"), options.rawCacheMB > 0 ? std::max( 1, options.cacheCpuCores ) : 0 );
+    metadata.insert( QStringLiteral("zebras"), options.zebras );
+    metadata.insert( QStringLiteral("fast_open"), options.fastOpen );
+    metadata.insert( QStringLiteral("window_visible"), options.showWindow );
+    metadata.insert( QStringLiteral("wait_for_paint"), options.waitForPaint );
+    metadata.insert( QStringLiteral("measurement_model"),
+                     options.waitForPaint
+                        ? QStringLiteral("frameReady plus viewport paint event")
+                        : QStringLiteral("frameReady after drawFrameReady, before guaranteed window paint") );
+    metadata.insert( QStringLiteral("scope"), QString::fromLatin1( playback_profile_scope_name( options.scope ) ) );
+    metadata.insert( QStringLiteral("playback_policy_active"),
+                     m_headlessPlaybackProfileUsePlaybackPolicy );
+    const QString playbackDebayerEffective = playbackDebayerLabel();
+    const bool playbackDebayerUsesCaching =
+        playbackDebayerEffective == QStringLiteral("amaze-cached")
+        && m_pMlvObject
+        && getMlvRawCacheLimitMegaBytes( m_pMlvObject ) > 0
+        && m_pMlvObject->stop_caching == 0;
+
+    metadata.insert( QStringLiteral("playback_debayer_request"),
+                     QString::fromLatin1(
+                         playback_profile_debayer_request_name(
+                             options.playbackDebayer ) ) );
+    metadata.insert( QStringLiteral("playback_debayer_effective"),
+                     playbackDebayerEffective );
+    metadata.insert( QStringLiteral("playback_processing_request"),
+                     QString::fromLatin1(
+                         playback_profile_processing_request_name(
+                             options.playbackProcessing ) ) );
+    metadata.insert( QStringLiteral("playback_processing_selected"),
+                     selectedPlaybackProcessingLabel() );
+    metadata.insert( QStringLiteral("playback_processing_effective"),
+                     playbackProcessingSubsetObserved
+                         ? QStringLiteral("subset")
+                         : QStringLiteral("receipt") );
+    metadata.insert( QStringLiteral("playback_processing_supported"),
+                     playbackProcessingSupported );
+    metadata.insert( QStringLiteral("playback_processing_reason"),
+                     playbackProcessingReason );
+    metadata.insert( QStringLiteral("playback_debayer_receipt"),
+                     ui->comboBoxDebayer->currentText() );
+    metadata.insert( QStringLiteral("playback_debayer_uses_caching"),
+                     playbackDebayerUsesCaching );
+    metadata.insert( QStringLiteral("playback_debayer_cache_threads_active"),
+                     isMlvObjectCaching( m_pMlvObject ) != 0 );
+    metadata.insert( QStringLiteral("playback_debayer_engine_mode"),
+                     m_pMlvObject ? doesMlvAlwaysUseAmaze( m_pMlvObject ) : -1 );
+    metadata.insert( QStringLiteral("gpu_preview_processing_backend_request"),
+                     QString::fromLatin1(
+                         playback_profile_gpu_preview_backend_name(
+                             options.gpuPreviewProcessingBackend ) ) );
+    metadata.insert( QStringLiteral("gpu_preview_processing_environment_requested"),
+                     gpuPreviewProcessingRequestedByEnvironment() );
+    metadata.insert( QStringLiteral("gpu_bilinear_debayer_backend_request"),
+                     QString::fromLatin1(
+                         playback_profile_gpu_bilinear_debayer_backend_name(
+                             options.gpuBilinearDebayerBackend ) ) );
+    metadata.insert( QStringLiteral("gpu_bilinear_debayer_environment_requested"),
+                     gpuBilinearDebayerRequestedByEnvironment() );
+    metadata.insert( QStringLiteral("gpu_bilinear_debayer_probe_available"),
+                    gpuBilinearDebayerProbe.available );
+    metadata.insert( QStringLiteral("gpu_bilinear_debayer_probe_reason"),
+                    gpuBilinearDebayerProbe.reason );
+    metadata.insert( QStringLiteral("gpu_bilinear_debayer_probe_renderer"),
+                    gpuBilinearDebayerProbe.rendererDescription );
+    metadata.insert( QStringLiteral("dual_iso_mode_selected"),
+                    selectedDualIsoMode );
+    metadata.insert( QStringLiteral("dual_iso_mode_effective"),
+                    dualIsoPlaybackSettings.mode );
+    metadata.insert( QStringLiteral("dual_iso_preview_runtime_active"),
+                    dualIsoPreviewRuntimeActive );
+    metadata.insert( QStringLiteral("dual_iso_preview_override_active"),
+                    dualIsoPreviewOverrideActive );
+    metadata.insert( QStringLiteral("qt_opengl_environment"),
+                    qEnvironmentVariable("QT_OPENGL") );
+    metadata.insert( QStringLiteral("qt_qpa_platform_environment"),
+                    qEnvironmentVariable("QT_QPA_PLATFORM") );
+    metadata.insert( QStringLiteral("play_start_preroll_active"),
+                    m_lastPlayStartPrerollRequested );
+    metadata.insert( QStringLiteral("play_start_preroll_eligible"),
+                    playbackDebayerUsesCaching );
+    metadata.insert( QStringLiteral("play_start_preroll_disabled_by_environment"),
+                    playback_start_preroll_disabled_by_environment() );
+    metadata.insert( QStringLiteral("play_to_first_frame_measured"),
+                    m_lastPlayToFirstFrameValid );
+    metadata.insert( QStringLiteral("play_to_first_frame_ms"),
+                    m_lastPlayToFirstFrameValid ? m_lastPlayToFirstFrameMs : -1.0 );
+    metadata.insert( QStringLiteral("average_latency_ms"), frameSamples.isEmpty() ? 0.0 : ( latencySumMs / frameSamples.size() ) );
+    metadata.insert( QStringLiteral("average_cadence_ms"), cadenceCount > 0 ? ( cadenceSumMs / cadenceCount ) : 0.0 );
+
+    QJsonObject documentRoot;
+    documentRoot.insert( QStringLiteral("metadata"), metadata );
+    documentRoot.insert( QStringLiteral("frames"), frameSamples );
+
+    QFile outputFile(outputPath);
+    if( !outputFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) )
+    {
+        err << "[PROFILE] ERROR: failed to open output file for writing: " << outputPath << "\n";
+        trace(QStringLiteral("output-open-failed"));
+        return 8;
+    }
+
+    outputFile.write( QJsonDocument(documentRoot).toJson( QJsonDocument::Indented ) );
+    outputFile.close();
+
+    out << "[PROFILE] DONE clip=" << inputInfo.absoluteFilePath()
+        << " output=" << outputInfo.absoluteFilePath()
+        << " measured_frames=" << measuredFrames
+        << " worker_threads_request="
+        << ( options.forceWorkerThreads
+                 ? QString::number( std::max( 1, options.workerThreads ) )
+                 : QStringLiteral("auto") )
+        << " worker_threads_effective=" << mlvappEffectiveWorkerThreadCount()
+        << " avg_latency_ms=" << QString::number( metadata.value( QStringLiteral("average_latency_ms") ).toDouble(), 'f', 3 )
+        << " avg_cadence_ms=" << QString::number( metadata.value( QStringLiteral("average_cadence_ms") ).toDouble(), 'f', 3 )
+        << " scope=" << playback_profile_scope_name( options.scope )
+        << " zebras=" << ( options.zebras ? "true" : "false" )
+        << " raw_cache_mb=" << options.rawCacheMB
+        << "\n";
+    trace(QStringLiteral("profile-complete"));
+
+    return 0;
 }
 
 //Import a MLV, complete procedure
@@ -747,6 +1784,8 @@ int MainWindow::openMlvForPreview(QString fileName)
     int imageSize = getMlvWidth( m_pMlvObject ) * getMlvHeight( m_pMlvObject ) * 3;
     if( m_pRawImage ) free( m_pRawImage );
     m_pRawImage = ( uint8_t* )malloc( imageSize );
+    if( m_pRawImage16 ) free( m_pRawImage16 );
+    m_pRawImage16 = ( uint16_t* )malloc( static_cast<size_t>(imageSize) * sizeof( uint16_t ) );
 
     m_fileLoaded = true;
 
@@ -919,9 +1958,11 @@ int MainWindow::openMlv( QString fileName )
     int imageSize = getMlvWidth( m_pMlvObject ) * getMlvHeight( m_pMlvObject ) * 3;
     if( m_pRawImage ) free( m_pRawImage );
     m_pRawImage = ( uint8_t* )malloc( imageSize );
+    if( m_pRawImage16 ) free( m_pRawImage16 );
+    m_pRawImage16 = ( uint16_t* )malloc( static_cast<size_t>(imageSize) * sizeof( uint16_t ) );
 
     //Init Render Thread
-    m_pRenderThread->init( m_pMlvObject, m_pRawImage );
+    m_pRenderThread->init( m_pMlvObject, m_pRawImage, m_pRawImage16 );
 
     //Calculate shutter flavors :)
     float shutterSpeed = 1000000.0f / (float)(getMlvShutter( m_pMlvObject ));
@@ -998,38 +2039,45 @@ int MainWindow::openMlv( QString fileName )
     //Restart timer
     m_timerId = startTimer( (int)( 1000.0 / getFramerate() ) );
 
-    //Set selected debayer type
-    if( ui->actionAlwaysUseAMaZE->isChecked() )
+    if( ui->actionDontSwitchDebayerForPlayback->isChecked() )
     {
-        setMlvAlwaysUseAmaze( m_pMlvObject );
-    }
-    else if( ui->actionUseNoneDebayer->isChecked() )
-    {
-        setMlvUseNoneDebayer( m_pMlvObject );
-    }
-    else if( ui->actionUseSimpleDebayer->isChecked() )
-    {
-        setMlvUseSimpleDebayer( m_pMlvObject );
-    }
-    else if( ui->actionUseLmmseDebayer->isChecked() )
-    {
-        setMlvUseLmmseDebayer( m_pMlvObject );
-    }
-    else if( ui->actionUseIgvDebayer->isChecked() )
-    {
-        setMlvUseIgvDebayer( m_pMlvObject );
-    }
-    else if( ui->actionUseRcdDebayer->isChecked() )
-    {
-        setMlvUseRcdDebayer( m_pMlvObject );
-    }
-    else if( ui->actionUseDcbDebayer->isChecked() )
-    {
-        setMlvUseDcbDebayer( m_pMlvObject );
+        switch( ui->comboBoxDebayer->currentIndex() )
+        {
+        case ReceiptSettings::None:
+            setMlvUseNoneDebayer( m_pMlvObject );
+            break;
+        case ReceiptSettings::Simple:
+            setMlvUseSimpleDebayer( m_pMlvObject );
+            break;
+        case ReceiptSettings::Bilinear:
+            setMlvDontAlwaysUseAmaze( m_pMlvObject );
+            break;
+        case ReceiptSettings::LMMSE:
+            setMlvUseLmmseDebayer( m_pMlvObject );
+            break;
+        case ReceiptSettings::IGV:
+            setMlvUseIgvDebayer( m_pMlvObject );
+            break;
+        case ReceiptSettings::AMaZE:
+            setMlvAlwaysUseAmaze( m_pMlvObject );
+            break;
+        case ReceiptSettings::AHD:
+            setMlvUseAhdDebayer( m_pMlvObject );
+            break;
+        case ReceiptSettings::RCD:
+            setMlvUseRcdDebayer( m_pMlvObject );
+            break;
+        case ReceiptSettings::DCB:
+            setMlvUseDcbDebayer( m_pMlvObject );
+            break;
+        default:
+            break;
+        }
+        disableMlvCaching( m_pMlvObject );
     }
     else
     {
-        setMlvDontAlwaysUseAmaze( m_pMlvObject );
+        applyPlaybackDebayerSelection();
     }
 
     //Init audio playback engine
@@ -1189,7 +2237,6 @@ void MainWindow::initGui( void )
     m_previewDebayerGroup->addAction( ui->actionCaching );
     m_previewDebayerGroup->addAction( ui->actionDontSwitchDebayerForPlayback );
     ui->actionUseBilinear->setChecked( true );
-    ui->actionCaching->setVisible( false );
 
     //Scope menu as group
     m_scopeGroup = new QActionGroup( this );
@@ -1298,6 +2345,7 @@ void MainWindow::initGui( void )
     m_pScene = new GraphicsPickerScene( this );
     m_pScene->addItem( m_pGraphicsItem );
     ui->graphicsView->setScene( m_pScene );
+    GpuDisplayViewport::installOn( ui->graphicsView );
     ui->graphicsView->show();
     connect( ui->graphicsView, SIGNAL( customContextMenuRequested(QPoint) ), this, SLOT( pictureCustomContextMenuRequested(QPoint) ) );
     connect( m_pScene, SIGNAL( wbPicked(int,int) ), this, SLOT( whiteBalancePicked(int,int) ) );
@@ -1544,6 +2592,7 @@ void MainWindow::initLib( void )
     }
 
     m_pRawImage = NULL;
+    m_pRawImage16 = NULL;
 }
 
 //Read some settings from registry
@@ -1590,7 +2639,13 @@ void MainWindow::readSettings()
         on_actionPreviewTableModeBottom_triggered();
         break;
     }
-    ui->actionCaching->setChecked( false );
+    restorePlaybackDebayerSelection(
+        set.value( "playbackDebayerMode",
+                   set.value( "caching", false ).toBool()
+                       ? QStringLiteral("amaze-cached")
+                       : QStringLiteral("bilinear") ).toString() );
+    ui->actionUseFastProcessingForPlayback->setChecked(
+        set.value( "playbackProcessingSubset", false ).toBool() );
     m_resizeFilterEnabled = set.value( "resizeEnable", false ).toBool();
     m_resizeWidth = set.value( "resizeWidth", 1920 ).toUInt();
     m_resizeHeight = set.value( "resizeHeight", 1080 ).toUInt();
@@ -1664,6 +2719,9 @@ void MainWindow::writeSettings()
     set.setValue( "codecOption", m_codecOption );
     set.setValue( "exportDebayerMode", m_exportDebayerMode );
     set.setValue( "previewMode", m_previewMode );
+    set.setValue( "playbackDebayerMode", selectedPlaybackDebayerLabel() );
+    set.setValue( "playbackProcessingSubset",
+                  ui->actionUseFastProcessingForPlayback->isChecked() );
     set.setValue( "caching", ui->actionCaching->isChecked() );
     set.setValue( "resizeEnable", m_resizeFilterEnabled );
     set.setValue( "resizeWidth", m_resizeWidth );
@@ -2842,7 +3900,7 @@ ProcessResult MainWindow::exportCdngSequence(
     /* Render one frame for raw correction init */
     uint32_t frameSize = getMlvWidth( mlvObject ) * getMlvHeight( mlvObject ) * 3;
     uint16_t *imgBuffer = (uint16_t *)malloc( frameSize * sizeof( uint16_t ) );
-    getMlvProcessedFrame16( mlvObject, 0, imgBuffer, QThread::idealThreadCount() );
+    getMlvProcessedFrame16( mlvObject, 0, imgBuffer, mlvappEffectiveWorkerThreadCount() );
     free( imgBuffer );
 
     /* --- Frame export loop (cutIn/cutOut are 1-based) --- */
@@ -4142,6 +5200,11 @@ void MainWindow::readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings
             receipt->setDualIso( Rxml->readElementText().toInt() );
             Rxml->readNext();
         }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "dualIsoAutoCorrected" ) )
+        {
+            receipt->setDualIsoAutoCorrected( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
         else if( Rxml->isStartElement() && Rxml->name() == QString( "dualIsoPattern" ) )
         {
             receipt->setDualIsoPattern( Rxml->readElementText().toInt() );
@@ -4415,6 +5478,7 @@ void MainWindow::writeXmlElementsToFile(QXmlStreamWriter *xmlWriter, ReceiptSett
     xmlWriter->writeTextElement( "deflickerTarget",         QString( "%1" ).arg( receipt->deflickerTarget() ) );
     xmlWriter->writeTextElement( "dualIsoForced",           QString( "%1" ).arg( receipt->dualIsoForced() ) );
     xmlWriter->writeTextElement( "dualIso",                 QString( "%1" ).arg( receipt->dualIso() ) );
+    xmlWriter->writeTextElement( "dualIsoAutoCorrected",    QString( "%1" ).arg( receipt->dualIsoAutoCorrected() ) );
     xmlWriter->writeTextElement( "dualIsoPattern",          QString( "%1" ).arg( receipt->dualIsoPattern() ) );
     xmlWriter->writeTextElement( "dualIsoEvCorrection",     QString( "%1" ).arg( receipt->dualIsoEvCorrection() ) );
     xmlWriter->writeTextElement( "dualIsoBlackDelta",       QString( "%1" ).arg( receipt->dualIsoBlackDelta() ) );
@@ -4472,6 +5536,8 @@ void MainWindow::deleteSession()
 
     //Set Labels black
     ui->labelScope->setScope( NULL, 0, 0, false, false, ScopesLabel::None );
+    invalidateDisplayPreviewCache();
+    GpuDisplayViewport::clearPresentedImage( ui->graphicsView, m_pGraphicsItem );
     m_pGraphicsItem->setPixmap( QPixmap( ":/IMG/IMG/TransDummy.png" ) );
     m_pScene->setSceneRect( 0, 0, 10, 10 );
 
@@ -4728,17 +5794,27 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
         m_pMlvObject->llrawproc->diso_auto_correction = -m_pMlvObject->llrawproc->diso_auto_correction;
     }
 
+    const int requestedDualIsoMode = receipt->dualIso();
     if( !receipt->dualIsoAutoCorrected() )
     {
-        receipt->setDualIso( 0 );
-
-        if( receipt->dualIsoForced() == DISO_VALID )
+        if( requestedDualIsoMode != 2 && receipt->dualIsoForced() == DISO_VALID )
         {
             if( m_pMlvObject->llrawproc->diso1 != m_pMlvObject->llrawproc->diso2 )
             {
                 receipt->setDualIso( 1 );
             }
+            else
+            {
+                receipt->setDualIso( 0 );
+            }
+        }
+        else if( requestedDualIsoMode != 2 )
+        {
+            receipt->setDualIso( 0 );
+        }
 
+        if( receipt->dualIsoForced() == DISO_VALID || requestedDualIsoMode == 2 )
+        {
             m_pMlvObject->llrawproc->diso_pattern = 0;
             m_pMlvObject->llrawproc->diso_auto_correction = -1;
             m_pMlvObject->llrawproc->diso_ev_correction = 1;
@@ -5188,6 +6264,7 @@ int MainWindow::showFileInEditor(int row)
 
     //Stop Playback
     ui->actionPlay->setChecked( false );
+    applyEffectiveDualIsoPlaybackSettings();
     //Save slider receipt
     if( !ACTIVE_RECEIPT->wasNeverLoaded() && !m_inClipDeleteProcess ) setReceipt( ACTIVE_RECEIPT );
     //Save new position in session
@@ -5512,41 +6589,123 @@ void MainWindow::paintAudioTrack( void )
 }
 
 //Draw Zebras, return: 1=under, 2=over, 3=under+over, 0=okay
-uint8_t MainWindow::drawZebras()
+static uint8_t scanZebrasRgb8(const uint8_t *rgbData, int width, int height)
+{
+    uint8_t underOver = 0;
+
+    if( !rgbData || width <= 0 || height <= 0 ) return underOver;
+
+    const int pixelCount = width * height;
+    for( int i = 0; i < pixelCount; ++i )
+    {
+        const uint8_t red = rgbData[i * 3 + 0];
+        const uint8_t green = rgbData[i * 3 + 1];
+        const uint8_t blue = rgbData[i * 3 + 2];
+        const int maxChannel = qMax(red, qMax(green, blue));
+        const int minChannel = qMin(red, qMin(green, blue));
+        const int lightness = (maxChannel + minChannel) / 2;
+        if( lightness >= preview_zebra::kOverThreshold8Bit ) underOver |= 0x02;
+        if( lightness <= preview_zebra::kUnderThreshold8Bit ) underOver |= 0x01;
+    }
+
+    return underOver;
+}
+
+uint8_t MainWindow::drawZebras(QImage *image)
 {
     uint8_t underOver = 0;
 
     //If option not checked we do nothing
     if( !ui->actionShowZebras->isChecked() ) return underOver;
 
-    //Get image
-    QImage image = m_pGraphicsItem->pixmap().toImage();
-    //Each pixel
-    for( int y = 0; y < image.height(); y++ )
+    if( !image ) return underOver;
+
+    for( int y = 0; y < image->height(); y++ )
     {
-        for( int x = 0; x < image.width(); x++ )
+        uchar * line = image->scanLine( y );
+        for( int x = 0; x < image->width(); x++ )
         {
-            QColor pixel = image.pixelColor( x, y );
+            uchar * pixel = line + (x * 3);
+            const int maxChannel = qMax(pixel[0], qMax(pixel[1], pixel[2]));
+            const int minChannel = qMin(pixel[0], qMin(pixel[1], pixel[2]));
+            const int lightness = (maxChannel + minChannel) / 2;
             //Overexposed
-            if( pixel.lightness() >= 252 )
+            if( lightness >= preview_zebra::kOverThreshold8Bit )
             {
                 //Set color red
-                image.setPixelColor( x, y, Qt::red );
+                pixel[0] = 255;
+                pixel[1] = 0;
+                pixel[2] = 0;
                 underOver |= 0x02;
             }
             //Underexposed
-            if( pixel.lightness() <= 3 )
+            if( lightness <= preview_zebra::kUnderThreshold8Bit )
             {
                 //Set color blue
-                image.setPixelColor( x, y, Qt::blue );
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 255;
                 underOver |= 0x01;
             }
         }
     }
-    //Set image with zebras to viewer
-    m_pGraphicsItem->setPixmap( QPixmap::fromImage( image ) );
 
     return underOver;
+}
+
+void MainWindow::invalidateDisplayPreviewCache( void )
+{
+    m_displayPreviewCacheNextSlot = 0;
+    for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
+    {
+        entry = DisplayPreviewCacheEntry();
+    }
+}
+
+bool MainWindow::shouldUseGpu16PreviewPath( void ) const
+{
+    MainWindowGpuPreviewPolicyState policyState;
+    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
+    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
+    policyState.paradeEnabled = ui->actionShowParade->isChecked();
+    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    return mainWindowAllowsGpu16PreviewRender( policyState );
+}
+
+bool MainWindow::shouldUseGpuPreviewProcessingPath( void ) const
+{
+    MainWindowGpuPreviewPolicyState policyState;
+    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
+    policyState.gpuPreviewProcessingEnvironmentRequested =
+        gpuPreviewProcessingRequestedByEnvironment();
+    policyState.gpuPreviewProcessingCompatible = gpuPreviewProcessingIsSupported( m_pProcessingObject );
+    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
+    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
+    policyState.paradeEnabled = ui->actionShowParade->isChecked();
+    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    return mainWindowAllowsGpuPreviewProcessing( policyState );
+}
+
+bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
+{
+    MainWindowGpuPreviewPolicyState policyState;
+    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
+    policyState.gpuPreviewProcessingEnvironmentRequested =
+        gpuPreviewProcessingRequestedByEnvironment();
+    policyState.gpuPreviewProcessingCompatible = gpuPreviewProcessingIsSupported( m_pProcessingObject );
+    policyState.gpuBilinearDebayerBackendRequest = m_gpuBilinearDebayerBackendRequest;
+    policyState.gpuBilinearDebayerEnvironmentRequested =
+        gpuBilinearDebayerRequestedByEnvironment();
+    policyState.gpuBilinearDebayerCompatible =
+        m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) == 0;
+    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
+    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
+    policyState.paradeEnabled = ui->actionShowParade->isChecked();
+    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    return mainWindowAllowsGpuBilinearDebayer( policyState );
 }
 
 //Write the frame number into the label
@@ -5745,8 +6904,8 @@ void MainWindow::setToolButtonDualIso(int index)
         break;
     case 1: ui->toolButtonDualIsoOn->setChecked( true );
         break;
-    //case 2: ui->toolButtonDualIsoPreview->setChecked( true );
-        //break;
+    case 2: ui->toolButtonDualIsoPreview->setChecked( true );
+        break;
     default: break;
     }
     if( actualize ) toolButtonDualIsoChanged();
@@ -5921,7 +7080,8 @@ int MainWindow::toolButtonVerticalStripesCurrentIndex()
 int MainWindow::toolButtonDualIsoCurrentIndex()
 {
     if( ui->toolButtonDualIsoOff->isChecked() ) return 0;
-    return 1;
+    else if( ui->toolButtonDualIsoOn->isChecked() ) return 1;
+    return 2;
 }
 
 //Get toolbutton index of dual iso interpolation
@@ -6850,6 +8010,7 @@ void MainWindow::on_actionExport_triggered()
 {
     //Stop playback if active
     ui->actionPlay->setChecked( false );
+    applyEffectiveDualIsoPlaybackSettings();
 
     //Save slider receipt
     setReceipt( ACTIVE_RECEIPT );
@@ -7075,6 +8236,8 @@ void MainWindow::on_actionExport_triggered()
 //Export actual frame as 16bit png
 void MainWindow::on_actionExportCurrentFrame_triggered()
 {
+    ui->actionPlay->setChecked( false );
+    applyEffectiveDualIsoPlaybackSettings();
     SingleFrameExportDialog *exportDialog = new SingleFrameExportDialog( this,
                                                                          m_pMlvObject,
                                                                          ACTIVE_RECEIPT->fileName(),
@@ -7435,15 +8598,8 @@ void MainWindow::on_actionAlwaysUseAMaZE_triggered()
 //En-/Disable Caching
 void MainWindow::on_actionCaching_triggered()
 {
-    /* Use AMaZE */
-    setMlvAlwaysUseAmaze( m_pMlvObject );
-
-    enableMlvCaching( m_pMlvObject );
-
-    llrpResetFpmStatus(m_pMlvObject);
-    llrpResetBpmStatus(m_pMlvObject);
-    llrpComputeStripesOn(m_pMlvObject);
-    m_frameChanged = true;
+    selectDebayerAlgorithm();
+    return;
 }
 
 //Use same debayer for playback like in edit panel
@@ -7451,6 +8607,12 @@ void MainWindow::on_actionDontSwitchDebayerForPlayback_triggered()
 {
     selectDebayerAlgorithm();
     return;
+}
+
+void MainWindow::on_actionUseFastProcessingForPlayback_triggered()
+{
+    invalidateDisplayPreviewCache();
+    m_frameChanged = true;
 }
 
 //Select the codec
@@ -8682,13 +9844,119 @@ void MainWindow::on_actionPlay_triggered(bool checked)
     }
 }
 
+void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
+{
+    if( !m_fileLoaded ) return;
+
+    const DualIsoPlaybackRuntimeSettings settings = effectiveDualIsoPlaybackRuntimeSettings(
+                playbackPolicyActive(),
+                ui->checkBoxRawFixEnable->isChecked(),
+                llrpGetDualIsoValidity( m_pMlvObject ),
+                toolButtonDualIsoCurrentIndex(),
+                toolButtonDualIsoInterpolationCurrentIndex(),
+                toolButtonDualIsoAliasMapCurrentIndex(),
+                toolButtonDualIsoFullresBlendingCurrentIndex() );
+
+    const bool changed = (m_dualIsoPlaybackPreviewActive != settings.previewOverrideActive)
+                      || (llrpGetDualIsoMode( m_pMlvObject ) != settings.mode)
+                      || (llrpGetDualIsoInterpolationMethod( m_pMlvObject ) != settings.interpolation)
+                      || (llrpGetDualIsoAliasMapMode( m_pMlvObject ) != settings.aliasMap)
+                      || (llrpGetDualIsoFullResBlendingMode( m_pMlvObject ) != settings.fullResBlending);
+
+    if( !changed ) return;
+
+    llrpSetDualIsoMode( m_pMlvObject, settings.mode );
+    llrpSetDualIsoInterpolationMethod( m_pMlvObject, settings.interpolation );
+    llrpSetDualIsoAliasMapMode( m_pMlvObject, settings.aliasMap );
+    llrpSetDualIsoFullResBlendingMode( m_pMlvObject, settings.fullResBlending );
+    processingSetBlackAndWhiteLevel( m_pMlvObject->processing,
+                                     getMlvBlackLevel( m_pMlvObject ),
+                                     getMlvWhiteLevel( m_pMlvObject ),
+                                     getMlvBitdepth( m_pMlvObject ) );
+    llrpResetDngBWLevels( m_pMlvObject );
+    resetMlvCache( m_pMlvObject );
+    resetMlvCachedFrame( m_pMlvObject );
+    m_frameChanged = true;
+    m_dualIsoPlaybackPreviewActive = settings.previewOverrideActive;
+}
+
+void MainWindow::beginPlayToFirstFrameMeasurement( void )
+{
+    m_playToFirstFramePending = true;
+    m_playToFirstFrameTargetFrameValid = false;
+    m_playToFirstFrameTargetFrame = -1;
+    m_lastPlayToFirstFrameValid = false;
+    m_playToFirstFrameStartSeconds = mlv_stage_timing_now();
+    m_lastPlayToFirstFrameMs = 0.0;
+}
+
+void MainWindow::notePlayToFirstFramePresentation( int presentedFrame )
+{
+    if( !m_playToFirstFramePending ) return;
+    if( !m_playToFirstFrameTargetFrameValid ) return;
+    if( presentedFrame != m_playToFirstFrameTargetFrame ) return;
+
+    m_lastPlayToFirstFrameMs =
+        ( mlv_stage_timing_now() - m_playToFirstFrameStartSeconds ) * 1000.0;
+    m_lastPlayToFirstFrameValid = true;
+    m_playToFirstFramePending = false;
+    m_playToFirstFrameTargetFrameValid = false;
+    m_playToFirstFrameTargetFrame = -1;
+}
+
+bool MainWindow::primePlaybackCacheOnPlayStart( void )
+{
+    if( !m_fileLoaded || !m_pMlvObject ) return false;
+    if( playback_start_preroll_disabled_by_environment() ) return false;
+    if( m_pMlvObject->stop_caching || getMlvRawCacheLimitFrames( m_pMlvObject ) == 0 ) return false;
+
+    int currentFrame = ui->horizontalSliderPosition->value();
+    if( currentFrame < 0 ) currentFrame = 0;
+
+    const int cutOutValue = ui->spinBoxCutOut->value();
+    if( currentFrame + 1 >= cutOutValue )
+    {
+        if( currentFrame == ui->spinBoxCutIn->value() - 1 )
+            currentFrame = 0;
+        else
+            currentFrame = ui->spinBoxCutIn->value() - 1;
+    }
+    if( currentFrame < 0 ) currentFrame = 0;
+
+    int lastPlayableFrame = cutOutValue - 1;
+    if( lastPlayableFrame < currentFrame ) lastPlayableFrame = currentFrame;
+
+    mlv_cache_request_playback_preroll(
+        m_pMlvObject,
+        static_cast<uint64_t>( currentFrame ),
+        static_cast<uint64_t>( lastPlayableFrame ),
+        kPlaybackStartPrerollFrames );
+    return true;
+}
+
 //Play button toggled (by program)
 void MainWindow::on_actionPlay_toggled(bool checked)
 {
     //When stopping, debayer selection has to come in right order from render thread (extra-invitation)
-    if( !checked ) m_playbackStopped = true;
+    if( !checked )
+    {
+        m_playbackStopped = true;
+        m_playToFirstFramePending = false;
+        m_playToFirstFrameTargetFrameValid = false;
+        m_playToFirstFrameTargetFrame = -1;
+        m_lastPlayStartPrerollRequested = false;
+    }
+    else
+    {
+        beginPlayToFirstFrameMeasurement();
+    }
 
     selectDebayerAlgorithm();
+    applyEffectiveDualIsoPlaybackSettings();
+    if( checked )
+    {
+        m_lastPlayStartPrerollRequested = primePlaybackCacheOnPlayStart();
+    }
 }
 
 //Zebras en-/disabled -> redraw
@@ -8824,7 +10092,11 @@ void MainWindow::on_spinBoxDeflickerTarget_valueChanged(int arg1)
 //DualISO changed
 void MainWindow::toolButtonDualIsoChanged( void )
 {
-    if( toolButtonDualIsoCurrentIndex() && ui->checkBoxRawFixEnable->isChecked() )
+    const int dualIsoMode = toolButtonDualIsoCurrentIndex();
+    const bool dualIsoEnabled = (dualIsoMode > 0) && ui->checkBoxRawFixEnable->isChecked();
+    const bool dualIsoFullMode = (dualIsoMode == 1) && ui->checkBoxRawFixEnable->isChecked();
+
+    if( dualIsoEnabled )
     {
         ui->toolButtonFocusDotInterpolation->setEnabled( false );
         ui->FocusPixelsInterpolationMethodLabel->setEnabled( false );
@@ -8832,19 +10104,20 @@ void MainWindow::toolButtonDualIsoChanged( void )
         ui->BadPixelsInterpolationMethodLabel->setEnabled( false );
         ui->DualIsoPatternLabel->setEnabled( true );
         ui->DualIsoPatternComboBox->setEnabled( true );
-        ui->DualIsoMatchExposuresLabel->setEnabled( true );
-        ui->toolButtonDualIsoMatchExposures->setEnabled( true );
-        ui->DualIsoEvCorrectionLabel->setEnabled( true );
-        ui->DualIsoEvCorrectionVal->setEnabled( true );
-        ui->horizontalSliderDualIsoEvCorrection->setEnabled( true );
-        ui->DualIsoBlackDeltaLabel->setEnabled( true );
-        ui->DualIsoBlackDeltaVal->setEnabled( true );
-        ui->horizontalSliderDualIsoBlackDelta->setEnabled( true );
-        ui->toolButtonDualIsoInterpolation->setEnabled( true );
-        ui->toolButtonDualIsoAliasMap->setEnabled( true );
-        ui->toolButtonDualIsoFullresBlending->setEnabled( true );
-        ui->DualISOInterpolationLabel->setEnabled( true );
-        ui->DualISOAliasMapLabel->setEnabled( true );
+        ui->DualIsoMatchExposuresLabel->setEnabled( dualIsoFullMode );
+        ui->toolButtonDualIsoMatchExposures->setEnabled( dualIsoFullMode );
+        ui->DualIsoEvCorrectionLabel->setEnabled( dualIsoFullMode );
+        ui->DualIsoEvCorrectionVal->setEnabled( dualIsoFullMode );
+        ui->horizontalSliderDualIsoEvCorrection->setEnabled( dualIsoFullMode );
+        ui->DualIsoBlackDeltaLabel->setEnabled( dualIsoFullMode );
+        ui->DualIsoBlackDeltaVal->setEnabled( dualIsoFullMode );
+        ui->horizontalSliderDualIsoBlackDelta->setEnabled( dualIsoFullMode );
+        ui->toolButtonDualIsoInterpolation->setEnabled( dualIsoFullMode );
+        ui->toolButtonDualIsoAliasMap->setEnabled( dualIsoFullMode );
+        ui->toolButtonDualIsoFullresBlending->setEnabled( dualIsoFullMode );
+        ui->DualISOInterpolationLabel->setEnabled( dualIsoFullMode );
+        ui->DualISOAliasMapLabel->setEnabled( dualIsoFullMode );
+        ui->DualISOFullresBlendingLabel->setEnabled( dualIsoFullMode );
     }
     else
     {
@@ -8867,19 +10140,12 @@ void MainWindow::toolButtonDualIsoChanged( void )
         ui->toolButtonDualIsoFullresBlending->setEnabled( false );
         ui->DualISOInterpolationLabel->setEnabled( false );
         ui->DualISOAliasMapLabel->setEnabled( false );
+        ui->DualISOFullresBlendingLabel->setEnabled( false );
     }
 
     if( !m_fileLoaded ) return;
 
-    //Set dualIso mode
-    llrpSetDualIsoMode( m_pMlvObject, toolButtonDualIsoCurrentIndex() );
-    //Reset processing black and white levels
-    processingSetBlackAndWhiteLevel( m_pMlvObject->processing, getMlvBlackLevel( m_pMlvObject ), getMlvWhiteLevel( m_pMlvObject ), getMlvBitdepth( m_pMlvObject ) );
-    //Reset diso levels to mlv raw levels
-    llrpResetDngBWLevels( m_pMlvObject );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 void MainWindow::on_DualIsoPatternComboBox_currentIndexChanged(int index)
@@ -8935,28 +10201,19 @@ void MainWindow::on_toolButtonDualIsoMatchExposures2_clicked()
 //DualISO Interpolation changed
 void MainWindow::toolButtonDualIsoInterpolationChanged( void )
 {
-    llrpSetDualIsoInterpolationMethod( m_pMlvObject, toolButtonDualIsoInterpolationCurrentIndex() );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //DualISO Alias Map changed
 void MainWindow::toolButtonDualIsoAliasMapChanged( void )
 {
-    llrpSetDualIsoAliasMapMode( m_pMlvObject, toolButtonDualIsoAliasMapCurrentIndex() );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //DualISO Fullres Blending changed
 void MainWindow::toolButtonDualIsoFullresBlendingChanged( void )
 {
-    llrpSetDualIsoFullResBlendingMode( m_pMlvObject, toolButtonDualIsoFullresBlendingCurrentIndex() );
-    resetMlvCache( m_pMlvObject );
-    resetMlvCachedFrame( m_pMlvObject );
-    m_frameChanged = true;
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //Darkframe Subtraction On/Off changed
@@ -9095,8 +10352,8 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     ui->VerticalStripesLabel->setEnabled( checked );
     ui->DeflickerTargetLabel->setEnabled( checked );
     ui->DualISOLabel->setEnabled( checked );
-    ui->DualIsoPatternLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 1 ) );
-    ui->DualIsoPatternComboBox->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 1 ) );
+    ui->DualIsoPatternLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() > 0 ) );
+    ui->DualIsoPatternComboBox->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() > 0 ) );
     ui->DualIsoMatchExposuresLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 1 ) );
     ui->toolButtonDualIsoMatchExposures->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 1 ) );
     ui->DualIsoEvCorrectionLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 1 ) );
@@ -9111,11 +10368,11 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     ui->FocusPixelsInterpolationMethodLabel_2->setEnabled( checked );
 
     ui->toolButtonFocusDots->setEnabled( checked );
-    ui->toolButtonFocusDotInterpolation->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() != 1 ) );
-    ui->FocusPixelsInterpolationMethodLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() != 1 ) );
+    ui->toolButtonFocusDotInterpolation->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 0 ) );
+    ui->FocusPixelsInterpolationMethodLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 0 ) );
     ui->toolButtonBadPixels->setEnabled( checked );
-    ui->toolButtonBadPixelsInterpolation->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() != 1 ) );
-    ui->BadPixelsInterpolationMethodLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() != 1 ) );
+    ui->toolButtonBadPixelsInterpolation->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 0 ) );
+    ui->BadPixelsInterpolationMethodLabel->setEnabled( checked && ( toolButtonDualIsoCurrentIndex() == 0 ) );
     ui->toolButtonChroma->setEnabled( checked );
     ui->toolButtonPatternNoise->setEnabled( checked );
     ui->toolButtonVerticalStripes->setEnabled( checked );
@@ -9143,6 +10400,7 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     ui->label_RawWhiteVal->setEnabled( checked );
     on_horizontalSliderRawBlack_valueChanged( ui->horizontalSliderRawBlack->value() );
     on_horizontalSliderRawWhite_valueChanged( ui->horizontalSliderRawWhite->value() );
+    applyEffectiveDualIsoPlaybackSettings();
 }
 
 //En-/disable all LUT processing
@@ -9551,7 +10809,28 @@ void MainWindow::exportAbort( void )
 //Draw the frame when render thread is ready
 void MainWindow::drawFrameReady()
 {
+    const uint64_t display_frame = ui->actionDropFrameMode->isChecked()
+        ? static_cast<uint64_t>(m_newPosDropMode)
+        : static_cast<uint64_t>(ui->horizontalSliderPosition->value());
+    const double display_start = mlv_stage_timing_now();
+    const bool gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    const bool zoomFitEnabled = ui->actionZoomFit->isChecked();
+    const bool zebrasEnabled = ui->actionShowZebras->isChecked();
+    const bool betterResizerEnabled = ui->actionBetterResizer->isChecked();
+    const int sourceWidth = getMlvWidth( m_pMlvObject );
+    const int sourceHeight = getMlvHeight( m_pMlvObject );
+    const double stretchX = getHorizontalStretchFactor(false);
+    const double stretchY = getVerticalStretchFactor(false);
     Qt::TransformationMode mode = Qt::FastTransformation;
+    QImage displayImage;
+    bool displayImageOwnsData = false;
+    QPixmap cachedPixmap;
+    bool cachedPixmapAvailable = false;
+    bool framePresentedByViewport = false;
+    uint8_t underOver = 0;
+    const uint8_t * rgb8DisplaySource = m_pRawImage;
+    int sceneWidth = sourceWidth;
+    int sceneHeight = sourceHeight;
     if( !ui->actionPlay->isChecked()
      || ui->actionUseNoneDebayer->isChecked()
      || ui->actionCaching->isChecked() )
@@ -9559,7 +10838,22 @@ void MainWindow::drawFrameReady()
         mode = Qt::SmoothTransformation;
     }
 
-    if( ui->actionZoomFit->isChecked() )
+    MainWindowGpuPreviewPolicyState gpuPreviewPolicy = m_lastQueuedGpuPreviewPolicy;
+    gpuPreviewPolicy.gpuViewportInstalled = gpuViewportInstalled;
+
+    const bool gpu16PreviewActive = mainWindowUsesGpu16PreviewPresentation( gpuPreviewPolicy );
+    const bool gpuPreviewProcessingActive = mainWindowUsesGpuPreviewProcessing( gpuPreviewPolicy );
+    const bool cpuPreviewProcessingActive =
+        m_renderThreadUsingCpuPreviewProcessing
+        && m_lastQueuedGpuPreviewProcessingConfig.enabled;
+    const bool useGpuImagePresentation = mainWindowUsesGpuImagePresentation( gpuPreviewPolicy );
+    const bool useGpuShaderZebras = mainWindowUsesGpuShaderZebraProcessing( gpuPreviewPolicy );
+    GpuPreviewProcessingConfig gpuPreviewProcessingConfig =
+        (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
+            ? m_lastQueuedGpuPreviewProcessingConfig
+            : GpuPreviewProcessingConfig();
+
+    if( zoomFitEnabled )
     {
         //Some math to have the picture exactly in the frame
         int actWidth;
@@ -9574,78 +10868,23 @@ void MainWindow::drawFrameReady()
             actWidth = ui->graphicsView->width();
             actHeight = ui->graphicsView->height();
         }
-        int desWidth = actWidth;
-        int desHeight = actWidth * getMlvHeight(m_pMlvObject) / getMlvWidth(m_pMlvObject) * getVerticalStretchFactor(false) / getHorizontalStretchFactor(false);
-        if( desHeight > actHeight )
+        sceneWidth = actWidth;
+        sceneHeight = actWidth * sourceHeight / sourceWidth * stretchY / stretchX;
+        if( sceneHeight > actHeight )
         {
-            desHeight = actHeight;
-            desWidth = actHeight * getMlvWidth(m_pMlvObject) / getMlvHeight(m_pMlvObject) / getVerticalStretchFactor(false) * getHorizontalStretchFactor(false);
+            sceneHeight = actHeight;
+            sceneWidth = actHeight * sourceWidth / sourceHeight / stretchY * stretchX;
         }
-
-        //Get Picture
-
-
-        QPixmap pic = QPixmap::fromImage( QImage( ( unsigned char *) m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), QImage::Format_RGB888 )
-                                          .scaled( desWidth * devicePixelRatio(),
-                                                   desHeight * devicePixelRatio(),
-                                                   Qt::IgnoreAspectRatio, mode) );
-        //Set Picture to Retina
-        pic.setDevicePixelRatio( devicePixelRatio() );
-        //Bring frame to GUI (fit to window)
-        m_pGraphicsItem->setPixmap( pic );
-        //Set Scene
-        m_pScene->setSceneRect( 0, 0, desWidth, desHeight );
     }
     else
     {
-        //Bring frame to GUI (100%)
-        if( getVerticalStretchFactor(false) == 1.0
-         && getHorizontalStretchFactor(false) == 1.0 ) //Fast mode for 1.0 stretch factor
-        {
-            m_pGraphicsItem->setPixmap( QPixmap::fromImage( QImage( ( unsigned char *) m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), QImage::Format_RGB888 ) ) );
-            m_pScene->setSceneRect( 0, 0, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject) );
-        }
-        else
-        {
-            QPixmap pixmap;
-            //Qvir resize
-            if( mode == Qt::SmoothTransformation && ui->actionBetterResizer->isChecked() )
-            {
-                uint8_t *scaledPic = (uint8_t*)malloc( 3 * getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false)
-                                                         * getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false)
-                                                         * sizeof( uint8_t ) );
-                avir_scale_thread_pool scaling_pool;
-                avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
-                avir::CImageResizerParamsUltra roptions;
-                avir::CImageResizer<> image_resizer( 8, 0, roptions );
-                image_resizer.resizeImage( m_pRawImage,
-                                           getMlvWidth(m_pMlvObject),
-                                           getMlvHeight(m_pMlvObject), 0,
-                                           scaledPic,
-                                           getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false),
-                                           getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false),
-                                           3, 0, &vars );
-                pixmap = QPixmap::fromImage( QImage( ( unsigned char *) scaledPic,
-                                                     getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false),
-                                                     getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false),
-                                                     QImage::Format_RGB888 ) );
-                free( scaledPic );
-            }
-            //Qt resize
-            else
-            {
-                pixmap = QPixmap::fromImage( QImage( ( unsigned char *) m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), QImage::Format_RGB888 )
-                                             .scaled( getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false),
-                                                      getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false),
-                                                      Qt::IgnoreAspectRatio, mode) );
-            }
-            m_pGraphicsItem->setPixmap( pixmap );
-            m_pScene->setSceneRect( 0, 0, getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false), getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false) );
-        }
+        sceneWidth = sourceWidth * stretchX;
+        sceneHeight = sourceHeight * stretchY;
     }
 
-    // Set sliders after dual ISO processing
-    if( toolButtonDualIsoCurrentIndex() == 1 )
+    m_pScene->setSceneRect( 0, 0, sceneWidth, sceneHeight );
+
+    if( toolButtonDualIsoCurrentIndex() > 0 )
     {
         ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 );
 
@@ -9656,10 +10895,9 @@ void MainWindow::drawFrameReady()
             ui->DualIsoPatternComboBox->blockSignals( true );
             ui->DualIsoPatternComboBox->setCurrentIndex(m_pMlvObject->llrawproc->diso_pattern);
             ui->DualIsoPatternComboBox->blockSignals( false );
-            //printf("DISO pattern: %d\n", m_pMlvObject->llrawproc->diso_pattern);
         }
 
-        if( m_pMlvObject->llrawproc->diso_auto_correction < 0 )
+        if( toolButtonDualIsoCurrentIndex() == 1 && m_pMlvObject->llrawproc->diso_auto_correction < 0 )
         {
             if( m_pMlvObject->llrawproc->diso_ev_correction != 1 )
             {
@@ -9678,42 +10916,257 @@ void MainWindow::drawFrameReady()
             }
 
             m_pMlvObject->llrawproc->diso_auto_correction = -m_pMlvObject->llrawproc->diso_auto_correction;
-
-            //printf("DISO: %d, %.2f, %d\n", m_pMlvObject->llrawproc->diso_auto_correction, m_pMlvObject->llrawproc->diso_ev_correction, m_pMlvObject->llrawproc->diso_black_delta);
         }
     }
 
-    //Add zebras on the image
-    uint8_t underOver = drawZebras();
+    const bool playbackProcessingSubsetActive =
+        (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
+        && gpuPreviewProcessingConfig.enabled;
+    const uint64_t display_signature =
+        playbackProcessingSubsetActive
+            ? (gpuPreviewProcessingConfig.signature
+                ^ display_frame
+                ^ (m_renderThreadUsingGpuBilinearDebayer ? 0x9d77d4e5cbd18b01ull : 0ull))
+            : (m_pMlvObject->current_processed_frame_8bit_active
+            ? m_pMlvObject->current_processed_frame_8bit_signature
+            : (m_pMlvObject->current_processed_frame_active
+                ? m_pMlvObject->current_processed_frame_signature
+                : display_frame));
+    const int devicePixelRatioMilli = static_cast<int>( devicePixelRatioF() * 1000.0 + 0.5 );
+    const int transformationMode = (mode == Qt::SmoothTransformation) ? 1 : 0;
+    GpuDisplayViewport::PresentationOptions gpuPresentationOptions =
+        m_lastQueuedGpuPresentationOptions;
+    gpuPresentationOptions.showZebras = gpuPreviewPolicy.zebrasEnabled;
+    if( gpuPreviewProcessingActive ) gpuPresentationOptions.previewProcessing = gpuPreviewProcessingConfig;
+
+    if( gpu16PreviewActive )
+    {
+        framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
+                                                                    m_pGraphicsItem,
+                                                                    m_pRawImage16,
+                                                                    sourceWidth,
+                                                                    sourceHeight,
+                                                                    gpuPresentationOptions );
+        if( !framePresentedByViewport )
+        {
+            static std::vector<uint16_t> gpu16FallbackProcessed;
+            static std::vector<uint8_t> gpu16FallbackRgb8;
+            const size_t pixelCount = static_cast<size_t>(sourceWidth) * static_cast<size_t>(sourceHeight);
+            gpu16FallbackRgb8.resize( pixelCount * 3u );
+            if( playbackProcessingSubsetActive )
+            {
+                gpu16FallbackProcessed.resize( pixelCount * 3u );
+                gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
+                                                       m_pRawImage16,
+                                                       gpu16FallbackProcessed.data(),
+                                                       static_cast<int>(pixelCount) );
+                convert_rgb16_to_rgb8( gpu16FallbackProcessed.data(),
+                                       gpu16FallbackRgb8.data(),
+                                       sourceWidth * sourceHeight );
+            }
+            else
+            {
+                convert_rgb16_to_rgb8( m_pRawImage16, gpu16FallbackRgb8.data(), sourceWidth * sourceHeight );
+            }
+            rgb8DisplaySource = gpu16FallbackRgb8.data();
+        }
+    }
+    else if( cpuPreviewProcessingActive && gpuPreviewProcessingConfig.enabled )
+    {
+        static std::vector<uint16_t> cpuPreviewProcessed;
+        static std::vector<uint8_t> cpuPreviewRgb8;
+        const size_t pixelCount = static_cast<size_t>(sourceWidth) * static_cast<size_t>(sourceHeight);
+        cpuPreviewProcessed.resize( pixelCount * 3u );
+        cpuPreviewRgb8.resize( pixelCount * 3u );
+        gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
+                                               m_pRawImage16,
+                                               cpuPreviewProcessed.data(),
+                                               static_cast<int>(pixelCount) );
+        convert_rgb16_to_rgb8( cpuPreviewProcessed.data(),
+                               cpuPreviewRgb8.data(),
+                               sourceWidth * sourceHeight );
+        rgb8DisplaySource = cpuPreviewRgb8.data();
+    }
+
+    if( !framePresentedByViewport )
+    {
+        for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
+        {
+            if( !entry.valid ) continue;
+            if( entry.frameIndex != display_frame ) continue;
+            if( entry.signature != display_signature ) continue;
+            if( entry.sourceWidth != sourceWidth || entry.sourceHeight != sourceHeight ) continue;
+            if( entry.sceneWidth != sceneWidth || entry.sceneHeight != sceneHeight ) continue;
+            if( entry.zoomFit != zoomFitEnabled ) continue;
+            if( entry.betterResizer != betterResizerEnabled ) continue;
+            if( entry.zebras != zebrasEnabled ) continue;
+            if( entry.gpuScaling != useGpuImagePresentation ) continue;
+            if( entry.transformationMode != transformationMode ) continue;
+            if( entry.devicePixelRatioMilli != devicePixelRatioMilli ) continue;
+
+            displayImage = entry.image;
+            displayImageOwnsData = true;
+            underOver = entry.underOver;
+            cachedPixmap = entry.pixmap;
+            cachedPixmapAvailable = !entry.pixmap.isNull();
+            break;
+        }
+    }
+
+    if( displayImage.isNull() && !framePresentedByViewport )
+    {
+        if( useGpuImagePresentation )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else if( zoomFitEnabled )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 )
+                               .scaled( sceneWidth * devicePixelRatioF(),
+                                        sceneHeight * devicePixelRatioF(),
+                                        Qt::IgnoreAspectRatio, mode);
+            displayImageOwnsData = true;
+        }
+        else if( stretchY == 1.0 && stretchX == 1.0 )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else if( mode == Qt::SmoothTransformation && betterResizerEnabled )
+        {
+            static avir_scale_thread_pool scaling_pool;
+            static avir::CImageResizerParamsUltra roptions;
+            static avir::CImageResizer<> image_resizer( 8, 0, roptions );
+            static std::vector<uint8_t> scaledPic;
+            scaledPic.resize( static_cast<size_t>(sceneWidth) * static_cast<size_t>(sceneHeight) * 3u );
+            avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
+            image_resizer.resizeImage( rgb8DisplaySource,
+                                       sourceWidth,
+                                       sourceHeight, 0,
+                                       scaledPic.data(),
+                                       sceneWidth,
+                                       sceneHeight,
+                                       3, 0, &vars );
+            displayImage = QImage( scaledPic.data(),
+                                   sceneWidth,
+                                   sceneHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 )
+                               .scaled( sceneWidth,
+                                        sceneHeight,
+                                        Qt::IgnoreAspectRatio, mode);
+            displayImageOwnsData = true;
+        }
+
+        if( useGpuImagePresentation && useGpuShaderZebras )
+        {
+            underOver = scanZebrasRgb8( rgb8DisplaySource, sourceWidth, sourceHeight );
+        }
+        else if( zebrasEnabled && !displayImageOwnsData )
+        {
+            displayImage = displayImage.copy();
+            displayImageOwnsData = true;
+        }
+
+        if( !useGpuImagePresentation || !useGpuShaderZebras )
+        {
+            underOver = drawZebras( &displayImage );
+        }
+
+        DisplayPreviewCacheEntry & cacheEntry =
+            m_displayPreviewCache[m_displayPreviewCacheNextSlot % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]))];
+        m_displayPreviewCacheNextSlot = (m_displayPreviewCacheNextSlot + 1) % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]));
+        cacheEntry = DisplayPreviewCacheEntry();
+        cacheEntry.valid = true;
+        cacheEntry.zoomFit = zoomFitEnabled;
+        cacheEntry.betterResizer = betterResizerEnabled;
+        cacheEntry.zebras = zebrasEnabled;
+        cacheEntry.gpuScaling = useGpuImagePresentation;
+        cacheEntry.frameIndex = display_frame;
+        cacheEntry.signature = display_signature;
+        cacheEntry.sourceWidth = sourceWidth;
+        cacheEntry.sourceHeight = sourceHeight;
+        cacheEntry.sceneWidth = sceneWidth;
+        cacheEntry.sceneHeight = sceneHeight;
+        cacheEntry.imageWidth = displayImage.width();
+        cacheEntry.imageHeight = displayImage.height();
+        cacheEntry.transformationMode = transformationMode;
+        cacheEntry.devicePixelRatioMilli = devicePixelRatioMilli;
+        cacheEntry.underOver = underOver;
+        cacheEntry.image = displayImage.copy();
+        if( !useGpuImagePresentation )
+        {
+            cacheEntry.pixmap = QPixmap::fromImage( cacheEntry.image );
+            if( zoomFitEnabled ) cacheEntry.pixmap.setDevicePixelRatio( devicePixelRatioF() );
+        }
+
+        displayImage = cacheEntry.image;
+        cachedPixmap = cacheEntry.pixmap;
+        cachedPixmapAvailable = !cacheEntry.pixmap.isNull();
+    }
+
+    if( !framePresentedByViewport
+     && !GpuDisplayViewport::presentImage( ui->graphicsView, m_pGraphicsItem, displayImage, gpuPresentationOptions ) )
+    {
+        if( zebrasEnabled && useGpuImagePresentation && useGpuShaderZebras )
+        {
+            if( !displayImageOwnsData )
+            {
+                displayImage = displayImage.copy();
+                displayImageOwnsData = true;
+            }
+            underOver = drawZebras( &displayImage );
+        }
+        QPixmap pic = cachedPixmapAvailable ? cachedPixmap : QPixmap::fromImage( displayImage );
+        if( zoomFitEnabled && pic.devicePixelRatio() == 1.0 )
+        {
+            pic.setDevicePixelRatio( devicePixelRatioF() );
+        }
+        m_pGraphicsItem->setPixmap( pic );
+    }
 
     if( ui->actionShowEditArea->isChecked() )
     {
-        //Bring over/under to histogram
+        const double scopes_start = mlv_stage_timing_now();
         bool under = false;
         bool over = false;
         if( ( underOver & 0x01 ) == 0x01 ) under = true;
         if( ( underOver & 0x02 ) == 0x02 ) over = true;
 
-        //GetHistogram
         if( ui->actionShowHistogram->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeHistogram );
         }
-        //Waveform
         else if( ui->actionShowWaveFormMonitor->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeWaveForm );
         }
-        //Parade
         else if( ui->actionShowParade->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeRgbParade);
         }
-        //VectorScope
         else if( ui->actionShowVectorScope->isChecked() )
         {
             ui->labelScope->setScope( m_pRawImage, getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeVectorScope );
         }
+        mlv_stage_timing_note("drawFrameReady.scopes", display_frame, scopes_start);
     }
     
     //Drawing ready, next frame can be rendered
@@ -9766,12 +11219,15 @@ void MainWindow::drawFrameReady()
     if( m_playbackStopped == true )
     {
         selectDebayerAlgorithm();
+        applyEffectiveDualIsoPlaybackSettings();
         m_playbackStopped = false;
     }
 
     //Reset delete clip action as enabled
     ui->actionDeleteSelectedClips->setEnabled( true );
 
+    mlv_stage_timing_note("drawFrameReady.total", display_frame, display_start);
+    notePlayToFirstFramePresentation( display_frame );
     emit frameReady();
 }
 
@@ -10685,7 +12141,7 @@ void MainWindow::selectDebayerAlgorithm()
     if( m_inOpeningProcess ) return;
 
     //If no playback active change debayer to receipt settings
-    if( !ui->actionPlay->isChecked() || ui->actionDontSwitchDebayerForPlayback->isChecked() )
+    if( !playbackPolicyActive() || ui->actionDontSwitchDebayerForPlayback->isChecked() )
     {
         switch( ui->comboBoxDebayer->currentIndex() )
         {
@@ -10725,66 +12181,7 @@ void MainWindow::selectDebayerAlgorithm()
     //Else change debayer to the selected one from preview menu
     else
     {
-        if( ui->actionUseNoneDebayer->isChecked() )
-        {
-            setMlvUseNoneDebayer( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "None" ) );
-        }
-        else if( ui->actionUseSimpleDebayer->isChecked() )
-        {
-            setMlvUseSimpleDebayer( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "Simple" ) );
-        }
-        else if( ui->actionUseBilinear->isChecked() )
-        {
-            setMlvDontAlwaysUseAmaze( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "Bilinear" ) );
-        }
-        else if( ui->actionUseLmmseDebayer->isChecked() )
-        {
-            setMlvUseLmmseDebayer( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "LMMSE" ) );
-        }
-        else if( ui->actionUseIgvDebayer->isChecked() )
-        {
-            setMlvUseIgvDebayer( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "IGV" ) );
-        }
-        else if( ui->actionUseAhdDebayer->isChecked() )
-        {
-            setMlvUseAhdDebayer( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "AHD" ) );
-        }
-        else if( ui->actionUseRcdDebayer->isChecked() )
-        {
-            setMlvUseRcdDebayer( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "RCD" ) );
-        }
-        else if( ui->actionUseDcbDebayer->isChecked() )
-        {
-            setMlvUseDcbDebayer( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "DCB" ) );
-        }
-        else if( ui->actionAlwaysUseAMaZE->isChecked() )
-        {
-            setMlvAlwaysUseAmaze( m_pMlvObject );
-            disableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "AMaZE" ) );
-        }
-        else if( ui->actionCaching->isChecked() )
-        {
-            setMlvAlwaysUseAmaze( m_pMlvObject );
-            enableMlvCaching( m_pMlvObject );
-            m_pChosenDebayer->setText( tr( "AMaZE" ) );
-        }
+        applyPlaybackDebayerSelection();
         ///@todo: ADD HERE OTHER CACHED DEBAYERS! AND ADD SOME SPECIAL TRICK FOR CACHING
     }
     while( !m_pRenderThread->isIdle() ) QThread::msleep(1);

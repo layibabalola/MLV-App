@@ -32,6 +32,41 @@ typedef struct {
     int coeffficients[8];
 } stripes_correction;
 
+typedef struct {
+    int * hist;
+    size_t hist_capacity;
+    int num[8];
+    unsigned int rng_state;
+} vertical_stripes_scratch_t;
+
+int compute_vertical_stripes_correction_only(stripes_correction * correction,
+                                             uint16_t * image_data,
+                                             int32_t black_level,
+                                             int32_t white_level,
+                                             int32_t raw_info_frame_size,
+                                             uint16_t width,
+                                             uint16_t height,
+                                             int vertical_stripes,
+                                             vertical_stripes_scratch_t * scratch);
+
+void compute_vertical_stripes_correction_if_needed(stripes_correction * correction,
+                                                   uint16_t * image_data,
+                                                   int32_t black_level,
+                                                   int32_t white_level,
+                                                   int32_t raw_info_frame_size,
+                                                   uint16_t width,
+                                                   uint16_t height,
+                                                   int vertical_stripes,
+                                                   int * compute_stripes,
+                                                   vertical_stripes_scratch_t * scratch);
+
+void apply_vertical_stripes_correction_only(const stripes_correction * correction,
+                                            uint16_t * image_data,
+                                            int32_t black_level,
+                                            int32_t white_level,
+                                            uint16_t width,
+                                            uint16_t height);
+
 void fix_vertical_stripes(stripes_correction * correction,
                           uint16_t * image_data,
                           int32_t black_level,
@@ -40,5 +75,8 @@ void fix_vertical_stripes(stripes_correction * correction,
                           uint16_t width,
                           uint16_t height,
                           int vertical_stripes,
-                          int * compute_stripes);
+                          int * compute_stripes,
+                          vertical_stripes_scratch_t * scratch);
+
+void free_vertical_stripes_scratch(vertical_stripes_scratch_t * scratch);
 #endif

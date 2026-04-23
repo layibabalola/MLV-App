@@ -1,0 +1,7 @@
+﻿perf_exe=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\tests\build-prof\perf\release\perf_tests.exe
+iterations=6
+baseline=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\tests\perf\baselines.json
+cold_8bit=False
+raw_cache_mb=128
+cache_cpu_cores=4
+threads=1 json=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\.claude\profiling\runtime-pass-cache-postsplit\perf-thread1.json stage_log=C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd\.claude\profiling\runtime-pass-cache-postsplit\stage-thread1.log
