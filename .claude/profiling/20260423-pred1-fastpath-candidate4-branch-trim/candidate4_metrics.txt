@@ -1,0 +1,28 @@
+Candidate 4: trim the `row == 0` / `col == 0` branches from the hot inner loop by peeling the first pixel of each row.
+
+Configuration: large_dual_iso preview receipt, --frames 16, discard first 5 total frames, then compute medians over remaining samples with raw_uint16_ms > 0.
+
+Decision: REVERT. The median result against the kept candidate-1 state was only a near-threshold `3.448%` gain at --threads 1 with no change at --threads 4, and the repeat-level story stayed mixed instead of improving cleanly across the set.
+
+threads=1
+run1: warm_decode_samples=10, raw_uint16_ms=28.000, decompress_execute_ms=26.000, fast_path_total_ms=26.000, bitstream_ms=23.000, predictor_ms=2.500, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=29.000, decompress_execute_ms=26.000, fast_path_total_ms=26.000, bitstream_ms=24.000, predictor_ms=2.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=28.000, decompress_execute_ms=26.000, fast_path_total_ms=26.000, bitstream_ms=24.000, predictor_ms=2.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=28.000, decompress_execute_ms=26.000, fast_path_total_ms=26.000, bitstream_ms=24.000, predictor_ms=2.000, other_ms=0.000
+
+threads=4
+run1: warm_decode_samples=11, raw_uint16_ms=28.000, decompress_execute_ms=26.000, fast_path_total_ms=26.000, bitstream_ms=23.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=29.000, decompress_execute_ms=27.000, fast_path_total_ms=27.000, bitstream_ms=23.000, predictor_ms=5.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=29.000, decompress_execute_ms=27.000, fast_path_total_ms=27.000, bitstream_ms=24.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=29.000, decompress_execute_ms=27.000, fast_path_total_ms=27.000, bitstream_ms=23.000, predictor_ms=3.000, other_ms=0.000
+
+Comparison points:
+vs corrected raw-JSON baseline:
+- threads=1: raw_uint16_ms 32.500 -> 28.000 (13.846% faster)
+- threads=4: raw_uint16_ms 39.000 -> 29.000 (25.641% faster)
+
+vs kept candidate-1 state:
+- threads=1: raw_uint16_ms 29.000 -> 28.000 (3.448% faster)
+- threads=4: raw_uint16_ms 29.000 -> 29.000 (0.000% change)
+
+Conclusion: too close to the 3-5% floor to keep without cleaner repeat-level confirmation, so the branch stays on candidate 1 and the branch-trim patch is reverted.

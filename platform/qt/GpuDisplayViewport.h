@@ -8,6 +8,8 @@
 #ifndef GPUDISPLAYVIEWPORT_H
 #define GPUDISPLAYVIEWPORT_H
 
+#include "ZebraThresholds.h"
+#include "GpuPreviewProcessing.h"
 #include <QImage>
 #include <QOpenGLFunctions>
 #include <QtOpenGL/qopenglshaderprogram.h>
@@ -34,12 +36,14 @@ public:
         bool showZebras;
         float zebraUnderThreshold;
         float zebraOverThreshold;
+        GpuPreviewProcessingConfig previewProcessing;
 
         PresentationOptions()
             : samplingMode(SamplingLinear)
             , showZebras(false)
-            , zebraUnderThreshold(3.0f / 255.0f)
-            , zebraOverThreshold(252.0f / 255.0f)
+            , zebraUnderThreshold(preview_zebra::kUnderThresholdNormalized)
+            , zebraOverThreshold(preview_zebra::kOverThresholdNormalized)
+            , previewProcessing()
         {
         }
     };
@@ -83,8 +87,10 @@ private:
     void setPresentedRgb16(const uint16_t *imageData, int width, int height, const PresentationOptions &options);
     void clearPresentedImage(void);
     void updateTextureIfNeeded(void);
+    void updateProcessingTexturesIfNeeded(void);
     void ensureProgram(void);
     void destroyTexture(void);
+    void destroyProcessingTextures(void);
     void applySamplingMode(void);
     QRectF targetRectInViewport(void) const;
     int pendingWidth(void) const;
@@ -96,6 +102,7 @@ private:
     bool m_textureDirty;
     bool m_texturePresentationActive;
     bool m_samplingModeDirty;
+    bool m_processingTexturesDirty;
     bool m_pendingTextureIs16Bit;
     bool m_textureIs16Bit;
     QGraphicsView *m_view;
@@ -108,6 +115,11 @@ private:
     QString m_rendererDescription;
     QOpenGLShaderProgram *m_program;
     QOpenGLTexture *m_texture;
+    QOpenGLTexture *m_levelsLutTexture;
+    QOpenGLTexture *m_matrixLutRTexture;
+    QOpenGLTexture *m_matrixLutGTexture;
+    QOpenGLTexture *m_matrixLutBTexture;
+    QOpenGLTexture *m_gammaLutTexture;
 };
 
 #endif // GPUDISPLAYVIEWPORT_H

@@ -1,0 +1,24 @@
+profile-start
+open-begin
+profile-start
+open-begin
+open-complete
+receipt-begin
+open-complete
+receipt-begin
+receipt-complete
+playback-debayer-configured
+play-start-primed
+render-begin frame=0
+receipt-complete
+playback-debayer-configured
+play-start-primed
+render-begin frame=0
+render-complete frame=0
+render-begin frame=1
+render-complete frame=0
+render-begin frame=1
+render-complete frame=1
+render-complete frame=1
+profile-complete
+profile-complete

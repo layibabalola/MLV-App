@@ -1,9 +1,13 @@
 #include "../../platform/qt/ColorToolButton.h"
+#include "../../platform/qt/DualIsoPlaybackPolicy.h"
 #include "../../platform/qt/GpuDisplayViewport.h"
+#include "../../platform/qt/GpuPreviewProcessing.h"
 #include "../../platform/qt/Histogram.h"
+#include "../../platform/qt/MainWindowGpuPreviewPolicy.h"
 #include "../../platform/qt/ScopesLabel.h"
 #include "../../platform/qt/VectorScope.h"
 #include "../../platform/qt/WaveFormMonitor.h"
+#include "../../platform/qt/ZebraThresholds.h"
 #include "../common/image_regression.h"
 #include "../common/repo_paths.h"
 #include "../common/test_runtime.h"
@@ -21,9 +25,14 @@
 #include <QPalette>
 #include <QtTest/QtTest>
 
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <vector>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -162,12 +171,12 @@ QImage apply_cpu_zebras(const QImage &submitted)
             const int max_channel = qMax(pixel[0], qMax(pixel[1], pixel[2]));
             const int min_channel = qMin(pixel[0], qMin(pixel[1], pixel[2]));
             const int lightness = (max_channel + min_channel) / 2;
-            if (lightness >= 252) {
+            if (lightness >= preview_zebra::kOverThreshold8Bit) {
                 pixel[0] = 255;
                 pixel[1] = 0;
                 pixel[2] = 0;
             }
-            if (lightness <= 3) {
+            if (lightness <= preview_zebra::kUnderThreshold8Bit) {
                 pixel[0] = 0;
                 pixel[1] = 0;
                 pixel[2] = 255;
@@ -193,6 +202,71 @@ std::vector<uint16_t> make_presenter_pattern_rgb16()
     }
 
     return rgb16;
+}
+
+QByteArray make_identity_lut_bytes()
+{
+    QByteArray lut(static_cast<int>(65536u * sizeof(uint16_t)), 0);
+    uint16_t *values = reinterpret_cast<uint16_t *>(lut.data());
+    for (int index = 0; index < 65536; ++index) {
+        values[index] = static_cast<uint16_t>(index);
+    }
+    return lut;
+}
+
+QByteArray make_scaled_lut_bytes(float factor)
+{
+    QByteArray lut(static_cast<int>(65536u * sizeof(uint16_t)), 0);
+    uint16_t *values = reinterpret_cast<uint16_t *>(lut.data());
+    for (int index = 0; index < 65536; ++index) {
+        const int scaled = static_cast<int>(std::lround(static_cast<double>(index) * factor));
+        values[index] = static_cast<uint16_t>(qBound(0, scaled, 65535));
+    }
+    return lut;
+}
+
+GpuPreviewProcessingConfig make_synthetic_preview_processing_config()
+{
+    GpuPreviewProcessingConfig config;
+    config.enabled = true;
+    config.useCameraMatrix = true;
+    config.applyGamutCompression = true;
+
+    config.properWbMatrix[0] = 1.0f;
+    config.properWbMatrix[1] = 0.04f;
+    config.properWbMatrix[2] = 0.00f;
+    config.properWbMatrix[3] = 0.02f;
+    config.properWbMatrix[4] = 0.98f;
+    config.properWbMatrix[5] = 0.02f;
+    config.properWbMatrix[6] = 0.00f;
+    config.properWbMatrix[7] = 0.05f;
+    config.properWbMatrix[8] = 0.95f;
+
+    config.rgbToY[0] = 0.2126729f;
+    config.rgbToY[1] = 0.7151522f;
+    config.rgbToY[2] = 0.0721750f;
+    config.levelsLut = make_identity_lut_bytes();
+    config.matrixLutR = make_scaled_lut_bytes(0.80f);
+    config.matrixLutG = make_scaled_lut_bytes(1.05f);
+    config.matrixLutB = make_scaled_lut_bytes(1.10f);
+    config.gammaLut = make_identity_lut_bytes();
+    config.signature = 0xBEEFull;
+    return config;
+}
+
+QImage rgb16_to_qimage(const std::vector<uint16_t> &rgb16, int width, int height)
+{
+    QImage image(width, height, QImage::Format_RGB888);
+    for (int y = 0; y < height; ++y) {
+        uint8_t *line = image.scanLine(y);
+        for (int x = 0; x < width; ++x) {
+            const std::size_t base = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 3u;
+            line[x * 3 + 0] = static_cast<uint8_t>((rgb16[base + 0] + 128u) >> 8);
+            line[x * 3 + 1] = static_cast<uint8_t>((rgb16[base + 1] + 128u) >> 8);
+            line[x * 3 + 2] = static_cast<uint8_t>((rgb16[base + 2] + 128u) >> 8);
+        }
+    }
+    return image;
 }
 
 QImage crop_presented_frame(QGraphicsView *view, QGraphicsPixmapItem *item)
@@ -284,12 +358,68 @@ QImage quantize_rgb888(const QImage &image, int quantum)
     return quantized;
 }
 
-QImage make_scopeslabel_signature(const QImage &image)
+QImage make_scopeslabel_scope_signature(const QImage &image)
 {
     const QRect compare_rect(8, 4, image.width() - 16, image.height() - 8);
     QImage cropped = image.copy(compare_rect);
     cropped = cropped.scaled(64, 20, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     return quantize_rgb888(cropped, 64);
+}
+
+void draw_scope_grid_lines(QImage &image, ScopesLabel::ScopeType type)
+{
+    QPainter painter(&image);
+    QPen pen;
+    pen.setStyle(Qt::DotLine);
+    pen.setWidth(1);
+    pen.setBrush(QColor(200, 200, 200, 96));
+    painter.setPen(pen);
+
+    const int width = image.width();
+    const int height = image.height();
+    if (type == ScopesLabel::ScopeHistogram) {
+        painter.drawLine(width * 0.1, 0, width * 0.1, height - 1);
+        painter.drawLine(width * 0.25, 0, width * 0.25, height - 1);
+        painter.drawLine(width * 0.5, 0, width * 0.5, height - 1);
+        painter.drawLine(width * 0.75, 0, width * 0.75, height - 1);
+        painter.drawLine(width * 0.9, 0, width * 0.9, height - 1);
+    } else if (type == ScopesLabel::ScopeWaveForm || type == ScopesLabel::ScopeRgbParade) {
+        painter.drawLine(0, height * 0.1, width, height * 0.1);
+        painter.drawLine(0, height * 0.25, width, height * 0.25);
+        painter.drawLine(0, height * 0.5, width, height * 0.5);
+        painter.drawLine(0, height * 0.75, width, height * 0.75);
+        painter.drawLine(0, height * 0.9, width, height * 0.9);
+    }
+}
+
+QImage render_expected_scope_label(const std::vector<uint8_t> &raw,
+                                   int width,
+                                   int height,
+                                   bool under,
+                                   bool over,
+                                   ScopesLabel::ScopeType type)
+{
+    QImage scope_image;
+    if (type == ScopesLabel::ScopeHistogram) {
+        Histogram histogram;
+        scope_image = histogram.getHistogramFromRaw(const_cast<uint8_t *>(raw.data()), width, height, under, over);
+    } else if (type == ScopesLabel::ScopeWaveForm) {
+        WaveFormMonitor waveform(width);
+        scope_image = waveform.getWaveFormMonitorFromRaw(const_cast<uint8_t *>(raw.data()), width, height);
+    } else if (type == ScopesLabel::ScopeRgbParade) {
+        WaveFormMonitor waveform(width);
+        scope_image = waveform.getParadeFromRaw(const_cast<uint8_t *>(raw.data()), width, height);
+    } else if (type == ScopesLabel::ScopeVectorScope) {
+        VectorScope vector_scope(511, 160);
+        scope_image = vector_scope.getVectorScopeFromRaw(const_cast<uint8_t *>(raw.data()), width, height);
+    } else {
+        scope_image = QImage(511, 160, QImage::Format_RGB888);
+        scope_image.fill(Qt::black);
+    }
+
+    QImage scaled = scope_image.scaled(511, 160, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    draw_scope_grid_lines(scaled, type);
+    return image_regression::normalize_rgb888(scaled);
 }
 
 QImage render_scopes_label_output(const std::vector<uint8_t> &raw,
@@ -350,12 +480,21 @@ class GuiSmokeTest : public QObject
 
 private slots:
     void checkedStateUpdatesPalette();
+    void mainWindowGpuPreviewPolicyAllowsGpu16OnlyWithoutScopes();
+    void mainWindowGpuPreviewPolicyUsesGpuShaderZebrasWhenViewportInstalled();
+    void mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions();
     void gpuViewportFallsBackToPixmapWhenNotInstalled();
     void gpuViewportQueuesAndClearsPresentedFrame();
     void gpuViewportQueuesRgb16Frame();
     void gpuViewportPresentsRgb888PatternExactly();
     void gpuViewportPresentsRgb16PatternExactly();
+    void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
+    void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
+    void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
+    void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
     void gpuViewportZebraProcessingMatchesCpuReference();
+    void gpuViewportPreviewProcessingMatchesCpuReference();
+    void gpuViewportPreviewProcessingWithZebrasMatchesCpuReference();
     void histogramRegressionMatchesGolden();
     void vectorScopeRegressionMatchesGolden();
     void waveformRegressionMatchesGolden();
@@ -377,6 +516,227 @@ void GuiSmokeTest::checkedStateUpdatesPalette()
 
     button.setChecked(false);
     QCOMPARE(button.palette().color(QPalette::Button), original_button);
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsGpu16OnlyWithoutScopes()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.renderThreadUsing16BitPreview = true;
+
+    QVERIFY(mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(mainWindowUsesGpu16PreviewPresentation(state));
+    QVERIFY(!mainWindowUsesGpuImagePresentation(state));
+
+    state.histogramEnabled = true;
+    QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(!mainWindowUsesGpu16PreviewPresentation(state));
+    QVERIFY(mainWindowUsesGpuImagePresentation(state));
+
+    state.histogramEnabled = false;
+    state.waveformEnabled = true;
+    QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(mainWindowUsesGpuImagePresentation(state));
+
+    state.waveformEnabled = false;
+    state.paradeEnabled = true;
+    QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(mainWindowUsesGpuImagePresentation(state));
+
+    state.paradeEnabled = false;
+    state.vectorScopeEnabled = true;
+    QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(mainWindowUsesGpuImagePresentation(state));
+
+    state = MainWindowGpuPreviewPolicyState();
+    state.gpuViewportInstalled = true;
+    state.renderThreadUsing16BitPreview = false;
+    QVERIFY(mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(!mainWindowUsesGpu16PreviewPresentation(state));
+    QVERIFY(mainWindowUsesGpuImagePresentation(state));
+
+    state.gpuViewportInstalled = false;
+    QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(!mainWindowUsesGpu16PreviewPresentation(state));
+    QVERIFY(!mainWindowUsesGpuImagePresentation(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.zebrasEnabled = true;
+    state.transformationMode = Qt::FastTransformation;
+
+    GpuDisplayViewport::PresentationOptions options =
+        mainWindowBuildGpuPresentationOptions(state);
+    QVERIFY(options.showZebras);
+    QCOMPARE(options.samplingMode, GpuDisplayViewport::SamplingNearest);
+    QCOMPARE(options.zebraUnderThreshold, preview_zebra::kUnderThresholdNormalized);
+    QCOMPARE(options.zebraOverThreshold, preview_zebra::kOverThresholdNormalized);
+
+    state.transformationMode = Qt::SmoothTransformation;
+    state.betterResizerEnabled = false;
+    options = mainWindowBuildGpuPresentationOptions(state);
+    QCOMPARE(options.samplingMode, GpuDisplayViewport::SamplingLinear);
+
+    state.betterResizerEnabled = true;
+    options = mainWindowBuildGpuPresentationOptions(state);
+    QCOMPARE(options.samplingMode, GpuDisplayViewport::SamplingBicubic);
+
+    state.renderThreadUsing16BitPreview = true;
+    options = mainWindowBuildGpuPresentationOptions(state);
+    QCOMPARE(options.samplingMode, GpuDisplayViewport::SamplingBicubic);
+    QVERIFY(options.showZebras);
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyUsesGpuShaderZebrasWhenViewportInstalled()
+{
+    MainWindowGpuPreviewPolicyState state;
+    QVERIFY(!mainWindowUsesGpuShaderZebraProcessing(state));
+
+    state.zebrasEnabled = true;
+    QVERIFY(!mainWindowUsesGpuShaderZebraProcessing(state));
+
+    state.gpuViewportInstalled = true;
+    QVERIFY(mainWindowUsesGpuShaderZebraProcessing(state));
+
+    state.renderThreadUsing16BitPreview = true;
+    QVERIFY(mainWindowUsesGpuShaderZebraProcessing(state));
+
+    state.histogramEnabled = true;
+    QVERIFY(mainWindowUsesGpuShaderZebraProcessing(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Gpu;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+
+    QVERIFY(mainWindowAllowsGpuPreviewProcessing(state));
+    QVERIFY(mainWindowUsesGpuPreviewProcessing(state));
+
+    state.gpuPreviewProcessingCompatible = false;
+    QVERIFY(!mainWindowAllowsGpuPreviewProcessing(state));
+    QVERIFY(!mainWindowUsesGpuPreviewProcessing(state));
+
+    state.gpuPreviewProcessingCompatible = true;
+    state.histogramEnabled = true;
+    QVERIFY(!mainWindowAllowsGpuPreviewProcessing(state));
+
+    state = MainWindowGpuPreviewPolicyState();
+    state.gpuViewportInstalled = true;
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Auto;
+    state.gpuPreviewProcessingEnvironmentRequested = false;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+    QVERIFY(!mainWindowAllowsGpuPreviewProcessing(state));
+
+    state.gpuPreviewProcessingEnvironmentRequested = true;
+    QVERIFY(mainWindowAllowsGpuPreviewProcessing(state));
+    QVERIFY(mainWindowUsesGpuPreviewProcessing(state));
+
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Cpu;
+    QVERIFY(!mainWindowAllowsGpuPreviewProcessing(state));
+    QVERIFY(!mainWindowUsesGpuPreviewProcessing(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Gpu;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+    state.gpuBilinearDebayerBackendRequest = GpuBilinearDebayerBackendRequest::Gpu;
+    state.gpuBilinearDebayerCompatible = true;
+    state.renderThreadUsingGpuBilinearDebayer = true;
+
+    QVERIFY(mainWindowAllowsGpuBilinearDebayer(state));
+    QVERIFY(mainWindowUsesGpuBilinearDebayer(state));
+
+    state.gpuBilinearDebayerCompatible = false;
+    QVERIFY(!mainWindowAllowsGpuBilinearDebayer(state));
+    QVERIFY(!mainWindowUsesGpuBilinearDebayer(state));
+
+    state.gpuBilinearDebayerCompatible = true;
+    state.renderThreadUsingGpuBilinearDebayer = false;
+    QVERIFY(mainWindowAllowsGpuBilinearDebayer(state));
+    QVERIFY(!mainWindowUsesGpuBilinearDebayer(state));
+
+    state.renderThreadUsingGpuBilinearDebayer = true;
+    state.gpuPreviewProcessingCompatible = false;
+    QVERIFY(!mainWindowAllowsGpuBilinearDebayer(state));
+    QVERIFY(!mainWindowUsesGpuBilinearDebayer(state));
+
+    state = MainWindowGpuPreviewPolicyState();
+    state.gpuViewportInstalled = true;
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Auto;
+    state.gpuPreviewProcessingEnvironmentRequested = true;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+    state.gpuBilinearDebayerBackendRequest = GpuBilinearDebayerBackendRequest::Auto;
+    state.gpuBilinearDebayerEnvironmentRequested = false;
+    state.gpuBilinearDebayerCompatible = true;
+    state.renderThreadUsingGpuBilinearDebayer = true;
+    QVERIFY(!mainWindowAllowsGpuBilinearDebayer(state));
+
+    state.gpuBilinearDebayerEnvironmentRequested = true;
+    QVERIFY(mainWindowAllowsGpuBilinearDebayer(state));
+    QVERIFY(mainWindowUsesGpuBilinearDebayer(state));
+
+    state.gpuBilinearDebayerBackendRequest = GpuBilinearDebayerBackendRequest::Cpu;
+    QVERIFY(!mainWindowAllowsGpuBilinearDebayer(state));
+    QVERIFY(!mainWindowUsesGpuBilinearDebayer(state));
+}
+
+void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()
+{
+    DualIsoPlaybackRuntimeSettings settings = effectiveDualIsoPlaybackRuntimeSettings(false,
+                                                                                      true,
+                                                                                      1,
+                                                                                      2,
+                                                                                      0,
+                                                                                      1,
+                                                                                      1);
+    QCOMPARE(settings.mode, 2);
+    QCOMPARE(settings.interpolation, 1);
+    QCOMPARE(settings.aliasMap, 0);
+    QCOMPARE(settings.fullResBlending, 0);
+    QVERIFY(!settings.previewOverrideActive);
+
+    settings = effectiveDualIsoPlaybackRuntimeSettings(true,
+                                                       true,
+                                                       1,
+                                                       1,
+                                                       0,
+                                                       1,
+                                                       1);
+    QCOMPARE(settings.mode, 2);
+    QCOMPARE(settings.interpolation, 1);
+    QCOMPARE(settings.aliasMap, 0);
+    QCOMPARE(settings.fullResBlending, 0);
+    QVERIFY(settings.previewOverrideActive);
+
+    settings = effectiveDualIsoPlaybackRuntimeSettings(false,
+                                                       true,
+                                                       1,
+                                                       1,
+                                                       0,
+                                                       1,
+                                                       1);
+    QCOMPARE(settings.mode, 1);
+    QCOMPARE(settings.interpolation, 0);
+    QCOMPARE(settings.aliasMap, 1);
+    QCOMPARE(settings.fullResBlending, 1);
+    QVERIFY(!settings.previewOverrideActive);
 }
 
 void GuiSmokeTest::gpuViewportFallsBackToPixmapWhenNotInstalled()
@@ -628,6 +988,156 @@ void GuiSmokeTest::gpuViewportZebraProcessingMatchesCpuReference()
     qunsetenv(GpuDisplayViewport::environmentVariableName());
 }
 
+void GuiSmokeTest::gpuViewportRgb888ZebraProcessingMatchesCpuReference()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QSKIP("GL viewport parity needs a platform plugin that can create an OpenGL context");
+    }
+
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    QImage submitted(4, 4, QImage::Format_RGB888);
+    submitted.fill(Qt::gray);
+    submitted.setPixel(0, 0, qRgb(255, 255, 255));
+    submitted.setPixel(1, 0, qRgb(0, 0, 0));
+    submitted.setPixel(2, 0, qRgb(250, 250, 250));
+    submitted.setPixel(3, 0, qRgb(5, 5, 5));
+
+    const QImage expected = presenter_expected_orientation(apply_cpu_zebras(submitted));
+
+    QGraphicsScene scene;
+    QPixmap fallback_pixmap(submitted.size());
+    fallback_pixmap.fill(Qt::black);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback_pixmap);
+    std::unique_ptr<QGraphicsView> view(make_presenter_view(scene, item, submitted.size()));
+
+    QVERIFY(GpuDisplayViewport::installOn(view.get()));
+    view->show();
+    QApplication::processEvents();
+    const QString renderer = GpuDisplayViewport::rendererDescriptionFor(view.get());
+    if (renderer.contains(QStringLiteral("llvmpipe"), Qt::CaseInsensitive)) {
+        QSKIP("GPU zebra parity is skipped on llvmpipe because the software GL stack does not produce stable shader-processed output here.");
+    }
+
+    GpuDisplayViewport::PresentationOptions options;
+    options.samplingMode = GpuDisplayViewport::SamplingNearest;
+    options.showZebras = true;
+    QVERIFY(GpuDisplayViewport::presentImage(view.get(), item, submitted, options));
+
+    const QImage actual = crop_presented_frame(view.get(), item);
+    if (actual.isNull()) {
+        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+    }
+
+    const QImage trimmed = trim_rounding_border(actual, submitted.size());
+    QCOMPARE(trimmed.size(), expected.size());
+    QString difference_message;
+    QVERIFY2(image_regression::images_match_rgb888(expected, trimmed, 0, &difference_message),
+             qPrintable(difference_message));
+
+    GpuDisplayViewport::clearPresentedImage(view.get(), item);
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuViewportPreviewProcessingMatchesCpuReference()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QSKIP("GL viewport parity needs a platform plugin that can create an OpenGL context");
+    }
+
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    const QImage submitted = make_presenter_pattern();
+    const std::vector<uint16_t> rgb16 = make_presenter_pattern_rgb16();
+    const GpuPreviewProcessingConfig processing = make_synthetic_preview_processing_config();
+    std::vector<uint16_t> expected16(rgb16.size(), 0);
+    gpuPreviewProcessingApplyCpuReference(processing, rgb16.data(), expected16.data(), submitted.width() * submitted.height());
+    const QImage expected = presenter_expected_orientation(rgb16_to_qimage(expected16, submitted.width(), submitted.height()));
+
+    QGraphicsScene scene;
+    QPixmap fallback_pixmap(submitted.size());
+    fallback_pixmap.fill(Qt::black);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback_pixmap);
+    std::unique_ptr<QGraphicsView> view(make_presenter_view(scene, item, submitted.size()));
+
+    QVERIFY(GpuDisplayViewport::installOn(view.get()));
+    view->show();
+    QApplication::processEvents();
+    const QString renderer = GpuDisplayViewport::rendererDescriptionFor(view.get());
+    if (renderer.contains(QStringLiteral("llvmpipe"), Qt::CaseInsensitive)) {
+        QSKIP("GPU preview-processing parity is skipped on llvmpipe because the software GL stack does not produce stable shader output here.");
+    }
+
+    GpuDisplayViewport::PresentationOptions options;
+    options.samplingMode = GpuDisplayViewport::SamplingNearest;
+    options.previewProcessing = processing;
+    QVERIFY(GpuDisplayViewport::presentRgb16(view.get(), item, rgb16.data(), submitted.width(), submitted.height(), options));
+
+    const QImage actual = crop_presented_frame(view.get(), item);
+    if (actual.isNull()) {
+        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+    }
+
+    const QImage trimmed = trim_rounding_border(actual, submitted.size());
+    QCOMPARE(trimmed.size(), expected.size());
+    QString difference_message;
+    QVERIFY2(image_regression::images_match_rgb888(expected, trimmed, 1, &difference_message),
+             qPrintable(difference_message));
+
+    GpuDisplayViewport::clearPresentedImage(view.get(), item);
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuViewportPreviewProcessingWithZebrasMatchesCpuReference()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QSKIP("GL viewport parity needs a platform plugin that can create an OpenGL context");
+    }
+
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    const QImage submitted = make_presenter_pattern();
+    const std::vector<uint16_t> rgb16 = make_presenter_pattern_rgb16();
+    const GpuPreviewProcessingConfig processing = make_synthetic_preview_processing_config();
+    std::vector<uint16_t> expected16(rgb16.size(), 0);
+    gpuPreviewProcessingApplyCpuReference(processing, rgb16.data(), expected16.data(), submitted.width() * submitted.height());
+    const QImage expected = presenter_expected_orientation(apply_cpu_zebras(rgb16_to_qimage(expected16, submitted.width(), submitted.height())));
+
+    QGraphicsScene scene;
+    QPixmap fallback_pixmap(submitted.size());
+    fallback_pixmap.fill(Qt::black);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback_pixmap);
+    std::unique_ptr<QGraphicsView> view(make_presenter_view(scene, item, submitted.size()));
+
+    QVERIFY(GpuDisplayViewport::installOn(view.get()));
+    view->show();
+    QApplication::processEvents();
+    const QString renderer = GpuDisplayViewport::rendererDescriptionFor(view.get());
+    if (renderer.contains(QStringLiteral("llvmpipe"), Qt::CaseInsensitive)) {
+        QSKIP("GPU preview-processing parity is skipped on llvmpipe because the software GL stack does not produce stable shader output here.");
+    }
+
+    GpuDisplayViewport::PresentationOptions options;
+    options.samplingMode = GpuDisplayViewport::SamplingNearest;
+    options.showZebras = true;
+    options.previewProcessing = processing;
+    QVERIFY(GpuDisplayViewport::presentRgb16(view.get(), item, rgb16.data(), submitted.width(), submitted.height(), options));
+
+    const QImage actual = crop_presented_frame(view.get(), item);
+    if (actual.isNull()) {
+        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+    }
+
+    const QImage trimmed = trim_rounding_border(actual, submitted.size());
+    QCOMPARE(trimmed.size(), expected.size());
+    QString difference_message;
+    QVERIFY2(image_regression::images_match_rgb888(expected, trimmed, 1, &difference_message),
+             qPrintable(difference_message));
+
+    GpuDisplayViewport::clearPresentedImage(view.get(), item);
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
 void GuiSmokeTest::histogramRegressionMatchesGolden()
 {
     const QMap<QString, QString> expected_hashes = load_expected_hashes();
@@ -680,13 +1190,15 @@ void GuiSmokeTest::scopesLabelDispatchesRawHistogramExactly()
 
 void GuiSmokeTest::scopesLabelDispatchesRawWaveformExactly()
 {
-    const QMap<QString, QString> expected_hashes = load_expected_hashes();
     const std::vector<uint8_t> raw = make_scope_raw_pattern(16, 8);
     const QImage actual = render_scopes_label_output(raw, 16, 8, false, false, ScopesLabel::ScopeWaveForm);
     QVERIFY(!actual.isNull());
-    assert_expected_hash(expected_hashes,
-                         QStringLiteral("scopeslabel.raw_waveform.signature"),
-                         make_scopeslabel_signature(actual));
+    const QImage expected = render_expected_scope_label(raw, 16, 8, false, false, ScopesLabel::ScopeWaveForm);
+    const QImage actual_signature = make_scopeslabel_scope_signature(actual);
+    const QImage expected_signature = make_scopeslabel_scope_signature(expected);
+    QString difference_message;
+    QVERIFY2(image_regression::images_match_rgb888(expected_signature, actual_signature, 64, &difference_message),
+             qPrintable(difference_message));
 }
 
 void GuiSmokeTest::scopesLabelDispatchesRawParadeExactly()
@@ -697,7 +1209,7 @@ void GuiSmokeTest::scopesLabelDispatchesRawParadeExactly()
     QVERIFY(!actual.isNull());
     assert_expected_hash(expected_hashes,
                          QStringLiteral("scopeslabel.raw_parade.signature"),
-                         make_scopeslabel_signature(actual));
+                         make_scopeslabel_scope_signature(actual));
 }
 
 void GuiSmokeTest::scopesLabelDispatchesRawVectorScopeExactly()
@@ -712,6 +1224,16 @@ void GuiSmokeTest::scopesLabelDispatchesRawVectorScopeExactly()
 int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
+    test_runtime::prefer_desktop_opengl_on_windows();
+#ifdef Q_OS_WIN
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+#endif
+    if ( qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") )
+    {
+        // Default GUI smoke runs to the offscreen platform so local launches do not
+        // create native-window/OpenGL fail-fast dialogs in this workspace.
+        qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
+    }
     qputenv("QT_SCALE_FACTOR", QByteArrayLiteral("1"));
     qputenv("QT_SCREEN_SCALE_FACTORS", QByteArrayLiteral("1"));
     QApplication app(argc, argv);

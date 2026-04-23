@@ -1,0 +1,6 @@
+latency_ms=121.701971
+raw_uint16_ms=39.285728
+raw_uint16_decompress_ms=37.285703
+llrawproc_ms=6.714310
+debayer_exclusive_ms=7.285697
+processing_ms=28.285742

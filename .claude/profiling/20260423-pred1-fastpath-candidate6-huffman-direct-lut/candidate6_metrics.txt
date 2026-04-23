@@ -1,0 +1,33 @@
+Candidate 6: widened Huffman LUT with direct-diff entries when the full symbol fits inside the current huffbits peek window, with the existing refill/receive path kept as fallback.
+
+Configuration: large_dual_iso preview receipt, --frames 16, discard first 5 total frames, then compute medians over remaining samples with raw_uint16_ms > 0.
+
+Decision: KEEP. The candidate is decisively above the >=5% bar, all repeats improve strongly, and --threads 4 improves materially instead of regressing.
+
+threads=1
+run1: warm_decode_samples=11, raw_uint16_ms=18.000, decompress_execute_ms=17.000, fast_path_total_ms=17.000, bitstream_ms=13.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=20.000, decompress_execute_ms=19.000, fast_path_total_ms=19.000, bitstream_ms=15.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=18.000, decompress_execute_ms=16.000, fast_path_total_ms=16.000, bitstream_ms=14.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=18.000, decompress_execute_ms=17.000, fast_path_total_ms=17.000, bitstream_ms=14.000, predictor_ms=3.000, other_ms=0.000
+
+threads=4
+run1: warm_decode_samples=11, raw_uint16_ms=18.000, decompress_execute_ms=17.000, fast_path_total_ms=17.000, bitstream_ms=14.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=19.000, decompress_execute_ms=17.000, fast_path_total_ms=17.000, bitstream_ms=12.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=18.000, decompress_execute_ms=16.000, fast_path_total_ms=16.000, bitstream_ms=13.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=18.000, decompress_execute_ms=17.000, fast_path_total_ms=17.000, bitstream_ms=13.000, predictor_ms=3.000, other_ms=0.000
+
+Comparison points:
+vs corrected raw-JSON baseline:
+- threads=1: raw_uint16_ms 32.500 -> 18.000 (44.615% faster)
+- threads=4: raw_uint16_ms 39.000 -> 18.000 (53.846% faster)
+
+vs kept candidate-1 state:
+- threads=1: raw_uint16_ms 29.000 -> 18.000 (37.930% faster)
+- threads=4: raw_uint16_ms 29.000 -> 18.000 (37.931% faster)
+
+Validation on the kept final candidate:
+- console_tests --check-golden: 41 tests / 160 assertions / 17 skips / 0 failures
+- app-backed console_tests --check-golden: 41 tests / 695 assertions / 1 skip / 0 failures
+- pipeline_tests --check-golden: 44 tests / 507 assertions / 4 skips / 0 failures
+
+Conclusion: the final kept source state is candidate 1 plus candidate 6.

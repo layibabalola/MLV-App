@@ -1105,33 +1105,204 @@ static int fpm_get_video_mode(int32_t raw_width, int32_t raw_height, int crop_re
     }
 }
 
-void fix_focus_pixels(pixel_map * focus_pixel_map,
-                      int * fpm_status,
-                      uint16_t * image_data,
-                      uint32_t camera_id,
-                      uint16_t width,
-                      uint16_t height,
-                      uint16_t pan_x,
-                      uint16_t pan_y,
-                      int32_t raw_width,
-                      int32_t raw_height,
-                      int crop_rec,
-                      int unified_mode,
-                      int average_method,
-                      int dual_iso,
-                      int * raw2ev,
-                      int * ev2raw)
+void interpolate_focus_pixel_map(const pixel_map * focus_pixel_map,
+                                 uint16_t * image_data,
+                                 uint16_t width,
+                                 uint16_t height,
+                                 uint16_t pan_x,
+                                 uint16_t pan_y,
+                                 int average_method,
+                                 int dual_iso,
+                                 int * raw2ev,
+                                 int * ev2raw)
 {
-    int w = width;
-    int h = height;
-    int cropX = (pan_x + 7) & ~7;
-    int cropY = pan_y & ~1;
+    const int w = width;
+    const int h = height;
+    const int cropX = (pan_x + 7) & ~7;
+    const int cropY = pan_y & ~1;
 
-    if(raw2ev == NULL)
+    if(raw2ev == NULL || focus_pixel_map == NULL)
     {
 #ifndef STDOUT_SILENT
         err_printf("raw2ev LUT error\n");
 #endif
+        return;
+    }
+
+#ifndef STDOUT_SILENT
+    if(dual_iso)
+    {
+        printf("Using fpi method for dualiso: 'HORIZONTAL'\n");
+    }
+    else if(average_method == 1)
+    {
+        printf("Using fpi method: 'RAW2DNG'\n");
+    }
+    else if(average_method == 2)
+    {
+        printf("Using fpi method: 'REWIND'\n");
+    }
+    else
+    {
+        printf("Using fpi method: 'MLVFS'\n");
+    }
+#endif
+
+    #pragma omp parallel for
+    for (size_t m = 0; m < focus_pixel_map->count; m++)
+    {
+        int x = focus_pixel_map->pixels[m].x - cropX;
+        int y = focus_pixel_map->pixels[m].y - cropY;
+
+        int i = x + y*w;
+        if (x > 2 && x < w - 3 && y > 2 && y < h - 3)
+        {
+            if(dual_iso)
+            {
+                interpolate_horizontal(image_data, i, raw2ev, ev2raw);
+            }
+            else if(average_method == 1)
+            {
+                interpolate_pixel(image_data, x, y, w, h);
+            }
+            else if(average_method == 2)
+            {
+                interpolate_rewind(image_data, x, y, w, h);
+            }
+            else
+            {
+                interpolate_around(image_data, i, w, raw2ev, ev2raw);
+            }
+        }
+        else if(i > 0 && i < w * h)
+        {
+            int horizontal_edge = (x >= w - 3 && x < w) || (x >= 0 && x <= 3);
+            int vertical_edge = (y >= h - 3 && y < h) || (y >= 0 && y <= 3);
+
+            if (horizontal_edge && !vertical_edge && !dual_iso)
+            {
+                interpolate_vertical(image_data, i, w, raw2ev, ev2raw);
+            }
+            else if (vertical_edge && !horizontal_edge)
+            {
+                interpolate_horizontal(image_data, i, raw2ev, ev2raw);
+            }
+            else if(x >= 0 && x <= 3)
+            {
+                image_data[i] = image_data[i + 2];
+            }
+            else if(x >= w - 3 && x < w)
+            {
+                image_data[i] = image_data[i - 2];
+            }
+        }
+    }
+}
+
+void interpolate_bad_pixel_map(const pixel_map * bad_pixel_map,
+                               uint16_t * image_data,
+                               uint16_t width,
+                               uint16_t height,
+                               uint16_t pan_x,
+                               uint16_t pan_y,
+                               int average_method,
+                               int dual_iso,
+                               int * raw2ev,
+                               int * ev2raw)
+{
+    const int w = width;
+    const int h = height;
+    const int cropX = (pan_x + 7) & ~7;
+    const int cropY = pan_y & ~1;
+
+    if(raw2ev == NULL || bad_pixel_map == NULL)
+    {
+#ifndef STDOUT_SILENT
+        err_printf("raw2ev LUT error\n");
+#endif
+        return;
+    }
+
+#ifndef STDOUT_SILENT
+    if(dual_iso)
+    {
+        printf("Using bpi method for dualiso: 'HORIZONTAL'\n");
+    }
+    else if(average_method == 1)
+    {
+        printf("Using bpi method: 'RAW2DNG'\n");
+    }
+    else if(average_method == 2)
+    {
+        printf("Using bpi method: 'REWIND'\n");
+    }
+    else
+    {
+        printf("Using bpi method: 'MLVFS'\n");
+    }
+#endif
+
+    #pragma omp parallel for
+    for (size_t m = 0; m < bad_pixel_map->count; m++)
+    {
+        int x = bad_pixel_map->pixels[m].x - cropX;
+        int y = bad_pixel_map->pixels[m].y - cropY;
+
+        int i = x + y*w;
+        if (x > 2 && x < w - 3 && y > 2 && y < h - 3)
+        {
+            if(dual_iso)
+            {
+                interpolate_horizontal(image_data, i, raw2ev, ev2raw);
+            }
+            else if(average_method == 1)
+            {
+                interpolate_pixel(image_data, x, y, w, h);
+            }
+            else if(average_method == 2)
+            {
+                interpolate_rewind(image_data, x, y, w, h);
+            }
+            else
+            {
+                interpolate_around(image_data, i, w, raw2ev, ev2raw);
+            }
+        }
+        else if(i > 0 && i < w * h)
+        {
+            int horizontal_edge = (x >= w - 3 && x < w) || (x >= 0 && x <= 3);
+            int vertical_edge = (y >= h - 3 && y < h) || (y >= 0 && y <= 3);
+
+            if (horizontal_edge && !vertical_edge && !dual_iso)
+            {
+                interpolate_vertical(image_data, i, w, raw2ev, ev2raw);
+            }
+            else if (vertical_edge && !horizontal_edge)
+            {
+                interpolate_horizontal(image_data, i, raw2ev, ev2raw);
+            }
+            else if(x >= 0 && x <= 3)
+            {
+                image_data[i] = image_data[i + 2];
+            }
+            else if(x >= w - 3 && x < w)
+            {
+                image_data[i] = image_data[i - 2];
+            }
+        }
+    }
+}
+
+void prepare_focus_pixel_map(pixel_map * focus_pixel_map,
+                             int * fpm_status,
+                             uint32_t camera_id,
+                             int32_t raw_width,
+                             int32_t raw_height,
+                             int crop_rec,
+                             int unified_mode)
+{
+    if(focus_pixel_map == NULL || fpm_status == NULL)
+    {
         return;
     }
 
@@ -1248,74 +1419,6 @@ fpm_check:
         }
         case 2: // interpolate pixels
         {
-#ifndef STDOUT_SILENT
-            if(dual_iso)
-            {
-                printf("Using fpi method for dualiso: 'HORIZONTAL'\n");
-            }
-            else if(average_method == 1)
-            {
-                printf("Using fpi method: 'RAW2DNG'\n");
-            }
-            else if(average_method == 2)
-            {
-                printf("Using fpi method: 'REWIND'\n");
-            }
-            else
-            {
-                printf("Using fpi method: 'MLVFS'\n");
-            }
-#endif
-            #pragma omp parallel for
-            for (size_t m = 0; m < focus_pixel_map->count; m++)
-            {
-                int x = focus_pixel_map->pixels[m].x - cropX;
-                int y = focus_pixel_map->pixels[m].y - cropY;
-
-                int i = x + y*w;
-                if (x > 2 && x < w - 3 && y > 2 && y < h - 3)
-                {
-                    if(dual_iso)
-                    {
-                        interpolate_horizontal(image_data, i, raw2ev, ev2raw);
-                    }
-                    else if(average_method == 1) // 1 = raw2dng
-                    {
-                        interpolate_pixel(image_data, x, y, w, h);
-                    }
-                    else if(average_method == 2) // 2 = method from @rewind
-                    {
-                        interpolate_rewind(image_data, x, y, w, h);
-                    }
-                    else // 0 = mlvfs
-                    {
-                        interpolate_around(image_data, i, w, raw2ev, ev2raw);
-                    }
-                }
-                else if(i > 0 && i < w * h)
-                {
-                    // handle edge pixels
-                    int horizontal_edge = (x >= w - 3 && x < w) || (x >= 0 && x <= 3);
-                    int vertical_edge = (y >= h - 3 && y < h) || (y >= 0 && y <= 3);
-                    
-                    if (horizontal_edge && !vertical_edge && !dual_iso)
-                    {
-                        interpolate_vertical(image_data, i, w, raw2ev, ev2raw);
-                    }
-                    else if (vertical_edge && !horizontal_edge)
-                    {
-                        interpolate_horizontal(image_data, i, raw2ev, ev2raw);
-                    }
-                    else if(x >= 0 && x <= 3)
-                    {
-                        image_data[i] = image_data[i + 2];
-                    }
-                    else if(x >= w - 3 && x < w)
-                    {
-                        image_data[i] = image_data[i - 2];
-                    }
-                }
-            }
             break;
         }
         default:
@@ -1323,24 +1426,68 @@ fpm_check:
     }
 }
 
-void fix_bad_pixels(pixel_map * bad_pixel_map,
-                    int * bpm_status,
-                    uint16_t * image_data,
-                    uint32_t camera_id,
-                    uint16_t width,
-                    uint16_t height,
-                    uint16_t pan_x,
-                    uint16_t pan_y,
-                    int32_t raw_width,
-                    int32_t raw_height,
-                    int32_t black_level,
-                    int bpm_mode,
-                    int search_method,
-                    int average_method,
-                    int dual_iso,
-                    int * raw2ev,
-                    int * ev2raw)
+void fix_focus_pixels(pixel_map * focus_pixel_map,
+                      int * fpm_status,
+                      uint16_t * image_data,
+                      uint32_t camera_id,
+                      uint16_t width,
+                      uint16_t height,
+                      uint16_t pan_x,
+                      uint16_t pan_y,
+                      int32_t raw_width,
+                      int32_t raw_height,
+                      int crop_rec,
+                      int unified_mode,
+                      int average_method,
+                      int dual_iso,
+                      int * raw2ev,
+                      int * ev2raw)
+{
+    if(raw2ev == NULL)
+    {
+#ifndef STDOUT_SILENT
+        err_printf("raw2ev LUT error\n");
+#endif
+        return;
+    }
 
+    prepare_focus_pixel_map(focus_pixel_map,
+                            fpm_status,
+                            camera_id,
+                            raw_width,
+                            raw_height,
+                            crop_rec,
+                            unified_mode);
+
+    if(*fpm_status == 2)
+    {
+        interpolate_focus_pixel_map(focus_pixel_map,
+                                    image_data,
+                                    width,
+                                    height,
+                                    pan_x,
+                                    pan_y,
+                                    average_method,
+                                    dual_iso,
+                                    raw2ev,
+                                    ev2raw);
+    }
+}
+
+int prepare_bad_pixel_map(pixel_map * bad_pixel_map,
+                          int * bpm_status,
+                          uint16_t * image_data,
+                          uint32_t camera_id,
+                          uint16_t width,
+                          uint16_t height,
+                          uint16_t pan_x,
+                          uint16_t pan_y,
+                          int32_t raw_width,
+                          int32_t raw_height,
+                          int32_t black_level,
+                          int bpm_mode,
+                          int search_method,
+                          int * raw2ev)
 {
     int w = width;
     int h = height;
@@ -1348,12 +1495,12 @@ void fix_bad_pixels(pixel_map * bad_pixel_map,
     int cropX = (pan_x + 7) & ~7;
     int cropY = pan_y & ~1;
 
-    if(raw2ev == NULL)
+    if(raw2ev == NULL || bad_pixel_map == NULL || bpm_status == NULL)
     {
 #ifndef STDOUT_SILENT
         err_printf("raw2ev LUT error\n");
 #endif
-        return;
+        return 0;
     }
 
 bpm_check:
@@ -1474,87 +1621,70 @@ mem_err:
         }
         case 2: // interpolate pixels
         {
-#ifndef STDOUT_SILENT
-            if(dual_iso)
-            {
-                printf("Using bpi method for dualiso: 'HORIZONTAL'\n");
-            }
-            else if(average_method == 1)
-            {
-                printf("Using bpi method: 'RAW2DNG'\n");
-            }
-            else if(average_method == 2)
-            {
-                printf("Using bpi method: 'REWIND'\n");
-            }
-            else
-            {
-                printf("Using bpi method: 'MLVFS'\n");
-            }
-#endif
-            #pragma omp parallel for
-            for (size_t m = 0; m < bad_pixel_map->count; m++)
-            {
-                int x = bad_pixel_map->pixels[m].x - cropX;
-                int y = bad_pixel_map->pixels[m].y - cropY;
-
-                int i = x + y*w;
-                if (x > 2 && x < w - 3 && y > 2 && y < h - 3)
-                {
-                    if(dual_iso)
-                    {
-                        interpolate_horizontal(image_data, i, raw2ev, ev2raw);
-                    }
-                    else if(average_method == 1)
-                    {
-                        interpolate_pixel(image_data, x, y, w, h);
-                    }
-                    else if(average_method == 2)
-                    {
-                        interpolate_rewind(image_data, x, y, w, h);
-                    }
-                    else
-                    {
-                        interpolate_around(image_data, i, w, raw2ev, ev2raw);
-                    }
-                }
-                else if(i > 0 && i < w * h)
-                {
-                    // handle edge pixels
-                    int horizontal_edge = (x >= w - 3 && x < w) || (x >= 0 && x <= 3);
-                    int vertical_edge = (y >= h - 3 && y < h) || (y >= 0 && y <= 3);
-
-                    if (horizontal_edge && !vertical_edge && !dual_iso)
-                    {
-                        interpolate_vertical(image_data, i, w, raw2ev, ev2raw);
-                    }
-                    else if (vertical_edge && !horizontal_edge)
-                    {
-                        interpolate_horizontal(image_data, i, raw2ev, ev2raw);
-                    }
-                    else if(x >= 0 && x <= 3)
-                    {
-                        image_data[i] = image_data[i + 2];
-                    }
-                    else if(x >= w - 3 && x < w)
-                    {
-                        image_data[i] = image_data[i - 2];
-                    }
-                }
-            }
-
-            if(bpm_mode == 2)
-            {
-                *bpm_status = 1;
-                bad_pixel_map->count = 0;
-#ifndef STDOUT_SILENT
-                printf("Searching bad pixels for every frame\n");
-#endif
-            }
-            break;
+            return (bpm_mode == 2);
         }
         default:
             break;
+    }
+
+    return 0;
+}
+
+void fix_bad_pixels(pixel_map * bad_pixel_map,
+                    int * bpm_status,
+                    uint16_t * image_data,
+                    uint32_t camera_id,
+                    uint16_t width,
+                    uint16_t height,
+                    uint16_t pan_x,
+                    uint16_t pan_y,
+                    int32_t raw_width,
+                    int32_t raw_height,
+                    int32_t black_level,
+                    int bpm_mode,
+                    int search_method,
+                    int average_method,
+                    int dual_iso,
+                    int * raw2ev,
+                    int * ev2raw)
+
+{
+    const int reset_after_interpolation = prepare_bad_pixel_map(bad_pixel_map,
+                                                                bpm_status,
+                                                                image_data,
+                                                                camera_id,
+                                                                width,
+                                                                height,
+                                                                pan_x,
+                                                                pan_y,
+                                                                raw_width,
+                                                                raw_height,
+                                                                black_level,
+                                                                bpm_mode,
+                                                                search_method,
+                                                                raw2ev);
+
+    if(*bpm_status == 2)
+    {
+        interpolate_bad_pixel_map(bad_pixel_map,
+                                  image_data,
+                                  width,
+                                  height,
+                                  pan_x,
+                                  pan_y,
+                                  average_method,
+                                  dual_iso,
+                                  raw2ev,
+                                  ev2raw);
+
+        if(reset_after_interpolation)
+        {
+            *bpm_status = 1;
+            bad_pixel_map->count = 0;
+#ifndef STDOUT_SILENT
+            printf("Searching bad pixels for every frame\n");
+#endif
+        }
     }
 }
 

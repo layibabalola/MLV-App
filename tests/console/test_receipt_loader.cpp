@@ -77,3 +77,18 @@ TEST(ReceiptLoader, MissingReceiptReturnsUsefulError)
                                              &error_message));
     ASSERT_TRUE(!error_message.isEmpty());
 }
+
+TEST(ReceiptLoader, LoadsDualIsoPreviewReceiptMode)
+{
+    ReceiptSettings receipt;
+    QString error_message;
+
+    ASSERT_TRUE(ReceiptLoader::loadFromFile(repo_file_path(QStringLiteral("tests/fixtures/receipts/large_dual_iso_preview.marxml")),
+                                            &receipt,
+                                            &error_message));
+    ASSERT_EQ(2, receipt.dualIso());
+    ASSERT_EQ(1, receipt.dualIsoAutoCorrected());
+    ASSERT_EQ(1, receipt.dualIsoInterpolation());
+    ASSERT_EQ(0, receipt.dualIsoAliasMap());
+    ASSERT_EQ(0, receipt.dualIsoFrBlending());
+}

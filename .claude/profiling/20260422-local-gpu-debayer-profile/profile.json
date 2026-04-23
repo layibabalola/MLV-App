@@ -1,0 +1,59 @@
+{
+    "frames": [
+        {
+            "completed_frame": 0,
+            "completion_ns": 565864200,
+            "engine_completion_ns": 557876900,
+            "engine_latency_ms": 557.0753,
+            "gpu16_preview_active": true,
+            "gpu_bilinear_debayer_active": false,
+            "gpu_preview_processing_active": false,
+            "latency_ms": 565.0626,
+            "presentation_overhead_ms": 7.9873,
+            "request_ns": 801600,
+            "requested_frame": 0,
+            "sample_index": 0
+        },
+        {
+            "cadence_ms": 339.1694,
+            "completed_frame": 1,
+            "completion_ns": 905033600,
+            "engine_completion_ns": 898824200,
+            "engine_latency_ms": 332.422,
+            "gpu16_preview_active": true,
+            "gpu_bilinear_debayer_active": false,
+            "gpu_preview_processing_active": false,
+            "latency_ms": 338.6314,
+            "presentation_overhead_ms": 6.2094,
+            "request_ns": 566402200,
+            "requested_frame": 1,
+            "sample_index": 1
+        }
+    ],
+    "metadata": {
+        "average_cadence_ms": 339.1694,
+        "average_latency_ms": 451.847,
+        "cache_cpu_cores": 0,
+        "captured_at_utc": "2026-04-22T08:31:10Z",
+        "fast_open": false,
+        "gpu_bilinear_debayer_backend_request": "gpu",
+        "gpu_bilinear_debayer_environment_requested": false,
+        "gpu_bilinear_debayer_probe_available": false,
+        "gpu_bilinear_debayer_probe_reason": "software rasterizer renderer: llvmpipe (LLVM 5.0.1, 256 bits)",
+        "gpu_bilinear_debayer_probe_renderer": "llvmpipe (LLVM 5.0.1, 256 bits)",
+        "gpu_preview_processing_backend_request": "gpu",
+        "gpu_preview_processing_environment_requested": false,
+        "input_clip": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/clips/tiny_dual_iso.mlv",
+        "measured_frames": 2,
+        "measurement_model": "frameReady after drawFrameReady, before guaranteed window paint",
+        "output": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/.claude/profiling/20260422-local-gpu-debayer-profile/profile.json",
+        "raw_cache_mb": 0,
+        "receipt": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+        "scope": "none",
+        "start_frame": 0,
+        "total_frames": 2,
+        "wait_for_paint": false,
+        "window_visible": false,
+        "zebras": false
+    }
+}

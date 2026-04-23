@@ -32,6 +32,11 @@ Set the environment variable below before launching the app:
 
 `MLVAPP_EXPERIMENTAL_GL_VIEWPORT=1`
 
+On Windows local GPU verification hosts, prefer desktop OpenGL too when the
+caller has not already chosen a Qt GL backend:
+
+`QT_OPENGL=desktop`
+
 When enabled, the app logs whether the experimental viewport was installed and
 which OpenGL renderer/context was created.
 

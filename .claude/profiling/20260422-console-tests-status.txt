@@ -1,0 +1,40 @@
+[BATCH] FINGERPRINT fixRaw=1 focusPixels=1 fpiMethod=0 badPixels=0 bpsMethod=0 bpiMethod=0 chromaSmooth=0 patternNoise=0 verticalStripes=0 deflickerTarget=0 dualIso=0 disoValidity=0 disoPattern=0 disoAutoCorr=0 disoEvCorr=0.0000 disoBlackDelta=0 disoAveraging=0 disoAliasMap=1 disoFrBlending=1 darkFrame=0 rawBlack=2047 rawWhite=2840
+[PASS] ReceiptApplier.FastProxyReceiptMapsToRuntimeState
+[PASS] ReceiptApplier.PreviewDualIsoModePropagatesToRuntime
+[PASS] ReceiptApplier.PreviewDualIsoModeSurvivesWhenAutoCorrectionIsDisabled
+[PASS] ReceiptApplier.ApplyingReceiptInvalidatesCachedFrames
+[PASS] ReceiptLoader.LoadsFastProxyReceipt
+[PASS] ReceiptLoader.LoadsFastProxyRcdReceipt
+[PASS] ReceiptLoader.MissingReceiptReturnsUsefulError
+[PASS] ReceiptLoader.LoadsDualIsoPreviewReceiptMode
+[PASS] FrameCompare.IdenticalU16FramesAreExact
+[PASS] FrameCompare.OffByOneDifferenceIsMeasured
+[PASS] DualIsoPlaybackPolicy.PlaybackForcesFastPreviewSettingsForValidDualIso
+[PASS] DualIsoPlaybackPolicy.PausedPlaybackRestoresReceiptSettings
+[PASS] DualIsoPlaybackPolicy.InvalidOrDisabledDualIsoDoesNotForcePreview
+[PASS] WorkerThreadCount.HonorsForcedThreadOverride
+[PASS] WorkerThreadCount.FallsBackToPositiveWorkerCount
+[PASS] AvxParity.DefaultAndAvxBuildsProduceMatchingFrameHashes
+[PASS] CacheBehavior.ResetMlvCacheClearsStatesAndCurrentCachedFrame
+[PASS] CacheBehavior.FindMlvFrameToCacheSkipsBusyAndCachedFrames
+[PASS] CacheBehavior.FindMlvFrameToCacheHonorsExplicitCacheNext
+[PASS] CacheBehavior.FindMlvFrameToCacheUsesCacheStartFrameWindow
+[PASS] CacheBehavior.EnsureWindowSlidesMinimallyAndPreservesOverlapPointers
+[PASS] CacheBehavior.EnsureWindowCanShiftWhenCachingThreadsAreIdle
+[ClipGolden] Expected hashes:
+  tiny_dual_iso/tiny_dual_iso_000000.dng 95a4913ca0633788370b75838b454699da8e9e15caf59b34953a25e7937f6b41
+  tiny_dual_iso/tiny_dual_iso_000001.dng 2791fd370e99822bc1a61f50da587e3d8841d92c62422413fafde261ba47abc3
+[ClipGolden] Actual hashes:
+  tiny_dual_iso/tiny_dual_iso_000000.dng 52a2efa2bec25a4561802e7fdcb90da408a3e2d3e354849ac840ba9f8c5737c1
+  tiny_dual_iso/tiny_dual_iso_000001.dng 6c689f25b621546a284a206b660708c27f80c7c0bf334737ba7555fa42d85df8
+[FAIL] ClipGolden.TinyDualIsoBatchExportMatchesGolden - ..\console\test_clip_golden.cpp:218: assertion failed: expected_hashes == actual_hashes
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtRuntime
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileCpuBackendProducesJson
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileGpuBilinearDebayerCpuBackendProducesJson
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileGpuBilinearDebayerGpuBackendProducesJson
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileAmazeCachedDebayerProducesJson
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileRejectsInvalidGpuPreviewProcessingBackend
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileRejectsInvalidGpuBilinearDebayerBackend
+[PASS] ClipGolden.TinyDualIsoHeadlessPlaybackProfileRejectsInvalidPlaybackDebayer
+[SUMMARY] tests=32 assertions=286 skipped=0 failed=1

@@ -1,0 +1,19 @@
+same-mode cached-AMaZE play-start A/B
+on.play_to_first_frame_ms=
+696.0000991821289
+off.play_to_first_frame_ms=
+733.0000400543213
+delta_ms=
+36.9999408721924
+on.preroll_active=
+True
+off.preroll_active=
+False
+on.preroll_eligible=
+True
+off.preroll_eligible=
+True
+on.warm_latency_avg_ms=
+365.736328571429
+off.warm_latency_avg_ms=
+155.584357142857

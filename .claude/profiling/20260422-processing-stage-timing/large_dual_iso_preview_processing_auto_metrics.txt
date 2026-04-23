@@ -1,0 +1,11 @@
+latency_ms=108.642414
+raw_uint16_ms=42.750120
+raw_uint16_disk_read_ms=2.750039
+raw_uint16_decompress_ms=40.000081
+raw_uint16_unpack_ms=0.000000
+raw_uint16_copy_ms=0.000000
+raw_uint16_other_ms=0.000000
+llrawproc_ms=6.500006
+debayer_exclusive_ms=10.999918
+processing_ms=43.750048
+processing_core_color_ms=0.000000

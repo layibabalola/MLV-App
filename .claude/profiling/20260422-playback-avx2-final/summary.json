@@ -1,0 +1,16 @@
+[
+    {
+        "name":  "bilinear",
+        "avg_latency_ms":  152.37904375,
+        "avg_cadence_ms":  152.76876666666666,
+        "warm_latency_ms":  151.6538,
+        "effective":  "bilinear"
+    },
+    {
+        "name":  "simple",
+        "avg_latency_ms":  138.46610625000002,
+        "avg_cadence_ms":  139.87686,
+        "warm_latency_ms":  138.12051333333332,
+        "effective":  "simple"
+    }
+]

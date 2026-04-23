@@ -1,0 +1,37 @@
+{
+    "frames": [
+        {
+            "completed_frame": 0,
+            "completion_ns": 627370600,
+            "latency_ms": 626.6709,
+            "request_ns": 699700,
+            "requested_frame": 0,
+            "sample_index": 0
+        },
+        {
+            "cadence_ms": 358.4246,
+            "completed_frame": 1,
+            "completion_ns": 985795200,
+            "latency_ms": 357.3251,
+            "request_ns": 628470100,
+            "requested_frame": 1,
+            "sample_index": 1
+        }
+    ],
+    "metadata": {
+        "average_cadence_ms": 358.4246,
+        "average_latency_ms": 491.998,
+        "cache_cpu_cores": 0,
+        "captured_at_utc": "2026-04-21T16:43:27Z",
+        "fast_open": false,
+        "input_clip": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/clips/tiny_dual_iso.mlv",
+        "measured_frames": 2,
+        "output": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/.claude/profiling/playback-ui/tiny-step.json",
+        "raw_cache_mb": 0,
+        "receipt": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+        "scope": "none",
+        "start_frame": 0,
+        "total_frames": 2,
+        "zebras": false
+    }
+}

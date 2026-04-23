@@ -44,6 +44,7 @@
 
 #define FIXP_ONE 65536
 #define FIXP_RANGE 65536
+#define STRIPES_HIST_BUCKETS (8u * FIXP_RANGE)
 
 /* do not use typeof in macros, use __typeof__ instead.
    see: http://gcc.gnu.org/onlinedocs/gcc-4.1.2/gcc/Alternate-Keywords.html#Alternate-Keywords
@@ -65,6 +66,7 @@
 #define COERCE(x,lo,hi) MAX(MIN((x),(hi)),(lo))
 
 #define STR_APPEND(orig,fmt,...) do { int _len = strlen(orig); snprintf(orig + _len, sizeof(orig) - _len, fmt, ## __VA_ARGS__); } while(0)
+#define STRIPES_HIST(hist, offset, bin) ((hist)[((size_t)(offset) * FIXP_RANGE) + (size_t)(bin)])
 
 struct raw_8pixels
 {
@@ -100,7 +102,60 @@ struct raw_8pixels
 #define F2H(ev) COERCE((int)(FIXP_RANGE/2 + ev * FIXP_RANGE/2), 0, FIXP_RANGE-1)
 #define H2F(x) ((double)((x) - FIXP_RANGE/2) / (FIXP_RANGE/2))
 
-static void add_pixel(int hist[8][FIXP_RANGE], int num[8], int offset, int pa, int pb, int32_t white_level)
+static int vertical_stripes_prepare_scratch(vertical_stripes_scratch_t * scratch)
+{
+    if (!scratch)
+    {
+        return 0;
+    }
+
+    if (scratch->hist_capacity < STRIPES_HIST_BUCKETS || !scratch->hist)
+    {
+        int * resized = realloc(scratch->hist, STRIPES_HIST_BUCKETS * sizeof(int));
+        if (!resized)
+        {
+            return 0;
+        }
+        scratch->hist = resized;
+        scratch->hist_capacity = STRIPES_HIST_BUCKETS;
+    }
+
+    if (!scratch->rng_state)
+    {
+        scratch->rng_state = 1u;
+    }
+
+    memset(scratch->hist, 0, STRIPES_HIST_BUCKETS * sizeof(int));
+    memset(scratch->num, 0, sizeof(scratch->num));
+    return 1;
+}
+
+void free_vertical_stripes_scratch(vertical_stripes_scratch_t * scratch)
+{
+    if (!scratch)
+    {
+        return;
+    }
+
+    free(scratch->hist);
+    scratch->hist = NULL;
+    scratch->hist_capacity = 0;
+    memset(scratch->num, 0, sizeof(scratch->num));
+    scratch->rng_state = 0;
+}
+
+static unsigned int vertical_stripes_next_random(vertical_stripes_scratch_t * scratch)
+{
+    if (!scratch)
+    {
+        return (unsigned int)rand();
+    }
+
+    scratch->rng_state = scratch->rng_state * 1664525u + 1013904223u;
+    return scratch->rng_state;
+}
+
+static void add_pixel(int * hist, int num[8], int offset, int pa, int pb, int32_t white_level, vertical_stripes_scratch_t * scratch)
 {
     int a = pa;
     int b = pb;
@@ -121,8 +176,8 @@ static void add_pixel(int hist[8][FIXP_RANGE], int num[8], int offset, int pa, i
      * 
      * this removes spikes on the histogram, thus canceling bias towards "round" values
      */
-    double af = a + (rand() % 1024) / 1024.0 - 0.5;
-    double bf = b + (rand() % 1024) / 1024.0 - 0.5;
+    double af = a + (vertical_stripes_next_random(scratch) % 1024) / 1024.0 - 0.5;
+    double bf = b + (vertical_stripes_next_random(scratch) % 1024) / 1024.0 - 0.5;
     double factor = af / bf;
     double ev = log2(factor);
     
@@ -130,23 +185,36 @@ static void add_pixel(int hist[8][FIXP_RANGE], int num[8], int offset, int pa, i
      * add to histogram (for computing the median)
      */
     int weight = log2(a);
-    hist[offset][F2H(ev)] += weight;
+    STRIPES_HIST(hist, offset, F2H(ev)) += weight;
     num[offset] += weight;
 }
 
 
-static void detect_vertical_stripes_coeffs(stripes_correction * correction,
-                                           uint16_t * image_data,
-                                           int32_t black_level,
-                                           int32_t white_level,
-                                           int32_t raw_info_frame_size,
-                                           uint16_t width,
-                                           uint16_t height)
+static int detect_vertical_stripes_coeffs(stripes_correction * correction,
+                                          uint16_t * image_data,
+                                          int32_t black_level,
+                                          int32_t white_level,
+                                          int32_t raw_info_frame_size,
+                                          uint16_t width,
+                                          uint16_t height,
+                                          vertical_stripes_scratch_t * scratch)
 {
-    static int hist[8][FIXP_RANGE];
-    static int num[8];
-    memset(hist, 0, sizeof(hist));
-    memset(num, 0, sizeof(num));
+    vertical_stripes_scratch_t local_scratch = { 0 };
+    vertical_stripes_scratch_t * active_scratch = scratch ? scratch : &local_scratch;
+    int * hist = NULL;
+    int * num = NULL;
+
+    if (!vertical_stripes_prepare_scratch(active_scratch))
+    {
+        if (!scratch)
+        {
+            free_vertical_stripes_scratch(&local_scratch);
+        }
+        return 0;
+    }
+
+    hist = active_scratch->hist;
+    num = active_scratch->num;
 
     int pitch = width * 2;
 
@@ -200,13 +268,13 @@ static void detect_vertical_stripes_coeffs(stripes_correction * correction,
              * and so on, to avoid getting tricked by smooth gradients.
              */
 
-            add_pixel(hist, num, 1, pa2, (pb * 1 + pb2 * 7) / 8, white_level);
-            add_pixel(hist, num, 2, pa2, (pc * 2 + pc2 * 6) / 8, white_level);
-            add_pixel(hist, num, 3, pa2, (pd * 3 + pd2 * 5) / 8, white_level);
-            add_pixel(hist, num, 4, pa2, (pe * 4 + pe2 * 4) / 8, white_level);
-            add_pixel(hist, num, 5, pa2, (pf * 5 + pf2 * 3) / 8, white_level);
-            add_pixel(hist, num, 6, pa2, (pg * 6 + pg2 * 2) / 8, white_level);
-            add_pixel(hist, num, 7, pa2, (ph * 7 + ph2 * 1) / 8, white_level);
+            add_pixel(hist, num, 1, pa2, (pb * 1 + pb2 * 7) / 8, white_level, active_scratch);
+            add_pixel(hist, num, 2, pa2, (pc * 2 + pc2 * 6) / 8, white_level, active_scratch);
+            add_pixel(hist, num, 3, pa2, (pd * 3 + pd2 * 5) / 8, white_level, active_scratch);
+            add_pixel(hist, num, 4, pa2, (pe * 4 + pe2 * 4) / 8, white_level, active_scratch);
+            add_pixel(hist, num, 5, pa2, (pf * 5 + pf2 * 3) / 8, white_level, active_scratch);
+            add_pixel(hist, num, 6, pa2, (pg * 6 + pg2 * 2) / 8, white_level, active_scratch);
+            add_pixel(hist, num, 7, pa2, (ph * 7 + ph2 * 1) / 8, white_level, active_scratch);
         }
     }
 
@@ -215,7 +283,7 @@ static void detect_vertical_stripes_coeffs(stripes_correction * correction,
     int max[8] = {0};
     for (j = 0; j < 8; j++)
         for (k = 1; k < FIXP_RANGE-1; k++)
-            max[j] = MAX(max[j], hist[j][k]);
+            max[j] = MAX(max[j], STRIPES_HIST(hist, j, k));
 
     /* compute the median correction factor (this will reject outliers) */
     for (j = 0; j < 8; j++)
@@ -224,7 +292,7 @@ static void detect_vertical_stripes_coeffs(stripes_correction * correction,
         int t = 0;
         for (k = 0; k < FIXP_RANGE; k++)
         {
-            t += hist[j][k];
+            t += STRIPES_HIST(hist, j, k);
             if (t >= num[j]/2)
             {
                 int c = pow(2, H2F(k)) * FIXP_ONE;
@@ -271,15 +339,27 @@ static void detect_vertical_stripes_coeffs(stripes_correction * correction,
         if (c < 0.998 || c > 1.002)
             correction->correction_needed = 1;
     }
+
+    if (!scratch)
+    {
+        free_vertical_stripes_scratch(&local_scratch);
+    }
+
+    return 1;
 }
 
-static void apply_vertical_stripes_correction(stripes_correction * correction,
-                                              uint16_t * image_data,
-                                              int32_t black_level,
-                                              int32_t white_level,
-                                              uint16_t width,
-                                              uint16_t height)
+void apply_vertical_stripes_correction_only(const stripes_correction * correction,
+                                            uint16_t * image_data,
+                                            int32_t black_level,
+                                            int32_t white_level,
+                                            uint16_t width,
+                                            uint16_t height)
 {
+    if (!correction || !correction->correction_needed)
+    {
+        return;
+    }
+
     /**
      * inexact white level will result in banding in highlights, especially if some channels are clipped
      * 
@@ -346,6 +426,84 @@ static void apply_vertical_stripes_correction(stripes_correction * correction,
     }
 }
 
+int compute_vertical_stripes_correction_only(stripes_correction * correction,
+                                             uint16_t * image_data,
+                                             int32_t black_level,
+                                             int32_t white_level,
+                                             int32_t raw_info_frame_size,
+                                             uint16_t width,
+                                             uint16_t height,
+                                             int vertical_stripes,
+                                             vertical_stripes_scratch_t * scratch)
+{
+    if (!detect_vertical_stripes_coeffs(correction,
+                                        image_data,
+                                        black_level,
+                                        white_level,
+                                        raw_info_frame_size,
+                                        width,
+                                        height,
+                                        scratch))
+    {
+        return 0;
+    }
+#ifndef STDOUT_SILENT
+    const char * method = NULL;
+    if (vertical_stripes == 2)
+    {
+        method = "FORCED";
+    }
+    else if (correction->correction_needed)
+    {
+        method = "NEEDED";
+    }
+    else
+    {
+        method = "UNNEEDED";
+    }
+
+    printf("\nVertical stripes correction: '%s'\n", method);
+    for (int j = 0; j < 8; j++)
+    {
+        if (correction->coeffficients[j])
+            printf("  %.5f", (double)correction->coeffficients[j] / FIXP_ONE);
+        else
+            printf("    1  ");
+    }
+    printf("\n\n");
+#endif
+    return 1;
+}
+
+void compute_vertical_stripes_correction_if_needed(stripes_correction * correction,
+                                                   uint16_t * image_data,
+                                                   int32_t black_level,
+                                                   int32_t white_level,
+                                                   int32_t raw_info_frame_size,
+                                                   uint16_t width,
+                                                   uint16_t height,
+                                                   int vertical_stripes,
+                                                   int * compute_stripes,
+                                                   vertical_stripes_scratch_t * scratch)
+{
+    /* for speed: only detect correction factors from the first frame if not forced */
+    if (*compute_stripes || vertical_stripes == 2)
+    {
+        if (compute_vertical_stripes_correction_only(correction,
+                                                     image_data,
+                                                     black_level,
+                                                     white_level,
+                                                     raw_info_frame_size,
+                                                     width,
+                                                     height,
+                                                     vertical_stripes,
+                                                     scratch))
+        {
+            *compute_stripes = 0;
+        }
+    }
+}
+
 void fix_vertical_stripes(stripes_correction * correction,
                           uint16_t * image_data,
                           int32_t black_level,
@@ -354,39 +512,18 @@ void fix_vertical_stripes(stripes_correction * correction,
                           uint16_t width,
                           uint16_t height,
                           int vertical_stripes,
-                          int * compute_stripes)
+                          int * compute_stripes,
+                          vertical_stripes_scratch_t * scratch)
 {
-    /* for speed: only detect correction factors from the first frame if not forced */
-    if (*compute_stripes || vertical_stripes == 2)
-    {
-        detect_vertical_stripes_coeffs(correction, image_data, black_level, white_level, raw_info_frame_size, width, height);
-#ifndef STDOUT_SILENT
-        const char * method = NULL;
-        if (vertical_stripes == 2)
-        {
-            method = "FORCED";
-        }
-        else if (correction->correction_needed)
-        {
-            method = "NEEDED";
-        }
-        else
-        {
-            method = "UNNEEDED";
-        }
-
-        printf("\nVertical stripes correction: '%s'\n", method);
-        for (int j = 0; j < 8; j++)
-        {
-            if (correction->coeffficients[j])
-                printf("  %.5f", (double)correction->coeffficients[j] / FIXP_ONE);
-            else
-                printf("    1  ");
-        }
-        printf("\n\n");
-#endif
-        *compute_stripes = 0;
-    }
-
-    apply_vertical_stripes_correction(correction, image_data, black_level, white_level, width, height);
+    compute_vertical_stripes_correction_if_needed(correction,
+                                                  image_data,
+                                                  black_level,
+                                                  white_level,
+                                                  raw_info_frame_size,
+                                                  width,
+                                                  height,
+                                                  vertical_stripes,
+                                                  compute_stripes,
+                                                  scratch);
+    apply_vertical_stripes_correction_only(correction, image_data, black_level, white_level, width, height);
 }

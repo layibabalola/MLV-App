@@ -1,0 +1,61 @@
+{
+    "frames": [
+        {
+            "completed_frame": 0,
+            "completion_ns": 868655800,
+            "engine_completion_ns": 858777500,
+            "engine_latency_ms": 857.8844,
+            "gpu16_preview_active": true,
+            "gpu_bilinear_debayer_active": false,
+            "gpu_preview_processing_active": false,
+            "latency_ms": 867.7627,
+            "presentation_overhead_ms": 9.8783,
+            "request_ns": 893100,
+            "requested_frame": 0,
+            "sample_index": 0
+        },
+        {
+            "cadence_ms": 285.7512,
+            "completed_frame": 1,
+            "completion_ns": 1154407000,
+            "engine_completion_ns": 1148857900,
+            "engine_latency_ms": 279.0546,
+            "gpu16_preview_active": true,
+            "gpu_bilinear_debayer_active": false,
+            "gpu_preview_processing_active": false,
+            "latency_ms": 284.6037,
+            "presentation_overhead_ms": 5.5491,
+            "request_ns": 869803300,
+            "requested_frame": 1,
+            "sample_index": 1
+        }
+    ],
+    "metadata": {
+        "average_cadence_ms": 285.7512,
+        "average_latency_ms": 576.1831999999999,
+        "cache_cpu_cores": 0,
+        "captured_at_utc": "2026-04-22T09:04:30Z",
+        "fast_open": false,
+        "gpu_bilinear_debayer_backend_request": "gpu",
+        "gpu_bilinear_debayer_environment_requested": false,
+        "gpu_bilinear_debayer_probe_available": false,
+        "gpu_bilinear_debayer_probe_reason": "software rasterizer renderer: llvmpipe (LLVM 5.0.1, 256 bits)",
+        "gpu_bilinear_debayer_probe_renderer": "llvmpipe (LLVM 5.0.1, 256 bits)",
+        "gpu_preview_processing_backend_request": "gpu",
+        "gpu_preview_processing_environment_requested": false,
+        "input_clip": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/clips/tiny_dual_iso.mlv",
+        "measured_frames": 2,
+        "measurement_model": "frameReady after drawFrameReady, before guaranteed window paint",
+        "output": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/.claude/profiling/20260422-qtopengl-desktop-check/profile.json",
+        "qt_opengl_environment": "desktop",
+        "qt_qpa_platform_environment": "",
+        "raw_cache_mb": 0,
+        "receipt": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+        "scope": "none",
+        "start_frame": 0,
+        "total_frames": 2,
+        "wait_for_paint": false,
+        "window_visible": false,
+        "zebras": false
+    }
+}

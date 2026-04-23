@@ -1,6 +1,6 @@
 include(../common/test_defaults.pri)
 
-QT += core gui widgets testlib openglwidgets
+QT += core gui widgets testlib opengl openglwidgets
 
 TEMPLATE = app
 CONFIG += testcase
@@ -8,6 +8,7 @@ TARGET = gui_tests
 
 SOURCES += \
     $$REPO_ROOT/platform/qt/ColorToolButton.cpp \
+    $$REPO_ROOT/platform/qt/GpuPreviewProcessing.cpp \
     $$REPO_ROOT/platform/qt/GpuDisplayViewport.cpp \
     $$REPO_ROOT/platform/qt/Histogram.cpp \
     $$REPO_ROOT/platform/qt/ScopesLabel.cpp \
@@ -20,11 +21,14 @@ SOURCES += \
 
 HEADERS += \
     $$REPO_ROOT/platform/qt/ColorToolButton.h \
+    $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
     $$REPO_ROOT/platform/qt/GpuDisplayViewport.h \
     $$REPO_ROOT/platform/qt/Histogram.h \
+    $$REPO_ROOT/platform/qt/MainWindowGpuPreviewPolicy.h \
     $$REPO_ROOT/platform/qt/ScopesLabel.h \
     $$REPO_ROOT/platform/qt/VectorScope.h \
     $$REPO_ROOT/platform/qt/WaveFormMonitor.h \
+    $$REPO_ROOT/platform/qt/ZebraThresholds.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/image_regression.h \
     $$REPO_ROOT/tests/common/repo_paths.h \

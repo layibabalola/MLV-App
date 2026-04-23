@@ -18,6 +18,7 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
                                                                               int selectedAliasMap,
                                                                               int selectedFullResBlending)
 {
+    const bool explicitPreviewSelected = (selectedMode == 2);
     const bool previewOverrideActive = playbackActive
                                     && rawFixEnabled
                                     && (dualIsoValidity != 0)
@@ -31,7 +32,7 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
         previewOverrideActive
     };
 
-    if( previewOverrideActive )
+    if( explicitPreviewSelected || previewOverrideActive )
     {
         settings.mode = 2;
         settings.interpolation = 1;

@@ -32,6 +32,11 @@ typedef struct
     int * data_y;
     double * data_w;
     size_t data_capacity;
+    uint16_t * output_image;
+    size_t output_capacity;
+    double last_histogram_ms;
+    double last_regression_ms;
+    double last_rowscale_ms;
 } dualiso_preview_scratch_t;
 
 typedef struct
@@ -59,6 +64,9 @@ typedef struct
     size_t histogram_match_sample_capacity;
     size_t histogram_match_highlight_capacity;
 
+    int * identify_histograms;
+    size_t identify_histogram_capacity;
+
     int * amaze_squeezed;
     float ** amaze_rawData_rows;
     float ** amaze_red_rows;
@@ -76,6 +84,7 @@ typedef struct
     void * amaze_arguments;
     size_t amaze_row_capacity;
     size_t amaze_row_width;
+    size_t amaze_plane_cell_capacity;
     size_t amaze_pixel_capacity;
     size_t amaze_thread_capacity;
 

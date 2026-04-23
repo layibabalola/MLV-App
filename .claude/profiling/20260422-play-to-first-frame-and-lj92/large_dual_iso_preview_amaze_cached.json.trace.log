@@ -1,0 +1,16 @@
+profile-start
+open-begin
+open-complete
+receipt-begin
+receipt-complete
+playback-debayer-configured
+play-start-primed
+render-begin frame=0
+render-complete frame=0
+render-begin frame=1
+render-complete frame=1
+render-begin frame=2
+render-complete frame=2
+render-begin frame=3
+render-complete frame=3
+profile-complete

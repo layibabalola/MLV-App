@@ -1,0 +1,28 @@
+Candidate 2: split the duplicated bit-buffer refill loops inside nextdiff_fast(...) through one always-inline refill helper.
+
+Configuration: large_dual_iso preview receipt, --frames 16, discard first 5 total frames, then compute medians over remaining samples with raw_uint16_ms > 0.
+
+Decision: REVERT. The cumulative branch still beat the original baseline, but this candidate materially regressed the kept candidate-1 state, especially at --threads 4, so it does not survive the stack.
+
+threads=1
+run1: warm_decode_samples=11, raw_uint16_ms=34.000, decompress_execute_ms=30.000, fast_path_total_ms=30.000, bitstream_ms=25.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=29.000, decompress_execute_ms=27.000, fast_path_total_ms=27.000, bitstream_ms=22.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=30.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=25.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=30.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=25.000, predictor_ms=4.000, other_ms=0.000
+
+threads=4
+run1: warm_decode_samples=11, raw_uint16_ms=29.000, decompress_execute_ms=26.000, fast_path_total_ms=26.000, bitstream_ms=24.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run2: warm_decode_samples=11, raw_uint16_ms=31.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=25.000, predictor_ms=4.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+run3: warm_decode_samples=11, raw_uint16_ms=31.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=24.000, predictor_ms=3.000, other_ms=0.000, fast_path_active_all_decode_samples=True
+median_of_run_medians: raw_uint16_ms=31.000, decompress_execute_ms=28.000, fast_path_total_ms=28.000, bitstream_ms=24.000, predictor_ms=3.000, other_ms=0.000
+
+Comparison points:
+vs corrected raw-JSON baseline:
+- threads=1: raw_uint16_ms 32.500 -> 30.000 (7.692% faster)
+- threads=4: raw_uint16_ms 39.000 -> 31.000 (20.513% faster)
+
+vs kept candidate-1 state:
+- threads=1: raw_uint16_ms 29.000 -> 30.000 (3.449% slower)
+- threads=4: raw_uint16_ms 29.000 -> 31.000 (6.896% slower)
+
+Conclusion: leave candidate 1 in place and move to the next queue item.

@@ -516,6 +516,11 @@ void ReceiptLoader::parseXmlElements(QXmlStreamReader *Rxml,
             receipt->setDualIso( Rxml->readElementText().toInt() );
             Rxml->readNext();
         }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "dualIsoAutoCorrected" ) )
+        {
+            receipt->setDualIsoAutoCorrected( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
         else if( Rxml->isStartElement() && Rxml->name() == QString( "dualIsoPattern" ) )
         {
             receipt->setDualIsoPattern( Rxml->readElementText().toInt() );

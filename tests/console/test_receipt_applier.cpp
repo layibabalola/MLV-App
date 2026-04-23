@@ -136,6 +136,35 @@ TEST(ReceiptApplier, PreviewDualIsoModePropagatesToRuntime)
     destroy_runtime_objects(video.get());
 }
 
+TEST(ReceiptApplier, PreviewDualIsoModeSurvivesWhenAutoCorrectionIsDisabled)
+{
+    ReceiptSettings receipt;
+    receipt.setRawFixesEnabled(true);
+    receipt.setFocusPixels(1);
+    receipt.setBadPixels(0);
+    receipt.setDualIsoForced(DISO_FORCED);
+    receipt.setDualIso(2);
+    receipt.setDualIsoAutoCorrected(0);
+    receipt.setDualIsoInterpolation(1);
+    receipt.setDualIsoAliasMap(0);
+    receipt.setDualIsoFrBlending(0);
+    receipt.setDarkFrameEnabled(0);
+    receipt.setRawBlack(-1);
+    receipt.setRawWhite(-1);
+
+    auto video = std::make_unique<mlvObject_t>();
+    auto llrawproc = std::make_unique<llrawprocObject_t>();
+    auto processing = std::make_unique<processingObject_t>();
+    seed_runtime_objects(video.get(), llrawproc.get(), processing.get());
+
+    ReceiptApplier::applyToMlv(&receipt, video.get(), processing.get());
+
+    ASSERT_EQ(2, llrawproc->dual_iso);
+    ASSERT_EQ(0, llrawproc->diso_pattern);
+
+    destroy_runtime_objects(video.get());
+}
+
 TEST(ReceiptApplier, ApplyingReceiptInvalidatesCachedFrames)
 {
     ReceiptSettings receipt;

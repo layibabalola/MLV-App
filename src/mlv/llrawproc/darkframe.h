@@ -37,5 +37,11 @@ int df_init(mlvObject_t * video);
 void df_free(mlvObject_t * video);
 
 void df_subtract(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size);
+void df_subtract_snapshot(const uint16_t * dark_frame_data,
+                          uint32_t dark_frame_size,
+                          uint32_t dark_frame_black_level,
+                          uint32_t raw_bits_per_pixel,
+                          uint16_t * raw_image_buff,
+                          size_t raw_image_size);
 
 #endif

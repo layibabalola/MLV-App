@@ -1,0 +1,232 @@
+{
+    "checks": {
+        "large_dual_iso.full16.average_ms.max": {
+            "current": 360.3405,
+            "kind": "maximum",
+            "maximum": 15000,
+            "status": "pass"
+        },
+        "large_dual_iso.full8.average_ms.max": {
+            "current": 5.7651,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "large_dual_iso.preview16.average_ms.max": {
+            "current": 307.2805,
+            "kind": "maximum",
+            "maximum": 15000,
+            "status": "pass"
+        },
+        "large_dual_iso.preview16_speedup_vs_full16.min": {
+            "current": 1.1726761053825414,
+            "kind": "minimum",
+            "required": 1.05,
+            "status": "pass"
+        },
+        "large_dual_iso.preview8.average_ms.max": {
+            "current": 6.5849,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.full16.average_ms.max": {
+            "current": 149.4868,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.full8.average_ms.max": {
+            "current": 146.9038,
+            "kind": "maximum",
+            "maximum": 1000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.preview16.average_ms.max": {
+            "current": 172.1534,
+            "kind": "maximum",
+            "maximum": 5000,
+            "status": "pass"
+        },
+        "tiny_dual_iso.preview16_speedup_vs_full16.min": {
+            "current": 0.8683348687856295,
+            "kind": "minimum",
+            "required": 1.05,
+            "status": "fail"
+        },
+        "tiny_dual_iso.preview8.average_ms.max": {
+            "current": 5.218,
+            "kind": "maximum",
+            "maximum": 1000,
+            "status": "pass"
+        }
+    },
+    "metadata": {
+        "baseline_path": "C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd\\tests\\perf\\baselines.json",
+        "baseline_profile": "auto.windows.x86_64.93c1151a315d.rawcache128.cores4",
+        "baseline_profile_found": false,
+        "baseline_profile_threads_match": true,
+        "baseline_regression_pct": 15,
+        "captured_at_utc": "2026-04-21T20:03:46Z",
+        "cold_8bit": false,
+        "fixtures": [
+            {
+                "clip_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/clips/tiny_dual_iso.mlv",
+                "key": "tiny_dual_iso",
+                "label": "tiny Dual ISO",
+                "receipt_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+                "sample_frames": 2,
+                "total_frames": 2
+            },
+            {
+                "clip_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/clips/large_dual_iso.mlv",
+                "key": "large_dual_iso",
+                "label": "extra fixture (large_dual_iso.mlv)",
+                "receipt_path": "C:/!Layi Wkspc/MLV-App/.claude/worktrees/festive-boyd/tests/fixtures/receipts/large_dual_iso_hq.marxml",
+                "sample_frames": 8,
+                "total_frames": 16
+            }
+        ],
+        "iterations": 1,
+        "threads": 1,
+        "updated_baseline": false
+    },
+    "results": {
+        "cache_cpu_cores": 4,
+        "cold_8bit": false,
+        "large_dual_iso.full16": {
+            "average_ms": 360.3405,
+            "cv_pct": 0,
+            "fps": 2.775152945616715,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 360.3405,
+            "median_ms": 360.3405,
+            "min_ms": 360.3405,
+            "samples_ms": [
+                360.3405
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 360.3405
+        },
+        "large_dual_iso.full8": {
+            "average_ms": 5.7651,
+            "cv_pct": 0,
+            "fps": 173.45752892404295,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 5.7651,
+            "median_ms": 5.7651,
+            "min_ms": 5.7651,
+            "samples_ms": [
+                5.7651
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 5.7651
+        },
+        "large_dual_iso.preview16": {
+            "average_ms": 307.2805,
+            "cv_pct": 0,
+            "fps": 3.2543555481066972,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 307.2805,
+            "median_ms": 307.2805,
+            "min_ms": 307.2805,
+            "samples_ms": [
+                307.2805
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 307.2805
+        },
+        "large_dual_iso.preview16_speedup_vs_full16": 1.1726761053825414,
+        "large_dual_iso.preview8": {
+            "average_ms": 6.5849,
+            "cv_pct": 0,
+            "fps": 151.86259472429344,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 6.5849,
+            "median_ms": 6.5849,
+            "min_ms": 6.5849,
+            "samples_ms": [
+                6.5849
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 6.5849
+        },
+        "large_dual_iso.preview8_speedup_vs_full8": 0.8755030448450243,
+        "raw_cache_enabled": true,
+        "raw_cache_mb": 128,
+        "threads": 1,
+        "tiny_dual_iso.full16": {
+            "average_ms": 149.4868,
+            "cv_pct": 0,
+            "fps": 6.689553860273951,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 149.4868,
+            "median_ms": 149.4868,
+            "min_ms": 149.4868,
+            "samples_ms": [
+                149.4868
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 149.4868
+        },
+        "tiny_dual_iso.full8": {
+            "average_ms": 146.9038,
+            "cv_pct": 0,
+            "fps": 6.807175852496669,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 146.9038,
+            "median_ms": 146.9038,
+            "min_ms": 146.9038,
+            "samples_ms": [
+                146.9038
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 146.9038
+        },
+        "tiny_dual_iso.preview16": {
+            "average_ms": 172.1534,
+            "cv_pct": 0,
+            "fps": 5.808772873495382,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 172.1534,
+            "median_ms": 172.1534,
+            "min_ms": 172.1534,
+            "samples_ms": [
+                172.1534
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 172.1534
+        },
+        "tiny_dual_iso.preview16_speedup_vs_full16": 0.8683348687856295,
+        "tiny_dual_iso.preview8": {
+            "average_ms": 5.218,
+            "cv_pct": 0,
+            "fps": 191.64430816404752,
+            "frames": 1,
+            "iterations": 1,
+            "max_ms": 5.218,
+            "median_ms": 5.218,
+            "min_ms": 5.218,
+            "samples_ms": [
+                5.218
+            ],
+            "stddev_ms": 0,
+            "trimmed_average_ms": 5.218
+        },
+        "tiny_dual_iso.preview8_speedup_vs_full8": 28.153277117669603
+    },
+    "status": {
+        "absolute_ok": true,
+        "exit_ok": false,
+        "overall_ok": false,
+        "profile_ok": true,
+        "relative_ok": false
+    }
+}

@@ -1,0 +1,66 @@
+********* Start testing of GuiSmokeTest *********
+Config: Using QtTest library 6.10.2, Qt 6.10.2 (x86_64-little_endian-llp64 shared (dynamic) release build; by GCC 13.1.0), windows 10
+PASS   : GuiSmokeTest::initTestCase()
+PASS   : GuiSmokeTest::checkedStateUpdatesPalette()
+PASS   : GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsGpu16OnlyWithoutScopes()
+PASS   : GuiSmokeTest::mainWindowGpuPreviewPolicyUsesGpuShaderZebrasWhenViewportInstalled()
+PASS   : GuiSmokeTest::mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions()
+PASS   : GuiSmokeTest::gpuViewportFallsBackToPixmapWhenNotInstalled()
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QOpenGLWidget is not supported on this platform.
+QINFO  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() Experimental GPU viewport enabled via MLVAPP_EXPERIMENTAL_GL_VIEWPORT - QGraphicsView now renders through QOpenGLWidget.
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::begin: Paint device returned engine == 0, type: 1
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setRenderHint: Painter must be active to set rendering hints
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setRenderHint: Painter must be active to set rendering hints
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setWorldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::worldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::save: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::restore: Unbalanced save/restore
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setWorldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::end: Painter not active, aborted
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::begin: Paint device returned engine == 0, type: 1
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setRenderHint: Painter must be active to set rendering hints
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setRenderHint: Painter must be active to set rendering hints
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setWorldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::worldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::save: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::restore: Unbalanced save/restore
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::setWorldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame() QPainter::end: Painter not active, aborted
+PASS   : GuiSmokeTest::gpuViewportQueuesAndClearsPresentedFrame()
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QOpenGLWidget is not supported on this platform.
+QINFO  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() Experimental GPU viewport enabled via MLVAPP_EXPERIMENTAL_GL_VIEWPORT - QGraphicsView now renders through QOpenGLWidget.
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::begin: Paint device returned engine == 0, type: 1
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::setRenderHint: Painter must be active to set rendering hints
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::setRenderHint: Painter must be active to set rendering hints
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::setWorldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::worldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::save: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::restore: Unbalanced save/restore
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::setWorldTransform: Painter not active
+QWARN  : GuiSmokeTest::gpuViewportQueuesRgb16Frame() QPainter::end: Painter not active, aborted
+PASS   : GuiSmokeTest::gpuViewportQueuesRgb16Frame()
+SKIP   : GuiSmokeTest::gpuViewportPresentsRgb888PatternExactly() GL viewport parity needs a platform plugin that can create an OpenGL context
+..\gui\test_gui_smoke.cpp(845) : failure location
+SKIP   : GuiSmokeTest::gpuViewportPresentsRgb16PatternExactly() GL viewport parity needs a platform plugin that can create an OpenGL context
+..\gui\test_gui_smoke.cpp(883) : failure location
+PASS   : GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible()
+PASS   : GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible()
+PASS   : GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()
+SKIP   : GuiSmokeTest::gpuViewportRgb888ZebraProcessingMatchesCpuReference() GL viewport parity needs a platform plugin that can create an OpenGL context
+..\gui\test_gui_smoke.cpp(994) : failure location
+SKIP   : GuiSmokeTest::gpuViewportZebraProcessingMatchesCpuReference() GL viewport parity needs a platform plugin that can create an OpenGL context
+..\gui\test_gui_smoke.cpp(928) : failure location
+SKIP   : GuiSmokeTest::gpuViewportPreviewProcessingMatchesCpuReference() GL viewport parity needs a platform plugin that can create an OpenGL context
+..\gui\test_gui_smoke.cpp(1045) : failure location
+SKIP   : GuiSmokeTest::gpuViewportPreviewProcessingWithZebrasMatchesCpuReference() GL viewport parity needs a platform plugin that can create an OpenGL context
+..\gui\test_gui_smoke.cpp(1094) : failure location
+PASS   : GuiSmokeTest::histogramRegressionMatchesGolden()
+PASS   : GuiSmokeTest::vectorScopeRegressionMatchesGolden()
+PASS   : GuiSmokeTest::waveformRegressionMatchesGolden()
+PASS   : GuiSmokeTest::scopesLabelDispatchesRawHistogramExactly()
+PASS   : GuiSmokeTest::scopesLabelDispatchesRawWaveformExactly()
+PASS   : GuiSmokeTest::scopesLabelDispatchesRawParadeExactly()
+PASS   : GuiSmokeTest::scopesLabelDispatchesRawVectorScopeExactly()
+PASS   : GuiSmokeTest::cleanupTestCase()
+Totals: 19 passed, 0 failed, 6 skipped, 0 blacklisted, 32ms
+********* Finished testing of GuiSmokeTest *********
