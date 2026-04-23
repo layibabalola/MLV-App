@@ -15,6 +15,7 @@ SOURCES += \
     $$REPO_ROOT/src/mlv/liblj92/lj92.c \
     $$REPO_ROOT/src/mlv/camid/camera_id.c \
     $$REPO_ROOT/src/mlv/mcraw/mcraw.c \
+    $$REPO_ROOT/src/mlv/mcraw/cJSON.c \
     $$REPO_ROOT/src/mlv/mcraw/RawData.cpp \
     $$REPO_ROOT/src/mlv/mcraw/RawData_Legacy.cpp \
     $$REPO_ROOT/src/mlv/llrawproc/llrawproc.c \

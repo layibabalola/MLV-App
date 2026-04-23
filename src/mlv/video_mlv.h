@@ -107,11 +107,16 @@ double getMlvLastProcessed16TotalMilliseconds(void);
 double getMlvLastProcessed16For8BitMilliseconds(void);
 double getMlvLastProcessed16To8BitMilliseconds(void);
 double getMlvLastProcessed8TotalMilliseconds(void);
+int getMlvLastProcessed8DirectPathActive(void);
 
 /* Unpacks the bits of a frame to get a bayer B&W image (without black level correction)
  * Needs memory to return to, sized: sizeof(float) * getMlvHeight(urvid) * getMlvWidth(urvid)
  * Output values will be in range 0-65535 (16 bit), float is only because AMAzE uses it */
 int getMlvRawFrameUint16(mlvObject_t * video, uint64_t frameIndex, uint16_t * unpackedFrame);
+int getMlvRawFrameProcessedUint16(mlvObject_t * video,
+                                  uint64_t frameIndex,
+                                  uint16_t * outputFrame,
+                                  int * bit_shift);
 void getMlvRawFrameFloat(mlvObject_t * video, uint64_t frameIndex, float * outputFrame);
 
 /* Gets a debayered 16 bit frame */

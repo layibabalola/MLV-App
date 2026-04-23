@@ -1,3 +1,236 @@
+## Cadence Gap Split + Direct Processed8 Path (2026-04-23, current)
+
+### Verified locally
+
+- Landed the first real step-1 + step-2 pass for the current Dual ISO playback plan.
+  - `platform/qt/RenderFrameThread.cpp:138`, `platform/qt/RenderFrameThread.cpp:177`, and `platform/qt/MainWindow.cpp:1442` now export the previously opaque playback gap as:
+    - `render_thread_queue_wait_ms`
+    - `render_thread_work_ms`
+    - `render_thread_total_ms`
+    - `draw_frame_ready_queue_ms`
+    - `draw_frame_ready_total_ms`
+  - `src/mlv/video_mlv.c:1791-2014` now has a direct processed-8-bit path for the display consumer instead of always materializing full `processed16` and then shifting it down.
+  - `src/processing/raw_processing.c:876-928` and `src/processing/raw_processing.c:1668-1755` were widened from the first too-narrow version so the direct path now preserves the real preview-receipt shape here:
+    - neutral creative flags no longer block it by themselves
+    - the direct path now applies the same post-gamma contrast / gradation curves as the 16-bit path
+    - `exr_mode` now follows the existing CPU semantics by skipping gamut compression instead of rejecting the path outright
+- The key activation mistake in the first cut is now understood and fixed.
+  - The preview receipts leave `allowCreativeAdjustments` at the legacy default `true`, and the current GUI path also keeps the contrast-curve controls (`DS/DR/LS/LR`) active on this receipt.
+  - The first narrow gate compiled and passed the math-only pipeline subset test, but it did not activate on the app-backed preview receipt until the direct path learned those post-gamma curve steps and the `exr_mode` skip-gamut behavior.
+- Fresh current-tree large-receipt artifacts for the real direct-8-bit path now live in:
+  - `.claude/profiling/20260423-direct8bit-playback-gap/large_dual_iso_preview_t4_direct8_run1.json`
+  - `.claude/profiling/20260423-direct8bit-playback-gap/large_dual_iso_preview_t4_direct8_run2.json`
+  - `.claude/profiling/20260423-direct8bit-playback-gap/large_dual_iso_preview_t4_direct8_run3.json`
+- Aggregate warm-sample medians versus the kept bilinear direct-`uint16` baseline moved from:
+  - `cadence_ms 75.439 -> 59.299`
+  - `latency_ms 74.678 -> 58.193`
+  - `processed8_total_ms 54.000 -> 37.000`
+  - `processed16_total_ms 48.000 -> 34.000`
+  - `processed16_to_8bit_ms 2.000 -> 0.000`
+  - `raw_uint16_ms 19.000 -> 17.000`
+  - `llrawproc_ms 6.000 -> 5.000`
+  - `debayered_frame_ms 29.000 -> 27.000`
+  - `processing_ms 13.000 -> 7.000`
+  - `processing_core_color_ms 8.000 -> 5.000`
+- The new telemetry split makes the remaining non-engine gap much clearer on the same warm aggregate:
+  - `render_thread_queue_wait_ms = 11.000`
+  - `render_thread_work_ms = 37.000`
+  - `render_thread_total_ms = 47.000`
+  - `draw_frame_ready_queue_ms = 0.000`
+  - `draw_frame_ready_total_ms = 10.000`
+  - `engine_latency_ms = 47.655`
+  - `presentation_overhead_ms = 10.497`
+- Safe claim after the reruns:
+  - this pass is no longer a plumbing-only change; `processed8_direct_path_active` was `true` on every warm frame in the kept large-receipt reruns
+  - the direct-8-bit path is worth keeping as a real VM win (`~16 ms` off warm cadence, `~17 ms` off warm processed8 total)
+  - it is still not enough for realtime on this VM; `59.299 ms` is materially better than `75.439 ms`, but still above the native `41.708 ms` budget for `23.976 fps`
+- Fresh current-tree validation after the telemetry split, kept direct-8-bit path, and activation guards:
+  - plain `console_tests --check-golden`: `41 tests / 160 assertions / 17 skips / 0 failures`
+  - app-backed `console_tests --check-golden` with `platform/qt/build-codex-current/release/MLVApp.exe`: `41 tests / 726 assertions / 1 skip / 0 failures`
+  - `pipeline_tests --check-golden`: `46 tests / 526 assertions / 4 skips / 0 failures`
+- Current ranked next steps after this result:
+  1. High impact / medium effort: overlap stages across frames so the new `~37 ms` render-thread work no longer sits on the critical path by itself.
+  2. High impact / low-medium effort: trim the newly measured `~11 ms` render-thread queue wait plus `~10 ms` `drawFrameReady()` cost before assuming more CPU math work is the next best lever.
+  3. Medium impact / medium effort: add the playback-only processing subset for Dual ISO on top of this direct-8-bit path rather than going straight to more decoder work.
+  4. Medium impact / medium-high effort: only then spend time on runtime-dispatched AVX2 kernels for the surviving hot loops.
+
+### Cross-checked from prior analysis
+
+- The locked step order was the right call. If we had gone straight to overlap or AVX2, we would have missed that the existing preview receipt still had real post-gamma curve work that the first direct-8-bit version was silently skipping.
+- The earlier “24 fps first, 60 fps aspirational” framing is even stronger now:
+  - `59.299 ms` is a real step forward
+  - the remaining `~17.6 ms` to native realtime is still substantial, but no longer looks like a decode-only problem
+
+### Needs runtime profiling
+
+- Re-run the same three-artifact shape on the host before promoting the new `~16 ms` cadence win into a broader performance claim.
+- When the overlap pass lands, compare it against this new direct-8-bit baseline rather than the older bilinear/u16 baseline; this is now the honest current keep point.
+
+## Integration Branch Post-Decode Follow-Up (2026-04-23, current)
+
+### Verified locally
+
+- Replayed the reconstructed April playback history into this clean integration tree by merging `codex/reconstruct-festive-boyd-history` onto `codex/festive-boyd-integration`.
+  - The checked merge base against `fork/master` was `c1d23e60`.
+  - The merge landed cleanly; the only overlap points were the auto-merges in `platform/qt/MLVApp.pro` and `src/mlv/video_mlv.c`.
+  - The safety refs named in the handoff (`fork/festive-boyd` and `fork/codex/reconstruct-festive-boyd-history`) were left untouched.
+- The integration tree exposed one real build seam from the upstream MCraw parser sync: the local test qmake files were compiling `src/mlv/mcraw/mcraw.c` without `src/mlv/mcraw/cJSON.c`.
+  - Fixed in `tests/common/pipeline_runtime.pri:18`, `tests/pipeline/pipeline_tests.pro:33`, and `tests/perf/perf_tests.pro:28`.
+  - Fresh current-tree validation after the fix:
+    - plain `console_tests --check-golden`: `41 tests / 160 assertions / 17 skips / 0 failures`
+    - app-backed `console_tests --check-golden` with `platform/qt/build-codex-current/release/MLVApp.exe`: `41 tests / 695 assertions / 1 skip / 0 failures`
+    - `pipeline_tests --check-golden`: `45 tests / 515 assertions / 4 skips / 0 failures`
+- The earlier multithread blind spot in `processing_core_*` is now fixed on this branch.
+  - `src/processing/raw_processing.h:323` adds `processing_core_timing_t`.
+  - `src/processing/raw_processing.c:576` and `src/processing/raw_processing.c:616` now capture per-worker core timings and collapse them back with `max(...)` on the `threads > 1` path, so the large Dual ISO `--threads 4` profile finally shows nonzero `processing_core_levels_ms`, `processing_core_color_ms`, and `processing_core_output_ms`.
+- Fresh current-tree t4 playback-profile artifact before any new processing-tail optimization:
+  - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown.json`
+  - warm medians after discard-5:
+    - `latency_ms = 79.667`
+    - `processed16_total_ms = 52.000`
+    - `debayered_frame_ms = 30.000`
+    - `processing_ms = 17.000`
+    - `raw_uint16_ms = 19.000`
+    - `processing_core_ms = 10.000`
+    - `processing_core_levels_ms = 2.000`
+    - `processing_core_color_ms = 7.000`
+    - `processing_core_output_ms = 1.000`
+    - `processing_other_ms = 8.000`
+    - `debayer_exclusive_ms = 6.000`
+    - `debayer_pipeline_other_ms = 3.000`
+- That t4 breakdown made the next code change concrete: the common preview receipt was still paying for two no-op full-frame copies after the core stage even when chroma separation, sharpening, and grain were all off.
+  - `src/processing/raw_processing.c:686` now detects that inactive tail shape and returns early before those copies.
+  - The post-copy-skip reruns live in:
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_postcopyskip.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_postcopyskip_run2.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_postcopyskip_run3.json`
+  - Warm medians from those three reruns:
+    - `processed16_total_ms = 51.000`, `48.000`, `49.000`
+    - `processing_ms = 14.000`, `13.000`, `14.000`
+    - `processing_other_ms = 3.000`, `3.000`, `4.000`
+    - `raw_uint16_ms = 19.000`, `19.000`, `19.000`
+    - `latency_ms = 85.426`, `76.246`, `76.098`
+- Safe claim from the reruns: the copy-skip removes real dead post-core work on this receipt (`processing_other_ms` falls from `8.000` into the `3-4 ms` band, with `processing_ms` falling from `17.000` into the `13-14 ms` band) while leaving raw decode unchanged.
+- I then tried a narrowly scoped follow-up on the common basic-matrix fast path under `src/processing/raw_processing.c:939-989`.
+  - Kept source change:
+    - scalarized the hot loop
+    - hoisted `proper_wb_matrix` entries into local `float` coefficients
+    - removed the per-pixel temporary arrays and inner channel loop
+    - added a zero-denominator guard around the desaturation step while preserving the existing non-red tonemap behavior
+  - Kept profiling artifacts:
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorfast_run1.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorfast_run2.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorfast_run3.json`
+  - Warm medians from those three reruns:
+    - `latency_ms = 71.292`, `76.565`, `74.294`
+    - `processed16_total_ms = 47.000`, `49.000`, `49.000`
+    - `debayered_frame_ms = 29.000`, `29.000`, `30.000`
+    - `processing_ms = 12.000`, `14.000`, `12.000`
+    - `processing_core_ms = 10.000`, `10.000`, `10.000`
+    - `processing_core_color_ms = 8.000`, `8.000`, `9.000`
+    - `processing_other_ms = 3.000`, `3.000`, `3.000`
+    - `raw_uint16_ms = 19.000`, `19.000`, `19.000`
+  - Aggregate warm-sample medians versus the kept post-copy-skip baseline moved from:
+    - `latency_ms 76.032 -> 74.294`
+    - `processed16_total_ms 49.000 -> 47.000`
+    - `debayered_frame_ms 30.000 -> 29.000`
+    - `processing_ms 13.000 -> 12.000`
+    - `processing_core_color_ms 8.000 -> 8.000`
+    - `raw_uint16_ms 19.000 -> 19.000`
+- I also tried a heavier precomputed-LUT version of that same color-path idea and then reverted it.
+  - Rejected profiling artifacts:
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorlut_run1.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorlut_run2.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorlut_run3.json`
+  - Aggregate warm-sample medians for that rejected variant were effectively back near the post-copy-skip baseline:
+    - `latency_ms = 76.450`
+    - `processed16_total_ms = 49.000`
+    - `debayered_frame_ms = 30.000`
+    - `processing_ms = 13.000`
+    - `processing_core_color_ms = 8.000`
+    - `raw_uint16_ms = 19.000`
+- Current keep/revert call on the color-path follow-up:
+  - keep the smaller scalar rewrite
+  - do not keep the LUT-backed version
+  - safe claim is only a modest post-decode trim (`~1-2 ms` on the aggregate warm `processed16` / `processing` path here), not a decisive `processing_core_color_ms` breakthrough yet
+- I then rechecked the current receipt/runtime path before touching debayer.
+  - The playback-profile metadata on the large Dual ISO preview receipt reports `playback_debayer_effective = bilinear` and `playback_debayer_engine_mode = 0` on this branch, so the current hot path is bilinear preview debayer, not the grayscale `none` mode.
+  - I kept a direct-`uint16` fast path for the `none` preview mode as a side cleanup, but the relevant current-tree follow-up was wiring the bilinear path to consume processed `uint16` raw data directly instead of round-tripping through `getMlvRawFrameFloat(...)`.
+  - Current kept debayer-side source changes:
+    - `src/mlv/video_mlv.c:1525` adds `getMlvRawFrameProcessedUint16(...)`, a shared helper that stops after `raw_uint16 + llrawproc` and returns the required bit-depth shift.
+    - `src/debayer/debayer.c:19` adds `debayerNoneU16(...)` for the grayscale preview path.
+    - `src/debayer/debayer.c:43` adds `debayerBasicU16(...)` for the current bilinear preview path.
+    - `src/mlv/frame_caching.c:686-722` now routes preview debayer types `0` and `2` through those direct-`uint16` helpers before falling back to the older float-based paths.
+  - Kept bilinear artifacts:
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_bilinearu16_run1.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_bilinearu16_run2.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_bilinearu16_run3.json`
+  - Warm medians from those three reruns:
+    - `latency_ms = 77.018`, `72.890`, `74.678`
+    - `processed16_total_ms = 49.000`, `48.000`, `49.000`
+    - `debayered_frame_ms = 29.000`, `29.000`, `30.000`
+    - `raw_float_convert_ms = 0.000`, `0.000`, `0.000`
+    - `debayer_exclusive_ms = 4.000`, `4.000`, `4.000`
+    - `debayer_kernel_ms = 2.000`, `2.000`, `2.000`
+    - `debayer_pipeline_other_ms = 2.000`, `2.000`, `3.000`
+    - `processing_ms = 14.000`, `13.000`, `13.000`
+    - `processing_core_color_ms = 8.000`, `8.000`, `8.000`
+    - `raw_uint16_ms = 19.000`, `19.000`, `18.000`
+  - Aggregate warm-sample medians versus the kept post-copy-skip baseline moved from:
+    - `latency_ms 76.032 -> 74.678`
+    - `processed16_total_ms 49.000 -> 48.000`
+    - `debayered_frame_ms 30.000 -> 29.000`
+    - `raw_float_convert_ms 1.000 -> 0.000`
+    - `debayer_exclusive_ms 6.000 -> 4.000`
+    - `raw_uint16_ms 19.000 -> 19.000`
+  - Relative to the earlier scalar colorfast reruns, the safe reading is narrower: the bilinear direct-`uint16` change clearly removes the warm `raw_float_convert` bucket and trims exclusive debayer, but total `processed16_total_ms` still lands in the same general `47-49 ms` band on this VM. Keep it as a low-risk debayer-side cleanup, not as a new major throughput breakthrough.
+- I also pinned the target math to the checked-in large fixture and the current kept warm medians before deciding how seriously to treat the `60 fps` ask.
+  - `tests/fixtures/clips/large_dual_iso.mlv` carries `sourceFpsNom = 23976` and `sourceFpsDenom = 1000`, so the native source rate is `23.976 fps`.
+  - That means the real native-rate playback budget is `41.708 ms/frame`; `60 fps` would require `16.667 ms/frame`.
+  - Current kept aggregate warm medians from the three bilinear direct-`uint16` reruns are:
+    - `cadence_ms = 75.7867`
+    - `processed16_total_ms = 49.000`
+    - `processed8_total_ms = 54.000`
+    - `raw_uint16_ms = 19.000`
+    - `llrawproc_ms = 6.000`
+    - `debayer_exclusive_ms = 4.000`
+    - `processing_ms = 13.000`
+  - The practical lower-bound read from those buckets is important:
+    - a receipt-preserving overlap of `raw_uint16 + llrawproc` is still about `25 ms`
+    - the downstream `processed8 - (raw_uint16 + llrawproc)` remainder is still about `29 ms`
+    - so even an idealized steady-state overlap only points to the high-`20 ms` range on this VM, not to `16.667 ms`
+  - Safe planning conclusion:
+    - `>24 fps` on this VM still looks plausible if we overlap stages and stop paying full serial receipt costs while playing
+    - `60 fps` is not a credible same-quality CPU-only target on this VM
+    - if "lossless quality" means paused/export output stays exact, we can preserve that by using a playback-only fast path and restoring the full receipt when playback stops
+    - if "lossless quality" means every displayed playback frame must stay pixel-identical to the current receipt/bilinear path, target `24+ fps` first; `60 fps` would need a materially faster runtime path than this VM currently has
+
+### Cross-checked from prior analysis
+
+- This validates the April closeout recommendation to stop reopening predictor-1 LJ92 churn once raw decode stopped dominating the t4 playback path. The first honest next pass really was to split the post-decode work, not to queue more decoder micro-candidates.
+- The new t4 breakdown also matches the earlier receipt reading: the remaining processing time is still concentrated in the basic color/core path and a smaller post-core tail, not in the disabled creative / denoise / RBF / highlight branches for this receipt.
+- The scalar color-loop cleanup was directionally useful, but the rejected LUT experiment reinforces the earlier caution against mistaking micro-hoists for the next major breakthrough. The next bigger win is more likely to come from algorithmic simplification or the debayer side than from stacking more local table churn onto this loop.
+- The bilinear reruns sharpen that ranking further: once the float handoff is removed, the current receipt still spends much more time in `processing_ms` / `processing_core_color_ms` than it does in warm exclusive debayer. That means the next bigger win is probably in the processing core or in a bigger preview/debayer policy shift, not in another tiny bilinear micro-pass.
+
+### Needs runtime profiling
+
+- I do not have a strong end-to-end latency claim from the copy-skip alone yet. The three post-change reruns still show VM jitter (`76.098-85.426 ms`) large enough that the safe conclusion is "processing tail reduced", not "steady-state playback latency definitely improved by X ms".
+- The next host rerun should keep using the same large Dual ISO preview receipt and `--threads 4` shape so we can see whether the current VM-local split carries over:
+  - `processing_core_color_ms` is still the largest honest inner bucket here at about `8 ms`.
+  - `debayer_exclusive_ms` is now down around `4 ms` on the current kept bilinear path, with `debayer_pipeline_other_ms` still around `2-3 ms`.
+  - `raw_float_convert_ms` is now gone on warm bilinear frames, so any remaining debayer-side work has to come from the kernel or policy/runtime shape rather than from more format-conversion cleanup.
+- If we want a formal keep/revert decision on the copy-skip itself, capture repeated t4 runs on the real host and compare the same discard-5 warm medians rather than trusting a single VM replay.
+- If we want to turn the scalar color-loop keep into a stronger claim, repeat the same comparison on the real host. On this VM the improvement is modest enough that host confirmation matters before we count it as a stable throughput gain.
+- The same caution now applies to the bilinear direct-`uint16` cleanup: it is behavior-preserving and measurably deletes a warm bucket, but host reruns still matter before claiming a larger FPS win from the resulting `~1 ms` aggregate trim.
+
+### Ranked next steps
+
+1. Highest impact / medium effort: treat `60 fps same-quality playback` as out of scope on this VM and target `better than native-rate 23.976 fps` first. The next work should optimize for `<= 41.708 ms/frame`, not for `16.667 ms/frame`.
+2. High impact / medium effort: build a true playback pipeline so `raw_uint16 + llrawproc` can overlap with downstream debayer/processing/display work. The current kept bucket shape says overlap is the main honest lever left.
+3. High impact / medium effort: add a playback-only fast-processing / direct-to-8-bit path that preserves paused/export quality. If we keep paying the full current receipt-shaped post-decode cost while playing, the VM budget stays too tight even after the recent `1-2 ms` trims.
+4. Medium-high impact / medium effort: if we stay in the bilinear preview path, inspect the remaining `debayer_pipeline_other_ms` / runtime policy seams instead of another tiny arithmetic cleanup inside the same bilinear loop.
+5. High impact / low-medium effort: rerun the same `large_dual_iso_preview` playback-profile shape on the real host before locking in more policy or architecture changes. The VM still moves enough frame-to-frame and run-to-run that host confirmation matters.
+
 ## Dual ISO Playback Status Snapshot (2026-04-23, summary)
 
 ### Verified locally

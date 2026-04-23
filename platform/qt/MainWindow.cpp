@@ -1437,6 +1437,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                            static_cast<double>( effectiveEngineNs - requestNs ) / 1000000.0 );
             sample.insert( QStringLiteral("presentation_overhead_ms"),
                            static_cast<double>( completionNs - effectiveEngineNs ) / 1000000.0 );
+            sample.insert( QStringLiteral("draw_frame_ready_queue_ms"),
+                           m_lastDrawFrameReadyQueueMs );
+            sample.insert( QStringLiteral("draw_frame_ready_total_ms"),
+                           m_lastDrawFrameReadyTotalMs );
             sample.insert( QStringLiteral("engine_latency_direct_measured"),
                            engineNs >= 0 );
             sample.insert( QStringLiteral("dual_iso_preview_histogram_ms"),
@@ -10813,6 +10817,15 @@ void MainWindow::drawFrameReady()
         ? static_cast<uint64_t>(m_newPosDropMode)
         : static_cast<uint64_t>(ui->horizontalSliderPosition->value());
     const double display_start = mlv_stage_timing_now();
+    m_lastDrawFrameReadyQueueMs = 0.0;
+    if( m_pRenderThread )
+    {
+        const double render_emit_stage_time = m_pRenderThread->lastFrameReadyEmitStageTime();
+        if( render_emit_stage_time > 0.0 && display_start >= render_emit_stage_time )
+        {
+            m_lastDrawFrameReadyQueueMs = (display_start - render_emit_stage_time) * 1000.0;
+        }
+    }
     const bool gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
     const bool zoomFitEnabled = ui->actionZoomFit->isChecked();
     const bool zebrasEnabled = ui->actionShowZebras->isChecked();
@@ -11226,7 +11239,8 @@ void MainWindow::drawFrameReady()
     //Reset delete clip action as enabled
     ui->actionDeleteSelectedClips->setEnabled( true );
 
-    mlv_stage_timing_note("drawFrameReady.total", display_frame, display_start);
+    m_lastDrawFrameReadyTotalMs = (mlv_stage_timing_now() - display_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.total", display_frame, m_lastDrawFrameReadyTotalMs);
     notePlayToFirstFramePresentation( display_frame );
     emit frameReady();
 }

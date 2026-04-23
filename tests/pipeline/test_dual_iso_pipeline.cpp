@@ -53,6 +53,37 @@ static const llrawprocWorkerState_t * current_worker(MlvPipelineFixture & fixtur
     return worker;
 }
 
+static void configure_direct_processed8_supported_subset(MlvPipelineFixture & fixture)
+{
+    processingObject_t * processing = fixture.processing();
+    ASSERT_TRUE(processing != nullptr);
+
+    processing->use_cam_matrix = 1;
+    processing->allow_creative_adjustments = 0;
+    processing->highlight_reconstruction = 0;
+    processing->gradient_enable = 0;
+    processing->vignette_strength = 0;
+    processing->exr_mode = 0;
+    processing->AgX = 0;
+    processing->denoiserStrength = 0;
+    processing->rbfDenoiserLuma = 0;
+    processing->rbfDenoiserChroma = 0;
+    processing->grainStrength = 0;
+    processing->ca_desaturate = 0;
+    processing->sharpen = 0.0;
+    processing->clarity = 0.0;
+    processing->contrast = 0.0;
+    processing->lighten = 0.0;
+    processing->shadows_highlights.shadows = 0.0;
+    processing->shadows_highlights.highlights = 0.0;
+    processing->cs_zone.use_cs = 0;
+    processing->cs_zone.chroma_blur_radius = 0;
+    processing->toning_dry = 1.0f;
+    processing->toning_wet[0] = 0.0f;
+    processing->toning_wet[1] = 0.0f;
+    processing->toning_wet[2] = 0.0f;
+}
+
 TEST(DualIsoPipeline, TinyDualIsoFullFramesMatchGolden)
 {
     MlvPipelineFixture fixture;
@@ -156,6 +187,81 @@ TEST(DualIsoPipeline, TinyDualIsoPreviewFrame1MatchesFreshAndSequentialRenders)
                                                               3,
                                                               2);
     ASSERT_TRUE(compare.psnr_db >= 40.0);
+}
+
+TEST(DualIsoPipeline, NoneDebayerMatchesScaledRawFloatReference)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    fixture.receipt().setDebayer(ReceiptSettings::None);
+
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const std::vector<float> raw_frame = fixture.renderRawFrameFloat(0);
+    const std::vector<uint16_t> debayered_frame = fixture.renderDebayeredFrame16(0);
+    std::vector<uint16_t> expected_frame(debayered_frame.size(), 0);
+
+    ASSERT_EQ(static_cast<unsigned long long>(fixture.width()) * static_cast<unsigned long long>(fixture.height()),
+              static_cast<unsigned long long>(raw_frame.size()));
+    ASSERT_EQ(static_cast<unsigned long long>(raw_frame.size()) * 3ull,
+              static_cast<unsigned long long>(debayered_frame.size()));
+
+    for (std::size_t pixel = 0; pixel < raw_frame.size(); ++pixel)
+    {
+        const uint16_t expected = static_cast<uint16_t>(raw_frame[pixel]);
+        const std::size_t output_index = pixel * 3u;
+        expected_frame[output_index + 0] = expected;
+        expected_frame[output_index + 1] = expected;
+        expected_frame[output_index + 2] = expected;
+    }
+
+    const frame_compare_result_t compare = compare_frames_u16(expected_frame.data(),
+                                                              debayered_frame.data(),
+                                                              fixture.width(),
+                                                              fixture.height(),
+                                                              3,
+                                                              0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, DirectProcessed8FastPathMatchesShiftedProcessed16Reference)
+{
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 1);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
+
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
 }
 
 TEST(DualIsoPipeline, HeadlessDualIsoPreviewAutoDetectsPatternAndKeepsItAcrossFrames)

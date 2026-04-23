@@ -1,5 +1,106 @@
 ## Testing Scaffold Notes
 
+### Cadence-Gap Telemetry + Activated Direct Processed8 Path (2026-04-23)
+
+#### Verified locally
+
+- The playback-profile scaffold now measures the full post-engine gap instead of treating it as one opaque cadence delta.
+  - `platform/qt/RenderFrameThread.cpp:138-189` and `platform/qt/RenderFrameThread.cpp:600-602` now export:
+    - `render_thread_queue_wait_ms`
+    - `render_thread_work_ms`
+    - `render_thread_total_ms`
+  - `platform/qt/MainWindow.cpp:1442` and `platform/qt/MainWindow.cpp:10823` now export:
+    - `draw_frame_ready_queue_ms`
+    - `draw_frame_ready_total_ms`
+- The new direct processed-8-bit path is now both behavior-covered and app-backed activation-covered.
+  - `tests/pipeline/test_dual_iso_pipeline.cpp:230` now includes `DualIsoPipeline.DirectProcessed8FastPathMatchesShiftedProcessed16Reference`, which keeps the direct 8-bit math pinned to the shifted 16-bit reference on a known-supported subset.
+  - `tests/console/test_clip_golden.cpp:530` now also asserts that the real app-backed preview receipt reports `processed8_direct_path_active = true` on every measured frame.
+- The first narrow direct-8-bit gate turned out to be too optimistic about what “neutral preview receipt” meant on this branch.
+  - The kept follow-up in `src/processing/raw_processing.c:876-928` and `src/processing/raw_processing.c:1668-1755` now preserves the preview receipt’s post-gamma curve steps and `exr_mode` skip-gamut behavior, which is what made the app-backed activation test turn green.
+- Fresh current-tree validation after the updated telemetry and activated direct-8-bit path:
+  - plain `console_tests --check-golden`: `41 tests / 160 assertions / 17 skips / 0 failures`
+  - app-backed `console_tests --check-golden` with `platform/qt/build-codex-current/release/MLVApp.exe`: `41 tests / 726 assertions / 1 skip / 0 failures`
+  - `pipeline_tests --check-golden`: `46 tests / 526 assertions / 4 skips / 0 failures`
+- Fresh large-receipt playback-profile artifacts on the current keep point:
+  - `.claude/profiling/20260423-direct8bit-playback-gap/large_dual_iso_preview_t4_direct8_run1.json`
+  - `.claude/profiling/20260423-direct8bit-playback-gap/large_dual_iso_preview_t4_direct8_run2.json`
+  - `.claude/profiling/20260423-direct8bit-playback-gap/large_dual_iso_preview_t4_direct8_run3.json`
+  - Warm aggregate medians versus the prior kept bilinear/u16 baseline moved from:
+    - `cadence_ms 75.439 -> 59.299`
+    - `processed8_total_ms 54.000 -> 37.000`
+    - `processed16_total_ms 48.000 -> 34.000`
+    - `processed16_to_8bit_ms 2.000 -> 0.000`
+    - `processing_ms 13.000 -> 7.000`
+  - The activation seam is now explicit in the artifact family itself:
+    - `processed8_direct_path_active` was `true` on every warm frame in the kept reruns
+
+#### Cross-checked from prior analysis
+
+- The scaffold change from “field presence only” to “field presence plus one app-backed activation assertion on the real preview receipt” was worth it here. The pipeline-only subset test would have missed the first non-activating implementation.
+
+#### Needs runtime profiling
+
+- The scaffold now proves the direct path activates and stays bit-matched on its supported receipt shape, but the remaining playback gap after this win is still a runtime diagnosis problem, not a scaffold problem. Re-profile host versus VM before locking in the next optimization order.
+
+### Multithread Processing Telemetry + MCraw Test-Link Fix (2026-04-23)
+
+#### Verified locally
+
+- The old single-thread-only caveat on `processing_core_*` is now superseded on this branch.
+  - `src/processing/raw_processing.h:323` adds `processing_core_timing_t`.
+  - `src/processing/raw_processing.c:576-623` now records per-worker core timings on the `threads > 1` path and collapses them back with `max(...)`, so app-backed playback-profile JSON now reports meaningful `processing_core_levels_ms`, `processing_core_color_ms`, and `processing_core_output_ms` on the large Dual ISO `--threads 4` path.
+- Fresh current-tree large-receipt playback-profile artifacts proving the t4 export:
+  - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown.json`
+  - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_postcopyskip.json`
+  - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_postcopyskip_run2.json`
+  - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_postcopyskip_run3.json`
+- The current kept post-decode follow-up on top of that telemetry is the smaller scalar cleanup of the common basic-matrix fast path in `src/processing/raw_processing.c:939-989`.
+  - Kept artifacts:
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorfast_run1.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorfast_run2.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorfast_run3.json`
+  - Aggregate warm-sample medians versus the kept post-copy-skip baseline moved from:
+    - `latency_ms 76.032 -> 74.294`
+    - `processed16_total_ms 49.000 -> 47.000`
+    - `processing_ms 13.000 -> 12.000`
+    - `processing_core_color_ms 8.000 -> 8.000`
+- A heavier LUT-backed version of the same color-path idea was measured and then reverted.
+  - Rejected artifacts:
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorlut_run1.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorlut_run2.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_colorlut_run3.json`
+  - It did not outperform the smaller scalar rewrite on the same large Dual ISO `--threads 4` shape.
+- Follow-up investigation on the current receipt showed that the hot preview path here is still bilinear, not grayscale `none`.
+  - The kept code now adds direct-`uint16` preview helpers in `src/mlv/video_mlv.c`, `src/debayer/debayer.c`, and `src/mlv/frame_caching.c` so the `none` and bilinear preview paths can stop after `raw_uint16 + llrawproc` instead of round-tripping through `getMlvRawFrameFloat(...)`.
+  - Kept artifacts for the current large Dual ISO bilinear path:
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_bilinearu16_run1.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_bilinearu16_run2.json`
+    - `.claude/profiling/20260423-postdecode-t4-breakdown/large_dual_iso_preview_t4_breakdown_bilinearu16_run3.json`
+  - Aggregate warm-sample medians versus the kept post-copy-skip baseline moved from:
+    - `processed16_total_ms 49.000 -> 48.000`
+    - `debayered_frame_ms 30.000 -> 29.000`
+    - `raw_float_convert_ms 1.000 -> 0.000`
+    - `debayer_exclusive_ms 6.000 -> 4.000`
+  - Safe read: keep it as a low-risk debayer-side cleanup, but it does not change the larger conclusion that `processing_ms` / `processing_core_color_ms` still dominate this receipt.
+- Added a focused regression guard in `tests/pipeline/test_dual_iso_pipeline.cpp`:
+  - `DualIsoPipeline.NoneDebayerMatchesScaledRawFloatReference` verifies that the new direct-`uint16` `none` preview path still matches the existing scaled raw-float reference exactly.
+- The current integration tree also needed a test-build fix after the upstream MCraw parser sync:
+  - `src/mlv/mcraw/cJSON.c` is now listed in `tests/common/pipeline_runtime.pri:18`, `tests/pipeline/pipeline_tests.pro:33`, and `tests/perf/perf_tests.pro:28`.
+- Fresh current-tree validation after the telemetry update, qmake fix, kept scalar fast-path cleanup, and kept direct-`uint16` preview debayer cleanup:
+  - plain `console_tests --check-golden`: `41 tests / 160 assertions / 17 skips / 0 failures`
+  - app-backed `console_tests --check-golden` with `platform/qt/build-codex-current/release/MLVApp.exe`: `41 tests / 726 assertions / 1 skip / 0 failures`
+  - `pipeline_tests --check-golden`: `46 tests / 526 assertions / 4 skips / 0 failures`
+
+#### Cross-checked from prior analysis
+
+- The earlier contract choice was still right: playback-profile coverage should assert field presence, numeric shape, and coarse parent/child bounds rather than exact additive equality. That stayed robust when the multithreaded `processing_core_*` values became nonzero.
+- The rejected LUT experiment was a useful reminder that the scaffold is now strong enough to reject performance-shaped code that compiles and stays green but fails to produce a convincing measurement win.
+- The added `NoneDebayerMatchesScaledRawFloatReference` guard is intentionally narrow: it gives the current direct-`uint16` preview cleanup a behavior tripwire without forcing new golden hashes or broadening the performance scaffold with another artifact family.
+
+#### Needs runtime profiling
+
+- The scaffold now exports honest multithreaded processing-core buckets, but the large-receipt performance interpretation is still measurement-first rather than gate-first. Use repeated host reruns before converting the new t4 values into hard performance claims.
+
 ### Playback-Profile Sample Flake Fix (2026-04-22)
 
 #### Verified locally
@@ -113,7 +214,7 @@
 
 #### Needs runtime profiling
 
-- The deep `processing_core_*` fields are only meaningful on the single-thread processing path right now. Multithreaded playback still reports valid top-level `processing_ms`, but the inner split should be treated as single-thread profiling telemetry.
+- That original single-thread limitation applied to the 2026-04-22 implementation only. See the 2026-04-23 multithread follow-up above for the current branch state: the large-receipt `--threads 4` playback-profile path now exports meaningful inner `processing_core_*` buckets.
 
 ### Exclusive Debayer Telemetry + Processing Fast Path (2026-04-22)
 

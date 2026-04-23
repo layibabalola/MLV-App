@@ -388,6 +388,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("latency_ms")).toDouble() > 0.0);
         ASSERT_TRUE(sample.contains(QStringLiteral("engine_latency_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("presentation_overhead_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_queue_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_total_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_histogram_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_regression_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_rowscale_ms")));
@@ -426,6 +428,10 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("processed16_for_8bit_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processed16_to_8bit_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processed8_total_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("processed8_direct_path_active")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_queue_wait_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_work_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_total_ms")));
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_preview_histogram_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_preview_regression_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_preview_rowscale_ms")).toDouble() >= 0.0);
@@ -462,6 +468,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("processed16_for_8bit_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("processed16_to_8bit_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("processed8_total_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_queue_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_total_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("processed8_direct_path_active")).isBool());
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_queue_wait_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_work_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_total_ms")).toDouble() >= 0.0);
         double processing_max_substage_ms = 0.0;
         require_processing_timing_field(sample, "processing_setup_ms", &processing_max_substage_ms);
         require_processing_timing_field(sample, "processing_shadows_highlights_prep_ms", &processing_max_substage_ms);
@@ -500,6 +512,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
                     >= sample.value(QStringLiteral("processing_core_color_ms")).toDouble());
         ASSERT_TRUE(sample.value(QStringLiteral("processing_core_ms")).toDouble()
                     >= sample.value(QStringLiteral("processing_core_levels_ms")).toDouble());
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_total_ms")).toDouble()
+                    >= sample.value(QStringLiteral("render_thread_work_ms")).toDouble());
         saw_preview_rowscale_timing = saw_preview_rowscale_timing
             || sample.value(QStringLiteral("dual_iso_preview_rowscale_ms")).toDouble() > 0.0;
         ASSERT_TRUE(sample.contains(QStringLiteral("playback_processing_subset_active")));
@@ -564,6 +578,14 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtR
     ASSERT_EQ(2, metadata.value(QStringLiteral("dual_iso_mode_effective")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("dual_iso_preview_runtime_active")).toBool());
     ASSERT_TRUE(!metadata.value(QStringLiteral("dual_iso_preview_override_active")).toBool());
+
+    const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
+    ASSERT_EQ(2, frames.size());
+    for (const QJsonValue & value : frames) {
+        const QJsonObject sample = value.toObject();
+        ASSERT_TRUE(sample.contains(QStringLiteral("processed8_direct_path_active")));
+        ASSERT_TRUE(sample.value(QStringLiteral("processed8_direct_path_active")).toBool());
+    }
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileCpuBackendProducesJson)

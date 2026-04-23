@@ -78,6 +78,7 @@ static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_total_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_for_8bit_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_to_8bit_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed8_total_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL int g_mlv_last_processed8_direct_path_active = 0;
 
 static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 {
@@ -1522,32 +1523,24 @@ int getMlvRawFrameUint16(mlvObject_t * video, uint64_t frameIndex, uint16_t * un
     return result;
 }
 
-/* Unpacks the bits of a frame to get a bayer B&W image (without black level correction)
- * Needs memory to return to, sized: sizeof(float) * getMlvHeight(urvid) * getMlvWidth(urvid)
- * Output image's pixels will be in range 0-65535 as if it is 16 bit integers */
-void getMlvRawFrameFloat(mlvObject_t * video, uint64_t frameIndex, float * outputFrame)
+int getMlvRawFrameProcessedUint16(mlvObject_t * video,
+                                  uint64_t frameIndex,
+                                  uint16_t * outputFrame,
+                                  int * bit_shift)
 {
-    const double total_start = mlv_stage_timing_now();
+    int pixels_count = video->RAWI.xRes * video->RAWI.yRes;
+    size_t output_frame_size = (size_t)pixels_count * sizeof(uint16_t);
+
     mlv_reset_last_raw_stage_telemetry();
     g_mlv_last_llrawproc_ms = 0.0;
     g_mlv_last_raw_float_convert_ms = 0.0;
-    int pixels_count = video->RAWI.xRes * video->RAWI.yRes;
-    uint16_t * unpacked_frame = mlv_ensure_thread_u16_buffer((uint64_t)pixels_count);
-    size_t unpacked_frame_size = pixels_count * 2;
-    if (!unpacked_frame)
-    {
-        memset(outputFrame, 0, pixels_count * sizeof(float));
-        mlv_stage_timing_note("raw_float_total", frameIndex, total_start);
-        return;
-    }
 
     const double unpack_start = mlv_stage_timing_now();
-    if(getMlvRawFrameUint16(video, frameIndex, unpacked_frame))
+    if(getMlvRawFrameUint16(video, frameIndex, outputFrame))
     {
-        memset(outputFrame, 0, pixels_count * sizeof(float));
+        memset(outputFrame, 0, output_frame_size);
         mlv_stage_timing_note("raw_uint16", frameIndex, unpack_start);
-        mlv_stage_timing_note("raw_float_total", frameIndex, total_start);
-        return;
+        return 1;
     }
     const double raw_uint16_ms = (mlv_stage_timing_now() - unpack_start) * 1000.0;
     mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, raw_uint16_ms);
@@ -1559,18 +1552,48 @@ void getMlvRawFrameFloat(mlvObject_t * video, uint64_t frameIndex, float * outpu
     mlv_stage_timing_note_elapsed("raw_uint16_unpack", frameIndex, g_mlv_last_raw_uint16_unpack_ms);
     mlv_stage_timing_note_elapsed("raw_uint16_copy", frameIndex, g_mlv_last_raw_uint16_copy_ms);
 
-    /* apply low level raw processing to the unpacked_frame */
     const double llraw_start = mlv_stage_timing_now();
-    applyLLRawProcObject(video, unpacked_frame, unpacked_frame_size);
+    applyLLRawProcObject(video, outputFrame, output_frame_size);
     const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
     mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
     g_mlv_last_llrawproc_ms = llrawproc_ms;
 
-    /* high quality dualiso buffer consists of real 16 bit values, no converting needed */
-    int shift_val = (llrpHQDualIso(video)) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    if (bit_shift)
+    {
+        *bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    }
+
+    return 0;
+}
+
+/* Unpacks the bits of a frame to get a bayer B&W image (without black level correction)
+ * Needs memory to return to, sized: sizeof(float) * getMlvHeight(urvid) * getMlvWidth(urvid)
+ * Output image's pixels will be in range 0-65535 as if it is 16 bit integers */
+void getMlvRawFrameFloat(mlvObject_t * video, uint64_t frameIndex, float * outputFrame)
+{
+    const double total_start = mlv_stage_timing_now();
+    mlv_reset_last_raw_stage_telemetry();
+    g_mlv_last_llrawproc_ms = 0.0;
+    g_mlv_last_raw_float_convert_ms = 0.0;
+    int pixels_count = video->RAWI.xRes * video->RAWI.yRes;
+    uint16_t * unpacked_frame = mlv_ensure_thread_u16_buffer((uint64_t)pixels_count);
+    if (!unpacked_frame)
+    {
+        memset(outputFrame, 0, pixels_count * sizeof(float));
+        mlv_stage_timing_note("raw_float_total", frameIndex, total_start);
+        return;
+    }
+
+    int shift_val = 0;
+    if(getMlvRawFrameProcessedUint16(video, frameIndex, unpacked_frame, &shift_val))
+    {
+        memset(outputFrame, 0, pixels_count * sizeof(float));
+        mlv_stage_timing_note("raw_float_total", frameIndex, total_start);
+        return;
+    }
     mlv_stage_timing_note_elapsed("raw_float_locked",
                                   frameIndex,
-                                  raw_uint16_ms + llrpGetLastSharedLockMilliseconds());
+                                  g_mlv_last_raw_uint16_ms + llrpGetLastSharedLockMilliseconds());
 
     /* convert uint16_t raw data -> float raw_data for processing with amaze or bilinear debayer, both need data input as float */
     const double raw_float_convert_start = mlv_stage_timing_now();
@@ -1736,6 +1759,42 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
     }
 }
 
+static void mlv_sync_processing_black_white_levels(mlvObject_t * video)
+{
+    const int desired_bit_depth = llrpHQDualIso(video)
+        ? video->llrawproc->dng_bit_depth
+        : getMlvBitdepth(video);
+    const float desired_black_level = llrpHQDualIso(video)
+        ? (float)video->llrawproc->dng_black_level
+        : (float)getMlvBlackLevel(video);
+    const int desired_white_level = llrpHQDualIso(video)
+        ? video->llrawproc->dng_white_level
+        : getMlvWhiteLevel(video);
+    const int bits_shift = 16 - desired_bit_depth;
+    const int expected_black_level =
+        (desired_black_level > 0.0f)
+            ? (int)(desired_black_level * pow(2.0, bits_shift))
+            : 0;
+    const int expected_white_level =
+        (int)((double)(desired_white_level << bits_shift) * 0.993);
+
+    if ((int)video->processing->black_level != expected_black_level
+     || video->processing->white_level != expected_white_level)
+    {
+        processingSetBlackAndWhiteLevel(video->processing,
+                                        desired_black_level,
+                                        desired_white_level,
+                                        desired_bit_depth);
+    }
+}
+
+static int mlv_can_use_direct_processed_frame8_path(mlvObject_t * video)
+{
+    return video
+        && video->processing
+        && processingCanUseDirect8BitOutput(video->processing);
+}
+
 /* Get a processed frame in 16 bit, only use more than one thread for preview as
  * it may have minor artifacts (though I haven't found them yet) */
 void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame, int threads)
@@ -1746,6 +1805,7 @@ void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t *
     g_mlv_last_debayered_frame_ms = 0.0;
     g_mlv_last_processing_ms = 0.0;
     g_mlv_last_processed16_total_ms = 0.0;
+    g_mlv_last_processed8_direct_path_active = 0;
     /* Useful */
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
@@ -1827,33 +1887,7 @@ void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t *
     g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
     mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
 
-    {
-        const int desired_bit_depth = llrpHQDualIso(video)
-            ? video->llrawproc->dng_bit_depth
-            : getMlvBitdepth(video);
-        const float desired_black_level = llrpHQDualIso(video)
-            ? (float)video->llrawproc->dng_black_level
-            : (float)getMlvBlackLevel(video);
-        const int desired_white_level = llrpHQDualIso(video)
-            ? video->llrawproc->dng_white_level
-            : getMlvWhiteLevel(video);
-        const int bits_shift = 16 - desired_bit_depth;
-        const int expected_black_level =
-            (desired_black_level > 0.0f)
-                ? (int)(desired_black_level * pow(2.0, bits_shift))
-                : 0;
-        const int expected_white_level =
-            (int)((double)(desired_white_level << bits_shift) * 0.993);
-
-        if ((int)video->processing->black_level != expected_black_level
-         || video->processing->white_level != expected_white_level)
-        {
-            processingSetBlackAndWhiteLevel(video->processing,
-                                            desired_black_level,
-                                            desired_white_level,
-                                            desired_bit_depth);
-        }
-    }
+    mlv_sync_processing_black_white_levels(video);
 
     /* Do processing.......... */
     const double processing_start = mlv_stage_timing_now();
@@ -1910,6 +1944,7 @@ void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * o
     g_mlv_last_processed16_for_8bit_ms = 0.0;
     g_mlv_last_processed16_to_8bit_ms = 0.0;
     g_mlv_last_processed8_total_ms = 0.0;
+    g_mlv_last_processed8_direct_path_active = 0;
     /* Size of RAW frame */
     uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     uint16_t * processed_frame = NULL;
@@ -1935,6 +1970,67 @@ void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * o
         }
 
         mlv_reset_processed_frame_8bit_cache(video);
+    }
+
+    if (mlv_can_use_direct_processed_frame8_path(video))
+    {
+        uint16_t * unprocessed_frame =
+            mlv_ensure_u16_buffer(&video->rgb_processed_temp_frame,
+                                  &video->rgb_processed_temp_frame_words,
+                                  rgb_frame_size);
+        if (!unprocessed_frame)
+        {
+            memset(outputFrame, 0, (size_t)rgb_frame_size);
+            video->current_processed_frame_8bit_active = 0;
+            mlv_reset_processed_frame_8bit_cache(video);
+            g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
+            mlv_stage_timing_note("processed8_total", frameIndex, total_start);
+            return;
+        }
+
+        const double processed16_start = mlv_stage_timing_now();
+        const double debayer_start = mlv_stage_timing_now();
+        getMlvRawFrameDebayered(video, frameIndex, unprocessed_frame);
+        g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+
+        mlv_sync_processing_black_white_levels(video);
+
+        const double processing_start = mlv_stage_timing_now();
+        applyProcessingObject8(video->processing,
+                               getMlvWidth(video),
+                               getMlvHeight(video),
+                               unprocessed_frame,
+                               outputFrame,
+                               threads,
+                               1,
+                               frameIndex);
+        g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
+
+        g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
+        g_mlv_last_processed16_for_8bit_ms = g_mlv_last_processed16_total_ms;
+        g_mlv_last_processed16_to_8bit_ms = 0.0;
+        g_mlv_last_processed8_direct_path_active = 1;
+        mlv_stage_timing_note_elapsed("processed16_total", frameIndex, g_mlv_last_processed16_total_ms);
+        mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
+        mlv_stage_timing_note_elapsed("processed16_to_8bit", frameIndex, g_mlv_last_processed16_to_8bit_ms);
+
+        video->current_processed_frame_8bit_active = 1;
+        video->current_processed_frame_8bit = frameIndex;
+        video->current_processed_frame_8bit_threads = threads;
+        video->current_processed_frame_8bit_signature = requested_signature;
+
+        mlv_store_processed_frame_8bit_cache(video,
+                                             frameIndex,
+                                             threads,
+                                             requested_signature,
+                                             outputFrame,
+                                             rgb_frame_size);
+
+        g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
+        return;
     }
 
     if (video->current_processed_frame_active
@@ -2196,6 +2292,11 @@ double getMlvLastProcessed16To8BitMilliseconds(void)
 double getMlvLastProcessed8TotalMilliseconds(void)
 {
     return g_mlv_last_processed8_total_ms;
+}
+
+int getMlvLastProcessed8DirectPathActive(void)
+{
+    return g_mlv_last_processed8_direct_path_active;
 }
 
 /* To initialise mlv object with a clip

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <float.h>
 #include <pthread.h>
 #include <ctype.h>
 #include <omp.h>
@@ -53,7 +54,24 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_levels_ms = 0.0
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
-static MLV_PROCESSING_THREAD_LOCAL int g_processing_capture_core_breakdown = 0;
+
+static void processing_core_timing_reset(processing_core_timing_t * timing)
+{
+    if( !timing ) return;
+
+    timing->levels_ms = 0.0;
+    timing->color_ms = 0.0;
+    timing->creative_ms = 0.0;
+    timing->output_ms = 0.0;
+}
+
+typedef struct
+{
+    processingObject_t * processing;
+    int imageX, imageY;
+    uint16_t * inputImage;
+    uint8_t * outputImage;
+} apply_processing_8_parameters_t;
 
 /* Thank you to https://gist.github.com/MrLixm/946c1b59cce8b74e948e75618583ce8d */
 double agx_compressed_matrix[9] = {
@@ -461,7 +479,8 @@ void processing_object_thread(apply_processing_parameters_t * p)
                              p->outputImage,
                              p->blurImage,
                              p->gradientMask,
-                             p->vignetteMask );
+                             p->vignetteMask,
+                             p->core_timing );
 }
 
 /* Apply it with multiple threads */
@@ -544,14 +563,26 @@ void applyProcessingObject( processingObject_t * processing,
     const double core_start = omp_get_wtime();
     if (threads == 1)
     {
-        g_processing_capture_core_breakdown = 1;
-        apply_processing_object(processing, imageX, imageY, inputImage, outputImage, get_buffer(processing->shadows_highlights.blur_image), processing->gradient_mask, processing->vignette_mask);
-        g_processing_capture_core_breakdown = 0;
+        processing_core_timing_t core_timing;
+        processing_core_timing_reset(&core_timing);
+        apply_processing_object(processing,
+                                imageX,
+                                imageY,
+                                inputImage,
+                                outputImage,
+                                get_buffer(processing->shadows_highlights.blur_image),
+                                processing->gradient_mask,
+                                processing->vignette_mask,
+                                &core_timing);
+        g_processing_last_core_levels_ms = core_timing.levels_ms;
+        g_processing_last_core_color_ms = core_timing.color_ms;
+        g_processing_last_core_creative_ms = core_timing.creative_ms;
+        g_processing_last_core_output_ms = core_timing.output_ms;
     }
     else
     {
-        g_processing_capture_core_breakdown = 0;
         apply_processing_parameters_t * params = alloca(sizeof(apply_processing_parameters_t) * threads);
+        processing_core_timing_t * core_timings = alloca(sizeof(processing_core_timing_t) * threads);
 
         /* All chunks this height except possibly slightly longer last one */
         int chunk_size = imageY/threads;
@@ -569,6 +600,8 @@ void applyProcessingObject( processingObject_t * processing,
             params[t].blurImage = get_buffer(processing->shadows_highlights.blur_image) + offset_chunk*t;
             params[t].gradientMask = processing->gradient_mask + (imageX * chunk_size * t);
             params[t].vignetteMask = processing->vignette_mask + (imageX * chunk_size * t);
+            params[t].core_timing = core_timings + t;
+            processing_core_timing_reset(params[t].core_timing);
         }
 
         /* To make sure bottom is processed */
@@ -585,6 +618,18 @@ void applyProcessingObject( processingObject_t * processing,
         for (int t = 0; t < threads; ++t)
         {
             pthread_join(threadid[t], NULL);
+        }
+
+        for (int t = 0; t < threads; ++t)
+        {
+            g_processing_last_core_levels_ms =
+                MAX(g_processing_last_core_levels_ms, core_timings[t].levels_ms);
+            g_processing_last_core_color_ms =
+                MAX(g_processing_last_core_color_ms, core_timings[t].color_ms);
+            g_processing_last_core_creative_ms =
+                MAX(g_processing_last_core_creative_ms, core_timings[t].creative_ms);
+            g_processing_last_core_output_ms =
+                MAX(g_processing_last_core_output_ms, core_timings[t].output_ms);
         }
     }
     g_processing_last_core_ms = (omp_get_wtime() - core_start) * 1000.0;
@@ -646,10 +691,17 @@ void applyProcessingObject( processingObject_t * processing,
     }
 
 
+    uint8_t doChromaSeperation = processingUsesChromaSeparation(processing);
+    const int doSharpening = processingGetSharpening(processing) > 0.005;
+    const int doGrain = processing->grainStrength > 0;
+    if( !doChromaSeperation && !doSharpening && !doGrain )
+    {
+        return;
+    }
+
     uint32_t sharp_skip = 1; /* Skip how many pixels when applying sharpening */
     uint32_t sharp_start = 0; /* How many pixels offset to start at */
     memcpy( inputImage, outputImage, img_s * sizeof(uint16_t) );
-    uint8_t doChromaSeperation = processingUsesChromaSeparation(processing);
 
     /* enter YCbCr world - https://en.wikipedia.org/wiki/YCbCr (I used the 'JPEG Transform') */
     if (doChromaSeperation)
@@ -670,7 +722,7 @@ void applyProcessingObject( processingObject_t * processing,
                     0,0 );
     }
 
-    if (processingGetSharpening(processing) > 0.005)
+    if( doSharpening )
     {
         /* Use sobel filter to create a edge mask */
         uint16_t *gray,
@@ -793,7 +845,7 @@ void applyProcessingObject( processingObject_t * processing,
     }
 
     /* Grain (simple monochrome noise) generator - must be applied after denoiser */
-    if( processing->grainStrength > 0 ) //Switch on/off
+    if( doGrain ) //Switch on/off
     {
         int strength = 50 * processing->grainStrength;
 #pragma omp parallel for
@@ -821,16 +873,182 @@ void applyProcessingObject( processingObject_t * processing,
 static float Reinhard_for_colour(float x) { return (x < 0.5f) ? x : (ReinhardTonemap_f((x-0.5f)/0.5f)*0.5f+0.5f); }
 static float Reinhard_for_blue(float x) { return (x < 0.7f) ? x : (ReinhardTonemap_f((x-0.7f)/0.3f)*0.3f+0.7f); }
 
+static int processing_has_neutral_creative_adjustments(const processingObject_t * processing)
+{
+    if( !processing ) return 0;
+    if( !processing->allow_creative_adjustments ) return 1;
+
+    if( processing->hue_vs_luma_used
+     || processing->hue_vs_saturation_used
+     || processing->hue_vs_hue_used
+     || processing->luma_vs_saturation_used )
+    {
+        return 0;
+    }
+
+    if( processing->vibrance > 1.01 || processing->vibrance < 0.99 ) return 0;
+    if( processing->saturation > 1.01 || processing->saturation < 0.99 ) return 0;
+    if( processing->toning_dry < 0.998f ) return 0;
+    if( fabsf(processing->toning_wet[0]) > 0.0005f
+     || fabsf(processing->toning_wet[1]) > 0.0005f
+     || fabsf(processing->toning_wet[2]) > 0.0005f )
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int processing_has_neutral_local_tone_adjustments(const processingObject_t * processing)
+{
+    if( !processing ) return 0;
+
+    return fabs(processing->contrast) < 0.01
+        && fabs(processing->clarity) < 0.01
+        && fabs(processing->shadows_highlights.shadows) < 0.01
+        && fabs(processing->shadows_highlights.highlights) < 0.01;
+}
+
 /* A private part of the processing machine */
 static int processing_can_use_basic_matrix_fast_path(const processingObject_t * processing)
 {
     return processing->use_cam_matrix > 0
-        && !processing->allow_creative_adjustments
+        && processing_has_neutral_creative_adjustments(processing)
+        && processing_has_neutral_local_tone_adjustments(processing)
         && !processing->highlight_reconstruction
         && !processing->gradient_enable
         && processing->vignette_strength == 0
-        && !processing->exr_mode
         && !processing->AgX;
+}
+
+static int processing_can_use_direct_8bit_output(const processingObject_t * processing)
+{
+    if( !processing ) return 0;
+
+    return processing_can_use_basic_matrix_fast_path(processing)
+        && !processing->lut_on
+        && !processing->filter_on
+        && processing->denoiserStrength <= 0
+        && processing->rbfDenoiserLuma <= 0
+        && processing->rbfDenoiserChroma <= 0
+        && processing->ca_desaturate <= 0
+        && !processingUsesChromaSeparation(processing)
+        && processingGetSharpening(processing) <= 0.005
+        && processing->grainStrength <= 0;
+}
+
+int processingCanUseDirect8BitOutput(const processingObject_t * processing)
+{
+    return processing_can_use_direct_8bit_output(processing);
+}
+
+static void apply_processing_object_8bit_fast(processingObject_t * processing,
+                                              int imageX,
+                                              int imageY,
+                                              uint16_t * __restrict inputImage,
+                                              uint8_t * __restrict outputImage)
+{
+    int32_t ** pm = processing->pre_calc_matrix;
+    const int img_s = imageX * imageY * 3;
+    uint16_t * img = inputImage;
+    uint16_t * img_end = img + img_s;
+    uint16_t * pix = img;
+    uint8_t * out = outputImage;
+    uint16_t * pre_calc_curve = processing->pre_calc_curve_r;
+    uint16_t * gcurve_y = processing->gcurve_y;
+    uint16_t * gcurve_r = processing->gcurve_r;
+    uint16_t * gcurve_g = processing->gcurve_g;
+    uint16_t * gcurve_b = processing->gcurve_b;
+    const int apply_creative_curves = processing->allow_creative_adjustments != 0;
+
+    int32_t * pm0 = pm[0];
+    int32_t * pm4 = pm[4];
+    int32_t * pm8 = pm[8];
+    uint16_t * pre_calc_gamma = processing->pre_calc_gamma;
+    float rgb_to_Y[3] = {0.0f, 0.0f, 0.0f};
+    double inverse_mat[9];
+    invertMatrix(colour_gamuts[processing->colour_gamut], inverse_mat);
+    for( int i = 0; i < 3; ++i ) rgb_to_Y[i] = inverse_mat[3 + i];
+
+    const float proper_wb_0 = (float)processing->proper_wb_matrix[0];
+    const float proper_wb_1 = (float)processing->proper_wb_matrix[1];
+    const float proper_wb_2 = (float)processing->proper_wb_matrix[2];
+    const float proper_wb_3 = (float)processing->proper_wb_matrix[3];
+    const float proper_wb_4 = (float)processing->proper_wb_matrix[4];
+    const float proper_wb_5 = (float)processing->proper_wb_matrix[5];
+    const float proper_wb_6 = (float)processing->proper_wb_matrix[6];
+    const float proper_wb_7 = (float)processing->proper_wb_matrix[7];
+    const float proper_wb_8 = (float)processing->proper_wb_matrix[8];
+    const float rgb_to_y0 = rgb_to_Y[0];
+    const float rgb_to_y1 = rgb_to_Y[1];
+    const float rgb_to_y2 = rgb_to_Y[2];
+
+    for( ; pix < img_end; pix += 3, out += 3 )
+    {
+        const float pix0 = (float)pm0[pix[0]];
+        const float pix1 = (float)pm4[pix[1]];
+        const float pix2 = (float)pm8[pix[2]];
+        float result0 = pix0 * proper_wb_0 + pix1 * proper_wb_1 + pix2 * proper_wb_2;
+        float result1 = pix0 * proper_wb_3 + pix1 * proper_wb_4 + pix2 * proper_wb_5;
+        float result2 = pix0 * proper_wb_6 + pix1 * proper_wb_7 + pix2 * proper_wb_8;
+
+        const float Y = rgb_to_y0 * result0
+                      + rgb_to_y1 * result1
+                      + rgb_to_y2 * result2;
+        if( !processing->exr_mode && Y > 0.0f )
+        {
+            const float min_channel = MIN(MIN(result0, result1), result2);
+            const float y_minus_min_channel = Y - min_channel;
+            if( fabsf(y_minus_min_channel) > FLT_MIN )
+            {
+                const float inv_y = 1.0f / Y;
+                const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
+                /* Preserve the existing fast-path tone-map behavior for non-red channels. */
+                const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
+                const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
+                const float desaturate_factor =
+                    (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
+
+                result0 = (result0 - Y) * desaturate_factor + Y;
+                result1 = (result1 - Y) * desaturate_factor + Y;
+                result2 = (result2 - Y) * desaturate_factor + Y;
+            }
+        }
+
+        uint16_t mapped0 = pre_calc_gamma[LIMIT16((uint32_t)result0)];
+        uint16_t mapped1 = pre_calc_gamma[LIMIT16((uint32_t)result1)];
+        uint16_t mapped2 = pre_calc_gamma[LIMIT16((uint32_t)result2)];
+
+        if( apply_creative_curves )
+        {
+            mapped0 = pre_calc_curve[mapped0];
+            mapped1 = pre_calc_curve[mapped1];
+            mapped2 = pre_calc_curve[mapped2];
+
+            mapped0 = gcurve_y[mapped0];
+            mapped1 = gcurve_y[mapped1];
+            mapped2 = gcurve_y[mapped2];
+
+            mapped0 = gcurve_r[mapped0];
+            mapped1 = gcurve_g[mapped1];
+            mapped2 = gcurve_b[mapped2];
+        }
+
+        out[0] = (uint8_t)(mapped0 >> 8);
+        out[1] = (uint8_t)(mapped1 >> 8);
+        out[2] = (uint8_t)(mapped2 >> 8);
+    }
+}
+
+static void * processing_object_8bit_thread(void * argument)
+{
+    apply_processing_8_parameters_t * p = (apply_processing_8_parameters_t *)argument;
+    apply_processing_object_8bit_fast(p->processing,
+                                      p->imageX,
+                                      p->imageY,
+                                      p->inputImage,
+                                      p->outputImage);
+    return NULL;
 }
 
 void apply_processing_object( processingObject_t * processing,
@@ -839,7 +1057,8 @@ void apply_processing_object( processingObject_t * processing,
                               uint16_t * __restrict outputImage,
                               uint16_t * __restrict blurImage,
                               uint16_t * __restrict gradientMask,
-                              float * __restrict vignetteMask )
+                              float * __restrict vignetteMask,
+                              processing_core_timing_t * core_timing )
 {
     /* Number of elements */
     int img_s = imageX * imageY * 3;
@@ -873,7 +1092,8 @@ void apply_processing_object( processingObject_t * processing,
     /* In case of camera matrix */
     //double (* tone_mapping_function)(double) = tonemap_functions[processing->tonemap_function];
 
-    const int capture_breakdown = g_processing_capture_core_breakdown;
+    const int capture_breakdown = core_timing != NULL;
+    processing_core_timing_reset(core_timing);
     const double levels_start = capture_breakdown ? omp_get_wtime() : 0.0;
     /* Apply some precalcuolated settings */
     for (int i = 0; i < img_s; ++i)
@@ -883,7 +1103,7 @@ void apply_processing_object( processingObject_t * processing,
     }
     if( capture_breakdown )
     {
-        g_processing_last_core_levels_ms = (omp_get_wtime() - levels_start) * 1000.0;
+        core_timing->levels_ms = (omp_get_wtime() - levels_start) * 1000.0;
     }
 
     const double color_start = capture_breakdown ? omp_get_wtime() : 0.0;
@@ -894,51 +1114,54 @@ void apply_processing_object( processingObject_t * processing,
         int32_t * pm4 = pm[4];
         int32_t * pm8 = pm[8];
         uint16_t * pre_calc_gamma = processing->pre_calc_gamma;
-        double * proper_wb_matrix = processing->proper_wb_matrix;
+        const float proper_wb_0 = (float)processing->proper_wb_matrix[0];
+        const float proper_wb_1 = (float)processing->proper_wb_matrix[1];
+        const float proper_wb_2 = (float)processing->proper_wb_matrix[2];
+        const float proper_wb_3 = (float)processing->proper_wb_matrix[3];
+        const float proper_wb_4 = (float)processing->proper_wb_matrix[4];
+        const float proper_wb_5 = (float)processing->proper_wb_matrix[5];
+        const float proper_wb_6 = (float)processing->proper_wb_matrix[6];
+        const float proper_wb_7 = (float)processing->proper_wb_matrix[7];
+        const float proper_wb_8 = (float)processing->proper_wb_matrix[8];
         const float rgb_to_y0 = rgb_to_Y[0];
         const float rgb_to_y1 = rgb_to_Y[1];
         const float rgb_to_y2 = rgb_to_Y[2];
 
         for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
-            float pix0 = pm0[pix[0]];
-            float pix1 = pm4[pix[1]];
-            float pix2 = pm8[pix[2]];
-            float result[3];
-            result[0] = pix0 * proper_wb_matrix[0] + pix1 * proper_wb_matrix[1] + pix2 * proper_wb_matrix[2];
-            result[1] = pix0 * proper_wb_matrix[3] + pix1 * proper_wb_matrix[4] + pix2 * proper_wb_matrix[5];
-            result[2] = pix0 * proper_wb_matrix[6] + pix1 * proper_wb_matrix[7] + pix2 * proper_wb_matrix[8];
+            const float pix0 = (float)pm0[pix[0]];
+            const float pix1 = (float)pm4[pix[1]];
+            const float pix2 = (float)pm8[pix[2]];
+            float result0 = pix0 * proper_wb_0 + pix1 * proper_wb_1 + pix2 * proper_wb_2;
+            float result1 = pix0 * proper_wb_3 + pix1 * proper_wb_4 + pix2 * proper_wb_5;
+            float result2 = pix0 * proper_wb_6 + pix1 * proper_wb_7 + pix2 * proper_wb_8;
 
+            const float Y = rgb_to_y0 * result0
+                          + rgb_to_y1 * result1
+                          + rgb_to_y2 * result2;
+            if( !processing->exr_mode && Y > 0.0f )
             {
-                float Y = rgb_to_y0 * result[0]
-                        + rgb_to_y1 * result[1]
-                        + rgb_to_y2 * result[2];
-                float min_channel = MIN(MIN(result[0],result[1]),result[2]);
-
-                float result2[3];
-                for (int i = 0; i < 3; ++i)
+                const float min_channel = MIN(MIN(result0, result1), result2);
+                const float y_minus_min_channel = Y - min_channel;
+                if( fabsf(y_minus_min_channel) > FLT_MIN )
                 {
-                    float Y_to_min_channel = (Y - result[i]) / Y;
-                    float tonemapped;
-                    if (i == 1)
-                        tonemapped = ReinhardTonemap_f(Y_to_min_channel);
-                    if (i == 0)
-                        tonemapped = Reinhard_for_colour(Y_to_min_channel);
-                    else
-                        tonemapped = Reinhard_for_blue(Y_to_min_channel);
+                    const float inv_y = 1.0f / Y;
+                    const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
+                    /* Preserve the existing fast-path tone-map behavior for non-red channels. */
+                    const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
+                    const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
+                    const float desaturate_factor =
+                        (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
 
-                    result2[i] = -(tonemapped * Y) + Y;
+                    result0 = (result0 - Y) * desaturate_factor + Y;
+                    result1 = (result1 - Y) * desaturate_factor + Y;
+                    result2 = (result2 - Y) * desaturate_factor + Y;
                 }
-
-                float desaturate_factor = (Y - MIN(MIN(result2[0],result2[1]),result2[2])) / (Y - min_channel);
-                if (Y <= 0.0f) desaturate_factor = 1;
-
-                for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * desaturate_factor + Y;
             }
 
-            pix[0] = pre_calc_gamma[LIMIT16((uint32_t)result[0])];
-            pix[1] = pre_calc_gamma[LIMIT16((uint32_t)result[1])];
-            pix[2] = pre_calc_gamma[LIMIT16((uint32_t)result[2])];
+            pix[0] = pre_calc_gamma[LIMIT16((uint32_t)result0)];
+            pix[1] = pre_calc_gamma[LIMIT16((uint32_t)result1)];
+            pix[2] = pre_calc_gamma[LIMIT16((uint32_t)result2)];
         }
     }
     else
@@ -1234,7 +1457,7 @@ void apply_processing_object( processingObject_t * processing,
     }
     if( capture_breakdown )
     {
-        g_processing_last_core_color_ms = (omp_get_wtime() - color_start) * 1000.0;
+        core_timing->color_ms = (omp_get_wtime() - color_start) * 1000.0;
     }
 
     const double creative_start = capture_breakdown ? omp_get_wtime() : 0.0;
@@ -1421,7 +1644,7 @@ void apply_processing_object( processingObject_t * processing,
     }
     if( capture_breakdown )
     {
-        g_processing_last_core_creative_ms = (omp_get_wtime() - creative_start) * 1000.0;
+        core_timing->creative_ms = (omp_get_wtime() - creative_start) * 1000.0;
     }
 
     const double output_start = capture_breakdown ? omp_get_wtime() : 0.0;
@@ -1438,8 +1661,92 @@ void apply_processing_object( processingObject_t * processing,
     }
     if( capture_breakdown )
     {
-        g_processing_last_core_output_ms = (omp_get_wtime() - output_start) * 1000.0;
+        core_timing->output_ms = (omp_get_wtime() - output_start) * 1000.0;
     }
+}
+
+void applyProcessingObject8( processingObject_t * processing,
+                             int imageX, int imageY,
+                             uint16_t * __restrict inputImage,
+                             uint8_t * __restrict outputImage,
+                             int threads, int imageChanged, uint64_t frameIndex )
+{
+    (void)frameIndex;
+
+    g_processing_last_setup_ms = 0.0;
+    g_processing_last_shadows_highlights_prep_ms = 0.0;
+    g_processing_last_highest_green_ms = 0.0;
+    g_processing_last_core_ms = 0.0;
+    g_processing_last_denoise_ms = 0.0;
+    g_processing_last_rbf_ms = 0.0;
+    g_processing_last_ca_ms = 0.0;
+    g_processing_last_core_levels_ms = 0.0;
+    g_processing_last_core_color_ms = 0.0;
+    g_processing_last_core_creative_ms = 0.0;
+    g_processing_last_core_output_ms = 0.0;
+
+    if( !processing_can_use_direct_8bit_output(processing) )
+    {
+        return;
+    }
+
+    const double setup_start = omp_get_wtime();
+    get_frame_transformed(processing, inputImage, imageX, imageY);
+    g_processing_last_setup_ms = (omp_get_wtime() - setup_start) * 1000.0;
+
+    const int img_s = imageX * imageY * 3;
+    const double core_start = omp_get_wtime();
+    const double levels_start = omp_get_wtime();
+    #pragma omp parallel for
+    for( int i = 0; i < img_s; ++i )
+    {
+        inputImage[i] = processing->pre_calc_levels[inputImage[i]];
+    }
+    g_processing_last_core_levels_ms = (omp_get_wtime() - levels_start) * 1000.0;
+
+    const double color_start = omp_get_wtime();
+    if( threads == 1 )
+    {
+        apply_processing_object_8bit_fast(processing,
+                                          imageX,
+                                          imageY,
+                                          inputImage,
+                                          outputImage);
+    }
+    else
+    {
+        apply_processing_8_parameters_t * params =
+            alloca(sizeof(apply_processing_8_parameters_t) * threads);
+        const int chunk_size = imageY / threads;
+        const uint32_t input_offset_chunk = imageX * chunk_size * 3;
+        const uint32_t output_offset_chunk = imageX * chunk_size * 3;
+
+        for( int t = 0; t < threads; ++t )
+        {
+            params[t].processing = processing;
+            params[t].imageX = imageX;
+            params[t].imageY = chunk_size;
+            params[t].inputImage = inputImage + input_offset_chunk * t;
+            params[t].outputImage = outputImage + output_offset_chunk * t;
+        }
+        params[threads - 1].imageY = imageY - chunk_size * (threads - 1);
+
+        pthread_t * threadid = alloca(threads * sizeof(pthread_t));
+        for( int t = 0; t < threads; ++t )
+        {
+            pthread_create(&threadid[t],
+                           NULL,
+                           processing_object_8bit_thread,
+                           (void *)(params + t));
+        }
+        for( int t = 0; t < threads; ++t )
+        {
+            pthread_join(threadid[t], NULL);
+        }
+    }
+
+    g_processing_last_core_color_ms = (omp_get_wtime() - color_start) * 1000.0;
+    g_processing_last_core_ms = (omp_get_wtime() - core_start) * 1000.0;
 }
 
 double processingGetLastSetupMilliseconds(void)

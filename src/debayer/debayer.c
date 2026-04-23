@@ -16,6 +16,138 @@ void convert_to_log(void * data)
     // float
 }
 
+void debayerNoneU16(uint16_t * __restrict debayerto,
+                    const uint16_t * __restrict bayerdata,
+                    int width,
+                    int height,
+                    int threads,
+                    int bit_shift)
+{
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int y = 0; y < height; ++y)
+    {
+        const uint16_t * __restrict src_row = bayerdata + ((size_t)y * (size_t)width);
+        uint16_t * __restrict dst_row = debayerto + ((size_t)y * (size_t)width * 3u);
+
+        for (int x = 0; x < width; ++x)
+        {
+            const uint16_t value = (uint16_t)(src_row[x] << bit_shift);
+            dst_row[0] = value;
+            dst_row[1] = value;
+            dst_row[2] = value;
+            dst_row += 3;
+        }
+    }
+}
+
+void debayerBasicU16(uint16_t * __restrict debayerto,
+                     uint16_t * __restrict bayerdata,
+                     int width,
+                     int height,
+                     int threads,
+                     int bit_shift)
+{
+    if (bit_shift > 0)
+    {
+        const int pixel_count = width * height;
+        #pragma omp parallel for if(threads > 1) num_threads(threads)
+        for (int i = 0; i < pixel_count; ++i)
+        {
+            bayerdata[i] = (uint16_t)(bayerdata[i] << bit_shift);
+        }
+    }
+
+    /* Debayer pixel size(limit with 1 pixel border to avoid seg fault, fix blank pixels L8ter) */
+    int pixelsizeDB;
+    if( height % 2 == 0 )
+        pixelsizeDB = width * (height - 1);
+    else
+        pixelsizeDB = width * (height - 2);
+    int widthDB = width - 1;
+
+    int step = width * 2;
+    int nextRowRGB = width * 3;
+
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int Y = width; Y < pixelsizeDB; Y += step)
+    {
+        for (int x = 1; x < widthDB; x += 2)
+        {
+            int pix = Y + x;
+            int pixm1 = pix - width;
+            int pixp1 = pix + width;
+            int pixp2 = pixp1 + width;
+
+            int bPix[16] = {
+                ( pixm1-1 ), ( pixm1 ), ( pixm1+1 ), ( pixm1+2 ),
+                ( pix - 1 ), (  pix  ), ( pix + 1 ), ( pix + 2 ),
+                ( pixp1-1 ), ( pixp1 ), ( pixp1+1 ), ( pixp1+2 ),
+                ( pixp2-1 ), ( pixp2 ), ( pixp2+1 ), ( pixp2+2 ),
+            };
+
+            int rgbPix[4] = {
+                (bPix[5] * 3), (bPix[ 6] * 3),
+                (bPix[9] * 3), (bPix[10] * 3)
+            };
+
+            debayerto[ rgbPix[0] ] = (uint32_t)(
+                  bayerdata[ bPix[0] ] + bayerdata[ bPix[ 2] ]
+                + bayerdata[ bPix[8] ] + bayerdata[ bPix[10] ]
+            ) >> 2;
+            debayerto[ rgbPix[0]+1 ] = (uint32_t)(
+                  bayerdata[ bPix[1] ] + bayerdata[ bPix[6] ]
+                + bayerdata[ bPix[4] ] + bayerdata[ bPix[9] ]
+            ) >> 2;
+            debayerto[ rgbPix[0]+2 ] = bayerdata[ bPix[5] ];
+
+            debayerto[ rgbPix[1] ] = (uint32_t)(
+                bayerdata[ bPix[2] ] + bayerdata[ bPix[10] ]
+            ) >> 1;
+            debayerto[ rgbPix[1]+1 ] = bayerdata[ bPix[6] ];
+            debayerto[ rgbPix[1]+2 ] = (uint32_t)(
+                bayerdata[ bPix[5] ] + bayerdata[ bPix[7] ]
+            ) >> 1;
+
+            debayerto[ rgbPix[2] ] = (uint32_t)(
+                bayerdata[ bPix[8] ] + bayerdata[ bPix[10] ]
+            ) >> 1;
+            debayerto[ rgbPix[2]+1 ] = bayerdata[ bPix[9] ];
+            debayerto[ rgbPix[2]+2 ] = (uint32_t)(
+                bayerdata[ bPix[5] ] + bayerdata[ bPix[13] ]
+            ) >> 1;
+
+            debayerto[ rgbPix[3] ] = bayerdata[ bPix[10] ];
+            debayerto[ rgbPix[3]+1 ] = (uint32_t)(
+                  bayerdata[ bPix[ 6] ] + bayerdata[ bPix[ 9] ]
+                + bayerdata[ bPix[11] ] + bayerdata[ bPix[14] ]
+            ) >> 2;
+            debayerto[ rgbPix[3]+2 ] = (uint32_t)(
+                  bayerdata[ bPix[ 5] ] + bayerdata[ bPix[ 7] ]
+                + bayerdata[ bPix[13] ] + bayerdata[ bPix[15] ]
+            ) >> 2;
+        }
+
+        uint16_t * edgePixel = debayerto + (3 * Y);
+        edgePixel[0] = edgePixel[3];
+        edgePixel[1] = edgePixel[4];
+        edgePixel[2] = edgePixel[5];
+        edgePixel += nextRowRGB;
+        edgePixel[0] = edgePixel[3];
+        edgePixel[1] = edgePixel[4];
+        edgePixel[2] = edgePixel[5];
+        edgePixel[-1] = edgePixel[-4];
+        edgePixel[-2] = edgePixel[-5];
+        edgePixel[-3] = edgePixel[-6];
+        edgePixel += nextRowRGB;
+        edgePixel[-1] = edgePixel[-4];
+        edgePixel[-2] = edgePixel[-5];
+        edgePixel[-3] = edgePixel[-6];
+    }
+
+    memcpy(debayerto, debayerto + (width * 3), width * 3 * sizeof(uint16_t));
+    memcpy(debayerto + (width * (height - 1) * 3), debayerto + (width * (height - 2) * 3), width * 3 * sizeof(uint16_t));
+}
+
 /* AmAZeMEmE debayer easier to use */
 void debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads, int blacklevel)
 {

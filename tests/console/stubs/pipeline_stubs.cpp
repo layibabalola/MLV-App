@@ -134,6 +134,13 @@ void processingSetWhiteLevel(processingObject_t * processing, int mlvWhiteLevel,
 }
 
 void getMlvRawFrameFloat(mlvObject_t *, uint64_t, float *) {}
+int getMlvRawFrameProcessedUint16(mlvObject_t *, uint64_t, uint16_t *, int * bit_shift)
+{
+    if (bit_shift) {
+        *bit_shift = 0;
+    }
+    return 0;
+}
 
 void wb_convert(wb_convert_info_t * wb_info, float *, int, int, int)
 {
@@ -149,8 +156,12 @@ void wb_undo(const wb_convert_info_t *, uint16_t *, int, int, int) {}
 void debayerLibRtProcess(uint16_t *, float *, int, int, int, double[9]) {}
 void debayerAmaze(uint16_t *, float *, int, int, int, int) {}
 void debayerEasy(uint16_t *, float *, int, int, int, int) {}
+void debayerNoneU16(uint16_t *, const uint16_t *, int, int, int, int) {}
+void debayerBasicU16(uint16_t *, uint16_t *, int, int, int, int) {}
 void debayerAhd(uint16_t *, float *, int, int) {}
 void debayerBasic(uint16_t *, float *, int, int, int) {}
+
+int getMlvLastProcessed8DirectPathActive(void) { return 0; }
 
 void demosaic(amazeinfo_t *) {}
 

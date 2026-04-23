@@ -45,6 +45,7 @@ public:
     double lastDualIsoPreviewRegressionMilliseconds( void ) const;
     double lastDualIsoPreviewRowscaleMilliseconds( void ) const;
     QJsonObject lastStageTimingTelemetry( void ) const;
+    double lastFrameReadyEmitStageTime( void ) const;
     void stop( void );
     void lock( void ){ m_mutex.lock(); }
     void unlock( void ){ m_mutex.unlock(); }
@@ -53,7 +54,7 @@ signals:
     void frameReady( void );
 
 private:
-    QMutex m_mutex;
+    mutable QMutex m_mutex;
     mlvObject_t *m_pMlvObject;
     uint8_t *m_pRawImage;
     uint16_t *m_pRawImage16;
@@ -71,6 +72,11 @@ private:
     double m_lastDualIsoPreviewHistogramMs;
     double m_lastDualIsoPreviewRegressionMs;
     double m_lastDualIsoPreviewRowscaleMs;
+    double m_frameRequestStageTime;
+    double m_lastRenderThreadQueueWaitMs;
+    double m_lastRenderThreadWorkMs;
+    double m_lastRenderThreadTotalMs;
+    double m_lastFrameReadyEmitStageTime;
     QJsonObject m_lastStageTimingTelemetry;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
 

@@ -13,6 +13,7 @@
 #include "../../src/processing/raw_processing.h"
 #include "debug/StageTiming.h"
 #include <QDebug>
+#include <QMutexLocker>
 
 //Constructor
 RenderFrameThread::RenderFrameThread()
@@ -29,6 +30,11 @@ RenderFrameThread::RenderFrameThread()
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
+    m_frameRequestStageTime = 0.0;
+    m_lastRenderThreadQueueWaitMs = 0.0;
+    m_lastRenderThreadWorkMs = 0.0;
+    m_lastRenderThreadTotalMs = 0.0;
+    m_lastFrameReadyEmitStageTime = 0.0;
 }
 
 //Destructor
@@ -52,6 +58,11 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, uint8_t *pRawImage, uint16
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
+    m_frameRequestStageTime = 0.0;
+    m_lastRenderThreadQueueWaitMs = 0.0;
+    m_lastRenderThreadWorkMs = 0.0;
+    m_lastRenderThreadTotalMs = 0.0;
+    m_lastFrameReadyEmitStageTime = 0.0;
     m_gpuBilinearDebayerRawFrame.clear();
     m_mutex.unlock();
 }
@@ -67,6 +78,7 @@ void RenderFrameThread::renderFrame(uint32_t frameNumber,
     m_useGpuBilinearDebayer = useGpuBilinearDebayer;
     m_renderFrame = true;
     m_frameReady = false;
+    m_frameRequestStageTime = mlv_stage_timing_now();
     m_mutex.unlock();
 }
 
@@ -123,6 +135,12 @@ QJsonObject RenderFrameThread::lastStageTimingTelemetry() const
     return m_lastStageTimingTelemetry;
 }
 
+double RenderFrameThread::lastFrameReadyEmitStageTime() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_lastFrameReadyEmitStageTime;
+}
+
 //Stop the thread
 void RenderFrameThread::stop()
 {
@@ -156,12 +174,19 @@ void RenderFrameThread::run(void)
 void RenderFrameThread::drawFrame()
 {
     const double render_start = mlv_stage_timing_now();
+    m_lastRenderThreadQueueWaitMs =
+        (m_frameRequestStageTime > 0.0 && render_start >= m_frameRequestStageTime)
+            ? (render_start - m_frameRequestStageTime) * 1000.0
+            : 0.0;
     mlv_stage_timing_reset_snapshot();
     m_lastFrameUsedGpuBilinearDebayer = false;
     m_lastGpuBilinearRendererDescription.clear();
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
+    m_lastRenderThreadWorkMs = 0.0;
+    m_lastRenderThreadTotalMs = 0.0;
+    m_lastFrameReadyEmitStageTime = 0.0;
     m_lastStageTimingTelemetry = QJsonObject();
     if ( !m_useGpuBilinearDebayer )
     {
@@ -565,5 +590,19 @@ void RenderFrameThread::drawFrame()
                                        getMlvLastProcessed16To8BitMilliseconds() );
     m_lastStageTimingTelemetry.insert( QStringLiteral("processed8_total_ms"),
                                        getMlvLastProcessed8TotalMilliseconds() );
+    m_lastStageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_active"),
+                                       getMlvLastProcessed8DirectPathActive() != 0 );
+    m_lastRenderThreadWorkMs = (mlv_stage_timing_now() - render_start) * 1000.0;
+    m_lastRenderThreadTotalMs =
+        (m_frameRequestStageTime > 0.0 && mlv_stage_timing_now() >= m_frameRequestStageTime)
+            ? (mlv_stage_timing_now() - m_frameRequestStageTime) * 1000.0
+            : m_lastRenderThreadWorkMs;
+    m_lastFrameReadyEmitStageTime = mlv_stage_timing_now();
+    m_lastStageTimingTelemetry.insert( QStringLiteral("render_thread_queue_wait_ms"),
+                                       m_lastRenderThreadQueueWaitMs );
+    m_lastStageTimingTelemetry.insert( QStringLiteral("render_thread_work_ms"),
+                                       m_lastRenderThreadWorkMs );
+    m_lastStageTimingTelemetry.insert( QStringLiteral("render_thread_total_ms"),
+                                       m_lastRenderThreadTotalMs );
     emit frameReady();
 }

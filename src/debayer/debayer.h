@@ -5,6 +5,19 @@
 
 /* Easy debayer types */
 void debayerEasy(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads, int type);
+/* Fast none-debayer path for already-processed uint16 raw frames. */
+void debayerNoneU16(uint16_t * __restrict debayerto,
+                    const uint16_t * __restrict bayerdata,
+                    int width,
+                    int height,
+                    int threads,
+                    int bit_shift);
+void debayerBasicU16(uint16_t * __restrict debayerto,
+                     uint16_t * __restrict bayerdata,
+                     int width,
+                     int height,
+                     int threads,
+                     int bit_shift);
 /* Quite quick bilinear debayer, floating point sadly; threads argument is unused */
 void debayerBasic(uint16_t * __restrict debayerto, float * __restrict bayerdata, int width, int height, int threads);
 /* More useable amaze, threads number should be the number of cores(or threads if >= i7) your cpu has */
