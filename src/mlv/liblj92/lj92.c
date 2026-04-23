@@ -26,11 +26,45 @@ SOFTWARE.
 #include <stdlib.h>
 #include <string.h>
 
+#include "../../debug/StageTiming.h"
 #include "lj92.h"
 
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
+
+#if defined(__GNUC__)
+#define LJ92_ALWAYS_INLINE inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define LJ92_ALWAYS_INLINE __forceinline
+#else
+#define LJ92_ALWAYS_INLINE inline
+#endif
+
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_pred6_split_active = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_pred6_split_requested = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_generic_split_active = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_generic_split_requested = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_pred1_fast_path_active = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_pred1_fast_path_measurement_requested = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_pred1_fast_path_measurement_active = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_pred1_fast_path_eligible = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_scan_component_count = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_write_length = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_expected_write_length = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_skip_length = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_linearize_active = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_component_count = 0;
+static MLV_STAGE_THREAD_LOCAL int g_lj92_last_predictor = -1;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_pred6_total_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_pred6_bitstream_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_pred6_predictor_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_generic_total_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_generic_bitstream_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_generic_predictor_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_pred1_fast_path_total_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_pred1_fast_path_bitstream_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_lj92_last_pred1_fast_path_predictor_ms = 0.0;
 
 //#define SLOW_HUFF
 //#define DEBUG
@@ -60,7 +94,7 @@ typedef struct _ljp {
     int* huffsize;
     int* huffcode;
 #else
-    u16* hufflut;
+    u32* hufflut;
     int huffbits;
 #endif
     // Parse state
@@ -84,6 +118,32 @@ static int find(ljp* self) {
 }
 
 #define BEH(ptr) ((((int)(*&ptr))<<8)|(*(&ptr+1)))
+
+#ifndef SLOW_HUFF
+#define LJ92_HUFF_DIRECT_FLAG 0x80000000u
+#define LJ92_HUFF_DIRECT_BITS_MASK 0x1Fu
+#define LJ92_HUFF_DIRECT_DIFF_SHIFT 5
+#define LJ92_HUFF_DIRECT_DIFF_BIAS 32767
+
+// Predecoded entries let nextdiff_fast() skip payload refill/sign-extend when
+// the initial huffbits-wide peek already contains the whole symbol.
+static LJ92_ALWAYS_INLINE u32 lj92_pack_huff_fallback(int ssss, int usedbits)
+{
+    return ((u32)ssss << 8) | (u32)usedbits;
+}
+
+static LJ92_ALWAYS_INLINE u32 lj92_pack_huff_direct(int diff, int total_used_bits)
+{
+    return LJ92_HUFF_DIRECT_FLAG
+        | ((u32)(diff + LJ92_HUFF_DIRECT_DIFF_BIAS) << LJ92_HUFF_DIRECT_DIFF_SHIFT)
+        | (u32)total_used_bits;
+}
+
+static LJ92_ALWAYS_INLINE int lj92_unpack_huff_direct_diff(u32 entry)
+{
+    return (int)((entry >> LJ92_HUFF_DIRECT_DIFF_SHIFT) & 0xFFFFu) - LJ92_HUFF_DIRECT_DIFF_BIAS;
+}
+#endif
 
 static int parseHuff(ljp* self) {
     int ret = LJ92_ERROR_CORRUPT;
@@ -224,7 +284,7 @@ static int parseHuff(ljp* self) {
     }
     self->huffbits = maxbits;
     /* Now fill the lut */
-    u16* hufflut = malloc((1<<maxbits) * sizeof(u16));
+    u32* hufflut = malloc((1<<maxbits) * sizeof(u32));
     if (hufflut == NULL) return LJ92_ERROR_NO_MEMORY;
     self->hufflut = hufflut;
     int i = 0;
@@ -255,7 +315,23 @@ static int parseHuff(ljp* self) {
             continue;
         }
         hcode = huffvals[hv];
-        hufflut[i] = hcode<<8 | bitsused;
+        if (hcode == 0) {
+            hufflut[i] = lj92_pack_huff_direct(0, bitsused);
+        } else if (hcode == 16) {
+            hufflut[i] = lj92_pack_huff_direct(1 << 15, bitsused);
+        } else if (bitsused + hcode <= maxbits) {
+            const int payload_bits_available = maxbits - bitsused;
+            const int suffix_mask = (1 << payload_bits_available) - 1;
+            const int payload = (i & suffix_mask) >> (payload_bits_available - hcode);
+            int diff = payload;
+            const int vt = 1 << (hcode - 1);
+            if (diff < vt) {
+                diff += 1 - (1 << hcode);
+            }
+            hufflut[i] = lj92_pack_huff_direct(diff, bitsused + hcode);
+        } else {
+            hufflut[i] = lj92_pack_huff_fallback(hcode, bitsused);
+        }
         //printf("%d %d %d\n",i,bitsused,hcode);
         i++;
         rv++;
@@ -337,19 +413,27 @@ static int extend(ljp* self,int v,int t) {
 }
 #endif
 
-inline static int nextdiff(ljp* self) {
+static LJ92_ALWAYS_INLINE int nextdiff_fast(ljp* self, u32* b_io, int* cnt_io, int* ix_io) {
 #ifdef SLOW_HUFF
+    self->b = *b_io;
+    self->cnt = *cnt_io;
+    self->ix = *ix_io;
     int t = decode(self);
     int diff = receive(self,t);
     diff = extend(self,diff,t);
+    *b_io = self->b;
+    *cnt_io = self->cnt;
+    *ix_io = self->ix;
 #else
-    u32 b = self->b;
-    int cnt = self->cnt;
+    u32 b = *b_io;
+    int cnt = *cnt_io;
     int huffbits = self->huffbits;
-    int ix = self->ix;
+    int ix = *ix_io;
+    const u8* data = self->data;
+    const u32* hufflut = self->hufflut;
     int next;
     while (cnt < huffbits) {
-        next = *(u16*)&self->data[ix];
+        next = *(u16*)&data[ix];
         int one = next&0xFF;
         int two = next>>8;
         b = (b<<16)|(one<<8)|two;
@@ -362,9 +446,17 @@ inline static int nextdiff(ljp* self) {
         } else if (two==0xFF) ix++;
     }
     int index = b >> (cnt - huffbits);
-    u16 ssssused = self->hufflut[index];
-    int usedbits = ssssused&0xFF;
-    int t = ssssused>>8;
+    u32 huffentry = hufflut[index];
+    if (huffentry & LJ92_HUFF_DIRECT_FLAG) {
+        cnt -= (int)(huffentry & LJ92_HUFF_DIRECT_BITS_MASK);
+        u32 keepbitsmask = cnt ? ((1u << cnt) - 1u) : 0u;
+        *b_io = b & keepbitsmask;
+        *cnt_io = cnt;
+        *ix_io = ix;
+        return lj92_unpack_huff_direct_diff(huffentry);
+    }
+    int usedbits = huffentry&0xFF;
+    int t = huffentry>>8;
     //self->sssshist[t]++;
     cnt -= usedbits;
     int keepbitsmask = (1 << cnt)-1;
@@ -374,7 +466,7 @@ inline static int nextdiff(ljp* self) {
         diff = 1 << 15;
     } else {
         while (cnt < t) {
-            next = *(u16*)&self->data[ix];
+            next = *(u16*)&data[ix];
             int one = next&0xFF;
             int two = next>>8;
             b = (b<<16)|(one<<8)|two;
@@ -389,14 +481,13 @@ inline static int nextdiff(ljp* self) {
         diff = b >> cnt;
         int vt = 1<<(t-1);
         if (diff < vt) {
-            vt = (-1 << t) + 1;
-            diff += vt;
+            diff += 1 - (1 << t);
         }
     }
     keepbitsmask = (1 << cnt)-1;
-    self->b = b & keepbitsmask;
-    self->cnt = cnt;
-    self->ix = ix;
+    *b_io = b & keepbitsmask;
+    *cnt_io = cnt;
+    *ix_io = ix;
     //printf("%d %d\n",t,diff);
 #ifdef DEBUG
 #endif
@@ -404,17 +495,278 @@ inline static int nextdiff(ljp* self) {
     return diff;
 }
 
+static int lj92_pred6_split_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 0;
+    if (!initialized) {
+        const char* value = getenv("MLVAPP_PROFILE_LJ92_PRED6_SPLIT");
+        enabled = (value != NULL
+                   && value[0] != '\0'
+                   && !(value[0] == '0' && value[1] == '\0'));
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int lj92_generic_split_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 0;
+    if (!initialized) {
+        const char* value = getenv("MLVAPP_PROFILE_LJ92_GENERIC_SPLIT");
+        enabled = (value != NULL
+                   && value[0] != '\0'
+                   && !(value[0] == '0' && value[1] == '\0'));
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int lj92_pred1_fastpath_measurement_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 0;
+    if (!initialized) {
+        const char* value = getenv("MLVAPP_PRED1_FASTPATH_MEASUREMENT");
+        enabled = (value != NULL
+                   && value[0] != '\0'
+                   && !(value[0] == '0' && value[1] == '\0'));
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static void lj92_reset_last_pred6_timing(void)
+{
+    g_lj92_last_pred6_split_active = 0;
+    g_lj92_last_pred6_split_requested = 0;
+    g_lj92_last_generic_split_active = 0;
+    g_lj92_last_generic_split_requested = 0;
+    g_lj92_last_pred1_fast_path_active = 0;
+    g_lj92_last_pred1_fast_path_measurement_requested = 0;
+    g_lj92_last_pred1_fast_path_measurement_active = 0;
+    g_lj92_last_pred1_fast_path_eligible = 0;
+    g_lj92_last_scan_component_count = 0;
+    g_lj92_last_write_length = 0;
+    g_lj92_last_expected_write_length = 0;
+    g_lj92_last_skip_length = 0;
+    g_lj92_last_linearize_active = 0;
+    g_lj92_last_component_count = 0;
+    g_lj92_last_predictor = -1;
+    g_lj92_last_pred6_total_ms = 0.0;
+    g_lj92_last_pred6_bitstream_ms = 0.0;
+    g_lj92_last_pred6_predictor_ms = 0.0;
+    g_lj92_last_generic_total_ms = 0.0;
+    g_lj92_last_generic_bitstream_ms = 0.0;
+    g_lj92_last_generic_predictor_ms = 0.0;
+    g_lj92_last_pred1_fast_path_total_ms = 0.0;
+    g_lj92_last_pred1_fast_path_bitstream_ms = 0.0;
+    g_lj92_last_pred1_fast_path_predictor_ms = 0.0;
+}
+
+static void lj92_commit_last_pred6_timing(int active,
+                                          double total_ms,
+                                          double bitstream_ms,
+                                          double predictor_ms)
+{
+    g_lj92_last_pred6_split_active = active;
+    g_lj92_last_pred6_total_ms = total_ms;
+    g_lj92_last_pred6_bitstream_ms = bitstream_ms;
+    g_lj92_last_pred6_predictor_ms = predictor_ms;
+}
+
+static void lj92_commit_last_generic_timing(int active,
+                                            double total_ms,
+                                            double bitstream_ms,
+                                            double predictor_ms)
+{
+    g_lj92_last_generic_split_active = active;
+    g_lj92_last_generic_total_ms = total_ms;
+    g_lj92_last_generic_bitstream_ms = bitstream_ms;
+    g_lj92_last_generic_predictor_ms = predictor_ms;
+}
+
+static void lj92_commit_last_pred1_fast_path_timing(int fast_path_active,
+                                                    int measurement_active,
+                                                    double total_ms,
+                                                    double bitstream_ms,
+                                                    double predictor_ms)
+{
+    g_lj92_last_pred1_fast_path_active = fast_path_active;
+    g_lj92_last_pred1_fast_path_measurement_active = measurement_active;
+    g_lj92_last_pred1_fast_path_total_ms = total_ms;
+    g_lj92_last_pred1_fast_path_bitstream_ms = bitstream_ms;
+    g_lj92_last_pred1_fast_path_predictor_ms = predictor_ms;
+}
+
+static int lj92_can_use_pred1_fast_path(const ljp* self,
+                                        int scan_component_count,
+                                        int pred,
+                                        int profile_generic_split)
+{
+    return !profile_generic_split
+        && pred == 1
+        && self->components > 0
+        && scan_component_count == self->components
+        && self->linearize == NULL
+        && self->skiplen == 0
+        && self->writelen == (self->x * self->y * self->components);
+}
+
+static int parseScanPred1Fast(ljp* self);
+
+static int parseScanPred1FastMeasured(ljp* self)
+{
+    int ix = self->scanstart;
+    ix += BEH(self->data[ix]);
+
+    int cnt = 0;
+    u32 b = 0;
+
+    const int width = self->x;
+    const int height = self->y;
+    const int components = self->components;
+    const int row_stride = width * components;
+    const int base_prediction = 1 << (self->bits - 1);
+
+    u16* out = self->image;
+    u16* thisrow = self->outrow[0];
+    u16* lastrow = self->outrow[1];
+    int* diff_buffer = malloc((size_t)row_stride * sizeof(int));
+    if (diff_buffer == NULL) {
+        return parseScanPred1Fast(self);
+    }
+
+    const double total_start = mlv_stage_timing_now();
+    double bitstream_ms = 0.0;
+    double predictor_ms = 0.0;
+    double stage_start;
+
+    for (int row = 0; row < height; row++) {
+        stage_start = mlv_stage_timing_now();
+        for (int index = 0; index < row_stride; index++) {
+            diff_buffer[index] = nextdiff_fast(self, &b, &cnt, &ix);
+        }
+        bitstream_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+
+        stage_start = mlv_stage_timing_now();
+        for (int col = 0; col < width; col++) {
+            const int colx = col * components;
+            const int prev_colx = (col - 1) * components;
+            for (int component = 0; component < components; component++) {
+                int Px;
+                if ((row == 0) && (col == 0))
+                    Px = base_prediction;
+                else if (row == 0)
+                    Px = thisrow[prev_colx + component];
+                else if (col == 0)
+                    Px = lastrow[component];
+                else
+                    Px = thisrow[prev_colx + component];
+
+                const int value = (u16)(Px + diff_buffer[colx + component]);
+                thisrow[colx + component] = (u16)value;
+                out[colx + component] = (u16)value;
+            }
+        }
+        predictor_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+
+        u16* temprow = lastrow;
+        lastrow = thisrow;
+        thisrow = temprow;
+        out += row_stride;
+    }
+
+    lj92_commit_last_pred1_fast_path_timing(1,
+                                            1,
+                                            (mlv_stage_timing_now() - total_start) * 1000.0,
+                                            bitstream_ms,
+                                            predictor_ms);
+    free(diff_buffer);
+
+    self->ix = ix;
+    self->cnt = cnt;
+    self->b = b;
+    lj92_commit_last_generic_timing(0, 0.0, 0.0, 0.0);
+    return LJ92_ERROR_NONE;
+}
+
+static int parseScanPred1Fast(ljp* self)
+{
+    int ix = self->scanstart;
+    ix += BEH(self->data[ix]);
+
+    int cnt = 0;
+    u32 b = 0;
+
+    const int width = self->x;
+    const int height = self->y;
+    const int components = self->components;
+    const int row_stride = width * components;
+    const int base_prediction = 1 << (self->bits - 1);
+
+    u16* out = self->image;
+    u16* thisrow = self->outrow[0];
+    u16* lastrow = self->outrow[1];
+
+    for (int row = 0; row < height; row++) {
+        for (int col = 0; col < width; col++) {
+            const int colx = col * components;
+            const int prev_colx = (col - 1) * components;
+            for (int component = 0; component < components; component++) {
+                int Px;
+                if ((row == 0) && (col == 0))
+                    Px = base_prediction;
+                else if (row == 0)
+                    Px = thisrow[prev_colx + component];
+                else if (col == 0)
+                    Px = lastrow[component];
+                else
+                    Px = thisrow[prev_colx + component];
+
+                const int value = (u16)(Px + nextdiff_fast(self, &b, &cnt, &ix));
+                thisrow[colx + component] = (u16)value;
+                out[colx + component] = (u16)value;
+            }
+        }
+
+        u16* temprow = lastrow;
+        lastrow = thisrow;
+        thisrow = temprow;
+        out += row_stride;
+    }
+
+    lj92_commit_last_pred1_fast_path_timing(1, 0, 0.0, 0.0, 0.0);
+    self->ix = ix;
+    self->cnt = cnt;
+    self->b = b;
+    lj92_commit_last_generic_timing(0, 0.0, 0.0, 0.0);
+    return LJ92_ERROR_NONE;
+}
+
 static int parsePred6(ljp* self) {
     int ret = LJ92_ERROR_CORRUPT;
-    self->ix = self->scanstart;
+    const int profile_split = lj92_pred6_split_enabled();
+    const double pred6_start = profile_split ? mlv_stage_timing_now() : 0.0;
+    double bitstream_ms = 0.0;
+    double predictor_ms = 0.0;
+    double stage_start = 0.0;
+    int ix = self->scanstart;
     //int compcount = self->data[self->ix+2];
-    self->ix += BEH(self->data[self->ix]);
-    self->cnt = 0;
-    self->b = 0;
+    ix += BEH(self->data[ix]);
+    int cnt = 0;
+    u32 b = 0;
     int write = self->writelen;
+    const int datalen = self->datalen;
+    const int x = self->x;
+    const int y = self->y;
+    const int bits = self->bits;
+    u16* const linearize = self->linearize;
+    const int linlen = self->linlen;
     // Now need to decode huffman coded values
     int c = 0;
-    int pixels = self->y * self->x;
+    int pixels = y * x;
     u16* out = self->image;
     u16* temprow;
     u16* thisrow = self->outrow[0];
@@ -429,32 +781,58 @@ static int parsePred6(ljp* self) {
     int linear;
 
     // First pixel
-    diff = nextdiff(self);
-    Px = 1 << (self->bits-1);
+    if (profile_split) stage_start = mlv_stage_timing_now();
+    diff = nextdiff_fast(self, &b, &cnt, &ix);
+    if (profile_split) bitstream_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+    if (profile_split) stage_start = mlv_stage_timing_now();
+    Px = 1 << (bits-1);
     left = Px + diff;
-    left = (u16) (left%65536);
-    if (self->linearize)
-        linear = self->linearize[left];
+    left = (u16)left;
+    if (linearize)
+        linear = linearize[left];
     else
         linear = left;
     thisrow[col++] = left;
     out[c++] = linear;
-    if (self->ix >= self->datalen) return ret;
+    if (profile_split) predictor_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+    if (ix >= datalen) {
+        self->ix = ix;
+        self->cnt = cnt;
+        self->b = b;
+        if (profile_split)
+            lj92_commit_last_pred6_timing(1, (mlv_stage_timing_now() - pred6_start) * 1000.0, bitstream_ms, predictor_ms);
+        else
+            lj92_commit_last_pred6_timing(0, 0.0, 0.0, 0.0);
+        return ret;
+    }
     --write;
-    int rowcount = self->x-1;
+    int rowcount = x-1;
     while (rowcount--) {
-        diff = nextdiff(self);
+        if (profile_split) stage_start = mlv_stage_timing_now();
+        diff = nextdiff_fast(self, &b, &cnt, &ix);
+        if (profile_split) bitstream_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+        if (profile_split) stage_start = mlv_stage_timing_now();
         Px = left;
         left = Px + diff;
-        left = (u16) (left%65536);
-        if (self->linearize)
-            linear = self->linearize[left];
+        left = (u16)left;
+        if (linearize)
+            linear = linearize[left];
         else
             linear = left;
         thisrow[col++] = left;
         out[c++] = linear;
+        if (profile_split) predictor_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
         //printf("%d %d %d %d %x\n",col-1,diff,left,thisrow[col-1],&thisrow[col-1]);
-        if (self->ix >= self->datalen) return ret;
+        if (ix >= datalen) {
+            self->ix = ix;
+            self->cnt = cnt;
+            self->b = b;
+            if (profile_split)
+                lj92_commit_last_pred6_timing(1, (mlv_stage_timing_now() - pred6_start) * 1000.0, bitstream_ms, predictor_ms);
+            else
+                lj92_commit_last_pred6_timing(0, 0.0, 0.0, 0.0);
+            return ret;
+        }
         if (--write==0) {
             out += self->skiplen;
             write = self->writelen;
@@ -467,37 +845,63 @@ static int parsePred6(ljp* self) {
     //printf("%x %x\n",thisrow,lastrow);
     while (c<pixels) {
         col = 0;
-        diff = nextdiff(self);
+        if (profile_split) stage_start = mlv_stage_timing_now();
+        diff = nextdiff_fast(self, &b, &cnt, &ix);
+        if (profile_split) bitstream_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+        if (profile_split) stage_start = mlv_stage_timing_now();
         Px = lastrow[col]; // Use value above for first pixel in row
         left = Px + diff;
-        left = (u16) (left%65536);
-        if (self->linearize) {
-            if (left>self->linlen) return LJ92_ERROR_CORRUPT;
-            linear = self->linearize[left];
+        left = (u16)left;
+        if (linearize) {
+            if (left>linlen) {
+                self->ix = ix;
+                self->cnt = cnt;
+                self->b = b;
+                if (profile_split)
+                    lj92_commit_last_pred6_timing(1, (mlv_stage_timing_now() - pred6_start) * 1000.0, bitstream_ms, predictor_ms);
+                else
+                    lj92_commit_last_pred6_timing(0, 0.0, 0.0, 0.0);
+                return LJ92_ERROR_CORRUPT;
+            }
+            linear = linearize[left];
         } else
             linear = left;
         thisrow[col++] = left;
         //printf("%d %d %d %d\n",col,diff,left,lastrow[col]);
         out[c++] = linear;
-        if (self->ix >= self->datalen) break;
-        rowcount = self->x-1;
+        if (profile_split) predictor_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+        if (ix >= datalen) break;
+        rowcount = x-1;
         if (--write==0) {
             out += self->skiplen;
             write = self->writelen;
         }
         while (rowcount--) {
-            diff = nextdiff(self);
+            if (profile_split) stage_start = mlv_stage_timing_now();
+            diff = nextdiff_fast(self, &b, &cnt, &ix);
+            if (profile_split) bitstream_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+            if (profile_split) stage_start = mlv_stage_timing_now();
             Px = lastrow[col] + ((left - lastrow[col-1])>>1);
             left = Px + diff;
-            left = (u16) (left%65536);
+            left = (u16)left;
             //printf("%d %d %d %d %d %x\n",col,diff,left,lastrow[col],lastrow[col-1],&lastrow[col]);
-            if (self->linearize) {
-                if (left>self->linlen) return LJ92_ERROR_CORRUPT;
-                linear = self->linearize[left];
+            if (linearize) {
+                if (left>linlen) {
+                    self->ix = ix;
+                    self->cnt = cnt;
+                    self->b = b;
+                    if (profile_split)
+                        lj92_commit_last_pred6_timing(1, (mlv_stage_timing_now() - pred6_start) * 1000.0, bitstream_ms, predictor_ms);
+                    else
+                        lj92_commit_last_pred6_timing(0, 0.0, 0.0, 0.0);
+                    return LJ92_ERROR_CORRUPT;
+                }
+                linear = linearize[left];
             } else
                 linear = left;
             thisrow[col++] = left;
             out[c++] = linear;
+            if (profile_split) predictor_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
             if (--write==0) {
                 out += self->skiplen;
                 write = self->writelen;
@@ -506,8 +910,15 @@ static int parsePred6(ljp* self) {
         temprow = lastrow;
         lastrow = thisrow;
         thisrow = temprow;
-        if (self->ix >= self->datalen) break;
+        if (ix >= datalen) break;
     }
+    self->ix = ix;
+    self->cnt = cnt;
+    self->b = b;
+    if (profile_split)
+        lj92_commit_last_pred6_timing(1, (mlv_stage_timing_now() - pred6_start) * 1000.0, bitstream_ms, predictor_ms);
+    else
+        lj92_commit_last_pred6_timing(0, 0.0, 0.0, 0.0);
     if (c >= pixels) ret = LJ92_ERROR_NONE;
     return ret;
 }
@@ -518,11 +929,37 @@ static int parseScan(ljp* self) {
     self->ix = self->scanstart;
     int compcount = self->data[self->ix+2];
     int pred = self->data[self->ix+3+2*compcount];
+    const int expected_write_length = self->x * self->y * self->components;
+    g_lj92_last_pred6_split_requested = lj92_pred6_split_enabled();
+    g_lj92_last_generic_split_requested = lj92_generic_split_enabled();
+    g_lj92_last_pred1_fast_path_measurement_requested = lj92_pred1_fastpath_measurement_enabled();
+    g_lj92_last_scan_component_count = compcount;
+    g_lj92_last_write_length = self->writelen;
+    g_lj92_last_expected_write_length = expected_write_length;
+    g_lj92_last_skip_length = self->skiplen;
+    g_lj92_last_linearize_active = self->linearize != NULL;
+    g_lj92_last_component_count = self->components;
+    g_lj92_last_predictor = pred;
     if (pred<0 || pred>7) return ret;
+    g_lj92_last_pred1_fast_path_eligible =
+        lj92_can_use_pred1_fast_path(self,
+                                     compcount,
+                                     pred,
+                                     g_lj92_last_generic_split_requested);
     if (pred==6) return parsePred6(self); // Fast path
-    self->ix += BEH(self->data[self->ix]);
-    self->cnt = 0;
-    self->b = 0;
+    if (g_lj92_last_pred1_fast_path_eligible)
+        return g_lj92_last_pred1_fast_path_measurement_requested
+            ? parseScanPred1FastMeasured(self)
+            : parseScanPred1Fast(self);
+    const int profile_generic_split = g_lj92_last_generic_split_requested;
+    const double generic_start = profile_generic_split ? mlv_stage_timing_now() : 0.0;
+    double generic_bitstream_ms = 0.0;
+    double generic_predictor_ms = 0.0;
+    double stage_start = 0.0;
+    int ix = self->scanstart;
+    ix += BEH(self->data[ix]);
+    int cnt = 0;
+    u32 b = 0;
     u16* out = self->image;
     u16* thisrow = self->outrow[0];
     u16* lastrow = self->outrow[1];
@@ -535,6 +972,7 @@ static int parseScan(ljp* self) {
         for (int col = 0; col < self->x; col++) {
             int colx = col * self->components;
             for (int c = 0; c < self->components; c++) {
+                if (profile_generic_split) stage_start = mlv_stage_timing_now();
                 if ((col==0)&&(row==0)) {
                     Px = 1 << (self->bits-1);
                 } else if (row==0) {
@@ -572,20 +1010,36 @@ static int parseScan(ljp* self) {
                           break;
                     }
                 }
-                
-                diff = nextdiff(self);
+                if (profile_generic_split) generic_predictor_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+                if (profile_generic_split) stage_start = mlv_stage_timing_now();
+                diff = nextdiff_fast(self, &b, &cnt, &ix);
+                if (profile_generic_split) generic_bitstream_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
+                if (profile_generic_split) stage_start = mlv_stage_timing_now();
                 left = Px + diff;
-                left = (u16) (left%65536);
+                left = (u16)left;
                 //printf("%d %d %d\n",c,diff,left);
                 int linear;
                 if (self->linearize) {
-                    if (left>self->linlen) return LJ92_ERROR_CORRUPT;
+                    if (left>self->linlen) {
+                        self->ix = ix;
+                        self->cnt = cnt;
+                        self->b = b;
+                        if (profile_generic_split)
+                            lj92_commit_last_generic_timing(1,
+                                                            (mlv_stage_timing_now() - generic_start) * 1000.0,
+                                                            generic_bitstream_ms,
+                                                            generic_predictor_ms);
+                        else
+                            lj92_commit_last_generic_timing(0, 0.0, 0.0, 0.0);
+                        return LJ92_ERROR_CORRUPT;
+                    }
                     linear = self->linearize[left];
                 } else
                     linear = left;
 
                 thisrow[colx + c] = left;
                 out[colx + c] = linear; // HACK
+                if (profile_generic_split) generic_predictor_ms += (mlv_stage_timing_now() - stage_start) * 1000.0;
             } // c
         } // col
 
@@ -596,6 +1050,17 @@ static int parseScan(ljp* self) {
         out += self->x * self->components + self->skiplen;
     } // row
 
+    self->ix = ix;
+    self->cnt = cnt;
+    self->b = b;
+
+    if (profile_generic_split)
+        lj92_commit_last_generic_timing(1,
+                                        (mlv_stage_timing_now() - generic_start) * 1000.0,
+                                        generic_bitstream_ms,
+                                        generic_predictor_ms);
+    else
+        lj92_commit_last_generic_timing(0, 0.0, 0.0, 0.0);
     ret = LJ92_ERROR_NONE;
     return ret;
 }
@@ -697,6 +1162,7 @@ int lj92_decode(lj92 lj,
     int ret = LJ92_ERROR_NONE;
     ljp* self = lj;
     if (self == NULL) return LJ92_ERROR_BAD_HANDLE;
+    lj92_reset_last_pred6_timing();
     self->image = target;
     self->writelen = writeLength;
     self->skiplen = skipLength;
@@ -704,6 +1170,102 @@ int lj92_decode(lj92 lj,
     self->linlen = linearizeLength;
     ret = parseScan(self);
     return ret;
+}
+
+int lj92_get_last_pred6_split_active(void) {
+    return g_lj92_last_pred6_split_active;
+}
+
+int lj92_get_last_pred6_split_requested(void) {
+    return g_lj92_last_pred6_split_requested;
+}
+
+int lj92_get_last_generic_split_active(void) {
+    return g_lj92_last_generic_split_active;
+}
+
+int lj92_get_last_generic_split_requested(void) {
+    return g_lj92_last_generic_split_requested;
+}
+
+int lj92_get_last_pred1_fast_path_active(void) {
+    return g_lj92_last_pred1_fast_path_active;
+}
+
+int lj92_get_last_pred1_fast_path_measurement_requested(void) {
+    return g_lj92_last_pred1_fast_path_measurement_requested;
+}
+
+int lj92_get_last_pred1_fast_path_measurement_active(void) {
+    return g_lj92_last_pred1_fast_path_measurement_active;
+}
+
+int lj92_get_last_pred1_fast_path_eligible(void) {
+    return g_lj92_last_pred1_fast_path_eligible;
+}
+
+int lj92_get_last_scan_component_count(void) {
+    return g_lj92_last_scan_component_count;
+}
+
+int lj92_get_last_write_length(void) {
+    return g_lj92_last_write_length;
+}
+
+int lj92_get_last_expected_write_length(void) {
+    return g_lj92_last_expected_write_length;
+}
+
+int lj92_get_last_skip_length(void) {
+    return g_lj92_last_skip_length;
+}
+
+int lj92_get_last_linearize_active(void) {
+    return g_lj92_last_linearize_active;
+}
+
+int lj92_get_last_component_count(void) {
+    return g_lj92_last_component_count;
+}
+
+int lj92_get_last_predictor(void) {
+    return g_lj92_last_predictor;
+}
+
+double lj92_get_last_pred6_total_ms(void) {
+    return g_lj92_last_pred6_total_ms;
+}
+
+double lj92_get_last_pred6_bitstream_ms(void) {
+    return g_lj92_last_pred6_bitstream_ms;
+}
+
+double lj92_get_last_pred6_predictor_ms(void) {
+    return g_lj92_last_pred6_predictor_ms;
+}
+
+double lj92_get_last_generic_total_ms(void) {
+    return g_lj92_last_generic_total_ms;
+}
+
+double lj92_get_last_generic_bitstream_ms(void) {
+    return g_lj92_last_generic_bitstream_ms;
+}
+
+double lj92_get_last_generic_predictor_ms(void) {
+    return g_lj92_last_generic_predictor_ms;
+}
+
+double lj92_get_last_pred1_fast_path_total_ms(void) {
+    return g_lj92_last_pred1_fast_path_total_ms;
+}
+
+double lj92_get_last_pred1_fast_path_bitstream_ms(void) {
+    return g_lj92_last_pred1_fast_path_bitstream_ms;
+}
+
+double lj92_get_last_pred1_fast_path_predictor_ms(void) {
+    return g_lj92_last_pred1_fast_path_predictor_ms;
 }
 
 void lj92_close(lj92 lj) {
