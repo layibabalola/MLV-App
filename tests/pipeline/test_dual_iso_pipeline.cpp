@@ -7,6 +7,7 @@
 #include "mlv_pipeline_fixture.h"
 
 #include "../../src/mlv/llrawproc/llrawproc.h"
+#include "../../src/processing/raw_processing.h"
 
 #include <cmath>
 #include <cstring>
@@ -250,6 +251,49 @@ TEST(DualIsoPipeline, DirectProcessed8FastPathMatchesShiftedProcessed16Reference
                                            &error_message));
     ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
     configure_direct_processed8_supported_subset(direct_fixture);
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
+
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, DirectProcessed8FastPathMatchesShiftedProcessed16WithCreativeCurveCache)
+{
+    const float curve_x[] = { 0.0f, 0.35f, 0.7f, 1.0f };
+    const float curve_y[] = { 0.0f, 0.28f, 0.78f, 1.0f };
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    reference_fixture.processing()->allow_creative_adjustments = 1;
+    processingSetGCurve(reference_fixture.processing(), 4, const_cast<float *>(curve_x), const_cast<float *>(curve_y), 1);
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 1);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    direct_fixture.processing()->allow_creative_adjustments = 1;
+    processingSetGCurve(direct_fixture.processing(), 4, const_cast<float *>(curve_x), const_cast<float *>(curve_y), 1);
     const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
 
     ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);

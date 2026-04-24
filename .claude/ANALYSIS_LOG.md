@@ -414,3 +414,17 @@
   - plain `console_tests --check-golden`: `41/160/17/0`
   - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/750/1/0`
   - `pipeline_tests --check-golden`: `46/526/4/0`
+
+## 2026-04-23 - direct processed8 follow-up rejects + kept regression guard
+
+- Rejected three same-day post-decode micro-passes on top of the direct processed8 keep:
+  - fused `pre_calc_levels` into the row kernel
+  - precomposed direct-8 creative-curve tables
+  - forced the direct-8 levels pass to the caller thread count
+- None of those held up as an honest playback keep on this VM once rerun.
+- Kept only the stronger pipeline guard:
+  - `DualIsoPipeline.DirectProcessed8FastPathMatchesShiftedProcessed16WithCreativeCurveCache`
+- Fresh green result on the kept tree:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden`: `41/750/1/0`
+  - `pipeline_tests --check-golden`: `47/537/4/0`

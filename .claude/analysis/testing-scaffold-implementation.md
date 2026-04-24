@@ -427,3 +427,14 @@
 - Practical scaffold takeaway:
   - the playback overlap work is now covered by the same console + pipeline + app-backed profile contracts that already pinned the direct-8-bit path
   - follow-up playback experiments should keep using those three checks before claiming any new cadence win
+
+### Direct processed8 creative-curve regression guard (2026-04-23, late)
+
+- Added a second strict direct processed8 parity guard in `tests/pipeline/test_dual_iso_pipeline.cpp`:
+  - `DualIsoPipeline.DirectProcessed8FastPathMatchesShiftedProcessed16WithCreativeCurveCache`
+- The new test keeps the direct processed8 path active, applies a non-identity gradation curve via `processingSetGCurve(...)`, then asserts the 8-bit fast path still matches `(processed16 >> 8)` exactly.
+- This was kept after several rejected direct processed8 micro-optimization experiments because it strengthens the hot-path contract without claiming a throughput win that did not hold up.
+- Fresh validation on the kept tree:
+  - `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden`: `41/750/1/0`
+  - `pipeline_tests --check-golden`: `47/537/4/0`

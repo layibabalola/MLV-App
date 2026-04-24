@@ -1460,3 +1460,38 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / medium effort: add runtime-dispatched AVX2 on the surviving hot current-receipt loops.
    The best target is still the direct processed-8 color core in `src/processing/raw_processing.c`, because that path is active on the real large Dual ISO preview receipt today.
 3. Medium impact / medium effort: only revisit playback-only subset work after we define a subset that is actually cheaper than the current direct processed-8 path on the target receipt.
+
+## Direct processed8 follow-up rejects + creative-curve guard (2026-04-23)
+
+### Verified locally
+
+- I ran three additional post-decode micro-passes on top of the current direct processed8 keep and rejected all three as playback keeps on this VM:
+  - fused `pre_calc_levels` into the direct-8 row kernel
+    - scratch folder: `.claude/profiling/20260423-direct8-fused-levels-v1/`
+    - result: clearly slower; not kept
+  - precomposed the direct-8 creative-curve chain into single-hop tables
+    - scratch folders: `.claude/profiling/20260423-direct8-curvecache-v1/` and `.claude/profiling/20260423-direct8-curvecache-v1-keepcheck/`
+    - result: did not hold up across reruns; not kept
+  - forced the direct-8 levels pass to honor the caller thread count explicitly
+    - scratch folders: `.claude/profiling/20260423-direct8-levelthreads-v1-keepcheck/` and `.claude/profiling/20260423-direct8-levelthreads-v1-staggered/`
+    - result: mixed single-run signal, but not a stable keep; not kept
+- The only code change I kept from this follow-up block is a stronger direct-8 regression guard in `tests/pipeline/test_dual_iso_pipeline.cpp`.
+  - `DirectProcessed8FastPathMatchesShiftedProcessed16WithCreativeCurveCache` forces a non-identity gradation curve while the direct processed8 path stays active and asserts zero-diff against `(processed16 >> 8)`.
+  - This protects the hot path against future lookup-table shortcuts that only happen to pass the neutral-curve case.
+- Fresh validation on the kept tree after reverting the non-winners:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/750/1/0`
+  - `pipeline_tests --check-golden`: `47/537/4/0`
+
+### Cross-checked from prior analysis
+
+- The current kept runtime baseline is still the direct processed8 OpenMP path from `.claude/profiling/20260423-direct8-omp-v2-final/`, with warm cadence medians in the high-`37 ms` band.
+- These rejected follow-ups reinforce the earlier ranking:
+  - the next honest CPU lever is a true SIMD/runtime-dispatch pass on the surviving direct processed8 color core
+  - not more table-lookup reshaping or small llrawproc preview churn without tighter same-session A/B controls
+
+### Ranked next steps
+
+1. High impact / medium effort: add runtime-dispatched AVX2 on the direct processed8 color core in `src/processing/raw_processing.c`, with scalar fallback preserved and parity checked against the existing direct-8 zero-diff tests.
+2. High impact / medium effort: revisit playback-only subset work only if it is measurably cheaper than the current direct processed8 path on the real large Dual ISO preview receipt.
+3. Medium impact / low-medium effort: if another micro-pass is attempted, capture same-session control and candidate artifacts before and after the change so VM drift does not masquerade as a real keep.
