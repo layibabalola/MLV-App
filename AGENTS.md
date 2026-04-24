@@ -1,10 +1,10 @@
 # Workspace Notes For Codex
 
-## Sensitive Folders — Write Policy
+## Sensitive Folders -- Write Policy
 - **DO NOT write new files into `.claude/`**. It is treated as a sensitive folder in this repo. Anything committed there was curated and should stay stable.
 - Write all *new* agent scratch/state to `.claude-state/` instead. This includes profiling runs, temporary JSON, smoke-test logs, stashed artifacts, summary scripts, etc. `.claude-state/` is `.gitignore`d.
-- Durable cross-session findings (the kind you want committed alongside a code change) still belong under `.claude/analysis/<topic>.md` — *editing* existing tracked notes there is fine, but do not create ad-hoc new files under `.claude/profiling/` or `.claude/` roots.
-- Codex worktrees under `.claude/worktrees/` remain in place — that subtree is load-bearing.
+- Durable cross-session findings (the kind you want committed alongside a code change) still belong under `.claude/analysis/<topic>.md` -- editing existing tracked notes there is fine, but do not create ad-hoc new files under `.claude/profiling/` or `.claude/` roots.
+- Codex worktrees under `.claude/worktrees/` remain in place -- that subtree is load-bearing.
 
 ## Investigation Discipline
 - Scratch profiling / ephemeral measurements: `.claude-state/profiling/<date>-<topic>/`.
@@ -28,16 +28,29 @@
 - Keep the docs above synchronized with what is implemented now versus still planned next.
 
 ## Runtime Execution Rules (Windows)
-- Before running any `MLVApp.exe` binary directly, always use an explicit Qt runtime path match to the build and set it for that command.
+- Before running any `MLVApp.exe` binary directly, always use a Qt runtime path that matches the binary and force it for that launch.
 - Required shell pattern before launch:
-  - set `QT_OPENGL=desktop` if not already set.
-  - set `PATH` so the active Qt release bin directory comes **before** any other Qt install:
-    - `C:\Qt\6.10.2\mingw_64\bin` (this branch’s default Qt runtime).
-    - then `C:\Qt\Tools\mingw1310_64\bin`.
-    - then the repo/build directory containing `MLVApp.exe`.
-  - launch from the directory that contains the executable (or pass absolute paths).
-- Do not mix 6.10.2 MinGW runtime binaries with a different Qt runtime in the same launch session.
-- Prefer this launch pattern for profile/test runs:
-  - `Push-Location <build-root>\release; $env:QT_OPENGL='desktop'; $env:PATH='<build-root>\release;C:\Qt\6.10.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;' + $env:PATH; .\MLVApp.exe ...; Pop-Location`
-- If the system reports missing `Qt6Core.dll` / `Qt6Network.dll` or entry-point lookup failures, rerun `windeployqt` for that exe:
+  - set `QT_OPENGL=desktop`.
+  - set `PATH` so the active Qt runtime comes first, then the active MinGW toolchain, then the exe folder:
+    - `C:\Qt\6.10.2\mingw_64\bin`
+    - `C:\Qt\Tools\mingw1310_64\bin`
+    - `<directory containing MLVApp.exe>`
+  - launch from the exe directory (or pass absolute paths).
+- Do not mix `C:\Qt\6.10.2\mingw_64` runtime binaries with a different Qt runtime in the same launch session.
+- For profile/test runs, prefer:
+  - `Set-Location <build-root>\release`
+  - `$env:QT_OPENGL='desktop'`
+  - `$env:PATH='C:\Qt\6.10.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;' + (Get-Location) + ';' + $env:PATH`
+  - `.\MLVApp.exe ...`
+- If the system reports missing `Qt6Core.dll` / `Qt6Network.dll` or entry-point lookup failures, rerun:
   - `C:\Qt\6.10.2\mingw_64\bin\windeployqt.exe <path-to-MLVApp.exe> --release --no-translations --no-compiler-runtime`
+- For a repeatable launch with less chance of error, use:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File platform\qt\scripts\run-mlvapp.ps1 -ExePath <path-to-MLVApp.exe> -Arguments '--help'`
+  - if you changed Qt paths, pass `-QtBin ...` and `-MingwBin ...`.
+
+## Runtime helper
+- Use `platform\qt\scripts\run-mlvapp.ps1` for deterministic launches:
+  - prepends the correct Qt and toolchain bins,
+  - sets `QT_OPENGL=desktop`,
+  - optionally runs `windeployqt` in-place,
+  - and launches `MLVApp.exe` with supplied arguments.
