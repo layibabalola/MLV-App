@@ -67,6 +67,7 @@
 #include "BadPixelFileHandler.h"
 #include "FocusPixelMapManager.h"
 #include "StatusFpmDialog.h"
+#include "CrashForensics.h"
 #include "RenameDialog.h"
 #include "batch/BatchContext.h"
 #include "batch/BatchPrompts.h"
@@ -1832,6 +1833,18 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     m_lastPlayToFirstFrameValid ? m_lastPlayToFirstFrameMs : -1.0 );
     metadata.insert( QStringLiteral("average_latency_ms"), frameSamples.isEmpty() ? 0.0 : ( latencySumMs / frameSamples.size() ) );
     metadata.insert( QStringLiteral("average_cadence_ms"), cadenceCount > 0 ? ( cadenceSumMs / cadenceCount ) : 0.0 );
+
+    /* Crash-forensics run metadata: build SHA, Qt/OS/CPU fingerprints,
+     * command line.  Mirrors the line emitted into the rotating log at
+     * startup so profile JSONs and log files share an identifier. */
+    {
+        const QJsonDocument runMetadataDoc = QJsonDocument::fromJson(
+            CrashForensics::runMetadataJson().toUtf8() );
+        if( runMetadataDoc.isObject() )
+        {
+            metadata.insert( QStringLiteral("run_metadata"), runMetadataDoc.object() );
+        }
+    }
 
     QJsonObject documentRoot;
     documentRoot.insert( QStringLiteral("metadata"), metadata );

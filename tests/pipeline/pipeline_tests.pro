@@ -12,6 +12,7 @@ SOURCES += \
     $$REPO_ROOT/tests/common/frame_compare.cpp \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
     $$REPO_ROOT/tests/common/repo_paths.cpp \
+    $$REPO_ROOT/platform/qt/CrashForensics.cpp \
     $$REPO_ROOT/platform/qt/GpuDebayer.cpp \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.cpp \
     $$REPO_ROOT/platform/qt/ReceiptSettings.cpp \
@@ -80,7 +81,8 @@ SOURCES += \
     $$REPO_ROOT/tests/pipeline/test_gpu_preview_processing.cpp \
     $$REPO_ROOT/tests/pipeline/test_backend_parametric_shell.cpp \
     $$REPO_ROOT/tests/pipeline/test_backend_parametric_debayer_shell.cpp \
-    $$REPO_ROOT/tests/pipeline/test_processing_filters.cpp
+    $$REPO_ROOT/tests/pipeline/test_processing_filters.cpp \
+    $$REPO_ROOT/tests/pipeline/test_crash_forensics.cpp
 
 HEADERS += \
     $$REPO_ROOT/tests/common/minitest.h \
@@ -89,6 +91,7 @@ HEADERS += \
     $$REPO_ROOT/tests/common/frame_compare.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h \
+    $$REPO_ROOT/platform/qt/CrashForensics.h \
     $$REPO_ROOT/platform/qt/GpuDebayer.h \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
     $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.h \
@@ -97,6 +100,8 @@ HEADERS += \
 win32{
     QMAKE_CFLAGS += -O2 -fopenmp -mssse3 -msse3 -msse2 -msse -D_FILE_OFFSET_BITS=64 -std=c99 -ftree-vectorize
     LIBS += -llibgomp-1
+    # dbghelp: CrashForensics links MiniDumpWriteDump via dbghelp.
+    LIBS += -ldbghelp
     QMAKE_CXXFLAGS += -fopenmp -std=c++17 -ftree-vectorize
 }
 
