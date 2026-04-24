@@ -45,11 +45,11 @@
 - If the system reports missing `Qt6Core.dll` / `Qt6Network.dll` or entry-point lookup failures, rerun:
   - `C:\Qt\6.10.2\mingw_64\bin\windeployqt.exe <path-to-MLVApp.exe> --release --no-translations --no-compiler-runtime`
 - For a repeatable launch with less chance of error, use:
-  - `powershell -NoProfile -ExecutionPolicy Bypass -File platform\qt\scripts\run-mlvapp.ps1 -ExePath <path-to-MLVApp.exe> -Arguments '--help'`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File .claude-state\\scripts\\run-mlvapp.ps1 -ExePath <path-to-MLVApp.exe> -Arguments '--help'`
   - if you changed Qt paths, pass `-QtBin ...` and `-MingwBin ...`.
 
 ## Runtime helper
-- Use `platform\qt\scripts\run-mlvapp.ps1` for deterministic launches:
+- Use `.claude-state\\scripts\\run-mlvapp.ps1` for deterministic launches:
   - prepends the correct Qt and toolchain bins,
   - sets `QT_OPENGL=desktop`,
   - optionally runs `windeployqt` in-place,
