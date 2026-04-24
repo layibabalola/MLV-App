@@ -58,6 +58,24 @@
 - Practical conclusion:
   - `4` threads is the best local benchmark point on this VM for the current Dual ISO preview workload
   - `8` threads regress, so future VM-local CPU passes should benchmark at `4` unless the host proves otherwise
+
+## 2026-04-24 - Reinhard inline same-session A/B
+
+- Ran a clean paired baseline+inline comparison from `ed3e5a17^ (1949b2d9...)` to `ed3e5a17` in one session using `--profile-playback` on the Large Dual ISO fixture:
+  - `--input tests/fixtures/clips/large_dual_iso.mlv`
+  - `--receipt tests/fixtures/receipts/large_dual_iso_hq.marxml`
+  - `--frames 16 --threads 1 --raw-cache-mb 0`
+- Executed 4 runs each, warm-filtering `sample_index >= 4`, artifacts in:
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/base-run*.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/inline-run*.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/summary.md`
+- Result:
+  - cadence median: base `46.6504`, inline `45.9953` (`-0.6551`, `-1.40%`)
+  - processed8_total median: base `44.5000`, inline `43.7500` (`-0.75`, `-1.69%`)
+  - processing_core_color median: both `15.0001`
+- Decision:
+  - Inline `ReinhardTonemap_f` and the accompanying raw_processing sub-loop wiring do not meet the 5% keep bar and are not an independent runtime keeper for this VM.
+  - Keep this as a low-priority cleanup/validation pass and continue structural queue/pipeline work toward 30fps/`M2`.
   - the next dominant investigation target is compressed raw decode, not disk I/O, not bit-unpack, and not deeper Dual ISO preview work
 - I also tested a thread-local raw read-buffer reuse candidate in `getMlvRawFrameUint16(...)` and reverted it in the same pass because it did not produce a clear measured win and introduced avoidable lifetime/sizing concerns.
 - Prototyped a raw `uint16` decode-ahead ring and measured it directly on the Dual ISO preview path.

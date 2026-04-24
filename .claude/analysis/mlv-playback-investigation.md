@@ -13,8 +13,30 @@
   - `src/processing/raw_processing.c` (timing split + getters + environment-gated probe path).
   - `platform/qt/RenderFrameThread.cpp` (per-slot stage telemetry export).
   - `src/processing/raw_processing_8bit_kernel.inc` (probe-only branch under `MLVAPP_PROFILE_DIRECT8_SUBLOOPS`).
-- `platform/qt/build-codex-current/release/MLVApp.exe` in this environment is older than the current tree, so a fresh paired run could not be completed in this session.
-- The earlier same-session artifacts at `.claude-state/profiling/20260424-m2-hotloop-rank*` still show large split distortion under sub-loop probe mode (`~200-300ms` overhead), so direct throughput deltas from those files are not trusted for absolute gains.
+- Same-session paired build/profile evidence now exists for current-tree baseline vs inline pass:
+  - Baseline branch built from `1949b2d9f740ea954a75755fbdacd7e54875d4ea`.
+  - Inline branch built from `ed3e5a17` with `ReinhardTonemap_f` inlined.
+  - Runs executed on `C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration` with:
+    - `--profile-playback --input tests/fixtures/clips/large_dual_iso.mlv --receipt tests/fixtures/receipts/large_dual_iso_hq.marxml --frames 16 --threads 1 --raw-cache-mb 0`
+  - Warm medians over 4 runs each (sample_index>=4), using `sample_index` filtered frame medians:
+    - `cadence_ms`: base `46.6504`, inline `45.9953` (Δ `-0.6551`, `-1.40%`, same-session 95% mean interval roughly `±4.0ms` base / `±1.87ms` inline across 4 medians).
+    - `processed8_total_ms`: base `44.5000`, inline `43.7500` (Δ `-0.75`, `-1.69%`).
+    - `processing_core_color_ms`: `15.0001` both (no delta).
+    - `raw_uint16_ms`: base `17.0000`, inline `16.5000` (Δ `-0.50`).
+- Artifacts captured here:
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/base-run1.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/base-run2.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/base-run3.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/base-run4.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/inline-run1.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/inline-run2.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/inline-run3.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/inline-run4.json`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/summary.md`
+  - `.claude-state/profiling/20260424-reinhard-inline-pair/summary.json`
+- Interpretation:
+  - Inline Reinhard flattening is below the 5% keep threshold and inside measured run variance; do not ship as an independent performance claim.
+  - It remains behavior-safe and useful only as a cleanup hypothesis, with priority lower than queue-depth/structural work at this point.
 
 ### Cross-checked from prior analysis
 
@@ -30,6 +52,14 @@
   - warm filter: `sample_index >= 4`
 - Compare warm medians for at least: `latency_ms`, `cadence_ms`, `processed8_total_ms`, `processing_core_color_ms`, `processing_direct8_matrix_ms`, `processing_direct8_gamma_ms`.
 - Accept a micro-pass only if the end-to-end `cadence_ms` delta is at least 5%.
+
+### Needs runtime profiling
+
+- Direct8 sub-loop telemetry (`processing_direct8_*`) did not materially move this clip in honest same-session A/B and therefore is not the first-order target for the immediate 30fps stretch pass.
+- Re-prioritize remaining work to:
+  - deepen playback overlap queue depth beyond current slot depth,
+  - keep/reduce render-slot presentation work only when it contributes additional overlap,
+  - pursue AVX2 dispatch only after a structural step shows stable headroom.
 
 ## Safe Overlap + Fast-Scale Keep Point (2026-04-23, current)
 
