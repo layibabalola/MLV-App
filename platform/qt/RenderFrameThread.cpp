@@ -24,22 +24,17 @@ RenderFrameThread::RenderFrameThread()
     m_renderingFrame = false;
     m_frameReady = false;
     m_pMlvObject = nullptr;
-    m_outputMode = OutputProcessed8;
-    m_useGpuBilinearDebayer = false;
-    m_frameNumber = 0;
-    m_frameRequestSerial = 0;
     m_activeOutputMode = OutputProcessed8;
     m_activeUseGpuBilinearDebayer = false;
     m_activeFrameNumber = 0;
     m_activeFrameRequestSerial = 0;
-    m_presentationPreparationOptions = PresentationPreparationOptions();
+    m_activePresentationContext = ReadyFrame::PresentationContext();
     m_activePresentationPreparationOptions = PresentationPreparationOptions();
     m_loggedGpuBilinearSuccess = false;
     m_lastFrameUsedGpuBilinearDebayer = false;
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
-    m_frameRequestStageTime = 0.0;
     m_activeFrameRequestStageTime = 0.0;
     m_lastRenderThreadQueueWaitMs = 0.0;
     m_lastRenderThreadWorkMs = 0.0;
@@ -62,16 +57,15 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
 {
     QMutexLocker locker(&m_mutex);
     m_frameReady = false;
+    m_renderRequests.clear();
     m_pMlvObject = pMlvObject;
     m_imageWidth = imageWidth;
     m_imageHeight = imageHeight;
-    m_useGpuBilinearDebayer = false;
-    m_frameNumber = 0;
-    m_frameRequestSerial = 0;
     m_activeUseGpuBilinearDebayer = false;
     m_activeFrameNumber = 0;
     m_activeFrameRequestSerial = 0;
     m_activeOutputMode = OutputProcessed8;
+    m_activePresentationContext = ReadyFrame::PresentationContext();
     m_renderingSlotIndex = -1;
     m_presentingSlotIndex = -1;
     m_lastFrameUsedGpuBilinearDebayer = false;
@@ -80,7 +74,6 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
-    m_frameRequestStageTime = 0.0;
     m_activeFrameRequestStageTime = 0.0;
     m_lastRenderThreadQueueWaitMs = 0.0;
     m_lastRenderThreadWorkMs = 0.0;
@@ -103,16 +96,25 @@ void RenderFrameThread::renderFrame(uint32_t frameNumber,
                                     OutputMode outputMode,
                                     bool useGpuBilinearDebayer,
                                     uint64_t requestSerial,
+                                    const ReadyFrame::PresentationContext &presentationContext,
                                     const PresentationPreparationOptions &presentationPreparation)
 {
     QMutexLocker locker(&m_mutex);
-    m_frameNumber = frameNumber;
-    m_outputMode = outputMode;
-    m_useGpuBilinearDebayer = useGpuBilinearDebayer;
-    m_frameRequestSerial = requestSerial;
-    m_presentationPreparationOptions = presentationPreparation;
+    if( static_cast<int>(m_renderRequests.size()) >= kRenderRequestQueueDepth )
+    {
+        m_renderRequests.pop_front();
+    }
+    m_renderRequests.push_back(
+        {
+            frameNumber,
+            outputMode,
+            useGpuBilinearDebayer,
+            requestSerial,
+            mlv_stage_timing_now(),
+            presentationContext,
+            presentationPreparation
+        } );
     m_renderFrame = true;
-    m_frameRequestStageTime = mlv_stage_timing_now();
     m_waitCondition.wakeOne();
 }
 
@@ -181,6 +183,7 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->dualIsoAutoCorrection = slot.dualIsoAutoCorrection;
         frame->dualIsoEvCorrection = slot.dualIsoEvCorrection;
         frame->dualIsoBlackDelta = slot.dualIsoBlackDelta;
+        frame->presentationContext = slot.presentationContext;
         frame->stageTimingTelemetry = slot.stageTimingTelemetry;
     }
     return true;
@@ -267,7 +270,7 @@ void RenderFrameThread::run(void)
     while( !m_stop )
     {
         while( !m_stop
-            && ( !m_renderFrame || findFreeSlotLocked() < 0 ) )
+            && ( m_renderRequests.empty() || findFreeSlotLocked() < 0 ) )
         {
             m_waitCondition.wait(&m_mutex);
         }
@@ -279,13 +282,16 @@ void RenderFrameThread::run(void)
             continue;
         }
 
-        m_activeFrameNumber = m_frameNumber;
-        m_activeOutputMode = m_outputMode;
-        m_activeUseGpuBilinearDebayer = m_useGpuBilinearDebayer;
-        m_activeFrameRequestSerial = m_frameRequestSerial;
-        m_activeFrameRequestStageTime = m_frameRequestStageTime;
-        m_activePresentationPreparationOptions = m_presentationPreparationOptions;
-        m_renderFrame = false;
+        const RenderRequest request = m_renderRequests.front();
+        m_renderRequests.pop_front();
+        m_renderFrame = !m_renderRequests.empty();
+        m_activeFrameNumber = request.frameNumber;
+        m_activeOutputMode = request.outputMode;
+        m_activeUseGpuBilinearDebayer = request.useGpuBilinearDebayer;
+        m_activeFrameRequestSerial = request.requestSerial;
+        m_activeFrameRequestStageTime = request.requestStageTime;
+        m_activePresentationContext = request.presentationContext;
+        m_activePresentationPreparationOptions = request.presentationPreparationOptions;
         m_renderingFrame = true;
         m_renderingSlotIndex = slotIndex;
         m_mutex.unlock();
@@ -293,14 +299,6 @@ void RenderFrameThread::run(void)
         m_mutex.lock();
         m_renderingFrame = false;
         m_renderingSlotIndex = -1;
-        for( int i = 0; i < static_cast<int>(m_frameSlots.size()); ++i )
-        {
-            if( i == slotIndex ) continue;
-            if( m_frameSlots[i].ready && !m_frameSlots[i].presenting )
-            {
-                releaseSlotLocked( i );
-            }
-        }
         m_frameSlots[slotIndex].ready = true;
         m_frameReady = true;
         m_waitCondition.wakeAll();
@@ -375,6 +373,7 @@ void RenderFrameThread::drawFrame( int slotIndex )
     slot.frameNumber = m_activeFrameNumber;
     slot.requestSerial = m_activeFrameRequestSerial;
     slot.outputMode = m_activeOutputMode;
+    slot.presentationContext = m_activePresentationContext;
 
     const double render_start = mlv_stage_timing_now();
     const uint32_t frameNumber = slot.frameNumber;

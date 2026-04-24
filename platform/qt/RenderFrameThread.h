@@ -14,9 +14,11 @@
 #include <QString>
 #include <QJsonObject>
 #include "../../src/mlv_include.h"
+#include "MainWindowGpuPreviewPolicy.h"
 #include "PlaybackScaling.h"
 
 #include <array>
+#include <deque>
 #include <vector>
 
 class RenderFrameThread : public QThread
@@ -33,6 +35,27 @@ public:
 
     struct ReadyFrame
     {
+        struct PresentationContext
+        {
+            uint64_t requestSerial = 0;
+            uint32_t frameNumber = 0;
+            int sceneWidth = 0;
+            int sceneHeight = 0;
+            int imageWidth = 0;
+            int imageHeight = 0;
+            int devicePixelRatioMilli = 0;
+            bool zoomFitEnabled = false;
+            bool fastPlaybackScaleEligible = false;
+            MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
+            GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
+            GpuPreviewProcessingConfig gpuPreviewProcessingConfig;
+            QString playbackProcessingReason;
+            bool renderThreadUsing16BitPreview = false;
+            bool renderThreadUsingGpuPreviewProcessing = false;
+            bool renderThreadUsingGpuBilinearDebayer = false;
+            bool renderThreadUsingCpuPreviewProcessing = false;
+        };
+
         const uint8_t *rawImage8 = nullptr;
         const uint16_t *rawImage16 = nullptr;
         const uint8_t *playbackScaledImage8 = nullptr;
@@ -49,6 +72,7 @@ public:
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
         double frameReadyEmitStageTime = 0.0;
+        PresentationContext presentationContext;
         bool processedFrame8Active = false;
         uint64_t processedFrame8Signature = 0;
         bool processedFrame16Active = false;
@@ -67,6 +91,17 @@ public:
         int targetHeight = 0;
     };
 
+    struct RenderRequest
+    {
+        uint32_t frameNumber = 0;
+        OutputMode outputMode = OutputProcessed8;
+        bool useGpuBilinearDebayer = false;
+        uint64_t requestSerial = 0;
+        double requestStageTime = 0.0;
+        ReadyFrame::PresentationContext presentationContext;
+        PresentationPreparationOptions presentationPreparationOptions;
+    };
+
     RenderFrameThread();
     ~RenderFrameThread();
     void init( mlvObject_t *pMlvObject,
@@ -76,6 +111,7 @@ public:
                       OutputMode outputMode,
                       bool useGpuBilinearDebayer,
                       uint64_t requestSerial,
+                      const ReadyFrame::PresentationContext &presentationContext,
                       const PresentationPreparationOptions &presentationPreparation );
     bool isFrameReady( void );
     bool isIdle( void );
@@ -117,6 +153,7 @@ private:
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
         double frameReadyEmitStageTime = 0.0;
+        ReadyFrame::PresentationContext presentationContext;
         bool processedFrame8Active = false;
         uint64_t processedFrame8Signature = 0;
         bool processedFrame16Active = false;
@@ -152,27 +189,27 @@ private:
             dualIsoAutoCorrection = 0;
             dualIsoEvCorrection = 0.0;
             dualIsoBlackDelta = 0;
+            presentationContext = ReadyFrame::PresentationContext();
             stageTimingTelemetry = QJsonObject();
         }
     };
 
     mutable QMutex m_mutex;
     QWaitCondition m_waitCondition;
+    static constexpr int kFrameSlotCount = 4;
+    static constexpr int kRenderRequestQueueDepth = 4;
     mlvObject_t *m_pMlvObject;
     bool m_initialized;
     bool m_stop;
     bool m_renderFrame;
     bool m_renderingFrame;
     bool m_frameReady;
-    OutputMode m_outputMode;
-    bool m_useGpuBilinearDebayer;
-    uint32_t m_frameNumber;
-    uint64_t m_frameRequestSerial;
+    std::deque<RenderRequest> m_renderRequests;
     OutputMode m_activeOutputMode;
     bool m_activeUseGpuBilinearDebayer;
     uint32_t m_activeFrameNumber;
     uint64_t m_activeFrameRequestSerial;
-    PresentationPreparationOptions m_presentationPreparationOptions;
+    ReadyFrame::PresentationContext m_activePresentationContext;
     PresentationPreparationOptions m_activePresentationPreparationOptions;
     bool m_loggedGpuBilinearSuccess;
     bool m_lastFrameUsedGpuBilinearDebayer;
@@ -181,7 +218,6 @@ private:
     double m_lastDualIsoPreviewHistogramMs;
     double m_lastDualIsoPreviewRegressionMs;
     double m_lastDualIsoPreviewRowscaleMs;
-    double m_frameRequestStageTime;
     double m_activeFrameRequestStageTime;
     double m_lastRenderThreadQueueWaitMs;
     double m_lastRenderThreadWorkMs;
@@ -192,7 +228,7 @@ private:
     int m_imageHeight;
     int m_renderingSlotIndex;
     int m_presentingSlotIndex;
-    std::array<FrameSlot, 2> m_frameSlots;
+    std::array<FrameSlot, kFrameSlotCount> m_frameSlots;
     FastPlaybackScaleCache m_playbackScaleCache;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
 

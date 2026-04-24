@@ -1288,6 +1288,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                                       renderOutputMode,
                                       m_renderThreadUsingGpuBilinearDebayer,
                                       requestSerial,
+                                      requestContext,
                                       presentationPreparation );
 
         //Draw TimeCode
@@ -1302,6 +1303,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                                       renderOutputMode,
                                       m_renderThreadUsingGpuBilinearDebayer,
                                       requestSerial,
+                                      requestContext,
                                       presentationPreparation );
 
         //Draw TimeCode
@@ -11162,19 +11164,8 @@ void MainWindow::drawFrameReady()
         return;
     }
 
-    if( !consumePresentationRequest( readyFrame.requestSerial, &requestContext ) )
-    {
-        requestContext.requestSerial = readyFrame.requestSerial;
-        requestContext.frameNumber = readyFrame.frameNumber;
-        requestContext.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
-        requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
-        requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
-        requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
-        requestContext.gpuPreviewPolicy = m_lastQueuedGpuPreviewPolicy;
-        requestContext.gpuPresentationOptions = m_lastQueuedGpuPresentationOptions;
-        requestContext.gpuPreviewProcessingConfig = m_lastQueuedGpuPreviewProcessingConfig;
-        requestContext.playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
-    }
+    consumePresentationRequest( readyFrame.requestSerial, nullptr );
+    requestContext = readyFrame.presentationContext;
 
     const uint64_t display_frame = readyFrame.frameNumber;
     const double display_start = mlv_stage_timing_now();

@@ -532,26 +532,7 @@ private:
         QPixmap pixmap;
     };
 
-    struct PresentationRequestContext
-    {
-        uint64_t requestSerial = 0;
-        uint32_t frameNumber = 0;
-        int sceneWidth = 0;
-        int sceneHeight = 0;
-        int imageWidth = 0;
-        int imageHeight = 0;
-        int devicePixelRatioMilli = 0;
-        bool zoomFitEnabled = false;
-        bool fastPlaybackScaleEligible = false;
-        bool renderThreadUsing16BitPreview = false;
-        bool renderThreadUsingGpuPreviewProcessing = false;
-        bool renderThreadUsingGpuBilinearDebayer = false;
-        bool renderThreadUsingCpuPreviewProcessing = false;
-        MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
-        GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
-        GpuPreviewProcessingConfig gpuPreviewProcessingConfig;
-        QString playbackProcessingReason;
-    };
+    using PresentationRequestContext = RenderFrameThread::ReadyFrame::PresentationContext;
 
     Ui::MainWindow *ui;
     InfoDialog *m_pInfoDialog;
