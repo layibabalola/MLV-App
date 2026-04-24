@@ -26,3 +26,18 @@
 - Seed automated coverage now lives under `tests/`.
 - CI entrypoint for that scaffold is `.github/workflows/tests.yml`.
 - Keep the docs above synchronized with what is implemented now versus still planned next.
+
+## Runtime Execution Rules (Windows)
+- Before running any `MLVApp.exe` binary directly, always use an explicit Qt runtime path match to the build and set it for that command.
+- Required shell pattern before launch:
+  - set `QT_OPENGL=desktop` if not already set.
+  - set `PATH` so the active Qt release bin directory comes **before** any other Qt install:
+    - `C:\Qt\6.10.2\mingw_64\bin` (this branch’s default Qt runtime).
+    - then `C:\Qt\Tools\mingw1310_64\bin`.
+    - then the repo/build directory containing `MLVApp.exe`.
+  - launch from the directory that contains the executable (or pass absolute paths).
+- Do not mix 6.10.2 MinGW runtime binaries with a different Qt runtime in the same launch session.
+- Prefer this launch pattern for profile/test runs:
+  - `Push-Location <build-root>\release; $env:QT_OPENGL='desktop'; $env:PATH='<build-root>\release;C:\Qt\6.10.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;' + $env:PATH; .\MLVApp.exe ...; Pop-Location`
+- If the system reports missing `Qt6Core.dll` / `Qt6Network.dll` or entry-point lookup failures, rerun `windeployqt` for that exe:
+  - `C:\Qt\6.10.2\mingw_64\bin\windeployqt.exe <path-to-MLVApp.exe> --release --no-translations --no-compiler-runtime`
