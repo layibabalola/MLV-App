@@ -10,6 +10,7 @@
 #include "../../src/processing/raw_processing.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <QString>
 
@@ -306,6 +307,32 @@ TEST(DualIsoPipeline, DirectProcessed8FastPathMatchesShiftedProcessed16WithCreat
                                                              0);
     ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
     ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, DirectProcessed8FastPathAvx2PathActiveOnCapableHost)
+{
+    /* On hosts that advertise AVX2+FMA and have not set MLVAPP_DISABLE_AVX2, the
+     * runtime dispatcher must latch the AVX2 variant of the fast-path kernel.
+     * The bit-exact guard above already verifies parity with scalar, so this
+     * test only asserts path selection to catch silent fallbacks. */
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+    ASSERT_TRUE(processingFastPathAvx2Active() != 0);
 }
 
 TEST(DualIsoPipeline, HeadlessDualIsoPreviewAutoDetectsPatternAndKeepsItAcrossFrames)
