@@ -1,5 +1,195 @@
 ## Direct-8 Loop Profiling (2026-04-24)
 
+## Presentation Split Handoff (2026-04-24, current)
+
+### Verified locally
+
+- `render_thread_queue_wait_ms` is the current known blocker only when it is non-zero and sustained; in recent overlap evidence it is mostly `0.0`, so queue-depth expansion stays out of scope for this block unless telemetry turns it back on.
+  - `.claude-state/profiling/20260423-frontback-overlap-v2/large_dual_iso_preview_t4_overlap_v2_run1.json` → median `0.0` (`n=16`)
+  - `.claude-state/profiling/20260423-frontback-overlap-v7-keepcheck/large_dual_iso_preview_t4_overlap_v7_keepcheck_run1.json` → median `0.0` (`n=16`)
+- `244c03a1` (immutable payload handoff) is now in-tree and satisfies the “no mutable render context at draw time” requirement:
+  - `platform/qt/RenderFrameThread.h/.cpp` now emit request-level immutable `PresentationContext` and request metadata through the ready queue.
+  - `platform/qt/MainWindow.cpp` now uses that context from `ReadyFrame`.
+- Current async-prep WIP builds and app-profile smokes cleanly after the worker image lifetime fix:
+  - Release build: `build-3slot/release/MLVApp.exe`.
+  - Smoke outputs: `.claude-state/profiling/20260424-async-prep-smoke/tiny_dual_iso_async_prep_final_smoke.json` and `.claude-state/profiling/20260424-async-prep-smoke/large_dual_iso_async_prep_final_run1.json`.
+  - Large Dual ISO run: 16 frames completed, warm `cadence_ms` median `47.5054`, warm `draw_frame_ready_image_ms` median `0.0`, final `prep_stale_drops` / replacement counters all `0`.
+  - Worker image handoff now keeps local vector-backed `QImage` storage alive until packing and copies rows by `bytesPerLine()` so padded RGB888 images remain correct.
+- Tier 1 measurement protocol from `.claude-state/profiling/20260424-m2-dualiso-lanes/areas.md` is now measured over 4 runs per case:
+  - Artifacts and summary: `.claude-state/profiling/20260424-tier1-prefetch-measurement/summary.md`.
+  - T0 (`--threads 1`): median warm cadence `46.6874 ms`.
+  - T1 (`--threads 8`): median warm cadence `33.5722 ms`; direct-8 color median drops from `15.25 ms` to `3.0 ms`.
+  - T2 (`--threads 1`, processed8 prefetch): median warm cadence `48.2558 ms`, processed8 hits `0/48`.
+  - T3 (`--threads 8`, processed8 prefetch): median warm cadence `35.8976 ms`, processed8 hits `1/48`.
+  - T4 (`--threads 8`, raw16 prefetch): median warm cadence `18.8752 ms`, raw16 hits `48/48`, raw decompress median `0.0 ms`.
+  - Conclusion: raw16 prefetch plus 8 threads clears M2 strongly; processed8 prefetch does not help this profile shape and regresses against T1.
+
+### Cross-checked from prior analysis
+
+- `MainWindow::drawFrameReady()` is still the boundary where the largest fixed GUI work remains (`drawFrameReady.image`), but it is now structurally splittable.
+- `drawFrameReady()` currently performs both:
+  - presentation-prep work (image construction, scaling, zebras, image cache writes), and
+  - final present/overlay/scope side effects.
+  This is the right next hard split point.
+- Dual-ISO sync scope:
+  - `platform/qt/MainWindow.cpp:11020-11054` is **not** pure display; it includes runtime state writes (`ACTIVE_RECEIPT`, `m_pMlvObject->llrawproc` fields), so keep it in the final commit and preserve exact behavior.
+- Zebras/scope execution:
+  - `MainWindow::drawZebras` and scope widgets (`ui->labelScope->setScope(...)`) are still in GUI-thread-only paths today.
+  - The split should avoid moving scope painting into a non-UI worker in this milestone.
+
+### Plan (next 2 commits)
+
+#### Locked execution order
+
+1. **Commit A — payload boundary hardening (tracked first)**
+   - Keep frame handoff immutable and side-effect free on the producer.
+   - Implement stale-serial guards before introducing async delivery.
+   - Target symbols:
+     - `platform/qt/MainWindow.h`: `PlaybackPrepTask`, `PlaybackPrepResult`, private worker state, method declarations.
+     - `platform/qt/MainWindow.cpp`: constructor/destructor boot/shutdown for worker thread.
+2. **Commit B — async `draw_frame_ready_image` split**
+   - Move image prep work off the GUI thread path behind serial-safe queue.
+   - Preserve `draw_frame_ready_scene`, `draw_frame_ready_present`, `draw_frame_ready_scopes`, `draw_frame_ready_overlay`, and all Dual-ISO widget sync and audio/scope side effects on the GUI thread.
+   - Target symbols:
+     - `platform/qt/MainWindow.cpp: drawFrameReady`, `enqueuePlaybackPrepTask`, `playbackPrepThreadLoop`, `buildPlaybackPrepResult`, `onPlaybackPrepResultReady`, `presentPlaybackPreparedFrame`.
+     - `platform/qt/MainWindow.cpp`: telemetry keys `draw_frame_ready_image_ms`, `draw_frame_ready_present_ms` may be reported from split stages, but keep profile payload contract and key names stable.
+
+1. **Payload commit already done (done)**
+   - Commit: `244c03a1` (`Playback: pass immutable presentation context with ready frame`)
+   - Scope: request-level immutability + slot metadata for safe overlap.
+
+2. **Commit B — front/back split (single bounded async prepare stage)**
+   - **Scope now, implementation split exactly into two parts:**
+     - `platform/qt/RenderFrameThread.h/.cpp`:
+       - Keep as-is from `244c03a1` for immutable context.
+       - No slot-depth changes in this commit.
+     - `platform/qt/MainWindow.h/.cpp`:
+       - add `struct PlaybackPreparedFrame` (output-only result of expensive prep, no UI side-effects).
+       - add `struct PlaybackPrepRequest` (captured, immutable request context + frame pointers + geometry booleans).
+       - add one bounded worker queue (`optional current + optional pending`) and one background thread loop that:
+         - takes one request,
+         - runs pure compute,
+         - posts completion back to UI with `QMetaObject::invokeMethod(..., Qt::QueuedConnection, ...)`.
+       - add `bool isPlaybackPrepReadyForAsync(const RenderFrameThread::ReadyFrame &, const PresentationRequestContext &) const`.
+       - add `PlaybackPreparedFrame buildPlaybackPreparedFrame(const PlaybackPrepRequest &, const RenderFrameThread::ReadyFrame &, const PresentationRequestContext &)`.
+       - add `void presentPreparedPlaybackFrame(PlaybackPreparedFrame &&)`.
+       - add `void finishPlaybackFrameFromPrepared(...)` helper to own only final `recordPresentedFrame/finishPresentedFrame` + scene/scopes/overlay/present flow.
+   - **What runs in background**
+     - `MainWindow::drawFrameReady()` extraction boundary:
+       - pure image preparation from source pixels to final `QImage`/`underOver` bundle, including:
+         - pre-scaled fast path `QImage` wrapping,
+         - `build_fast_playback_scaled_image` fallback path,
+         - `scanZebrasRgb8` and `drawZebras` raster pass.
+       - no GUI object reads/writes except captured values from context.
+     - keep UI-thread boundary for:
+       - scene geometry application,
+       - `GpuDisplayViewport::presentImage` / `presentRgb16` call,
+       - audio sync and overlay label updates,
+       - scope widgets and dual-iso edit widgets (`ACTIVE_RECEIPT`/`llrawproc` sync),
+       - `recordPresentedFrame` / `finishPresentedFrame` state updates.
+   - **Data-race protection rule (important)**
+     - do not pass raw slot pointers to worker without ownership transfer.
+     - for async path, use `PlaybackPreparedFrame` inputs built from copied byte vectors when `readyFrame.playbackFastScaleActive`:
+       - copy of `readyFrame.playbackScaledImage8` into request-owned buffer before worker use.
+     - if copy path cannot be enabled for a case, force that frame down legacy synchronous path and keep behavior unchanged.
+   - **Execution order inside `drawFrameReady()`**
+     - keep metadata sync and `timerFrameEvent()` queue-advance exactly as today.
+     - if `playbackPolicyActive()` and async-prep guard passes:
+       - build/queue prep request and return quickly after scheduling.
+       - on completion invoke `presentPreparedPlaybackFrame(...)` on UI thread.
+     - else:
+       - preserve current synchronous branch unchanged.
+
+### Needs runtime profiling
+
+- Keep same command and filtering:
+  - `--profile-playback --input tests/fixtures/clips/large_dual_iso.mlv --receipt tests/fixtures/receipts/large_dual_iso_hq.marxml --frames 16 --threads 1 --raw-cache-mb 0`
+  - warm filter `sample_index >= 4`
+- Capture under `.claude-state/profiling/20260424-payload-split-v1/`.
+- Compare paired 4-run medians:
+  - `cadence_ms`
+  - `render_thread_work_ms`
+  - `draw_frame_ready_image_ms`
+  - `draw_frame_ready_present_ms`
+- Decision gates:
+  - if `cadence_ms <= 41.7 ms` warm median → M1 accepted for this block,
+  - else proceed to Finding #4 (playback preview quality mode) for clip set that is not already fast-path eligible.
+
+### Non-negotiables before merge
+
+- No behavior change for pause/export/CPU fallback paths.
+- Keep Dual-ISO UI sync writes in place for now (separate setting-controlled optimization only later).
+- Keep scoped telemetry updates and any new split-stage timing under the existing profile contract.
+
+## Playback Realization Plan (2026-04-24)
+
+### Verified locally
+
+- M1 is not the immediate blocking constraint anymore on this branch's current evidence set; the structural bottleneck for M2 is still end-to-end handoff overlap and presentation work, not raw decode math.
+- Existing keep-set is still valid:
+  - direct processed8 fast path remains active and bit-identical when enabled.
+  - `getMlvLastProcessed8DirectPathActive` gating and curve/hash parity guards are in place.
+  - queue/slot overlap in `RenderFrameThread` is now safer than earlier WIP (no visible corruption from the reviewed overlap patches).
+- Repeated crashes/popups from Qt DLL lookup are still environment/runtime-path sensitive (not source-level functional bugs), and should be handled via run-env bootstrapping scripts rather than UI logic changes.
+- Quick Step-0 telemetry check: warm `render_thread_queue_wait_ms` medians are still mostly `0.0` across recent runs (rare one-frame spikes only, not a sustained stall pattern), so we should prioritize payload immutability + presentation split before more queue-depth tuning.
+
+### Cross-checked from prior analysis
+
+- The dominant remaining cost is the serialized boundary around `MainWindow::drawFrameReady()` despite overlap in `RenderFrameThread`.
+- The shared mutable handoff is still both:
+  - the live `m_pRawImage/m_pRawImage16` buffers and
+  - render-policy state (`m_renderThreadUsing*`, active receipt fields, llrawproc mutators in playback path).
+- A correct M2 pass needs one immutable per-frame payload contract so we can decouple render completion from presentation consumption.
+
+### Needs runtime profiling
+
+- Keep the same-session paired protocol from earlier as a hard rule: warm medians on:
+  - `--profile-playback --input tests/fixtures/clips/large_dual_iso.mlv --receipt tests/fixtures/receipts/large_dual_iso_hq.marxml --frames 16 --threads 1 --raw-cache-mb 0`
+  - warm filter `sample_index >= 4`
+  - runs A/B within one profile session per code change.
+- Priority order for this next block (ranked by impact/effort):
+
+  1. **Per-frame render snapshot object** (`platform/qt/MainWindow.h/.cpp`):
+     - Introduce an immutable `RenderedFramePayload` (QImage/QImage16 copy or shared-pointer image blob, frameNumber, outputMode, display signature, all render-policy fields needed for present/scopes).
+     - Emit payload from `RenderFrameThread` via `frameReady` arguments instead of re-reading mutable `MainWindow` state.
+     - `drawFrameReady()` should validate generation before consuming.
+  2. **Presentation tail offload to prep worker** (`platform/qt/MainWindow.cpp`):
+     - Keep decode/debayer/processing on render thread.
+     - Move image build/scaling/caching work into a bounded producer-consumer step that can run while next frame rendering advances.
+     - Keep final UI presentation (scene/layout/overlay/scope paint and `draw()` path) on GUI thread and short.
+  3. **Render/ready queue depth bump** (`platform/qt/RenderFrameThread.h/.cpp`):
+     - Expand frame slot depth so render can stay ahead of present:
+       - at least 3 slots first (1 rendering, 1 ready, 1 presenting/standby)
+       - consider 4 only if telemetry shows queue starvation persists.
+     - Preserve invariant: no slot reused while presenting or marked ready.
+  4. **Playback subset processing gate refinement** (`src/processing/raw_processing.c`, `platform/qt/MainWindow.cpp`, tests):
+     - Add a constrained playback-only processing-mode branch only after step 1/2 are stable.
+     - Preserve pause/export unchanged.
+     - Gate by explicit playback-fast-path predicate and add explicit telemetry key showing branch usage.
+  5. **Re-introduce AVX2 only after structural gains** (`src/processing/raw_processing_8bit_kernel.inc`):
+     - Keep dispatcher + parity tests, but only attempt hand-tuned intrinsics if the above reduces cadence sufficiently and M2 remains open.
+     - Treat any AVX2 gain below 5% on paired `cadence_ms` as non-actionable noise.
+
+- Safety rails to preserve during all steps:
+  - never mix "display state" writes (scope updates, UI sync, receipt writes) into the critical render/present boundary.
+  - continue preserving Dual ISO preview correctness contract and restore previous state on playback stop.
+  - if Dual ISO UI sync is optimized, split into:
+    - widget reflection-only defer-able block (can be delayed/throttled), and
+    - llrawproc/receipt state writes (must remain exact unless scoped behind explicit advanced preference).
+
+### Definition of done
+
+- M2 acceptance on this VM:
+  - `cadence_ms` warm median `<= 33.3 ms` across 4 paired runs.
+  - all existing golden tests green:
+    - `console_tests --check-golden`
+    - `pipeline_tests --check-golden`
+    - app-backed sanity pass that previously passed on this branch family.
+- Mandatory run-artefact capture:
+  - `.claude-state/profiling/` run trees with summary+raw JSON for each side of A/B step.
+- Post-step notes update:
+  - `Dual ISO playback hypotheses` + `ANALYSIS_LOG.md` append with outcome and next ranked target.
+
 ### Verified locally
 
 - Update from same-session re-run on this VM/worktree (`ed3e5a17^` vs `ed3e5a17`) with `--threads 1 --raw-cache-mb 0 --frames 16` and warm filter `sample_index >= 4`:

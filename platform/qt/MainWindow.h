@@ -44,8 +44,12 @@
 #include "ReceiptCopyMaskDialog.h"
 #include "QRecentFilesMenu.h"
 #include "batch/BatchTypes.h"
+#include <atomic>
 #include <deque>
 #include <functional>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace Ui {
 class MainWindow;
@@ -508,6 +512,7 @@ private slots:
     void on_actionShowUnmarkedClips_toggled(bool arg1);
 
     void on_lineEditTransferFunction_textChanged(const QString &arg1);
+    void onPlaybackPrepResultReady( void );
 
 private:
     struct DisplayPreviewCacheEntry
@@ -533,6 +538,57 @@ private:
     };
 
     using PresentationRequestContext = RenderFrameThread::ReadyFrame::PresentationContext;
+
+    // Immutable inputs to the playback-prep worker. Non-owning views
+    // (`scopeSourceImage` / `sourceImage`) point into this task for the
+    // background copy path when needed, and fall back to ready-slot data
+    // otherwise.
+    struct PlaybackPrepTask
+    {
+        RenderFrameThread::ReadyFrame readyFrame;
+        PresentationRequestContext requestContext;
+        uint64_t requestSerial = 0;
+        double displayStart = 0.0;
+        uint64_t displayFrame = 0;
+        double stretchX = 1.0;
+        double stretchY = 1.0;
+        const uint8_t *scopeSourceImage = nullptr;
+        size_t scopeSourceImageSize = 0;
+        const uint8_t *sourceImage = nullptr;
+        size_t sourceImageSize = 0;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        int sceneWidth = 0;
+        int sceneHeight = 0;
+        int transformationMode = 0;
+        int devicePixelRatioMilli = 0;
+        const uint16_t *sourceImage16 = nullptr;
+        size_t sourceImage16Size = 0;
+        bool gpu16PreviewActive = false;
+        bool gpuPreviewProcessingActive = false;
+        bool cpuPreviewProcessingActive = false;
+        bool useGpuImagePresentation = false;
+        bool useGpuShaderZebras = false;
+        bool zoomFitEnabled = false;
+        bool zebrasEnabled = false;
+        bool betterResizerEnabled = false;
+        bool displayPreviewCachingAllowed = false;
+        bool playbackFastScaleActive = false;
+        GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
+    };
+
+    // Worker output. Composes the originating Task so the presenter has the
+    // full input context without field duplication.
+    struct PlaybackPrepResult
+    {
+        PlaybackPrepTask task;
+        int preparedWidth = 0;
+        int preparedHeight = 0;
+        uint8_t underOver = 0;
+        double imageBuildMs = 0.0;
+        std::vector<uint8_t> preparedImage;
+        std::vector<uint8_t> scopeSourceImage;
+    };
 
     Ui::MainWindow *ui;
     InfoDialog *m_pInfoDialog;
@@ -630,6 +686,25 @@ private:
     std::deque<PresentationRequestContext> m_pendingPresentationRequests;
     PresentationRequestContext m_lastPresentedRequestContext;
     bool m_lastPresentedRequestContextValid = false;
+
+    // Playback-prep worker: background image preparation with request-conflated
+    // delivery to the UI thread.
+    // - `m_latestRequestedSerial` is the staleness baseline: any result whose
+    //   `task.requestSerial` != the latest requested is dropped at the
+    //   presenter. Accessed from UI and worker threads.
+    // - Conflation queue semantics: at most one in-flight task ("current") and
+    //   at most one queued task ("pending"). New enqueues replace pending.
+    std::atomic<uint64_t> m_latestRequestedSerial{0};
+    std::thread m_playbackPrepThread;
+    std::mutex m_playbackPrepMutex;
+    std::condition_variable m_playbackPrepCv;
+    std::atomic<bool> m_playbackPrepStop{false};
+    bool m_playbackPrepPendingValid = false;
+    PlaybackPrepTask m_playbackPrepPending;
+    std::deque<PlaybackPrepResult> m_playbackPrepResults;
+    std::atomic<uint64_t> m_playbackPrepStaleDropCount{0};
+    std::atomic<uint64_t> m_playbackPrepReplacedBeforeComputeCount{0};
+    std::atomic<uint64_t> m_playbackPrepReplacedAfterComputeCount{0};
     bool m_lastPresentedFrameUsedGpuBilinearDebayer = false;
     QString m_lastPresentedGpuBilinearFallbackReason;
     QString m_lastPresentedGpuBilinearRendererDescription;
@@ -669,6 +744,10 @@ private:
                                       int *sceneHeight ) const;
     void recordPresentedFrame( const RenderFrameThread::ReadyFrame &readyFrame,
                                const PresentationRequestContext &requestContext );
+    void enqueuePlaybackPrepTask( const PlaybackPrepTask &task );
+    PlaybackPrepResult buildPlaybackPrepResult( const PlaybackPrepTask &task );
+    void playbackPrepThreadLoop( void );
+    void presentPlaybackPreparedFrame( const PlaybackPrepResult &result );
     void finishPresentedFrame( uint64_t displayFrame,
                                const RenderFrameThread::ReadyFrame &readyFrame,
                                const PresentationRequestContext &requestContext,
@@ -781,6 +860,7 @@ private:
 
 signals:
     void exportReady( void );
+    void playbackPrepResultReady( void );
 };
 
 #endif // MAINWINDOW_H

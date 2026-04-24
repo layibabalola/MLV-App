@@ -85,6 +85,9 @@
 #include <atomic>
 #include <vector>
 
+static uint8_t scanZebrasRgb8(const uint8_t *rgbData, int width, int height);
+static uint8_t applyZebrasToImage( QImage *image, bool enableZebras );
+
 /* spaceTag argument options: ffmpeg color space tag number compliant */
 #define SPACETAG_REC709   1   /* rec709 color space */
 #define SPACETAG_UNKNOWN  2   /* No color space tag set */
@@ -348,6 +351,14 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     connect( m_pRenderThread, SIGNAL(frameReady()), this, SLOT(drawFrameReady()) );
     while( !m_pRenderThread->isRunning() ) {}
 
+    // Playback-prep worker handles heavy image work on a background thread and
+    // marshals prepared results back to the UI thread.
+    connect( this, &MainWindow::playbackPrepResultReady,
+             this, &MainWindow::onPlaybackPrepResultReady,
+             Qt::QueuedConnection );
+    m_playbackPrepStop.store( false, std::memory_order_release );
+    m_playbackPrepThread = std::thread( &MainWindow::playbackPrepThreadLoop, this );
+
     //Init scripting engine
     m_pScripting = new Scripting( this );
     m_pScripting->scanScripts();
@@ -432,6 +443,15 @@ MainWindow::~MainWindow()
 {
     killTimer( m_timerId );
     killTimer( m_timerCacheId );
+
+    //Stop playback-prep worker before tearing down render state it may reference.
+    {
+        std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
+        m_playbackPrepStop.store( true, std::memory_order_release );
+        m_playbackPrepPendingValid = false;
+    }
+    m_playbackPrepCv.notify_all();
+    if( m_playbackPrepThread.joinable() ) m_playbackPrepThread.join();
 
     //End Render Thread
     m_frameStillDrawing = false;
@@ -1086,6 +1106,593 @@ bool MainWindow::consumePresentationRequest( uint64_t requestSerial,
     m_pendingPresentationRequests.erase( m_pendingPresentationRequests.begin(),
                                          m_pendingPresentationRequests.begin() + eraseCount );
     return true;
+}
+
+// Playback-prep worker queue. drawFrameReady now dispatches work to a background
+// thread, then marshals completion back to the UI thread for final presentation.
+// Conflation is by request serial: only the latest requested serial can present.
+void MainWindow::enqueuePlaybackPrepTask( const PlaybackPrepTask &task )
+{
+    m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
+    {
+        std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
+        if( m_playbackPrepPendingValid )
+        {
+            ++m_playbackPrepReplacedBeforeComputeCount;
+            if( m_pRenderThread )
+                m_pRenderThread->releasePresentedFrameForRequestSerial(
+                    m_playbackPrepPending.requestSerial );
+        }
+        m_playbackPrepPending = task;
+        m_playbackPrepPendingValid = true;
+    }
+    m_playbackPrepCv.notify_one();
+}
+
+MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const PlaybackPrepTask &task )
+{
+    PlaybackPrepResult result;
+    result.task = task;
+
+    const double image_start = mlv_stage_timing_now();
+
+    const int sourceWidth = task.sourceWidth;
+    const int sourceHeight = task.sourceHeight;
+    int sceneWidth = task.sceneWidth;
+    int sceneHeight = task.sceneHeight;
+    const double stretchX = task.stretchX;
+    const double stretchY = task.stretchY;
+    const bool displayPreviewCachingAllowed = task.displayPreviewCachingAllowed;
+    const bool zoomFitEnabled = task.zoomFitEnabled;
+    const bool zebrasEnabled = task.zebrasEnabled;
+    const bool betterResizerEnabled = task.betterResizerEnabled;
+    const bool useGpuImagePresentation = task.useGpuImagePresentation;
+    const bool useGpuShaderZebras = task.useGpuShaderZebras;
+    const bool gpu16PreviewActive = task.gpu16PreviewActive;
+    const bool gpuPreviewProcessingActive = task.gpuPreviewProcessingActive;
+    const bool cpuPreviewProcessingActive = task.cpuPreviewProcessingActive;
+    const bool playbackPolicyActive = !displayPreviewCachingAllowed;
+    const int transformationMode = task.transformationMode;
+    const auto mode = (transformationMode == 1) ? Qt::SmoothTransformation : Qt::FastTransformation;
+
+    const double devicePixelRatio = static_cast<double>( qMax( 1, task.devicePixelRatioMilli ) ) / 1000.0;
+    const GpuPreviewProcessingConfig &gpuPreviewProcessingConfig =
+        task.requestContext.gpuPreviewProcessingConfig;
+
+    const size_t sourceImageBytes = static_cast<size_t>( sourceWidth )
+        * static_cast<size_t>( sourceHeight ) * 3u;
+    const size_t sourceImage16Bytes = sourceImageBytes * sizeof( uint16_t );
+    const uint16_t *rgb16DisplaySource =
+        (task.sourceImage16 != nullptr && task.sourceImage16Size > 0
+         && task.sourceImage16Size >= sourceImage16Bytes)
+            ? task.sourceImage16
+            : task.readyFrame.rawImage16;
+    const uint8_t *rgb8DisplaySource =
+        (task.sourceImage != nullptr && task.sourceImageSize > 0
+         && task.sourceImageSize >= sourceImageBytes)
+            ? task.sourceImage
+            : task.readyFrame.rawImage8;
+    result.task.scopeSourceImage = task.scopeSourceImage;
+    result.task.scopeSourceImageSize = task.scopeSourceImageSize;
+
+    const bool playbackProcessingSubsetActive =
+        (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
+        && gpuPreviewProcessingConfig.enabled;
+    const bool playbackFastPlaybackPresentation =
+        task.playbackFastScaleActive
+        && task.zoomFitEnabled
+        && transformationMode == 0
+        && !zebrasEnabled
+        && !useGpuImagePresentation
+        && !displayPreviewCachingAllowed;
+
+    const bool preScaledPlaybackImageAvailable =
+        playbackFastPlaybackPresentation
+        && task.readyFrame.playbackScaledImage8
+        && task.readyFrame.playbackScaledWidth > 0
+        && task.readyFrame.playbackScaledHeight > 0;
+    result.task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("draw_frame_ready_prescaled_image_active"),
+        preScaledPlaybackImageAvailable );
+
+    QImage displayImage;
+    bool displayImageOwnsData = false;
+    std::vector<uint8_t> displayImageBacking;
+    uint8_t underOver = 0;
+
+    if( gpu16PreviewActive )
+    {
+        const size_t pixelCount = static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight );
+        std::vector<uint16_t> gpu16FallbackProcessed;
+        std::vector<uint8_t> gpu16FallbackRgb8;
+        gpu16FallbackRgb8.resize( pixelCount * 3u );
+        if( playbackProcessingSubsetActive )
+        {
+            gpu16FallbackProcessed.resize( pixelCount * 3u );
+            gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
+                                                   rgb16DisplaySource,
+                                                   gpu16FallbackProcessed.data(),
+                                                   static_cast<int>(pixelCount) );
+            convert_rgb16_to_rgb8( gpu16FallbackProcessed.data(),
+                                   gpu16FallbackRgb8.data(),
+                                   sourceWidth * sourceHeight );
+        }
+        else
+        {
+            convert_rgb16_to_rgb8( rgb16DisplaySource, gpu16FallbackRgb8.data(), sourceWidth * sourceHeight );
+        }
+        result.scopeSourceImage = std::move( gpu16FallbackRgb8 );
+        result.task.scopeSourceImage = result.scopeSourceImage.data();
+        result.task.scopeSourceImageSize = pixelCount * 3u;
+        rgb8DisplaySource = result.task.scopeSourceImage;
+    }
+    else if( cpuPreviewProcessingActive && playbackProcessingSubsetActive )
+    {
+        const size_t pixelCount = static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight );
+        std::vector<uint16_t> cpuPreviewProcessed;
+        std::vector<uint8_t> cpuPreviewRgb8;
+        cpuPreviewProcessed.resize( pixelCount * 3u );
+        cpuPreviewRgb8.resize( pixelCount * 3u );
+        gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
+                                               rgb16DisplaySource,
+                                               cpuPreviewProcessed.data(),
+                                               static_cast<int>(pixelCount) );
+        convert_rgb16_to_rgb8( cpuPreviewProcessed.data(),
+                               cpuPreviewRgb8.data(),
+                               sourceWidth * sourceHeight );
+        result.scopeSourceImage = std::move( cpuPreviewRgb8 );
+        result.task.scopeSourceImage = result.scopeSourceImage.data();
+        result.task.scopeSourceImageSize = pixelCount * 3u;
+        rgb8DisplaySource = result.task.scopeSourceImage;
+    }
+
+    if( preScaledPlaybackImageAvailable )
+    {
+        displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( task.readyFrame.playbackScaledImage8 ),
+                                              task.readyFrame.playbackScaledWidth,
+                                              task.readyFrame.playbackScaledHeight );
+        displayImageOwnsData = false;
+    }
+
+    if( displayImage.isNull() )
+    {
+        const bool playbackFastScalingActive =
+            playbackPolicyActive
+            && !useGpuImagePresentation
+            && mode == Qt::FastTransformation;
+        if( useGpuImagePresentation )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else if( zoomFitEnabled && playbackFastScalingActive )
+        {
+            const int scaledWidth =
+                std::max( 1, qRound( sceneWidth * devicePixelRatio ) );
+            const int scaledHeight =
+                std::max( 1, qRound( sceneHeight * devicePixelRatio ) );
+            displayImage = build_fast_playback_scaled_image( rgb8DisplaySource,
+                                                             sourceWidth,
+                                                             sourceHeight,
+                                                             scaledWidth,
+                                                             scaledHeight,
+                                                             displayImageBacking );
+            displayImageOwnsData = false;
+        }
+        else if( zoomFitEnabled )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 )
+                               .scaled( sceneWidth * devicePixelRatio,
+                                        sceneHeight * devicePixelRatio,
+                                        Qt::IgnoreAspectRatio, mode);
+            displayImageOwnsData = true;
+        }
+        else if( stretchY == 1.0 && stretchX == 1.0 )
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else if( mode == Qt::SmoothTransformation && betterResizerEnabled )
+        {
+            avir_scale_thread_pool scaling_pool;
+            avir::CImageResizerParamsUltra roptions;
+            avir::CImageResizer<> image_resizer( 8, 0, roptions );
+            displayImageBacking.resize( static_cast<size_t>(sceneWidth) * static_cast<size_t>(sceneHeight) * 3u );
+            avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
+            image_resizer.resizeImage( rgb8DisplaySource,
+                                       sourceWidth,
+                                       sourceHeight, 0,
+                                       displayImageBacking.data(),
+                                       sceneWidth,
+                                       sceneHeight,
+                                       3, 0, &vars );
+            displayImage = QImage( displayImageBacking.data(),
+                                   sceneWidth,
+                                   sceneHeight,
+                                   QImage::Format_RGB888 );
+            displayImageOwnsData = false;
+        }
+        else
+        {
+            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
+                                   sourceWidth,
+                                   sourceHeight,
+                                   QImage::Format_RGB888 )
+                               .scaled( sceneWidth,
+                                        sceneHeight,
+                                        Qt::IgnoreAspectRatio, mode);
+            displayImageOwnsData = true;
+        }
+    }
+
+    if( useGpuImagePresentation && useGpuShaderZebras )
+    {
+        underOver = scanZebrasRgb8( rgb8DisplaySource, sourceWidth, sourceHeight );
+    }
+    else if( zebrasEnabled && !displayImage.isNull() && !displayImageOwnsData )
+    {
+        displayImage = displayImage.copy();
+        displayImageOwnsData = true;
+        underOver = applyZebrasToImage( &displayImage, zebrasEnabled );
+    }
+    else if( !useGpuImagePresentation )
+    {
+        underOver = applyZebrasToImage( &displayImage, zebrasEnabled );
+    }
+
+    if( !displayImage.isNull() )
+    {
+        result.preparedWidth = displayImage.width();
+        result.preparedHeight = displayImage.height();
+        const int rowBytes = result.preparedWidth * 3;
+        const size_t preparedSize = static_cast<size_t>( rowBytes )
+            * static_cast<size_t>( result.preparedHeight );
+        result.preparedImage.resize( preparedSize );
+        if( displayImage.bytesPerLine() == rowBytes )
+        {
+            memcpy( result.preparedImage.data(), displayImage.constBits(), preparedSize );
+        }
+        else
+        {
+            for( int y = 0; y < result.preparedHeight; ++y )
+            {
+                memcpy( result.preparedImage.data() + static_cast<size_t>( y ) * rowBytes,
+                        displayImage.constScanLine( y ),
+                        static_cast<size_t>( rowBytes ) );
+            }
+        }
+    }
+    result.underOver = underOver;
+    result.imageBuildMs = (mlv_stage_timing_now() - image_start) * 1000.0;
+
+    if( result.task.scopeSourceImage == nullptr )
+    {
+        const size_t sourceImageBytes = static_cast<size_t>( sourceWidth ) *
+                                       static_cast<size_t>( sourceHeight ) * 3u;
+        if( sourceImageBytes > 0 && rgb8DisplaySource )
+        {
+            result.scopeSourceImage.assign( rgb8DisplaySource, rgb8DisplaySource + sourceImageBytes );
+            result.task.scopeSourceImage = result.scopeSourceImage.data();
+            result.task.scopeSourceImageSize = sourceImageBytes;
+        }
+    }
+    else if( result.task.scopeSourceImageSize !=
+             static_cast<size_t>(sourceWidth) * static_cast<size_t>(sourceHeight) * 3u )
+    {
+        result.task.scopeSourceImage = nullptr;
+        result.task.scopeSourceImageSize = 0;
+    }
+
+    return result;
+}
+
+void MainWindow::playbackPrepThreadLoop( void )
+{
+    for( ;; )
+    {
+        PlaybackPrepTask task;
+        {
+            std::unique_lock<std::mutex> lk( m_playbackPrepMutex );
+            m_playbackPrepCv.wait( lk, [this]{
+                return m_playbackPrepStop.load( std::memory_order_acquire )
+                    || m_playbackPrepPendingValid;
+            } );
+            if( m_playbackPrepStop.load( std::memory_order_acquire ) ) return;
+            task = m_playbackPrepPending;
+            m_playbackPrepPendingValid = false;
+        }
+
+        const uint64_t latestBeforeCompute =
+            m_latestRequestedSerial.load( std::memory_order_acquire );
+        if( task.requestSerial != latestBeforeCompute )
+        {
+            std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
+            ++m_playbackPrepStaleDropCount;
+            if( m_pRenderThread )
+                m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
+            continue;
+        }
+
+        PlaybackPrepResult result = buildPlaybackPrepResult( task );
+
+        // Post-compute staleness check: if the UI has moved on while we were
+        // building this frame, drop it at the worker and let the presenter
+        // see a clean queue. Presenter also has an independent check to cover
+        // the race between this push and the queued slot firing.
+        const uint64_t latest = m_latestRequestedSerial.load( std::memory_order_acquire );
+        if( result.task.requestSerial != latest )
+        {
+            std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
+            ++m_playbackPrepStaleDropCount;
+            ++m_playbackPrepReplacedAfterComputeCount;
+            if( m_pRenderThread )
+                m_pRenderThread->releasePresentedFrameForRequestSerial( result.task.requestSerial );
+            continue;
+        }
+        if( m_playbackPrepStop.load( std::memory_order_acquire ) )
+        {
+            if( m_pRenderThread )
+                m_pRenderThread->releasePresentedFrameForRequestSerial( result.task.requestSerial );
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
+            if( !m_playbackPrepResults.empty() )
+            {
+                for( const PlaybackPrepResult &staleResult : m_playbackPrepResults )
+                {
+                    ++m_playbackPrepStaleDropCount;
+                    ++m_playbackPrepReplacedAfterComputeCount;
+                    if( m_pRenderThread )
+                        m_pRenderThread->releasePresentedFrameForRequestSerial(
+                            staleResult.task.requestSerial );
+                }
+                m_playbackPrepResults.clear();
+            }
+            m_playbackPrepResults.push_back( std::move( result ) );
+        }
+        emit playbackPrepResultReady();
+    }
+}
+
+void MainWindow::onPlaybackPrepResultReady( void )
+{
+    PlaybackPrepResult result;
+    {
+        std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
+        if( m_playbackPrepResults.empty() ) return;
+        result = std::move( m_playbackPrepResults.front() );
+        m_playbackPrepResults.pop_front();
+    }
+
+    const uint64_t latest = m_latestRequestedSerial.load( std::memory_order_acquire );
+    if( result.task.requestSerial != latest )
+    {
+        ++m_playbackPrepStaleDropCount;
+        if( m_pRenderThread )
+            m_pRenderThread->releasePresentedFrameForRequestSerial( result.task.requestSerial );
+        m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+        return;
+    }
+
+    presentPlaybackPreparedFrame( result );
+}
+void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result )
+{
+    const PlaybackPrepTask &task = result.task;
+    RenderFrameThread::ReadyFrame readyFrame = task.readyFrame;
+    const uint64_t display_frame = task.displayFrame;
+    const double display_start = task.displayStart;
+
+    const int sourceWidth = task.sourceWidth;
+    const int sourceHeight = task.sourceHeight;
+    const bool zoomFitEnabled = task.zoomFitEnabled;
+    const bool useGpuImagePresentation = task.useGpuImagePresentation;
+    const bool useGpuShaderZebras = task.useGpuShaderZebras;
+    const bool betterResizerEnabled = task.betterResizerEnabled;
+    const bool zebrasEnabled = task.zebrasEnabled;
+    const int sceneWidth = task.sceneWidth;
+    const int sceneHeight = task.sceneHeight;
+    const int transformationMode = task.transformationMode;
+    const int devicePixelRatioMilli = task.devicePixelRatioMilli;
+    const bool displayPreviewCachingAllowed = task.displayPreviewCachingAllowed;
+    const bool gpu16PreviewActive = task.gpu16PreviewActive;
+    const bool gpuPreviewProcessingActive = task.gpuPreviewProcessingActive;
+    const bool cpuPreviewProcessingActive = task.cpuPreviewProcessingActive;
+    const bool playbackProcessingSubsetActive =
+        (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
+        && task.gpuPresentationOptions.previewProcessing.enabled;
+
+    const uint64_t display_signature =
+        playbackProcessingSubsetActive
+            ? (task.gpuPresentationOptions.previewProcessing.signature
+                ^ display_frame
+                ^ (task.requestContext.renderThreadUsingGpuBilinearDebayer ? 0x9d77d4e5cbd18b01ull : 0ull))
+            : (task.readyFrame.processedFrame8Active
+            ? task.readyFrame.processedFrame8Signature
+            : (task.readyFrame.processedFrame16Active
+                ? task.readyFrame.processedFrame16Signature
+                : display_frame));
+
+    m_lastDrawFrameReadyImageMs = result.imageBuildMs;
+    const size_t sourceImageBytes = static_cast<size_t>( sourceWidth )
+        * static_cast<size_t>( sourceHeight ) * 3u;
+    const size_t sourceImage16Bytes = sourceImageBytes * sizeof( uint16_t );
+    const uint16_t *rgb16DisplaySource =
+        (task.sourceImage16 != nullptr && task.sourceImage16Size > 0
+         && task.sourceImage16Size >= sourceImage16Bytes)
+            ? task.sourceImage16
+            : task.readyFrame.rawImage16;
+    const uint8_t *rgb8DisplaySource =
+        (task.sourceImage != nullptr && task.sourceImageSize > 0
+         && task.sourceImageSize >= sourceImageBytes)
+            ? task.sourceImage
+            : task.readyFrame.rawImage8;
+    bool framePresentedByViewport = false;
+    uint8_t underOver = result.underOver;
+    if( gpu16PreviewActive )
+    {
+        framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
+                                                                    m_pGraphicsItem,
+                                                                    rgb16DisplaySource,
+                                                                    sourceWidth,
+                                                                    sourceHeight,
+                                                                    task.gpuPresentationOptions );
+    }
+
+    QImage displayImage;
+    bool displayImageOwnsData = false;
+    QPixmap cachedPixmap;
+    bool cachedPixmapAvailable = false;
+
+    if( displayPreviewCachingAllowed && !framePresentedByViewport )
+    {
+        for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
+        {
+            if( !entry.valid ) continue;
+            if( entry.frameIndex != display_frame ) continue;
+            if( entry.signature != display_signature ) continue;
+            if( entry.sourceWidth != sourceWidth || entry.sourceHeight != sourceHeight ) continue;
+            if( entry.sceneWidth != sceneWidth || entry.sceneHeight != sceneHeight ) continue;
+            if( entry.zoomFit != zoomFitEnabled ) continue;
+            if( entry.betterResizer != betterResizerEnabled ) continue;
+            if( entry.zebras != zebrasEnabled ) continue;
+            if( entry.gpuScaling != useGpuImagePresentation ) continue;
+            if( entry.transformationMode != transformationMode ) continue;
+            if( entry.devicePixelRatioMilli != devicePixelRatioMilli ) continue;
+
+            displayImage = entry.image;
+            displayImageOwnsData = true;
+            cachedPixmap = entry.pixmap;
+            cachedPixmapAvailable = !entry.pixmap.isNull();
+            underOver = entry.underOver;
+            break;
+        }
+    }
+
+    if( displayImage.isNull() && !framePresentedByViewport )
+    {
+        if( !result.preparedImage.empty() )
+        {
+            displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( result.preparedImage.data() ),
+                                                result.preparedWidth,
+                                                result.preparedHeight );
+            displayImageOwnsData = false;
+        }
+    }
+
+    if( !framePresentedByViewport && displayImage.isNull() )
+    {
+        if( m_pRenderThread )
+            m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
+        m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+        return;
+    }
+
+    if( !framePresentedByViewport
+     && !GpuDisplayViewport::presentImage( ui->graphicsView,
+                                           m_pGraphicsItem,
+                                           displayImage,
+                                           task.gpuPresentationOptions ) )
+    {
+        if( useGpuImagePresentation && useGpuShaderZebras && zebrasEnabled )
+        {
+            if( !displayImageOwnsData )
+            {
+                displayImage = displayImage.copy();
+                displayImageOwnsData = true;
+            }
+            underOver = applyZebrasToImage( &displayImage, zebrasEnabled );
+        }
+
+        QPixmap pic = cachedPixmapAvailable ? cachedPixmap : QPixmap::fromImage( displayImage );
+        if( zoomFitEnabled && pic.devicePixelRatio() == 1.0 )
+        {
+            pic.setDevicePixelRatio( devicePixelRatioF() );
+        }
+        m_pGraphicsItem->setPixmap( pic );
+    }
+
+    m_lastDrawFrameReadyImageMs = result.imageBuildMs;
+    mlv_stage_timing_note_elapsed("draw_frameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
+
+    const double present_start = mlv_stage_timing_now();
+    if( displayPreviewCachingAllowed && !framePresentedByViewport )
+    {
+        DisplayPreviewCacheEntry & cacheEntry =
+            m_displayPreviewCache[m_displayPreviewCacheNextSlot % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]))];
+        m_displayPreviewCacheNextSlot = (m_displayPreviewCacheNextSlot + 1) % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]));
+        cacheEntry = DisplayPreviewCacheEntry();
+        cacheEntry.valid = true;
+        cacheEntry.zoomFit = zoomFitEnabled;
+        cacheEntry.betterResizer = betterResizerEnabled;
+        cacheEntry.zebras = zebrasEnabled;
+        cacheEntry.gpuScaling = useGpuImagePresentation;
+        cacheEntry.frameIndex = display_frame;
+        cacheEntry.signature = display_signature;
+        cacheEntry.sourceWidth = sourceWidth;
+        cacheEntry.sourceHeight = sourceHeight;
+        cacheEntry.sceneWidth = sceneWidth;
+        cacheEntry.sceneHeight = sceneHeight;
+        cacheEntry.imageWidth = displayImage.width();
+        cacheEntry.imageHeight = displayImage.height();
+        cacheEntry.transformationMode = transformationMode;
+        cacheEntry.devicePixelRatioMilli = devicePixelRatioMilli;
+        cacheEntry.underOver = underOver;
+        cacheEntry.image = displayImage.copy();
+        if( !useGpuImagePresentation )
+        {
+            cacheEntry.pixmap = QPixmap::fromImage( cacheEntry.image );
+            if( zoomFitEnabled ) cacheEntry.pixmap.setDevicePixelRatio( devicePixelRatioF() );
+        }
+        displayImage = cacheEntry.image;
+        cachedPixmap = cacheEntry.pixmap;
+        cachedPixmapAvailable = !cacheEntry.pixmap.isNull();
+    }
+
+    m_lastDrawFrameReadyPresentMs = (mlv_stage_timing_now() - present_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.present", display_frame, m_lastDrawFrameReadyPresentMs);
+
+    const uint8_t *scopeSourceImage = task.scopeSourceImage;
+    size_t scopeSourceImageSize = task.scopeSourceImageSize;
+    if( !result.scopeSourceImage.empty() )
+    {
+        scopeSourceImage = result.scopeSourceImage.data();
+        scopeSourceImageSize = result.scopeSourceImage.size();
+    }
+    const bool useScopeSourceImage =
+        scopeSourceImage != nullptr
+        && scopeSourceImageSize >= static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight ) * 3u;
+
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_stale_drops"),
+                                           static_cast<double>( m_playbackPrepStaleDropCount.load(
+                                                                 std::memory_order_acquire ) ) );
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_replaced_before_compute"),
+                                           static_cast<double>( m_playbackPrepReplacedBeforeComputeCount.load(
+                                                                 std::memory_order_acquire ) ) );
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_replaced_after_compute"),
+                                           static_cast<double>( m_playbackPrepReplacedAfterComputeCount.load(
+                                                                 std::memory_order_acquire ) ) );
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("draw_frame_ready_scopes_ms"),
+                                                m_lastDrawFrameReadyScopesMs );
+
+    finishPresentedFrame( display_frame,
+                          readyFrame,
+                          task.requestContext,
+                          useScopeSourceImage ? scopeSourceImage : rgb8DisplaySource,
+                           underOver,
+                           display_start );
+    m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
 }
 
 void MainWindow::computeDisplaySceneGeometry( int sourceWidth,
@@ -6830,10 +7437,14 @@ static uint8_t scanZebrasRgb8(const uint8_t *rgbData, int width, int height)
 
 uint8_t MainWindow::drawZebras(QImage *image)
 {
+    return applyZebrasToImage( image, ui->actionShowZebras->isChecked() );
+}
+static uint8_t applyZebrasToImage( QImage *image, bool enableZebras )
+{
     uint8_t underOver = 0;
 
     //If option not checked we do nothing
-    if( !ui->actionShowZebras->isChecked() ) return underOver;
+    if( !enableZebras ) return underOver;
 
     if( !image ) return underOver;
 
@@ -11146,7 +11757,8 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     m_lastDrawFrameReadyTotalMs = (mlv_stage_timing_now() - displayStart) * 1000.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.total", displayFrame, m_lastDrawFrameReadyTotalMs);
     notePlayToFirstFramePresentation( displayFrame );
-    if( m_pRenderThread ) m_pRenderThread->releasePresentedFrame();
+    if( m_pRenderThread )
+        m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
     emit frameReady();
 }
@@ -11190,14 +11802,6 @@ void MainWindow::drawFrameReady()
     const double stretchX = getHorizontalStretchFactor(false);
     const double stretchY = getVerticalStretchFactor(false);
     Qt::TransformationMode mode = Qt::FastTransformation;
-    QImage displayImage;
-    bool displayImageOwnsData = false;
-    QPixmap cachedPixmap;
-    bool cachedPixmapAvailable = false;
-    bool framePresentedByViewport = false;
-    uint8_t underOver = 0;
-    const uint8_t * rgb8DisplaySource = readyFrame.rawImage8;
-    const uint16_t * rgb16DisplaySource = readyFrame.rawImage16;
     int sceneWidth = sourceWidth;
     int sceneHeight = sourceHeight;
     if( !playbackPolicyActive()
@@ -11299,281 +11903,62 @@ void MainWindow::drawFrameReady()
         }
     }
 
-    const bool playbackProcessingSubsetActive =
-        (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
-        && gpuPreviewProcessingConfig.enabled;
-    const uint64_t display_signature =
-        playbackProcessingSubsetActive
-            ? (gpuPreviewProcessingConfig.signature
-                ^ display_frame
-                ^ (requestContext.renderThreadUsingGpuBilinearDebayer ? 0x9d77d4e5cbd18b01ull : 0ull))
-            : (readyFrame.processedFrame8Active
-            ? readyFrame.processedFrame8Signature
-            : (readyFrame.processedFrame16Active
-                ? readyFrame.processedFrame16Signature
-                : display_frame));
-    const int devicePixelRatioMilli = static_cast<int>( devicePixelRatioF() * 1000.0 + 0.5 );
+    const int devicePixelRatioMilli =
+        static_cast<int>( devicePixelRatioF() * 1000.0 + 0.5 );
     const int transformationMode = (mode == Qt::SmoothTransformation) ? 1 : 0;
     const bool displayPreviewCachingAllowed = !playbackPolicyActive();
     GpuDisplayViewport::PresentationOptions gpuPresentationOptions =
         requestContext.gpuPresentationOptions;
     gpuPresentationOptions.showZebras = gpuPreviewPolicy.zebrasEnabled;
-    if( gpuPreviewProcessingActive ) gpuPresentationOptions.previewProcessing = gpuPreviewProcessingConfig;
-
-    if( gpu16PreviewActive )
+    if( gpuPreviewProcessingActive )
     {
-        framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
-                                                                    m_pGraphicsItem,
-                                                                    rgb16DisplaySource,
-                                                                    sourceWidth,
-                                                                    sourceHeight,
-                                                                    gpuPresentationOptions );
-        if( !framePresentedByViewport )
-        {
-            static std::vector<uint16_t> gpu16FallbackProcessed;
-            static std::vector<uint8_t> gpu16FallbackRgb8;
-            const size_t pixelCount = static_cast<size_t>(sourceWidth) * static_cast<size_t>(sourceHeight);
-            gpu16FallbackRgb8.resize( pixelCount * 3u );
-            if( playbackProcessingSubsetActive )
-            {
-                gpu16FallbackProcessed.resize( pixelCount * 3u );
-                gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
-                                                       rgb16DisplaySource,
-                                                       gpu16FallbackProcessed.data(),
-                                                       static_cast<int>(pixelCount) );
-                convert_rgb16_to_rgb8( gpu16FallbackProcessed.data(),
-                                       gpu16FallbackRgb8.data(),
-                                       sourceWidth * sourceHeight );
-            }
-            else
-            {
-                convert_rgb16_to_rgb8( rgb16DisplaySource, gpu16FallbackRgb8.data(), sourceWidth * sourceHeight );
-            }
-            rgb8DisplaySource = gpu16FallbackRgb8.data();
-        }
-    }
-    else if( cpuPreviewProcessingActive && gpuPreviewProcessingConfig.enabled )
-    {
-        static std::vector<uint16_t> cpuPreviewProcessed;
-        static std::vector<uint8_t> cpuPreviewRgb8;
-        const size_t pixelCount = static_cast<size_t>(sourceWidth) * static_cast<size_t>(sourceHeight);
-        cpuPreviewProcessed.resize( pixelCount * 3u );
-        cpuPreviewRgb8.resize( pixelCount * 3u );
-        gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
-                                               rgb16DisplaySource,
-                                               cpuPreviewProcessed.data(),
-                                               static_cast<int>(pixelCount) );
-        convert_rgb16_to_rgb8( cpuPreviewProcessed.data(),
-                               cpuPreviewRgb8.data(),
-                               sourceWidth * sourceHeight );
-        rgb8DisplaySource = cpuPreviewRgb8.data();
+        gpuPresentationOptions.previewProcessing = gpuPreviewProcessingConfig;
     }
 
-    const bool preScaledPlaybackImageAvailable =
-        currentFastPlaybackPresentation
-        && !framePresentedByViewport
-        && !useGpuImagePresentation
-        && !displayPreviewCachingAllowed
-        && readyFrame.playbackScaledImage8
-        && readyFrame.playbackScaledWidth > 0
-        && readyFrame.playbackScaledHeight > 0;
-    readyFrame.stageTimingTelemetry.insert( QStringLiteral("draw_frame_ready_prescaled_image_active"),
-                                            preScaledPlaybackImageAvailable );
-    if( preScaledPlaybackImageAvailable )
-    {
-        displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( readyFrame.playbackScaledImage8 ),
-                                              readyFrame.playbackScaledWidth,
-                                              readyFrame.playbackScaledHeight );
-        displayImageOwnsData = false;
-    }
+    PlaybackPrepTask task;
+    task.readyFrame = readyFrame;
+    task.requestContext = requestContext;
+    task.requestSerial = readyFrame.requestSerial;
+    task.displayStart = display_start;
+    task.displayFrame = display_frame;
+    task.stretchX = stretchX;
+    task.stretchY = stretchY;
+    const size_t sourceImageBytes =
+        (sourceWidth > 0 && sourceHeight > 0)
+            ? static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight ) * 3u
+            : 0;
+    task.sourceImage = readyFrame.rawImage8;
+    task.sourceImageSize = sourceImageBytes;
+    task.scopeSourceImage = task.sourceImage;
+    task.scopeSourceImageSize = sourceImageBytes;
+    const size_t sourceImage16Bytes =
+        (sourceWidth > 0 && sourceHeight > 0)
+            ? static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight ) * 3u
+              * sizeof( uint16_t )
+            : 0;
+    task.sourceImage16 = readyFrame.rawImage16;
+    task.sourceImage16Size = sourceImage16Bytes;
+    task.sourceWidth = sourceWidth;
+    task.sourceHeight = sourceHeight;
+    task.sceneWidth = sceneWidth;
+    task.sceneHeight = sceneHeight;
+    task.transformationMode = transformationMode;
+    task.devicePixelRatioMilli = devicePixelRatioMilli;
+    task.gpu16PreviewActive = gpu16PreviewActive;
+    task.gpuPreviewProcessingActive = gpuPreviewProcessingActive;
+    task.cpuPreviewProcessingActive = cpuPreviewProcessingActive;
+    task.useGpuImagePresentation = useGpuImagePresentation;
+    task.useGpuShaderZebras = useGpuShaderZebras;
+    task.zoomFitEnabled = zoomFitEnabled;
+    task.zebrasEnabled = zebrasEnabled;
+    task.betterResizerEnabled = betterResizerEnabled;
+    task.displayPreviewCachingAllowed = displayPreviewCachingAllowed;
+    task.playbackFastScaleActive = readyFrame.playbackFastScaleActive;
+    task.gpuPresentationOptions = gpuPresentationOptions;
 
-    if( displayPreviewCachingAllowed && !framePresentedByViewport )
-    {
-        for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
-        {
-            if( !entry.valid ) continue;
-            if( entry.frameIndex != display_frame ) continue;
-            if( entry.signature != display_signature ) continue;
-            if( entry.sourceWidth != sourceWidth || entry.sourceHeight != sourceHeight ) continue;
-            if( entry.sceneWidth != sceneWidth || entry.sceneHeight != sceneHeight ) continue;
-            if( entry.zoomFit != zoomFitEnabled ) continue;
-            if( entry.betterResizer != betterResizerEnabled ) continue;
-            if( entry.zebras != zebrasEnabled ) continue;
-            if( entry.gpuScaling != useGpuImagePresentation ) continue;
-            if( entry.transformationMode != transformationMode ) continue;
-            if( entry.devicePixelRatioMilli != devicePixelRatioMilli ) continue;
+    enqueuePlaybackPrepTask( task );
+    return;
 
-            displayImage = entry.image;
-            displayImageOwnsData = true;
-            underOver = entry.underOver;
-            cachedPixmap = entry.pixmap;
-            cachedPixmapAvailable = !entry.pixmap.isNull();
-            break;
-        }
-    }
-
-    const double image_start = mlv_stage_timing_now();
-    if( displayImage.isNull() && !framePresentedByViewport )
-    {
-        const bool playbackFastScalingActive =
-            playbackPolicyActive()
-            && !useGpuImagePresentation
-            && mode == Qt::FastTransformation;
-        if( useGpuImagePresentation )
-        {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 );
-            displayImageOwnsData = false;
-        }
-        else if( zoomFitEnabled && playbackFastScalingActive )
-        {
-            static std::vector<uint8_t> fastPlaybackScaledPic;
-            const int scaledWidth =
-                std::max( 1, qRound( sceneWidth * devicePixelRatioF() ) );
-            const int scaledHeight =
-                std::max( 1, qRound( sceneHeight * devicePixelRatioF() ) );
-            displayImage = build_fast_playback_scaled_image( rgb8DisplaySource,
-                                                             sourceWidth,
-                                                             sourceHeight,
-                                                             scaledWidth,
-                                                             scaledHeight,
-                                                             fastPlaybackScaledPic );
-            displayImageOwnsData = false;
-        }
-        else if( zoomFitEnabled )
-        {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 )
-                               .scaled( sceneWidth * devicePixelRatioF(),
-                                        sceneHeight * devicePixelRatioF(),
-                                        Qt::IgnoreAspectRatio, mode);
-            displayImageOwnsData = true;
-        }
-        else if( stretchY == 1.0 && stretchX == 1.0 )
-        {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 );
-            displayImageOwnsData = false;
-        }
-        else if( mode == Qt::SmoothTransformation && betterResizerEnabled )
-        {
-            static avir_scale_thread_pool scaling_pool;
-            static avir::CImageResizerParamsUltra roptions;
-            static avir::CImageResizer<> image_resizer( 8, 0, roptions );
-            static std::vector<uint8_t> scaledPic;
-            scaledPic.resize( static_cast<size_t>(sceneWidth) * static_cast<size_t>(sceneHeight) * 3u );
-            avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
-            image_resizer.resizeImage( rgb8DisplaySource,
-                                       sourceWidth,
-                                       sourceHeight, 0,
-                                       scaledPic.data(),
-                                       sceneWidth,
-                                       sceneHeight,
-                                       3, 0, &vars );
-            displayImage = QImage( scaledPic.data(),
-                                   sceneWidth,
-                                   sceneHeight,
-                                   QImage::Format_RGB888 );
-            displayImageOwnsData = false;
-        }
-        else
-        {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 )
-                               .scaled( sceneWidth,
-                                        sceneHeight,
-                                        Qt::IgnoreAspectRatio, mode);
-            displayImageOwnsData = true;
-        }
-
-        if( useGpuImagePresentation && useGpuShaderZebras )
-        {
-            underOver = scanZebrasRgb8( rgb8DisplaySource, sourceWidth, sourceHeight );
-        }
-        else if( zebrasEnabled && !displayImageOwnsData )
-        {
-            displayImage = displayImage.copy();
-            displayImageOwnsData = true;
-        }
-
-        if( !useGpuImagePresentation || !useGpuShaderZebras )
-        {
-            underOver = drawZebras( &displayImage );
-        }
-
-        if( displayPreviewCachingAllowed )
-        {
-            DisplayPreviewCacheEntry & cacheEntry =
-                m_displayPreviewCache[m_displayPreviewCacheNextSlot % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]))];
-            m_displayPreviewCacheNextSlot = (m_displayPreviewCacheNextSlot + 1) % (sizeof(m_displayPreviewCache) / sizeof(m_displayPreviewCache[0]));
-            cacheEntry = DisplayPreviewCacheEntry();
-            cacheEntry.valid = true;
-            cacheEntry.zoomFit = zoomFitEnabled;
-            cacheEntry.betterResizer = betterResizerEnabled;
-            cacheEntry.zebras = zebrasEnabled;
-            cacheEntry.gpuScaling = useGpuImagePresentation;
-            cacheEntry.frameIndex = display_frame;
-            cacheEntry.signature = display_signature;
-            cacheEntry.sourceWidth = sourceWidth;
-            cacheEntry.sourceHeight = sourceHeight;
-            cacheEntry.sceneWidth = sceneWidth;
-            cacheEntry.sceneHeight = sceneHeight;
-            cacheEntry.imageWidth = displayImage.width();
-            cacheEntry.imageHeight = displayImage.height();
-            cacheEntry.transformationMode = transformationMode;
-            cacheEntry.devicePixelRatioMilli = devicePixelRatioMilli;
-            cacheEntry.underOver = underOver;
-            cacheEntry.image = displayImage.copy();
-            if( !useGpuImagePresentation )
-            {
-                cacheEntry.pixmap = QPixmap::fromImage( cacheEntry.image );
-                if( zoomFitEnabled ) cacheEntry.pixmap.setDevicePixelRatio( devicePixelRatioF() );
-            }
-
-            displayImage = cacheEntry.image;
-            cachedPixmap = cacheEntry.pixmap;
-            cachedPixmapAvailable = !cacheEntry.pixmap.isNull();
-        }
-    }
-    m_lastDrawFrameReadyImageMs = (mlv_stage_timing_now() - image_start) * 1000.0;
-    mlv_stage_timing_note_elapsed("drawFrameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
-
-    const double present_start = mlv_stage_timing_now();
-    if( !framePresentedByViewport
-     && !GpuDisplayViewport::presentImage( ui->graphicsView, m_pGraphicsItem, displayImage, gpuPresentationOptions ) )
-    {
-        if( zebrasEnabled && useGpuImagePresentation && useGpuShaderZebras )
-        {
-            if( !displayImageOwnsData )
-            {
-                displayImage = displayImage.copy();
-                displayImageOwnsData = true;
-            }
-            underOver = drawZebras( &displayImage );
-        }
-        QPixmap pic = cachedPixmapAvailable ? cachedPixmap : QPixmap::fromImage( displayImage );
-        if( zoomFitEnabled && pic.devicePixelRatio() == 1.0 )
-        {
-            pic.setDevicePixelRatio( devicePixelRatioF() );
-        }
-        m_pGraphicsItem->setPixmap( pic );
-    }
-    m_lastDrawFrameReadyPresentMs = (mlv_stage_timing_now() - present_start) * 1000.0;
-    mlv_stage_timing_note_elapsed("drawFrameReady.present", display_frame, m_lastDrawFrameReadyPresentMs);
-    finishPresentedFrame( display_frame,
-                          readyFrame,
-                          requestContext,
-                          rgb8DisplaySource,
-                          underOver,
-                          display_start );
 }
 
 //Paintmode for gradient enabled/disabled
