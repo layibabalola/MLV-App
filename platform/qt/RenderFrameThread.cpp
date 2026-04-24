@@ -142,12 +142,6 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         return false;
     }
 
-    if( m_presentingSlotIndex >= 0 )
-    {
-        releaseSlotLocked( m_presentingSlotIndex );
-        m_presentingSlotIndex = -1;
-    }
-
     FrameSlot &slot = m_frameSlots[readySlotIndex];
     slot.ready = false;
     slot.presenting = true;
@@ -197,6 +191,21 @@ void RenderFrameThread::releasePresentedFrame()
         releaseSlotLocked( m_presentingSlotIndex );
         m_presentingSlotIndex = -1;
         m_waitCondition.wakeAll();
+    }
+}
+
+void RenderFrameThread::releasePresentedFrameForRequestSerial( uint64_t requestSerial )
+{
+    QMutexLocker locker(&m_mutex);
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        FrameSlot &slot = m_frameSlots[i];
+        if( !slot.presenting ) continue;
+        if( slot.requestSerial != requestSerial ) continue;
+        releaseSlotLocked( i );
+        if( m_presentingSlotIndex == i ) m_presentingSlotIndex = -1;
+        m_waitCondition.wakeAll();
+        break;
     }
 }
 
@@ -577,6 +586,8 @@ void RenderFrameThread::drawFrame( int slotIndex )
     const double rawUint16UnpackMs = getMlvLastRawUint16UnpackMilliseconds();
     const double rawUint16CopyMs = getMlvLastRawUint16CopyMilliseconds();
     const int rawUint16PrefetchHit = getMlvLastRawUint16PrefetchHit();
+    const quint64 rawUint16PrefetchDecodeFailures =
+        static_cast<quint64>( getMlvRawUint16PrefetchDecodeFailures( m_pMlvObject ) );
     const double llrawprocMs = getMlvLastLlrawprocMilliseconds();
     const double llrawprocDarkFrameMs = llrpGetLastDarkFrameMilliseconds();
     const double llrawprocVerticalStripesMs = llrpGetLastVerticalStripesMilliseconds();
@@ -748,6 +759,8 @@ void RenderFrameThread::drawFrame( int slotIndex )
                                       rawUint16CopyMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_prefetch_hit"),
                                       rawUint16PrefetchHit != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_prefetch_decode_failures"),
+                                      static_cast<qint64>( rawUint16PrefetchDecodeFailures ) );
     slot.stageTimingTelemetry.insert( QStringLiteral("raw_uint16_other_ms"),
                                       rawUint16OtherMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_ms"),

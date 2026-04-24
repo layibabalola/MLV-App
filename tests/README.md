@@ -332,11 +332,19 @@ Experimental GPU bilinear debayer (2026-04-22):
   - `--threads 8` regresses materially on this VM (`158.73 ms` warm)
   - the raw split shows the remaining bottleneck is compressed decode
     (`raw_uint16_decompress_ms`), not disk I/O or bit-unpack
-- decode-ahead prototype status:
-  - `MLVAPP_EXPERIMENTAL_RAW_UINT16_PREFETCH=1` enables the current raw-`uint16`
-    decode-ahead experiment
-  - it is intentionally off by default because it hid foreground decode time but
-    regressed end-to-end playback on this VM
+- decode-ahead prefetch status:
+  - the raw-`uint16` decode-ahead worker is **default-on**; it hides foreground
+    decode time on hosts with spare CPU headroom and produces `raw_uint16_prefetch_hit=true`
+    on warm samples for compressed raw
+  - set `MLVAPP_DISABLE_RAW_UINT16_PREFETCH=1` (values `1`, `true`, `yes`, `on`) to
+    disable the worker and fall back to foreground decode — use this if the host
+    regresses on end-to-end playback latency
+  - the older `MLVAPP_EXPERIMENTAL_RAW_UINT16_PREFETCH` env var is inert; setting
+    it has no effect (removed from the enable gate)
+  - new telemetry field `raw_uint16_prefetch_decode_failures` surfaces the count
+    of background decode failures per clip (mutex-protected read of the worker
+    counter); it should be `0` on healthy runs, and remains `0` when the worker
+    is disabled
 - play-start cache preroll status:
   - clicking play now primes the existing raw cache window with a small
     non-blocking 2-frame lookahead

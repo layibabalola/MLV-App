@@ -117,6 +117,7 @@ public:
     bool isIdle( void );
     bool acquireLatestReadyFrame( ReadyFrame *frame );
     void releasePresentedFrame( void );
+    void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
     bool lastFrameUsedGpuBilinearDebayer( void ) const;
     QString lastGpuBilinearFallbackReason( void ) const;
     QString lastGpuBilinearRendererDescription( void ) const;

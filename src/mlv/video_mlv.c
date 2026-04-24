@@ -164,6 +164,27 @@ static void mlv_reset_last_raw_stage_telemetry(void)
     g_mlv_last_raw_uint16_prefetch_hit = 0;
 }
 
+static int mlv_env_value_is_truthy(const char * value)
+{
+    if (!value || value[0] == '\0') return 0;
+    if (strcmp(value, "1") == 0) return 1;
+    if (strcasecmp(value, "true") == 0) return 1;
+    if (strcasecmp(value, "yes") == 0) return 1;
+    if (strcasecmp(value, "on") == 0) return 1;
+    return 0;
+}
+
+/* Matches lj92.c's lj92_pred6_split_enabled-style truthy check: any non-empty
+ * value other than literal "0" enables the feature. Broader than
+ * mlv_env_value_is_truthy so the prefetch disable here tracks whatever lj92
+ * considers "profiling requested". */
+static int mlv_env_value_is_lj92_truthy(const char * value)
+{
+    if (!value || value[0] == '\0') return 0;
+    if (value[0] == '0' && value[1] == '\0') return 0;
+    return 1;
+}
+
 static int mlv_raw_uint16_prefetch_enabled(void)
 {
     static int enabled = -1;
@@ -172,15 +193,32 @@ static int mlv_raw_uint16_prefetch_enabled(void)
         return enabled;
     }
 
-    const char * value = getenv("MLVAPP_EXPERIMENTAL_RAW_UINT16_PREFETCH");
-    enabled =
-        (value
-         && value[0] != '\0'
-         && strcmp(value, "0") != 0
-         && strcasecmp(value, "false") != 0
-         && strcasecmp(value, "off") != 0)
-            ? 1
-            : 0;
+    if (mlv_env_value_is_truthy(getenv("MLVAPP_DISABLE_RAW_UINT16_PREFETCH")))
+    {
+        enabled = 0;
+    }
+    else if (mlv_env_value_is_lj92_truthy(getenv("MLVAPP_PROFILE_LJ92_PRED6_SPLIT"))
+             || mlv_env_value_is_lj92_truthy(getenv("MLVAPP_PROFILE_LJ92_GENERIC_SPLIT"))
+             || mlv_env_value_is_lj92_truthy(getenv("MLVAPP_PRED1_FASTPATH_MEASUREMENT")))
+    {
+        /* Invariant (future maintainers, preserve this):
+         *   These profiling modes populate THREAD-LOCAL telemetry on the
+         *   decoding thread. The consumer then reads those TLs back on its
+         *   own thread after the decode returns. For the signals to reach
+         *   the consumer at all, DECODE MUST REMAIN ON THE CALLER / READ
+         *   THREAD — running it in the prefetch worker puts the TLs on the
+         *   worker thread, where the consumer never sees them.
+         *
+         * Therefore: while any of these profiling env vars are truthy, the
+         * prefetch is implicitly disabled so decode stays in-thread. This
+         * gate is the single place that enforces the invariant; do not try
+         * to propagate thread-locality awareness through the worker path. */
+        enabled = 0;
+    }
+    else
+    {
+        enabled = 1;
+    }
     return enabled;
 }
 
@@ -825,6 +863,10 @@ static void * mlv_raw_uint16_prefetch_thread_main(void * opaque)
             int decodeOk = (getMlvRawFrameUint16Direct(video, targetFrame, slotBuffer) == 0);
 
             pthread_mutex_lock(&video->raw_uint16_prefetch_mutex);
+            if (!decodeOk)
+            {
+                ++video->raw_uint16_prefetch_decode_failures;
+            }
             if (slot < MLV_RAW_UINT16_PREFETCH_SLOTS
                 && video->raw_uint16_prefetch_slot_frame[slot] == targetFrame
                 && video->raw_uint16_prefetch_slot_generation[slot] == generation)
@@ -854,20 +896,20 @@ static int mlv_start_raw_uint16_prefetch_thread(mlvObject_t * video)
         pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
         return 1;
     }
-    video->raw_uint16_prefetch_thread_started = 1;
-    pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
 
-    if (pthread_create(&video->raw_uint16_prefetch_thread,
-                       NULL,
-                       mlv_raw_uint16_prefetch_thread_main,
-                       video) != 0)
+    /* Hold the mutex across pthread_create so the started flag only publishes
+     * after the thread actually exists; otherwise a concurrent note_request
+     * could signal a cond for a thread that failed to spawn. */
+    int create_rc = pthread_create(&video->raw_uint16_prefetch_thread,
+                                   NULL,
+                                   mlv_raw_uint16_prefetch_thread_main,
+                                   video);
+    if (create_rc == 0)
     {
-        pthread_mutex_lock(&video->raw_uint16_prefetch_mutex);
-        video->raw_uint16_prefetch_thread_started = 0;
-        pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
-        return 0;
+        video->raw_uint16_prefetch_thread_started = 1;
     }
-    return 1;
+    pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
+    return create_rc == 0 ? 1 : 0;
 }
 
 static void mlv_reset_processed_frame_16bit_cache(mlvObject_t * video)
@@ -2844,6 +2886,15 @@ double getMlvLastRawUint16CopyMilliseconds(void)
 int getMlvLastRawUint16PrefetchHit(void)
 {
     return g_mlv_last_raw_uint16_prefetch_hit;
+}
+
+uint64_t getMlvRawUint16PrefetchDecodeFailures(mlvObject_t * video)
+{
+    if (!video) return 0;
+    pthread_mutex_lock(&video->raw_uint16_prefetch_mutex);
+    uint64_t value = video->raw_uint16_prefetch_decode_failures;
+    pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
+    return value;
 }
 
 double getMlvLastLlrawprocMilliseconds(void)

@@ -235,6 +235,7 @@ typedef struct {
     uint64_t raw_uint16_prefetch_slot_frame[MLV_RAW_UINT16_PREFETCH_SLOTS];
     uint32_t raw_uint16_prefetch_slot_generation[MLV_RAW_UINT16_PREFETCH_SLOTS];
     uint32_t raw_uint16_prefetch_next_slot;
+    uint64_t raw_uint16_prefetch_decode_failures;
 
     /* How many cores, will not neccesarily determine number of threads made in any case, but helps */
     int cpu_cores; /* Default 4 */
