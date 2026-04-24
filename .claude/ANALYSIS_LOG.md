@@ -367,3 +367,29 @@
   - plain `console_tests --check-golden`: `41/160/17/0`
   - `pipeline_tests --check-golden`: `46/526/4/0`
   - app-backed `console_tests --check-golden`: `41/750/1/0`
+
+## 2026-04-23 - render-slot playback pre-scale keep
+
+- Restored the non-winning H2/H3 llrawproc pass out of the live tree and kept the next block focused on the Qt playback path.
+- Added a shared fast playback scaler helper in `platform/qt/PlaybackScaling.h` and let `RenderFrameThread` publish a slot-owned `playbackScaledImage8` buffer for the default zoom-fit processed8 playback path.
+- Queued target presentation geometry with each render request from `MainWindow::drawFrame()` and taught `drawFrameReady()` to consume the slot-owned pre-scaled image instead of rebuilding the image on the UI thread.
+- Caught one real false start:
+  - the first version rendered the pre-scaled image in the worker but `drawFrameReady()` still chose the smooth path during headless playback because it gated off `ui->actionPlay->isChecked()` instead of `playbackPolicyActive()`
+  - false-start artifact kept for reference: `.claude/profiling/20260423-render-prescale-v1/large_dual_iso_preview_t4_prescale_run1c.json`
+- Final kept artifacts live in `.claude/profiling/20260423-render-prescale-v2-final/`
+  - warm medians:
+    - `run1 cadence_ms 39.263`
+    - `run2 cadence_ms 43.2626`
+    - `run3 cadence_ms 37.9273`
+    - `run4 cadence_ms 39.8684`
+  - across-run median of warm medians: `39.8684 ms`
+  - `draw_frame_ready_prescaled_image_active = true` on all measured frames in the kept folder
+  - `draw_frame_ready_image_ms` collapses from the prior `~10-11 ms` band to `0`
+  - `render_thread_playback_scale_ms` stays around `0-1 ms` warm on this VM
+- Result against the committed bar:
+  - native realtime budget for this `23.976 fps` clip is `41.708 ms`
+  - current kept path is below that bar on the VM, so M1 is met
+- Final validation on the kept state:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/758/0/0`
+  - `pipeline_tests --check-golden`: `46/526/4/0`

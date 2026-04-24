@@ -14,6 +14,7 @@
 #include <QString>
 #include <QJsonObject>
 #include "../../src/mlv_include.h"
+#include "PlaybackScaling.h"
 
 #include <array>
 #include <vector>
@@ -34,9 +35,13 @@ public:
     {
         const uint8_t *rawImage8 = nullptr;
         const uint16_t *rawImage16 = nullptr;
+        const uint8_t *playbackScaledImage8 = nullptr;
         uint32_t frameNumber = 0;
         uint64_t requestSerial = 0;
         OutputMode outputMode = OutputProcessed8;
+        bool playbackFastScaleActive = false;
+        int playbackScaledWidth = 0;
+        int playbackScaledHeight = 0;
         bool usedGpuBilinearDebayer = false;
         QString gpuBilinearFallbackReason;
         QString gpuBilinearRendererDescription;
@@ -55,15 +60,23 @@ public:
         QJsonObject stageTimingTelemetry;
     };
 
+    struct PresentationPreparationOptions
+    {
+        bool fastPlaybackScale = false;
+        int targetWidth = 0;
+        int targetHeight = 0;
+    };
+
     RenderFrameThread();
     ~RenderFrameThread();
     void init( mlvObject_t *pMlvObject,
                int imageWidth,
                int imageHeight );
     void renderFrame( uint32_t frameNumber,
-                      OutputMode outputMode = OutputProcessed8,
-                      bool useGpuBilinearDebayer = false,
-                      uint64_t requestSerial = 0 );
+                      OutputMode outputMode,
+                      bool useGpuBilinearDebayer,
+                      uint64_t requestSerial,
+                      const PresentationPreparationOptions &presentationPreparation );
     bool isFrameReady( void );
     bool isIdle( void );
     bool acquireLatestReadyFrame( ReadyFrame *frame );
@@ -88,11 +101,15 @@ private:
     {
         std::vector<uint8_t> rawImage8;
         std::vector<uint16_t> rawImage16;
+        std::vector<uint8_t> playbackScaledImage8;
         uint32_t frameNumber = 0;
         uint64_t requestSerial = 0;
         OutputMode outputMode = OutputProcessed8;
         bool ready = false;
         bool presenting = false;
+        bool playbackFastScaleActive = false;
+        int playbackScaledWidth = 0;
+        int playbackScaledHeight = 0;
         bool usedGpuBilinearDebayer = false;
         QString gpuBilinearFallbackReason;
         QString gpuBilinearRendererDescription;
@@ -117,6 +134,9 @@ private:
             outputMode = OutputProcessed8;
             ready = false;
             presenting = false;
+            playbackFastScaleActive = false;
+            playbackScaledWidth = 0;
+            playbackScaledHeight = 0;
             usedGpuBilinearDebayer = false;
             gpuBilinearFallbackReason.clear();
             gpuBilinearRendererDescription.clear();
@@ -152,6 +172,8 @@ private:
     bool m_activeUseGpuBilinearDebayer;
     uint32_t m_activeFrameNumber;
     uint64_t m_activeFrameRequestSerial;
+    PresentationPreparationOptions m_presentationPreparationOptions;
+    PresentationPreparationOptions m_activePresentationPreparationOptions;
     bool m_loggedGpuBilinearSuccess;
     bool m_lastFrameUsedGpuBilinearDebayer;
     QString m_lastGpuBilinearFallbackReason;
@@ -171,6 +193,7 @@ private:
     int m_renderingSlotIndex;
     int m_presentingSlotIndex;
     std::array<FrameSlot, 2> m_frameSlots;
+    FastPlaybackScaleCache m_playbackScaleCache;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
 
     void run( void );

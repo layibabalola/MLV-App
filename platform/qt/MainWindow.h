@@ -536,6 +536,13 @@ private:
     {
         uint64_t requestSerial = 0;
         uint32_t frameNumber = 0;
+        int sceneWidth = 0;
+        int sceneHeight = 0;
+        int imageWidth = 0;
+        int imageHeight = 0;
+        int devicePixelRatioMilli = 0;
+        bool zoomFitEnabled = false;
+        bool fastPlaybackScaleEligible = false;
         bool renderThreadUsing16BitPreview = false;
         bool renderThreadUsingGpuPreviewProcessing = false;
         bool renderThreadUsingGpuBilinearDebayer = false;
@@ -672,6 +679,21 @@ private:
     void queuePresentationRequest( const PresentationRequestContext &context );
     bool consumePresentationRequest( uint64_t requestSerial,
                                      PresentationRequestContext *context );
+    void computeDisplaySceneGeometry( int sourceWidth,
+                                      int sourceHeight,
+                                      bool zoomFitEnabled,
+                                      double stretchX,
+                                      double stretchY,
+                                      int *sceneWidth,
+                                      int *sceneHeight ) const;
+    void recordPresentedFrame( const RenderFrameThread::ReadyFrame &readyFrame,
+                               const PresentationRequestContext &requestContext );
+    void finishPresentedFrame( uint64_t displayFrame,
+                               const RenderFrameThread::ReadyFrame &readyFrame,
+                               const PresentationRequestContext &requestContext,
+                               const uint8_t *rgb8DisplaySource,
+                               uint8_t underOver,
+                               double displayStart );
     bool playbackPolicyActive( void ) const;
     void applyPlaybackDebayerSelection( void );
     void setPlaybackProfileDebayerRequest(

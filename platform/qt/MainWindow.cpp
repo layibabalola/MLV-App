@@ -43,6 +43,7 @@
 #include "GpuDebayer.h"
 #include "GpuDisplayViewport.h"
 #include "MainWindowGpuPreviewPolicy.h"
+#include "PlaybackScaling.h"
 #include "ZebraThresholds.h"
 #include "batch/WorkerThreadCount.h"
 #include "ExportSettingsDialog.h"
@@ -136,111 +137,14 @@ static QImage build_fast_playback_scaled_image(const uint8_t * source,
                                                int targetHeight,
                                                std::vector<uint8_t> & scaledBuffer)
 {
-    struct FastPlaybackScaleCache
-    {
-        int sourceWidth = 0;
-        int sourceHeight = 0;
-        int targetWidth = 0;
-        int targetHeight = 0;
-        std::vector<int> xOffsets;
-        std::vector<int> yOffsets;
-    };
-
-    static FastPlaybackScaleCache cache;
-
-    if( !source
-     || sourceWidth <= 0
-     || sourceHeight <= 0
-     || targetWidth <= 0
-     || targetHeight <= 0 )
-    {
-        return QImage();
-    }
-
-    const size_t targetPixels =
-        static_cast<size_t>( targetWidth ) * static_cast<size_t>( targetHeight );
-    scaledBuffer.resize( targetPixels * 3u );
-
-    if( cache.sourceWidth != sourceWidth
-     || cache.sourceHeight != sourceHeight
-     || cache.targetWidth != targetWidth
-     || cache.targetHeight != targetHeight )
-    {
-        cache.sourceWidth = sourceWidth;
-        cache.sourceHeight = sourceHeight;
-        cache.targetWidth = targetWidth;
-        cache.targetHeight = targetHeight;
-        cache.xOffsets.resize( static_cast<size_t>( targetWidth ) );
-        cache.yOffsets.resize( static_cast<size_t>( targetHeight ) );
-
-        for( int x = 0; x < targetWidth; ++x )
-        {
-            const int srcX = std::min( sourceWidth - 1,
-                                       static_cast<int>(
-                                           ( static_cast<uint64_t>( x ) * static_cast<uint64_t>( sourceWidth ) )
-                                           / static_cast<uint64_t>( targetWidth ) ) );
-            cache.xOffsets[static_cast<size_t>( x )] = srcX * 3;
-        }
-
-        for( int y = 0; y < targetHeight; ++y )
-        {
-            const int srcY = std::min( sourceHeight - 1,
-                                       static_cast<int>(
-                                           ( static_cast<uint64_t>( y ) * static_cast<uint64_t>( sourceHeight ) )
-                                           / static_cast<uint64_t>( targetHeight ) ) );
-            cache.yOffsets[static_cast<size_t>( y )] = srcY * sourceWidth * 3;
-        }
-    }
-
-    for( int y = 0; y < targetHeight; ++y )
-    {
-        const uint8_t * srcRow =
-            source + static_cast<size_t>( cache.yOffsets[static_cast<size_t>( y )] );
-        uint8_t * dstRow =
-            scaledBuffer.data() + static_cast<size_t>( y ) * static_cast<size_t>( targetWidth ) * 3u;
-
-        int x = 0;
-        for( ; x + 3 < targetWidth; x += 4 )
-        {
-            const uint8_t * srcPixel0 =
-                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x )] );
-            const uint8_t * srcPixel1 =
-                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x + 1 )] );
-            const uint8_t * srcPixel2 =
-                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x + 2 )] );
-            const uint8_t * srcPixel3 =
-                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x + 3 )] );
-            uint8_t * dstPixel = dstRow + static_cast<size_t>( x ) * 3u;
-
-            dstPixel[0] = srcPixel0[0];
-            dstPixel[1] = srcPixel0[1];
-            dstPixel[2] = srcPixel0[2];
-            dstPixel[3] = srcPixel1[0];
-            dstPixel[4] = srcPixel1[1];
-            dstPixel[5] = srcPixel1[2];
-            dstPixel[6] = srcPixel2[0];
-            dstPixel[7] = srcPixel2[1];
-            dstPixel[8] = srcPixel2[2];
-            dstPixel[9] = srcPixel3[0];
-            dstPixel[10] = srcPixel3[1];
-            dstPixel[11] = srcPixel3[2];
-        }
-
-        for( ; x < targetWidth; ++x )
-        {
-            const uint8_t * srcPixel =
-                srcRow + static_cast<size_t>( cache.xOffsets[static_cast<size_t>( x )] );
-            uint8_t * dstPixel = dstRow + static_cast<size_t>( x ) * 3u;
-            dstPixel[0] = srcPixel[0];
-            dstPixel[1] = srcPixel[1];
-            dstPixel[2] = srcPixel[2];
-        }
-    }
-
-    return QImage( scaledBuffer.data(),
-                   targetWidth,
-                   targetHeight,
-                   QImage::Format_RGB888 );
+    static thread_local FastPlaybackScaleCache cache;
+    return playbackBuildFastScaledImage( source,
+                                         sourceWidth,
+                                         sourceHeight,
+                                         targetWidth,
+                                         targetHeight,
+                                         scaledBuffer,
+                                         cache );
 }
 
 static const char * playback_profile_scope_name(MainWindow::PlaybackProfileScope scope)
@@ -1183,6 +1087,54 @@ bool MainWindow::consumePresentationRequest( uint64_t requestSerial,
     return true;
 }
 
+void MainWindow::computeDisplaySceneGeometry( int sourceWidth,
+                                              int sourceHeight,
+                                              bool zoomFitEnabled,
+                                              double stretchX,
+                                              double stretchY,
+                                              int *sceneWidth,
+                                              int *sceneHeight ) const
+{
+    if( sceneWidth ) *sceneWidth = sourceWidth;
+    if( sceneHeight ) *sceneHeight = sourceHeight;
+    if( sourceWidth <= 0 || sourceHeight <= 0 ) return;
+
+    int resolvedSceneWidth = sourceWidth;
+    int resolvedSceneHeight = sourceHeight;
+
+    if( zoomFitEnabled )
+    {
+        int actWidth = 0;
+        int actHeight = 0;
+        if( ui->actionFullscreen->isChecked() )
+        {
+            actWidth = QApplication::primaryScreen()->size().width();
+            actHeight = QApplication::primaryScreen()->size().height();
+        }
+        else
+        {
+            actWidth = ui->graphicsView->width();
+            actHeight = ui->graphicsView->height();
+        }
+
+        resolvedSceneWidth = actWidth;
+        resolvedSceneHeight = actWidth * sourceHeight / sourceWidth * stretchY / stretchX;
+        if( resolvedSceneHeight > actHeight )
+        {
+            resolvedSceneHeight = actHeight;
+            resolvedSceneWidth = actHeight * sourceWidth / sourceHeight / stretchY * stretchX;
+        }
+    }
+    else
+    {
+        resolvedSceneWidth = sourceWidth * stretchX;
+        resolvedSceneHeight = sourceHeight * stretchY;
+    }
+
+    if( sceneWidth ) *sceneWidth = resolvedSceneWidth;
+    if( sceneHeight ) *sceneHeight = resolvedSceneHeight;
+}
+
 //Draw a raw picture to the gui -> start render thread
 void MainWindow::drawFrame( bool updateTimecodeLabel )
 {
@@ -1246,9 +1198,32 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             m_lastQueuedGpuPreviewProcessingConfig;
     }
 
+    const int sourceWidth = getMlvWidth( m_pMlvObject );
+    const int sourceHeight = getMlvHeight( m_pMlvObject );
+    const bool zoomFitEnabled = ui->actionZoomFit->isChecked();
+    const double stretchX = getHorizontalStretchFactor( false );
+    const double stretchY = getVerticalStretchFactor( false );
+    int sceneWidth = sourceWidth;
+    int sceneHeight = sourceHeight;
+    computeDisplaySceneGeometry( sourceWidth,
+                                 sourceHeight,
+                                 zoomFitEnabled,
+                                 stretchX,
+                                 stretchY,
+                                 &sceneWidth,
+                                 &sceneHeight );
+    const int devicePixelRatioMilli =
+        static_cast<int>( devicePixelRatioF() * 1000.0 + 0.5 );
+    const bool useGpuImagePresentation =
+        mainWindowUsesGpuImagePresentation( renderPolicy );
+
     const uint64_t requestSerial = m_nextRenderRequestSerial++;
     PresentationRequestContext requestContext;
     requestContext.requestSerial = requestSerial;
+    requestContext.sceneWidth = sceneWidth;
+    requestContext.sceneHeight = sceneHeight;
+    requestContext.devicePixelRatioMilli = devicePixelRatioMilli;
+    requestContext.zoomFitEnabled = zoomFitEnabled;
     requestContext.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
     requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
     requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
@@ -1267,6 +1242,26 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     {
         renderOutputMode = RenderFrameThread::OutputProcessed16;
     }
+
+    requestContext.fastPlaybackScaleEligible =
+        playbackPolicyActive()
+        && renderOutputMode == RenderFrameThread::OutputProcessed8
+        && zoomFitEnabled
+        && transformationMode == Qt::FastTransformation
+        && !useGpuImagePresentation
+        && !renderPolicy.zebrasEnabled;
+    if( requestContext.fastPlaybackScaleEligible )
+    {
+        requestContext.imageWidth =
+            std::max( 1, qRound( sceneWidth * devicePixelRatioF() ) );
+        requestContext.imageHeight =
+            std::max( 1, qRound( sceneHeight * devicePixelRatioF() ) );
+    }
+
+    RenderFrameThread::PresentationPreparationOptions presentationPreparation;
+    presentationPreparation.fastPlaybackScale = requestContext.fastPlaybackScaleEligible;
+    presentationPreparation.targetWidth = requestContext.imageWidth;
+    presentationPreparation.targetHeight = requestContext.imageHeight;
 
     //enable low level raw fixes (if wanted)
     if( ui->checkBoxRawFixEnable->isChecked() ) m_pMlvObject->llrawproc->fix_raw = 1;
@@ -1291,7 +1286,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
                                       m_renderThreadUsingGpuBilinearDebayer,
-                                      requestSerial );
+                                      requestSerial,
+                                      presentationPreparation );
 
         //Draw TimeCode
         if( updateTimecodeLabel && !m_tcModeDuration ) updateTimeCodeLabelForFrame( m_newPosDropMode );
@@ -1304,7 +1300,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
                                       m_renderThreadUsingGpuBilinearDebayer,
-                                      requestSerial );
+                                      requestSerial,
+                                      presentationPreparation );
 
         //Draw TimeCode
         if( updateTimecodeLabel && !m_tcModeDuration ) updateTimeCodeLabelForFrame( ui->horizontalSliderPosition->value() );
@@ -11025,6 +11022,120 @@ void MainWindow::exportAbort( void )
     m_exportQueue.clear();
 }
 
+void MainWindow::recordPresentedFrame( const RenderFrameThread::ReadyFrame &readyFrame,
+                                       const PresentationRequestContext &requestContext )
+{
+    m_lastPresentedRequestSerial = readyFrame.requestSerial;
+    m_lastPresentedRequestContext = requestContext;
+    m_lastPresentedRequestContextValid = true;
+    m_lastPresentedFrameUsedGpuBilinearDebayer = readyFrame.usedGpuBilinearDebayer;
+    m_lastPresentedGpuBilinearFallbackReason = readyFrame.gpuBilinearFallbackReason;
+    m_lastPresentedGpuBilinearRendererDescription = readyFrame.gpuBilinearRendererDescription;
+    m_lastPresentedDualIsoPreviewHistogramMs = readyFrame.dualIsoPreviewHistogramMs;
+    m_lastPresentedDualIsoPreviewRegressionMs = readyFrame.dualIsoPreviewRegressionMs;
+    m_lastPresentedDualIsoPreviewRowscaleMs = readyFrame.dualIsoPreviewRowscaleMs;
+    m_lastPresentedStageTimingTelemetry = readyFrame.stageTimingTelemetry;
+}
+
+void MainWindow::finishPresentedFrame( uint64_t displayFrame,
+                                       const RenderFrameThread::ReadyFrame &readyFrame,
+                                       const PresentationRequestContext &requestContext,
+                                       const uint8_t *rgb8DisplaySource,
+                                       uint8_t underOver,
+                                       double displayStart )
+{
+    recordPresentedFrame( readyFrame, requestContext );
+
+    if( ui->actionShowEditArea->isChecked() )
+    {
+        const double scopes_start = mlv_stage_timing_now();
+        bool under = false;
+        bool over = false;
+        if( ( underOver & 0x01 ) == 0x01 ) under = true;
+        if( ( underOver & 0x02 ) == 0x02 ) over = true;
+
+        if( ui->actionShowHistogram->isChecked() )
+        {
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeHistogram );
+        }
+        else if( ui->actionShowWaveFormMonitor->isChecked() )
+        {
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeWaveForm );
+        }
+        else if( ui->actionShowParade->isChecked() )
+        {
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeRgbParade);
+        }
+        else if( ui->actionShowVectorScope->isChecked() )
+        {
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeVectorScope );
+        }
+        m_lastDrawFrameReadyScopesMs = (mlv_stage_timing_now() - scopes_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("drawFrameReady.scopes", displayFrame, m_lastDrawFrameReadyScopesMs);
+    }
+
+    const double overlay_start = mlv_stage_timing_now();
+    if( m_tryToSyncAudio && ui->actionAudioOutput->isChecked() && ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
+    {
+        m_tryToSyncAudio = false;
+        m_pAudioPlayback->stop();
+        m_pAudioPlayback->jumpToPos( m_newPosDropMode );
+        m_pAudioPlayback->play();
+    }
+
+    drawFrameNumberLabel( static_cast<int>(displayFrame) );
+    if( !m_tcModeDuration )
+    {
+        updateTimeCodeLabelForFrame( static_cast<int>(displayFrame) );
+    }
+
+    if( m_zoomTo100Center )
+    {
+        m_zoomTo100Center = false;
+        ui->graphicsView->horizontalScrollBar()->setValue( ( getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false) - ui->graphicsView->width() ) / 2 );
+        ui->graphicsView->verticalScrollBar()->setValue( ( getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false) - ui->graphicsView->height() ) / 2 );
+    }
+
+    if( m_zoomModeChanged )
+    {
+        m_zoomModeChanged = false;
+        m_pGradientElement->redrawGradientElement( m_pScene->width(),
+                                                  m_pScene->height(),
+                                                  getMlvWidth( m_pMlvObject ),
+                                                  getMlvHeight( m_pMlvObject ) );
+    }
+
+    if( ui->toolButtonBadPixelsCrosshairEnable->isChecked()
+     && toolButtonBadPixelsCurrentIndex() >= 3
+     && ui->checkBoxRawFixEnable->isChecked() )
+    {
+        BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
+        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
+    }
+    else
+    {
+        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
+    }
+
+    if( m_playbackStopped == true )
+    {
+        selectDebayerAlgorithm();
+        applyEffectiveDualIsoPlaybackSettings();
+        m_playbackStopped = false;
+    }
+
+    ui->actionDeleteSelectedClips->setEnabled( true );
+
+    m_lastDrawFrameReadyOverlayMs = (mlv_stage_timing_now() - overlay_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.overlay", displayFrame, m_lastDrawFrameReadyOverlayMs);
+    m_lastDrawFrameReadyTotalMs = (mlv_stage_timing_now() - displayStart) * 1000.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.total", displayFrame, m_lastDrawFrameReadyTotalMs);
+    notePlayToFirstFramePresentation( displayFrame );
+    if( m_pRenderThread ) m_pRenderThread->releasePresentedFrame();
+    m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+    emit frameReady();
+}
+
 //Draw the frame when render thread is ready
 void MainWindow::drawFrameReady()
 {
@@ -11051,17 +11162,6 @@ void MainWindow::drawFrameReady()
         requestContext.gpuPreviewProcessingConfig = m_lastQueuedGpuPreviewProcessingConfig;
         requestContext.playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
     }
-
-    m_lastPresentedRequestSerial = readyFrame.requestSerial;
-    m_lastPresentedRequestContext = requestContext;
-    m_lastPresentedRequestContextValid = true;
-    m_lastPresentedFrameUsedGpuBilinearDebayer = readyFrame.usedGpuBilinearDebayer;
-    m_lastPresentedGpuBilinearFallbackReason = readyFrame.gpuBilinearFallbackReason;
-    m_lastPresentedGpuBilinearRendererDescription = readyFrame.gpuBilinearRendererDescription;
-    m_lastPresentedDualIsoPreviewHistogramMs = readyFrame.dualIsoPreviewHistogramMs;
-    m_lastPresentedDualIsoPreviewRegressionMs = readyFrame.dualIsoPreviewRegressionMs;
-    m_lastPresentedDualIsoPreviewRowscaleMs = readyFrame.dualIsoPreviewRowscaleMs;
-    m_lastPresentedStageTimingTelemetry = readyFrame.stageTimingTelemetry;
 
     const uint64_t display_frame = readyFrame.frameNumber;
     const double display_start = mlv_stage_timing_now();
@@ -11096,7 +11196,7 @@ void MainWindow::drawFrameReady()
     const uint16_t * rgb16DisplaySource = readyFrame.rawImage16;
     int sceneWidth = sourceWidth;
     int sceneHeight = sourceHeight;
-    if( !ui->actionPlay->isChecked()
+    if( !playbackPolicyActive()
      || ui->actionUseNoneDebayer->isChecked()
      || ui->actionCaching->isChecked() )
     {
@@ -11130,33 +11230,28 @@ void MainWindow::drawFrameReady()
     }
 
     const double scene_start = mlv_stage_timing_now();
-    if( zoomFitEnabled )
+    computeDisplaySceneGeometry( sourceWidth,
+                                 sourceHeight,
+                                 zoomFitEnabled,
+                                 stretchX,
+                                 stretchY,
+                                 &sceneWidth,
+                                 &sceneHeight );
+    const bool currentFastPlaybackPresentation =
+        readyFrame.playbackFastScaleActive
+        && zoomFitEnabled
+        && mode == Qt::FastTransformation
+        && !zebrasEnabled;
+    if( currentFastPlaybackPresentation
+     && readyFrame.playbackScaledWidth > 0
+     && readyFrame.playbackScaledHeight > 0 )
     {
-        //Some math to have the picture exactly in the frame
-        int actWidth;
-        int actHeight;
-        if( ui->actionFullscreen->isChecked() )
-        {
-            actWidth = QApplication::primaryScreen()->size().width();
-            actHeight = QApplication::primaryScreen()->size().height();
-        }
-        else
-        {
-            actWidth = ui->graphicsView->width();
-            actHeight = ui->graphicsView->height();
-        }
-        sceneWidth = actWidth;
-        sceneHeight = actWidth * sourceHeight / sourceWidth * stretchY / stretchX;
-        if( sceneHeight > actHeight )
-        {
-            sceneHeight = actHeight;
-            sceneWidth = actHeight * sourceWidth / sourceHeight / stretchY * stretchX;
-        }
-    }
-    else
-    {
-        sceneWidth = sourceWidth * stretchX;
-        sceneHeight = sourceHeight * stretchY;
+        sceneWidth =
+            std::max( 1, qRound( static_cast<double>( readyFrame.playbackScaledWidth )
+                                 / qMax( 1.0, devicePixelRatioF() ) ) );
+        sceneHeight =
+            std::max( 1, qRound( static_cast<double>( readyFrame.playbackScaledHeight )
+                                 / qMax( 1.0, devicePixelRatioF() ) ) );
     }
 
     if( m_lastDisplaySceneWidth != sceneWidth
@@ -11268,6 +11363,24 @@ void MainWindow::drawFrameReady()
                                cpuPreviewRgb8.data(),
                                sourceWidth * sourceHeight );
         rgb8DisplaySource = cpuPreviewRgb8.data();
+    }
+
+    const bool preScaledPlaybackImageAvailable =
+        currentFastPlaybackPresentation
+        && !framePresentedByViewport
+        && !useGpuImagePresentation
+        && !displayPreviewCachingAllowed
+        && readyFrame.playbackScaledImage8
+        && readyFrame.playbackScaledWidth > 0
+        && readyFrame.playbackScaledHeight > 0;
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("draw_frame_ready_prescaled_image_active"),
+                                            preScaledPlaybackImageAvailable );
+    if( preScaledPlaybackImageAvailable )
+    {
+        displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( readyFrame.playbackScaledImage8 ),
+                                              readyFrame.playbackScaledWidth,
+                                              readyFrame.playbackScaledHeight );
+        displayImageOwnsData = false;
     }
 
     if( displayPreviewCachingAllowed && !framePresentedByViewport )
@@ -11451,102 +11564,12 @@ void MainWindow::drawFrameReady()
     }
     m_lastDrawFrameReadyPresentMs = (mlv_stage_timing_now() - present_start) * 1000.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.present", display_frame, m_lastDrawFrameReadyPresentMs);
-
-    if( ui->actionShowEditArea->isChecked() )
-    {
-        const double scopes_start = mlv_stage_timing_now();
-        bool under = false;
-        bool over = false;
-        if( ( underOver & 0x01 ) == 0x01 ) under = true;
-        if( ( underOver & 0x02 ) == 0x02 ) over = true;
-
-        if( ui->actionShowHistogram->isChecked() )
-        {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeHistogram );
-        }
-        else if( ui->actionShowWaveFormMonitor->isChecked() )
-        {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeWaveForm );
-        }
-        else if( ui->actionShowParade->isChecked() )
-        {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeRgbParade);
-        }
-        else if( ui->actionShowVectorScope->isChecked() )
-        {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeVectorScope );
-        }
-        m_lastDrawFrameReadyScopesMs = (mlv_stage_timing_now() - scopes_start) * 1000.0;
-        mlv_stage_timing_note_elapsed("drawFrameReady.scopes", display_frame, m_lastDrawFrameReadyScopesMs);
-    }
-    
-    const double overlay_start = mlv_stage_timing_now();
-    //Sync Audio
-    if( m_tryToSyncAudio && ui->actionAudioOutput->isChecked() && ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
-    {
-        m_tryToSyncAudio = false;
-        m_pAudioPlayback->stop();
-        m_pAudioPlayback->jumpToPos( m_newPosDropMode );
-        m_pAudioPlayback->play();
-    }
-
-    //And show the user which frame we show
-    drawFrameNumberLabel( static_cast<int>(display_frame) );
-    if( !m_tcModeDuration )
-    {
-        updateTimeCodeLabelForFrame( static_cast<int>(display_frame) );
-    }
-
-    //Set frame to the middle
-    if( m_zoomTo100Center )
-    {
-        m_zoomTo100Center = false;
-        ui->graphicsView->horizontalScrollBar()->setValue( ( getMlvWidth(m_pMlvObject) * getHorizontalStretchFactor(false) - ui->graphicsView->width() ) / 2 );
-        ui->graphicsView->verticalScrollBar()->setValue( ( getMlvHeight(m_pMlvObject) * getVerticalStretchFactor(false) - ui->graphicsView->height() ) / 2 );
-    }
-
-    //If zoom mode changed, redraw gradient element to the new size
-    if( m_zoomModeChanged )
-    {
-        m_zoomModeChanged = false;
-        m_pGradientElement->redrawGradientElement( m_pScene->width(),
-                                                   m_pScene->height(),
-                                                   getMlvWidth( m_pMlvObject ),
-                                                   getMlvHeight( m_pMlvObject ) );
-    }
-
-    //Bad Pixel crosses in viewer
-    if( ui->toolButtonBadPixelsCrosshairEnable->isChecked()
-     && toolButtonBadPixelsCurrentIndex() >= 3
-     && ui->checkBoxRawFixEnable->isChecked() )
-    {
-        BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
-        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
-    }
-    else
-    {
-        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
-    }
-
-    //One more frame if stopped
-    if( m_playbackStopped == true )
-    {
-        selectDebayerAlgorithm();
-        applyEffectiveDualIsoPlaybackSettings();
-        m_playbackStopped = false;
-    }
-
-    //Reset delete clip action as enabled
-    ui->actionDeleteSelectedClips->setEnabled( true );
-
-    m_lastDrawFrameReadyOverlayMs = (mlv_stage_timing_now() - overlay_start) * 1000.0;
-    mlv_stage_timing_note_elapsed("drawFrameReady.overlay", display_frame, m_lastDrawFrameReadyOverlayMs);
-    m_lastDrawFrameReadyTotalMs = (mlv_stage_timing_now() - display_start) * 1000.0;
-    mlv_stage_timing_note_elapsed("drawFrameReady.total", display_frame, m_lastDrawFrameReadyTotalMs);
-    notePlayToFirstFramePresentation( display_frame );
-    if( m_pRenderThread ) m_pRenderThread->releasePresentedFrame();
-    m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
-    emit frameReady();
+    finishPresentedFrame( display_frame,
+                          readyFrame,
+                          requestContext,
+                          rgb8DisplaySource,
+                          underOver,
+                          display_start );
 }
 
 //Paintmode for gradient enabled/disabled

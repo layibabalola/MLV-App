@@ -1328,3 +1328,87 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
    The current two-slot handoff is safe and useful, but it still does not give the worker a true future-frame queue.
 3. Medium impact / medium effort: if another structural stage still leaves us short, spend the next performance budget on post-decode processing, not more scaler/prefetch churn.
    Best candidates remain the playback-only processing subset and then runtime-dispatched AVX2 on the surviving color-core / Dual ISO hot loops.
+
+## H2/H3 follow-up and queue prototype (2026-04-23, current dirty pass)
+
+### Verified locally
+
+- I tried the next deeper playback queue / render-request mailbox step and backed it out from the runtime path in this worktree.
+  - Parallel background review agreed the next structural idea is a bounded request queue plus deeper overlap, but the local prototype was not keepable in its first form.
+  - The prototype broke the app-backed headless playback-profile seam, so it is not the right next commit shape on this branch.
+  - The queue code was reverted from the live tree before the current validation sweep; the remaining tracked changes are back to the low-level Dual ISO preview pass plus the earlier `drawFrameReady()` helper extraction.
+- The current remaining low-level pass is behavior-safe after one real edge fix.
+  - `src/mlv/llrawproc/llrawproc.c` now replaces the scalar restricted-range scale loop with a 14-bit LUT in `scale_restricted_range(...)`.
+  - `src/mlv/llrawproc/dualiso.c` / `.h` now reuse preview histogram storage inside `dualiso_preview_scratch_t`, build the preview rowscale curve through a LUT, and only copy dark rows into the preview scratch output buffer before the shadow-fix pass.
+  - The first dark-row LUT version was wrong on the tiny app-backed fixture because it dereferenced the `+2` source row unconditionally near the bottom edge; that is now fixed by only reading `source_row_next2` on the branches that actually need it.
+- Validation is green again on the current dirty tree after backing out the queue prototype and fixing the dark-row edge bug.
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/758/0/0`
+  - `pipeline_tests --check-golden`: `46/526/4/0`
+
+### Needs runtime profiling
+
+- The low-level H2/H3 pass still does **not** have an honest throughput win on this VM.
+  - Fresh artifacts under `.claude/profiling/20260423-h2h3-keepcheck/` are too noisy and too slow to justify a commit as a playback optimization keep.
+  - What the current reruns do show:
+    - `dual_iso_preview_histogram_ms` is effectively `0` on most warm samples
+    - `dual_iso_preview_rowscale_ms` is still in the `~5-9 ms` band
+    - end-to-end warm medians are currently worse than the earlier `72b41aa9` overlap keep, so I am not counting this as a real playback win yet
+- Safe conclusion:
+  - the low-level pass is plausible as allocator/churn cleanup
+  - it is **not** yet strong enough to commit as a performance improvement without a cleaner A/B showing that it beats the current overlap baseline on the same VM conditions
+
+### Ranked next steps
+
+1. Highest impact / medium effort: revisit the queue / deeper-overlap idea in an isolated follow-up branch, but make it generation-aware from the start and keep it out of the current branch until the app-backed profile seam is green.
+2. High impact / medium effort: if the next pass stays on this branch, target `drawFrameReady()` image cost again rather than more llrawproc churn.
+   The strongest code-level suggestion from the background review was a slot-owned pre-scaled playback image / third stage, not another predictor or preview micro-pass.
+3. Medium impact / low-medium effort: if we want to keep exploring H2/H3 locally, add a tighter same-session A/B harness before committing more preview-loop tweaks.
+   Right now the VM variance is large enough that small llrawproc wins are being drowned out by bigger render/presentation swings.
+
+## Render-slot pre-scale keep (2026-04-23, current keep)
+
+### Verified locally
+
+- The non-winning H2/H3 llrawproc pass was restored out of the live tree before this keep.
+  - Current tracked runtime changes are all on the Qt playback path plus the note updates.
+- The kept implementation moves the default zoom-fit playback scale result into the render slot itself.
+  - Added shared fast-scaling helpers in `platform/qt/PlaybackScaling.h`.
+  - `platform/qt/RenderFrameThread.h` / `.cpp` now accept per-request presentation-prep options and can publish a slot-owned `playbackScaledImage8` buffer alongside the raw processed8 frame.
+  - `platform/qt/MainWindow.cpp` now queues the target presentation geometry with each render request and consumes the slot-owned pre-scaled image on the default playback path.
+- The first render-slot pre-scale attempt built and tested green but did **not** change runtime behavior because `drawFrameReady()` still decided between smooth and fast presentation from `ui->actionPlay->isChecked()` instead of `playbackPolicyActive()`.
+  - Fresh probe artifact showing the false start: `.claude/profiling/20260423-render-prescale-v1/large_dual_iso_preview_t4_prescale_run1c.json`
+  - In that false-start run, `render_thread_playback_scale_active = true` but `draw_frame_ready_prescaled_image_active = false` on every frame, so `draw_frame_ready_image_ms` stayed around `10-12`.
+- The actual keep was the follow-up fix in `platform/qt/MainWindow.cpp`:
+  - align the presentation fast-path gate with `playbackPolicyActive()`
+  - consume the slot-owned pre-scaled image from the actual frame payload instead of depending on the side `PresentationRequestContext` deque for fast-path eligibility
+- Fresh final artifacts live in `.claude/profiling/20260423-render-prescale-v2-final/`.
+  - warm medians by run:
+    - `run1`: `cadence_ms 39.263`, `render_thread_work_ms 37.9999`, `draw_frame_ready_image_ms 0`, `draw_frame_ready_total_ms 0`, `render_thread_playback_scale_ms ~1`
+    - `run2`: `cadence_ms 43.2626`, `render_thread_work_ms 40.9999`, `draw_frame_ready_image_ms 0`, `draw_frame_ready_total_ms 0`, `render_thread_playback_scale_ms ~1`
+    - `run3`: `cadence_ms 37.9273`, `render_thread_work_ms 36.0000`, `draw_frame_ready_image_ms 0`, `draw_frame_ready_total_ms 0`, `render_thread_playback_scale_ms ~1`
+    - `run4`: `cadence_ms 39.8684`, `render_thread_work_ms 38.0001`, `draw_frame_ready_image_ms 0`, `draw_frame_ready_total_ms 0`, `render_thread_playback_scale_ms 0`
+  - across-run median of warm medians: `39.8684 ms`
+  - native realtime budget for the large fixture at `23.976 fps`: `41.708 ms`
+- Honest claim:
+  - this block clears the committed M1 bar on this VM for the target clip/receipt
+  - the gain came from deleting the serial UI-side image-build bucket, not from more decoder churn
+  - the remaining dominant warm bucket is now `render_thread_work_ms ~36-41`
+- Fresh validation on the kept state:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/758/0/0`
+  - `pipeline_tests --check-golden`: `46/526/4/0`
+
+### Cross-checked from prior analysis
+
+- This confirms the earlier ranking that `draw_frame_ready_image_ms` was the last large serial presentation bucket worth attacking before deeper queue work.
+- It also confirms that the render/request metadata seam is still fragile enough to avoid using the side deque as a hard requirement for hot-path eligibility.
+
+### Ranked next steps
+
+1. High impact / medium effort: deepen the overlap beyond the current two-slot handoff so `N+2` can exist while `N+1` is already ready.
+   With `drawFrameReady.image` deleted on the target path, the next ceiling is the render slot / mailbox depth rather than UI image work.
+2. High impact / medium effort: introduce the playback-only processing subset now that realtime is met.
+   This should be the shortest path from realtime to a more comfortable `>24 fps` margin and toward the `30 fps` stretch target.
+3. Medium impact / medium effort: add runtime-dispatched AVX2 on the surviving hot loops after the playback-only subset lands.
+   Best candidates remain the color-core processing path and the Dual ISO blend path, not more predictor-1 work.

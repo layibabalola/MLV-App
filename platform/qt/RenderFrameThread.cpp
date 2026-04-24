@@ -32,6 +32,8 @@ RenderFrameThread::RenderFrameThread()
     m_activeUseGpuBilinearDebayer = false;
     m_activeFrameNumber = 0;
     m_activeFrameRequestSerial = 0;
+    m_presentationPreparationOptions = PresentationPreparationOptions();
+    m_activePresentationPreparationOptions = PresentationPreparationOptions();
     m_loggedGpuBilinearSuccess = false;
     m_lastFrameUsedGpuBilinearDebayer = false;
     m_lastDualIsoPreviewHistogramMs = 0.0;
@@ -100,13 +102,15 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
 void RenderFrameThread::renderFrame(uint32_t frameNumber,
                                     OutputMode outputMode,
                                     bool useGpuBilinearDebayer,
-                                    uint64_t requestSerial)
+                                    uint64_t requestSerial,
+                                    const PresentationPreparationOptions &presentationPreparation)
 {
     QMutexLocker locker(&m_mutex);
     m_frameNumber = frameNumber;
     m_outputMode = outputMode;
     m_useGpuBilinearDebayer = useGpuBilinearDebayer;
     m_frameRequestSerial = requestSerial;
+    m_presentationPreparationOptions = presentationPreparation;
     m_renderFrame = true;
     m_frameRequestStageTime = mlv_stage_timing_now();
     m_waitCondition.wakeOne();
@@ -154,9 +158,14 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
     {
         frame->rawImage8 = slot.rawImage8.empty() ? nullptr : slot.rawImage8.data();
         frame->rawImage16 = slot.rawImage16.empty() ? nullptr : slot.rawImage16.data();
+        frame->playbackScaledImage8 =
+            slot.playbackScaledImage8.empty() ? nullptr : slot.playbackScaledImage8.data();
         frame->frameNumber = slot.frameNumber;
         frame->requestSerial = slot.requestSerial;
         frame->outputMode = slot.outputMode;
+        frame->playbackFastScaleActive = slot.playbackFastScaleActive;
+        frame->playbackScaledWidth = slot.playbackScaledWidth;
+        frame->playbackScaledHeight = slot.playbackScaledHeight;
         frame->usedGpuBilinearDebayer = slot.usedGpuBilinearDebayer;
         frame->gpuBilinearFallbackReason = slot.gpuBilinearFallbackReason;
         frame->gpuBilinearRendererDescription = slot.gpuBilinearRendererDescription;
@@ -275,6 +284,7 @@ void RenderFrameThread::run(void)
         m_activeUseGpuBilinearDebayer = m_useGpuBilinearDebayer;
         m_activeFrameRequestSerial = m_frameRequestSerial;
         m_activeFrameRequestStageTime = m_frameRequestStageTime;
+        m_activePresentationPreparationOptions = m_presentationPreparationOptions;
         m_renderFrame = false;
         m_renderingFrame = true;
         m_renderingSlotIndex = slotIndex;
@@ -472,6 +482,42 @@ void RenderFrameThread::drawFrame( int slotIndex )
         slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
         slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
         mlv_stage_timing_note("render_thread_draw", frameNumber, render_start);
+    }
+
+    slot.playbackFastScaleActive = false;
+    slot.playbackScaledWidth = 0;
+    slot.playbackScaledHeight = 0;
+    if( outputMode == OutputProcessed8
+     && m_activePresentationPreparationOptions.fastPlaybackScale
+     && !slot.rawImage8.empty()
+     && m_activePresentationPreparationOptions.targetWidth > 0
+     && m_activePresentationPreparationOptions.targetHeight > 0 )
+    {
+        const double playbackScaleStart = mlv_stage_timing_now();
+        slot.playbackFastScaleActive =
+            playbackBuildFastScaledRgb8( slot.rawImage8.data(),
+                                         m_imageWidth,
+                                         m_imageHeight,
+                                         m_activePresentationPreparationOptions.targetWidth,
+                                         m_activePresentationPreparationOptions.targetHeight,
+                                         slot.playbackScaledImage8,
+                                         m_playbackScaleCache );
+        if( slot.playbackFastScaleActive )
+        {
+            slot.playbackScaledWidth = m_activePresentationPreparationOptions.targetWidth;
+            slot.playbackScaledHeight = m_activePresentationPreparationOptions.targetHeight;
+        }
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_active"),
+                                          slot.playbackFastScaleActive );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_ms"),
+                                          (mlv_stage_timing_now() - playbackScaleStart) * 1000.0 );
+    }
+    else
+    {
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_active"),
+                                          false );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_ms"),
+                                          0.0 );
     }
 
     const double rawUint16Ms = getMlvLastRawUint16Milliseconds();
