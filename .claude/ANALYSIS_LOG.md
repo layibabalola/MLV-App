@@ -393,3 +393,24 @@
   - plain `console_tests --check-golden`: `41/160/17/0`
   - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/758/0/0`
   - `pipeline_tests --check-golden`: `46/526/4/0`
+
+## 2026-04-23 - direct processed8 OpenMP keep
+
+- Tried a render-thread direct-8 playback-subset pass first and did **not** keep it.
+  - Scratch artifact: `.claude/profiling/20260423-subset-renderthread-v1/large_dual_iso_preview_t4_subset_run1.json`
+  - The large Dual ISO preview receipt supports subset mode when explicitly requested, but that path was slower here (`warm cadence ~60.4 ms`, `render_thread_cpu_preview_processing_ms ~21`), so it is not the honest next VM lever on this receipt.
+- Kept the lower-risk follow-up in `src/processing/raw_processing.c` instead:
+  - `applyProcessingObject8(...)` no longer launches per-frame pthread chunks for the direct processed-8 color pass.
+  - The kept implementation now partitions row ranges across stable OpenMP workers while keeping the direct-8 math unchanged.
+- Fresh kept artifacts: `.claude/profiling/20260423-direct8-omp-v2-final/`
+  - warm cadence medians:
+    - `run1 37.7476`
+    - `run2 36.6793`
+    - `run3 38.5429`
+    - `run4 37.7434`
+  - across-run upper median of warm medians: `37.7476`
+  - comparable prior keep folder `.claude/profiling/20260423-render-prescale-v2-final/` recomputes around `39.263`
+- Final validation on the kept state:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/750/1/0`
+  - `pipeline_tests --check-golden`: `46/526/4/0`

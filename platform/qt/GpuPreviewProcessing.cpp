@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <omp.h>
 
 namespace
 {
@@ -107,6 +108,78 @@ float sampleNormalizedLut(const QByteArray & lutBytes, float normalized)
     const int index = std::max(0, std::min(65535,
         static_cast<int>(normalized * 65535.0f + 0.5f)));
     return reinterpret_cast<const uint16_t *>(lutBytes.constData())[index] / 65535.0f;
+}
+
+void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
+                                 const uint16_t * inputPixel,
+                                 uint16_t * outputPixel)
+{
+    float color[3];
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        color[channel] =
+            sampleLut(config.levelsLut, inputPixel[channel] / 65535.0f) / 65535.0f;
+    }
+
+    float matrixApplied[3];
+    matrixApplied[0] = sampleNormalizedLut(config.matrixLutR, color[0]);
+    matrixApplied[1] = sampleNormalizedLut(config.matrixLutG, color[1]);
+    matrixApplied[2] = sampleNormalizedLut(config.matrixLutB, color[2]);
+
+    if ( config.useCameraMatrix )
+    {
+        float wbApplied[3];
+        wbApplied[0] = config.properWbMatrix[0] * matrixApplied[0]
+                     + config.properWbMatrix[1] * matrixApplied[1]
+                     + config.properWbMatrix[2] * matrixApplied[2];
+        wbApplied[1] = config.properWbMatrix[3] * matrixApplied[0]
+                     + config.properWbMatrix[4] * matrixApplied[1]
+                     + config.properWbMatrix[5] * matrixApplied[2];
+        wbApplied[2] = config.properWbMatrix[6] * matrixApplied[0]
+                     + config.properWbMatrix[7] * matrixApplied[1]
+                     + config.properWbMatrix[8] * matrixApplied[2];
+
+        if ( config.applyGamutCompression )
+        {
+            const float y = config.rgbToY[0] * wbApplied[0]
+                          + config.rgbToY[1] * wbApplied[1]
+                          + config.rgbToY[2] * wbApplied[2];
+            const float minChannel =
+                std::min(std::min(wbApplied[0], wbApplied[1]), wbApplied[2]);
+            float gamutReference[3];
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const float yToMinChannel =
+                    (y != 0.0f) ? ((y - wbApplied[channel]) / y) : 0.0f;
+                const float tonemapped = (channel == 0)
+                    ? reinhardForColour(yToMinChannel)
+                    : reinhardForBlue(yToMinChannel);
+                gamutReference[channel] = -(tonemapped * y) + y;
+            }
+
+            const float gamutMin =
+                std::min(std::min(gamutReference[0], gamutReference[1]), gamutReference[2]);
+            float desaturateFactor = 1.0f;
+            const float denominator = y - minChannel;
+            if ( y > 0.0f && std::fabs(denominator) > 1e-8f )
+            {
+                desaturateFactor = (y - gamutMin) / denominator;
+            }
+
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                wbApplied[channel] = (wbApplied[channel] - y) * desaturateFactor + y;
+            }
+        }
+
+        std::memcpy(matrixApplied, wbApplied, sizeof(matrixApplied));
+    }
+
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        const float gammaInput = clamp01(matrixApplied[channel]);
+        outputPixel[channel] = sampleLut(config.gammaLut, gammaInput);
+    }
 }
 
 QSurfaceFormat previewProcessingSurfaceFormat()
@@ -697,67 +770,12 @@ void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & co
         return;
     }
 
+    #pragma omp parallel for if(pixelCount >= 2048)
     for (int pixelIndex = 0; pixelIndex < pixelCount; ++pixelIndex)
     {
         const uint16_t * inputPixel = inputRgb16 + pixelIndex * 3;
         uint16_t * outputPixel = outputRgb16 + pixelIndex * 3;
-
-        float color[3];
-        for (int channel = 0; channel < 3; ++channel)
-        {
-            color[channel] = sampleLut(config.levelsLut, inputPixel[channel] / 65535.0f) / 65535.0f;
-        }
-
-        float matrixApplied[3];
-        matrixApplied[0] = sampleNormalizedLut(config.matrixLutR, color[0]);
-        matrixApplied[1] = sampleNormalizedLut(config.matrixLutG, color[1]);
-        matrixApplied[2] = sampleNormalizedLut(config.matrixLutB, color[2]);
-
-        if ( config.useCameraMatrix )
-        {
-            float wbApplied[3];
-            wbApplied[0] = config.properWbMatrix[0] * matrixApplied[0] + config.properWbMatrix[1] * matrixApplied[1] + config.properWbMatrix[2] * matrixApplied[2];
-            wbApplied[1] = config.properWbMatrix[3] * matrixApplied[0] + config.properWbMatrix[4] * matrixApplied[1] + config.properWbMatrix[5] * matrixApplied[2];
-            wbApplied[2] = config.properWbMatrix[6] * matrixApplied[0] + config.properWbMatrix[7] * matrixApplied[1] + config.properWbMatrix[8] * matrixApplied[2];
-
-            if ( config.applyGamutCompression )
-            {
-                const float y = config.rgbToY[0] * wbApplied[0]
-                              + config.rgbToY[1] * wbApplied[1]
-                              + config.rgbToY[2] * wbApplied[2];
-                const float minChannel = std::min(std::min(wbApplied[0], wbApplied[1]), wbApplied[2]);
-                float gamutReference[3];
-                for (int channel = 0; channel < 3; ++channel)
-                {
-                    const float yToMinChannel = (y != 0.0f) ? ((y - wbApplied[channel]) / y) : 0.0f;
-                    const float tonemapped = (channel == 0)
-                        ? reinhardForColour(yToMinChannel)
-                        : reinhardForBlue(yToMinChannel);
-                    gamutReference[channel] = -(tonemapped * y) + y;
-                }
-
-                const float gamutMin = std::min(std::min(gamutReference[0], gamutReference[1]), gamutReference[2]);
-                float desaturateFactor = 1.0f;
-                const float denominator = y - minChannel;
-                if ( y > 0.0f && std::fabs(denominator) > 1e-8f )
-                {
-                    desaturateFactor = (y - gamutMin) / denominator;
-                }
-
-                for (int channel = 0; channel < 3; ++channel)
-                {
-                    wbApplied[channel] = (wbApplied[channel] - y) * desaturateFactor + y;
-                }
-            }
-
-            std::memcpy(matrixApplied, wbApplied, sizeof(matrixApplied));
-        }
-
-        for (int channel = 0; channel < 3; ++channel)
-        {
-            const float gammaInput = clamp01(matrixApplied[channel]);
-            outputPixel[channel] = sampleLut(config.gammaLut, gammaInput);
-        }
+        applyPreviewProcessingPixel(config, inputPixel, outputPixel);
     }
 }
 

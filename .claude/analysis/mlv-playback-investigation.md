@@ -1412,3 +1412,51 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
    This should be the shortest path from realtime to a more comfortable `>24 fps` margin and toward the `30 fps` stretch target.
 3. Medium impact / medium effort: add runtime-dispatched AVX2 on the surviving hot loops after the playback-only subset lands.
    Best candidates remain the color-core processing path and the Dual ISO blend path, not more predictor-1 work.
+
+## Direct processed8 OpenMP keep (2026-04-23, current keep)
+
+### Verified locally
+
+- I tried a render-thread direct-8 playback-subset pass first and explicitly did **not** keep it.
+  - Fresh scratch artifact: `.claude/profiling/20260423-subset-renderthread-v1/large_dual_iso_preview_t4_subset_run1.json`
+  - The large Dual ISO preview receipt does support subset mode when explicitly requested (`playback_processing_effective = subset`), but the CPU subset path is not the honest next VM lever on this receipt.
+  - Warm subset numbers on that scratch run were worse than the current receipt path:
+    - `warm cadence_ms ~60.4`
+    - `warm render_thread_work_ms ~56`
+    - `render_thread_cpu_preview_processing_ms ~21`
+  - Safe conclusion: do not keep the render-thread subset experiment as a playback optimization on this branch.
+- The kept follow-up was lower-risk and directly on the hot current receipt path in `src/processing/raw_processing.c`.
+  - `applyProcessingObject8(...)` no longer spins up per-frame pthread chunks for the direct processed-8 color pass.
+  - The kept change now partitions rows across stable OpenMP workers and reuses the existing direct-8 math unchanged.
+  - This keeps the exact direct processed-8 output contract while deleting frame-by-frame thread creation / join overhead from the hot playback path.
+- Fresh final artifacts live in `.claude/profiling/20260423-direct8-omp-v2-final/`.
+  - warm cadence medians by run:
+    - `run1`: `37.7476`
+    - `run2`: `36.6793`
+    - `run3`: `38.5429`
+    - `run4`: `37.7434`
+  - across-run upper median of warm medians: `37.7476`
+  - comparable prior keep folder `.claude/profiling/20260423-render-prescale-v2-final/` now recomputes to an across-run upper median around `39.263`
+  - warm `processed8_total_ms` moved from about `37.0` down to about `35.0`
+  - warm `render_thread_work_ms` moved from roughly `37-40` down to roughly `35-36`
+- Honest claim:
+  - this is a real smaller follow-up win on top of the render-slot pre-scale keep, not another structural breakthrough
+  - it pushes the target receipt from “just below realtime” toward a more comfortable margin on this VM
+  - it does **not** by itself close the full gap to the `30 fps` stretch target (`33.333 ms`)
+- Fresh validation on the kept state:
+  - plain `console_tests --check-golden`: `41/160/17/0`
+  - app-backed `console_tests --check-golden` with fresh `MLVApp.exe`: `41/750/1/0`
+  - `pipeline_tests --check-golden`: `46/526/4/0`
+
+### Cross-checked from prior analysis
+
+- The receipt is still on the direct processed-8 playback path, so the most honest post-M1 CPU optimization remains the direct-8 kernel and its worker orchestration, not a subset mode the current receipt does not need.
+- The next largest bucket is still `render_thread_work_ms`; this keep only trims that bucket modestly, which matches the measured `~1-2 ms` cadence gain.
+
+### Ranked next steps
+
+1. High impact / medium effort: deepen the overlap beyond the current two-slot handoff so `N+2` can exist while `N+1` is already ready.
+   This is still the clearest structural lever if we want more margin without depending on receipt-specific subset compatibility.
+2. High impact / medium effort: add runtime-dispatched AVX2 on the surviving hot current-receipt loops.
+   The best target is still the direct processed-8 color core in `src/processing/raw_processing.c`, because that path is active on the real large Dual ISO preview receipt today.
+3. Medium impact / medium effort: only revisit playback-only subset work after we define a subset that is actually cheaper than the current direct processed-8 path on the target receipt.

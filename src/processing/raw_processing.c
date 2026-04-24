@@ -80,14 +80,6 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->output_ms = 0.0;
 }
 
-typedef struct
-{
-    processingObject_t * processing;
-    int imageX, imageY;
-    uint16_t * inputImage;
-    uint8_t * outputImage;
-} apply_processing_8_parameters_t;
-
 /* Thank you to https://gist.github.com/MrLixm/946c1b59cce8b74e948e75618583ce8d */
 double agx_compressed_matrix[9] = {
     0.84247906, 0.0784336, 0.07922375,
@@ -947,18 +939,18 @@ int processingCanUseDirect8BitOutput(const processingObject_t * processing)
     return processing_can_use_direct_8bit_output(processing);
 }
 
-static void apply_processing_object_8bit_fast(processingObject_t * processing,
-                                              int imageX,
-                                              int imageY,
-                                              uint16_t * __restrict inputImage,
-                                              uint8_t * __restrict outputImage)
+static void apply_processing_object_8bit_fast_rows(processingObject_t * processing,
+                                                   int imageX,
+                                                   int rowStart,
+                                                   int rowEnd,
+                                                   uint16_t * __restrict inputImage,
+                                                   uint8_t * __restrict outputImage)
 {
     int32_t ** pm = processing->pre_calc_matrix;
-    const int img_s = imageX * imageY * 3;
-    uint16_t * img = inputImage;
-    uint16_t * img_end = img + img_s;
-    uint16_t * pix = img;
-    uint8_t * out = outputImage;
+    const int row_stride = imageX * 3;
+    uint16_t * pix = inputImage + ( rowStart * row_stride );
+    uint8_t * out = outputImage + ( rowStart * row_stride );
+    uint16_t * pix_end = inputImage + ( rowEnd * row_stride );
     uint16_t * pre_calc_curve = processing->pre_calc_curve_r;
     uint16_t * gcurve_y = processing->gcurve_y;
     uint16_t * gcurve_r = processing->gcurve_r;
@@ -988,7 +980,7 @@ static void apply_processing_object_8bit_fast(processingObject_t * processing,
     const float rgb_to_y1 = rgb_to_Y[1];
     const float rgb_to_y2 = rgb_to_Y[2];
 
-    for( ; pix < img_end; pix += 3, out += 3 )
+    for( ; pix < pix_end; pix += 3, out += 3 )
     {
         const float pix0 = (float)pm0[pix[0]];
         const float pix1 = (float)pm4[pix[1]];
@@ -1045,15 +1037,18 @@ static void apply_processing_object_8bit_fast(processingObject_t * processing,
     }
 }
 
-static void * processing_object_8bit_thread(void * argument)
+static void apply_processing_object_8bit_fast(processingObject_t * processing,
+                                              int imageX,
+                                              int imageY,
+                                              uint16_t * __restrict inputImage,
+                                              uint8_t * __restrict outputImage)
 {
-    apply_processing_8_parameters_t * p = (apply_processing_8_parameters_t *)argument;
-    apply_processing_object_8bit_fast(p->processing,
-                                      p->imageX,
-                                      p->imageY,
-                                      p->inputImage,
-                                      p->outputImage);
-    return NULL;
+    apply_processing_object_8bit_fast_rows(processing,
+                                           imageX,
+                                           0,
+                                           imageY,
+                                           inputImage,
+                                           outputImage);
 }
 
 void apply_processing_object( processingObject_t * processing,
@@ -1710,33 +1705,21 @@ void applyProcessingObject8( processingObject_t * processing,
     }
     else
     {
-        apply_processing_8_parameters_t * params =
-            alloca(sizeof(apply_processing_8_parameters_t) * threads);
-        const int chunk_size = imageY / threads;
-        const uint32_t input_offset_chunk = imageX * chunk_size * 3;
-        const uint32_t output_offset_chunk = imageX * chunk_size * 3;
-
-        for( int t = 0; t < threads; ++t )
+        #pragma omp parallel num_threads(threads) if(threads > 1)
         {
-            params[t].processing = processing;
-            params[t].imageX = imageX;
-            params[t].imageY = chunk_size;
-            params[t].inputImage = inputImage + input_offset_chunk * t;
-            params[t].outputImage = outputImage + output_offset_chunk * t;
-        }
-        params[threads - 1].imageY = imageY - chunk_size * (threads - 1);
-
-        pthread_t * threadid = alloca(threads * sizeof(pthread_t));
-        for( int t = 0; t < threads; ++t )
-        {
-            pthread_create(&threadid[t],
-                           NULL,
-                           processing_object_8bit_thread,
-                           (void *)(params + t));
-        }
-        for( int t = 0; t < threads; ++t )
-        {
-            pthread_join(threadid[t], NULL);
+            const int thread_index = omp_get_thread_num();
+            const int thread_count = omp_get_num_threads();
+            const int row_start = ( imageY * thread_index ) / thread_count;
+            const int row_end = ( imageY * ( thread_index + 1 ) ) / thread_count;
+            if( row_end > row_start )
+            {
+                apply_processing_object_8bit_fast_rows(processing,
+                                                       imageX,
+                                                       row_start,
+                                                       row_end,
+                                                       inputImage,
+                                                       outputImage);
+            }
         }
     }
 
