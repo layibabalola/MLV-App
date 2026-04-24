@@ -91,6 +91,9 @@ macx{
 win32{
     QMAKE_CFLAGS += -O2 -fopenmp -mssse3 -msse3 -msse2 -msse -D_FILE_OFFSET_BITS=64 -std=c99 -ftree-vectorize
     LIBS += -llibgomp-1
+    # dbghelp: required by CrashForensics' MiniDumpWriteDump-based
+    # unhandled-exception filter.
+    LIBS += -ldbghelp
     greaterThan(QT_MAJOR_VERSION, 5){
         QMAKE_CXXFLAGS += -fopenmp -std=c++17 -ftree-vectorize
     }
@@ -99,6 +102,14 @@ win32{
         QMAKE_CXXFLAGS += -fopenmp -std=c++14 -ftree-vectorize
     }
 }
+
+# Build-time git SHA for CrashForensics run-metadata stamp.  Falls back
+# to "unknown" when git is unavailable (e.g. tarball builds).  The
+# system() call suppresses stderr so a non-repo build does not fail.
+win32:MLVAPP_GIT_SHA_VALUE = $$system(git -C \"$$_PRO_FILE_PWD_\" rev-parse HEAD 2> NUL)
+else:MLVAPP_GIT_SHA_VALUE  = $$system(git -C \"$$_PRO_FILE_PWD_\" rev-parse HEAD 2>/dev/null)
+isEmpty(MLVAPP_GIT_SHA_VALUE): MLVAPP_GIT_SHA_VALUE = unknown
+DEFINES += MLVAPP_GIT_SHA=\\\"$$MLVAPP_GIT_SHA_VALUE\\\"
 
 # Win64 static: install msys2 to the default location C:\msys64, install qt $ pacman -S mingw-w64-x86_64-qt5-static, then set up qt-creator accordingly.
 # Else comment these lines!
@@ -140,6 +151,7 @@ include(avx_optin.pri)
 ##############
 SOURCES += \
     ClipInformation.cpp \
+    CrashForensics.cpp \
     RenameDialog.cpp \
     SessionModel.cpp \
     Updater/Updater.cpp \
@@ -263,6 +275,7 @@ INCLUDEPATH += $$PWD/../../src
 macx: SOURCES += ../cocoa/avf_lib/avf_lib.m
 
 HEADERS += MainWindow.h \
+           CrashForensics.h \
            GpuDebayer.h \
            GpuPreviewProcessing.h \
     GpuDisplayViewport.h \

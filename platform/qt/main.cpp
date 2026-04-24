@@ -7,12 +7,14 @@
 
 #include "MainWindow.h"
 #include "MyApplication.h"
+#include "CrashForensics.h"
 #include "../../src/batch/BatchContext.h"
 #include "../../src/batch/BatchRunner.h"
 #include "../../src/batch/BatchLogger.h"
 #include "../../src/batch/MlvTrim.h"
 
 #include <QCommandLineParser>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QTextStream>
@@ -652,6 +654,20 @@ static int runPlaybackProfile(QApplication &app)
 
 int main(int argc, char *argv[])
 {
+    /* Crash forensics initialization runs BEFORE QApplication so the
+     * qInstallMessageHandler file sink and (on Windows) minidump filter
+     * are ready to capture any early failures.  Version/organization
+     * names are set here so QStandardPaths::AppDataLocation resolves
+     * correctly before CrashForensics::install() queries it. */
+    QCoreApplication::setOrganizationName(QStringLiteral("magiclantern"));
+    QCoreApplication::setApplicationName(QStringLiteral("MLVApp"));
+    QCoreApplication::setApplicationVersion(
+        QStringLiteral("%1.%2.%3.%4")
+            .arg(VERSION_MAJOR).arg(VERSION_MINOR)
+            .arg(VERSION_PATCH).arg(VERSION_BUILD));
+    CrashForensics::install(argc, argv);
+    CrashForensics::logStartupMetadata();
+
     bool batch = hasBatchFlag(argc, argv);
     bool trim_mlv = hasTrimMlvFlag(argc, argv);
     bool profile_playback = hasPlaybackProfileFlag(argc, argv);
