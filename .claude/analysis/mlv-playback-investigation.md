@@ -1,3 +1,36 @@
+## Direct-8 Loop Profiling (2026-04-24)
+
+### Verified locally
+
+- `ReinhardTonemap_f` is now inlined on its definition side:
+  - `src/processing/processing.c:126` changed from external function to `static inline`.
+  - `src/processing/raw_processing.h:431` prototype removed, so direct-8 call sites no longer rely on TU-level external linkage.
+- Direct-8 sub-loop telemetry is wired in-tree and can emit:
+  - `processing_direct8_matrix_ms`
+  - `processing_direct8_gamma_ms`
+  - `processing_direct8_curves_ms`
+- The telemetry wiring is visible in:
+  - `src/processing/raw_processing.c` (timing split + getters + environment-gated probe path).
+  - `platform/qt/RenderFrameThread.cpp` (per-slot stage telemetry export).
+  - `src/processing/raw_processing_8bit_kernel.inc` (probe-only branch under `MLVAPP_PROFILE_DIRECT8_SUBLOOPS`).
+- `platform/qt/build-codex-current/release/MLVApp.exe` in this environment is older than the current tree, so a fresh paired run could not be completed in this session.
+- The earlier same-session artifacts at `.claude-state/profiling/20260424-m2-hotloop-rank*` still show large split distortion under sub-loop probe mode (`~200-300ms` overhead), so direct throughput deltas from those files are not trusted for absolute gains.
+
+### Cross-checked from prior analysis
+
+- This matches the static hypothesis ordering: matrix/tonemap math is the highest-confidence target before wider SIMD work, and creative curves are effectively inactive on the current Dual ISO preview receipt (`processing_direct8_curves_ms` is expected to remain zero in this shape).
+- The direct-8 split hooks were added with the existing keep-set in place (no behavior change to pause/export pathways), and this aligns with the M1 milestone constraint.
+
+### Needs runtime profiling
+
+- Do a fresh same-session 4x baseline + 4x sub-loop rerun after rebuilding the exact working tree:
+  - `--input tests/fixtures/clips/large_dual_iso.mlv`
+  - `--receipt tests/fixtures/receipts/large_dual_iso_hq.marxml`
+  - `--frames 16 --threads 1 --raw-cache-mb 0`
+  - warm filter: `sample_index >= 4`
+- Compare warm medians for at least: `latency_ms`, `cadence_ms`, `processed8_total_ms`, `processing_core_color_ms`, `processing_direct8_matrix_ms`, `processing_direct8_gamma_ms`.
+- Accept a micro-pass only if the end-to-end `cadence_ms` delta is at least 5%.
+
 ## Safe Overlap + Fast-Scale Keep Point (2026-04-23, current)
 
 ### Verified locally
@@ -1495,3 +1528,7 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium effort: add runtime-dispatched AVX2 on the direct processed8 color core in `src/processing/raw_processing.c`, with scalar fallback preserved and parity checked against the existing direct-8 zero-diff tests.
 2. High impact / medium effort: revisit playback-only subset work only if it is measurably cheaper than the current direct processed8 path on the real large Dual ISO preview receipt.
 3. Medium impact / low-medium effort: if another micro-pass is attempted, capture same-session control and candidate artifacts before and after the change so VM drift does not masquerade as a real keep.
+
+
+
+

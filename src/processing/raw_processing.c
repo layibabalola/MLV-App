@@ -54,6 +54,16 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_levels_ms = 0.0
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_matrix_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_gamma_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_curves_ms = 0.0;
+
+typedef struct
+{
+    double matrix_ms;
+    double gamma_ms;
+    double curves_ms;
+} processing_direct8_kernel_timing_t;
 
 void processingResetLastTimingTelemetry(void)
 {
@@ -68,6 +78,9 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
     g_processing_last_core_output_ms = 0.0;
+    g_processing_last_direct8_matrix_ms = 0.0;
+    g_processing_last_direct8_gamma_ms = 0.0;
+    g_processing_last_direct8_curves_ms = 0.0;
 }
 
 static void processing_core_timing_reset(processing_core_timing_t * timing)
@@ -951,7 +964,13 @@ int processingCanUseDirect8BitOutput(const processingObject_t * processing)
  */
 
 typedef void (*apply_processing_object_8bit_fast_rows_fn_t)(
-    processingObject_t *, int, int, int, uint16_t * __restrict, uint8_t * __restrict);
+    processingObject_t *,
+    int,
+    int,
+    int,
+    uint16_t * __restrict,
+    uint8_t * __restrict,
+    processing_direct8_kernel_timing_t *);
 
 #define APPLY_8BIT_FAST_ROWS_NAME apply_processing_object_8bit_fast_rows_scalar
 #include "raw_processing_8bit_kernel.inc"
@@ -979,6 +998,18 @@ static int processing_env_flag_enabled(const char * value)
     if( strcmp(value, "yes") == 0 ) return 1;
     if( strcmp(value, "on") == 0 ) return 1;
     return 0;
+}
+
+static int processing_profile_direct8_subloops_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 0;
+    if( !initialized )
+    {
+        enabled = processing_env_flag_enabled(getenv("MLVAPP_PROFILE_DIRECT8_SUBLOOPS"));
+        initialized = 1;
+    }
+    return enabled;
 }
 
 static void apply_processing_object_8bit_fast_rows_dispatch_init(void)
@@ -1015,7 +1046,8 @@ static void apply_processing_object_8bit_fast_rows(processingObject_t * processi
                                                    int rowStart,
                                                    int rowEnd,
                                                    uint16_t * __restrict inputImage,
-                                                   uint8_t * __restrict outputImage)
+                                                   uint8_t * __restrict outputImage,
+                                                   processing_direct8_kernel_timing_t * timing)
 {
     pthread_once(&g_apply_processing_object_8bit_fast_rows_dispatch_once,
                  apply_processing_object_8bit_fast_rows_dispatch_init);
@@ -1024,21 +1056,24 @@ static void apply_processing_object_8bit_fast_rows(processingObject_t * processi
                                                 rowStart,
                                                 rowEnd,
                                                 inputImage,
-                                                outputImage);
+                                                outputImage,
+                                                timing);
 }
 
 static void apply_processing_object_8bit_fast(processingObject_t * processing,
                                               int imageX,
                                               int imageY,
                                               uint16_t * __restrict inputImage,
-                                              uint8_t * __restrict outputImage)
+                                              uint8_t * __restrict outputImage,
+                                              processing_direct8_kernel_timing_t * timing)
 {
     apply_processing_object_8bit_fast_rows(processing,
                                            imageX,
                                            0,
                                            imageY,
                                            inputImage,
-                                           outputImage);
+                                           outputImage,
+                                           timing);
 }
 
 void apply_processing_object( processingObject_t * processing,
@@ -1685,13 +1720,17 @@ void applyProcessingObject8( processingObject_t * processing,
     g_processing_last_core_levels_ms = (omp_get_wtime() - levels_start) * 1000.0;
 
     const double color_start = omp_get_wtime();
+    const int direct8_profile_subloops =
+        (threads == 1) && processing_profile_direct8_subloops_enabled();
+    processing_direct8_kernel_timing_t direct8_timing = { 0.0, 0.0, 0.0 };
     if( threads == 1 )
     {
         apply_processing_object_8bit_fast(processing,
                                           imageX,
                                           imageY,
                                           inputImage,
-                                          outputImage);
+                                          outputImage,
+                                          direct8_profile_subloops ? &direct8_timing : NULL);
     }
     else
     {
@@ -1708,11 +1747,24 @@ void applyProcessingObject8( processingObject_t * processing,
                                                        row_start,
                                                        row_end,
                                                        inputImage,
-                                                       outputImage);
+                                                       outputImage,
+                                                       NULL);
             }
         }
     }
 
+    if( direct8_profile_subloops )
+    {
+        g_processing_last_direct8_matrix_ms = direct8_timing.matrix_ms;
+        g_processing_last_direct8_gamma_ms = direct8_timing.gamma_ms;
+        g_processing_last_direct8_curves_ms = direct8_timing.curves_ms;
+    }
+    else
+    {
+        g_processing_last_direct8_matrix_ms = 0.0;
+        g_processing_last_direct8_gamma_ms = 0.0;
+        g_processing_last_direct8_curves_ms = 0.0;
+    }
     g_processing_last_core_color_ms = (omp_get_wtime() - color_start) * 1000.0;
     g_processing_last_core_ms = (omp_get_wtime() - core_start) * 1000.0;
 }
@@ -1770,6 +1822,21 @@ double processingGetLastCoreCreativeMilliseconds(void)
 double processingGetLastCoreOutputMilliseconds(void)
 {
     return g_processing_last_core_output_ms;
+}
+
+double processingGetLastDirect8MatrixMilliseconds(void)
+{
+    return g_processing_last_direct8_matrix_ms;
+}
+
+double processingGetLastDirect8GammaMilliseconds(void)
+{
+    return g_processing_last_direct8_gamma_ms;
+}
+
+double processingGetLastDirect8CurvesMilliseconds(void)
+{
+    return g_processing_last_direct8_curves_ms;
 }
 
 /* Pass frame buffer and do the transform on it */

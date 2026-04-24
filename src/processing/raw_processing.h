@@ -109,6 +109,9 @@ double processingGetLastCoreLevelsMilliseconds(void);
 double processingGetLastCoreColorMilliseconds(void);
 double processingGetLastCoreCreativeMilliseconds(void);
 double processingGetLastCoreOutputMilliseconds(void);
+double processingGetLastDirect8MatrixMilliseconds(void);
+double processingGetLastDirect8GammaMilliseconds(void);
+double processingGetLastDirect8CurvesMilliseconds(void);
 
 /* This is for EXR output, works exactly the same as applyprocessing object,
  * except output is float and ready for EXR export. */
@@ -425,7 +428,6 @@ void convert_YCbCr_to_rgb(uint16_t * __restrict img, int32_t size, int32_t ** lu
 double uncharted_tonemap(double x);
 double UnchartedTonemap(double x);
 double ReinhardTonemap(double x);
-float ReinhardTonemap_f(float x);
 /* Inverse tangent based tonemap - interesting... filmmic? */
 double TangentTonemap(double x);
 float TangentTonemap_f(float x);

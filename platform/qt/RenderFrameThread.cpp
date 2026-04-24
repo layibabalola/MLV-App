@@ -661,6 +661,12 @@ void RenderFrameThread::drawFrame( int slotIndex )
         processingGetLastCoreLevelsMilliseconds();
     const double processingCoreColorMs =
         processingGetLastCoreColorMilliseconds();
+    const double processingDirect8MatrixMs =
+        processingGetLastDirect8MatrixMilliseconds();
+    const double processingDirect8GammaMs =
+        processingGetLastDirect8GammaMilliseconds();
+    const double processingDirect8CurvesMs =
+        processingGetLastDirect8CurvesMilliseconds();
     const double processingCoreCreativeMs =
         processingGetLastCoreCreativeMilliseconds();
     const double processingCoreOutputMs =
@@ -811,6 +817,12 @@ void RenderFrameThread::drawFrame( int slotIndex )
                                       processingCoreLevelsMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_ms"),
                                       processingCoreColorMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_direct8_matrix_ms"),
+                                      processingDirect8MatrixMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_direct8_gamma_ms"),
+                                      processingDirect8GammaMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_direct8_curves_ms"),
+                                      processingDirect8CurvesMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_ms"),
                                       processingCoreCreativeMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_output_ms"),
