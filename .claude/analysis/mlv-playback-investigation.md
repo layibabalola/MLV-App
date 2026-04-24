@@ -2,6 +2,17 @@
 
 ### Verified locally
 
+- Update from same-session re-run on this VM/worktree (`ed3e5a17^` vs `ed3e5a17`) with `--threads 1 --raw-cache-mb 0 --frames 16` and warm filter `sample_index >= 4`:
+  - `cadence_ms`: base `47.8288`, inline `48.0156` (Δ `+0.1868`, `+0.39%`).
+  - `processed8_total_ms`: base `45.75`, inline `46.0` (Δ `+0.25`, `+0.55%`).
+  - `processing_core_color_ms`: base `15.75`, inline `16.0` (Δ `+0.25`).
+  - `raw_uint16_ms`: base `17.0`, inline `16.75` (Δ `-0.25`).
+  - primary data in:
+    - `.claude-state/profiling/20260424-reinhard-inline-pair/re-runs/base/run{1..4}.json`
+    - `.claude-state/profiling/20260424-reinhard-inline-pair/re-runs/inline/run{1..4}.json`
+    - `.claude-state/profiling/20260424-reinhard-inline-pair/re-runs/summary-stats.csv`
+  - interpretation: this pass is not a robust perf win; cadence moved within noise and should not be shipped as an independent claim.
+
 - `ReinhardTonemap_f` is now inlined on its definition side:
   - `src/processing/processing.c:126` changed from external function to `static inline`.
   - `src/processing/raw_processing.h:431` prototype removed, so direct-8 call sites no longer rely on TU-level external linkage.
@@ -13,8 +24,9 @@
   - `src/processing/raw_processing.c` (timing split + getters + environment-gated probe path).
   - `platform/qt/RenderFrameThread.cpp` (per-slot stage telemetry export).
   - `src/processing/raw_processing_8bit_kernel.inc` (probe-only branch under `MLVAPP_PROFILE_DIRECT8_SUBLOOPS`).
-- Same-session paired build/profile evidence now exists for current-tree baseline vs inline pass:
-  - Baseline branch built from `1949b2d9f740ea954a75755fbdacd7e54875d4ea`.
+- Historical paired evidence (outdated; kept for audit only):
+  - Same-session paired build/profile evidence now exists for current-tree baseline vs inline pass:
+  - Baseline branch built from `ed3e5a17^`.
   - Inline branch built from `ed3e5a17` with `ReinhardTonemap_f` inlined.
   - Runs executed on `C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration` with:
     - `--profile-playback --input tests/fixtures/clips/large_dual_iso.mlv --receipt tests/fixtures/receipts/large_dual_iso_hq.marxml --frames 16 --threads 1 --raw-cache-mb 0`
@@ -45,13 +57,8 @@
 
 ### Needs runtime profiling
 
-- Do a fresh same-session 4x baseline + 4x sub-loop rerun after rebuilding the exact working tree:
-  - `--input tests/fixtures/clips/large_dual_iso.mlv`
-  - `--receipt tests/fixtures/receipts/large_dual_iso_hq.marxml`
-  - `--frames 16 --threads 1 --raw-cache-mb 0`
-  - warm filter: `sample_index >= 4`
-- Compare warm medians for at least: `latency_ms`, `cadence_ms`, `processed8_total_ms`, `processing_core_color_ms`, `processing_direct8_matrix_ms`, `processing_direct8_gamma_ms`.
-- Accept a micro-pass only if the end-to-end `cadence_ms` delta is at least 5%.
+- This rerun is complete on this branch (`re-runs/summary-stats.csv`).
+- Next micro-pass should remain gated by the same rule: only proceed if paired end-to-end `cadence_ms` gain is >= 5%.
 
 ### Needs runtime profiling
 
