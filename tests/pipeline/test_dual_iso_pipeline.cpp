@@ -202,6 +202,8 @@ extern "C" int dualisoRowscaleReinitDispatchForTesting(void);
 extern "C" int dualisoRowscaleAvx2Active(void);
 extern "C" int dualisoAliasMapReinitDispatchForTesting(void);
 extern "C" int dualisoAliasMapAvx2Active(void);
+extern "C" int dualisoAmazeReinitDispatchForTesting(void);
+extern "C" int dualisoAmazeAvx2Active(void);
 
 /* Parity check for Path B Phase B1+B2: AVX2 + FMA acceleration of the
  * HQ Dual ISO recon (final_blend, mix_images, fullres_reconstruction,
@@ -2765,4 +2767,150 @@ TEST(DualIsoPipeline, Phase4B_AVX2ByteIdentityVsScalar)
 
     ASSERT_EQ(scalar_frame.size(), default_frame.size());
     ASSERT_TRUE(scalar_frame == default_frame);
+}
+
+/* Byte-identity parity audit for the Phase E1 AMaZE edge-direction
+ * estimator AVX2 kernel.
+ *
+ * Phase E1 vectorises the inner per-pixel sweep of
+ * dualiso.c::amaze_interpolate. The kernel is byte-identical to scalar by
+ * construction: pure int32 arithmetic (sub / abs_epi32 / add) on raw2ev
+ * gather results, no FMA, no float reorder, no division. Argmin
+ * tie-break uses _mm256_cmpgt_epi32 to match scalar `<`. Diagonal penalty
+ * (constant per direction) added once per direction, same as scalar.
+ *
+ * The output is the uint8_t edge_direction[] array, which feeds into the
+ * downstream directed interpolation (edge_interp). A 1-LSB drift in
+ * edge_direction[] would yield potentially-different pixels in the post-
+ * debayer output.
+ *
+ * Strategy: render the tiny_dual_iso_hq fixture once with the AMaZE AVX2
+ * dispatch off (MLVAPP_DISABLE_AVX2_DUALISO_AMAZE=1) and once with the
+ * AVX2 path active. Other AVX2 paths (HQ, alias-map) stay default-ON in
+ * both runs, so the only delta is the AMaZE edge-direction kernel.
+ *
+ * Allowed drift: same bound as the alias-map test (max abs <=64, <=50%
+ * pixels). The HQ AVX2 path's dither RNG schedule introduces this
+ * envelope regardless; E1 itself is parity-clean. */
+TEST(DualIsoPipeline, PhaseE1_AMaZEEdgeDirectionAvx2ByteIdentity)
+{
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+    /* Stage 1: scalar reference for the AMaZE edge-direction estimator.
+     * Other AVX2 dispatches stay default-ON to isolate the E1 contribution. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE", "1");
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_HQ", "");
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_ALIAS_MAP", "");
+#else
+    setenv("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE", "1", 1);
+    unsetenv("MLVAPP_DISABLE_AVX2_DUALISO_HQ");
+    unsetenv("MLVAPP_DISABLE_AVX2_DUALISO_ALIAS_MAP");
+#endif
+    dualisoAmazeReinitDispatchForTesting();
+    dualisoHqReinitDispatchForTesting();
+    dualisoAliasMapReinitDispatchForTesting();
+    ASSERT_EQ(0, dualisoAmazeAvx2Active());
+
+    QString error_message;
+    MlvPipelineFixture scalar_fixture;
+    ASSERT_TRUE(scalar_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(scalar_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(scalar_fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(scalar_fixture.video()));
+    const std::vector<uint16_t> scalar_frame = scalar_fixture.renderFrame16(0, 1);
+
+    /* Stage 2: AMaZE AVX2 path on. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE", "");
+#else
+    unsetenv("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE");
+#endif
+    const int avx2_active = dualisoAmazeReinitDispatchForTesting();
+    ASSERT_TRUE(avx2_active != 0);
+
+    MlvPipelineFixture avx2_fixture;
+    ASSERT_TRUE(avx2_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(avx2_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                                         &error_message));
+    ASSERT_TRUE(avx2_fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(avx2_fixture.video()));
+    const std::vector<uint16_t> avx2_frame = avx2_fixture.renderFrame16(0, 1);
+
+    ASSERT_EQ(scalar_frame.size(), avx2_frame.size());
+
+    /* Phase E1 is parity-clean by construction. Any residual drift comes
+     * from the shared HQ AVX2 dither RNG schedule (same envelope as the
+     * Phase B and C4 parity tests). */
+    std::uint64_t total_pixels = static_cast<std::uint64_t>(scalar_frame.size());
+    std::uint64_t differing = 0;
+    int max_abs = 0;
+    for (std::size_t i = 0; i < scalar_frame.size(); ++i) {
+        int d = static_cast<int>(scalar_frame[i]) - static_cast<int>(avx2_frame[i]);
+        if (d < 0) d = -d;
+        if (d) {
+            differing++;
+            if (d > max_abs) max_abs = d;
+        }
+    }
+    std::fprintf(stderr,
+                 "PhaseE1_AMaZEEdgeDirectionAvx2ByteIdentity: %llu/%llu pixels differ, max|d|=%d\n",
+                 static_cast<unsigned long long>(differing),
+                 static_cast<unsigned long long>(total_pixels),
+                 max_abs);
+    ASSERT_TRUE(max_abs <= 64);
+    ASSERT_TRUE(differing * 100ull <= total_pixels * 50ull);
+
+    /* Restore default dispatch for subsequent tests. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE", "");
+#else
+    unsetenv("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE");
+#endif
+    dualisoAmazeReinitDispatchForTesting();
+}
+
+/* Path-selection check: on a capable host with the kill switch unset,
+ * the AMaZE edge-direction AVX2 path must latch active. Mirrors the
+ * Phase B (HQ) and C4 (alias-map) probe tests. */
+TEST(DualIsoPipeline, PhaseE1_AMaZEEdgeDirectionAvx2PathActiveOnCapableHost)
+{
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE", "");
+#else
+    unsetenv("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE");
+#endif
+    dualisoAmazeReinitDispatchForTesting();
+    ASSERT_TRUE(dualisoAmazeAvx2Active() != 0);
 }

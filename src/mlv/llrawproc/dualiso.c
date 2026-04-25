@@ -542,6 +542,59 @@ int dualisoAliasMapReinitDispatchForTesting(void)
     return g_dualiso_alias_use_avx2;
 }
 
+/* ====================================================================== *
+ * Phase E1 — AMaZE edge-direction estimator AVX2 dispatch.
+ *
+ * Independent dispatch from g_dualiso_hq_use_avx2 / g_dualiso_alias_use_avx2
+ * so the parity test can isolate the E1 contribution. Kill switch:
+ *   MLVAPP_DISABLE_AVX2_DUALISO_AMAZE=1   (also gated by the global
+ *   MLVAPP_DISABLE_AVX2=1).
+ *
+ * The kernel is byte-identical to scalar: pure int32 arith
+ * (ABS / sub / add / cmp) on raw2ev gather results. No FMA, no float
+ * reordering, no division.
+ *
+ * The kernel itself lives in dualiso_amaze_avx2.inc (included earlier
+ * in this TU; the include ordering keeps the helpers next to their
+ * dispatch siblings). It depends on the file-scope `edge_directions[]`
+ * table which is defined later in this TU at line ~2263 — to keep the
+ * include order valid we wire the dispatch flags here but include the
+ * .inc *after* edge_directions[] is declared (forward declaration of
+ * the kernel below resolves the ordering).
+ * ====================================================================== */
+static pthread_once_t g_dualiso_amaze_dispatch_once = PTHREAD_ONCE_INIT;
+static int g_dualiso_amaze_use_avx2 = 0;
+
+static void dualiso_amaze_dispatch_init(void)
+{
+    int use_avx2 = 0;
+#ifdef DUALISO_AVX2_AVAILABLE
+    __builtin_cpu_init();
+    use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#endif
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2"))) use_avx2 = 0;
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2_DUALISO_AMAZE"))) use_avx2 = 0;
+    g_dualiso_amaze_use_avx2 = use_avx2;
+}
+
+int dualisoAmazeAvx2Active(void);
+int dualisoAmazeAvx2Active(void)
+{
+    pthread_once(&g_dualiso_amaze_dispatch_once, dualiso_amaze_dispatch_init);
+    return g_dualiso_amaze_use_avx2;
+}
+
+/* Test-only hook: force re-evaluation of the dispatch from current env.
+ * Mirrors dualisoAliasMapReinitDispatchForTesting. Not in the public
+ * header; tests forward-declare it. */
+int dualisoAmazeReinitDispatchForTesting(void);
+int dualisoAmazeReinitDispatchForTesting(void)
+{
+    pthread_once(&g_dualiso_amaze_dispatch_once, dualiso_amaze_dispatch_init);
+    dualiso_amaze_dispatch_init();
+    return g_dualiso_amaze_use_avx2;
+}
+
 static int preview_pattern_index(int iso_pattern)
 {
     const int pattern = ABS(iso_pattern);
@@ -2276,6 +2329,14 @@ edge_directions[] = {       /* note: all y coords should be multiplied by s */
     //~ { { 6,2}, { 3,1}, {-6,-2}, {-9,-3} },     /* almost horizontal */
 };
 
+/* Phase E1 — AMaZE edge-direction estimator AVX2 kernel.
+ *
+ * Included here (rather than at the top with dualiso_avx2.inc) because the
+ * kernel needs the file-scope `edge_directions[]` table just declared above.
+ * Wired via the g_dualiso_amaze_use_avx2 dispatch flag declared earlier in
+ * this TU. */
+#include "dualiso_amaze_avx2.inc"
+
 static inline int edge_interp(float ** plane, int * squeezed, int * raw2ev, int dir, int x, int y, int s)
 {
     
@@ -2472,6 +2533,32 @@ static inline void amaze_interpolate(struct raw_info raw_info,
             build_ev2raw_lut(raw2ev, ev2raw_0, black, white);
             previous_black = black;
         }
+#ifdef DUALISO_AVX2_AVAILABLE
+        pthread_once(&g_dualiso_amaze_dispatch_once, dualiso_amaze_dispatch_init);
+        if (g_dualiso_amaze_use_avx2)
+        {
+            /* Phase E1 — AVX2 fast path. Skips the diagnostic stat counters
+             * (semi_overexposed/not_overexposed/deep_shadow/not_shadow) which
+             * only feed the STDOUT_SILENT printfs below. The kernel is
+             * byte-identical for `edge_direction[x + y*w]` writes. */
+            #pragma omp parallel for
+            for (int y = 5; y < h-5; y ++)
+            {
+                int s = (is_bright[y%4] == is_bright[(y+1)%4]) ? -1 : 1;
+                int br = BRIGHT_ROW;
+                /* Pass a row pointer into the per-row kernel so its writes
+                 * land in edge_direction[x + y*w]. */
+                amaze_edge_direction_estimator_row_avx2(
+                    y, w, s, br,
+                    gray, raw_buffer_32, raw2ev,
+                    fullres_curve, fullres_thr,
+                    (uint32_t)white_darkened,
+                    &edge_direction[(size_t)y * (size_t)w]);
+            }
+        }
+        else
+#endif
+        {
         #pragma omp parallel for
         for (int y = 5; y < h-5; y ++)
         {
@@ -2483,7 +2570,7 @@ static inline void amaze_interpolate(struct raw_info raw_info,
                 int dmin = 0;
                 int dmax = COUNT(edge_directions)-1;
                 int search_area = 5;
-                
+
                 /* only use high accuracy on the dark exposure where the bright ISO is overexposed */
                 if (!BRIGHT_ROW)
                 {
@@ -2517,7 +2604,7 @@ static inline void amaze_interpolate(struct raw_info raw_info,
                     /* interpolating dark exposure, but the bright one is clipped */
                     semi_overexposed++;
                 }
-                
+
                 if (dmin == dmax)
                 {
                     d_best = dmin;
@@ -2543,11 +2630,11 @@ static inline void amaze_interpolate(struct raw_info raw_info,
                             int p4 = raw2ev[gray[x+dx4 + (y+dy4)*w]];
                             e += ABS(p1-p2) + ABS(p2-p3) + ABS(p3-p4);
                         }
-                        
+
                         /* add a small penalty for diagonal directions */
                         /* (the improvement should be significant in order to choose one of these) */
                         e += ABS(d - d0) * EV_RESOLUTION/8;
-                        
+
                         if (e < e_best)
                         {
                             e_best = e;
@@ -2555,9 +2642,10 @@ static inline void amaze_interpolate(struct raw_info raw_info,
                         }
                     }
                 }
-                
+
                 edge_direction[x + y*w] = d_best;
             }
+        }
         }
 #ifndef STDOUT_SILENT
         printf("Semi-overexposed: %.02f%%\n", semi_overexposed * 100.0 / (semi_overexposed + not_overexposed));
