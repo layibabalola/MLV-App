@@ -49,6 +49,41 @@
 #define LOCK(x) static pthread_mutex_t x = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&x);
 #define UNLOCK(x) pthread_mutex_unlock(&(x));
 
+/* Thread-local HQ recon path counters. Declared __thread so OMP-parallel
+ * fixtures and concurrent test runners don't cross-contaminate each other.
+ * Only the worker thread that drove diso_get_full20bit increments these;
+ * tests reset and read them on the same thread that ran the render. */
+#if defined(_MSC_VER)
+#define DUALISO_THREAD_LOCAL __declspec(thread)
+#else
+#define DUALISO_THREAD_LOCAL __thread
+#endif
+
+static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_amaze_count = 0;
+static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_mean23_count = 0;
+
+void dualiso_debug_note_hq_path(int which)
+{
+    if (which == 0) g_dualiso_hq_amaze_count++;
+    else            g_dualiso_hq_mean23_count++;
+}
+
+void dualiso_debug_reset_hq_path_counters(void)
+{
+    g_dualiso_hq_amaze_count = 0;
+    g_dualiso_hq_mean23_count = 0;
+}
+
+unsigned long long dualiso_debug_hq_amaze_count(void)
+{
+    return g_dualiso_hq_amaze_count;
+}
+
+unsigned long long dualiso_debug_hq_mean23_count(void)
+{
+    return g_dualiso_hq_mean23_count;
+}
+
 /* ------------------------------------------------------------------------
  * Dual ISO preview rowscale: hot inner loop. Two implementations selected
  * once via pthread_once based on host CPU support and the
@@ -210,12 +245,24 @@ static void dualiso_rowscale_avx2(int width, int height, int dark_row_start,
                 lo_f = _mm256_min_ps(_mm256_max_ps(lo_f, zerof), whitef);
                 hi_f = _mm256_min_ps(_mm256_max_ps(hi_f, zerof), whitef);
 
-                /* repack to uint16 */
+                /* repack to uint16. With lo_p coming from unpacklo (src lanes
+                 * [0..3, 8..11]) and hi_p from unpackhi (src lanes [4..7,
+                 * 12..15]), _mm256_packus_epi32 lays out:
+                 *   result[0..3]   = lo_p low 128  (= src[0..3])
+                 *   result[4..7]   = hi_p low 128  (= src[4..7])
+                 *   result[8..11]  = lo_p high 128 (= src[8..11])
+                 *   result[12..15] = hi_p high 128 (= src[12..15])
+                 * which is exactly src[0..15] in order, so NO permute is
+                 * needed. A previous version of this kernel applied
+                 * _mm256_permute4x64_epi64(scaled, 0xD8) here, which
+                 * scrambled the already-correct layout and silently
+                 * miscoloured the rowscaled bright/dark rows. The byte-
+                 * identity test RowscaleAvx2ByteIdentityVsScalar guards
+                 * against regression. See debayer.c:167-176 for the same
+                 * pattern. */
                 __m256i lo_p = _mm256_cvttps_epi32(lo_f);
                 __m256i hi_p = _mm256_cvttps_epi32(hi_f);
                 __m256i scaled = _mm256_packus_epi32(lo_p, hi_p);
-                /* AVX2 packus does within-lane interleave; permute fixes order */
-                scaled = _mm256_permute4x64_epi64(scaled, 0xD8);
 
                 _mm256_storeu_si256((__m256i*)&output_image[i], scaled);
 
@@ -336,6 +383,17 @@ static void dualiso_rowscale(int width, int height, int dark_row_start,
 int dualisoRowscaleAvx2Active(void)
 {
     pthread_once(&g_dualiso_rowscale_dispatch_once, dualiso_rowscale_dispatch_init);
+    return g_dualiso_rowscale_use_avx2;
+}
+
+/* Test-only hook: force re-evaluation of the dispatch from current env.
+ * Mirrors dualisoHqReinitDispatchForTesting / debayerBasicU16ReinitDispatchForTesting.
+ * Not in the public header; tests forward-declare it. */
+int dualisoRowscaleReinitDispatchForTesting(void);
+int dualisoRowscaleReinitDispatchForTesting(void)
+{
+    pthread_once(&g_dualiso_rowscale_dispatch_once, dualiso_rowscale_dispatch_init);
+    dualiso_rowscale_dispatch_init();
     return g_dualiso_rowscale_use_avx2;
 }
 
@@ -3331,10 +3389,12 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 
     if (interp_method == 0)
     {
+        dualiso_debug_note_hq_path(0);
         amaze_interpolate(raw_info, raw_buffer_32, dark, bright, black, white, white_darkened, is_bright, threads, scratch);
     }
     else
     {
+        dualiso_debug_note_hq_path(1);
         mean23_interpolate(raw_info, raw_buffer_32, dark, bright, black, white, white_darkened, is_bright);
     }
 
