@@ -92,6 +92,11 @@ int processingCanUseDirect8BitOutput(const processingObject_t * processing);
  * direct processed8 fast path. Probes CPU features and the MLVAPP_DISABLE_AVX2
  * kill switch on first call. */
 int processingFastPathAvx2Active(void);
+/* Nonzero when the runtime dispatcher selected the hand-tuned AVX2 + FMA
+ * intrinsics variant of the direct processed8 fast path. Enabled by setting
+ * MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1; still subject to MLVAPP_DISABLE_AVX2
+ * and CPU feature support. */
+int processingFastPathAvx2IntrinActive(void);
 void processingResetLastTimingTelemetry(void);
 void applyProcessingObject8( processingObject_t * processing,
                              int imageX, int imageY,

@@ -309,6 +309,99 @@ TEST(DualIsoPipeline, DirectProcessed8FastPathMatchesShiftedProcessed16WithCreat
     ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
 }
 
+/* Forward decl of a test-only hook implemented in raw_processing.c. Re-runs
+ * the runtime dispatch from the current env so the AVX2 intrinsics variant
+ * can be activated mid-test-suite (production code latches once via
+ * pthread_once). */
+extern "C" int processingFastPathReinitDispatchForTesting(void);
+
+TEST(DualIsoPipeline, DirectProcessed8FastPath_AVX2IntrinByteIdentity)
+{
+    /* Byte-identity check for the hand-tuned AVX2 + FMA intrinsics direct8
+     * variant. Strategy: render the reference once with the default dispatch
+     * (scalar or autovec AVX2), shift down to uint8 to get the expected
+     * frame, then re-render with MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1 forcing
+     * the intrinsics path, and assert max_abs_diff == 0 across all pixels. */
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+    /* Stage 1: reference frame16 -> shifted-to-8 expected. Run with the
+     * intrinsics OFF so we get the deterministic scalar/autovec output. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "");
+#else
+    unsetenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8");
+#endif
+    processingFastPathReinitDispatchForTesting();
+    ASSERT_TRUE(processingFastPathAvx2IntrinActive() == 0);
+
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 1);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    /* Stage 2: enable the intrinsics path and re-render at 8-bit. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "1");
+#else
+    setenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "1", 1);
+#endif
+    const int reinit_active = processingFastPathReinitDispatchForTesting();
+    ASSERT_TRUE(reinit_active != 0);
+    ASSERT_TRUE(processingFastPathAvx2IntrinActive() != 0);
+
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
+
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+
+    /* Restore default dispatch for subsequent tests. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "");
+#else
+    unsetenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8");
+#endif
+    processingFastPathReinitDispatchForTesting();
+}
+
 TEST(DualIsoPipeline, DirectProcessed8FastPathAvx2PathActiveOnCapableHost)
 {
     /* On hosts that advertise AVX2+FMA and have not set MLVAPP_DISABLE_AVX2, the

@@ -979,12 +979,32 @@ int processingCanUseDirect8BitOutput(const processingObject_t * processing)
 /*
  * Runtime-dispatched direct processed8 fast path.
  *
- * The kernel body lives in raw_processing_8bit_kernel.inc so it can be compiled
- * twice: once with the scalar ISA baseline and once with AVX2+FMA enabled via
- * __attribute__((target("avx2,fma"))). On first call we probe the host CPU
- * (honouring the MLVAPP_DISABLE_AVX2 kill switch) and latch the function
- * pointer. Parity with the scalar variant is gated by the DirectProcessed8
- * byte-identity tests in tests/pipeline/test_dual_iso_pipeline.cpp.
+ * Three kernel variants compile here:
+ *
+ *   - apply_processing_object_8bit_fast_rows_scalar
+ *       Plain C, baseline ISA. Reference for byte-identity comparisons.
+ *
+ *   - apply_processing_object_8bit_fast_rows_avx2
+ *       Same source (raw_processing_8bit_kernel.inc) recompiled with
+ *       __attribute__((target("avx2,fma"))) -- relies on GCC autovec to
+ *       lift the matrix multiply / Y compute into AVX2 + FMA.
+ *
+ *   - apply_processing_object_8bit_fast_rows_avx2_intrin
+ *       Hand-tuned AVX2 + FMA intrinsics
+ *       (raw_processing_8bit_kernel_avx2_intrin.inc), 8 RGB pixels per
+ *       inner iteration with explicit gathers + FMA. Phase 2A experiment.
+ *
+ * Dispatch policy (first call latches the function pointer via pthread_once):
+ *
+ *   - default: AVX2 autovec variant when CPU supports avx2+fma.
+ *   - MLVAPP_DISABLE_AVX2=1: force scalar.
+ *   - MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1: prefer the intrinsics variant
+ *     over the autovec variant (still subject to MLVAPP_DISABLE_AVX2 and
+ *     CPU support).
+ *
+ * Parity with scalar is enforced by the DirectProcessed8FastPath* tests in
+ * tests/pipeline/test_dual_iso_pipeline.cpp. The intrinsics variant has its
+ * own byte-identity test (DirectProcessed8FastPath_AVX2IntrinByteIdentity).
  */
 
 typedef void (*apply_processing_object_8bit_fast_rows_fn_t)(
@@ -1004,6 +1024,10 @@ typedef void (*apply_processing_object_8bit_fast_rows_fn_t)(
 #define APPLY_8BIT_FAST_ROWS_NAME apply_processing_object_8bit_fast_rows_avx2
 #define APPLY_8BIT_FAST_ROWS_ATTRS __attribute__((target("avx2,fma")))
 #include "raw_processing_8bit_kernel.inc"
+
+#define APPLY_8BIT_FAST_ROWS_NAME apply_processing_object_8bit_fast_rows_avx2_intrin
+#define APPLY_8BIT_FAST_ROWS_ATTRS __attribute__((target("avx2,fma")))
+#include "raw_processing_8bit_kernel_avx2_intrin.inc"
 #endif
 
 static pthread_once_t g_apply_processing_object_8bit_fast_rows_dispatch_once =
@@ -1011,6 +1035,7 @@ static pthread_once_t g_apply_processing_object_8bit_fast_rows_dispatch_once =
 static apply_processing_object_8bit_fast_rows_fn_t
     g_apply_processing_object_8bit_fast_rows_fn = NULL;
 static int g_apply_processing_object_8bit_fast_rows_use_avx2 = 0;
+static int g_apply_processing_object_8bit_fast_rows_use_avx2_intrin = 0;
 
 static int processing_env_flag_enabled(const char * value)
 {
@@ -1039,6 +1064,7 @@ static int processing_profile_direct8_subloops_enabled(void)
 static void apply_processing_object_8bit_fast_rows_dispatch_init(void)
 {
     int use_avx2 = 0;
+    int use_avx2_intrin = 0;
 #ifdef MLVAPP_AVX2_DISPATCH_AVAILABLE
     __builtin_cpu_init();
     use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
@@ -1047,11 +1073,29 @@ static void apply_processing_object_8bit_fast_rows_dispatch_init(void)
     {
         use_avx2 = 0;
     }
+    if( use_avx2 &&
+        processing_env_flag_enabled(getenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8")) )
+    {
+        use_avx2_intrin = 1;
+    }
     g_apply_processing_object_8bit_fast_rows_use_avx2 = use_avx2;
+    g_apply_processing_object_8bit_fast_rows_use_avx2_intrin = use_avx2_intrin;
 #ifdef MLVAPP_AVX2_DISPATCH_AVAILABLE
-    g_apply_processing_object_8bit_fast_rows_fn =
-        use_avx2 ? apply_processing_object_8bit_fast_rows_avx2
-                 : apply_processing_object_8bit_fast_rows_scalar;
+    if( use_avx2_intrin )
+    {
+        g_apply_processing_object_8bit_fast_rows_fn =
+            apply_processing_object_8bit_fast_rows_avx2_intrin;
+    }
+    else if( use_avx2 )
+    {
+        g_apply_processing_object_8bit_fast_rows_fn =
+            apply_processing_object_8bit_fast_rows_avx2;
+    }
+    else
+    {
+        g_apply_processing_object_8bit_fast_rows_fn =
+            apply_processing_object_8bit_fast_rows_scalar;
+    }
 #else
     g_apply_processing_object_8bit_fast_rows_fn =
         apply_processing_object_8bit_fast_rows_scalar;
@@ -1063,6 +1107,30 @@ int processingFastPathAvx2Active(void)
     pthread_once(&g_apply_processing_object_8bit_fast_rows_dispatch_once,
                  apply_processing_object_8bit_fast_rows_dispatch_init);
     return g_apply_processing_object_8bit_fast_rows_use_avx2;
+}
+
+int processingFastPathAvx2IntrinActive(void)
+{
+    pthread_once(&g_apply_processing_object_8bit_fast_rows_dispatch_once,
+                 apply_processing_object_8bit_fast_rows_dispatch_init);
+    return g_apply_processing_object_8bit_fast_rows_use_avx2_intrin;
+}
+
+/* Test-only hook: re-run the dispatch policy from the current environment.
+ * Production code latches once via pthread_once, but the tests run multiple
+ * configs in a single process and need to flip the dispatch by editing the
+ * env var. Returns 1 if the resulting selection points at the intrinsics
+ * variant, 0 otherwise. Not declared in the public header. */
+int processingFastPathReinitDispatchForTesting(void);
+int processingFastPathReinitDispatchForTesting(void)
+{
+    /* Run the init at least once so the pthread_once flag is consumed and
+     * future production callers don't re-run the env probe. After that,
+     * directly mutate the latched globals from the current env. */
+    pthread_once(&g_apply_processing_object_8bit_fast_rows_dispatch_once,
+                 apply_processing_object_8bit_fast_rows_dispatch_init);
+    apply_processing_object_8bit_fast_rows_dispatch_init();
+    return g_apply_processing_object_8bit_fast_rows_use_avx2_intrin;
 }
 
 static void apply_processing_object_8bit_fast_rows(processingObject_t * processing,
