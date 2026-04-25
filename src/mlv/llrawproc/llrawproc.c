@@ -33,6 +33,7 @@
 #include "darkframe.h"
 #include "../../debug/StageTiming.h"
 #include "../../processing/raw_processing.h"
+#include "../pipeline_stage_capture.h"
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -971,6 +972,37 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
 
     int publish_auto_correction = 1;
 
+    /* S1_pre_dualiso capture: post focus pixel / bad pixel / chroma smooth /
+     * pattern noise / dark frame / vertical stripes, but pre Dual ISO recon.
+     * Inert when MLVAPP_PIPELINE_CAPTURE_DIR is unset. The current frame
+     * index is read from the thread-local set by the caller of
+     * applyLLRawProcObject. */
+    {
+        const uint64_t frame_index = mlv_pipeline_capture_get_current_frame();
+        if (mlv_pipeline_capture_should_capture_frame(frame_index))
+        {
+            mlv_pipeline_capture_meta_t meta;
+            memset(&meta, 0, sizeof meta);
+            meta.stage = MLV_PIPELINE_STAGE_S1_PRE_DUALISO;
+            meta.format = MLV_PIPELINE_FORMAT_UINT16_MONO;
+            meta.format_label = "uint16_bayer_pre_dualiso";
+            meta.width = x_res;
+            meta.height = y_res;
+            meta.bytes_per_line = x_res * (int)sizeof(uint16_t);
+            meta.bytes_per_pixel = (int)sizeof(uint16_t);
+            meta.channels = 1;
+            meta.bit_depth = 16;
+            meta.dual_iso_mode = (dual_iso_mode == 0) ? "off"
+                               : (dual_iso_mode == 1) ? "full"
+                               : (dual_iso_mode == 2) ? "preview"
+                               : "unknown";
+            meta.debayer_mode = "n/a";
+            meta.scaler = "none";
+            meta.path_label = "applyLLRawProcObject_pre_dualiso";
+            mlv_pipeline_capture(frame_index, raw_image_buff, &meta);
+        }
+    }
+
     if (diso_validity && dual_iso_mode)
     {
         raw_info.width = x_res;
@@ -1172,6 +1204,36 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
             g_llrawproc_last_preview_histogram_ms = worker->diso_preview_scratch.last_histogram_ms;
             g_llrawproc_last_preview_regression_ms = worker->diso_preview_scratch.last_regression_ms;
             g_llrawproc_last_preview_rowscale_ms = worker->diso_preview_scratch.last_rowscale_ms;
+        }
+    }
+
+    /* S2_post_dualiso capture: post Dual ISO recon (full HQ or preview
+     * rowscale), before chroma smooth. If dual_iso_mode==0 the capture
+     * happens with no transformation since the if-block above was
+     * skipped — useful as a "this clip has no Dual ISO" baseline. */
+    {
+        const uint64_t frame_index = mlv_pipeline_capture_get_current_frame();
+        if (mlv_pipeline_capture_should_capture_frame(frame_index))
+        {
+            mlv_pipeline_capture_meta_t meta;
+            memset(&meta, 0, sizeof meta);
+            meta.stage = MLV_PIPELINE_STAGE_S2_POST_DUALISO;
+            meta.format = MLV_PIPELINE_FORMAT_UINT16_MONO;
+            meta.format_label = "uint16_bayer_post_dualiso";
+            meta.width = x_res;
+            meta.height = y_res;
+            meta.bytes_per_line = x_res * (int)sizeof(uint16_t);
+            meta.bytes_per_pixel = (int)sizeof(uint16_t);
+            meta.channels = 1;
+            meta.bit_depth = 16;
+            meta.dual_iso_mode = (dual_iso_mode == 0) ? "off"
+                               : (dual_iso_mode == 1) ? "full"
+                               : (dual_iso_mode == 2) ? "preview"
+                               : "unknown";
+            meta.debayer_mode = "n/a";
+            meta.scaler = "none";
+            meta.path_label = "applyLLRawProcObject_post_dualiso";
+            mlv_pipeline_capture(frame_index, raw_image_buff, &meta);
         }
     }
 

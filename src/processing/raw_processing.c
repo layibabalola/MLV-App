@@ -19,6 +19,7 @@
 
 #include "raw_processing.h"
 #include "../mlv/video_mlv.h"
+#include "../mlv/pipeline_stage_capture.h"
 #include "filter/filter.h"
 #include "denoiser/denoiser_2d_median.h"
 #include "../mlv/camid/camera_id.h"
@@ -876,6 +877,29 @@ void applyProcessingObject( processingObject_t * processing,
             outputImage[i+1] = LIMIT16( outputImage[i+1] + grain );
             outputImage[i+2] = LIMIT16( outputImage[i+2] + grain );
         }
+    }
+
+    /* S4_processing capture: post processing core (matrix + levels + gamma +
+     * curves + denoise + RBF + CA + sharpening + grain). RGB16 packed.
+     * Inert when MLVAPP_PIPELINE_CAPTURE_DIR is unset. */
+    if( mlv_pipeline_capture_should_capture_frame(frameIndex) )
+    {
+        mlv_pipeline_capture_meta_t meta;
+        memset(&meta, 0, sizeof meta);
+        meta.stage = MLV_PIPELINE_STAGE_S4_PROCESSING;
+        meta.format = MLV_PIPELINE_FORMAT_UINT16_RGB;
+        meta.format_label = "uint16_rgb_post_processing";
+        meta.width = imageX;
+        meta.height = imageY;
+        meta.bytes_per_line = imageX * 3 * (int)sizeof(uint16_t);
+        meta.bytes_per_pixel = 3 * (int)sizeof(uint16_t);
+        meta.channels = 3;
+        meta.bit_depth = 16;
+        meta.dual_iso_mode = NULL;
+        meta.debayer_mode = NULL;
+        meta.scaler = "none";
+        meta.path_label = "applyProcessingObject";
+        mlv_pipeline_capture(frameIndex, outputImage, &meta);
     }
 }
 

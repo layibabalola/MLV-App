@@ -8,6 +8,9 @@
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
 #include "debug/StageTiming.h"
+extern "C" {
+#include "../../src/mlv/pipeline_stage_capture.h"
+}
 #include "math.h"
 
 #include <QMessageBox>
@@ -1654,6 +1657,36 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                 displayImageOwnsData = true;
             }
             underOver = applyZebrasToImage( &displayImage, zebrasEnabled );
+        }
+
+        /* S6_displayImage capture: final RGB8 buffer just before
+         * QPixmap::fromImage. Inert when MLVAPP_PIPELINE_CAPTURE_DIR is
+         * unset. We only capture when fromImage actually fires (cache
+         * miss); the cachedPixmap path already has its source captured
+         * earlier in this same path. */
+        if( !cachedPixmapAvailable
+         && !displayImage.isNull()
+         && mlv_pipeline_capture_should_capture_frame( display_frame ) )
+        {
+            mlv_pipeline_capture_meta_t meta;
+            memset( &meta, 0, sizeof meta );
+            meta.stage = MLV_PIPELINE_STAGE_S6_DISPLAYIMAGE;
+            meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
+            meta.format_label = "uint8_rgb_displayImage_pre_pixmap";
+            meta.width = displayImage.width();
+            meta.height = displayImage.height();
+            meta.bytes_per_line = (int)displayImage.bytesPerLine();
+            meta.bytes_per_pixel = 3;
+            meta.channels = 3;
+            meta.bit_depth = 8;
+            meta.scaler = task.playbackFastScaleActive ? "fast" : "smooth";
+            meta.path_label = "presentPlaybackPreparedFrame";
+            meta.processing_subset_active =
+                task.gpuPresentationOptions.previewProcessing.enabled ? 1 : 0;
+            meta.settings_hash = (uint64_t)display_signature;
+            mlv_pipeline_capture( display_frame,
+                                  displayImage.constBits(),
+                                  &meta );
         }
 
         QPixmap pic = cachedPixmapAvailable ? cachedPixmap : QPixmap::fromImage( displayImage );

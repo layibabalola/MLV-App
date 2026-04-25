@@ -16,6 +16,7 @@
 
 #include "video_mlv.h"
 #include "../debug/StageTiming.h"
+#include "pipeline_stage_capture.h"
 #include "audio_mlv.h"
 
 #include "raw.h"
@@ -2038,6 +2039,31 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
     }
 
     free(raw_frame);
+
+    /* S0_raw_uint16 capture: post LJ92 decode + bit-unpack, pre llrawproc.
+     * Inert when MLVAPP_PIPELINE_CAPTURE_DIR is unset. */
+    if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+    {
+        const int width = (int)getMlvWidth(video);
+        const int height = (int)getMlvHeight(video);
+        mlv_pipeline_capture_meta_t meta;
+        memset(&meta, 0, sizeof meta);
+        meta.stage = MLV_PIPELINE_STAGE_S0_RAW_UINT16;
+        meta.format = MLV_PIPELINE_FORMAT_UINT16_MONO;
+        meta.format_label = "uint16_bayer_post_unpack";
+        meta.width = width;
+        meta.height = height;
+        meta.bytes_per_line = width * (int)sizeof(uint16_t);
+        meta.bytes_per_pixel = (int)sizeof(uint16_t);
+        meta.channels = 1;
+        meta.bit_depth = 16;
+        meta.dual_iso_mode = "n/a";
+        meta.debayer_mode = "n/a";
+        meta.scaler = "none";
+        meta.path_label = NULL;
+        mlv_pipeline_capture(frameIndex, unpackedFrame, &meta);
+    }
+
     return 0;
 }
 
@@ -2126,6 +2152,9 @@ int getMlvRawFrameProcessedUint16(mlvObject_t * video,
     mlv_stage_timing_note_elapsed("raw_uint16_copy", frameIndex, g_mlv_last_raw_uint16_copy_ms);
 
     const double llraw_start = mlv_stage_timing_now();
+    /* Make the frame index available to S1/S2 capture hooks inside
+     * applyLLRawProcObject (which doesn't otherwise carry one). */
+    mlv_pipeline_capture_set_current_frame(frameIndex);
     applyLLRawProcObject(video, outputFrame, output_frame_size);
     const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
     mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
@@ -2658,6 +2687,28 @@ void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * o
                                              1,
                                              0);
 
+        /* S5_processed8 capture (direct8 fast path) */
+        if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+        {
+            const int width = (int)getMlvWidth(video);
+            const int height = (int)getMlvHeight(video);
+            mlv_pipeline_capture_meta_t meta;
+            memset(&meta, 0, sizeof meta);
+            meta.stage = MLV_PIPELINE_STAGE_S5_PROCESSED8;
+            meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
+            meta.format_label = "uint8_rgb_direct8";
+            meta.width = width;
+            meta.height = height;
+            meta.bytes_per_line = width * 3;
+            meta.bytes_per_pixel = 3;
+            meta.channels = 3;
+            meta.bit_depth = 8;
+            meta.scaler = "none";
+            meta.path_label = "direct8";
+            meta.settings_hash = (uint64_t)requested_signature;
+            mlv_pipeline_capture(frameIndex, outputFrame, &meta);
+        }
+
         g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
         mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
         return;
@@ -2712,6 +2763,29 @@ void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * o
     }
     g_mlv_last_processed16_to_8bit_ms = (mlv_stage_timing_now() - convert_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed16_to_8bit", frameIndex, g_mlv_last_processed16_to_8bit_ms);
+
+    /* S5_processed8 capture (indirect path: processed16 -> 8) */
+    if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+    {
+        const int width = (int)getMlvWidth(video);
+        const int height = (int)getMlvHeight(video);
+        mlv_pipeline_capture_meta_t meta;
+        memset(&meta, 0, sizeof meta);
+        meta.stage = MLV_PIPELINE_STAGE_S5_PROCESSED8;
+        meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
+        meta.format_label = "uint8_rgb_processed16_packdown";
+        meta.width = width;
+        meta.height = height;
+        meta.bytes_per_line = width * 3;
+        meta.bytes_per_pixel = 3;
+        meta.channels = 3;
+        meta.bit_depth = 8;
+        meta.scaler = "none";
+        meta.path_label = "processed16_to_8";
+        meta.settings_hash =
+            (uint64_t)mlv_processed_frame_signature(video, frameIndex);
+        mlv_pipeline_capture(frameIndex, outputFrame, &meta);
+    }
 
     mlv_store_processed_frame_8bit_cache(video,
                                          frameIndex,

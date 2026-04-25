@@ -12,6 +12,7 @@ SOURCES += \
     $$REPO_ROOT/tests/common/repo_paths.cpp \
     $$REPO_ROOT/platform/qt/ReceiptSettings.cpp \
     $$REPO_ROOT/src/mlv/frame_caching.c \
+    $$REPO_ROOT/src/mlv/pipeline_stage_capture.c \
     $$REPO_ROOT/src/batch/BatchLogger.cpp \
     $$REPO_ROOT/src/batch/ReceiptLoader.cpp \
     $$REPO_ROOT/src/batch/ReceiptApplier.cpp \

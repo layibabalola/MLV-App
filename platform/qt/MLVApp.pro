@@ -167,6 +167,7 @@ SOURCES += \
     ../../src/ca_correct/CA_correct_RT.c \
     ../../src/matrix/matrix.c \
     ../../src/mlv/frame_caching.c \
+    ../../src/mlv/pipeline_stage_capture.c \
     ../../src/mlv/video_mlv.c \
     ../../src/mlv/video_mlv_misc.c \
     ../../src/mlv/liblj92/lj92.c \

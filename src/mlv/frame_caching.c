@@ -16,6 +16,7 @@
 #include "../debayer/debayer.h"
 #include "../ca_correct/CA_correct_RT.h"
 #include "../debayer/wb_conversion.h"
+#include "pipeline_stage_capture.h"
 
 #include "librtprocesswrapper.h"
 
@@ -792,5 +793,39 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
         const double wb_undo_start = mlv_debayer_timing_now_seconds();
         wb_undo(&wb_info, output_frame, width, height, getMlvBlackLevel(video));
         g_mlv_last_debayer_wb_undo_ms = (mlv_debayer_timing_now_seconds() - wb_undo_start) * 1000.0;
+    }
+
+    /* S3_debayer capture: post Bayer->RGB16, all debayer algorithms (AMaZE,
+     * Bilinear, AHD, LibRtProcess, Easy) converge here before return. Inert
+     * when MLVAPP_PIPELINE_CAPTURE_DIR is unset. */
+    if( mlv_pipeline_capture_should_capture_frame(frame_index) )
+    {
+        const char * debayer_label =
+            debayer_type == 0 ? "none"   :
+            debayer_type == 1 ? "amaze"  :
+            debayer_type == 2 ? "easy"   :
+            debayer_type == 3 ? "bilinear" :
+            debayer_type == 4 ? "ahd"    :
+            debayer_type == 5 ? "rcd"    :
+            debayer_type == 6 ? "dcb"    :
+            debayer_type == 7 ? "lmmse"  :
+            debayer_type == 8 ? "igv"    :
+            "unknown";
+        mlv_pipeline_capture_meta_t meta;
+        memset(&meta, 0, sizeof meta);
+        meta.stage = MLV_PIPELINE_STAGE_S3_DEBAYER;
+        meta.format = MLV_PIPELINE_FORMAT_UINT16_RGB;
+        meta.format_label = "uint16_rgb_post_debayer";
+        meta.width = width;
+        meta.height = height;
+        meta.bytes_per_line = width * 3 * (int)sizeof(uint16_t);
+        meta.bytes_per_pixel = 3 * (int)sizeof(uint16_t);
+        meta.channels = 3;
+        meta.bit_depth = 16;
+        meta.dual_iso_mode = NULL;
+        meta.debayer_mode = debayer_label;
+        meta.scaler = "none";
+        meta.path_label = "get_mlv_raw_frame_debayered";
+        mlv_pipeline_capture(frame_index, output_frame, &meta);
     }
 }
