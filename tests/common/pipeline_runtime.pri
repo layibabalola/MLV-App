@@ -28,6 +28,7 @@ SOURCES += \
     $$REPO_ROOT/src/mlv/llrawproc/darkframe.c \
     $$REPO_ROOT/src/mlv/llrawproc/dualiso.c \
     $$REPO_ROOT/src/processing/raw_processing.c \
+    $$REPO_ROOT/src/processing/playback_downsample.c \
     $$REPO_ROOT/src/processing/blur_threaded.c \
     $$REPO_ROOT/src/processing/filter/filter.c \
     $$REPO_ROOT/src/processing/filter/genann/genann.c \

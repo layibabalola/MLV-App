@@ -28,6 +28,8 @@
 #include "../debayer/debayer.h"
 /* Processing module */
 #include "../processing/raw_processing.h"
+/* Phase 4B: fused downsample-and-debayer for adaptive playback resolution. */
+#include "../processing/playback_downsample.h"
 
 /* Lossless decompression */
 #include "liblj92/lj92.h"
@@ -431,6 +433,40 @@ static int mlv_normalize_playback_scale_factor(int scaleFactor)
         return scaleFactor;
     }
     return 1;
+}
+
+/* Phase 4B: resolve the effective scale factor for a given video object.
+ * Forces scale=4 when dual ISO is active (the dual-ISO recon relies on
+ * the 4-row iso_patterns cycle, so half-rate sampling at scale=2 would
+ * silently corrupt the recon). Also rejects scales that don't divide the
+ * sensor dimensions evenly (we need clean 2x2 / 4x4 block alignment). */
+static int mlv_effective_playback_scale_factor(mlvObject_t * video, int requestedScale)
+{
+    int s = mlv_normalize_playback_scale_factor(requestedScale);
+    if (s == 1) return 1;
+
+    if (!video) return 1;
+
+    const int width = (int)getMlvWidth(video);
+    const int height = (int)getMlvHeight(video);
+    if (width <= 0 || height <= 0) return 1;
+
+    /* Dual ISO HQ recon: scale must be 4 (or 1). The 4-row iso_patterns
+     * cycle isn't preserved at scale=2. */
+    if (llrpHQDualIso(video) && s == 2)
+    {
+        s = 4;
+    }
+
+    /* Block alignment: width and height must be a multiple of (s*1) for
+     * the 2x kernel and (s) for the 4x kernel. To be safe we require both
+     * to be a multiple of `s`. */
+    if ((width % s) != 0 || (height % s) != 0)
+    {
+        return 1;
+    }
+
+    return s;
 }
 
 static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * video,
@@ -986,6 +1022,9 @@ static void mlv_reset_processed_frame_16bit_cache(mlvObject_t * video)
      * always store a normalised 1, 2, or 4 so a zero lane never matches
      * any live request. */
     memset(video->processed_16bit_cache_scale, 0, sizeof(video->processed_16bit_cache_scale));
+    /* Phase 4B: clear the layout unit so the next prepare picks up the
+     * new layout fresh. */
+    video->processed_16bit_cache_unit_words = 0;
 }
 
 static uint16_t * mlv_processed_frame_16bit_cache_slot(mlvObject_t * video, uint32_t slot, uint64_t rgb_frame_words)
@@ -1053,6 +1092,16 @@ static uint16_t * mlv_prepare_processed_frame_16bit_cache(mlvObject_t * video,
         return NULL;
     }
 
+    /* Phase 4B: when rgb_frame_words differs from the layout unit used by
+     * existing slots, the slot offsets are stale (one scale's slot 1
+     * overlaps another scale's slot 0). Reset so the next store
+     * re-establishes the layout. */
+    if (video->processed_16bit_cache_unit_words != 0
+        && video->processed_16bit_cache_unit_words != rgb_frame_words)
+    {
+        mlv_reset_processed_frame_16bit_cache(video);
+    }
+
     uint64_t previous_capacity = video->rgb_processed_frame_cache_16bit_words;
     uint16_t * cache = mlv_ensure_u16_buffer(&video->rgb_processed_frame_cache_16bit,
                                              &video->rgb_processed_frame_cache_16bit_words,
@@ -1068,6 +1117,8 @@ static uint16_t * mlv_prepare_processed_frame_16bit_cache(mlvObject_t * video,
         mlv_reset_processed_frame_16bit_cache(video);
     }
 
+    /* Record the layout unit so subsequent calls can detect a size change. */
+    video->processed_16bit_cache_unit_words = rgb_frame_words;
     return cache;
 }
 
@@ -1144,6 +1195,9 @@ static void mlv_reset_processed_frame_8bit_cache_locked(mlvObject_t * video)
     memset(video->processed_8bit_cache_state, 0, sizeof(video->processed_8bit_cache_state));
     memset(video->processed_8bit_cache_prefetched, 0, sizeof(video->processed_8bit_cache_prefetched));
     memset(video->processed_8bit_cache_generation, 0, sizeof(video->processed_8bit_cache_generation));
+    /* Phase 4B: clear the per-call unit size so the next prepare picks up
+     * the new layout fresh. */
+    video->processed_8bit_cache_unit_size = 0;
 }
 
 static void mlv_reset_processed_frame_8bit_cache(mlvObject_t * video)
@@ -1320,6 +1374,17 @@ static uint8_t * mlv_prepare_processed_frame_8bit_cache_locked(mlvObject_t * vid
         return NULL;
     }
 
+    /* Phase 4B: when rgb_frame_size differs from the size used to lay out
+     * existing slots (e.g. a scale=1 store after the buffer was laid out
+     * for scale=2), the slot offsets are stale and the data overlaps
+     * unrelated entries. Reset so the next store re-establishes the
+     * layout. */
+    if (video->processed_8bit_cache_unit_size != 0
+        && video->processed_8bit_cache_unit_size != rgb_frame_size)
+    {
+        mlv_reset_processed_frame_8bit_cache_locked(video);
+    }
+
     uint64_t previous_capacity = video->rgb_processed_current_frame_8bit_bytes;
     uint8_t * cache = mlv_ensure_u8_buffer(&video->rgb_processed_current_frame_8bit,
                                            &video->rgb_processed_current_frame_8bit_bytes,
@@ -1335,6 +1400,8 @@ static uint8_t * mlv_prepare_processed_frame_8bit_cache_locked(mlvObject_t * vid
         mlv_reset_processed_frame_8bit_cache_locked(video);
     }
 
+    /* Record the layout unit so subsequent calls can detect a size change. */
+    video->processed_8bit_cache_unit_size = rgb_frame_size;
     return cache;
 }
 
@@ -2492,6 +2559,65 @@ void setMlvProcessing(mlvObject_t * video, processingObject_t * processing)
     }
 }
 
+/* Phase 4B: scaled-resolution debayered-RGB16 producer.
+ *
+ * Routes around the cache-window debayer path (full-res RGB cache) and
+ * builds a half- or quarter-res RGB16 directly from the post-llrawproc
+ * uint16 Bayer image. The output is already debayered (per-channel block
+ * average) so the debayer step is bypassed entirely.
+ *
+ * Returns 1 on success, 0 on failure (then outputFrame is zeroed). The
+ * scaleFactor must be the *effective* scale (caller already ran it
+ * through mlv_effective_playback_scale_factor — typically 2 or 4). */
+static int mlv_render_scaled_rgb16(mlvObject_t * video,
+                                   uint64_t frameIndex,
+                                   uint16_t * outputFrame,
+                                   int scaleFactor,
+                                   int threads)
+{
+    if (!video || !outputFrame || scaleFactor <= 1) return 0;
+
+    const int width  = (int)getMlvWidth(video);
+    const int height = (int)getMlvHeight(video);
+    const int out_w  = width  / scaleFactor;
+    const int out_h  = height / scaleFactor;
+    const uint64_t in_pixels = (uint64_t)width * (uint64_t)height;
+    const uint64_t out_words = (uint64_t)out_w * (uint64_t)out_h * 3u;
+
+    /* Borrow a thread-local buffer for the full-res Bayer. The TLS
+     * buffer grows on demand; once allocated for the full sensor it's
+     * reused across calls. */
+    uint16_t * unpacked = mlv_ensure_thread_u16_buffer(in_pixels);
+    if (!unpacked)
+    {
+        memset(outputFrame, 0, (size_t)out_words * sizeof(uint16_t));
+        return 0;
+    }
+
+    int bit_shift = 0;
+    const double debayer_start = mlv_stage_timing_now();
+    if (getMlvRawFrameProcessedUint16(video, frameIndex, unpacked, &bit_shift))
+    {
+        memset(outputFrame, 0, (size_t)out_words * sizeof(uint16_t));
+        return 0;
+    }
+
+    /* Per scope plan: bit_shift widens narrow-bitdepth bayer to 16-bit.
+     * For HQ Dual ISO recon, llrawproc has already widened to 16-bit
+     * (bit_shift==0). For non-recon paths bit_shift may be non-zero. */
+    if (scaleFactor == 4)
+    {
+        pl_downsample_bayer_to_rgb_4x(unpacked, width, height, outputFrame, bit_shift, threads);
+    }
+    else
+    {
+        pl_downsample_bayer_to_rgb_2x(unpacked, width, height, outputFrame, bit_shift, threads);
+    }
+    g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    return 1;
+}
+
 void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame)
 {
     int width = getMlvWidth(video);
@@ -2612,10 +2738,23 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
                                                               int threads,
                                                               int recordTelemetry)
 {
-    const uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
-    const uint64_t pixels_count = (uint64_t)getMlvWidth(video) * getMlvHeight(video);
+    /* Phase 4B: scale resolution. video->playback_scale_factor_active is
+     * the *effective* scale set by the *_with_scale entry points. */
+    const int scaleFactor = video ? video->playback_scale_factor_active : 1;
+    const int eff_scale = (scaleFactor > 1) ? scaleFactor : 1;
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int out_w = (eff_scale > 1) ? (full_w / eff_scale) : full_w;
+    const int out_h = (eff_scale > 1) ? (full_h / eff_scale) : full_h;
+
+    const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
+    const uint64_t pixels_count = (uint64_t)full_w * (uint64_t)full_h;
     float * raw_frame = mlv_ensure_thread_float_buffer(pixels_count);
-    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_frame_size);
+    /* The TLS rgb_u16 buffer grows to the largest size requested across
+     * calls; oversize for scaled output is harmless (we only fill the
+     * scaled-W * scaled-H * 3 prefix). */
+    const uint64_t rgb_buf_words = (eff_scale > 1) ? rgb_frame_size : ((uint64_t)full_w * (uint64_t)full_h * 3u);
+    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_buf_words);
     if (!raw_frame || !unprocessed_frame || !processing)
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
@@ -2624,11 +2763,25 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
 
     const double processed16_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     const double debayer_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
-    get_mlv_raw_frame_debayered(video,
-                                frameIndex,
-                                raw_frame,
-                                unprocessed_frame,
-                                doesMlvAlwaysUseAmaze(video));
+    if (eff_scale > 1)
+    {
+        /* Phase 4B: fused downsample-and-debayer at scale > 1. The
+         * unprocessed_frame buffer is filled with scaled RGB16 directly;
+         * the debayer step is bypassed entirely. */
+        if (!mlv_render_scaled_rgb16(video, frameIndex, unprocessed_frame, eff_scale, threads))
+        {
+            memset(outputFrame, 0, (size_t)rgb_frame_size);
+            return 0;
+        }
+    }
+    else
+    {
+        get_mlv_raw_frame_debayered(video,
+                                    frameIndex,
+                                    raw_frame,
+                                    unprocessed_frame,
+                                    doesMlvAlwaysUseAmaze(video));
+    }
     if (recordTelemetry)
     {
         g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
@@ -2642,8 +2795,8 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
 
     const double processing_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     applyProcessingObject8(processing,
-                           getMlvWidth(video),
-                           getMlvHeight(video),
+                           out_w,
+                           out_h,
                            unprocessed_frame,
                            outputFrame,
                            threads,
@@ -2695,17 +2848,25 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
     g_mlv_last_processing_ms = 0.0;
     g_mlv_last_processed16_total_ms = 0.0;
     g_mlv_last_processed8_direct_path_active = 0;
-    /* Useful */
-    int width = getMlvWidth(video);
-    int height = getMlvHeight(video);
 
-    /* Phase 4A: scaleFactor is observed by cache key only; pipeline still
-     * renders at full resolution. */
-    const int normalizedScale = mlv_normalize_playback_scale_factor(scaleFactor);
+    /* Phase 4B: resolve effective scale (clamps dual ISO scale=2 up to 4,
+     * rejects scales that don't divide the sensor evenly). The cache key
+     * uses the *effective* scale so a request that gets clamped doesn't
+     * collide with a different request that lands at the same scale. */
+    const int normalizedScale = mlv_effective_playback_scale_factor(video, scaleFactor);
     if (video)
     {
         video->playback_scale_factor_active = normalizedScale;
     }
+
+    /* Phase 4B: width/height are the OUTPUT (scaled) dimensions for the
+     * downstream processing call and the cache. The full sensor
+     * dimensions are still required by the downsample kernel; we capture
+     * those in full_w / full_h. */
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    int width  = (normalizedScale > 1) ? (full_w / normalizedScale) : full_w;
+    int height = (normalizedScale > 1) ? (full_h / normalizedScale) : full_h;
 
     /* Size of RAW frame */
     uint64_t rgb_frame_size = (uint64_t)height * width * 3;
@@ -2784,11 +2945,27 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
         return;
     }
 
-    /* Get the raw data in B&W */
-    const double debayer_start = mlv_stage_timing_now();
-    getMlvRawFrameDebayered(video, frameIndex, unprocessed_frame);
-    g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
-    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    /* Phase 4B: at scale > 1, route through the fused
+     * downsample-and-debayer that produces RGB16 directly at scaled
+     * dimensions. The debayer step is skipped entirely on this path. */
+    if (normalizedScale > 1)
+    {
+        if (!mlv_render_scaled_rgb16(video, frameIndex, unprocessed_frame, normalizedScale, threads))
+        {
+            memset(outputFrame, 0, (size_t)rgb_frame_size * sizeof(uint16_t));
+            video->current_processed_frame_active = 0;
+            g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
+            mlv_stage_timing_note("processed16_total", frameIndex, total_start);
+            return;
+        }
+    }
+    else
+    {
+        const double debayer_start = mlv_stage_timing_now();
+        getMlvRawFrameDebayered(video, frameIndex, unprocessed_frame);
+        g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    }
 
     mlv_sync_processing_black_white_levels(video);
 
@@ -2874,16 +3051,22 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed8_direct_path_active = 0;
     g_mlv_last_processed8_prefetch_hit = 0;
 
-    /* Phase 4A: scaleFactor is observed by cache key only; pipeline still
-     * renders at full resolution. */
-    const int normalizedScale = mlv_normalize_playback_scale_factor(scaleFactor);
+    /* Phase 4B: resolve effective scale (clamps dual ISO scale=2 up to 4,
+     * rejects scales that don't divide the sensor evenly). */
+    const int normalizedScale = mlv_effective_playback_scale_factor(video, scaleFactor);
     if (video)
     {
         video->playback_scale_factor_active = normalizedScale;
     }
 
-    /* Size of RAW frame */
-    uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
+    /* Phase 4B: size the output by *effective* scale, not full sensor.
+     * The downstream direct8 path reads playback_scale_factor_active to
+     * decide whether to invoke the fused downsample. */
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int out_w  = (normalizedScale > 1) ? (full_w / normalizedScale) : full_w;
+    const int out_h  = (normalizedScale > 1) ? (full_h / normalizedScale) : full_h;
+    uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
     uint16_t * processed_frame = NULL;
     const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
     const int processed8PrefetchActive =
@@ -2950,20 +3133,18 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
         /* S5_processed8 capture (direct8 fast path) */
         if (mlv_pipeline_capture_should_capture_frame(frameIndex))
         {
-            const int width = (int)getMlvWidth(video);
-            const int height = (int)getMlvHeight(video);
             mlv_pipeline_capture_meta_t meta;
             memset(&meta, 0, sizeof meta);
             meta.stage = MLV_PIPELINE_STAGE_S5_PROCESSED8;
             meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
             meta.format_label = "uint8_rgb_direct8";
-            meta.width = width;
-            meta.height = height;
-            meta.bytes_per_line = width * 3;
+            meta.width = out_w;
+            meta.height = out_h;
+            meta.bytes_per_line = out_w * 3;
             meta.bytes_per_pixel = 3;
             meta.channels = 3;
             meta.bit_depth = 8;
-            meta.scaler = "none";
+            meta.scaler = (normalizedScale > 1) ? "playback_downsample" : "none";
             meta.path_label = "direct8";
             meta.settings_hash = (uint64_t)requested_signature;
             mlv_pipeline_capture(frameIndex, outputFrame, &meta);
@@ -3027,20 +3208,18 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     /* S5_processed8 capture (indirect path: processed16 -> 8) */
     if (mlv_pipeline_capture_should_capture_frame(frameIndex))
     {
-        const int width = (int)getMlvWidth(video);
-        const int height = (int)getMlvHeight(video);
         mlv_pipeline_capture_meta_t meta;
         memset(&meta, 0, sizeof meta);
         meta.stage = MLV_PIPELINE_STAGE_S5_PROCESSED8;
         meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
         meta.format_label = "uint8_rgb_processed16_packdown";
-        meta.width = width;
-        meta.height = height;
-        meta.bytes_per_line = width * 3;
+        meta.width = out_w;
+        meta.height = out_h;
+        meta.bytes_per_line = out_w * 3;
         meta.bytes_per_pixel = 3;
         meta.channels = 3;
         meta.bit_depth = 8;
-        meta.scaler = "none";
+        meta.scaler = (normalizedScale > 1) ? "playback_downsample" : "none";
         meta.path_label = "processed16_to_8";
         meta.settings_hash =
             (uint64_t)mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
@@ -3081,23 +3260,28 @@ void getMlvProcessedFrame8Scaled(mlvObject_t * video,
     getMlvProcessedFrame8_with_scale(video, frameIndex, outputFrame, threads, scaleFactor);
 }
 
-/* Phase 4A: helper for callers that need to size their output buffer for
- * the eventual scaled pipeline. Today this always returns full sensor
- * dimensions because the pipeline ignores scaleFactor; once Phase 4B lands
- * the same caller automatically sees W/scale, H/scale. */
+/* Phase 4B: helper for callers that need to size their output buffer for
+ * the scaled pipeline. Returns (W/scale, H/scale) when the requested
+ * scale is honoured, else returns the full sensor dimensions.
+ *
+ * The "effective" scale is computed with the same dual-ISO clamp rules as
+ * the rendering path — for HQ Dual ISO clips, scale=2 is forced up to
+ * scale=4 because the recon relies on the 4-row iso_patterns cycle. */
 void mlvFrameOutputDimensions(mlvObject_t * video,
                               int scaleFactor,
                               int * outWidth,
                               int * outHeight)
 {
-    (void)scaleFactor; /* Phase 4A: full resolution regardless of scale. */
+    const int width  = video ? (int)getMlvWidth(video) : 0;
+    const int height = video ? (int)getMlvHeight(video) : 0;
+    const int s = mlv_effective_playback_scale_factor(video, scaleFactor);
     if (outWidth)
     {
-        *outWidth = video ? (int)getMlvWidth(video) : 0;
+        *outWidth = (s > 1) ? (width / s) : width;
     }
     if (outHeight)
     {
-        *outHeight = video ? (int)getMlvHeight(video) : 0;
+        *outHeight = (s > 1) ? (height / s) : height;
     }
 }
 

@@ -184,6 +184,7 @@ SOURCES += \
     ../../src/mlv/mcraw/RawData_Legacy.cpp \
     ../../src/processing/processing.c \
     ../../src/processing/raw_processing.c \
+    ../../src/processing/playback_downsample.c \
     ../../src/processing/filter/filter.c \
     ../../src/processing/filter/genann/genann.c \
     ../../src/processing/image_profiles.c \
@@ -310,6 +311,7 @@ HEADERS += MainWindow.h \
     ../../src/dng/dng_tag_values.h \
     ../../src/processing/processing_object.h \
     ../../src/processing/raw_processing.h \
+    ../../src/processing/playback_downsample.h \
     ../../src/processing/filter/filter.h \
     ../../src/processing/filter/film.h \
     ../../src/processing/filter/genann/genann.h \

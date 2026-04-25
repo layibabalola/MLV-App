@@ -192,6 +192,7 @@ public:
         ReceiptApplier::applyToMlv(&m_receipt, m_video, m_processing);
         applyDebayerSelection();
         resetSingleThreadedRuntime();
+        applyMean23OverrideFromEnv();
         return true;
     }
 
@@ -263,17 +264,52 @@ public:
         m_receipt.setVerticalStripes(mode);
     }
 
+    /* Phase 4B: honor MLVAPP_PLAYBACK_SCALE_FACTOR for perf measurements.
+     * Falls back to scale=1 (the original full-resolution path) when unset
+     * or invalid. */
+    static int read_playback_scale_factor_env()
+    {
+        const char * v = getenv("MLVAPP_PLAYBACK_SCALE_FACTOR");
+        if( !v || !*v ) return 1;
+        char * end = NULL;
+        long parsed = strtol(v, &end, 10);
+        if( end == v ) return 1;
+        if( parsed == 1 || parsed == 2 || parsed == 4 ) return (int)parsed;
+        return 1;
+    }
+
+    /* Phase 4B: honor MLVAPP_PLAYBACK_PREFER_HQ_MEAN23 for perf measurements
+     * (the GUI applies this through DualIsoPlaybackPolicy; the perf harness
+     * is headless so we apply it here). */
+    void applyMean23OverrideFromEnv()
+    {
+        if( !m_video ) return;
+        const char * v = getenv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+        const int truthy = (v && *v
+                            && strcmp(v, "0") != 0
+                            && strcmp(v, "false") != 0
+                            && strcmp(v, "FALSE") != 0
+                            && strcmp(v, "False") != 0) ? 1 : 0;
+        llrpSetDualIsoPlaybackForceMean23(m_video, truthy);
+    }
+
     std::vector<uint16_t> renderFrame16(uint64_t frame_index, int threads) const
     {
-        std::vector<uint16_t> frame(static_cast<std::size_t>(width()) * static_cast<std::size_t>(height()) * 3u);
-        getMlvProcessedFrame16(m_video, frame_index, frame.data(), threads);
+        const int sf = read_playback_scale_factor_env();
+        int outW = 0, outH = 0;
+        mlvFrameOutputDimensions(m_video, sf, &outW, &outH);
+        std::vector<uint16_t> frame(static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u);
+        getMlvProcessedFrame16Scaled(m_video, frame_index, frame.data(), threads, sf);
         return frame;
     }
 
     std::vector<uint8_t> renderFrame8(uint64_t frame_index, int threads) const
     {
-        std::vector<uint8_t> frame(static_cast<std::size_t>(width()) * static_cast<std::size_t>(height()) * 3u);
-        getMlvProcessedFrame8(m_video, frame_index, frame.data(), threads);
+        const int sf = read_playback_scale_factor_env();
+        int outW = 0, outH = 0;
+        mlvFrameOutputDimensions(m_video, sf, &outW, &outH);
+        std::vector<uint8_t> frame(static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u);
+        getMlvProcessedFrame8Scaled(m_video, frame_index, frame.data(), threads, sf);
         return frame;
     }
 
