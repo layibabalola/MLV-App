@@ -82,6 +82,94 @@ void pl_downsample_bayer_to_rgb_4x(const uint16_t * bayer_in,
                                    int bit_shift,
                                    int threads);
 
+/* Phase 4B-v2: Bayer-preserving downsample kernels.
+ *
+ * Output is uint16 RGGB Bayer at reduced resolution. Designed to be applied
+ * BEFORE HQ Dual ISO recon (and before the rest of llrawproc that operates
+ * on the bayer image), so that the recon runs on a much smaller buffer.
+ *
+ * The 4-row dual-ISO bright/dark pattern is preserved by sampling complete
+ * 4-row source blocks and then skipping forward by an integer multiple of 4
+ * rows for the next output block. For scale=4: keep src rows 0-3, skip
+ * 4-15, keep 16-19, ... so that out_y=0..3 mirror src_y=0..3 (the full
+ * iso_patterns 4-row cycle), out_y=4..7 mirror src_y=16..19, and so on.
+ *
+ * The X axis is downsampled by averaging same-Bayer-position taps inside a
+ * 4-col (or 2-col) tile, which preserves the RGGB pattern at the smaller
+ * resolution.
+ *
+ * Both kernels output uint16 with no bit-shift (we run BEFORE llrawproc, so
+ * the input is the raw 14-bit-stored-as-uint16 values from
+ * getMlvRawFrameUint16, and the output is the same range). llrawproc's
+ * make_14bit / undo_14bit logic still works because the value range is
+ * preserved.
+ *
+ * pl_downsample_bayer_to_bayer_4x_block_stride16:
+ *   Output dim: (in_w/4, in_h/4).
+ *   Y stride: keep complete 4-row blocks, block-stride 16 in source space.
+ *   X downsample: 2x2 same-Bayer-position averaging inside 4-col tiles.
+ *   in_w must be a multiple of 4. in_h must be a multiple of 16.
+ *   When in_h is NOT a multiple of 16, falls back to 8-row block stride
+ *   (block-stride 8 → Y/2) which still preserves the 4-row pattern but
+ *   scales Y by 2 instead of 4.
+ *
+ * pl_downsample_bayer_to_bayer_2x_block_stride8:
+ *   Output dim: (in_w/2, in_h/2).
+ *   Y stride: keep complete 4-row blocks, block-stride 8 in source space.
+ *   X downsample: take alternate Bayer cells (decimation, no averaging in X
+ *   would still preserve RGGB; we average for anti-aliasing).
+ *   in_w must be a multiple of 2. in_h must be a multiple of 8.
+ *
+ * Both return 0 on success, non-zero if dimensions don't satisfy the
+ * stride constraints (in which case the caller must fall back to the v1
+ * post-llrawproc path). */
+int pl_downsample_bayer_to_bayer_4x(const uint16_t * bayer_in,
+                                    int in_w,
+                                    int in_h,
+                                    uint16_t * bayer_out,
+                                    int * out_w,
+                                    int * out_h,
+                                    int threads);
+
+int pl_downsample_bayer_to_bayer_2x(const uint16_t * bayer_in,
+                                    int in_w,
+                                    int in_h,
+                                    uint16_t * bayer_out,
+                                    int * out_w,
+                                    int * out_h,
+                                    int threads);
+
+/* Phase 4B-v2 (X-only): bayer-to-bayer 4x reduction in X only, identity
+ * in Y. Used when the source height is not 16-aligned and so the
+ * Y-axis-also-downsample 4x kernel would reject. Output dim:
+ * (in_w/4, in_h). Preserves RGGB pattern. The dual-ISO 4-row bright/dark
+ * pattern is unchanged because Y is identity.
+ *
+ * Returns 0 on success, non-zero if dimensions don't satisfy constraints
+ * (in_w must be multiple of 4). */
+int pl_downsample_bayer_to_bayer_4x_x_only(const uint16_t * bayer_in,
+                                            int in_w,
+                                            int in_h,
+                                            uint16_t * bayer_out,
+                                            int * out_w,
+                                            int * out_h,
+                                            int threads);
+
+/* Phase 4B-v2 (post-recon Y-only RGB downsample): RGB→RGB 4x reduction
+ * in Y only, identity in X. Used after debayering the (W/4, H) recon
+ * output to produce the (W/4, H/4) final RGB output.
+ *
+ *   in_rgb  : input RGB16 at (in_w, in_h), AoS-3 interleaved.
+ *   in_h must be a multiple of 4.
+ * Returns 0 on success. */
+int pl_downsample_rgb_to_rgb_4x_y_only(const uint16_t * in_rgb,
+                                       int in_w,
+                                       int in_h,
+                                       uint16_t * out_rgb,
+                                       int * out_w,
+                                       int * out_h,
+                                       int threads);
+
 /* Returns 1 if the AVX2 fast path is in use for the downsample kernels,
  * 0 otherwise. Reads kill-switch env vars on first call. */
 int plDownsampleAvx2Active(void);

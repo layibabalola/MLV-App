@@ -29,6 +29,35 @@ void freeLLRawProcObject(mlvObject_t * video);
 
 /* all low level raw processing takes place here */
 void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size);
+
+/* Phase 4B-v2: scaled variant for the downsample-BEFORE-llrawproc path.
+ * Runs the same pipeline as applyLLRawProcObject but on a buffer whose
+ * dimensions differ from video->RAWI.xRes / yRes. The override_w and
+ * override_h MUST match the actual buffer dimensions (rows*cols*sizeof
+ * uint16_t == raw_image_size). The 4-row dual-ISO pattern must be
+ * preserved by the caller — the recon code reads is_bright[y%4] and the
+ * caller's downsample kernel must guarantee row 0,1,2,3 of the input
+ * carry the same brightness pattern as the corresponding source rows.
+ *
+ * Subset of operations applied:
+ *  - dark frame subtraction (size-agnostic)
+ *  - HQ Dual ISO recon (operates on raw_info.width/height)
+ *  - chroma smooth (size-agnostic)
+ *  - 14-bit lift / undo
+ * NOT applied (pre-downsample at full res only when enabled):
+ *  - focus pixel interpolation (uses absolute sensor coords)
+ *  - bad pixel interpolation (same)
+ *  - vertical stripes (uses absolute column index)
+ *  - pattern noise fix
+ *
+ * Returns 1 if the scaled application is safe, 0 if not (in which case
+ * the caller must fall back to the v1 full-res llrawproc + post-
+ * downsample path). */
+int applyLLRawProcObject_with_dims(mlvObject_t * video,
+                                   uint16_t * raw_image_buff,
+                                   size_t raw_image_size,
+                                   int override_w,
+                                   int override_h);
 double llrpGetLastSharedLockMilliseconds(void);
 double llrpGetLastDualIsoRefineLockMilliseconds(void);
 double llrpGetLastPublishLockMilliseconds(void);

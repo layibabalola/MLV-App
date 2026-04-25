@@ -2559,12 +2559,231 @@ void setMlvProcessing(mlvObject_t * video, processingObject_t * processing)
     }
 }
 
+/* Phase 4B-v2: TLS scratch buffer for the post-downsample bayer (used
+ * before llrawproc runs on the smaller buffer). */
+static uint16_t * mlv_ensure_thread_scaled_bayer_buffer(uint64_t required_words)
+{
+    static MLV_THREAD_LOCAL uint16_t * tls_buffer = NULL;
+    static MLV_THREAD_LOCAL uint64_t tls_capacity_words = 0;
+    return mlv_ensure_u16_buffer(&tls_buffer, &tls_capacity_words, required_words);
+}
+
+/* Phase 4B-v2: env kill switch — set to 1 to disable downsample-before-
+ * llrawproc and fall back to the v1 (downsample-after) path. Cached after
+ * first read for branchless per-frame fast path. */
+static int g_mlv_phase4bv2_disabled_env_cache = -1;
+
+static int mlv_phase4bv2_disabled_via_env(void)
+{
+    if (g_mlv_phase4bv2_disabled_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_DISABLE_PHASE4BV2");
+        g_mlv_phase4bv2_disabled_env_cache =
+            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+    }
+    return g_mlv_phase4bv2_disabled_env_cache;
+}
+
+/* Phase 4B-v2: returns 1 if the receipt's llrawproc options are compatible
+ * with the downsample-before-llrawproc path. The path skips focus pixel,
+ * bad pixel, vertical stripes, and pattern noise — those need full-res
+ * absolute coordinates or column indices. If any of them are enabled, the
+ * caller falls back to the v1 path. Dual ISO HQ recon is the headline
+ * case; if it's enabled and the other features are off, v2 is safe. */
+static int mlv_phase4bv2_receipt_compatible(mlvObject_t * video)
+{
+    if (!video || !video->llrawproc) return 0;
+    llrawprocObject_t * shared = video->llrawproc;
+    if (shared->focus_pixels) return 0;
+    if (shared->bad_pixels) return 0;
+    if (shared->vertical_stripes) return 0;
+    if (shared->pattern_noise) return 0;
+    return 1;
+}
+
+/* Phase 4B-v2: one-shot diagnostic logger. Set MLVAPP_LOG_PHASE4BV2=1 to
+ * see why the v2 path is being rejected on the first frame of a session. */
+static int g_mlv_phase4bv2_log_env_cache = -1;
+static MLV_THREAD_LOCAL int g_mlv_phase4bv2_log_emitted = 0;
+
+static void mlv_phase4bv2_log_rejection(const char * reason)
+{
+    if (g_mlv_phase4bv2_log_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_LOG_PHASE4BV2");
+        g_mlv_phase4bv2_log_env_cache =
+            (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
+    }
+    if (!g_mlv_phase4bv2_log_env_cache) return;
+    if (g_mlv_phase4bv2_log_emitted) return;
+    g_mlv_phase4bv2_log_emitted = 1;
+    fprintf(stderr, "[PHASE4BV2] reject: %s\n", reason);
+    fflush(stderr);
+}
+
+/* Phase 4B-v2: downsample-BEFORE-llrawproc path.
+ *
+ * Architecture (the actual cast-closed-fast path):
+ *   1. Decode raw at full res (LJ92 / unpacked uint16 bayer).
+ *   2. Bayer→bayer X-only 4x downsample. Output (in_w/4, in_h). Y is
+ *      identity, preserving the dual-ISO 4-row pattern unchanged.
+ *   3. Apply HQ Dual ISO recon + dark frame + chroma smooth on the
+ *      narrowed buffer (~1/4 the pixels at scale=4).
+ *   4. Debayer the narrowed bayer → RGB16 at (in_w/4, in_h).
+ *   5. RGB Y-only 4x downsample → RGB16 at (in_w/4, in_h/4) = the
+ *      requested scale=4 output dimensions.
+ *
+ * Why X-only pre-recon: the dual-ISO 4-row bright/dark pattern uses
+ * is_bright[y%4] inside diso_get_full20bit. Y downsampling pre-recon
+ * requires keeping COMPLETE 4-row blocks, which forces block-stride to be
+ * a multiple of 4. For arbitrary in_h the largest stride that divides
+ * in_h is gcd(in_h, 16). For the user's M16-1210 (1808x2268),
+ * gcd(2268, 16) = 4 — meaning Y stride 4 = no Y reduction. So we run
+ * recon on (W/4, H) and Y-reduce after recon (which has already mixed
+ * bright+dark into a single high-DR row, so further Y averaging is fine).
+ *
+ * Speedup: HQ recon scales linearly with W*H. Going from W*H to
+ * (W/4)*H saves ~75% of recon time (on top of the 50% mean23-vs-AMaZE
+ * saving already in effect via diso_playback_force_mean23).
+ *
+ * Returns 1 on success, 0 if the receipt is incompatible (caller falls
+ * back to v1). */
+static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
+                                      uint64_t frameIndex,
+                                      uint16_t * outputFrame,
+                                      int scaleFactor,
+                                      int threads)
+{
+    if (!video || !outputFrame || scaleFactor <= 1) return 0;
+    if (mlv_phase4bv2_disabled_via_env())
+    {
+        mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV2 set");
+        return 0;
+    }
+    if (!mlv_phase4bv2_receipt_compatible(video))
+    {
+        llrawprocObject_t * shared = video ? video->llrawproc : NULL;
+        if (!shared) mlv_phase4bv2_log_rejection("no shared");
+        else if (shared->focus_pixels) mlv_phase4bv2_log_rejection("focus_pixels enabled");
+        else if (shared->bad_pixels) mlv_phase4bv2_log_rejection("bad_pixels enabled");
+        else if (shared->vertical_stripes) mlv_phase4bv2_log_rejection("vertical_stripes enabled");
+        else if (shared->pattern_noise) mlv_phase4bv2_log_rejection("pattern_noise enabled");
+        else mlv_phase4bv2_log_rejection("receipt incompatible (unknown)");
+        return 0;
+    }
+    if (scaleFactor != 4)
+    {
+        /* scale=2 falls back to v1; the X-only-pre-recon savings only
+         * pay off at scale=4 (X reduction by 4 = 75% recon save). */
+        return 0;
+    }
+
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    if (full_w <= 0 || full_h <= 0)
+    {
+        mlv_phase4bv2_log_rejection("invalid dims");
+        return 0;
+    }
+    if (full_w % 4 != 0)
+    {
+        mlv_phase4bv2_log_rejection("width not multiple of 4");
+        return 0;
+    }
+    if (full_h % 4 != 0)
+    {
+        mlv_phase4bv2_log_rejection("height not multiple of 4");
+        return 0;
+    }
+
+    /* Intermediate dim: X reduced by 4, Y identity. */
+    const int mid_w = full_w / 4;
+    const int mid_h = full_h;
+    /* Final output dim: scale=4 in both. */
+    const int out_w = full_w / 4;
+    const int out_h = full_h / 4;
+    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+    const uint64_t mid_pixels = (uint64_t)mid_w * (uint64_t)mid_h;
+    const uint64_t mid_rgb_words = mid_pixels * 3u;
+    const uint64_t out_rgb_words = (uint64_t)out_w * (uint64_t)out_h * 3u;
+
+    uint16_t * full_bayer = mlv_ensure_thread_u16_buffer(full_pixels);
+    uint16_t * mid_bayer = mlv_ensure_thread_scaled_bayer_buffer(mid_pixels);
+    /* Reuse the rgb_u16 thread-local for the post-debayer mid-RGB buffer.
+     * Its capacity grows on demand; oversize for our (mid_w,mid_h) case
+     * is harmless. */
+    uint16_t * mid_rgb = mlv_ensure_thread_rgb_u16_buffer(mid_rgb_words);
+    if (!full_bayer || !mid_bayer || !mid_rgb) return 0;
+
+    /* Step 1: decode raw at full res (no llrawproc). */
+    const double raw_start = mlv_stage_timing_now();
+    if (getMlvRawFrameUint16(video, frameIndex, full_bayer))
+    {
+        memset(outputFrame, 0, (size_t)out_rgb_words * sizeof(uint16_t));
+        return 0;
+    }
+    g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
+
+    /* Step 2: bayer→bayer X-only 4x downsample. */
+    const double downsample_start = mlv_stage_timing_now();
+    int actual_mid_w = 0, actual_mid_h = 0;
+    int rc = pl_downsample_bayer_to_bayer_4x_x_only(full_bayer, full_w, full_h,
+                                                     mid_bayer, &actual_mid_w, &actual_mid_h, threads);
+    if (rc != 0 || actual_mid_w != mid_w || actual_mid_h != mid_h)
+    {
+        mlv_phase4bv2_log_rejection("bayer-to-bayer x-only kernel rejected");
+        return 0;
+    }
+    const double downsample_ms = (mlv_stage_timing_now() - downsample_start) * 1000.0;
+
+    /* Step 3: apply llrawproc subset (HQ recon, dark frame, chroma smooth)
+     * on the narrowed buffer. */
+    const double llraw_start = mlv_stage_timing_now();
+    mlv_pipeline_capture_set_current_frame(frameIndex);
+    const size_t mid_bytes = (size_t)mid_pixels * sizeof(uint16_t);
+    int llraw_ok = applyLLRawProcObject_with_dims(video, mid_bayer, mid_bytes,
+                                                  mid_w, mid_h);
+    if (!llraw_ok)
+    {
+        mlv_phase4bv2_log_rejection("applyLLRawProcObject_with_dims rejected");
+        return 0;
+    }
+    const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
+    g_mlv_last_llrawproc_ms = llrawproc_ms;
+
+    /* Step 4: debayer narrowed bayer → RGB16 at (mid_w, mid_h). */
+    const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    const double debayer_start = mlv_stage_timing_now();
+    debayerBasicU16(mid_rgb, mid_bayer, mid_w, mid_h, threads, bit_shift);
+
+    /* Step 5: RGB Y-only 4x downsample → final (out_w, out_h). */
+    int actual_out_w = 0, actual_out_h = 0;
+    int rc2 = pl_downsample_rgb_to_rgb_4x_y_only(mid_rgb, mid_w, mid_h,
+                                                  outputFrame, &actual_out_w, &actual_out_h, threads);
+    if (rc2 != 0 || actual_out_w != out_w || actual_out_h != out_h)
+    {
+        mlv_phase4bv2_log_rejection("post-recon Y-only RGB downsample rejected");
+        return 0;
+    }
+    const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+    g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms;
+    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    return 1;
+}
+
 /* Phase 4B: scaled-resolution debayered-RGB16 producer.
  *
- * Routes around the cache-window debayer path (full-res RGB cache) and
- * builds a half- or quarter-res RGB16 directly from the post-llrawproc
- * uint16 Bayer image. The output is already debayered (per-channel block
- * average) so the debayer step is bypassed entirely.
+ * Phase 4B-v2 path (preferred when compatible): see
+ * mlv_render_scaled_rgb16_v2 above — runs the HQ Dual ISO recon on the
+ * downsampled bayer (1/16 the pixels at scale=4).
+ *
+ * Phase 4B-v1 fallback: full LJ92 + full llrawproc + post-downsample. Used
+ * when the receipt enables features (focus pixel, bad pixel, vstripes,
+ * pattern noise) that require full-res absolute coordinates. The output is
+ * already debayered (per-channel block average) so the debayer step is
+ * bypassed entirely.
  *
  * Returns 1 on success, 0 on failure (then outputFrame is zeroed). The
  * scaleFactor must be the *effective* scale (caller already ran it
@@ -2576,6 +2795,12 @@ static int mlv_render_scaled_rgb16(mlvObject_t * video,
                                    int threads)
 {
     if (!video || !outputFrame || scaleFactor <= 1) return 0;
+
+    /* Try Phase 4B-v2 first. */
+    if (mlv_render_scaled_rgb16_v2(video, frameIndex, outputFrame, scaleFactor, threads))
+    {
+        return 1;
+    }
 
     const int width  = (int)getMlvWidth(video);
     const int height = (int)getMlvHeight(video);

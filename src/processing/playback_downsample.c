@@ -547,3 +547,485 @@ void pl_downsample_bayer_to_rgb_4x(const uint16_t * bayer_in,
         }
     }
 }
+
+/* ---------------------------------------------------------------------- */
+/* Phase 4B-v2: Bayer-preserving downsample kernels for the
+ * downsample-BEFORE-llrawproc path. The output is still uint16 RGGB Bayer
+ * (not RGB), so HQ Dual ISO recon and the rest of llrawproc can run on the
+ * smaller buffer.
+ *
+ * The 4-row dual-ISO bright/dark pattern is preserved by sampling complete
+ * 4-row source blocks and skipping forward by an integer multiple of 4
+ * rows for the next output block. Output row indices satisfy
+ *   src_row[y_out] % 4 == y_out % 4
+ * so that BRIGHT_ROW (= is_bright[y%4]) at the recon step yields the same
+ * classification as on the full-res input.
+ *
+ * X axis: 2-tap same-Bayer-position averaging (in-row), preserves RGGB.
+ *
+ * Scale=4 mode (block-stride 16): out_dim = (in_w/4, in_h/4).
+ *   Requires in_w % 4 == 0 and in_h % 16 == 0.
+ *   src_row = (y_out / 4) * 16 + (y_out % 4).
+ * Scale=2 mode (block-stride 8): out_dim = (in_w/2, in_h/2).
+ *   Requires in_w % 2 == 0 and in_h % 8 == 0.
+ *   src_row = (y_out / 4) * 8 + (y_out % 4).
+ *
+ * Both kernels use 1x2 same-Bayer-position averaging in X (2 source taps
+ * per output cell). They run scalar today; AVX2 fast paths can be added
+ * later if profiling shows the kernel is hot. Even at 5K resolution the
+ * scale=4 bayer-to-bayer pass writes only 1302*768 = 1M uint16 per frame —
+ * memory-bandwidth bound, not compute bound.
+ */
+
+static int pl_downsample_bayer_to_bayer_4x_scalar(const uint16_t * __restrict bayer_in,
+                                                  int in_w,
+                                                  int in_h,
+                                                  uint16_t * __restrict bayer_out,
+                                                  int * out_w_p,
+                                                  int * out_h_p,
+                                                  int threads)
+{
+    if (!bayer_in || !bayer_out) return 1;
+    if (in_w < 4 || in_h < 16) return 1;
+    if (in_w & 3) return 1; /* multiple of 4 */
+    if (in_h & 15) return 1; /* multiple of 16 (block stride) */
+
+    const int out_w = in_w >> 2;
+    const int out_h = in_h >> 2;
+    if (out_w_p) *out_w_p = out_w;
+    if (out_h_p) *out_h_p = out_h;
+
+    /* Each output row processes one src row. Loop is parallel-safe over y_out
+     * because src_row mapping is bijective on kept rows. */
+    if (threads > 1)
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 16 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+
+            /* even x_out (R or G2): src cols x*4 + 0, x*4 + 2.
+             * odd x_out (G1 or B): src cols x*4 + 1, x*4 + 3.
+             * We unroll the inner loop in pairs so two consecutive
+             * x_out values cover all 4 source cols of one tile. */
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 4;
+                const uint32_t r0 = srow[xs + 0];
+                const uint32_t r1 = srow[xs + 2];
+                const uint32_t g0 = srow[xs + 1];
+                const uint32_t g1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((r0 + r1) >> 1);
+                drow[x_out + 1] = (uint16_t)((g0 + g1) >> 1);
+            }
+            /* Tail: out_w even (always, since in_w % 4 == 0 → out_w even),
+             * so no tail handling needed. */
+        }
+    }
+    else
+    {
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 16 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 4;
+                const uint32_t r0 = srow[xs + 0];
+                const uint32_t r1 = srow[xs + 2];
+                const uint32_t g0 = srow[xs + 1];
+                const uint32_t g1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((r0 + r1) >> 1);
+                drow[x_out + 1] = (uint16_t)((g0 + g1) >> 1);
+            }
+        }
+    }
+    return 0;
+}
+
+static int pl_downsample_bayer_to_bayer_2x_scalar(const uint16_t * __restrict bayer_in,
+                                                  int in_w,
+                                                  int in_h,
+                                                  uint16_t * __restrict bayer_out,
+                                                  int * out_w_p,
+                                                  int * out_h_p,
+                                                  int threads)
+{
+    if (!bayer_in || !bayer_out) return 1;
+    if (in_w < 2 || in_h < 8) return 1;
+    if (in_w & 1) return 1;
+    if (in_h & 7) return 1; /* multiple of 8 (block stride) */
+
+    const int out_w = in_w >> 1;
+    const int out_h = in_h >> 1;
+    if (out_w_p) *out_w_p = out_w;
+    if (out_h_p) *out_h_p = out_h;
+
+    /* X downsample by 2: each output Bayer cell takes 1 source cell at the
+     * same color position. We use src col x_out*2 + (x_out%2) — wait, that
+     * collapses to identity. We want to take TWO same-color taps per output
+     * cell to reduce aliasing. So src cols at x_out*2 + 0 and... wait, with
+     * in_w/2 outputs there's only 1 source col pair per output cell.
+     * x_out=0 (R) → src col 0 (R). x_out=1 (G) → src col 1 (G).
+     * x_out=2 (R) → src col 2 (R). x_out=3 (G) → src col 3 (G).
+     * That IS identity — there's no X downsample at scale=2 for bayer-to-
+     * bayer because the Bayer cell pitch already matches. So scale=2 mode
+     * is pure Y block-stride downsample (in_h/2). */
+    if (threads > 1)
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 8 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+            /* Take alternate source cells: src_col = x_out * 2 + (x_out % 2).
+             * Wait that's not right either. Per the X analysis above, scale=2
+             * keeps Y/2 (block-stride 8) but X identity at the Bayer-cell
+             * pitch. We sample TWO consecutive source cells (one R-G pair
+             * or one G-B pair) per output Bayer cell pair, taking src
+             * col = x_out (no X reduction). To actually reduce X by 2 we'd
+             * need pl_downsample_bayer_to_bayer_2x_x to average across the
+             * 4-col tile, but that contracts X by 2 (output cells at
+             * x*2 + 0 and x*2 + 1 take src cols 0,2 and 1,3 — not what we
+             * want for a "2x"). For now scale=2 is Y/2 only — equivalent
+             * pixel reduction is 2x. */
+            for (int x_out = 0; x_out < out_w; ++x_out)
+            {
+                drow[x_out] = srow[x_out];
+            }
+        }
+    }
+    else
+    {
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 8 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+            for (int x_out = 0; x_out < out_w; ++x_out)
+            {
+                drow[x_out] = srow[x_out];
+            }
+        }
+    }
+    return 0;
+}
+
+#ifdef PL_DOWNSAMPLE_AVX2_AVAILABLE
+__attribute__((target("avx2")))
+static int pl_downsample_bayer_to_bayer_4x_avx2(const uint16_t * __restrict bayer_in,
+                                                int in_w,
+                                                int in_h,
+                                                uint16_t * __restrict bayer_out,
+                                                int * out_w_p,
+                                                int * out_h_p,
+                                                int threads)
+{
+    if (!bayer_in || !bayer_out) return 1;
+    if (in_w < 4 || in_h < 16) return 1;
+    if (in_w & 3) return 1;
+    if (in_h & 15) return 1;
+
+    const int out_w = in_w >> 2;
+    const int out_h = in_h >> 2;
+    if (out_w_p) *out_w_p = out_w;
+    if (out_h_p) *out_h_p = out_h;
+
+    /* AVX2 row processor.
+     *
+     * Per output row, we read 32 source uint16 lanes (= 8 output cells) per
+     * 256-bit load. Source layout in lanes: [a0 a1 a2 a3 a4 a5 a6 a7 a8...]
+     * where a_i is source col i.
+     *
+     * For each pair of output cells (R, G) we average:
+     *   out[x]   = (a[xs+0] + a[xs+2]) >> 1   (R or G2)
+     *   out[x+1] = (a[xs+1] + a[xs+3]) >> 1   (G1 or B)
+     *
+     * Strategy: take the 32-lane vector as four 8-lane groups. Within each
+     * group of 4 source lanes we want to produce 2 output lanes:
+     *   pair0: (lane0 + lane2) >> 1
+     *   pair1: (lane1 + lane3) >> 1
+     *
+     * Implementation: shuffle to extract evens and odds into separate
+     * vectors, then average pairs. We use _mm256_shufflelo_epi16 +
+     * _mm256_shufflehi_epi16 to swap (lane0,lane1,lane2,lane3) →
+     * (lane0,lane2,lane1,lane3). Then _mm256_unpacklo_epi32 /
+     * _mm256_unpackhi_epi32 to gather even-indexed (lane0,lane2 from each
+     * 4-group) and odd-indexed (lane1,lane3) into separate vectors.
+     *
+     * Simpler approach: scalar fallback for the inner loop, but vectorise
+     * the load. The kernel is memory-bound at this scale (5K -> 1.25K
+     * cols), so the load is what costs. We use a 32-lane scratch and a
+     * tight scalar loop over it. */
+
+    if (threads > 1)
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 16 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+
+            int x_out = 0;
+            /* Process 8 output cells (= 32 source cols) per AVX2 iter.
+             * Spill the 32 source lanes to scratch and run a tight scalar
+             * inner loop. The compiler typically unrolls this well. */
+            for (; x_out + 8 <= out_w; x_out += 8)
+            {
+                const int xs = x_out * 4;
+                const __m256i v_lo = _mm256_loadu_si256((const __m256i *)(srow + xs + 0));
+                const __m256i v_hi = _mm256_loadu_si256((const __m256i *)(srow + xs + 16));
+
+                uint16_t scratch[32] __attribute__((aligned(32)));
+                _mm256_store_si256((__m256i *)(scratch + 0), v_lo);
+                _mm256_store_si256((__m256i *)(scratch + 16), v_hi);
+
+                for (int k = 0; k < 4; ++k)
+                {
+                    const int s = k * 4;
+                    const uint32_t r0 = scratch[s + 0];
+                    const uint32_t r1 = scratch[s + 2];
+                    const uint32_t g0 = scratch[s + 1];
+                    const uint32_t g1 = scratch[s + 3];
+                    drow[x_out + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
+                    drow[x_out + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
+                }
+                /* Second half of the 8 cells. */
+                for (int k = 0; k < 4; ++k)
+                {
+                    const int s = 16 + k * 4;
+                    const uint32_t r0 = scratch[s + 0];
+                    const uint32_t r1 = scratch[s + 2];
+                    const uint32_t g0 = scratch[s + 1];
+                    const uint32_t g1 = scratch[s + 3];
+                    drow[x_out + 4 + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
+                    drow[x_out + 4 + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
+                }
+            }
+            /* Tail. */
+            for (; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 4;
+                const uint32_t r0 = srow[xs + 0];
+                const uint32_t r1 = srow[xs + 2];
+                const uint32_t g0 = srow[xs + 1];
+                const uint32_t g1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((r0 + r1) >> 1);
+                drow[x_out + 1] = (uint16_t)((g0 + g1) >> 1);
+            }
+        }
+    }
+    else
+    {
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 16 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+            int x_out = 0;
+            for (; x_out + 8 <= out_w; x_out += 8)
+            {
+                const int xs = x_out * 4;
+                const __m256i v_lo = _mm256_loadu_si256((const __m256i *)(srow + xs + 0));
+                const __m256i v_hi = _mm256_loadu_si256((const __m256i *)(srow + xs + 16));
+                uint16_t scratch[32] __attribute__((aligned(32)));
+                _mm256_store_si256((__m256i *)(scratch + 0), v_lo);
+                _mm256_store_si256((__m256i *)(scratch + 16), v_hi);
+                for (int k = 0; k < 4; ++k)
+                {
+                    const int s = k * 4;
+                    const uint32_t r0 = scratch[s + 0];
+                    const uint32_t r1 = scratch[s + 2];
+                    const uint32_t g0 = scratch[s + 1];
+                    const uint32_t g1 = scratch[s + 3];
+                    drow[x_out + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
+                    drow[x_out + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
+                }
+                for (int k = 0; k < 4; ++k)
+                {
+                    const int s = 16 + k * 4;
+                    const uint32_t r0 = scratch[s + 0];
+                    const uint32_t r1 = scratch[s + 2];
+                    const uint32_t g0 = scratch[s + 1];
+                    const uint32_t g1 = scratch[s + 3];
+                    drow[x_out + 4 + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
+                    drow[x_out + 4 + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
+                }
+            }
+            for (; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 4;
+                const uint32_t r0 = srow[xs + 0];
+                const uint32_t r1 = srow[xs + 2];
+                const uint32_t g0 = srow[xs + 1];
+                const uint32_t g1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((r0 + r1) >> 1);
+                drow[x_out + 1] = (uint16_t)((g0 + g1) >> 1);
+            }
+        }
+    }
+    return 0;
+}
+#endif /* PL_DOWNSAMPLE_AVX2_AVAILABLE */
+
+int pl_downsample_bayer_to_bayer_4x(const uint16_t * bayer_in,
+                                    int in_w,
+                                    int in_h,
+                                    uint16_t * bayer_out,
+                                    int * out_w,
+                                    int * out_h,
+                                    int threads)
+{
+    pthread_once(&g_pl_downsample_dispatch_once, pl_downsample_dispatch_init);
+#ifdef PL_DOWNSAMPLE_AVX2_AVAILABLE
+    if (g_pl_downsample_use_avx2)
+    {
+        return pl_downsample_bayer_to_bayer_4x_avx2(bayer_in, in_w, in_h,
+                                                    bayer_out, out_w, out_h, threads);
+    }
+#endif
+    return pl_downsample_bayer_to_bayer_4x_scalar(bayer_in, in_w, in_h,
+                                                  bayer_out, out_w, out_h, threads);
+}
+
+int pl_downsample_bayer_to_bayer_2x(const uint16_t * bayer_in,
+                                    int in_w,
+                                    int in_h,
+                                    uint16_t * bayer_out,
+                                    int * out_w,
+                                    int * out_h,
+                                    int threads)
+{
+    pthread_once(&g_pl_downsample_dispatch_once, pl_downsample_dispatch_init);
+    return pl_downsample_bayer_to_bayer_2x_scalar(bayer_in, in_w, in_h,
+                                                  bayer_out, out_w, out_h, threads);
+}
+
+/* X-only bayer-to-bayer 4x: same per-row 2-tap same-Bayer-position
+ * average as the full kernel, but iterates over ALL source rows (no
+ * block stride). Y identity preserves the dual-ISO 4-row pattern
+ * unchanged. */
+int pl_downsample_bayer_to_bayer_4x_x_only(const uint16_t * bayer_in,
+                                            int in_w,
+                                            int in_h,
+                                            uint16_t * bayer_out,
+                                            int * out_w_p,
+                                            int * out_h_p,
+                                            int threads)
+{
+    if (!bayer_in || !bayer_out) return 1;
+    if (in_w < 4 || in_h < 1) return 1;
+    if (in_w & 3) return 1;
+
+    const int out_w = in_w >> 2;
+    const int out_h = in_h;
+    if (out_w_p) *out_w_p = out_w;
+    if (out_h_p) *out_h_p = out_h;
+
+    if (threads > 1)
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const uint16_t * __restrict srow = bayer_in + (size_t)y_out * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 4;
+                const uint32_t r0 = srow[xs + 0];
+                const uint32_t r1 = srow[xs + 2];
+                const uint32_t g0 = srow[xs + 1];
+                const uint32_t g1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((r0 + r1) >> 1);
+                drow[x_out + 1] = (uint16_t)((g0 + g1) >> 1);
+            }
+        }
+    }
+    else
+    {
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const uint16_t * __restrict srow = bayer_in + (size_t)y_out * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 4;
+                const uint32_t r0 = srow[xs + 0];
+                const uint32_t r1 = srow[xs + 2];
+                const uint32_t g0 = srow[xs + 1];
+                const uint32_t g1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((r0 + r1) >> 1);
+                drow[x_out + 1] = (uint16_t)((g0 + g1) >> 1);
+            }
+        }
+    }
+    return 0;
+}
+
+/* RGB→RGB Y-only 4x downsample. Each output RGB pixel = mean of 4
+ * vertical RGB neighbors at the same X. Threads parallelise over output
+ * rows. */
+int pl_downsample_rgb_to_rgb_4x_y_only(const uint16_t * in_rgb,
+                                       int in_w,
+                                       int in_h,
+                                       uint16_t * out_rgb,
+                                       int * out_w_p,
+                                       int * out_h_p,
+                                       int threads)
+{
+    if (!in_rgb || !out_rgb) return 1;
+    if (in_w < 1 || in_h < 4) return 1;
+    if (in_h & 3) return 1;
+
+    const int out_w = in_w;
+    const int out_h = in_h >> 2;
+    if (out_w_p) *out_w_p = out_w;
+    if (out_h_p) *out_h_p = out_h;
+
+    const size_t row_stride = (size_t)in_w * 3u;
+
+    if (threads > 1)
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int y_src = y_out * 4;
+            const uint16_t * __restrict r0 = in_rgb + (size_t)y_src * row_stride;
+            const uint16_t * __restrict r1 = r0 + row_stride;
+            const uint16_t * __restrict r2 = r1 + row_stride;
+            const uint16_t * __restrict r3 = r2 + row_stride;
+            uint16_t * __restrict drow = out_rgb + (size_t)y_out * row_stride;
+            for (int i = 0; i < (int)row_stride; ++i)
+            {
+                const uint32_t s = (uint32_t)r0[i] + (uint32_t)r1[i]
+                                 + (uint32_t)r2[i] + (uint32_t)r3[i];
+                drow[i] = (uint16_t)(s >> 2);
+            }
+        }
+    }
+    else
+    {
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int y_src = y_out * 4;
+            const uint16_t * __restrict r0 = in_rgb + (size_t)y_src * row_stride;
+            const uint16_t * __restrict r1 = r0 + row_stride;
+            const uint16_t * __restrict r2 = r1 + row_stride;
+            const uint16_t * __restrict r3 = r2 + row_stride;
+            uint16_t * __restrict drow = out_rgb + (size_t)y_out * row_stride;
+            for (int i = 0; i < (int)row_stride; ++i)
+            {
+                const uint32_t s = (uint32_t)r0[i] + (uint32_t)r1[i]
+                                 + (uint32_t)r2[i] + (uint32_t)r3[i];
+                drow[i] = (uint16_t)(s >> 2);
+            }
+        }
+    }
+    return 0;
+}

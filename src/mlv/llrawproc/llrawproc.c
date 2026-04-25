@@ -1369,6 +1369,309 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
     }
 }
 
+/* Phase 4B-v2: scaled-buffer entry point. Runs a SUBSET of the llrawproc
+ * pipeline on a buffer whose dimensions differ from
+ * video->RAWI.xRes/yRes. The subset includes only the size-agnostic
+ * stages (HQ Dual ISO recon, dark frame subtraction, chroma smooth, 14-bit
+ * conversion). Pre-downsample stages (focus pixel, bad pixel, vertical
+ * stripes, pattern noise) are NOT applied here — the caller must apply
+ * them at full res before downsampling, OR ensure they are disabled in
+ * the receipt.
+ *
+ * Returns 1 if the scaled application is safe (caller can proceed), 0 if
+ * a feature in the receipt is incompatible with the scaled path (caller
+ * must fall back to the v1 full-res path).
+ *
+ * Threading: this function is callable from playback worker threads. It
+ * shares the per-clip worker state with applyLLRawProcObject (acquires the
+ * worker via llrawproc_acquire_worker_state). The shared->diso_pattern
+ * field is read but not written from the scaled path — so the iso pattern
+ * detection MUST have been seeded by a prior full-res render. */
+int applyLLRawProcObject_with_dims(mlvObject_t * video,
+                                   uint16_t * raw_image_buff,
+                                   size_t raw_image_size,
+                                   int override_w,
+                                   int override_h)
+{
+    const double apply_start = mlv_stage_timing_now();
+    llrawprocObject_t * shared = video ? video->llrawproc : NULL;
+    llrawprocWorkerState_t stack_worker;
+    llrawprocWorkerState_t * worker = NULL;
+    int using_stack_worker = 0;
+
+    g_llrawproc_last_shared_lock_ms = 0.0;
+    g_llrawproc_last_dualiso_refine_lock_ms = 0.0;
+    g_llrawproc_last_publish_lock_ms = 0.0;
+    g_llrawproc_last_total_ms = 0.0;
+    g_llrawproc_last_dark_frame_ms = 0.0;
+    g_llrawproc_last_vertical_stripes_ms = 0.0;
+    g_llrawproc_last_focus_pixels_ms = 0.0;
+    g_llrawproc_last_bad_pixels_ms = 0.0;
+    g_llrawproc_last_pattern_noise_ms = 0.0;
+    g_llrawproc_last_dual_iso_ms = 0.0;
+    g_llrawproc_last_chroma_smooth_ms = 0.0;
+    g_llrawproc_last_preview_histogram_ms = 0.0;
+    g_llrawproc_last_preview_regression_ms = 0.0;
+    g_llrawproc_last_preview_rowscale_ms = 0.0;
+
+    if (!video || !shared || !shared->fix_raw)
+    {
+        g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+        return 1; /* nothing to do — no recon, no fix */
+    }
+    if (override_w <= 0 || override_h <= 0) return 0;
+    if ((size_t)override_w * (size_t)override_h * sizeof(uint16_t) != raw_image_size) return 0;
+
+    /* Bail if the receipt enables features that are unsafe at scaled
+     * resolution. The caller must fall back to the v1 path. */
+    if (shared->focus_pixels) return 0;
+    if (shared->bad_pixels) return 0;
+    if (shared->vertical_stripes) return 0;
+    if (shared->pattern_noise) return 0;
+
+    memset(&stack_worker, 0, sizeof(stack_worker));
+    stack_worker.prev_black_level = -1;
+    worker = llrawproc_acquire_worker_state(video);
+    if (!worker)
+    {
+        worker = &stack_worker;
+        using_stack_worker = 1;
+    }
+
+    /* Build a local raw_info with the override dimensions. The dual ISO
+     * recon reads raw_info.width/height/pitch + active_area. */
+    struct raw_info raw_info = video->RAWI.raw_info;
+    const int original_bits_per_pixel = video->RAWI.raw_info.bits_per_pixel;
+
+    raw_info.width = override_w;
+    raw_info.height = override_h;
+    raw_info.pitch = override_w * (raw_info.bits_per_pixel <= 16 ? 2 : 4);
+    raw_info.frame_size = (uint32_t)(override_w * override_h * 14 / 8);
+    raw_info.active_area.x1 = 0;
+    raw_info.active_area.y1 = 0;
+    raw_info.active_area.x2 = override_w;
+    raw_info.active_area.y2 = override_h;
+
+    int diso_validity = 0;
+    int dual_iso_mode = 0;
+    int diso1 = 0;
+    int diso2 = 0;
+    int diso_averaging = 0;
+    int diso_alias_map = 0;
+    int diso_frblending = 0;
+    int chroma_smooth_mode = 0;
+    int dark_frame_mode = 0;
+    int worker_diso_pattern = 0;
+    int worker_diso_auto_correction = 0;
+    double worker_diso_ev_correction = 0.0;
+    int worker_diso_black_delta = 0;
+    int apply_dark_frame_outside_lock = 0;
+    const uint16_t * dark_frame_data_for_subtraction = NULL;
+    uint32_t dark_frame_size_for_subtraction = 0;
+    uint32_t dark_frame_black_level = 0;
+
+    if (original_bits_per_pixel < 14)
+    {
+        make_14bit(raw_image_buff, raw_image_size, &raw_info);
+    }
+
+    llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
+    llrawproc_worker_ensure_luts(worker, raw_info.black_level);
+
+    double shared_lock_start = mlv_stage_timing_now();
+    pthread_mutex_lock(&video->llrawproc_mutex);
+    if (!shared->fix_raw)
+    {
+        pthread_mutex_unlock(&video->llrawproc_mutex);
+        g_llrawproc_last_shared_lock_ms = (mlv_stage_timing_now() - shared_lock_start) * 1000.0;
+        g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+        if (using_stack_worker) llrawproc_free_worker_state(worker);
+        return 1;
+    }
+
+    /* Dark frame: only safe if its dimensions match the override. */
+    if (!df_init(video))
+    {
+        if (llrawproc_worker_sync_dark_frame_copy(worker, shared)
+         && worker->dark_frame_data_copy
+         && worker->dark_frame_size == raw_image_size)
+        {
+            apply_dark_frame_outside_lock = 1;
+            dark_frame_data_for_subtraction = worker->dark_frame_data_copy;
+            dark_frame_size_for_subtraction = worker->dark_frame_size;
+            dark_frame_black_level = worker->dark_frame_hdr_copy.black_level;
+        }
+        /* If the dark frame size doesn't match the scaled buffer, we
+         * can't apply it at scale — bail and let the caller fall back. */
+        else if (worker->dark_frame_size != 0)
+        {
+            pthread_mutex_unlock(&video->llrawproc_mutex);
+            g_llrawproc_last_shared_lock_ms = (mlv_stage_timing_now() - shared_lock_start) * 1000.0;
+            g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+            if (using_stack_worker) llrawproc_free_worker_state(worker);
+            return 0;
+        }
+    }
+
+    diso_validity = shared->diso_validity;
+    dual_iso_mode = shared->dual_iso;
+    diso1 = shared->diso1;
+    diso2 = shared->diso2;
+    diso_averaging = shared->diso_averaging;
+    if (shared->diso_playback_force_mean23 != 0
+        && !dualiso_playback_mean23_override_disabled_via_env())
+    {
+        diso_averaging = 1; /* DISOI_MEAN23 */
+    }
+    diso_alias_map = shared->diso_alias_map;
+    diso_frblending = shared->diso_frblending;
+    worker_diso_pattern = shared->diso_pattern;
+    worker_diso_auto_correction = shared->diso_auto_correction;
+    worker_diso_ev_correction = shared->diso_ev_correction;
+    worker_diso_black_delta = shared->diso_black_delta;
+    worker->seeded_runtime_state = llrawproc_capture_shared_runtime_state(shared);
+    dark_frame_mode = shared->dark_frame;
+    chroma_smooth_mode = shared->chroma_smooth;
+
+    pthread_mutex_unlock(&video->llrawproc_mutex);
+    g_llrawproc_last_shared_lock_ms += (mlv_stage_timing_now() - shared_lock_start) * 1000.0;
+
+    worker->diso_pattern = worker_diso_pattern;
+    worker->diso_auto_correction = worker_diso_auto_correction;
+    worker->diso_ev_correction = worker_diso_ev_correction;
+    worker->diso_black_delta = worker_diso_black_delta;
+
+    if (apply_dark_frame_outside_lock)
+    {
+        const double dark_frame_start = mlv_stage_timing_now();
+        df_subtract_snapshot(dark_frame_data_for_subtraction,
+                             dark_frame_size_for_subtraction,
+                             dark_frame_black_level,
+                             raw_info.bits_per_pixel,
+                             raw_image_buff,
+                             raw_image_size);
+        g_llrawproc_last_dark_frame_ms = (mlv_stage_timing_now() - dark_frame_start) * 1000.0;
+    }
+
+    int publish_auto_correction = 1;
+    double dual_iso_ms = 0.0;
+    double chroma_smooth_ms = 0.0;
+
+    if (diso_validity && dual_iso_mode == 1)
+    {
+        int restricted_lossless = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) && raw_info.white_level < 15000;
+        if (restricted_lossless)
+        {
+            const double dual_iso_start = mlv_stage_timing_now();
+            int low_iso = MIN(diso1, diso2);
+            int high_iso = MAX(diso1, diso2);
+            scale_restricted_range(&raw_info, raw_image_buff, low_iso, high_iso);
+            llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
+            dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
+        }
+
+        const double dual_iso_start = mlv_stage_timing_now();
+        int explicit_auto_correction = 0;
+        double explicit_ev_correction = worker->diso_ev_correction;
+        int explicit_black_delta = worker->diso_black_delta;
+        const int has_explicit_auto_match =
+            (worker->diso_auto_correction < 0) &&
+            (worker->diso_ev_correction != 1) &&
+            (worker->diso_black_delta != -1);
+
+        int * auto_correction_ptr = has_explicit_auto_match
+            ? &explicit_auto_correction
+            : &worker->diso_auto_correction;
+        double * ev_correction_ptr = has_explicit_auto_match
+            ? &explicit_ev_correction
+            : &worker->diso_ev_correction;
+        int * black_delta_ptr = has_explicit_auto_match
+            ? &explicit_black_delta
+            : &worker->diso_black_delta;
+
+        publish_auto_correction = !has_explicit_auto_match;
+
+        diso_get_full20bit(raw_info,
+                           raw_image_buff,
+                           dark_frame_mode,
+                           diso1,
+                           diso2,
+                           &worker->diso_pattern,
+                           auto_correction_ptr,
+                           ev_correction_ptr,
+                           black_delta_ptr,
+                           diso_averaging,
+                           diso_alias_map,
+                           diso_frblending,
+                           chroma_smooth_mode,
+                           video->cpu_cores,
+                           &worker->diso_full20bit_scratch);
+        dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
+
+        if (has_explicit_auto_match)
+        {
+            worker->diso_ev_correction = explicit_ev_correction;
+            worker->diso_black_delta = explicit_black_delta;
+        }
+
+        {
+            int bits_shift = 16 - raw_info.bits_per_pixel;
+            worker->dng_black_level = raw_info.black_level << bits_shift;
+            worker->dng_white_level = raw_info.white_level << bits_shift;
+            worker->dng_bit_depth = 16;
+        }
+
+        llrawproc_worker_ensure_luts(worker, raw_info.black_level);
+    }
+
+    if (chroma_smooth_mode && dual_iso_mode != 1)
+    {
+        const double chroma_smooth_start = mlv_stage_timing_now();
+        chroma_smooth(chroma_smooth_mode,
+                      raw_image_buff,
+                      override_w,
+                      override_h,
+                      raw_info.black_level,
+                      raw_info.white_level,
+                      worker->raw2ev,
+                      worker->ev2raw,
+                      &worker->chroma_smooth_scratch);
+        chroma_smooth_ms += (mlv_stage_timing_now() - chroma_smooth_start) * 1000.0;
+    }
+
+    if (original_bits_per_pixel < 14 && dual_iso_mode != 1)
+    {
+        undo_14bit(raw_image_buff, raw_image_size, video->RAWI.raw_info.bits_per_pixel);
+    }
+
+    {
+        const llrawproc_runtime_state_t runtime_state = llrawproc_capture_worker_runtime_state(worker);
+        const int runtime_state_changed =
+            !llrawproc_runtime_state_equal(&runtime_state,
+                                           &worker->seeded_runtime_state,
+                                           publish_auto_correction);
+        if (runtime_state_changed)
+        {
+            const double publish_lock_start = mlv_stage_timing_now();
+            pthread_mutex_lock(&video->llrawproc_mutex);
+            llrawproc_publish_worker_results(video, &runtime_state, publish_auto_correction);
+            pthread_mutex_unlock(&video->llrawproc_mutex);
+            g_llrawproc_last_publish_lock_ms += (mlv_stage_timing_now() - publish_lock_start) * 1000.0;
+            g_llrawproc_last_shared_lock_ms += g_llrawproc_last_publish_lock_ms;
+        }
+    }
+
+    g_llrawproc_last_dual_iso_ms = dual_iso_ms;
+    g_llrawproc_last_chroma_smooth_ms = chroma_smooth_ms;
+    g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+
+    if (using_stack_worker)
+    {
+        llrawproc_free_worker_state(worker);
+    }
+    return 1;
+}
+
 double llrpGetLastSharedLockMilliseconds(void)
 {
     return g_llrawproc_last_shared_lock_ms;
