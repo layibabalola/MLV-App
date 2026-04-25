@@ -107,6 +107,47 @@ int llrpReinitMean23OverrideDispatchForTesting(void)
     return dualiso_playback_mean23_override_disabled_via_env();
 }
 
+/* Phase E5: peer of MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE for the
+ * scale-aware alias_map / FR blending downgrade. The downgrade is opt-in
+ * (default OFF) at the GUI policy layer, so this env-disable is mostly a
+ * symmetry tool — set MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE=1 to
+ * make the per-frame fast-path treat diso_playback_force_disable_alias_map
+ * and diso_playback_force_disable_fr_blending as if they were 0, even
+ * when the GUI policy has flipped them on (e.g. via the
+ * MLVAPP_PLAYBACK_DOWNGRADE_ALIAS_MAP_AT_SCALE=1 opt-in). Useful for
+ * headless A/B harnesses that want to force the field on for cache-key
+ * tests but still measure the full receipt-authored pipeline cost.
+ *
+ * Cache reset hook for tests: llrpReinitKeepHeavyStagesAtScaleDispatchForTesting. */
+static int g_dualiso_playback_disable_alias_map_downgrade_env_cache = -1;
+
+static int dualiso_playback_alias_map_downgrade_disabled_via_env(void)
+{
+    if (g_dualiso_playback_disable_alias_map_downgrade_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE");
+        if (v && *v && strcmp(v, "0") != 0
+                  && strcmp(v, "false") != 0
+                  && strcmp(v, "FALSE") != 0
+                  && strcmp(v, "False") != 0)
+        {
+            g_dualiso_playback_disable_alias_map_downgrade_env_cache = 1;
+        }
+        else
+        {
+            g_dualiso_playback_disable_alias_map_downgrade_env_cache = 0;
+        }
+    }
+    return g_dualiso_playback_disable_alias_map_downgrade_env_cache;
+}
+
+int llrpReinitKeepHeavyStagesAtScaleDispatchForTesting(void);
+int llrpReinitKeepHeavyStagesAtScaleDispatchForTesting(void)
+{
+    g_dualiso_playback_disable_alias_map_downgrade_env_cache = -1;
+    return dualiso_playback_alias_map_downgrade_disabled_via_env();
+}
+
 static int llrawproc_worker_copy_pixel_map(pixel_map * destination,
                                            const pixel_map * source)
 {
@@ -601,6 +642,8 @@ llrawprocObject_t * initLLRawProcObject()
     llrawproc->diso_playback_force_mean23 = 0;
     llrawproc->diso_alias_map = 0;
     llrawproc->diso_frblending = 1;
+    llrawproc->diso_playback_force_disable_alias_map = 0;
+    llrawproc->diso_playback_force_disable_fr_blending = 0;
     llrawproc->dark_frame = 0;
 
     llrawproc->dark_frame_filename = NULL;
@@ -830,6 +873,27 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
     }
     diso_alias_map = shared->diso_alias_map;
     diso_frblending = shared->diso_frblending;
+    /* Phase E5 playback-only fast-path overrides: at scale >= 4 the GUI
+     * policy disables alias_map suppression and full-res blending because
+     * the 4x4 downsample is itself an anti-aliasing operation and the
+     * FR-blending stage on a 1/16 pixel-count buffer mixes same-resolution
+     * data with itself. Both stages cost ~8-15 ms/frame combined on 5K
+     * dual-ISO clips. Receipt-authored values are not modified, so
+     * paused/scrubbing/export keep diso_alias_map / diso_frblending
+     * untouched. Cache invalidation: the override fields are hashed by
+     * mlv_hash_llrawproc_state, so playback-active and paused produce
+     * different cache slot signatures for the same frame index. */
+    if (!dualiso_playback_alias_map_downgrade_disabled_via_env())
+    {
+        if (shared->diso_playback_force_disable_alias_map != 0)
+        {
+            diso_alias_map = 0;
+        }
+        if (shared->diso_playback_force_disable_fr_blending != 0)
+        {
+            diso_frblending = 0;
+        }
+    }
     worker_diso_pattern = shared->diso_pattern;
     worker_diso_auto_correction = shared->diso_auto_correction;
     worker_diso_ev_correction = shared->diso_ev_correction;
@@ -1525,6 +1589,18 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     }
     diso_alias_map = shared->diso_alias_map;
     diso_frblending = shared->diso_frblending;
+    /* Phase E5 scale-aware downgrade: see note in applyLLRawProcObject. */
+    if (!dualiso_playback_alias_map_downgrade_disabled_via_env())
+    {
+        if (shared->diso_playback_force_disable_alias_map != 0)
+        {
+            diso_alias_map = 0;
+        }
+        if (shared->diso_playback_force_disable_fr_blending != 0)
+        {
+            diso_frblending = 0;
+        }
+    }
     worker_diso_pattern = shared->diso_pattern;
     worker_diso_auto_correction = shared->diso_auto_correction;
     worker_diso_ev_correction = shared->diso_ev_correction;
@@ -1955,6 +2031,26 @@ int llrpGetDualIsoFullResBlendingMode(mlvObject_t * video)
 void llrpSetDualIsoFullResBlendingMode(mlvObject_t * video, int value)
 {
     video->llrawproc->diso_frblending = value;
+}
+
+int llrpGetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video)
+{
+    return video->llrawproc->diso_playback_force_disable_alias_map;
+}
+
+void llrpSetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video, int value)
+{
+    video->llrawproc->diso_playback_force_disable_alias_map = value ? 1 : 0;
+}
+
+int llrpGetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video)
+{
+    return video->llrawproc->diso_playback_force_disable_fr_blending;
+}
+
+void llrpSetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video, int value)
+{
+    video->llrawproc->diso_playback_force_disable_fr_blending = value ? 1 : 0;
 }
 
 int llrpGetDualIsoValidity(mlvObject_t * video)

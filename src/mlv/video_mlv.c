@@ -388,6 +388,13 @@ static uint64_t mlv_hash_llrawproc_state(uint64_t hash, const llrawprocObject_t 
     hash = mlv_hash_bytes(hash, &llrawproc->diso_playback_force_mean23, sizeof(llrawproc->diso_playback_force_mean23));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_alias_map, sizeof(llrawproc->diso_alias_map));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_frblending, sizeof(llrawproc->diso_frblending));
+    /* Phase E5 scale-aware downgrade overrides: same cache-key principle
+     * as the mean23 override above. With override on (alias_map / FR
+     * blending suppressed) the recon produces different pixels than with
+     * override off, so the processed-frame cache must keep both alive
+     * across a paused -> playing transition. */
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_playback_force_disable_alias_map, sizeof(llrawproc->diso_playback_force_disable_alias_map));
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_playback_force_disable_fr_blending, sizeof(llrawproc->diso_playback_force_disable_fr_blending));
     hash = mlv_hash_bytes(hash, &llrawproc->dark_frame, sizeof(llrawproc->dark_frame));
     /* Phase 2C: diso_pattern, diso_ev_correction, diso_black_delta and the
      * dng_* fields are auto-published per frame by Dual ISO recon (see

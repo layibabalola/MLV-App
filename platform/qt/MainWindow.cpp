@@ -611,6 +611,12 @@ void MainWindow::timerFrameEvent( void )
                     invalidateDisplayPreviewCache();
                     m_frameChanged = true;
                     updatePlaybackQualityIndicator();
+                    /* Phase E5: the scale-aware alias_map / FR-blending
+                     * downgrade is keyed on m_playbackQualityActiveScale.
+                     * When the auto sampler bumps from <4 to 4 (or back),
+                     * the override needs to fire/clear so the next render
+                     * sees the right alias_map / FR flags. */
+                    applyEffectiveDualIsoPlaybackSettings();
                 }
             }
         }
@@ -9840,6 +9846,9 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
          * because rowscale vs HQ produces different chroma. */
         invalidateDisplayPreviewCache();
         m_frameChanged = true;
+        /* Phase E5: refresh the scale-aware alias_map / FR-blending
+         * downgrade when the user changes Playback Quality. */
+        applyEffectiveDualIsoPlaybackSettings();
     }
     updatePlaybackQualityIndicator();
 }
@@ -11293,12 +11302,33 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
                 toolButtonDualIsoFullresBlendingCurrentIndex() );
 
     const int mean23OverrideValue = settings.playbackForceMean23 ? 1 : 0;
+
+    /* Phase E5 scale-aware downgrade: the policy says "approve the alias_map
+     * / FR-blending downgrade IF the runtime scale is >= 4". We AND-combine
+     * with the active scale here. The active scale comes from the same
+     * source the render request reads (m_playbackQualityActiveScale)
+     * with the env-var override taking priority — that mirrors the
+     * effectivePlaybackScaleFactorForRequest() rules so the policy
+     * decision tracks the actual buffer the worker thread renders. */
+    const int activeScaleForPolicy = []() -> int {
+        const int envScale = playback_scale_factor_env_override();
+        return ( envScale == 1 || envScale == 2 || envScale == 4 ) ? envScale : -1;
+    }();
+    const int effectiveScale = ( activeScaleForPolicy > 0 )
+                                 ? activeScaleForPolicy
+                                 : m_playbackQualityActiveScale;
+    const bool scaleGate = ( effectiveScale >= 4 );
+    const int disableAliasMapValue = ( settings.playbackDisableAliasMapAtScale && scaleGate ) ? 1 : 0;
+    const int disableFrBlendingValue = ( settings.playbackDisableFrBlendingAtScale && scaleGate ) ? 1 : 0;
+
     const bool changed = (m_dualIsoPlaybackPreviewActive != settings.previewOverrideActive)
                       || (llrpGetDualIsoMode( m_pMlvObject ) != settings.mode)
                       || (llrpGetDualIsoInterpolationMethod( m_pMlvObject ) != settings.interpolation)
                       || (llrpGetDualIsoAliasMapMode( m_pMlvObject ) != settings.aliasMap)
                       || (llrpGetDualIsoFullResBlendingMode( m_pMlvObject ) != settings.fullResBlending)
-                      || (llrpGetDualIsoPlaybackForceMean23( m_pMlvObject ) != mean23OverrideValue);
+                      || (llrpGetDualIsoPlaybackForceMean23( m_pMlvObject ) != mean23OverrideValue)
+                      || (llrpGetDualIsoPlaybackForceDisableAliasMap( m_pMlvObject ) != disableAliasMapValue)
+                      || (llrpGetDualIsoPlaybackForceDisableFrBlending( m_pMlvObject ) != disableFrBlendingValue);
 
     if( !changed ) return;
 
@@ -11307,6 +11337,8 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
     llrpSetDualIsoAliasMapMode( m_pMlvObject, settings.aliasMap );
     llrpSetDualIsoFullResBlendingMode( m_pMlvObject, settings.fullResBlending );
     llrpSetDualIsoPlaybackForceMean23( m_pMlvObject, mean23OverrideValue );
+    llrpSetDualIsoPlaybackForceDisableAliasMap( m_pMlvObject, disableAliasMapValue );
+    llrpSetDualIsoPlaybackForceDisableFrBlending( m_pMlvObject, disableFrBlendingValue );
     processingSetBlackAndWhiteLevel( m_pMlvObject->processing,
                                      getMlvBlackLevel( m_pMlvObject ),
                                      getMlvWhiteLevel( m_pMlvObject ),

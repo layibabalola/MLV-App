@@ -125,6 +125,23 @@ typedef struct
     int diso_playback_force_mean23;
     int diso_alias_map;   // flag for Alias Map switchin on/off
     int diso_frblending;  // flag for Fullres Blending switching on/off
+    /* Phase E5 playback-only overrides: when non-zero, applyLLRawProcObject
+     * forces the HQ recon to skip the alias_map suppression / full-res
+     * blending stages regardless of what diso_alias_map / diso_frblending
+     * select. Set/cleared by the GUI when (a) playback is active, (b) HQ
+     * recon would otherwise run, AND (c) the active playback scale factor
+     * is >= 4. The 4x4 downsample is itself an anti-aliasing operation
+     * and the FR-blending stage on a 1/16 pixel-count buffer mixes same-
+     * resolution data with itself, so both stages produce diminishing
+     * returns at scale 4 while costing ~8-15 ms/frame combined. The
+     * receipt's authored values are left untouched, so paused/scrubbing/
+     * export keep the user's intended quality. Diagnostic env var
+     * MLVAPP_PLAYBACK_KEEP_ALIAS_MAP_AT_SCALE=1 disables the override at
+     * the GUI policy layer (see platform/qt/DualIsoPlaybackPolicy.h) and
+     * the cached env-disable check at llrawproc.c also short-circuits
+     * the per-frame fast-path. */
+    int diso_playback_force_disable_alias_map;
+    int diso_playback_force_disable_fr_blending;
     int dark_frame;       // flag for Dark Frame subtraction mode 0 = off, 1 = ext, 2 = int
     dualiso_preview_scratch_t diso_preview_scratch;
     dualiso_full20bit_scratch_t diso_full20bit_scratch;

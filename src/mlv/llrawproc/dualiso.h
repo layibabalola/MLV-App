@@ -105,4 +105,13 @@ void dualiso_debug_reset_hq_path_counters(void);
 unsigned long long dualiso_debug_hq_amaze_count(void);
 unsigned long long dualiso_debug_hq_mean23_count(void);
 
+/* Phase E5: thread-local counters for the alias_map and full-res blending
+ * stages. Incremented when each stage is taken (use_alias_map != 0 /
+ * use_fullres != 0) inside diso_get_full20bit. The reset peer is
+ * dualiso_debug_reset_hq_path_counters above. Tests verify that the
+ * scale-aware downgrade actually short-circuits these stages without
+ * having to diff pixels against an alias_map-on reference. */
+unsigned long long dualiso_debug_alias_map_taken_count(void);
+unsigned long long dualiso_debug_fullres_blend_taken_count(void);
+
 #endif

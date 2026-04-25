@@ -61,6 +61,10 @@ int llrpGetDualIsoAliasMapMode(mlvObject_t * video) { return video->llrawproc->d
 void llrpSetDualIsoAliasMapMode(mlvObject_t * video, int value) { video->llrawproc->diso_alias_map = value; }
 int llrpGetDualIsoFullResBlendingMode(mlvObject_t * video) { return video->llrawproc->diso_frblending; }
 void llrpSetDualIsoFullResBlendingMode(mlvObject_t * video, int value) { video->llrawproc->diso_frblending = value; }
+int llrpGetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video) { return video->llrawproc->diso_playback_force_disable_alias_map; }
+void llrpSetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video, int value) { video->llrawproc->diso_playback_force_disable_alias_map = value ? 1 : 0; }
+int llrpGetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video) { return video->llrawproc->diso_playback_force_disable_fr_blending; }
+void llrpSetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video, int value) { video->llrawproc->diso_playback_force_disable_fr_blending = value ? 1 : 0; }
 int llrpGetDualIsoValidity(mlvObject_t * video) { return video->llrawproc->diso_validity; }
 void llrpSetDualIsoValidity(mlvObject_t * video, int diso_force)
 {

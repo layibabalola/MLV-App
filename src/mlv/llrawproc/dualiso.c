@@ -61,6 +61,8 @@
 
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_amaze_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_mean23_count = 0;
+static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_alias_map_taken_count = 0;
+static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_fullres_blend_taken_count = 0;
 
 void dualiso_debug_note_hq_path(int which)
 {
@@ -72,6 +74,8 @@ void dualiso_debug_reset_hq_path_counters(void)
 {
     g_dualiso_hq_amaze_count = 0;
     g_dualiso_hq_mean23_count = 0;
+    g_dualiso_alias_map_taken_count = 0;
+    g_dualiso_fullres_blend_taken_count = 0;
 }
 
 unsigned long long dualiso_debug_hq_amaze_count(void)
@@ -82,6 +86,16 @@ unsigned long long dualiso_debug_hq_amaze_count(void)
 unsigned long long dualiso_debug_hq_mean23_count(void)
 {
     return g_dualiso_hq_mean23_count;
+}
+
+unsigned long long dualiso_debug_alias_map_taken_count(void)
+{
+    return g_dualiso_alias_map_taken_count;
+}
+
+unsigned long long dualiso_debug_fullres_blend_taken_count(void)
+{
+    return g_dualiso_fullres_blend_taken_count;
 }
 
 /* ------------------------------------------------------------------------
@@ -3573,6 +3587,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     {
         alias_map = scratch->alias_map;
         memset(alias_map, 0, w * h * sizeof(uint16_t));
+        g_dualiso_alias_map_taken_count++;
     }
     
     //~ printf("Exposure matching...\n");
@@ -3617,7 +3632,11 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 
     border_interpolate(raw_info, raw_buffer_32, dark, bright, is_bright);
 
-    if (use_fullres) fullres_reconstruction(raw_info, fullres, dark, bright, white_darkened, is_bright);
+    if (use_fullres)
+    {
+        g_dualiso_fullres_blend_taken_count++;
+        fullres_reconstruction(raw_info, fullres, dark, bright, white_darkened, is_bright);
+    }
 
     if (mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, chroma_smooth_method, scratch))
     {

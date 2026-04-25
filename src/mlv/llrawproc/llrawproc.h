@@ -148,6 +148,20 @@ void llrpSetDualIsoAliasMapMode(mlvObject_t * video, int value);
 int llrpGetDualIsoFullResBlendingMode(mlvObject_t * video);
 void llrpSetDualIsoFullResBlendingMode(mlvObject_t * video, int value);
 
+/* Phase E5: playback-only overrides that force the HQ dual ISO recon to
+ * skip alias_map suppression and full-res blending. The GUI sets these
+ * non-zero when playback is active AND HQ recon would run AND the active
+ * playback scale factor is >= 4 (see MainWindow::applyEffectiveDualIsoPlaybackSettings).
+ * Receipt-authored values for diso_alias_map / diso_frblending are not
+ * modified, so paused/scrubbing/export still apply the receipt's intended
+ * quality. Diagnostic env var MLVAPP_PLAYBACK_KEEP_ALIAS_MAP_AT_SCALE=1
+ * forces the override off (matches the precedent set by the rowscale and
+ * mean23 escape hatches). */
+int llrpGetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video);
+void llrpSetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video, int value);
+int llrpGetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video);
+void llrpSetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video, int value);
+
 enum { DISO_INVALID, DISO_FORCED, DISO_VALID }; // Return values
 int llrpGetDualIsoValidity(mlvObject_t * video);
 void llrpSetDualIsoValidity(mlvObject_t * video, int diso_force);
