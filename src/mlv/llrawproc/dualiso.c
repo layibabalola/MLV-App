@@ -28,6 +28,11 @@
 #include "opt_med.h"
 #include "wirth.h"
 #include <pthread.h>
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+#include <immintrin.h>
+#define DUALISO_AVX2_AVAILABLE 1
+#endif
+#include "../pipeline_stage_capture.h"
 #include "../../debayer/debayer.h"
 #include "../../debug/StageTiming.h"
 
@@ -43,6 +48,296 @@
 
 #define LOCK(x) static pthread_mutex_t x = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&x);
 #define UNLOCK(x) pthread_mutex_unlock(&(x));
+
+/* ------------------------------------------------------------------------
+ * Dual ISO preview rowscale: hot inner loop. Two implementations selected
+ * once via pthread_once based on host CPU support and the
+ * MLVAPP_DISABLE_AVX2 env-var kill switch. Mirrors the dispatch pattern at
+ * src/processing/raw_processing.c:980-1066.
+ *
+ * The y-2 cross-row dependency (output[i - 2*width] is read after row y-2
+ * has been written) means the OUTER y loop is sequential. Column-SIMD
+ * within each row is safe.
+ * ------------------------------------------------------------------------ */
+
+typedef void (*dualiso_rowscale_fn_t)(int width, int height, int dark_row_start,
+                                      const uint16_t * source_image,
+                                      uint16_t * output_image,
+                                      double a, double b,
+                                      int32_t black, int32_t white,
+                                      uint16_t shadow);
+
+static void dualiso_rowscale_scalar(int width, int height, int dark_row_start,
+                                    const uint16_t * source_image,
+                                    uint16_t * output_image,
+                                    double a, double b,
+                                    int32_t black, int32_t white,
+                                    uint16_t shadow)
+{
+    for(int y = 0; y < height; y++)
+    {
+        int row_start = y * width;
+        if (((y - dark_row_start + 4) % 4) >= 2)
+        {
+            //bright row
+            for(int i = row_start; i < row_start + width; i++)
+            {
+                if(source_image[i] >= white)
+                {
+                    output_image[i] = y > 2
+                        ? (y < height - 2
+                            ? (output_image[i-width*2] + source_image[i+width*2]) / 2
+                            : output_image[i-width*2])
+                        : source_image[i+width*2];
+                }
+                else
+                {
+                    output_image[i] = (uint16_t)(MIN(white,(source_image[i] - black) * a + black + b));
+                }
+            }
+        }
+        else
+        {
+            //dark row
+            for(int i = row_start; i < row_start + width; i++)
+            {
+                if(source_image[i] < shadow)
+                {
+                    output_image[i] = (uint16_t)(y > 2
+                        ? (y < height - 2
+                            ? (output_image[i-width*2] + MIN(white,(source_image[i+width*2]  - black) * a + black + b)) / 2
+                            : output_image[i-width*2])
+                        : MIN(white,(source_image[i+width*2]  - black) * a + black + b));
+                }
+            }
+        }
+    }
+}
+
+#ifdef DUALISO_AVX2_AVAILABLE
+__attribute__((target("avx2,fma")))
+static void dualiso_rowscale_avx2(int width, int height, int dark_row_start,
+                                  const uint16_t * source_image,
+                                  uint16_t * output_image,
+                                  double a, double b,
+                                  int32_t black, int32_t white,
+                                  uint16_t shadow)
+{
+    /* Hot kernel: 16 uint16/iter via two 8-float halves through FMA.
+     * Edge rows (y < 2 or y >= height - 2) and saturated/shadow lanes use
+     * scalar fallbacks so we don't have to cross-row gather in SIMD. */
+    const __m256 af     = _mm256_set1_ps((float)a);
+    const __m256 bf     = _mm256_set1_ps((float)b);
+    const __m256 blackf = _mm256_set1_ps((float)black);
+    const __m256 whitef = _mm256_set1_ps((float)white);
+    const __m256 zerof  = _mm256_setzero_ps();
+    const __m256i white_u16  = _mm256_set1_epi16((int16_t)white);
+    const __m256i bias_xor   = _mm256_set1_epi16((int16_t)0x8000);
+    const __m256i shadow_biased = _mm256_set1_epi16((int16_t)((shadow ^ 0x8000) & 0xFFFF));
+    const __m256i zero_i = _mm256_setzero_si256();
+    /* black + b broadcast for the FMA: out = (src - black) * a + (black + b). */
+    const __m256 black_plus_b = _mm256_add_ps(blackf, bf);
+
+    for(int y = 0; y < height; y++)
+    {
+        const int row_start = y * width;
+        const int row_end   = row_start + width;
+        const int is_bright = (((y - dark_row_start + 4) % 4) >= 2);
+        const int edge_row  = (y < 2) || (y >= height - 2) || (width < 16);
+
+        /* Edge rows or narrow widths: scalar full-row. Cheap because rare
+         * (only 4 rows out of ~2200 typically). */
+        if (edge_row)
+        {
+            if (is_bright)
+            {
+                for(int i = row_start; i < row_end; i++)
+                {
+                    if(source_image[i] >= white)
+                    {
+                        output_image[i] = y > 2
+                            ? (y < height - 2
+                                ? (output_image[i-width*2] + source_image[i+width*2]) / 2
+                                : output_image[i-width*2])
+                            : source_image[i+width*2];
+                    }
+                    else
+                    {
+                        output_image[i] = (uint16_t)(MIN(white,(source_image[i] - black) * a + black + b));
+                    }
+                }
+            }
+            else
+            {
+                for(int i = row_start; i < row_end; i++)
+                {
+                    if(source_image[i] < shadow)
+                    {
+                        output_image[i] = (uint16_t)(y > 2
+                            ? (y < height - 2
+                                ? (output_image[i-width*2] + MIN(white,(source_image[i+width*2]  - black) * a + black + b)) / 2
+                                : output_image[i-width*2])
+                            : MIN(white,(source_image[i+width*2]  - black) * a + black + b));
+                    }
+                }
+            }
+            continue;
+        }
+
+        const int simd_end = row_start + (width / 16) * 16;
+        int i = row_start;
+
+        if (is_bright)
+        {
+            for( ; i < simd_end; i += 16)
+            {
+                __m256i src_v = _mm256_loadu_si256((const __m256i*)&source_image[i]);
+
+                /* Saturated mask: src >= white. max(src,white)==src iff src>=white. */
+                __m256i sat_mask = _mm256_cmpeq_epi16(_mm256_max_epu16(src_v, white_u16), src_v);
+
+                /* Convert to two halves of 8 floats each. */
+                __m256i lo_i32 = _mm256_unpacklo_epi16(src_v, zero_i);
+                __m256i hi_i32 = _mm256_unpackhi_epi16(src_v, zero_i);
+                __m256  lo_f   = _mm256_cvtepi32_ps(lo_i32);
+                __m256  hi_f   = _mm256_cvtepi32_ps(hi_i32);
+
+                /* (src - black) * a + (black + b) */
+                lo_f = _mm256_fmadd_ps(_mm256_sub_ps(lo_f, blackf), af, black_plus_b);
+                hi_f = _mm256_fmadd_ps(_mm256_sub_ps(hi_f, blackf), af, black_plus_b);
+
+                /* clamp to [0, white] */
+                lo_f = _mm256_min_ps(_mm256_max_ps(lo_f, zerof), whitef);
+                hi_f = _mm256_min_ps(_mm256_max_ps(hi_f, zerof), whitef);
+
+                /* repack to uint16 */
+                __m256i lo_p = _mm256_cvttps_epi32(lo_f);
+                __m256i hi_p = _mm256_cvttps_epi32(hi_f);
+                __m256i scaled = _mm256_packus_epi32(lo_p, hi_p);
+                /* AVX2 packus does within-lane interleave; permute fixes order */
+                scaled = _mm256_permute4x64_epi64(scaled, 0xD8);
+
+                _mm256_storeu_si256((__m256i*)&output_image[i], scaled);
+
+                /* Patch saturated lanes scalarly (rare path, <5% typical). */
+                int sat_mm = _mm256_movemask_epi8(sat_mask);
+                if (sat_mm)
+                {
+                    for(int j = 0; j < 16; j++)
+                    {
+                        if ((sat_mm >> (j * 2)) & 0x3)
+                        {
+                            int idx = i + j;
+                            output_image[idx] = (output_image[idx-width*2] + source_image[idx+width*2]) / 2;
+                        }
+                    }
+                }
+            }
+            /* tail */
+            for( ; i < row_end; i++)
+            {
+                if(source_image[i] >= white)
+                {
+                    output_image[i] = (output_image[i-width*2] + source_image[i+width*2]) / 2;
+                }
+                else
+                {
+                    output_image[i] = (uint16_t)(MIN(white,(source_image[i] - black) * a + black + b));
+                }
+            }
+        }
+        else /* dark row */
+        {
+            for( ; i < simd_end; i += 16)
+            {
+                __m256i src_v = _mm256_loadu_si256((const __m256i*)&source_image[i]);
+
+                /* Shadow mask: src < shadow. _mm256_cmpgt_epi16 is signed; bias both ops by 0x8000. */
+                __m256i src_biased = _mm256_xor_si256(src_v, bias_xor);
+                __m256i shadow_mask = _mm256_cmpgt_epi16(shadow_biased, src_biased);
+
+                int sm = _mm256_movemask_epi8(shadow_mask);
+                if (sm)
+                {
+                    /* Scalar update only on shadow lanes. Most lanes leave
+                     * output untouched (already initialised by the memcpy
+                     * before this loop runs). */
+                    for(int j = 0; j < 16; j++)
+                    {
+                        if ((sm >> (j * 2)) & 0x3)
+                        {
+                            int idx = i + j;
+                            int scaled = (int)((source_image[idx+width*2] - black) * a + black + b);
+                            if (scaled < 0)     scaled = 0;
+                            if (scaled > white) scaled = white;
+                            output_image[idx] = (uint16_t)((output_image[idx-width*2] + scaled) / 2);
+                        }
+                    }
+                }
+            }
+            /* tail */
+            for( ; i < row_end; i++)
+            {
+                if(source_image[i] < shadow)
+                {
+                    int scaled = (int)((source_image[i+width*2] - black) * a + black + b);
+                    if (scaled < 0)     scaled = 0;
+                    if (scaled > white) scaled = white;
+                    output_image[i] = (uint16_t)((output_image[i-width*2] + scaled) / 2);
+                }
+            }
+        }
+    }
+}
+#endif /* DUALISO_AVX2_AVAILABLE */
+
+static int dualiso_env_truthy(const char * v)
+{
+    if (!v || !*v) return 0;
+    if (!strcmp(v, "1") || !strcmp(v, "true") || !strcmp(v, "TRUE")
+     || !strcmp(v, "True") || !strcmp(v, "yes") || !strcmp(v, "on")) return 1;
+    return 0;
+}
+
+static pthread_once_t g_dualiso_rowscale_dispatch_once = PTHREAD_ONCE_INIT;
+static dualiso_rowscale_fn_t g_dualiso_rowscale_fn = NULL;
+static int g_dualiso_rowscale_use_avx2 = 0;
+
+static void dualiso_rowscale_dispatch_init(void)
+{
+    int use_avx2 = 0;
+#ifdef DUALISO_AVX2_AVAILABLE
+    __builtin_cpu_init();
+    use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#endif
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2"))) use_avx2 = 0;
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2_DUALISO"))) use_avx2 = 0;
+    g_dualiso_rowscale_use_avx2 = use_avx2;
+#ifdef DUALISO_AVX2_AVAILABLE
+    g_dualiso_rowscale_fn = use_avx2 ? dualiso_rowscale_avx2 : dualiso_rowscale_scalar;
+#else
+    g_dualiso_rowscale_fn = dualiso_rowscale_scalar;
+#endif
+}
+
+static void dualiso_rowscale(int width, int height, int dark_row_start,
+                             const uint16_t * source_image,
+                             uint16_t * output_image,
+                             double a, double b,
+                             int32_t black, int32_t white,
+                             uint16_t shadow)
+{
+    pthread_once(&g_dualiso_rowscale_dispatch_once, dualiso_rowscale_dispatch_init);
+    g_dualiso_rowscale_fn(width, height, dark_row_start,
+                          source_image, output_image,
+                          a, b, black, white, shadow);
+}
+
+int dualisoRowscaleAvx2Active(void)
+{
+    pthread_once(&g_dualiso_rowscale_dispatch_once, dualiso_rowscale_dispatch_init);
+    return g_dualiso_rowscale_use_avx2;
+}
 
 static int preview_pattern_index(int iso_pattern)
 {
@@ -783,44 +1078,15 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
         output_image = image_data;
     }
 
-    for(int y = 0; y < height; y++)
-    {
-        int row_start = y * width;
-        if (((y - dark_row_start + 4) % 4) >= 2)
-        {
-            //bright row
-            for(int i = row_start; i < row_start + width; i++)
-            {
-                if(source_image[i] >= white)
-                {
-                    output_image[i] = y > 2
-                        ? (y < height - 2
-                            ? (output_image[i-width*2] + source_image[i+width*2]) / 2
-                            : output_image[i-width*2])
-                        : source_image[i+width*2];
-                }
-                else
-                {
-                    output_image[i] = (uint16_t)(MIN(white,(source_image[i] - black) * a + black + b));
-                }
-            }
-        }
-        else
-        {
-            //dark row
-            for(int i = row_start; i < row_start + width; i++)
-            {
-                if(source_image[i] < shadow)
-                {
-                    output_image[i] = (uint16_t)(y > 2
-                        ? (y < height - 2
-                            ? (output_image[i-width*2] + MIN(white,(source_image[i+width*2]  - black) * a + black + b)) / 2
-                            : output_image[i-width*2])
-                        : MIN(white,(source_image[i+width*2]  - black) * a + black + b));
-                }
-            }
-        }
-    }
+    /* Hot inner loop. Dispatched once via pthread_once to either an AVX2
+     * vectorised implementation or a portable scalar fallback. The y-2
+     * cross-row dependency forces sequential outer iteration; SIMD
+     * happens within each row. See the dispatch helpers near the top of
+     * this file. */
+    dualiso_rowscale(width, height, dark_row_start,
+                     source_image, output_image,
+                     a, b,
+                     black, white, shadow);
 
     if( output_image != image_data )
     {
