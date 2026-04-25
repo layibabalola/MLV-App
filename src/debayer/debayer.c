@@ -7,69 +7,66 @@
 #include "debayer.h"
 #include "librtprocesswrapper.h"
 
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+#include <immintrin.h>
+#define DEBAYER_AVX2_AVAILABLE 1
+#endif
+
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 #define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
 #define LIMIT16(X) MAX(MIN(X, 65535), 0)
 
-void convert_to_log(void * data)
+/* ------------------------------------------------------------------------
+ * AVX2 fast path for the bilinear debayer (debayerBasicU16).
+ *
+ * The scalar inner loop per inner step does ~50 integer ops to produce 4
+ * RGB pixels (12 uint16 outputs) using a fixed pattern of overlapping
+ * 4-input and 2-input averages on the 4x4 Bayer neighbourhood. GCC -O2
+ * autovec with -mssse3 declines to vectorise this loop at all (verified
+ * via objdump on the 0xa50..0xd60 disassembly window in build-3slot/obj/
+ * debayer.o pre-Phase-2B), so the wins come from explicit SIMD.
+ *
+ * Strategy: 256-bit AVX2 vectors of 16 uint16 lanes, one SIMD iter
+ * processes 8 blocks (16 source columns -> 16 RGB output columns per
+ * row x 2 rows = 32 RGB pixels = 96 uint16). Each lane k maps to output
+ * column (x_anchor + k); the TL/BL formulas apply at even lanes, the
+ * TR/BR formulas at odd lanes. We compute both formulas on all 16 lanes
+ * then merge via _mm256_blend_epi16 with mask 0xAA.
+ *
+ * 4-input averages use 32-bit unpack/add/srli/repack for bit-exact
+ * parity with scalar's `(a+b+c+d) >> 2` truncation. 2-input averages
+ * use the avg-of-avg trick `(a+b)>>1 = avg_epu16(a,b) - ((a^b)&1)` for
+ * matching parity (avg_epu16 rounds half-up, scalar truncates).
+ *
+ * AoS-3 RGB stores: compute six 16-lane channel vectors per iter
+ * (top R/G/B, bot R/G/B), spill to 32-byte-aligned scratch arrays, then
+ * write 16 RGB triplets per row scalarly. The scalar interleave runs
+ * with hot L1 cache since it reads data just stored, and gets autovec'd
+ * by GCC for the simple stride-3 store pattern.
+ *
+ * Edge handling: the first and last 1-pixel column borders, and the
+ * top/bottom row pair, fall back to the scalar code (matched memcpy
+ * post-fixup, identical to the original kernel).
+ *
+ * Dispatch: pthread_once latch, default-on for AVX2+FMA hosts. Kill
+ * switches MLVAPP_DISABLE_AVX2 (global) and MLVAPP_DISABLE_AVX2_DEBAYER
+ * (per-kernel) force the scalar fallback.
+ * ------------------------------------------------------------------------ */
+
+/* Per row-pair body: processes one Y (= flat pixel offset of the
+ * top row in the 2x2 block). Caller drives the outer loop over Y. */
+typedef void (*debayer_basic_u16_rows_fn_t)(uint16_t * __restrict debayerto,
+                                            uint16_t * __restrict bayerdata,
+                                            int width,
+                                            int Y);
+
+static void debayer_basic_u16_rows_scalar(uint16_t * __restrict debayerto,
+                                          uint16_t * __restrict bayerdata,
+                                          int width,
+                                          int Y)
 {
-    // float
-}
-
-void debayerNoneU16(uint16_t * __restrict debayerto,
-                    const uint16_t * __restrict bayerdata,
-                    int width,
-                    int height,
-                    int threads,
-                    int bit_shift)
-{
-    #pragma omp parallel for if(threads > 1) num_threads(threads)
-    for (int y = 0; y < height; ++y)
-    {
-        const uint16_t * __restrict src_row = bayerdata + ((size_t)y * (size_t)width);
-        uint16_t * __restrict dst_row = debayerto + ((size_t)y * (size_t)width * 3u);
-
-        for (int x = 0; x < width; ++x)
-        {
-            const uint16_t value = (uint16_t)(src_row[x] << bit_shift);
-            dst_row[0] = value;
-            dst_row[1] = value;
-            dst_row[2] = value;
-            dst_row += 3;
-        }
-    }
-}
-
-void debayerBasicU16(uint16_t * __restrict debayerto,
-                     uint16_t * __restrict bayerdata,
-                     int width,
-                     int height,
-                     int threads,
-                     int bit_shift)
-{
-    if (bit_shift > 0)
-    {
-        const int pixel_count = width * height;
-        #pragma omp parallel for if(threads > 1) num_threads(threads)
-        for (int i = 0; i < pixel_count; ++i)
-        {
-            bayerdata[i] = (uint16_t)(bayerdata[i] << bit_shift);
-        }
-    }
-
-    /* Debayer pixel size(limit with 1 pixel border to avoid seg fault, fix blank pixels L8ter) */
-    int pixelsizeDB;
-    if( height % 2 == 0 )
-        pixelsizeDB = width * (height - 1);
-    else
-        pixelsizeDB = width * (height - 2);
-    int widthDB = width - 1;
-
-    int step = width * 2;
-    int nextRowRGB = width * 3;
-
-    #pragma omp parallel for if(threads > 1) num_threads(threads)
-    for (int Y = width; Y < pixelsizeDB; Y += step)
+    const int widthDB = width - 1;
+    const int nextRowRGB = width * 3;
     {
         for (int x = 1; x < widthDB; x += 2)
         {
@@ -142,6 +139,361 @@ void debayerBasicU16(uint16_t * __restrict debayerto,
         edgePixel[-1] = edgePixel[-4];
         edgePixel[-2] = edgePixel[-5];
         edgePixel[-3] = edgePixel[-6];
+    }
+}
+
+#ifdef DEBAYER_AVX2_AVAILABLE
+
+/* Compute (a+b+c+d) >> 2 with bit-exact parity to scalar's truncating
+ * cast. Uses 32-bit unpack to avoid 16-bit overflow and the rounding
+ * bias that double-_mm256_avg_epu16 would introduce. */
+__attribute__((target("avx2,fma")))
+static inline __m256i debayer_avg4_u16_truncate(__m256i a, __m256i b, __m256i c, __m256i d)
+{
+    const __m256i z = _mm256_setzero_si256();
+    __m256i a_lo = _mm256_unpacklo_epi16(a, z);
+    __m256i a_hi = _mm256_unpackhi_epi16(a, z);
+    __m256i b_lo = _mm256_unpacklo_epi16(b, z);
+    __m256i b_hi = _mm256_unpackhi_epi16(b, z);
+    __m256i c_lo = _mm256_unpacklo_epi16(c, z);
+    __m256i c_hi = _mm256_unpackhi_epi16(c, z);
+    __m256i d_lo = _mm256_unpacklo_epi16(d, z);
+    __m256i d_hi = _mm256_unpackhi_epi16(d, z);
+    __m256i s_lo = _mm256_add_epi32(_mm256_add_epi32(a_lo, b_lo),
+                                    _mm256_add_epi32(c_lo, d_lo));
+    __m256i s_hi = _mm256_add_epi32(_mm256_add_epi32(a_hi, b_hi),
+                                    _mm256_add_epi32(c_hi, d_hi));
+    s_lo = _mm256_srli_epi32(s_lo, 2);
+    s_hi = _mm256_srli_epi32(s_hi, 2);
+    /* Pack 32-bit -> 16-bit. With s_lo coming from unpacklo (src lanes
+     * [0..3, 8..11]) and s_hi from unpackhi (src lanes [4..7, 12..15]),
+     * _mm256_packus_epi32 lays out:
+     *   result[0..3]   = s_lo low 128 (= src[0..3])
+     *   result[4..7]   = s_hi low 128 (= src[4..7])
+     *   result[8..11]  = s_lo high 128 (= src[8..11])
+     *   result[12..15] = s_hi high 128 (= src[12..15])
+     * which is exactly src[0..15] in order, so no permute needed. */
+    return _mm256_packus_epi32(s_lo, s_hi);
+}
+
+/* Compute (a+b) >> 1 with bit-exact parity to scalar's truncating cast.
+ * _mm256_avg_epu16 rounds half-up (= (a+b+1)/2); scalar truncates.
+ * Difference is 1 iff (a^b) has its LSB set, i.e. exactly one of {a,b}
+ * is odd. Subtract the LSB-of-XOR to correct. */
+__attribute__((target("avx2,fma")))
+static inline __m256i debayer_avg2_u16_truncate(__m256i a, __m256i b, __m256i one_u16)
+{
+    __m256i avg = _mm256_avg_epu16(a, b);
+    __m256i parity = _mm256_and_si256(_mm256_xor_si256(a, b), one_u16);
+    return _mm256_sub_epi16(avg, parity);
+}
+
+/* Per-row debayer body for two consecutive RGB output rows starting at
+ * source row index Y/width. Y is a flat pixel offset. The SIMD bulk
+ * processes 16 source columns per inner iter starting at x_anchor=1. */
+__attribute__((target("avx2,fma")))
+static void debayer_basic_u16_rows_avx2(uint16_t * __restrict debayerto,
+                                        uint16_t * __restrict bayerdata,
+                                        int width,
+                                        int Y)
+{
+    const int widthDB = width - 1;
+    const int nextRowRGB = width * 3;
+    const __m256i one_u16 = _mm256_set1_epi16(1);
+
+    /* Per-iter SIMD covers x_anchor = 1, 17, 33, ... up to the last full
+     * 16-column-wide chunk that ends at or before x_anchor + 15 < widthDB
+     * (i.e., x_anchor + 15 <= widthDB - 1), so x_anchor <= widthDB - 16. */
+    const int x_simd_last = widthDB - 16;
+
+    {
+        const uint16_t * row_m1 = bayerdata + (Y - width);
+        const uint16_t * row_0  = bayerdata + Y;
+        const uint16_t * row_p1 = bayerdata + (Y + width);
+        const uint16_t * row_p2 = bayerdata + (Y + 2 * width);
+
+        /* Output base for top RGB row at this iter = Y * 3.
+         * For lane k of a 16-lane vector starting at x_anchor, the output
+         * RGB pixel is at debayerto[(Y + x_anchor + k) * 3 .. +2]. */
+
+        int x = 1;
+        uint16_t __attribute__((aligned(32))) tR[16], tG[16], tB[16];
+        uint16_t __attribute__((aligned(32))) bR[16], bG[16], bB[16];
+        if (x <= x_simd_last)
+        {
+            for (; x <= x_simd_last; x += 16)
+            {
+                /* Three loads per row covering source cols x-1..x+15,
+                 * x..x+16, x+1..x+17. Rows m1, 0, p1, p2. */
+                __m256i s_m1_a = _mm256_loadu_si256((const __m256i*)(row_m1 + x - 1));
+                __m256i s_m1_b = _mm256_loadu_si256((const __m256i*)(row_m1 + x));
+                __m256i s_m1_c = _mm256_loadu_si256((const __m256i*)(row_m1 + x + 1));
+                __m256i s_0_a  = _mm256_loadu_si256((const __m256i*)(row_0  + x - 1));
+                __m256i s_0_b  = _mm256_loadu_si256((const __m256i*)(row_0  + x));
+                __m256i s_0_c  = _mm256_loadu_si256((const __m256i*)(row_0  + x + 1));
+                __m256i s_p1_a = _mm256_loadu_si256((const __m256i*)(row_p1 + x - 1));
+                __m256i s_p1_b = _mm256_loadu_si256((const __m256i*)(row_p1 + x));
+                __m256i s_p1_c = _mm256_loadu_si256((const __m256i*)(row_p1 + x + 1));
+                __m256i s_p2_a = _mm256_loadu_si256((const __m256i*)(row_p2 + x - 1));
+                __m256i s_p2_b = _mm256_loadu_si256((const __m256i*)(row_p2 + x));
+                __m256i s_p2_c = _mm256_loadu_si256((const __m256i*)(row_p2 + x + 1));
+
+                /* Top row stream (lanes alternate TL, TR; even=TL, odd=TR). */
+                /* TL.R = avg4(m1[k-1], m1[k+1], p1[k-1], p1[k+1])
+                 * TR.R = avg2(m1[k],   p1[k]) at lane k odd */
+                __m256i v_TL_R = debayer_avg4_u16_truncate(s_m1_a, s_m1_c, s_p1_a, s_p1_c);
+                __m256i v_TR_R = debayer_avg2_u16_truncate(s_m1_b, s_p1_b, one_u16);
+                /* Blend: even lanes (mask bit=0) take v_TL_R, odd (bit=1) take v_TR_R.
+                 * _mm256_blend_epi16 mask is per-128bit-lane 8-bit, so 0xAA selects
+                 * lanes 1,3,5,7 from the second arg (and same in upper half). */
+                __m256i top_R = _mm256_blend_epi16(v_TL_R, v_TR_R, 0xAA);
+
+                /* TL.G = avg4(m1[k], 0[k+1], 0[k-1], p1[k])
+                 * TR.G = 0[k] = s_0_b */
+                __m256i v_TL_G = debayer_avg4_u16_truncate(s_m1_b, s_0_c, s_0_a, s_p1_b);
+                __m256i top_G  = _mm256_blend_epi16(v_TL_G, s_0_b, 0xAA);
+
+                /* TL.B = 0[k] = s_0_b
+                 * TR.B = avg2(0[k-1], 0[k+1]) = avg2(s_0_a, s_0_c) */
+                __m256i v_TR_B = debayer_avg2_u16_truncate(s_0_a, s_0_c, one_u16);
+                __m256i top_B  = _mm256_blend_epi16(s_0_b, v_TR_B, 0xAA);
+
+                /* Bot row stream (lanes alternate BL, BR; even=BL, odd=BR). */
+                /* BL.R = avg2(p1[k-1], p1[k+1]) = avg2(s_p1_a, s_p1_c)
+                 * BR.R = p1[k] = s_p1_b */
+                __m256i v_BL_R = debayer_avg2_u16_truncate(s_p1_a, s_p1_c, one_u16);
+                __m256i bot_R  = _mm256_blend_epi16(v_BL_R, s_p1_b, 0xAA);
+
+                /* BL.G = p1[k] = s_p1_b
+                 * BR.G = avg4(0[k], p1[k-1], p1[k+1], p2[k]) */
+                __m256i v_BR_G = debayer_avg4_u16_truncate(s_0_b, s_p1_a, s_p1_c, s_p2_b);
+                __m256i bot_G  = _mm256_blend_epi16(s_p1_b, v_BR_G, 0xAA);
+
+                /* BL.B = avg2(0[k], p2[k]) = avg2(s_0_b, s_p2_b)
+                 * BR.B = avg4(0[k-1], 0[k+1], p2[k-1], p2[k+1]) */
+                __m256i v_BL_B = debayer_avg2_u16_truncate(s_0_b, s_p2_b, one_u16);
+                __m256i v_BR_B = debayer_avg4_u16_truncate(s_0_a, s_0_c, s_p2_a, s_p2_c);
+                __m256i bot_B  = _mm256_blend_epi16(v_BL_B, v_BR_B, 0xAA);
+
+                /* Spill to 16-uint16 scratch arrays (32-byte aligned) and
+                 * scalar-interleave-write to RGB AoS-3 output. The scalar
+                 * loop is a tight stride-3 store that GCC autovec's into
+                 * 128-bit pshufb-based interleaved stores. */
+                _mm256_store_si256((__m256i*)tR, top_R);
+                _mm256_store_si256((__m256i*)tG, top_G);
+                _mm256_store_si256((__m256i*)tB, top_B);
+                _mm256_store_si256((__m256i*)bR, bot_R);
+                _mm256_store_si256((__m256i*)bG, bot_G);
+                _mm256_store_si256((__m256i*)bB, bot_B);
+
+                uint16_t * out_top = debayerto + (Y + x) * 3;
+                uint16_t * out_bot = debayerto + (Y + width + x) * 3;
+                for (int k = 0; k < 16; ++k)
+                {
+                    out_top[k * 3 + 0] = tR[k];
+                    out_top[k * 3 + 1] = tG[k];
+                    out_top[k * 3 + 2] = tB[k];
+                    out_bot[k * 3 + 0] = bR[k];
+                    out_bot[k * 3 + 1] = bG[k];
+                    out_bot[k * 3 + 2] = bB[k];
+                }
+            }
+        }
+
+        /* Scalar tail for trailing inner cols. */
+        for (; x < widthDB; x += 2)
+        {
+            int pix = Y + x;
+            int pixm1 = pix - width;
+            int pixp1 = pix + width;
+            int pixp2 = pixp1 + width;
+
+            int bPix[16] = {
+                ( pixm1-1 ), ( pixm1 ), ( pixm1+1 ), ( pixm1+2 ),
+                ( pix - 1 ), (  pix  ), ( pix + 1 ), ( pix + 2 ),
+                ( pixp1-1 ), ( pixp1 ), ( pixp1+1 ), ( pixp1+2 ),
+                ( pixp2-1 ), ( pixp2 ), ( pixp2+1 ), ( pixp2+2 ),
+            };
+            int rgbPix[4] = {
+                (bPix[5] * 3), (bPix[ 6] * 3),
+                (bPix[9] * 3), (bPix[10] * 3)
+            };
+
+            debayerto[ rgbPix[0] ] = (uint32_t)(
+                  bayerdata[ bPix[0] ] + bayerdata[ bPix[ 2] ]
+                + bayerdata[ bPix[8] ] + bayerdata[ bPix[10] ]
+            ) >> 2;
+            debayerto[ rgbPix[0]+1 ] = (uint32_t)(
+                  bayerdata[ bPix[1] ] + bayerdata[ bPix[6] ]
+                + bayerdata[ bPix[4] ] + bayerdata[ bPix[9] ]
+            ) >> 2;
+            debayerto[ rgbPix[0]+2 ] = bayerdata[ bPix[5] ];
+            debayerto[ rgbPix[1] ] = (uint32_t)(
+                bayerdata[ bPix[2] ] + bayerdata[ bPix[10] ]
+            ) >> 1;
+            debayerto[ rgbPix[1]+1 ] = bayerdata[ bPix[6] ];
+            debayerto[ rgbPix[1]+2 ] = (uint32_t)(
+                bayerdata[ bPix[5] ] + bayerdata[ bPix[7] ]
+            ) >> 1;
+            debayerto[ rgbPix[2] ] = (uint32_t)(
+                bayerdata[ bPix[8] ] + bayerdata[ bPix[10] ]
+            ) >> 1;
+            debayerto[ rgbPix[2]+1 ] = bayerdata[ bPix[9] ];
+            debayerto[ rgbPix[2]+2 ] = (uint32_t)(
+                bayerdata[ bPix[5] ] + bayerdata[ bPix[13] ]
+            ) >> 1;
+            debayerto[ rgbPix[3] ] = bayerdata[ bPix[10] ];
+            debayerto[ rgbPix[3]+1 ] = (uint32_t)(
+                  bayerdata[ bPix[ 6] ] + bayerdata[ bPix[ 9] ]
+                + bayerdata[ bPix[11] ] + bayerdata[ bPix[14] ]
+            ) >> 2;
+            debayerto[ rgbPix[3]+2 ] = (uint32_t)(
+                  bayerdata[ bPix[ 5] ] + bayerdata[ bPix[ 7] ]
+                + bayerdata[ bPix[13] ] + bayerdata[ bPix[15] ]
+            ) >> 2;
+        }
+
+        /* Edge fixups (identical to scalar). */
+        uint16_t * edgePixel = debayerto + (3 * Y);
+        edgePixel[0] = edgePixel[3];
+        edgePixel[1] = edgePixel[4];
+        edgePixel[2] = edgePixel[5];
+        edgePixel += nextRowRGB;
+        edgePixel[0] = edgePixel[3];
+        edgePixel[1] = edgePixel[4];
+        edgePixel[2] = edgePixel[5];
+        edgePixel[-1] = edgePixel[-4];
+        edgePixel[-2] = edgePixel[-5];
+        edgePixel[-3] = edgePixel[-6];
+        edgePixel += nextRowRGB;
+        edgePixel[-1] = edgePixel[-4];
+        edgePixel[-2] = edgePixel[-5];
+        edgePixel[-3] = edgePixel[-6];
+    }
+}
+
+#endif /* DEBAYER_AVX2_AVAILABLE */
+
+static int debayer_env_truthy(const char * v)
+{
+    if (!v || !*v) return 0;
+    if (!strcmp(v, "1") || !strcmp(v, "true") || !strcmp(v, "TRUE")
+     || !strcmp(v, "True") || !strcmp(v, "yes") || !strcmp(v, "on")) return 1;
+    return 0;
+}
+
+static pthread_once_t g_debayer_basic_u16_dispatch_once = PTHREAD_ONCE_INIT;
+static debayer_basic_u16_rows_fn_t g_debayer_basic_u16_rows_fn = NULL;
+static int g_debayer_basic_u16_use_avx2 = 0;
+
+static void debayer_basic_u16_dispatch_init(void)
+{
+    int use_avx2 = 0;
+#ifdef DEBAYER_AVX2_AVAILABLE
+    __builtin_cpu_init();
+    use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#endif
+    if (debayer_env_truthy(getenv("MLVAPP_DISABLE_AVX2"))) use_avx2 = 0;
+    if (debayer_env_truthy(getenv("MLVAPP_DISABLE_AVX2_DEBAYER"))) use_avx2 = 0;
+    g_debayer_basic_u16_use_avx2 = use_avx2;
+#ifdef DEBAYER_AVX2_AVAILABLE
+    g_debayer_basic_u16_rows_fn = use_avx2 ? debayer_basic_u16_rows_avx2
+                                           : debayer_basic_u16_rows_scalar;
+#else
+    g_debayer_basic_u16_rows_fn = debayer_basic_u16_rows_scalar;
+#endif
+}
+
+int debayerBasicU16Avx2Active(void)
+{
+    pthread_once(&g_debayer_basic_u16_dispatch_once, debayer_basic_u16_dispatch_init);
+    return g_debayer_basic_u16_use_avx2;
+}
+
+/* Test-only hook: force re-evaluation of the dispatch from current env.
+ * Mirrors processingFastPathReinitDispatchForTesting. Not in the public
+ * header. */
+int debayerBasicU16ReinitDispatchForTesting(void);
+int debayerBasicU16ReinitDispatchForTesting(void)
+{
+    pthread_once(&g_debayer_basic_u16_dispatch_once, debayer_basic_u16_dispatch_init);
+    debayer_basic_u16_dispatch_init();
+    return g_debayer_basic_u16_use_avx2;
+}
+
+void convert_to_log(void * data)
+{
+    // float
+}
+
+void debayerNoneU16(uint16_t * __restrict debayerto,
+                    const uint16_t * __restrict bayerdata,
+                    int width,
+                    int height,
+                    int threads,
+                    int bit_shift)
+{
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int y = 0; y < height; ++y)
+    {
+        const uint16_t * __restrict src_row = bayerdata + ((size_t)y * (size_t)width);
+        uint16_t * __restrict dst_row = debayerto + ((size_t)y * (size_t)width * 3u);
+
+        for (int x = 0; x < width; ++x)
+        {
+            const uint16_t value = (uint16_t)(src_row[x] << bit_shift);
+            dst_row[0] = value;
+            dst_row[1] = value;
+            dst_row[2] = value;
+            dst_row += 3;
+        }
+    }
+}
+
+void debayerBasicU16(uint16_t * __restrict debayerto,
+                     uint16_t * __restrict bayerdata,
+                     int width,
+                     int height,
+                     int threads,
+                     int bit_shift)
+{
+    if (bit_shift > 0)
+    {
+        const int pixel_count = width * height;
+        #pragma omp parallel for if(threads > 1) num_threads(threads)
+        for (int i = 0; i < pixel_count; ++i)
+        {
+            bayerdata[i] = (uint16_t)(bayerdata[i] << bit_shift);
+        }
+    }
+
+    /* Debayer pixel size (limit with 1 pixel border). */
+    int pixelsizeDB;
+    if( height % 2 == 0 )
+        pixelsizeDB = width * (height - 1);
+    else
+        pixelsizeDB = width * (height - 2);
+
+    const int step = width * 2;
+
+    /* Latch the dispatch once, then divide the row-pair sweep across the
+     * OMP thread pool with chunk size 1 so each thread inherits the
+     * pthread_once-cached function pointer. */
+    pthread_once(&g_debayer_basic_u16_dispatch_once, debayer_basic_u16_dispatch_init);
+    debayer_basic_u16_rows_fn_t row_fn = g_debayer_basic_u16_rows_fn;
+
+    /* Width too small for SIMD bulk: fall back to scalar full-row even on
+     * AVX2 hosts. The 16-source-col SIMD step needs widthDB - 1 >= 16,
+     * i.e. width >= 18. Anything less stays scalar to avoid bounds bugs. */
+    if (width < 18)
+    {
+        row_fn = debayer_basic_u16_rows_scalar;
+    }
+
+    #pragma omp parallel for if(threads > 1) num_threads(threads) schedule(static)
+    for (int Y = width; Y < pixelsizeDB; Y += step)
+    {
+        row_fn(debayerto, bayerdata, width, Y);
     }
 
     memcpy(debayerto, debayerto + (width * 3), width * 3 * sizeof(uint16_t));

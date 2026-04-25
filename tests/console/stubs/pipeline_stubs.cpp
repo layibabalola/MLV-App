@@ -158,6 +158,7 @@ void debayerAmaze(uint16_t *, float *, int, int, int, int) {}
 void debayerEasy(uint16_t *, float *, int, int, int, int) {}
 void debayerNoneU16(uint16_t *, const uint16_t *, int, int, int, int) {}
 void debayerBasicU16(uint16_t *, uint16_t *, int, int, int, int) {}
+int debayerBasicU16Avx2Active(void) { return 0; }
 void debayerAhd(uint16_t *, float *, int, int) {}
 void debayerBasic(uint16_t *, float *, int, int, int) {}
 

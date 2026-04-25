@@ -8,10 +8,12 @@
 
 #include "../../src/mlv/llrawproc/llrawproc.h"
 #include "../../src/processing/raw_processing.h"
+#include "../../src/debayer/debayer.h"
 
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <QString>
 
 static void assert_fixture_ready(MlvPipelineFixture & fixture)
@@ -426,6 +428,140 @@ TEST(DualIsoPipeline, DirectProcessed8FastPathAvx2PathActiveOnCapableHost)
     }
 
     ASSERT_TRUE(processingFastPathAvx2Active() != 0);
+}
+
+/* Forward decl of a test-only hook implemented in src/debayer/debayer.c.
+ * Re-runs the runtime dispatch from the current env so we can flip the
+ * AVX2 fast path on/off mid-suite. */
+extern "C" int debayerBasicU16ReinitDispatchForTesting(void);
+
+/* Parity check: AVX2 fast path of debayerBasicU16 must produce
+ * byte-identical output to the scalar reference. The kernel is the
+ * bilinear debayer used during Dual ISO playback when receipt debayer=0.
+ *
+ * Strategy: synthesize a deterministic 14-bit Bayer frame, run the
+ * scalar path with MLVAPP_DISABLE_AVX2_DEBAYER=1, snapshot the output,
+ * then run the AVX2 path and assert byte-for-byte equality. The width
+ * is chosen so the SIMD bulk + scalar tail path are both exercised
+ * (width >= 18 enables SIMD; widthDB-1 not divisible by 16 forces a
+ * non-trivial tail). */
+TEST(DualIsoPipeline, DebayerBasicU16_AVX2ByteIdentity)
+{
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+    /* Test grid: a few widths chosen to exercise the SIMD bulk + scalar
+     * tail at different alignments. Heights are even so pixelsizeDB
+     * uses the height-1 branch. */
+    struct Case { int width; int height; };
+    const Case cases[] = {
+        { 64,   8 },   /* small, pure SIMD */
+        { 80,   16 },  /* SIMD plus a scalar tail of one block */
+        { 127,  20 },  /* odd width, irregular tail */
+        { 256,  32 },  /* larger, multiple SIMD passes */
+        { 33,   12 },  /* near the SIMD threshold */
+    };
+
+    for (const Case & c : cases) {
+        const std::size_t n_pixels = static_cast<std::size_t>(c.width) * static_cast<std::size_t>(c.height);
+        std::vector<uint16_t> bayer_in(n_pixels);
+        /* Deterministic 14-bit pattern; LSBs vary so the (a+b)>>1 / (a+b+c+d)>>2
+         * truncation-vs-round corrections actually trigger. */
+        for (std::size_t i = 0; i < n_pixels; ++i) {
+            bayer_in[i] = static_cast<uint16_t>((i * 37u + (i >> 3) * 13u + 1u) & 0x3FFFu);
+        }
+
+        std::vector<uint16_t> bayer_scalar = bayer_in;
+        std::vector<uint16_t> bayer_avx2   = bayer_in;
+        std::vector<uint16_t> out_scalar(n_pixels * 3u, 0);
+        std::vector<uint16_t> out_avx2(n_pixels * 3u, 0);
+
+        /* Stage 1: force scalar via MLVAPP_DISABLE_AVX2_DEBAYER. */
+#ifdef _WIN32
+        _putenv_s("MLVAPP_DISABLE_AVX2_DEBAYER", "1");
+#else
+        setenv("MLVAPP_DISABLE_AVX2_DEBAYER", "1", 1);
+#endif
+        debayerBasicU16ReinitDispatchForTesting();
+        ASSERT_EQ(0, debayerBasicU16Avx2Active());
+        debayerBasicU16(out_scalar.data(), bayer_scalar.data(),
+                        c.width, c.height, /*threads*/1, /*bit_shift*/0);
+
+        /* Stage 2: enable AVX2 path. */
+#ifdef _WIN32
+        _putenv_s("MLVAPP_DISABLE_AVX2_DEBAYER", "");
+#else
+        unsetenv("MLVAPP_DISABLE_AVX2_DEBAYER");
+#endif
+        const int avx2_active = debayerBasicU16ReinitDispatchForTesting();
+        ASSERT_TRUE(avx2_active != 0);
+        debayerBasicU16(out_avx2.data(), bayer_avx2.data(),
+                        c.width, c.height, /*threads*/1, /*bit_shift*/0);
+
+        /* Byte-for-byte equality. */
+        for (std::size_t i = 0; i < out_scalar.size(); ++i) {
+            if (out_scalar[i] != out_avx2[i]) {
+                std::fprintf(stderr,
+                             "DebayerBasicU16_AVX2ByteIdentity mismatch: "
+                             "case w=%d h=%d index=%llu scalar=%u avx2=%u\n",
+                             c.width, c.height,
+                             static_cast<unsigned long long>(i),
+                             static_cast<unsigned>(out_scalar[i]),
+                             static_cast<unsigned>(out_avx2[i]));
+                ASSERT_EQ(out_scalar[i], out_avx2[i]);
+            }
+        }
+    }
+
+    /* Restore default dispatch. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DEBAYER", "");
+#else
+    unsetenv("MLVAPP_DISABLE_AVX2_DEBAYER");
+#endif
+    debayerBasicU16ReinitDispatchForTesting();
+}
+
+/* Path-selection check: on a capable host with the kill switch unset,
+ * the bilinear debayer must latch the AVX2 fast path. */
+TEST(DualIsoPipeline, DebayerBasicU16_Avx2PathActiveOnCapableHost)
+{
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DEBAYER", "");
+#else
+    unsetenv("MLVAPP_DISABLE_AVX2_DEBAYER");
+#endif
+    debayerBasicU16ReinitDispatchForTesting();
+    ASSERT_TRUE(debayerBasicU16Avx2Active() != 0);
 }
 
 TEST(DualIsoPipeline, HeadlessDualIsoPreviewAutoDetectsPatternAndKeepsItAcrossFrames)
