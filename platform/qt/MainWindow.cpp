@@ -9831,29 +9831,67 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     }
     m_pPlaybackQualityIndicator->show();
 
+    /* The actual render uses env vars (MLVAPP_PLAYBACK_SCALE_FACTOR and
+     * MLVAPP_PLAYBACK_PREFER_HQ_MEAN23) at higher priority than the
+     * QSettings-stored mode (see effectivePlaybackScaleFactorForRequest()
+     * + the env-var probe at the requestContext build site). The
+     * indicator must reflect what is ACTUALLY happening, not what is
+     * stored, otherwise users who have an env var set see a misleading
+     * "Quality: Fast" while the pipeline is really running HQ x4.
+     * Detect env-var override first, surface "[env]" suffix so it is
+     * obvious the GUI dial is being bypassed, and color-code by the
+     * effective behaviour rather than the stored mode. */
+    const int envScale = playback_scale_factor_env_override();
+    const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
+    const bool envOverrideActive = ( envScale == 1 || envScale == 2 || envScale == 4 ) || envHq;
+
     QString text;
     QString color;
-    const int scale = m_playbackQualityActiveScale;
-    const bool hq = m_playbackQualityActiveHq;
-    switch ( m_playbackQualityMode )
+    if ( envOverrideActive )
     {
-        case 0:
-            text = tr( "Quality: Fast" );
-            color = QStringLiteral( "#A0A0A0" );
-            break;
-        case 1:
-            text = tr( "Quality: HQ x%1" ).arg( scale );
+        const int effScale = ( envScale == 1 || envScale == 2 || envScale == 4 )
+                                 ? envScale
+                                 : m_playbackQualityActiveScale;
+        if ( envHq )
+        {
+            text = tr( "Quality: HQ x%1 [env]" ).arg( effScale );
             color = QStringLiteral( "#7CCB6E" );
-            break;
-        case 2:
-            text = hq ? tr( "Quality: Auto (HQ x%1)" ).arg( scale )
-                      : tr( "Quality: Auto (Fast)" );
-            color = QStringLiteral( "#5DADE2" );
-            break;
-        default:
-            text = tr( "Quality: ?" );
+        }
+        else if ( effScale > 1 )
+        {
+            text = tr( "Quality: Fast x%1 [env]" ).arg( effScale );
             color = QStringLiteral( "#A0A0A0" );
-            break;
+        }
+        else
+        {
+            text = tr( "Quality: Fast [env]" );
+            color = QStringLiteral( "#A0A0A0" );
+        }
+    }
+    else
+    {
+        const int scale = m_playbackQualityActiveScale;
+        const bool hq = m_playbackQualityActiveHq;
+        switch ( m_playbackQualityMode )
+        {
+            case 0:
+                text = tr( "Quality: Fast" );
+                color = QStringLiteral( "#A0A0A0" );
+                break;
+            case 1:
+                text = tr( "Quality: HQ x%1" ).arg( scale );
+                color = QStringLiteral( "#7CCB6E" );
+                break;
+            case 2:
+                text = hq ? tr( "Quality: Auto (HQ x%1)" ).arg( scale )
+                          : tr( "Quality: Auto (Fast)" );
+                color = QStringLiteral( "#5DADE2" );
+                break;
+            default:
+                text = tr( "Quality: ?" );
+                color = QStringLiteral( "#A0A0A0" );
+                break;
+        }
     }
     m_pPlaybackQualityIndicator->setText( text );
     m_pPlaybackQualityIndicator->setStyleSheet(
