@@ -3457,11 +3457,20 @@ void MainWindow::initGui( void )
         m_pPlaybackQualityToolButton->setMenu( m_pPlaybackQualityToolButtonMenu );
         m_pPlaybackQualityToolButton->setPopupMode( QToolButton::InstantPopup );
         m_pPlaybackQualityToolButton->setToolButtonStyle( Qt::ToolButtonTextOnly );
-        m_pPlaybackQualityToolButton->setText( tr( "Quality: Fast" ) );
+        /* Click-affordance: default Qt QToolButton has autoRaise=true, which
+         * draws no border until hover and makes the button look like a flat
+         * label. Set it false so the button always renders with a proper
+         * raised frame, matching the icon-buttons next to it on the toolbar. */
+        m_pPlaybackQualityToolButton->setAutoRaise( false );
+        /* Append a downward triangle glyph to the text so users see at a
+         * glance that this is a dropdown control, not a static label. The
+         * glyph is preserved across mode changes by updatePlaybackQualityIndicator. */
+        m_pPlaybackQualityToolButton->setText( tr( "Quality: Fast ▾" ) );
         m_pPlaybackQualityToolButton->setToolTip(
             tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
                 "(HQ matched-pair, cast-closed), or Auto (adapts to target fps).\n"
                 "Keyboard shortcut: Q" ) );
+        m_pPlaybackQualityToolButton->setCursor( Qt::PointingHandCursor );
         ui->mainToolBar->addSeparator();
         ui->mainToolBar->addWidget( m_pPlaybackQualityToolButton );
     }
@@ -9959,9 +9968,31 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     //remain visible/up-to-date regardless of that toggle.
     if ( m_pPlaybackQualityToolButton )
     {
-        m_pPlaybackQualityToolButton->setText( text );
-        m_pPlaybackQualityToolButton->setStyleSheet(
-            QStringLiteral( "QToolButton { color: %1; padding: 2px 8px; }" ).arg( color ) );
+        /* Append ▾ glyph so users see this is a dropdown control. The status
+         * bar QLabel doesn't need it (it's a readout, not a control), so we
+         * append the glyph here only on the toolbar button. */
+        m_pPlaybackQualityToolButton->setText( text + QStringLiteral( " ▾" ) );
+        /* Stylesheet gives the button a visible border, hover highlight, and
+         * pressed/menu-open state — matching the visual weight of the
+         * icon-buttons (skip-back, play, etc.) next to it on the toolbar.
+         * Color is the same accent used by the status-bar indicator. */
+        m_pPlaybackQualityToolButton->setStyleSheet( QStringLiteral(
+            "QToolButton {"
+            "  color: %1;"
+            "  padding: 4px 10px;"
+            "  border: 1px solid #444;"
+            "  border-radius: 3px;"
+            "  background: rgba(255,255,255,0.04);"
+            "}"
+            "QToolButton:hover {"
+            "  border: 1px solid %1;"
+            "  background: rgba(255,255,255,0.10);"
+            "}"
+            "QToolButton:pressed, QToolButton:menu-active {"
+            "  background: rgba(255,255,255,0.16);"
+            "  border: 1px solid %1;"
+            "}"
+        ).arg( color ) );
     }
 }
 
