@@ -39,6 +39,11 @@ platform/build-*
 *build*
 .qtcreator
 
+# Docs tree is the canonical documentation set; track it even if filenames
+# happen to contain "build" (e.g. 10-build-windows.md).
+!docs/
+!docs/**
+
 # Agent working state — profiling runs, ephemeral analysis, stashed artifacts.
 # Durable findings go under .claude/ and are tracked; .claude-state/ is scratch.
 .claude-state/
