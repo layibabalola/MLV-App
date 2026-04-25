@@ -234,6 +234,16 @@ typedef struct {
     int processed8_prefetch_last_request_threads;
     uint64_t processed8_prefetch_last_state_signature;
     uint32_t processed8_prefetch_generation;
+    /* Phase E6: scaleFactor accompanying the most recent note_request. The
+     * worker uses this to record the slot's `scale` lane (so render-thread
+     * lookups at the same scale match) and to set
+     * playback_scale_factor_active before the worker's render call (so the
+     * direct8 path runs the same downsample / scaled debayer as the live
+     * path would). The state signature already encodes scale via Phase 4A,
+     * but the slot-match comparator additionally checks the raw scale lane,
+     * so both must agree. */
+    int processed8_prefetch_request_scale;
+    int processed8_prefetch_last_request_scale;
 
     /* Massive block of memory for all frames that will be cached, pointers in rgb_raw_frames will point within here, 
      * using one big block block to try and avoid fragmentation (I feel that may be one of the causes of growth) */

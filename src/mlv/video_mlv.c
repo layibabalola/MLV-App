@@ -1600,6 +1600,7 @@ static int mlv_processed_frame_8bit_cache_try_copy(mlvObject_t * video,
                                                    int allow_prefetched_hit,
                                                    uint8_t * outputFrame,
                                                    uint64_t rgb_frame_size,
+                                                   int scaleFactor,
                                                    int * prefetched)
 {
     int hit = 0;
@@ -1609,7 +1610,11 @@ static int mlv_processed_frame_8bit_cache_try_copy(mlvObject_t * video,
     }
 
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
-    int slot = mlv_find_processed_frame_8bit_cache_slot_locked(video, frameIndex, threads, signature);
+    int slot = mlv_find_processed_frame_8bit_cache_slot_locked_with_scale(video,
+                                                                          frameIndex,
+                                                                          threads,
+                                                                          signature,
+                                                                          scaleFactor);
     if (slot >= 0)
     {
         uint8_t * cached_frame = mlv_processed_frame_8bit_cache_slot(video, (uint32_t)slot, rgb_frame_size);
@@ -1652,6 +1657,7 @@ static void mlv_reset_processed8_prefetch_locked(mlvObject_t * video)
     video->processed8_prefetch_worker_busy = 0;
     video->processed8_prefetch_request_frame = 0;
     video->processed8_prefetch_request_threads = 0;
+    video->processed8_prefetch_request_scale = 0;
     mlv_reset_processed_frame_8bit_cache_locked(video);
 }
 
@@ -1667,7 +1673,8 @@ static int mlv_start_processed8_prefetch_thread(mlvObject_t * video);
 static void mlv_processed8_prefetch_note_request(mlvObject_t * video,
                                                  uint64_t frameIndex,
                                                  int threads,
-                                                 uint64_t stateSignature)
+                                                 uint64_t stateSignature,
+                                                 int scaleFactor)
 {
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
 
@@ -1681,10 +1688,16 @@ static void mlv_processed8_prefetch_note_request(mlvObject_t * video,
         pthread_mutex_lock(&video->processed8_prefetch_mutex);
     }
 
+    /* Phase E6: scaleFactor change must invalidate the prefetch generation
+     * the same way the state signature already does. (The state signature
+     * encodes scale via Phase 4A, so this is in practice subsumed by the
+     * stateSignature comparison below; we guard explicitly anyway in case
+     * future hash refactors decouple them.) */
     if ((video->processed8_prefetch_last_request_frame + 1 != frameIndex
          && video->processed8_prefetch_last_request_frame != frameIndex)
         || video->processed8_prefetch_last_request_threads != threads
-        || video->processed8_prefetch_last_state_signature != stateSignature)
+        || video->processed8_prefetch_last_state_signature != stateSignature
+        || video->processed8_prefetch_last_request_scale != scaleFactor)
     {
         ++video->processed8_prefetch_generation;
         mlv_reset_processed8_prefetch_locked(video);
@@ -1700,8 +1713,10 @@ static void mlv_processed8_prefetch_note_request(mlvObject_t * video,
     video->processed8_prefetch_last_request_frame = frameIndex;
     video->processed8_prefetch_last_request_threads = threads;
     video->processed8_prefetch_last_state_signature = stateSignature;
+    video->processed8_prefetch_last_request_scale = scaleFactor;
     video->processed8_prefetch_request_frame = frameIndex;
     video->processed8_prefetch_request_threads = threads;
+    video->processed8_prefetch_request_scale = scaleFactor;
     video->processed8_prefetch_request_pending = 1;
     pthread_cond_signal(&video->processed8_prefetch_cond);
     pthread_mutex_unlock(&video->processed8_prefetch_mutex);
@@ -1718,6 +1733,10 @@ typedef struct
     uint64_t rgb_frame_size;
     uint32_t offsetStart;
     uint32_t offsetStep;
+    int scaleFactor; /* Phase E6: must match the render thread's normalizedScale
+                      * so the cache slot's `scale` lane lines up with the
+                      * lookup. Without this, store-with-scale=4 vs
+                      * lookup-with-scale=1 misses every time. */
 } mlv_processed8_prefetch_task_t;
 
 static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_task_t * task)
@@ -1756,11 +1775,12 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             continue;
         }
 
-        if (mlv_processed_frame_8bit_cache_contains_locked(task->video,
-                                                           targetFrame,
-                                                           task->threads,
-                                                           targetSignature,
-                                                           task->generation))
+        if (mlv_processed_frame_8bit_cache_contains_locked_with_scale(task->video,
+                                                                      targetFrame,
+                                                                      task->threads,
+                                                                      targetSignature,
+                                                                      task->generation,
+                                                                      task->scaleFactor))
         {
             pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
             continue;
@@ -1773,6 +1793,15 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             continue;
         }
 
+        /* Phase E6: the direct render reads playback_scale_factor_active
+         * from the video object to decide whether to invoke the fused
+         * downsample. The render thread sets this before calling the
+         * direct path (line ~3499). When the worker pre-renders we must
+         * mirror that contract — without it the worker would render at
+         * full resolution but store under the scale-N cache lane (or vice
+         * versa), invalidating any byte-identity assumption. */
+        const int saved_scale = task->video->playback_scale_factor_active;
+        task->video->playback_scale_factor_active = task->scaleFactor;
         int renderOk = mlv_render_processed_frame8_direct_with_processing(
             task->video,
             task->processing,
@@ -1781,25 +1810,28 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             prefetchBuffer,
             task->threads,
             0);
+        task->video->playback_scale_factor_active = saved_scale;
 
         pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
         if (renderOk
             && !task->video->processed8_prefetch_stop
             && task->generation == task->video->processed8_prefetch_generation
-            && !mlv_processed_frame_8bit_cache_contains_locked(task->video,
-                                                               targetFrame,
-                                                               task->threads,
-                                                               targetSignature,
-                                                               task->generation))
+            && !mlv_processed_frame_8bit_cache_contains_locked_with_scale(task->video,
+                                                                          targetFrame,
+                                                                          task->threads,
+                                                                          targetSignature,
+                                                                          task->generation,
+                                                                          task->scaleFactor))
         {
-            mlv_store_processed_frame_8bit_cache_locked(task->video,
-                                                        targetFrame,
-                                                        task->threads,
-                                                        targetSignature,
-                                                        prefetchBuffer,
-                                                        task->rgb_frame_size,
-                                                        0,
-                                                        1);
+            mlv_store_processed_frame_8bit_cache_locked_with_scale(task->video,
+                                                                   targetFrame,
+                                                                   task->threads,
+                                                                   targetSignature,
+                                                                   prefetchBuffer,
+                                                                   task->rgb_frame_size,
+                                                                   0,
+                                                                   1,
+                                                                   task->scaleFactor);
         }
         pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
     }
@@ -1808,7 +1840,6 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
 static void * mlv_processed8_prefetch_thread_main(void * opaque)
 {
     mlvObject_t * video = (mlvObject_t *)opaque;
-    const uint64_t rgb_frame_size = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     processingObject_t * prefetchProcessing = initProcessingObject();
 
     while (1)
@@ -1826,6 +1857,18 @@ static void * mlv_processed8_prefetch_thread_main(void * opaque)
             break;
         }
 
+        /* Phase E6: rgb_frame_size depends on the requested scale; size the
+         * cache buffer to match what the slot store will write. Computing
+         * this from the active request keeps store and lookup byte-sized
+         * the same way. */
+        const int requestScale = mlv_normalize_playback_scale_factor(
+            video->processed8_prefetch_request_scale);
+        const int full_w = (int)getMlvWidth(video);
+        const int full_h = (int)getMlvHeight(video);
+        const int out_w = (requestScale > 1) ? (full_w / requestScale) : full_w;
+        const int out_h = (requestScale > 1) ? (full_h / requestScale) : full_h;
+        const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
+
         if (!mlv_prepare_processed_frame_8bit_cache_locked(video, rgb_frame_size))
         {
             video->processed8_prefetch_request_pending = 0;
@@ -1835,6 +1878,7 @@ static void * mlv_processed8_prefetch_thread_main(void * opaque)
 
         uint64_t baseFrame = video->processed8_prefetch_request_frame;
         int threads = video->processed8_prefetch_request_threads;
+        int taskScale = requestScale;
         uint64_t stateSignature = video->processed8_prefetch_last_state_signature;
         uint32_t generation = video->processed8_prefetch_generation;
         if (prefetchProcessing && video->processed8_prefetch_processing)
@@ -1855,7 +1899,8 @@ static void * mlv_processed8_prefetch_thread_main(void * opaque)
             .generation = generation,
             .rgb_frame_size = rgb_frame_size,
             .offsetStart = 1,
-            .offsetStep = 1
+            .offsetStep = 1,
+            .scaleFactor = taskScale
         };
         mlv_processed8_prefetch_execute_task(&primaryTask);
 
@@ -3523,7 +3568,8 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
             mlv_processed8_prefetch_note_request(video,
                                                 frameIndex,
                                                 threads,
-                                                requested_state_signature);
+                                                requested_state_signature,
+                                                normalizedScale);
         }
     }
 
@@ -3539,6 +3585,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
                                                 processed8PrefetchActive,
                                                 outputFrame,
                                                 rgb_frame_size,
+                                                normalizedScale,
                                                 &prefetched_hit))
     {
         g_mlv_last_processed8_prefetch_hit = prefetched_hit;
