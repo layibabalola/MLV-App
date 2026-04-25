@@ -656,32 +656,57 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 //The dropEvent() is used to unpack dropped data and handle it in way that is suitable for your application.
 void MainWindow::dropEvent(QDropEvent *event)
 {
-    QStringList list;
-    if( event->mimeData()->urls().size() > 0 )
+    // Convert dropped URLs to native filesystem paths via toLocalFile().
+    // The previous implementation used QUrl::path() + a Q_OS_WIN leading-slash
+    // strip in openMlvSet(), which works for drive-letter URLs like
+    // file:///E:/foo (path() returns "/E:/foo") but mangles UNC paths like
+    // file://server/share/foo (path() returns "/share/foo", losing the host).
+    // Mapped network drives that resolve to a UNC underneath would land in
+    // openMlv() with a path missing the server prefix and fail to open
+    // (2026-04-24 user report on \\ultra-magnus\e\... drag-drop).
+    // toLocalFile() is the documented Qt API for this conversion: returns
+    // "E:/foo" for drive letters and "//server/share/foo" for UNC.
+    const QList<QUrl> urls = event->mimeData()->urls();
+    if( urls.isEmpty() )
     {
-        if( event->mimeData()->urls().at(0).path().endsWith( ".MLV", Qt::CaseInsensitive )
-         || event->mimeData()->urls().at(0).path().endsWith( ".MCRAW", Qt::CaseInsensitive )
-         || event->mimeData()->urls().at(0).path().endsWith( ".FPM", Qt::CaseInsensitive )
-         || event->mimeData()->urls().at(0).path().endsWith( ".COMMAND", Qt::CaseInsensitive ) )
-        {
-            for( int i = 0; i < event->mimeData()->urls().size(); i++ )
-            {
-                list.append( event->mimeData()->urls().at(i).path() );
-            }
-            openMlvSet( list );
-        }
-        else if( event->mimeData()->urls().at(0).path().endsWith( ".masxml", Qt::CaseInsensitive ) )
-        {
-            if( SESSION_CLIP_COUNT && askToSaveCurrentSession() ) return;
+        event->acceptProposedAction();
+        return;
+    }
 
-            m_inOpeningProcess = true;
-            openSession( event->mimeData()->urls().at(0).path() );
-            //Show last imported file
-            if( SESSION_CLIP_COUNT ) showFileInEditor( SESSION_CLIP_COUNT - 1 );
-            m_inOpeningProcess = false;
-            m_sessionFileName = event->mimeData()->urls().at(0).path();
-            selectDebayerAlgorithm();
-        }
+    QStringList localPaths;
+    localPaths.reserve( urls.size() );
+    for( const QUrl & url : urls )
+    {
+        const QString localPath = url.toLocalFile();
+        if( !localPath.isEmpty() )
+            localPaths.append( localPath );
+    }
+
+    if( localPaths.isEmpty() )
+    {
+        event->acceptProposedAction();
+        return;
+    }
+
+    const QString & firstPath = localPaths.at(0);
+    if( firstPath.endsWith( ".MLV", Qt::CaseInsensitive )
+     || firstPath.endsWith( ".MCRAW", Qt::CaseInsensitive )
+     || firstPath.endsWith( ".FPM", Qt::CaseInsensitive )
+     || firstPath.endsWith( ".COMMAND", Qt::CaseInsensitive ) )
+    {
+        openMlvSet( localPaths );
+    }
+    else if( firstPath.endsWith( ".masxml", Qt::CaseInsensitive ) )
+    {
+        if( SESSION_CLIP_COUNT && askToSaveCurrentSession() ) return;
+
+        m_inOpeningProcess = true;
+        openSession( firstPath );
+        //Show last imported file
+        if( SESSION_CLIP_COUNT ) showFileInEditor( SESSION_CLIP_COUNT - 1 );
+        m_inOpeningProcess = false;
+        m_sessionFileName = firstPath;
+        selectDebayerAlgorithm();
     }
     event->acceptProposedAction();
 }
@@ -693,8 +718,16 @@ void MainWindow::openMlvSet( QStringList list )
     for( int i = 0; i < list.size(); i++ )
     {
         QString fileName = list.at(i);
-#ifdef Q_OS_WIN //Qt Bug?
-        if( fileName.startsWith( "/" ) ) fileName.remove( 0, 1 );
+#ifdef Q_OS_WIN
+        // Legacy band-aid: callers used to pass QUrl::path() output which
+        // prepends a leading "/" on Windows for drive-letter paths
+        // (e.g. "/E:/foo"). Both drop-event paths now use toLocalFile()
+        // so this should be a no-op, but kept defensively in case any
+        // remaining caller still passes path()-style strings. CRITICAL:
+        // do NOT strip the leading "//" of a UNC path — that converts
+        // "//server/share/foo" to "/server/share/foo" (invalid).
+        if( fileName.startsWith( "/" ) && !fileName.startsWith( "//" ) )
+            fileName.remove( 0, 1 );
 #endif
 
         if( i == 0 && QFile(fileName).exists() && fileName.endsWith( ".command", Qt::CaseInsensitive ) )

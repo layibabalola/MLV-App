@@ -85,10 +85,19 @@ void GraphicsPickerScene::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
 //Drop Event for opening MLV files
 void GraphicsPickerScene::dropEvent(QGraphicsSceneDragDropEvent *event)
 {
+    // toLocalFile() returns native filesystem paths for both drive-letter
+    // URLs (file:///E:/foo -> "E:/foo") and UNC URLs
+    // (file://server/share/foo -> "//server/share/foo"). The previous
+    // implementation used QUrl::path() which loses the host on UNC,
+    // mangling \\ultra-magnus\e\... drag-drops to "e/..." (2026-04-24).
+    const QList<QUrl> urls = event->mimeData()->urls();
     QStringList list;
-    for( int i = 0; i < event->mimeData()->urls().count(); i++ )
+    list.reserve( urls.size() );
+    for( const QUrl & url : urls )
     {
-        list.append( event->mimeData()->urls().at(i).path() );
+        const QString localPath = url.toLocalFile();
+        if( !localPath.isEmpty() )
+            list.append( localPath );
     }
     emit filesDropped( list );
     event->acceptProposedAction();
