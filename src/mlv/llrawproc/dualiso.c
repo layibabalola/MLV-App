@@ -159,26 +159,43 @@ static void dualiso_rowscale_avx2(int width, int height, int dark_row_start,
                                   uint16_t shadow)
 {
     /* Hot kernel: 16 uint16/iter via two 8-float halves through FMA.
-     * Edge rows (y < 2 or y >= height - 2) and saturated/shadow lanes use
-     * scalar fallbacks so we don't have to cross-row gather in SIMD. */
-    const __m256 af     = _mm256_set1_ps((float)a);
-    const __m256 bf     = _mm256_set1_ps((float)b);
-    const __m256 blackf = _mm256_set1_ps((float)black);
-    const __m256 whitef = _mm256_set1_ps((float)white);
-    const __m256 zerof  = _mm256_setzero_ps();
+     * Edge rows use scalar fallbacks. The "edge" range is intentionally
+     * wider than (y < 2 || y >= height - 2): the scalar reference treats
+     * y == 2 (and y == height - 3) as a *boundary* case for saturated /
+     * shadow lanes, where it skips the cross-row averaging that the
+     * steady-state body performs. The SIMD body's saturated/shadow patch
+     * unconditionally averages output[idx - 2w] with source[idx + 2w],
+     * which is the y > 2 formula and disagrees with scalar at exactly the
+     * y == 2 boundary. Treating y == 2 as an edge row pushes that boundary
+     * back into the scalar fallback and yields byte-identity vs scalar.
+     * Cost: 1 additional scalar row out of ~2200 (negligible). The
+     * RowscaleAvx2ByteIdentityVsScalar parity test guards against a
+     * regression on this boundary. */
+    /* Constants in pd (double) so the FMA chain matches scalar bit-for-bit
+     * on the values that previously drifted by 1 ULP in float32. The float
+     * lo/hi vectors are kept for the integer<->float round trip and the
+     * non-FMA tests; only the multiply/add chain runs in pd. */
+    const __m256d ad     = _mm256_set1_pd(a);
+    const __m256d blackd = _mm256_set1_pd((double)black);
+    const __m256d zeroed = _mm256_setzero_pd();
+    const __m256d whited = _mm256_set1_pd((double)white);
+    /* Match scalar associativity exactly: `(((src - black) * a) + black) + b`,
+     * NOT a 3-arg fmadd. Two separate add steps preserve scalar rounding. */
+    const __m256d bd     = _mm256_set1_pd(b);
     const __m256i white_u16  = _mm256_set1_epi16((int16_t)white);
     const __m256i bias_xor   = _mm256_set1_epi16((int16_t)0x8000);
     const __m256i shadow_biased = _mm256_set1_epi16((int16_t)((shadow ^ 0x8000) & 0xFFFF));
     const __m256i zero_i = _mm256_setzero_si256();
-    /* black + b broadcast for the FMA: out = (src - black) * a + (black + b). */
-    const __m256 black_plus_b = _mm256_add_ps(blackf, bf);
 
     for(int y = 0; y < height; y++)
     {
         const int row_start = y * width;
         const int row_end   = row_start + width;
         const int is_bright = (((y - dark_row_start + 4) % 4) >= 2);
-        const int edge_row  = (y < 2) || (y >= height - 2) || (width < 16);
+        /* Treat y in [0, 2] and [height-3, height-1] as edge so the SIMD
+         * body only runs on rows where the y > 2 / y < height - 2 fast
+         * paths in the scalar reference both apply. */
+        const int edge_row  = (y < 3) || (y >= height - 3) || (width < 16);
 
         /* Edge rows or narrow widths: scalar full-row. Cheap because rare
          * (only 4 rows out of ~2200 typically). */
@@ -231,19 +248,42 @@ static void dualiso_rowscale_avx2(int width, int height, int dark_row_start,
                 /* Saturated mask: src >= white. max(src,white)==src iff src>=white. */
                 __m256i sat_mask = _mm256_cmpeq_epi16(_mm256_max_epu16(src_v, white_u16), src_v);
 
-                /* Convert to two halves of 8 floats each. */
+                /* Convert to four pd-quartets (4 doubles per reg, 16 lanes
+                 * total). The float intermediate path was 1 ULP off scalar
+                 * for borderline values; full-double matches scalar
+                 * byte-for-byte. */
                 __m256i lo_i32 = _mm256_unpacklo_epi16(src_v, zero_i);
                 __m256i hi_i32 = _mm256_unpackhi_epi16(src_v, zero_i);
-                __m256  lo_f   = _mm256_cvtepi32_ps(lo_i32);
-                __m256  hi_f   = _mm256_cvtepi32_ps(hi_i32);
+                __m256d q0 = _mm256_cvtepi32_pd(_mm256_castsi256_si128(lo_i32));
+                __m256d q1 = _mm256_cvtepi32_pd(_mm256_extracti128_si256(lo_i32, 1));
+                __m256d q2 = _mm256_cvtepi32_pd(_mm256_castsi256_si128(hi_i32));
+                __m256d q3 = _mm256_cvtepi32_pd(_mm256_extracti128_si256(hi_i32, 1));
 
-                /* (src - black) * a + (black + b) */
-                lo_f = _mm256_fmadd_ps(_mm256_sub_ps(lo_f, blackf), af, black_plus_b);
-                hi_f = _mm256_fmadd_ps(_mm256_sub_ps(hi_f, blackf), af, black_plus_b);
+                /* Match scalar: ((src - black) * a + black) + b. The two
+                 * trailing adds are *not* fused so the rounding boundary
+                 * matches the scalar reference's three rounding steps. */
+                q0 = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(_mm256_sub_pd(q0, blackd), ad), blackd), bd);
+                q1 = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(_mm256_sub_pd(q1, blackd), ad), blackd), bd);
+                q2 = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(_mm256_sub_pd(q2, blackd), ad), blackd), bd);
+                q3 = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(_mm256_sub_pd(q3, blackd), ad), blackd), bd);
 
-                /* clamp to [0, white] */
-                lo_f = _mm256_min_ps(_mm256_max_ps(lo_f, zerof), whitef);
-                hi_f = _mm256_min_ps(_mm256_max_ps(hi_f, zerof), whitef);
+                /* Clamp to [0, white]. The scalar uses MIN(white, .) but no
+                 * lower bound — that's UB on negative values cast to uint16.
+                 * The AVX2 path explicitly clamps to [0, white] which is the
+                 * documented behaviour we want. */
+                q0 = _mm256_min_pd(_mm256_max_pd(q0, zeroed), whited);
+                q1 = _mm256_min_pd(_mm256_max_pd(q1, zeroed), whited);
+                q2 = _mm256_min_pd(_mm256_max_pd(q2, zeroed), whited);
+                q3 = _mm256_min_pd(_mm256_max_pd(q3, zeroed), whited);
+
+                /* Truncate-to-int matches scalar's `(uint16_t)double_value`
+                 * cast (truncation toward zero). */
+                __m128i p0 = _mm256_cvttpd_epi32(q0);
+                __m128i p1 = _mm256_cvttpd_epi32(q1);
+                __m128i p2 = _mm256_cvttpd_epi32(q2);
+                __m128i p3 = _mm256_cvttpd_epi32(q3);
+                __m256i lo_p = _mm256_inserti128_si256(_mm256_castsi128_si256(p0), p1, 1);
+                __m256i hi_p = _mm256_inserti128_si256(_mm256_castsi128_si256(p2), p3, 1);
 
                 /* repack to uint16. With lo_p coming from unpacklo (src lanes
                  * [0..3, 8..11]) and hi_p from unpackhi (src lanes [4..7,
@@ -260,13 +300,14 @@ static void dualiso_rowscale_avx2(int width, int height, int dark_row_start,
                  * identity test RowscaleAvx2ByteIdentityVsScalar guards
                  * against regression. See debayer.c:167-176 for the same
                  * pattern. */
-                __m256i lo_p = _mm256_cvttps_epi32(lo_f);
-                __m256i hi_p = _mm256_cvttps_epi32(hi_f);
                 __m256i scaled = _mm256_packus_epi32(lo_p, hi_p);
 
                 _mm256_storeu_si256((__m256i*)&output_image[i], scaled);
 
-                /* Patch saturated lanes scalarly (rare path, <5% typical). */
+                /* Patch saturated lanes scalarly (rare path, <5% typical).
+                 * The y == 2 boundary is in the edge_row fallback so the
+                 * `y > 2` formula here is unconditionally correct for the
+                 * SIMD-eligible rows. */
                 int sat_mm = _mm256_movemask_epi8(sat_mask);
                 if (sat_mm)
                 {

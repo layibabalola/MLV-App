@@ -476,16 +476,29 @@ TEST(DualIsoPipeline, RowscaleAvx2ByteIdentityVsScalar)
                      static_cast<unsigned long long>(scalar_huge),
                      static_cast<unsigned long long>(avx2_huge));
     }
-    /* Pre-fix (with the buggy 0xD8 permute): ~12% of pixels differ with
-     * max|d| ~3352 (lane-permute scrambles 16-pixel groups across rows).
-     * Post-fix: residual ~0.05% of pixels with max|d| ~1852, attributed
-     * to scalar-double vs AVX2-float32 precision in the rowscale FMA on
-     * Bayer-channels with extreme regression slopes. The bound below
-     * catches the lane-permute regression with margin (1% pixels) while
-     * allowing the residual float-vs-double drift. The lane-permute bug
-     * gave 12.2% diffs, so 1% gates the regression cleanly. */
-    const std::uint64_t total_pixels = static_cast<std::uint64_t>(scalar_raw.size());
-    ASSERT_TRUE(differing * 100ull <= total_pixels * 1ull);
+    /* Bug history:
+     *   - Original buggy _mm256_permute4x64_epi64(., 0xD8) after the packus:
+     *     ~12.2% pixels differ, max|d| ~3352. Lane-permute scrambled the
+     *     already-correct layout from packus(unpacklo, unpackhi).
+     *   - After removing the permute: residual ~0.05% pixels, max|d| ~1852.
+     *     Two compounding causes: (a) the y == 2 / y == height - 3 boundary
+     *     was being routed through the SIMD body, where the saturated/shadow
+     *     patch unconditionally averages output[idx-2w] with source[idx+2w]
+     *     (the y > 2 formula); scalar at y == 2 uses source[idx+2w]
+     *     directly. (b) the FMA chain ran in float32 with three-arg
+     *     _mm256_fmadd_ps, while scalar's `(src - black) * a + black + b`
+     *     evaluated in double with three rounding steps.
+     *   - Current fix: (a) widen edge_row to (y < 3) || (y >= height - 3)
+     *     so the boundary rows fall through to the scalar fallback; (b)
+     *     compute the FMA chain in pd (4 doubles per ymm reg) with the
+     *     same three rounding steps as scalar — no fmadd fusion.
+     *   - Result: zero divergent pixels at the rowscale stage on
+     *     tiny_dual_iso_preview (4_100_544 pixels). The assertion below
+     *     enforces byte-identity. Any regression (e.g., re-introducing the
+     *     permute, narrowing back to ps, or shrinking edge_row) will fire
+     *     this. */
+    ASSERT_EQ(static_cast<std::uint64_t>(0), differing);
+    ASSERT_EQ(0, max_abs);
 
     /* Restore default dispatch for subsequent tests. */
 #ifdef _WIN32
