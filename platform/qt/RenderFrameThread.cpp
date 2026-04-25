@@ -400,12 +400,21 @@ void RenderFrameThread::drawFrame( int slotIndex )
         slot.gpuBilinearFallbackReason.clear();
     }
 
+    /* Phase 4A: read the requested scale factor; the pipeline ignores it
+     * today but the call routes through the *Scaled getters so the cache
+     * key sees a different signature for scale=2 vs scale=1. */
+    const int playbackScaleFactor = m_activePresentationContext.playbackScaleFactor;
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_scale_factor_request"),
+        playbackScaleFactor );
+
     if ( outputMode == OutputProcessed16 && !slot.rawImage16.empty() )
     {
-        getMlvProcessedFrame16( m_pMlvObject,
-                                frameNumber,
-                                slot.rawImage16.data(),
-                                mlvappEffectiveWorkerThreadCount() );
+        getMlvProcessedFrame16Scaled( m_pMlvObject,
+                                      frameNumber,
+                                      slot.rawImage16.data(),
+                                      mlvappEffectiveWorkerThreadCount(),
+                                      playbackScaleFactor );
         slot.dualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
         slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
         slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
@@ -482,10 +491,11 @@ void RenderFrameThread::drawFrame( int slotIndex )
     }
     else if( !slot.rawImage8.empty() )
     {
-        getMlvProcessedFrame8( m_pMlvObject,
-                               frameNumber,
-                               slot.rawImage8.data(),
-                               mlvappEffectiveWorkerThreadCount() );
+        getMlvProcessedFrame8Scaled( m_pMlvObject,
+                                     frameNumber,
+                                     slot.rawImage8.data(),
+                                     mlvappEffectiveWorkerThreadCount(),
+                                     playbackScaleFactor );
         slot.dualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
         slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
         slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();

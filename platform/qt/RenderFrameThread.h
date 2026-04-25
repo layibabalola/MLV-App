@@ -46,6 +46,9 @@ public:
             int devicePixelRatioMilli = 0;
             bool zoomFitEnabled = false;
             bool fastPlaybackScaleEligible = false;
+            /* Phase 4A: requested playback scale factor (1, 2, or 4). Always
+             * 1 in production today; observed only by the cache key. */
+            int playbackScaleFactor = 1;
             MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
             GpuPreviewProcessingConfig gpuPreviewProcessingConfig;

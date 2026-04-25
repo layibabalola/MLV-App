@@ -148,6 +148,32 @@ std::vector<uint8_t> MlvPipelineFixture::renderFrame8(uint64_t frame_index, int 
     return frame;
 }
 
+std::vector<uint16_t> MlvPipelineFixture::renderFrame16Scaled(uint64_t frame_index,
+                                                              int threads,
+                                                              int scaleFactor) const
+{
+    /* Phase 4A: dimensions helper still returns full resolution; sized
+     * accordingly so existing Phase-4A wiring is forward-compatible. */
+    int outW = 0;
+    int outH = 0;
+    mlvFrameOutputDimensions(m_video, scaleFactor, &outW, &outH);
+    std::vector<uint16_t> frame(static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u);
+    getMlvProcessedFrame16Scaled(m_video, frame_index, frame.data(), threads, scaleFactor);
+    return frame;
+}
+
+std::vector<uint8_t> MlvPipelineFixture::renderFrame8Scaled(uint64_t frame_index,
+                                                            int threads,
+                                                            int scaleFactor) const
+{
+    int outW = 0;
+    int outH = 0;
+    mlvFrameOutputDimensions(m_video, scaleFactor, &outW, &outH);
+    std::vector<uint8_t> frame(static_cast<std::size_t>(outW) * static_cast<std::size_t>(outH) * 3u);
+    getMlvProcessedFrame8Scaled(m_video, frame_index, frame.data(), threads, scaleFactor);
+    return frame;
+}
+
 int MlvPipelineFixture::width() const
 {
     return getMlvWidth( m_video );

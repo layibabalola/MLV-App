@@ -23,6 +23,15 @@ public:
     std::vector<uint16_t> renderDebayeredFrame16(uint64_t frame_index) const;
     std::vector<uint16_t> renderFrame16(uint64_t frame_index, int threads = 1) const;
     std::vector<uint8_t> renderFrame8(uint64_t frame_index, int threads = 1) const;
+    /* Phase 4A: scale-aware variants. scaleFactor must be 1, 2, or 4.
+     * Phase 4A returns full-resolution output regardless of scale; the
+     * factor is observed only by the cache key. */
+    std::vector<uint16_t> renderFrame16Scaled(uint64_t frame_index,
+                                              int threads,
+                                              int scaleFactor) const;
+    std::vector<uint8_t> renderFrame8Scaled(uint64_t frame_index,
+                                            int threads,
+                                            int scaleFactor) const;
 
     int width() const;
     int height() const;

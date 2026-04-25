@@ -261,6 +261,47 @@ static bool playback_start_preroll_disabled_by_environment()
         && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
 }
 
+/* Phase 4A: read MLVAPP_PLAYBACK_SCALE_FACTOR once and cache the result.
+ * Accepts "1", "2", or "4"; anything else clamps to 1. Today the value is
+ * only observed by the processed8/16 cache key (the pipeline still renders
+ * at full resolution). Phase 4B will honor it in the actual render
+ * pipeline. */
+static int playback_scale_factor_from_environment()
+{
+    static int cached_scale = -1;
+    if (cached_scale >= 0)
+    {
+        return cached_scale;
+    }
+
+    const QString raw =
+        qEnvironmentVariable("MLVAPP_PLAYBACK_SCALE_FACTOR").trimmed();
+    int requested = 1;
+    if (!raw.isEmpty())
+    {
+        bool ok = false;
+        const int parsed = raw.toInt(&ok);
+        if (ok && (parsed == 1 || parsed == 2 || parsed == 4))
+        {
+            requested = parsed;
+        }
+        else
+        {
+            qWarning().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR ignored:"
+                                 << raw
+                                 << "(must be 1, 2, or 4); using 1.";
+        }
+    }
+    cached_scale = requested;
+    if (requested != 1)
+    {
+        qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR =" << requested
+                          << "(Phase 4A: cache-key only; pipeline still"
+                             " renders at full resolution).";
+    }
+    return cached_scale;
+}
+
 class PlaybackPaintProbe : public QObject
 {
 public:
@@ -1939,6 +1980,14 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         requestContext.imageHeight =
             std::max( 1, qRound( sceneHeight * devicePixelRatioF() ) );
     }
+
+    /* Phase 4A: thread MLVAPP_PLAYBACK_SCALE_FACTOR through to the render
+     * thread. The pipeline still produces full-resolution output today;
+     * the value is observed only by the processed-frame cache key so a
+     * scale=1 entry never satisfies a scale=2 lookup. Once Phase 4B lands
+     * the env var (and the eventual GUI control) will start producing
+     * smaller buffers without any further plumbing churn. */
+    requestContext.playbackScaleFactor = playback_scale_factor_from_environment();
 
     RenderFrameThread::PresentationPreparationOptions presentationPreparation;
     presentationPreparation.fastPlaybackScale = requestContext.fastPlaybackScaleEligible;

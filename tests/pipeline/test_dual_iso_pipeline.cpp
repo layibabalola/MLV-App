@@ -2204,6 +2204,89 @@ extern "C" int llrpReinitMean23OverrideDispatchForTesting(void);
  * still flipped to 1, the HQ recon must continue to use AMaZE. This
  * lets the headless --profile-playback harness measure AMaZE cadence
  * without having to also strip the override from the receipt path. */
+TEST(DualIsoPipeline, Phase4A_TestProcessed8CacheScaleKeyIsolation)
+{
+    /* Phase 4A scaffolding: render at scale=1, then at scale=2, then again
+     * at scale=1. The pipeline still produces full-resolution output for
+     * every call (Phase 4A does not change pixels), but the cache key
+     * MUST differ between scale=1 and scale=2 — otherwise once Phase 4B
+     * starts producing scaled output a stale full-resolution buffer would
+     * silently satisfy a half-resolution lookup. */
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setDualIso(0); /* match the warm-frames sibling test. */
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    /* Render frame 0 at scale=1 first. */
+    const std::vector<uint8_t> scale1_frame = fixture.renderFrame8Scaled(0, 1, 1);
+    const uint64_t scale1_signature = fixture.video()->current_processed_frame_8bit_signature;
+    ASSERT_TRUE(!scale1_frame.empty());
+    ASSERT_EQ(1, fixture.video()->playback_scale_factor_active);
+    ASSERT_TRUE(has_processed_8bit_cache_slot(fixture.video(), 0, 1));
+
+    /* Find the slot that holds scale=1 and capture its signature/scale. */
+    int scale1_slot = -1;
+    for (int slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot) {
+        if (fixture.video()->processed_8bit_cache_active[slot]
+            && fixture.video()->processed_8bit_cache_frame[slot] == 0
+            && fixture.video()->processed_8bit_cache_scale[slot] == 1) {
+            scale1_slot = slot;
+            break;
+        }
+    }
+    ASSERT_TRUE(scale1_slot >= 0);
+    ASSERT_EQ(static_cast<unsigned long long>(scale1_signature),
+              static_cast<unsigned long long>(fixture.video()->processed_8bit_cache_signature[scale1_slot]));
+
+    /* Render frame 0 at scale=2. The pipeline still produces a
+     * full-resolution buffer, but the cache key MUST differ. */
+    const std::vector<uint8_t> scale2_frame = fixture.renderFrame8Scaled(0, 1, 2);
+    const uint64_t scale2_signature = fixture.video()->current_processed_frame_8bit_signature;
+    ASSERT_TRUE(!scale2_frame.empty());
+    ASSERT_EQ(2, fixture.video()->playback_scale_factor_active);
+    ASSERT_TRUE(scale1_signature != scale2_signature);
+
+    /* Phase 4A: pipeline ignores scaleFactor, so the produced bytes match
+     * the scale=1 output exactly. (Phase 4B will replace this assertion
+     * with a "scaled output is half-W half-H" check.) */
+    ASSERT_TRUE(scale1_frame == scale2_frame);
+
+    /* Both slots must be live — the scale=1 entry must NOT have been
+     * overwritten by the scale=2 store. */
+    int scale2_slot = -1;
+    bool scale1_slot_still_live = false;
+    for (int slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot) {
+        if (fixture.video()->processed_8bit_cache_active[slot]
+            && fixture.video()->processed_8bit_cache_frame[slot] == 0) {
+            if (fixture.video()->processed_8bit_cache_scale[slot] == 1
+                && fixture.video()->processed_8bit_cache_signature[slot] == scale1_signature) {
+                scale1_slot_still_live = true;
+            }
+            else if (fixture.video()->processed_8bit_cache_scale[slot] == 2
+                     && fixture.video()->processed_8bit_cache_signature[slot] == scale2_signature) {
+                scale2_slot = slot;
+            }
+        }
+    }
+    ASSERT_TRUE(scale1_slot_still_live);
+    ASSERT_TRUE(scale2_slot >= 0);
+
+    /* Render frame 0 at scale=1 again — must hit the original scale=1
+     * slot and return byte-identical output. */
+    const std::vector<uint8_t> scale1_repeat = fixture.renderFrame8Scaled(0, 1, 1);
+    ASSERT_TRUE(scale1_frame == scale1_repeat);
+    ASSERT_EQ(static_cast<unsigned long long>(scale1_signature),
+              static_cast<unsigned long long>(fixture.video()->current_processed_frame_8bit_signature));
+    ASSERT_EQ(1, fixture.video()->playback_scale_factor_active);
+
+    /* The non-scaled API must remain byte-identical with scale=1 — proves
+     * the public-API surface stays compatible. */
+    const std::vector<uint8_t> nonScaled_frame = fixture.renderFrame8(0, 1);
+    ASSERT_TRUE(scale1_frame == nonScaled_frame);
+}
+
 TEST(DualIsoPipeline, DualIsoPlaybackOverrideRespectsMean23DisableEnv)
 {
     /* Stage 1: env-disable ON. Set the env, flush the cache, render with

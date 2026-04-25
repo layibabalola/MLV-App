@@ -62,6 +62,47 @@ void findMlvWhiteBalance(mlvObject_t * video, uint64_t frameIndex, int posX, int
  * as it may have minor artifacts (though I haven't found them yet) */
 void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * outputFrame, int threads);
 void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame, int threads);
+
+/* Phase 4A: scale-aware processed-frame getters.
+ *
+ * The scaleFactor contract is:
+ *   - must be 1, 2, or 4
+ *   - must be a power of two (Phase 4B will reject non-power-of-two values
+ *     to preserve the 2x2 Bayer block alignment)
+ *   - if scaleFactor is invalid, the call is treated as scaleFactor == 1
+ *
+ * Phase 4A note: the rendering pipeline still produces full-resolution
+ * output regardless of scaleFactor. The parameter is observed only by:
+ *   1. the processed8/16 cache key (so a scale=1 result cannot satisfy a
+ *      scale=2 lookup, and vice versa), and
+ *   2. mlvFrameOutputDimensions() reporting (always returns full res in
+ *      Phase 4A).
+ *
+ * Phase 4B will add the fused-downsample-and-debayer that actually
+ * produces a smaller buffer for scaleFactor > 1. Callers wiring through
+ * the scaled API today are forward-compatible: their output buffer must be
+ * sized to mlvFrameOutputDimensions(), and once Phase 4B lands the same
+ * call site automatically gets the smaller render. */
+void getMlvProcessedFrame8Scaled(mlvObject_t * video,
+                                 uint64_t frameIndex,
+                                 uint8_t * outputFrame,
+                                 int threads,
+                                 int scaleFactor);
+void getMlvProcessedFrame16Scaled(mlvObject_t * video,
+                                  uint64_t frameIndex,
+                                  uint16_t * outputFrame,
+                                  int threads,
+                                  int scaleFactor);
+
+/* Reports the (width,height) a Phase-4-aware caller should size the output
+ * buffer for. In Phase 4A this always returns the full sensor dimensions
+ * (the pipeline still renders at scale=1 internally). In Phase 4B it will
+ * return W/scaleFactor and H/scaleFactor when scaleFactor > 1.
+ * scaleFactor must be 1, 2, or 4; invalid values are treated as 1. */
+void mlvFrameOutputDimensions(mlvObject_t * video,
+                              int scaleFactor,
+                              int * outWidth,
+                              int * outHeight);
 double getMlvLastRawUint16Milliseconds(void);
 double getMlvLastRawUint16DiskReadMilliseconds(void);
 double getMlvLastRawUint16DecompressMilliseconds(void);
