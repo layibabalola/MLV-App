@@ -1,0 +1,197 @@
+# Doc-ownership map for incremental docs/ sync.
+#
+# When a commit changes a path matching one of the `paths` globs below,
+# the named docs are candidates for a sync edit. The /docs-sync skill
+# (.claude/skills/docs-sync/SKILL.md) reads this file to route work.
+#
+# Conventions:
+#   - `paths` are glob patterns matched against `git diff --name-only`.
+#   - `docs` are repo-relative under docs/. Specific sections (`§N`) are
+#     hints, not constraints; the agent verifies the actual section name.
+#   - `notes` describes WHY this routing exists.
+
+owners:
+
+  - id: mlv-format
+    paths:
+      - "src/mlv/mlv.h"
+      - "src/mlv/raw.h"
+      - "src/mlv/mlv_object.h"
+      - "src/mlv/video_mlv.{c,h}"
+      - "src/mlv/frame_caching.c"
+      - "src/mlv/mapp.h"
+    docs:
+      - "docs/03-technical-specification.md"        # §4 data model
+      - "docs/03b-technical-specification-algorithms.md"  # §2 MLV format, §3 MAPP
+    notes: "Block structs, frame_index_t, MAPP layout, spanned-file rules."
+
+  - id: lj92-codec
+    paths:
+      - "src/mlv/liblj92/**"
+    docs:
+      - "docs/03b-technical-specification-algorithms.md"  # §4 LJ92
+    notes: "Predictor table, public API, thread-safety contract."
+
+  - id: llrawproc
+    paths:
+      - "src/mlv/llrawproc/**"
+    docs:
+      - "docs/03-technical-specification.md"        # pipeline overview
+      - "docs/03b-technical-specification-algorithms.md"  # §5 algorithms
+      - "docs/01-user-guide.md"                     # §7 raw corrections (user-facing)
+    notes: "Focus pixels, bad pixels, dark frame, dual ISO, stripes, chroma smooth, pattern noise."
+
+  - id: processing-pipeline
+    paths:
+      - "src/processing/**"
+      - "!src/processing/**/README.md"
+    docs:
+      - "docs/03-technical-specification.md"        # §4.1, §6 pipeline
+      - "docs/03b-technical-specification-algorithms.md"  # §6 9-stage pipeline
+      - "docs/01-user-guide.md"                     # §6 parameter tour
+    notes: "9-stage processing chain. User-visible parameters live in receipt + Editor panel."
+
+  - id: debayer
+    paths:
+      - "src/debayer/**"
+      - "src/librtprocess/**"
+    docs:
+      - "docs/03b-technical-specification-algorithms.md"  # §7 debayer
+      - "docs/01-user-guide.md"                     # §6 debayer choices
+    notes: "9 algorithms; bilinear is the in-tree reference, others via librtprocess."
+
+  - id: dng-writer
+    paths:
+      - "src/dng/**"
+    docs:
+      - "docs/03b-technical-specification-algorithms.md"  # §9 CDNG IFDs
+      - "docs/01-user-guide.md"                     # §11.4 CDNG export
+    notes: "TIFF-EP IFDs, CinemaDNG tags, sequence naming."
+
+  - id: receipt-batch
+    paths:
+      - "src/batch/**"
+    docs:
+      - "docs/03b-technical-specification-algorithms.md"  # §8 receipt schema
+      - "docs/02-developer-guide.md"                # §9 CLI subcommands, §12 receipts
+      - "docs/01-user-guide.md"                     # §10 sessions/receipts, §15 CLI
+    notes: "ReceiptLoader/Applier, BatchRunner, MlvTrim. Touches CLI surface."
+
+  - id: qt-gui-mainwindow
+    paths:
+      - "platform/qt/MainWindow.{cpp,h,ui}"
+      - "platform/qt/RenderFrameThread.{cpp,h}"
+      - "platform/qt/PresentationContext.h"
+    docs:
+      - "docs/03-technical-specification.md"        # §7 threading, §12 telemetry
+      - "docs/03b-technical-specification-algorithms.md"  # §10 profile JSON
+      - "docs/04-external-auditor-guide.md"         # §13.5 WIP surface
+      - "docs/01-user-guide.md"                     # GUI-visible behavior
+    notes: "Hot path. Crash-investigation work usually lands here. Re-verify §13.5 enumeration."
+
+  - id: qt-gui-other
+    paths:
+      - "platform/qt/*.{cpp,h,ui}"
+      - "!platform/qt/MainWindow.{cpp,h,ui}"
+      - "!platform/qt/RenderFrameThread.{cpp,h}"
+    docs:
+      - "docs/01-user-guide.md"                     # GUI-visible behavior
+      - "docs/02-developer-guide.md"                # §11 entry points if header changes
+    notes: "Dialogs, scopes, GPU widgets. User-visible if labels/shortcuts change."
+
+  - id: gpu-paths
+    paths:
+      - "platform/qt/Gpu*.{cpp,h}"
+      - "platform/qt/MainWindowGpuPreviewPolicy.h"
+      - "platform/qt/GPUDisplayFoundation.md"
+    docs:
+      - "docs/12-gpu-viewport-architecture.md"
+      - "docs/02-developer-guide.md"                # §9.2 --gpu-* flags
+      - "docs/01-user-guide.md"                     # §8 debayer-for-playback
+    notes: "Experimental, env-gated. Status table in 00-overview lists 'Experimental'."
+
+  - id: build-system
+    paths:
+      - "platform/qt/MLVApp.pro"
+      - "platform/qt/avx_optin.pri"
+      - "platform/qt/FFmpeg/**"
+      - "platform/qt/raw2mlv/**"
+    docs:
+      - "docs/02-developer-guide.md"                # §3 prereqs, §5 building, §7 AVX, §8 FFmpeg
+      - "docs/10-build-windows.md"
+      - "docs/11-build-macos-linux.md"
+      - "docs/00-overview.md"                       # version pin if 1.15.0.0 bumps
+      - "docs/03-technical-specification.md"        # version pin reference
+      - "docs/04-external-auditor-guide.md"         # provenance citations
+    notes: "Version bumps in MLVApp.pro:450-460 propagate to every doc that names 1.15.0.0."
+
+  - id: ci-workflows
+    paths:
+      - ".github/workflows/**"
+    docs:
+      - "docs/02-developer-guide.md"                # §14 CI overview
+      - "docs/04-external-auditor-guide.md"         # §10 reproduce CI gates
+      - "docs/13-testing-infrastructure.md"         # blocking vs pilot
+    notes: "Re-verify aqtinstall pin, runner OS, blocking-job list."
+
+  - id: tests
+    paths:
+      - "tests/**"
+      - "!tests/build-*/**"
+      - "!tests/fixtures/**"
+    docs:
+      - "docs/13-testing-infrastructure.md"
+      - "docs/14-performance-benchmarking.md"       # if tests/perf/ touched
+      - "docs/16-fuzz-testing.md"                   # if tests/fuzz/ touched
+      - "docs/02-developer-guide.md"                # §13 testing
+    notes: "Test-name changes invalidate any 'Filter to a single test' style examples."
+
+  - id: test-fixtures
+    paths:
+      - "tests/fixtures/**"
+    docs:
+      - "docs/15-test-fixtures.md"
+      - "docs/13-testing-infrastructure.md"         # golden hash references
+    notes: "Adding/removing a fixture invalidates the goldens list and per-fixture descriptions."
+
+  - id: agents-policy
+    paths:
+      - "AGENTS.md"
+    docs:
+      - "docs/02-developer-guide.md"                # §6 Windows runtime rules (verbatim mirror)
+      - "docs/04-external-auditor-guide.md"         # §13.7 .claude/ vs .claude-state/
+    notes: "AGENTS.md is the source of truth; the developer guide mirrors §6 verbatim."
+
+  - id: readme
+    paths:
+      - "README.md"
+    docs:
+      - "docs/00-overview.md"                       # if camera/feature list changes
+    notes: "README.md is now a thin pointer; significant changes likely belong in docs/01."
+
+  - id: pixel-maps
+    paths:
+      - "pixel_maps/**"
+    docs:
+      - "docs/01-user-guide.md"                     # §7.1 focus pixels
+      - "docs/03b-technical-specification-algorithms.md"  # §5.1 focus pixel removal
+    notes: "Adding a new camera's focus-pixel map updates the supported-camera surface."
+
+  - id: receipts-presets
+    paths:
+      - "receipts/**"
+    docs:
+      - "docs/01-user-guide.md"                     # §10 receipts
+      - "docs/02-developer-guide.md"                # §12 receipts
+    notes: "New shipped presets should appear in the user-guide receipts table."
+
+# Paths intentionally NOT routed (changes here do not affect docs):
+ignored:
+  - ".claude-state/**"        # scratch
+  - ".claude/profiling/**"    # ephemeral
+  - "tests/build-*/**"        # qmake build dirs
+  - "**/*.dmp"                # crash dumps
+  - "osx_installer/create-dmg-master/**"  # vendored sub-tree
+
+# Sync metadata: incremented when this map's structure changes.
+schema_version: 1
