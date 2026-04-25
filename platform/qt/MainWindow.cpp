@@ -9774,6 +9774,20 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
     if ( ui->actionPlaybackQualityAuto )
         ui->actionPlaybackQualityAuto->setChecked( mode == 2 );
 
+    /* Auto Target FPS is meaningful only when Auto mode is active — the
+     * sampler reads it as the cadence threshold for switching between
+     * Fast and HQ. In Fast or HQ mode the user has chosen a fixed
+     * behaviour and the target-fps setting does nothing. Grey out the
+     * sub-menu in that case so the menu structure visually reflects
+     * which controls are live. */
+    const bool autoActive = ( mode == 2 );
+    if ( ui->actionPlaybackAutoTarget24 )
+        ui->actionPlaybackAutoTarget24->setEnabled( autoActive );
+    if ( ui->actionPlaybackAutoTarget30 )
+        ui->actionPlaybackAutoTarget30->setEnabled( autoActive );
+    if ( ui->actionPlaybackAutoTarget60 )
+        ui->actionPlaybackAutoTarget60->setEnabled( autoActive );
+
     if ( changed )
     {
         /* Buffer size or HQ flag may have changed; cached frames are no
