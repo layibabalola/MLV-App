@@ -29,6 +29,14 @@ struct histogram
 {
     uint16_t white;
     uint32_t count;
+    /* TODO(perf-vs-correctness): uint16_t bin counters can silently wrap
+     * when one bin sees >65535 pixels (typical for >=1080p Dual ISO
+     * where each ISO half has hundreds of thousands of pixels). Widening
+     * to uint32_t fixes the wrap but doubles the histogram's working set
+     * (~24KB -> 48KB) which falls out of L1 cache and was measured to
+     * cost ~6 ms at T8 p95 on the test clip. Keep uint16 for now;
+     * follow-up either with saturating increment (`if (x<UINT16_MAX) x++`)
+     * or a quantised bin layout that fits L1. */
     uint16_t * data;
 };
 

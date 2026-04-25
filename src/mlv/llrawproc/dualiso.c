@@ -672,17 +672,23 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
     int prev_acc_hi = 0;
     
     int hist_total = hist[0]->count;
-    
-    for (raw_hi = 0; raw_hi < hist_total; raw_hi++)
+
+    /* Iterate over histogram BINS (sized white+1 in hist_create), not the
+     * pixel count. The previous loop bound `< hist_total` caused
+     * out-of-bounds reads at hist_hi->data[raw_hi] whenever the source
+     * frame contained more pixels than the white level (i.e., almost
+     * always at 1080p+). The percentile thresholds at the data_w cutoff
+     * below still use hist_total correctly. */
+    for (raw_hi = 0; raw_hi <= hist_hi->white; raw_hi++)
     {
         acc_hi += hist_hi->data[raw_hi];
-        
+
         while (acc_lo < acc_hi)
         {
             acc_lo += hist_lo->data[raw_lo];
             raw_lo++;
         }
-        
+
         if (raw_lo >= white)
             break;
         
@@ -720,8 +726,30 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
     my /= weight;
     mxy /= weight;
     mx2 /= weight;
-    double a = (mxy - mx*my) / (mx2 - mx*mx);
-    double b = my - a * mx;
+
+    /* Guard against zero-variance bright-row sample. When all bright
+     * samples are at the same x-value (e.g. clipped highlights or a flat
+     * patch), the regression denominator (mx2 - mx*mx) collapses to zero
+     * and `a` becomes NaN/inf. NaN then propagates into 1/(a*a) at the
+     * shadow computation and the per-pixel scale at lines below, casting
+     * to undefined uint16 values that render as the magenta/cyan cast
+     * users observed during playback (2026-04-24). Fall back to the
+     * median-ratio scale (my/mx) and zero offset when variance is below
+     * a small epsilon — that's the right "no slope detected" default
+     * for the dual-ISO pair-up. */
+    const double DUALISO_VARIANCE_EPSILON = 1e-9;
+    const double denom = mx2 - mx * mx;
+    double a, b;
+    if (fabs(denom) < DUALISO_VARIANCE_EPSILON)
+    {
+        a = (fabs(mx) > DUALISO_VARIANCE_EPSILON) ? (my / mx) : 1.0;
+        b = 0.0;
+    }
+    else
+    {
+        a = (mxy - mx * my) / denom;
+        b = my - a * mx;
+    }
     
     if (!using_scratch)
     {
