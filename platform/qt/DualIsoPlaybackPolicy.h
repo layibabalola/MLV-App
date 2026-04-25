@@ -81,6 +81,45 @@ inline bool dualIsoPlaybackMean23OverrideDisabledViaEnv()
     return cached != 0;
 }
 
+/* Opt-in: prefer HQ Dual ISO recon with mean23 interpolation during playback
+ * over the preview-rowscale-forced override. Closes the structural magenta
+ * cast that preview rowscale introduces (preview's global linear gain is
+ * fundamentally different from HQ matched-pair recon and produces a
+ * deterministic chroma bias on bright lanes). Set
+ *   MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1
+ * to enable.
+ *
+ * Tradeoff: HQ recon is much slower than preview rowscale at full sensor
+ * resolution. On 5K dual-ISO clips, expect cadence to drop from ~50 fps
+ * (preview rowscale) to ~2-3 fps (HQ + mean23 even with all the AVX2
+ * acceleration shipped this session). On smaller clips (~1808x2268) HQ +
+ * mean23 sustains ~50 fps and there is no cadence cost.
+ *
+ * Without this env var, playback continues to use preview rowscale (cast
+ * present, fast). With it, playback uses HQ + mean23 (cast closed, slow on
+ * big sensors). Phase 4 adaptive resolution is the long-term path that
+ * delivers both. */
+inline bool dualIsoPlaybackPreferHqMean23ViaEnv()
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char * v = std::getenv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+        if (v && *v && std::strcmp(v, "0") != 0
+                  && std::strcmp(v, "false") != 0
+                  && std::strcmp(v, "FALSE") != 0
+                  && std::strcmp(v, "False") != 0)
+        {
+            cached = 1;
+        }
+        else
+        {
+            cached = 0;
+        }
+    }
+    return cached != 0;
+}
+
 inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bool playbackActive,
                                                                               bool rawFixEnabled,
                                                                               int dualIsoValidity,
@@ -97,10 +136,17 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
     }
 
     const bool explicitPreviewSelected = (selectedMode == 2);
+    const bool preferHqMean23 = dualIsoPlaybackPreferHqMean23ViaEnv();
+    /* When the user has opted into HQ-during-playback via env var, suppress
+     * the preview-rowscale override so the receipt's selectedMode (typically
+     * 1 = HQ recon) flows through. The mean23 override below then catches
+     * the now-still-HQ playback path and writes the playbackForceMean23 flag,
+     * giving us HQ + mean23 (cast closed) at the cost of cadence. */
     const bool previewOverrideActive = playbackActive
                                     && rawFixEnabled
                                     && (dualIsoValidity != 0)
-                                    && (selectedMode > 0);
+                                    && (selectedMode > 0)
+                                    && !preferHqMean23;
 
     DualIsoPlaybackRuntimeSettings settings = {
         selectedMode,
