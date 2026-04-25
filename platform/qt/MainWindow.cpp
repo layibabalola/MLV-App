@@ -13,6 +13,7 @@ extern "C" {
 }
 #include "math.h"
 
+#include <QMenu>
 #include <QMessageBox>
 #include <QShortcut>
 #include <QThread>
@@ -3431,6 +3432,39 @@ void MainWindow::initGui( void )
     m_pPlaybackQualityIndicator->setToolTip(
         tr( "Active playback quality mode (Playback menu / shortcut Q)." ) );
     statusBar()->addWidget( m_pPlaybackQualityIndicator );
+
+    //Phase 4F-toolbar: Playback Quality dropdown on the main toolbar.
+    //Shares the same QActions as the Playback -> Playback Quality menu
+    //and the Q shortcut; the button is a second view onto those actions.
+    //Mode changes via this button trigger applyPlaybackQualityMode() the
+    //same way as the menu bar item, so QSettings persistence and the
+    //status-bar indicator update automatically.
+    {
+        m_pPlaybackQualityToolButtonMenu = new QMenu( this );
+        m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityFast );
+        m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityHQ );
+        m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityAuto );
+        m_pPlaybackQualityToolButtonMenu->addSeparator();
+        m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackShowQualityIndicator );
+        QMenu *pAutoTargetSub = new QMenu( tr( "Auto Target FPS" ),
+                                           m_pPlaybackQualityToolButtonMenu );
+        pAutoTargetSub->addAction( ui->actionPlaybackAutoTarget24 );
+        pAutoTargetSub->addAction( ui->actionPlaybackAutoTarget30 );
+        pAutoTargetSub->addAction( ui->actionPlaybackAutoTarget60 );
+        m_pPlaybackQualityToolButtonMenu->addMenu( pAutoTargetSub );
+
+        m_pPlaybackQualityToolButton = new QToolButton( this );
+        m_pPlaybackQualityToolButton->setMenu( m_pPlaybackQualityToolButtonMenu );
+        m_pPlaybackQualityToolButton->setPopupMode( QToolButton::InstantPopup );
+        m_pPlaybackQualityToolButton->setToolButtonStyle( Qt::ToolButtonTextOnly );
+        m_pPlaybackQualityToolButton->setText( tr( "Quality: Fast" ) );
+        m_pPlaybackQualityToolButton->setToolTip(
+            tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
+                "(HQ matched-pair, cast-closed), or Auto (adapts to target fps).\n"
+                "Keyboard shortcut: Q" ) );
+        ui->mainToolBar->addSeparator();
+        ui->mainToolBar->addWidget( m_pPlaybackQualityToolButton );
+    }
 
     //Recent sessions menu
     m_pRecentFilesMenu = new QRecentFilesMenu(tr("Recent Sessions"), ui->menuFile);
@@ -9837,13 +9871,16 @@ void MainWindow::setPlaybackQualityIndicatorVisible( bool visible, bool persist 
 
 void MainWindow::updatePlaybackQualityIndicator( void )
 {
-    if ( !m_pPlaybackQualityIndicator ) return;
-    if ( !m_playbackQualityIndicatorVisible )
+    /* The status-bar QLabel can be toggled off by the user via "Show
+     * Quality Indicator", but the toolbar button is a CONTROL and must
+     * always update so its visible label tracks the active mode. So we
+     * compute text/color unconditionally and only short-circuit the QLabel
+     * visibility/text writes when the indicator is hidden. */
+    if ( m_pPlaybackQualityIndicator )
     {
-        m_pPlaybackQualityIndicator->hide();
-        return;
+        if ( m_playbackQualityIndicatorVisible ) m_pPlaybackQualityIndicator->show();
+        else m_pPlaybackQualityIndicator->hide();
     }
-    m_pPlaybackQualityIndicator->show();
 
     /* The actual render uses env vars (MLVAPP_PLAYBACK_SCALE_FACTOR and
      * MLVAPP_PLAYBACK_PREFER_HQ_MEAN23) at higher priority than the
@@ -9907,9 +9944,25 @@ void MainWindow::updatePlaybackQualityIndicator( void )
                 break;
         }
     }
-    m_pPlaybackQualityIndicator->setText( text );
-    m_pPlaybackQualityIndicator->setStyleSheet(
-        QStringLiteral( "QLabel { color: %1; padding: 0 6px; }" ).arg( color ) );
+    if ( m_pPlaybackQualityIndicator && m_playbackQualityIndicatorVisible )
+    {
+        m_pPlaybackQualityIndicator->setText( text );
+        m_pPlaybackQualityIndicator->setStyleSheet(
+            QStringLiteral( "QLabel { color: %1; padding: 0 6px; }" ).arg( color ) );
+    }
+
+    //Phase 4F-toolbar: mirror the same text/color into the toolbar dropdown
+    //button so both views always agree. The button is constructed in the
+    //ctor before initPlaybackQualityFromSettings() so the first paint here
+    //already finds it. The "Show Quality Indicator" preference only hides
+    //the status-bar QLabel above; the toolbar button is a control and must
+    //remain visible/up-to-date regardless of that toggle.
+    if ( m_pPlaybackQualityToolButton )
+    {
+        m_pPlaybackQualityToolButton->setText( text );
+        m_pPlaybackQualityToolButton->setStyleSheet(
+            QStringLiteral( "QToolButton { color: %1; padding: 2px 8px; }" ).arg( color ) );
+    }
 }
 
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const

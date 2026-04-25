@@ -25,6 +25,7 @@
 #include <QActionGroup>
 #include <QSortFilterProxyModel>
 #include <QItemSelectionModel>
+#include <QToolButton>
 #include "SessionModel.h"
 #include "../../src/mlv_include.h"
 #include "InfoDialog.h"
@@ -628,6 +629,11 @@ private:
     QLabel *m_pFrameNumber;
     QLabel *m_pChosenDebayer;
     QLabel *m_pPlaybackQualityIndicator = nullptr; // Phase 4E
+    // Phase 4F-toolbar: Playback Quality dropdown on the main toolbar. The
+    // button is a second view onto the same Playback Quality QActions used
+    // by the Playback -> Playback Quality menu and the Q shortcut.
+    QToolButton *m_pPlaybackQualityToolButton = nullptr;
+    QMenu *m_pPlaybackQualityToolButtonMenu = nullptr;
     QActionGroup *m_darkFrameGroup;
     QActionGroup *m_previewDebayerGroup;
     QActionGroup *m_sessionListGroup;
