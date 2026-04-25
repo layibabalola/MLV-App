@@ -1,6 +1,41 @@
 ---
 name: docs-sync
-description: Sync the docs/ tree to the current HEAD by analyzing commits since the last docs-touching commit and applying surgical edits to the affected sections. Use when code has drifted from docs (after merging engine work, before a release, when fabrications are suspected, or any time the user says "sync the docs", "update docs to HEAD", "refresh docs after recent commits", or "incremental docs update").
+description: |
+  Bring the docs/ tree back into agreement with the working tree by
+  analyzing commits since the last docs-touching commit and applying
+  surgical edits to the affected sections. Routes via the ownership map
+  at docs/.sync-ownership.yml. Avoids fabrications by re-grepping every
+  cited symbol before quoting it, and commits the result as
+  "docs: sync to <short-sha>".
+
+  Trigger this skill BOTH when the user explicitly invokes /docs-sync
+  AND when the user says any of the following in natural language:
+  - "sync the docs"
+  - "sync docs"
+  - "sync documentation"
+  - "update the docs"
+  - "update docs to HEAD"
+  - "update docs to current code"
+  - "refresh the docs"
+  - "refresh docs after recent commits"
+  - "incremental docs update"
+  - "incremental documentation update"
+  - "docs sync"
+  - "docs are stale, update them"
+  - "documentation has drifted, fix it"
+  - "bring docs up to date"
+  - "bring documentation up to date"
+  - "are the docs current?" (run --dry-run first to report drift)
+  - "what changed since the last docs commit?" (--dry-run)
+  - "sync docs after the merge"
+  - "refresh the docs from HEAD"
+  - "reconcile docs with code"
+  - "patch docs for recent changes"
+
+  Use this skill INSTEAD OF doing a full re-audit when changes are
+  incremental. Use the four-stranger-reviewer audit (separate workflow)
+  only if the user asks "are the docs still 10/10?" or "re-audit
+  everything".
 ---
 
 # /docs-sync — Incremental documentation sync
