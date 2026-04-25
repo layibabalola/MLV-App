@@ -1,0 +1,254 @@
+#ifndef PLAYBACKQUALITYPOLICY_H
+#define PLAYBACKQUALITYPOLICY_H
+
+/*
+ * Phase 4E: GUI-grade Playback Quality dial.
+ *
+ * Three discrete user-facing modes plus an Auto mode that adapts based on
+ * measured cadence. The mode is persisted to the existing QSettings store
+ * (HKCU\Software\magiclantern.MLVApp\MLVApp\Playback\... on Windows).
+ *
+ * The MLVAPP_PLAYBACK_PREFER_HQ_MEAN23 and MLVAPP_PLAYBACK_SCALE_FACTOR env
+ * vars retain priority for dev/CI overrides; this layer only kicks in when
+ * those env vars are unset.
+ *
+ * Decisions:
+ * - Fast: preview rowscale, scale=1, cast present, fastest cadence.
+ * - HighQuality: HQ + mean23 + scale=4, cast closed, slower cadence.
+ * - Auto: starts at HQ scale=4; if measured cadence misses target, fall
+ *   back to Fast for the next slot. Re-evaluates every kAutoSlidingWindow
+ *   frames.
+ *
+ * Dual-ISO clips MUST stay at scale=4 when running HQ (the reconstruction
+ * cost only pays for itself at scale=4 on big sensors). Non-dual-ISO HQ
+ * playback CAN use scale=2 in Auto mode if there is headroom.
+ */
+
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <mutex>
+
+#ifdef QT_CORE_LIB
+#include <QSettings>
+#include <QString>
+#endif
+
+enum class PlaybackQualityMode : int
+{
+    Fast = 0,
+    HighQuality = 1,
+    Auto = 2
+};
+
+namespace PlaybackQualitySettings
+{
+    inline constexpr const char * kOrganization() { return "magiclantern.MLVApp"; }
+    inline constexpr const char * kApplication() { return "MLVApp"; }
+    inline constexpr const char * kKeyQualityMode() { return "Playback/QualityMode"; }
+    inline constexpr const char * kKeyAutoTargetFps() { return "Playback/AutoTargetFps"; }
+    inline constexpr const char * kKeyShowQualityIndicator() { return "Playback/ShowQualityIndicator"; }
+
+    inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Fast ); }
+    inline constexpr int kDefaultAutoTargetFps() { return 30; }
+    inline constexpr int kDefaultShowQualityIndicator() { return 1; }
+}
+
+inline bool playbackQualityEnvVarTruthy(const char * raw)
+{
+    if (!raw || !*raw) return false;
+    return std::strcmp(raw, "0") != 0
+        && std::strcmp(raw, "false") != 0
+        && std::strcmp(raw, "FALSE") != 0
+        && std::strcmp(raw, "False") != 0;
+}
+
+/* Returns the user's persisted QualityMode (Fast=0, HighQuality=1, Auto=2). */
+#ifdef QT_CORE_LIB
+inline PlaybackQualityMode playbackQualityModeFromSettings()
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    const int raw = set.value( PlaybackQualitySettings::kKeyQualityMode(),
+                               PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
+    if ( raw < 0 || raw > 2 ) return PlaybackQualityMode::Fast;
+    return static_cast<PlaybackQualityMode>( raw );
+}
+
+inline int playbackQualityAutoTargetFpsFromSettings()
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    const int raw = set.value( PlaybackQualitySettings::kKeyAutoTargetFps(),
+                               PlaybackQualitySettings::kDefaultAutoTargetFps() ).toInt();
+    if ( raw == 24 || raw == 30 || raw == 60 ) return raw;
+    return PlaybackQualitySettings::kDefaultAutoTargetFps();
+}
+
+inline bool playbackQualityShowIndicatorFromSettings()
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    return set.value( PlaybackQualitySettings::kKeyShowQualityIndicator(),
+                      PlaybackQualitySettings::kDefaultShowQualityIndicator() ).toBool();
+}
+
+inline void playbackQualityModeWriteToSettings( PlaybackQualityMode mode )
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyQualityMode(),
+                  static_cast<int>( mode ) );
+}
+
+inline void playbackQualityAutoTargetFpsWriteToSettings( int targetFps )
+{
+    int v = targetFps;
+    if ( v != 24 && v != 30 && v != 60 )
+    {
+        v = PlaybackQualitySettings::kDefaultAutoTargetFps();
+    }
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyAutoTargetFps(), v );
+}
+
+inline void playbackQualityShowIndicatorWriteToSettings( bool show )
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyShowQualityIndicator(),
+                  show ? 1 : 0 );
+}
+#endif // QT_CORE_LIB
+
+/* Effective HQ-mean23 desire considering env override + GUI fallback.
+ * Env var takes priority; otherwise HighQuality and Auto modes ask for HQ. */
+inline bool playbackQualityWantsHqMean23( PlaybackQualityMode mode )
+{
+    /* Env var takes precedence: matches existing
+     * dualIsoPlaybackPreferHqMean23ViaEnv() semantics. */
+    const char * env = std::getenv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+    if ( env && *env )
+    {
+        return playbackQualityEnvVarTruthy( env );
+    }
+    return mode == PlaybackQualityMode::HighQuality
+        || mode == PlaybackQualityMode::Auto;
+}
+
+/* Effective playback scale factor considering env override + GUI fallback.
+ * Returns 1, 2, or 4 (clamped). For Auto mode, the dynamic decision is
+ * made by the cadence sampler; this returns the mode's *initial* scale
+ * factor. */
+inline int playbackQualityScaleFactorForMode( PlaybackQualityMode mode,
+                                              bool dualIsoActive )
+{
+    /* Env var takes precedence. */
+    const char * env = std::getenv("MLVAPP_PLAYBACK_SCALE_FACTOR");
+    if ( env && *env )
+    {
+        const int v = std::atoi(env);
+        if ( v == 1 || v == 2 || v == 4 ) return v;
+    }
+    switch ( mode )
+    {
+        case PlaybackQualityMode::Fast:
+            return 1;
+        case PlaybackQualityMode::HighQuality:
+            return 4;
+        case PlaybackQualityMode::Auto:
+            return 4; /* start optimistic; sampler may downgrade */
+    }
+    (void)dualIsoActive;
+    return 1;
+}
+
+/* Cadence sampler used by Auto mode. Maintains a sliding window of frame
+ * timings and decides which mode the next slot should use.
+ *
+ * Thread-safety: timer events run on the GUI thread and the read paths
+ * from RenderFrameThread don't share state with this sampler, so a simple
+ * mutex around the deque is enough. The whole class is intentionally
+ * header-only and stateless across runs. */
+struct PlaybackQualityAutoSampler
+{
+    static constexpr size_t kSlidingWindow = 16;
+
+    void recordFrameMs( double frameMs )
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        if ( frameMs <= 0.0 ) return;
+        m_window.push_back( frameMs );
+        if ( m_window.size() > kSlidingWindow ) m_window.pop_front();
+    }
+
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        m_window.clear();
+    }
+
+    /* Returns the recommended scale factor for the next slot.
+     * targetFps is the user's chosen target (24, 30, or 60).
+     * dualIsoActive forces scale=4 when HQ is selected (no scale=2 for DI).
+     *
+     * Logic:
+     *   - if window not full yet -> stay at HQ scale=4 (gather more data)
+     *   - else compute avg cadence
+     *   - if avg cadence > 1.10 * frame budget (under-meeting target by >10%)
+     *       -> downgrade to Fast (scale=1, no HQ)
+     *   - else if avg cadence < 0.65 * frame budget (lots of headroom)
+     *       and !dualIsoActive
+     *       -> upgrade HQ to scale=2 (try sharper)
+     *   - else stay at HQ scale=4 */
+    struct Decision
+    {
+        int scaleFactor;       /* 1, 2, or 4 */
+        bool useHqMean23;      /* true => HQ + mean23, false => Fast preview */
+    };
+
+    Decision decideNextSlot( int targetFps, bool dualIsoActive ) const
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        if ( targetFps <= 0 ) targetFps = 30;
+        const double frameBudgetMs = 1000.0 / static_cast<double>( targetFps );
+
+        if ( m_window.size() < kSlidingWindow )
+        {
+            /* Optimistic start: HQ scale=4 until we have a full window. */
+            return Decision{ 4, true };
+        }
+
+        double sum = 0.0;
+        for ( const double v : m_window ) sum += v;
+        const double avgMs = sum / static_cast<double>( m_window.size() );
+
+        if ( avgMs > frameBudgetMs * 1.10 )
+        {
+            /* Missing target by >10%: drop to Fast. */
+            return Decision{ 1, false };
+        }
+        if ( !dualIsoActive && avgMs < frameBudgetMs * 0.65 )
+        {
+            /* Plenty of headroom on a non-DI clip: try sharper HQ. */
+            return Decision{ 2, true };
+        }
+        /* Steady state: HQ scale=4. */
+        return Decision{ 4, true };
+    }
+
+private:
+    mutable std::mutex m_mutex;
+    std::deque<double> m_window;
+};
+
+#endif // PLAYBACKQUALITYPOLICY_H

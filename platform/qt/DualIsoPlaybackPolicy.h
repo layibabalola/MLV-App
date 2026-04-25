@@ -120,6 +120,56 @@ inline bool dualIsoPlaybackPreferHqMean23ViaEnv()
     return cached != 0;
 }
 
+/* Phase 4E: GUI-grade override hook for the HQ+mean23 playback toggle.
+ *
+ * This is consulted by effectiveDualIsoPlaybackRuntimeSettings() AFTER the
+ * env-var check, so MLVAPP_PLAYBACK_PREFER_HQ_MEAN23 retains priority for
+ * dev/CI overrides. The MainWindow installs a callback that returns the
+ * effective desire derived from QSettings (Playback/QualityMode == 1 or 2).
+ *
+ * Header-only by design: QSettings construction would force a Qt dependency
+ * here, which the headless console-test harness (which links this header
+ * into pipeline_stubs / non-GUI TUs) doesn't want to pay. Instead, the GUI
+ * code installs a function pointer at startup. */
+using DualIsoPlaybackPreferHqMean23Fallback = bool (*)();
+
+inline DualIsoPlaybackPreferHqMean23Fallback &
+dualIsoPlaybackPreferHqMean23FallbackRef()
+{
+    static DualIsoPlaybackPreferHqMean23Fallback fallback = nullptr;
+    return fallback;
+}
+
+inline void
+setDualIsoPlaybackPreferHqMean23Fallback(DualIsoPlaybackPreferHqMean23Fallback fallback)
+{
+    dualIsoPlaybackPreferHqMean23FallbackRef() = fallback;
+}
+
+/* Convenience: true if env var is set OR (env var unset AND fallback says
+ * yes). Used by the runtime settings function below. */
+inline bool dualIsoPlaybackPreferHqMean23()
+{
+    /* Env var takes priority. We check the env var directly here (not via
+     * the cached ViaEnv() helper) so the "unset" case correctly falls
+     * through to the GUI fallback. */
+    const char * v = std::getenv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+    if (v && *v)
+    {
+        if (std::strcmp(v, "0") != 0
+            && std::strcmp(v, "false") != 0
+            && std::strcmp(v, "FALSE") != 0
+            && std::strcmp(v, "False") != 0)
+        {
+            return true;
+        }
+        return false;
+    }
+    DualIsoPlaybackPreferHqMean23Fallback fallback =
+        dualIsoPlaybackPreferHqMean23FallbackRef();
+    return fallback ? fallback() : false;
+}
+
 inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bool playbackActive,
                                                                               bool rawFixEnabled,
                                                                               int dualIsoValidity,
@@ -136,12 +186,14 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
     }
 
     const bool explicitPreviewSelected = (selectedMode == 2);
-    const bool preferHqMean23 = dualIsoPlaybackPreferHqMean23ViaEnv();
-    /* When the user has opted into HQ-during-playback via env var, suppress
-     * the preview-rowscale override so the receipt's selectedMode (typically
-     * 1 = HQ recon) flows through. The mean23 override below then catches
-     * the now-still-HQ playback path and writes the playbackForceMean23 flag,
-     * giving us HQ + mean23 (cast closed) at the cost of cadence. */
+    const bool preferHqMean23 = dualIsoPlaybackPreferHqMean23();
+    /* When the user has opted into HQ-during-playback (via env var or via
+     * the GUI Playback Quality dial that sets the QSettings-backed
+     * fallback), suppress the preview-rowscale override so the receipt's
+     * selectedMode (typically 1 = HQ recon) flows through. The mean23
+     * override below then catches the now-still-HQ playback path and
+     * writes the playbackForceMean23 flag, giving us HQ + mean23 (cast
+     * closed) at the cost of cadence. */
     const bool previewOverrideActive = playbackActive
                                     && rawFixEnabled
                                     && (dualIsoValidity != 0)

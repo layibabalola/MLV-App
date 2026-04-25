@@ -207,6 +207,25 @@
      <addaction name="actionCaching"/>
      <addaction name="actionDontSwitchDebayerForPlayback"/>
     </widget>
+    <widget class="QMenu" name="menuPlaybackQuality">
+     <property name="title">
+      <string>Playback Quality</string>
+     </property>
+     <widget class="QMenu" name="menuPlaybackAutoTargetFps">
+      <property name="title">
+       <string>Auto Target FPS</string>
+      </property>
+      <addaction name="actionPlaybackAutoTarget24"/>
+      <addaction name="actionPlaybackAutoTarget30"/>
+      <addaction name="actionPlaybackAutoTarget60"/>
+     </widget>
+     <addaction name="actionPlaybackQualityFast"/>
+     <addaction name="actionPlaybackQualityHQ"/>
+     <addaction name="actionPlaybackQualityAuto"/>
+     <addaction name="separator"/>
+     <addaction name="actionPlaybackShowQualityIndicator"/>
+     <addaction name="menuPlaybackAutoTargetFps"/>
+    </widget>
     <addaction name="actionGoto_First_Frame"/>
     <addaction name="actionPreviousFrame"/>
     <addaction name="actionPlay"/>
@@ -221,6 +240,7 @@
     <addaction name="actionDropFrameMode"/>
     <addaction name="actionPlaybackPosition"/>
     <addaction name="menuDemosaicForPlayback"/>
+    <addaction name="menuPlaybackQuality"/>
     <addaction name="actionUseFastProcessingForPlayback"/>
     <addaction name="actionBetterResizer"/>
     <addaction name="actionViewerBackgroundColor"/>
@@ -10983,6 +11003,83 @@ QGroupBox::indicator:checked:disabled {
    </property>
    <property name="statusTip">
     <string>Trade some playback grading fidelity for speed while the transport is running; full processing returns when paused.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackQualityFast">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Fast (preview, max cadence)</string>
+   </property>
+   <property name="toolTip">
+    <string>Preview rowscale during playback. Fastest cadence but the structural magenta cast on Dual ISO clips remains visible.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback Quality: Fast preview path; cast may be visible on Dual ISO; highest framerate.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackQualityHQ">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>High Quality (cast-closed, slower)</string>
+   </property>
+   <property name="toolTip">
+    <string>Force HQ Dual ISO + mean23 reconstruction at scale=4 during playback. Closes the magenta cast on Dual ISO clips at the cost of cadence.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback Quality: HQ + mean23 + scale=4; cast closed; slower cadence on big sensors.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackQualityAuto">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Auto (adapt to cadence)</string>
+   </property>
+   <property name="toolTip">
+    <string>Start in High Quality and adapt scale/quality based on measured cadence over a 16-frame sliding window.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback Quality: Auto. Samples cadence and falls back to Fast if the measured framerate misses the target.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackShowQualityIndicator">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show Quality Indicator</string>
+   </property>
+   <property name="toolTip">
+    <string>Show a small status bar indicator with the active playback quality mode.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackAutoTarget24">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>24 fps</string>
+   </property>
+  </action>
+  <action name="actionPlaybackAutoTarget30">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>30 fps</string>
+   </property>
+  </action>
+  <action name="actionPlaybackAutoTarget60">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>60 fps</string>
    </property>
   </action>
   <action name="actionTranscodeAndImport">

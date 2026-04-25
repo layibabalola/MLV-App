@@ -24,6 +24,8 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_worker_thread_count.cpp \
     $$REPO_ROOT/tests/console/test_dual_iso_playback_policy.cpp \
     $$REPO_ROOT/tests/console/test_frame_compare.cpp \
+    $$REPO_ROOT/tests/console/test_playback_quality_settings.cpp \
+    $$REPO_ROOT/tests/console/test_playback_quality_auto_mode.cpp \
     $$REPO_ROOT/tests/console/test_receipt_loader.cpp \
     $$REPO_ROOT/tests/console/test_receipt_applier.cpp
 

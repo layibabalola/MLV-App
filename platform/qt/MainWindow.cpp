@@ -14,6 +14,7 @@ extern "C" {
 #include "math.h"
 
 #include <QMessageBox>
+#include <QShortcut>
 #include <QThread>
 #include <QTime>
 #include <QSettings>
@@ -46,6 +47,7 @@ extern "C" {
 #include "GpuDebayer.h"
 #include "GpuDisplayViewport.h"
 #include "MainWindowGpuPreviewPolicy.h"
+#include "PlaybackQualityPolicy.h"
 #include "PlaybackScaling.h"
 #include "ZebraThresholds.h"
 #include "batch/WorkerThreadCount.h"
@@ -123,6 +125,11 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #define SESSION_ACTIVE_CLIP_ROW      m_pModel->activeRow()
 #define SET_ACTIVE_CLIP_IDX(index)   m_pModel->setActiveRow(index)
 #define SESSION_EMPTY                m_pModel->rowCount(QModelIndex())==0
+
+/* Phase 4E: atomic mirror of MainWindow's m_playbackQualityActiveHq.
+ * Declared at file scope so the static GUI fallback and the timer callback
+ * (both static-context with respect to ordering) both see it. */
+static std::atomic<int> g_playbackQualityActiveHqMirror{ -1 };
 
 namespace
 {
@@ -265,18 +272,19 @@ static bool playback_start_preroll_disabled_by_environment()
  * Accepts "1", "2", or "4"; anything else clamps to 1. Today the value is
  * only observed by the processed8/16 cache key (the pipeline still renders
  * at full resolution). Phase 4B will honor it in the actual render
- * pipeline. */
-static int playback_scale_factor_from_environment()
+ * pipeline. Phase 4E: returns 0 when the env var is unset, so the caller
+ * can fall back to the GUI dial. Otherwise returns the parsed value. */
+static int playback_scale_factor_env_override()
 {
-    static int cached_scale = -1;
-    if (cached_scale >= 0)
+    static int cached_scale = -2; /* -2 == not yet probed, 0 == unset */
+    if (cached_scale != -2)
     {
         return cached_scale;
     }
 
     const QString raw =
         qEnvironmentVariable("MLVAPP_PLAYBACK_SCALE_FACTOR").trimmed();
-    int requested = 1;
+    int requested = 0;
     if (!raw.isEmpty())
     {
         bool ok = false;
@@ -289,18 +297,18 @@ static int playback_scale_factor_from_environment()
         {
             qWarning().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR ignored:"
                                  << raw
-                                 << "(must be 1, 2, or 4); using 1.";
+                                 << "(must be 1, 2, or 4); falling back to GUI dial.";
         }
     }
     cached_scale = requested;
-    if (requested != 1)
+    if (requested != 0)
     {
         qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR =" << requested
-                          << "(Phase 4A: cache-key only; pipeline still"
-                             " renders at full resolution).";
+                          << "(env override; the GUI dial is bypassed).";
     }
     return cached_scale;
 }
+
 
 class PlaybackPaintProbe : public QObject
 {
@@ -565,8 +573,46 @@ void MainWindow::timerFrameEvent( void )
         //qApp->processEvents();
 
         //fps measurement
-        if( timeDiff != 0 ) m_pFpsStatus->setText( tr( "Playback: %1 fps" ).arg( (int)( 1000 / lastTime.msecsTo( nowTime ) ) ) );
+        const int measuredFrameMs = lastTime.msecsTo( nowTime );
+        if( timeDiff != 0 ) m_pFpsStatus->setText( tr( "Playback: %1 fps" ).arg( (int)( 1000 / measuredFrameMs ) ) );
         lastTime = nowTime;
+
+        //Phase 4E: feed the auto sampler with the per-frame cadence; only
+        //relevant during active playback in Auto mode, but we always
+        //record (stale samples are pruned by the sliding window).
+        if( ui->actionPlay->isChecked() && measuredFrameMs > 0 )
+        {
+            m_playbackQualitySampler.recordFrameMs( static_cast<double>( measuredFrameMs ) );
+            ++m_playbackQualityFrameCounter;
+            if ( m_playbackQualityMode == 2
+                 && (m_playbackQualityFrameCounter % PlaybackQualityAutoSampler::kSlidingWindow) == 0 )
+            {
+                /* Re-evaluate every full sliding window. Dual-ISO state
+                 * influences the sampler's headroom heuristic; we read the
+                 * current llrawproc validity directly. */
+                const bool dualIsoActive =
+                    ( m_pMlvObject != nullptr )
+                    && ( llrpGetDualIsoValidity( m_pMlvObject ) != 0 )
+                    && ui->checkBoxRawFixEnable->isChecked();
+                const PlaybackQualityAutoSampler::Decision decision =
+                    m_playbackQualitySampler.decideNextSlot(
+                        m_playbackAutoTargetFps, dualIsoActive );
+                if ( decision.scaleFactor != m_playbackQualityActiveScale
+                     || decision.useHqMean23 != m_playbackQualityActiveHq )
+                {
+                    m_playbackQualityActiveScale = decision.scaleFactor;
+                    m_playbackQualityActiveHq    = decision.useHqMean23;
+                    g_playbackQualityActiveHqMirror.store(
+                        m_playbackQualityActiveHq ? 1 : 0,
+                        std::memory_order_release );
+                    /* Buffer-size or HQ-flag changed: invalidate caches so
+                     * the next request re-renders. */
+                    invalidateDisplayPreviewCache();
+                    m_frameChanged = true;
+                    updatePlaybackQualityIndicator();
+                }
+            }
+        }
 
         //When playback is off, the timeDiff is set to 0 for DropFrameMode
         if( !ui->actionPlay->isChecked() ) timeDiff = 1000 / getFramerate();
@@ -1981,13 +2027,22 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             std::max( 1, qRound( sceneHeight * devicePixelRatioF() ) );
     }
 
-    /* Phase 4A: thread MLVAPP_PLAYBACK_SCALE_FACTOR through to the render
-     * thread. The pipeline still produces full-resolution output today;
-     * the value is observed only by the processed-frame cache key so a
-     * scale=1 entry never satisfies a scale=2 lookup. Once Phase 4B lands
-     * the env var (and the eventual GUI control) will start producing
-     * smaller buffers without any further plumbing churn. */
-    requestContext.playbackScaleFactor = playback_scale_factor_from_environment();
+    /* Phase 4A/4E: thread the playback scale factor through to the render
+     * thread. The env var MLVAPP_PLAYBACK_SCALE_FACTOR takes priority
+     * (developer override); otherwise the GUI Playback Quality dial state
+     * (m_playbackQualityActiveScale, updated dynamically by the auto
+     * sampler) drives the value. The pipeline still produces full-
+     * resolution output today; the value is observed by the processed-
+     * frame cache key so a scale=1 entry never satisfies a scale=2 lookup.
+     * Once Phase 4B lands the dial will start producing smaller buffers
+     * without any further plumbing churn. */
+    {
+        const int envScale = playback_scale_factor_env_override();
+        requestContext.playbackScaleFactor =
+            ( envScale == 1 || envScale == 2 || envScale == 4 )
+                ? envScale
+                : effectivePlaybackScaleFactorForRequest();
+    }
 
     RenderFrameThread::PresentationPreparationOptions presentationPreparation;
     presentationPreparation.fastPlaybackScale = requestContext.fastPlaybackScaleEligible;
@@ -3208,6 +3263,25 @@ void MainWindow::initGui( void )
     m_playbackElementGroup->addAction( ui->actionTimecodePositionMiddle );
     m_playbackElementGroup->addAction( ui->actionTimecodePositionRight );
 
+    //Phase 4E: Playback Quality dial as exclusive group, plus Auto-target FPS group
+    m_playbackQualityGroup = new QActionGroup( this );
+    m_playbackQualityGroup->setExclusive( true );
+    m_playbackQualityGroup->addAction( ui->actionPlaybackQualityFast );
+    m_playbackQualityGroup->addAction( ui->actionPlaybackQualityHQ );
+    m_playbackQualityGroup->addAction( ui->actionPlaybackQualityAuto );
+
+    m_playbackAutoTargetFpsGroup = new QActionGroup( this );
+    m_playbackAutoTargetFpsGroup->setExclusive( true );
+    m_playbackAutoTargetFpsGroup->addAction( ui->actionPlaybackAutoTarget24 );
+    m_playbackAutoTargetFpsGroup->addAction( ui->actionPlaybackAutoTarget30 );
+    m_playbackAutoTargetFpsGroup->addAction( ui->actionPlaybackAutoTarget60 );
+
+    //Keyboard shortcut Q cycles Fast -> HQ -> Auto -> Fast.
+    QShortcut * pQualityCycle = new QShortcut( QKeySequence( Qt::Key_Q ), this );
+    pQualityCycle->setContext( Qt::ApplicationShortcut );
+    connect( pQualityCycle, &QShortcut::activated,
+             this, &MainWindow::cyclePlaybackQualityMode );
+
 #ifdef Q_OS_LINUX
     //if not doing this, some elements are covered by the scrollbar on Linux only
     ui->dockWidgetEdit->setMinimumWidth( 240 );
@@ -3348,11 +3422,25 @@ void MainWindow::initGui( void )
     m_pChosenDebayer->setToolTip( tr( "Current debayer algorithm." ) );
     statusBar()->addWidget( m_pChosenDebayer );
 
+    //Phase 4E: Set up playback-quality status indicator. Tooltip-described
+    //and toggleable via the Playback menu.
+    m_pPlaybackQualityIndicator = new QLabel( statusBar() );
+    m_pPlaybackQualityIndicator->setMaximumWidth( 200 );
+    m_pPlaybackQualityIndicator->setMinimumWidth( 140 );
+    m_pPlaybackQualityIndicator->setText( tr( "Quality: Fast" ) );
+    m_pPlaybackQualityIndicator->setToolTip(
+        tr( "Active playback quality mode (Playback menu / shortcut Q)." ) );
+    statusBar()->addWidget( m_pPlaybackQualityIndicator );
+
     //Recent sessions menu
     m_pRecentFilesMenu = new QRecentFilesMenu(tr("Recent Sessions"), ui->menuFile);
 
     //Read Settings
     readSettings();
+    //Phase 4E: read Playback Quality state and reflect into menu/sampler.
+    //Must run AFTER initGui() (action groups exist) and AFTER readSettings()
+    //(though Playback Quality keys are independent of legacy keys).
+    initPlaybackQualityFromSettings();
 
     //Add recent sessions to filemenu
     ui->menuFile->insertMenu( ui->actionSaveSession, m_pRecentFilesMenu );
@@ -9578,6 +9666,252 @@ void MainWindow::on_actionUseFastProcessingForPlayback_triggered()
 {
     invalidateDisplayPreviewCache();
     m_frameChanged = true;
+}
+
+/* ============================================================
+ * Phase 4E: Playback Quality dial (Fast / HighQuality / Auto).
+ * ============================================================
+ *
+ * The state machine:
+ *   m_playbackQualityMode  : the user's persisted choice (0,1,2)
+ *   m_playbackAutoTargetFps: the user's chosen target fps for Auto (24/30/60)
+ *   m_playbackQualityActiveScale : effective scale for the next render (1/2/4)
+ *   m_playbackQualityActiveHq    : effective HQ-mean23 desire for next render
+ *
+ * applyPlaybackQualityMode() sets the user choice and seeds the active
+ * state. Each render request reads m_playbackQualityActiveScale into
+ * requestContext.playbackScaleFactor. The DualIsoPlaybackPolicy reads the
+ * HQ desire via the function-pointer fallback installed in initGui().
+ *
+ * Auto-mode adaptation: every 16 frames the GUI sampler hands back a
+ * recommendation based on the recent cadence; we update the active state
+ * and invalidate the display cache so the new buffer size takes effect. */
+
+bool MainWindow::dualIsoPlaybackPreferHqMean23GuiFallback( void )
+{
+    /* Fast path: if the GUI has installed its live mirror, use it. The
+     * mirror reflects the Auto sampler's dynamic decision; without this
+     * indirection Auto-mode demotion (HQ -> Fast on cadence miss) would
+     * not take effect for Dual ISO clips. */
+    const int mirror = g_playbackQualityActiveHqMirror.load(std::memory_order_acquire);
+    if (mirror == 0) return false;
+    if (mirror == 1) return true;
+    /* Mirror not yet primed (very early in startup): consult QSettings. */
+    return playbackQualityWantsHqMean23( playbackQualityModeFromSettings() );
+}
+
+void MainWindow::initPlaybackQualityFromSettings( void )
+{
+    /* Install the HQ-mean23 GUI fallback so DualIsoPlaybackPolicy picks up
+     * the QSettings choice when no env var is set. */
+    setDualIsoPlaybackPreferHqMean23Fallback(&MainWindow::dualIsoPlaybackPreferHqMean23GuiFallback);
+
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    int rawMode = set.value( PlaybackQualitySettings::kKeyQualityMode(),
+                             PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
+    if ( rawMode < 0 || rawMode > 2 ) rawMode = 0;
+    int rawTargetFps = set.value( PlaybackQualitySettings::kKeyAutoTargetFps(),
+                                  PlaybackQualitySettings::kDefaultAutoTargetFps() ).toInt();
+    if ( rawTargetFps != 24 && rawTargetFps != 30 && rawTargetFps != 60 ) rawTargetFps = 30;
+    const bool indicatorVisible =
+        set.value( PlaybackQualitySettings::kKeyShowQualityIndicator(),
+                   PlaybackQualitySettings::kDefaultShowQualityIndicator() ).toBool();
+
+    m_playbackQualityMode = rawMode;
+    m_playbackAutoTargetFps = rawTargetFps;
+    m_playbackQualityIndicatorVisible = indicatorVisible;
+
+    /* Reflect the loaded state into the menu actions. */
+    if ( ui->actionPlaybackQualityFast )
+        ui->actionPlaybackQualityFast->setChecked( rawMode == 0 );
+    if ( ui->actionPlaybackQualityHQ )
+        ui->actionPlaybackQualityHQ->setChecked( rawMode == 1 );
+    if ( ui->actionPlaybackQualityAuto )
+        ui->actionPlaybackQualityAuto->setChecked( rawMode == 2 );
+    if ( ui->actionPlaybackAutoTarget24 )
+        ui->actionPlaybackAutoTarget24->setChecked( rawTargetFps == 24 );
+    if ( ui->actionPlaybackAutoTarget30 )
+        ui->actionPlaybackAutoTarget30->setChecked( rawTargetFps == 30 );
+    if ( ui->actionPlaybackAutoTarget60 )
+        ui->actionPlaybackAutoTarget60->setChecked( rawTargetFps == 60 );
+    if ( ui->actionPlaybackShowQualityIndicator )
+        ui->actionPlaybackShowQualityIndicator->setChecked( indicatorVisible );
+
+    /* Seed active state without persisting (already loaded). */
+    applyPlaybackQualityMode( rawMode, /*persist*/false, /*forceRefresh*/true );
+    setPlaybackQualityIndicatorVisible( indicatorVisible, /*persist*/false );
+}
+
+void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh )
+{
+    if ( mode < 0 || mode > 2 ) mode = 0;
+    const bool changed = (mode != m_playbackQualityMode) || forceRefresh;
+    m_playbackQualityMode = mode;
+
+    const PlaybackQualityMode pqMode = static_cast<PlaybackQualityMode>( mode );
+    const bool dualIsoActive = false; /* sampler keys off DI dynamically */
+    m_playbackQualityActiveScale = playbackQualityScaleFactorForMode( pqMode, dualIsoActive );
+    m_playbackQualityActiveHq    = playbackQualityWantsHqMean23( pqMode );
+    g_playbackQualityActiveHqMirror.store( m_playbackQualityActiveHq ? 1 : 0,
+                                            std::memory_order_release );
+    m_playbackQualityFrameCounter = 0;
+    m_playbackQualitySampler.reset();
+
+    if ( persist )
+    {
+        playbackQualityModeWriteToSettings( pqMode );
+    }
+
+    /* Reflect into menu state in case the change came from a non-menu source
+     * (keyboard shortcut, programmatic). The QActionGroup keeps mutual
+     * exclusion. */
+    if ( ui->actionPlaybackQualityFast )
+        ui->actionPlaybackQualityFast->setChecked( mode == 0 );
+    if ( ui->actionPlaybackQualityHQ )
+        ui->actionPlaybackQualityHQ->setChecked( mode == 1 );
+    if ( ui->actionPlaybackQualityAuto )
+        ui->actionPlaybackQualityAuto->setChecked( mode == 2 );
+
+    if ( changed )
+    {
+        /* Buffer size or HQ flag may have changed; cached frames are no
+         * longer valid for the new mode. Existing scaleFactor changes
+         * already invalidate the processed-frame cache via cache key,
+         * but the in-MainWindow display preview cache also needs flushing
+         * because rowscale vs HQ produces different chroma. */
+        invalidateDisplayPreviewCache();
+        m_frameChanged = true;
+    }
+    updatePlaybackQualityIndicator();
+}
+
+void MainWindow::applyPlaybackAutoTargetFps( int targetFps, bool persist )
+{
+    if ( targetFps != 24 && targetFps != 30 && targetFps != 60 ) targetFps = 30;
+    m_playbackAutoTargetFps = targetFps;
+    if ( ui->actionPlaybackAutoTarget24 )
+        ui->actionPlaybackAutoTarget24->setChecked( targetFps == 24 );
+    if ( ui->actionPlaybackAutoTarget30 )
+        ui->actionPlaybackAutoTarget30->setChecked( targetFps == 30 );
+    if ( ui->actionPlaybackAutoTarget60 )
+        ui->actionPlaybackAutoTarget60->setChecked( targetFps == 60 );
+    if ( persist )
+    {
+        playbackQualityAutoTargetFpsWriteToSettings( targetFps );
+    }
+    updatePlaybackQualityIndicator();
+}
+
+void MainWindow::setPlaybackQualityIndicatorVisible( bool visible, bool persist )
+{
+    m_playbackQualityIndicatorVisible = visible;
+    if ( ui->actionPlaybackShowQualityIndicator )
+        ui->actionPlaybackShowQualityIndicator->setChecked( visible );
+    if ( m_pPlaybackQualityIndicator )
+    {
+        if ( visible ) m_pPlaybackQualityIndicator->show();
+        else m_pPlaybackQualityIndicator->hide();
+    }
+    if ( persist )
+    {
+        playbackQualityShowIndicatorWriteToSettings( visible );
+    }
+    updatePlaybackQualityIndicator();
+}
+
+void MainWindow::updatePlaybackQualityIndicator( void )
+{
+    if ( !m_pPlaybackQualityIndicator ) return;
+    if ( !m_playbackQualityIndicatorVisible )
+    {
+        m_pPlaybackQualityIndicator->hide();
+        return;
+    }
+    m_pPlaybackQualityIndicator->show();
+
+    QString text;
+    QString color;
+    const int scale = m_playbackQualityActiveScale;
+    const bool hq = m_playbackQualityActiveHq;
+    switch ( m_playbackQualityMode )
+    {
+        case 0:
+            text = tr( "Quality: Fast" );
+            color = QStringLiteral( "#A0A0A0" );
+            break;
+        case 1:
+            text = tr( "Quality: HQ x%1" ).arg( scale );
+            color = QStringLiteral( "#7CCB6E" );
+            break;
+        case 2:
+            text = hq ? tr( "Quality: Auto (HQ x%1)" ).arg( scale )
+                      : tr( "Quality: Auto (Fast)" );
+            color = QStringLiteral( "#5DADE2" );
+            break;
+        default:
+            text = tr( "Quality: ?" );
+            color = QStringLiteral( "#A0A0A0" );
+            break;
+    }
+    m_pPlaybackQualityIndicator->setText( text );
+    m_pPlaybackQualityIndicator->setStyleSheet(
+        QStringLiteral( "QLabel { color: %1; padding: 0 6px; }" ).arg( color ) );
+}
+
+int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
+{
+    /* Env var takes priority and matches the existing
+     * playback_scale_factor_from_environment() rules. The static cache in
+     * that function would also return the env value, so returning that
+     * here keeps both paths consistent. */
+    const int active = m_playbackQualityActiveScale;
+    if ( active == 1 || active == 2 || active == 4 ) return active;
+    return 1;
+}
+
+void MainWindow::on_actionPlaybackQualityFast_triggered()
+{
+    applyPlaybackQualityMode( 0, /*persist*/true, /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackQualityHQ_triggered()
+{
+    applyPlaybackQualityMode( 1, /*persist*/true, /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackQualityAuto_triggered()
+{
+    applyPlaybackQualityMode( 2, /*persist*/true, /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackShowQualityIndicator_triggered()
+{
+    const bool checked = ui->actionPlaybackShowQualityIndicator
+                       && ui->actionPlaybackShowQualityIndicator->isChecked();
+    setPlaybackQualityIndicatorVisible( checked, /*persist*/true );
+}
+
+void MainWindow::on_actionPlaybackAutoTarget24_triggered()
+{
+    applyPlaybackAutoTargetFps( 24, /*persist*/true );
+}
+
+void MainWindow::on_actionPlaybackAutoTarget30_triggered()
+{
+    applyPlaybackAutoTargetFps( 30, /*persist*/true );
+}
+
+void MainWindow::on_actionPlaybackAutoTarget60_triggered()
+{
+    applyPlaybackAutoTargetFps( 60, /*persist*/true );
+}
+
+void MainWindow::cyclePlaybackQualityMode( void )
+{
+    const int next = ( m_playbackQualityMode + 1 ) % 3;
+    applyPlaybackQualityMode( next, /*persist*/true, /*forceRefresh*/false );
 }
 
 //Select the codec

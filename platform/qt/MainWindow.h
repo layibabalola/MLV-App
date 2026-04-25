@@ -43,6 +43,7 @@
 #include "Scripting.h"
 #include "ReceiptCopyMaskDialog.h"
 #include "QRecentFilesMenu.h"
+#include "PlaybackQualityPolicy.h"
 #include "batch/BatchTypes.h"
 #include <atomic>
 #include <deque>
@@ -297,6 +298,15 @@ private slots:
     void on_actionCaching_triggered();
     void on_actionDontSwitchDebayerForPlayback_triggered();
     void on_actionUseFastProcessingForPlayback_triggered();
+    /* Phase 4E: Playback Quality dial (Fast / HighQuality / Auto). */
+    void on_actionPlaybackQualityFast_triggered();
+    void on_actionPlaybackQualityHQ_triggered();
+    void on_actionPlaybackQualityAuto_triggered();
+    void on_actionPlaybackShowQualityIndicator_triggered();
+    void on_actionPlaybackAutoTarget24_triggered();
+    void on_actionPlaybackAutoTarget30_triggered();
+    void on_actionPlaybackAutoTarget60_triggered();
+    void cyclePlaybackQualityMode();
     void on_actionExportSettings_triggered();
     void on_actionResetReceipt_triggered();
     void on_actionCopyRecept_triggered();
@@ -617,11 +627,14 @@ private:
     QLabel *m_pFpsStatus;
     QLabel *m_pFrameNumber;
     QLabel *m_pChosenDebayer;
+    QLabel *m_pPlaybackQualityIndicator = nullptr; // Phase 4E
     QActionGroup *m_darkFrameGroup;
     QActionGroup *m_previewDebayerGroup;
     QActionGroup *m_sessionListGroup;
     QActionGroup *m_playbackElementGroup;
     QActionGroup *m_scopeGroup;
+    QActionGroup *m_playbackQualityGroup = nullptr;       // Phase 4E
+    QActionGroup *m_playbackAutoTargetFpsGroup = nullptr; // Phase 4E
     DoubleClickLabel *m_pTcLabel;
     bool m_tcModeDuration;
     uint8_t *m_pRawImage;
@@ -658,6 +671,18 @@ private:
     bool m_zoomModeChanged;
     bool m_playbackStopped;
     bool m_dualIsoPlaybackPreviewActive;
+    /* Phase 4E: Playback Quality state. m_playbackQualityMode reflects the
+     * persisted user choice; m_playbackQualityActiveScale and
+     * m_playbackQualityActiveHq reflect the *effective* state for the next
+     * frame (equal to the user choice for Fast/HighQuality, dynamically
+     * decided by the auto sampler for Auto). */
+    int m_playbackQualityMode = 0;
+    int m_playbackAutoTargetFps = 30;
+    int m_playbackQualityActiveScale = 1;
+    bool m_playbackQualityActiveHq = false;
+    bool m_playbackQualityIndicatorVisible = true;
+    uint64_t m_playbackQualityFrameCounter = 0;
+    PlaybackQualityAutoSampler m_playbackQualitySampler;
     bool m_playbackFrameAdvancePending = false;
     bool m_skipImmediateTimecodeLabel = false;
     bool m_playToFirstFramePending = false;
@@ -789,6 +814,14 @@ private:
     void openSession(QString fileNameSession );
     void saveSession( QString fileName );
     void applyEffectiveDualIsoPlaybackSettings( void );
+    /* Phase 4E: Playback Quality dial helpers. */
+    void initPlaybackQualityFromSettings( void );
+    void applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh );
+    void applyPlaybackAutoTargetFps( int targetFps, bool persist );
+    void setPlaybackQualityIndicatorVisible( bool visible, bool persist );
+    void updatePlaybackQualityIndicator( void );
+    int  effectivePlaybackScaleFactorForRequest( void ) const;
+    static bool dualIsoPlaybackPreferHqMean23GuiFallback( void );
     void beginPlayToFirstFrameMeasurement( void );
     void notePlayToFirstFramePresentation( int presentedFrame );
     bool primePlaybackCacheOnPlayStart( void );
