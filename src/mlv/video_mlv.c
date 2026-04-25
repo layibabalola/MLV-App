@@ -2584,6 +2584,52 @@ static int mlv_phase4bv2_disabled_via_env(void)
     return g_mlv_phase4bv2_disabled_env_cache;
 }
 
+/* Phase 4B-v3: env kill switch — set to 1 to disable the Y-crop-to-16-aligned
+ * full XY pre-recon wrapper and force the v2 X-only-pre-recon fallback. v3
+ * adds <= 0.66% of source rows lost from the bottom edge (zero on clips
+ * already 16-aligned). */
+static int g_mlv_phase4bv3_disabled_env_cache = -1;
+
+static int mlv_phase4bv3_disabled_via_env(void)
+{
+    if (g_mlv_phase4bv3_disabled_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_DISABLE_PHASE4BV3");
+        g_mlv_phase4bv3_disabled_env_cache =
+            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+    }
+    return g_mlv_phase4bv3_disabled_env_cache;
+}
+
+/* Phase 4B-v3: telemetry — counts which path the most recent v2 entry took.
+ * 3 = full XY (v3, Y-cropped or natively aligned); 2 = X-only fallback;
+ * 0 = v2 entry not invoked / rejected before path selection.
+ *
+ * Process-wide (not thread-local) so test code reading the counter on the
+ * test thread sees writes from any worker thread that ran the v2 entry.
+ * The counter is updated atomically via store-only semantics; tests don't
+ * require any cross-thread synchronisation beyond a memory fence at the
+ * end of the rendering call (which is provided by the OMP parallel-for
+ * end barrier in the surrounding pipeline). */
+static int g_mlv_phase4bv2_path_taken = 0;
+static int g_mlv_phase4bv3_y_crop_rows = 0;
+
+int mlv_phase4bv2_last_path_taken(void)
+{
+    return g_mlv_phase4bv2_path_taken;
+}
+
+int mlv_phase4bv3_last_y_crop_rows(void)
+{
+    return g_mlv_phase4bv3_y_crop_rows;
+}
+
+void mlv_phase4bv_reset_env_cache_for_testing(void)
+{
+    g_mlv_phase4bv2_disabled_env_cache = -1;
+    g_mlv_phase4bv3_disabled_env_cache = -1;
+}
+
 /* Phase 4B-v2: returns 1 if the receipt's llrawproc options are compatible
  * with the downsample-before-llrawproc path. The path skips focus pixel,
  * bad pixel, vertical stripes, and pattern noise — those need full-res
@@ -2621,30 +2667,168 @@ static void mlv_phase4bv2_log_rejection(const char * reason)
     fflush(stderr);
 }
 
+/* Phase 4B-v3 (full XY pre-recon, optionally Y-cropped to 16-aligned):
+ *
+ * Runs pl_downsample_bayer_to_bayer_4x on (full_w, eff_h) where
+ * eff_h = (full_h / 16) * 16 — the largest 16-aligned height <= full_h.
+ * For clips where full_h is already 16-aligned this is identity (no rows
+ * lost). For clips where it isn't (e.g. user's 5K M16-1210 at 1808x2268,
+ * gcd=4), eff_h = 2256, losing 12 source rows from the bottom edge
+ * (~0.5% Y loss, invisible at playback display resolution after the
+ * existing bilinear stretch).
+ *
+ * After the kernel produces (full_w/4, eff_h/4) bayer, llrawproc and
+ * debayer run on that smaller buffer. The output rows 0..eff_h/4-1 are
+ * direct recon results; the trailing (full_h - eff_h)/4 rows of the
+ * caller-sized output buffer are filled by replicating the last valid
+ * row, so the downstream upscale doesn't see a black band.
+ *
+ * Returns 1 on success, 0 to fall back to the v2 X-only path. */
+static int mlv_render_scaled_rgb16_v3_full_xy(mlvObject_t * video,
+                                              uint64_t frameIndex,
+                                              uint16_t * outputFrame,
+                                              int threads,
+                                              int * out_dn_ms_x100)
+{
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+
+    /* in_w must be multiple of 4 (kernel constraint, same as v2).
+     * eff_h must be multiple of 16 (kernel constraint), so we crop down to
+     * the nearest 16-aligned height. eff_h must also be > 0; in practice
+     * any sensible Dual ISO clip has full_h >= 16. */
+    const int eff_h = (full_h / 16) * 16;
+    if (full_w % 4 != 0 || eff_h < 16) return 0;
+
+    g_mlv_phase4bv3_y_crop_rows = full_h - eff_h;
+
+    /* Bayer→bayer 4x kernel output dim. */
+    const int mid_w = full_w / 4;
+    const int mid_h = eff_h / 4;
+    /* Final output dim that the caller's buffer is sized for. */
+    const int out_w = full_w / 4;
+    const int out_h = full_h / 4;
+    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+    const uint64_t mid_pixels = (uint64_t)mid_w * (uint64_t)mid_h;
+    const uint64_t mid_rgb_words = mid_pixels * 3u;
+    const uint64_t out_rgb_words = (uint64_t)out_w * (uint64_t)out_h * 3u;
+
+    uint16_t * full_bayer = mlv_ensure_thread_u16_buffer(full_pixels);
+    uint16_t * mid_bayer = mlv_ensure_thread_scaled_bayer_buffer(mid_pixels);
+    uint16_t * mid_rgb = mlv_ensure_thread_rgb_u16_buffer(mid_rgb_words);
+    if (!full_bayer || !mid_bayer || !mid_rgb) return 0;
+
+    /* Step 1: decode raw at full res (no llrawproc). */
+    const double raw_start = mlv_stage_timing_now();
+    if (getMlvRawFrameUint16(video, frameIndex, full_bayer))
+    {
+        memset(outputFrame, 0, (size_t)out_rgb_words * sizeof(uint16_t));
+        return 0;
+    }
+    g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
+
+    /* Step 2: bayer→bayer 4x (full XY) downsample, viewing the full bayer
+     * as (full_w, eff_h). The kernel reads only rows 0..eff_h-1 — rows
+     * eff_h..full_h-1 are simply ignored. (Reading less data than the
+     * buffer holds is safe.) */
+    const double downsample_start = mlv_stage_timing_now();
+    int actual_mid_w = 0, actual_mid_h = 0;
+    int rc = pl_downsample_bayer_to_bayer_4x(full_bayer, full_w, eff_h,
+                                              mid_bayer, &actual_mid_w, &actual_mid_h, threads);
+    if (rc != 0 || actual_mid_w != mid_w || actual_mid_h != mid_h)
+    {
+        mlv_phase4bv2_log_rejection("v3 bayer-to-bayer 4x kernel rejected");
+        return 0;
+    }
+    const double downsample_ms = (mlv_stage_timing_now() - downsample_start) * 1000.0;
+
+    /* Step 3: apply llrawproc subset on the narrowed buffer. Dimensions
+     * (mid_w, mid_h) — the dual-ISO 4-row pattern is preserved by the
+     * kernel because it samples complete 4-row blocks at stride 16 in
+     * source space. */
+    const double llraw_start = mlv_stage_timing_now();
+    mlv_pipeline_capture_set_current_frame(frameIndex);
+    const size_t mid_bytes = (size_t)mid_pixels * sizeof(uint16_t);
+    int llraw_ok = applyLLRawProcObject_with_dims(video, mid_bayer, mid_bytes,
+                                                  mid_w, mid_h);
+    if (!llraw_ok)
+    {
+        mlv_phase4bv2_log_rejection("v3 applyLLRawProcObject_with_dims rejected");
+        return 0;
+    }
+    const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
+    g_mlv_last_llrawproc_ms = llrawproc_ms;
+
+    /* Step 4: debayer narrowed bayer → RGB16 at (mid_w, mid_h) directly
+     * into the head of the output buffer. (out_w == mid_w by design,
+     * and mid_h <= out_h, so this fills rows 0..mid_h-1 of the output.) */
+    const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    const double debayer_start = mlv_stage_timing_now();
+    debayerBasicU16(outputFrame, mid_bayer, mid_w, mid_h, threads, bit_shift);
+    const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+
+    /* Step 5: replicate the last valid row into rows mid_h..out_h-1 of the
+     * output buffer. For 16-aligned clips mid_h == out_h and this loop
+     * runs zero iterations. For the user's 1808x2268 clip mid_h=564,
+     * out_h=567 — we replicate row 563 into rows 564, 565, 566. The
+     * downstream bilinear upscale to display target then sees a 567-row
+     * image; the last 3 rows are duplicates of row 563, contributing a
+     * negligible band at the very bottom edge after stretch. */
+    const size_t row_words = (size_t)out_w * 3u;
+    if (mid_h > 0)
+    {
+        const uint16_t * last_row = outputFrame + (size_t)(mid_h - 1) * row_words;
+        for (int y = mid_h; y < out_h; ++y)
+        {
+            uint16_t * dst = outputFrame + (size_t)y * row_words;
+            memcpy(dst, last_row, row_words * sizeof(uint16_t));
+        }
+    }
+    else
+    {
+        memset(outputFrame, 0, (size_t)out_rgb_words * sizeof(uint16_t));
+    }
+
+    g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms;
+    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    if (out_dn_ms_x100)
+    {
+        *out_dn_ms_x100 = (int)(downsample_ms * 100.0);
+    }
+    return 1;
+}
+
 /* Phase 4B-v2: downsample-BEFORE-llrawproc path.
  *
  * Architecture (the actual cast-closed-fast path):
  *   1. Decode raw at full res (LJ92 / unpacked uint16 bayer).
- *   2. Bayer→bayer X-only 4x downsample. Output (in_w/4, in_h). Y is
- *      identity, preserving the dual-ISO 4-row pattern unchanged.
+ *   2. Bayer→bayer 4x downsample. Phase 4B-v3 runs the FULL XY downsample
+ *      (Y reduced 4x in pre-recon) when in_h is a multiple of 16 OR can
+ *      be cropped down to the nearest 16-aligned height with negligible
+ *      visual loss. Otherwise falls back to the v2 X-only kernel
+ *      (Y identity).
  *   3. Apply HQ Dual ISO recon + dark frame + chroma smooth on the
- *      narrowed buffer (~1/4 the pixels at scale=4).
- *   4. Debayer the narrowed bayer → RGB16 at (in_w/4, in_h).
- *   5. RGB Y-only 4x downsample → RGB16 at (in_w/4, in_h/4) = the
- *      requested scale=4 output dimensions.
+ *      narrowed buffer.
+ *   4. Debayer the narrowed bayer → RGB16.
+ *   5. (X-only fallback only) RGB Y-only 4x downsample to final dim.
  *
- * Why X-only pre-recon: the dual-ISO 4-row bright/dark pattern uses
+ * Why the v3 wrapper: the dual-ISO 4-row bright/dark pattern uses
  * is_bright[y%4] inside diso_get_full20bit. Y downsampling pre-recon
- * requires keeping COMPLETE 4-row blocks, which forces block-stride to be
- * a multiple of 4. For arbitrary in_h the largest stride that divides
- * in_h is gcd(in_h, 16). For the user's M16-1210 (1808x2268),
- * gcd(2268, 16) = 4 — meaning Y stride 4 = no Y reduction. So we run
- * recon on (W/4, H) and Y-reduce after recon (which has already mixed
- * bright+dark into a single high-DR row, so further Y averaging is fine).
+ * requires keeping COMPLETE 4-row blocks at stride 16 in source space
+ * (so the kept row indices modulo 4 match the iso_patterns cycle). For
+ * arbitrary in_h the largest stride that divides in_h is gcd(in_h, 16).
+ * For the user's M16-1210 (1808x2268), gcd(2268, 16) = 4 — meaning
+ * Y stride 4 = no Y reduction in the v2 X-only fallback. v3 instead
+ * crops to eff_h = 2256 (the largest 16-aligned <= 2268), losing 12
+ * source rows from the bottom edge, and runs the full XY downsample.
  *
- * Speedup: HQ recon scales linearly with W*H. Going from W*H to
- * (W/4)*H saves ~75% of recon time (on top of the 50% mean23-vs-AMaZE
- * saving already in effect via diso_playback_force_mean23).
+ * Speedup at v3 (full XY) on 5K: HQ recon scales linearly with W*H.
+ * Going from W*H to (W/4)*(H/4) saves ~94% of recon time vs the v1
+ * post-recon path; ~75% vs the v2 X-only path. The Y-crop is the
+ * architectural change needed to push cast-closed playback past
+ * ~15 fps GUI on the user's clip.
  *
  * Returns 1 on success, 0 if the receipt is incompatible (caller falls
  * back to v1). */
@@ -2654,6 +2838,9 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
                                       int scaleFactor,
                                       int threads)
 {
+    g_mlv_phase4bv2_path_taken = 0;
+    g_mlv_phase4bv3_y_crop_rows = 0;
+
     if (!video || !outputFrame || scaleFactor <= 1) return 0;
     if (mlv_phase4bv2_disabled_via_env())
     {
@@ -2695,6 +2882,26 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
         mlv_phase4bv2_log_rejection("height not multiple of 4");
         return 0;
     }
+
+    /* Phase 4B-v3: try the full XY pre-recon path first. Eligible whenever
+     * full_h >= 16 (so eff_h = floor(full_h/16)*16 >= 16) and the v3 kill
+     * switch is not set. The path runs the recon on (W/4, eff_h/4) — for
+     * 5K Dual ISO (1808x2268) that's (452, 564) = 254,928 pixels, vs the
+     * X-only path's (452, 2268) = 1,025,136 pixels. */
+    if (!mlv_phase4bv3_disabled_via_env() && full_h >= 16)
+    {
+        int dn_x100 = 0;
+        if (mlv_render_scaled_rgb16_v3_full_xy(video, frameIndex, outputFrame, threads, &dn_x100))
+        {
+            g_mlv_phase4bv2_path_taken = 3;
+            return 1;
+        }
+        /* v3 path attempted and rejected — fall through to v2 X-only. */
+    }
+
+    /* Phase 4B-v2 X-only fallback. Reached when v3 is disabled, full_h < 16,
+     * the v3 kernel rejected (kernel-level dim check fails), or the
+     * llrawproc recon at the cropped+downsampled dim failed. */
 
     /* Intermediate dim: X reduced by 4, Y identity. */
     const int mid_w = full_w / 4;
@@ -2770,6 +2977,7 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
     g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms;
     mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    g_mlv_phase4bv2_path_taken = 2;
     return 1;
 }
 

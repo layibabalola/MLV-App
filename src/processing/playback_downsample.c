@@ -773,9 +773,29 @@ static int pl_downsample_bayer_to_bayer_4x_avx2(const uint16_t * __restrict baye
             uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
 
             int x_out = 0;
-            /* Process 8 output cells (= 32 source cols) per AVX2 iter.
-             * Spill the 32 source lanes to scratch and run a tight scalar
-             * inner loop. The compiler typically unrolls this well. */
+            /* Process 8 output cells (= 4 RGGB pairs = 32 source cols) per
+             * AVX2 iter. Each output pair (R, G) consumes 4 source cols at
+             * stride 8 (a 4-col tile of one bright/dark row, then skip
+             * 4 cols to the next tile). 4 pairs * 8 cols = 32 src cols.
+             *
+             * Pre-2026-04-25 bug: the inner loop's `s = k * 4` walked
+             * scratch in 4-col chunks expecting adjacency, but the scalar
+             * walks src with stride 8 per pair. Outputs were only correct
+             * for k=0 (first pair); pairs k=1..3 were sourced from the
+             * wrong src cols (4..7 instead of 8..11, etc.). The original
+             * test fixture was X-uniform so the wrong-source computation
+             * happened to produce the same value as the correct one. The
+             * Phase 4B-v3 Y-cropped 5K dual-iso path triggers the bug
+             * visibly because the kernel runs on real (non-uniform) data.
+             *
+             * Fix: walk scratch with `s = k * 8` (stride 8 = 4-col tile of
+             * one src row + the same tile of the next src row, but the
+             * kernel only operates on a single row at a time so it's just
+             * 8 src cols stride). 4 pairs * 8 src cols = 32 src cols loaded.
+             *
+             * Inner loop 2 was REMOVED — it was operating on the next
+             * 16 src cols expecting a different output range, which is
+             * fundamentally incompatible with the stride-8 source layout. */
             for (; x_out + 8 <= out_w; x_out += 8)
             {
                 const int xs = x_out * 4;
@@ -788,7 +808,7 @@ static int pl_downsample_bayer_to_bayer_4x_avx2(const uint16_t * __restrict baye
 
                 for (int k = 0; k < 4; ++k)
                 {
-                    const int s = k * 4;
+                    const int s = k * 8;
                     const uint32_t r0 = scratch[s + 0];
                     const uint32_t r1 = scratch[s + 2];
                     const uint32_t g0 = scratch[s + 1];
@@ -796,19 +816,8 @@ static int pl_downsample_bayer_to_bayer_4x_avx2(const uint16_t * __restrict baye
                     drow[x_out + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
                     drow[x_out + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
                 }
-                /* Second half of the 8 cells. */
-                for (int k = 0; k < 4; ++k)
-                {
-                    const int s = 16 + k * 4;
-                    const uint32_t r0 = scratch[s + 0];
-                    const uint32_t r1 = scratch[s + 2];
-                    const uint32_t g0 = scratch[s + 1];
-                    const uint32_t g1 = scratch[s + 3];
-                    drow[x_out + 4 + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
-                    drow[x_out + 4 + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
-                }
             }
-            /* Tail. */
+            /* Tail: process 2 cells per iter using scalar. */
             for (; x_out + 1 < out_w; x_out += 2)
             {
                 const int xs = x_out * 4;
@@ -839,23 +848,13 @@ static int pl_downsample_bayer_to_bayer_4x_avx2(const uint16_t * __restrict baye
                 _mm256_store_si256((__m256i *)(scratch + 16), v_hi);
                 for (int k = 0; k < 4; ++k)
                 {
-                    const int s = k * 4;
+                    const int s = k * 8;
                     const uint32_t r0 = scratch[s + 0];
                     const uint32_t r1 = scratch[s + 2];
                     const uint32_t g0 = scratch[s + 1];
                     const uint32_t g1 = scratch[s + 3];
                     drow[x_out + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
                     drow[x_out + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
-                }
-                for (int k = 0; k < 4; ++k)
-                {
-                    const int s = 16 + k * 4;
-                    const uint32_t r0 = scratch[s + 0];
-                    const uint32_t r1 = scratch[s + 2];
-                    const uint32_t g0 = scratch[s + 1];
-                    const uint32_t g1 = scratch[s + 3];
-                    drow[x_out + 4 + 2 * k + 0] = (uint16_t)((r0 + r1) >> 1);
-                    drow[x_out + 4 + 2 * k + 1] = (uint16_t)((g0 + g1) >> 1);
                 }
             }
             for (; x_out + 1 < out_w; x_out += 2)

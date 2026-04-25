@@ -152,6 +152,22 @@ double getMlvLastProcessed8TotalMilliseconds(void);
 int getMlvLastProcessed8DirectPathActive(void);
 int getMlvLastProcessed8PrefetchHit(void);
 
+/* Phase 4B-v2/v3 telemetry — for parity tests and diagnostics. Returns the
+ * path taken on the most recent v2 entry on the calling thread:
+ *   3 = v3 full-XY pre-recon (Y-cropped if necessary)
+ *   2 = v2 X-only pre-recon fallback
+ *   0 = v2 entry not invoked / rejected before path selection. */
+int mlv_phase4bv2_last_path_taken(void);
+/* Number of source rows cropped from the bottom edge by the v3 Y-crop
+ * wrapper on the most recent v2 entry on the calling thread. 0 if v3
+ * wasn't taken or if the clip was already 16-Y-aligned. */
+int mlv_phase4bv3_last_y_crop_rows(void);
+
+/* Test-only hook: clear the cached env-var values for MLVAPP_DISABLE_PHASE4BV2
+ * and MLVAPP_DISABLE_PHASE4BV3 so subsequent calls re-read getenv(). Used by
+ * parity tests that flip the kill switches mid-process. */
+void mlv_phase4bv_reset_env_cache_for_testing(void);
+
 /* Unpacks the bits of a frame to get a bayer B&W image (without black level correction)
  * Needs memory to return to, sized: sizeof(float) * getMlvHeight(urvid) * getMlvWidth(urvid)
  * Output values will be in range 0-65535 (16 bit), float is only because AMAzE uses it */
