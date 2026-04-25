@@ -769,14 +769,16 @@ TEST(DualIsoPipeline, DualIsoRuntimeChangeForcesPublishAcrossForcedReprocess)
     fixture.video()->llrawproc->dng_white_level = mutated_white_level;
     pthread_mutex_unlock(&fixture.video()->llrawproc_mutex);
 
-    /* resetMlvCachedFrame clears BOTH the raw-debayered cache
-       (current_cached_frame_active) AND the processed cache, forcing the next
-       renderFrame16 to re-run getMlvRawFrameDebayered -> llrawproc_apply.
-       invalidateMlvProcessedPreviewCache alone leaves the raw cache warm,
-       which would let getMlvRawFrameDebayered short-circuit via memcpy at
-       video_mlv.c:1015 and llrawproc_apply would never execute a second time,
-       making this test pass trivially. */
+    /* Force the next render to re-run getMlvRawFrameDebayered -> llrawproc_apply.
+       resetMlvCachedFrame alone only clears single-frame state, not the 8-slot
+       processed caches; before Phase 2C the slot signature also differed because
+       the cache hash bound dng_white_level, so a hash-driven mismatch invalidated
+       the slot. After Phase 2C the hash no longer carries auto-published fields
+       (see src/mlv/video_mlv.c:mlv_hash_llrawproc_state), so this test has to
+       invalidate the slot caches explicitly to keep testing the publish detection
+       (rather than the hash side effect). */
     resetMlvCachedFrame(fixture.video());
+    invalidateMlvProcessedPreviewCache(fixture.video());
 
     const std::vector<uint16_t> second_frame = fixture.renderFrame16(0, 1);
     ASSERT_TRUE(!second_frame.empty());

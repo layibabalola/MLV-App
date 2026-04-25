@@ -376,17 +376,33 @@ static uint64_t mlv_hash_llrawproc_state(uint64_t hash, const llrawprocObject_t 
     hash = mlv_hash_bytes(hash, &llrawproc->dual_iso, sizeof(llrawproc->dual_iso));
     hash = mlv_hash_bytes(hash, &llrawproc->diso1, sizeof(llrawproc->diso1));
     hash = mlv_hash_bytes(hash, &llrawproc->diso2, sizeof(llrawproc->diso2));
-    hash = mlv_hash_bytes(hash, &llrawproc->diso_pattern, sizeof(llrawproc->diso_pattern));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_auto_correction, sizeof(llrawproc->diso_auto_correction));
-    hash = mlv_hash_bytes(hash, &llrawproc->diso_ev_correction, sizeof(llrawproc->diso_ev_correction));
-    hash = mlv_hash_bytes(hash, &llrawproc->diso_black_delta, sizeof(llrawproc->diso_black_delta));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_averaging, sizeof(llrawproc->diso_averaging));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_alias_map, sizeof(llrawproc->diso_alias_map));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_frblending, sizeof(llrawproc->diso_frblending));
     hash = mlv_hash_bytes(hash, &llrawproc->dark_frame, sizeof(llrawproc->dark_frame));
-    hash = mlv_hash_bytes(hash, &llrawproc->dng_bit_depth, sizeof(llrawproc->dng_bit_depth));
-    hash = mlv_hash_bytes(hash, &llrawproc->dng_black_level, sizeof(llrawproc->dng_black_level));
-    hash = mlv_hash_bytes(hash, &llrawproc->dng_white_level, sizeof(llrawproc->dng_white_level));
+    /* Phase 2C: diso_pattern, diso_ev_correction, diso_black_delta and the
+     * dng_* fields are auto-published per frame by Dual ISO recon (see
+     * src/mlv/llrawproc/llrawproc.c:llrawproc_publish_worker_results) and
+     * therefore drift across consecutive frames in steady-state playback
+     * (e.g. patt 0 -> -4 and dng_white_level 2840 -> 12688 between the
+     * first and second frame on the large_dual_iso fixture).
+     *
+     * Including them in the cache state hash forces every frame's
+     * note_request to bump the prefetch generation counter, which
+     * silently invalidates the processed8 8-slot cache. The render thread
+     * then re-runs the full pipeline every frame.
+     *
+     * User-driven changes to any of these fields (manual ev/black-delta
+     * sliders, pattern combobox, etc.) flow through resetMlvCache() in
+     * the GUI handlers (platform/qt/MainWindow.cpp:8482-8531, 11082) which
+     * calls invalidateMlvProcessedPreviewCache() and zeros all 8 cache
+     * slots. Cache invalidation on user intent is preserved without
+     * relying on the hash. Mode (auto vs manual) stays in the hash via
+     * diso_auto_correction (above).
+     *
+     * See .claude-state/profiling/20260424-phase2c-prefetch-fix/ for
+     * diagnostic logs identifying the drift fields. */
     hash = mlv_hash_c_string(hash, llrawproc->dark_frame_filename);
     hash = mlv_hash_bytes(hash, &llrawproc->dark_frame_hdr, sizeof(llrawproc->dark_frame_hdr));
     hash = mlv_hash_bytes(hash, &llrawproc->dark_frame_size, sizeof(llrawproc->dark_frame_size));
