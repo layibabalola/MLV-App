@@ -11,6 +11,18 @@ struct DualIsoPlaybackRuntimeSettings
     int aliasMap;
     int fullResBlending;
     bool previewOverrideActive;
+    /* Mean23 fast-path override: independent of previewOverrideActive.
+     * The preview override forces mode=2 (rowscale, no HQ at all). The
+     * mean23 override only applies when the user has explicitly selected
+     * mode=2 themselves (so the preview override doesn't kick in) or when
+     * the preview override is suppressed (e.g. via the diagnostic
+     * MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE). In production the preview
+     * override is always preferred over the mean23 override because
+     * preview rowscale is faster than mean23 HQ; mean23 is the
+     * second-best fallback for the case where the user wants HQ-style
+     * receipt-driven output during playback (e.g. while exporting from
+     * the timeline). */
+    bool playbackForceMean23;
 };
 
 /* Diagnostic-only escape hatch for the playback Dual ISO preview override.
@@ -27,6 +39,33 @@ inline bool dualIsoPlaybackOverrideDisabledViaEnv()
     if (cached < 0)
     {
         const char * v = std::getenv("MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE");
+        if (v && *v && std::strcmp(v, "0") != 0
+                  && std::strcmp(v, "false") != 0
+                  && std::strcmp(v, "FALSE") != 0
+                  && std::strcmp(v, "False") != 0)
+        {
+            cached = 1;
+        }
+        else
+        {
+            cached = 0;
+        }
+    }
+    return cached != 0;
+}
+
+/* Diagnostic-only escape hatch for the mean23 playback override (peer to
+ * MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE above). Set to 1 to make this
+ * function leave playbackForceMean23 == false even when the override
+ * conditions are otherwise satisfied. Useful for A/B'ing AMaZE vs mean23
+ * cadence in the headless --profile-playback harness. The receipt's
+ * authored interpolation flows through unchanged in either case. */
+inline bool dualIsoPlaybackMean23OverrideDisabledViaEnv()
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char * v = std::getenv("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE");
         if (v && *v && std::strcmp(v, "0") != 0
                   && std::strcmp(v, "false") != 0
                   && std::strcmp(v, "FALSE") != 0
@@ -68,7 +107,8 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
         selectedInterpolation,
         selectedAliasMap,
         selectedFullResBlending,
-        previewOverrideActive
+        previewOverrideActive,
+        false
     };
 
     if( explicitPreviewSelected || previewOverrideActive )
@@ -77,6 +117,22 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
         settings.interpolation = 1;
         settings.aliasMap = 0;
         settings.fullResBlending = 0;
+    }
+
+    /* Mean23 playback override: only applies when the receipt-driven HQ
+     * path is going to actually run during playback. That happens when
+     * the preview override is suppressed (env or invalid Dual ISO) yet
+     * playback is active and the receipt asks for HQ (mode == 1). The
+     * override leaves the interpolation field's authored value alone
+     * (so paused/scrubbing/export keep AMaZE) and instead surfaces a
+     * separate flag the caller writes to llrawproc->diso_playback_force_mean23. */
+    const bool hqWillRunDuringPlayback = playbackActive
+                                       && rawFixEnabled
+                                       && (dualIsoValidity != 0)
+                                       && (settings.mode == 1);
+    if (hqWillRunDuringPlayback && !dualIsoPlaybackMean23OverrideDisabledViaEnv())
+    {
+        settings.playbackForceMean23 = true;
     }
 
     return settings;

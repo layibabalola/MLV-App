@@ -10773,11 +10773,13 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
                 toolButtonDualIsoAliasMapCurrentIndex(),
                 toolButtonDualIsoFullresBlendingCurrentIndex() );
 
+    const int mean23OverrideValue = settings.playbackForceMean23 ? 1 : 0;
     const bool changed = (m_dualIsoPlaybackPreviewActive != settings.previewOverrideActive)
                       || (llrpGetDualIsoMode( m_pMlvObject ) != settings.mode)
                       || (llrpGetDualIsoInterpolationMethod( m_pMlvObject ) != settings.interpolation)
                       || (llrpGetDualIsoAliasMapMode( m_pMlvObject ) != settings.aliasMap)
-                      || (llrpGetDualIsoFullResBlendingMode( m_pMlvObject ) != settings.fullResBlending);
+                      || (llrpGetDualIsoFullResBlendingMode( m_pMlvObject ) != settings.fullResBlending)
+                      || (llrpGetDualIsoPlaybackForceMean23( m_pMlvObject ) != mean23OverrideValue);
 
     if( !changed ) return;
 
@@ -10785,6 +10787,7 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
     llrpSetDualIsoInterpolationMethod( m_pMlvObject, settings.interpolation );
     llrpSetDualIsoAliasMapMode( m_pMlvObject, settings.aliasMap );
     llrpSetDualIsoFullResBlendingMode( m_pMlvObject, settings.fullResBlending );
+    llrpSetDualIsoPlaybackForceMean23( m_pMlvObject, mean23OverrideValue );
     processingSetBlackAndWhiteLevel( m_pMlvObject->processing,
                                      getMlvBlackLevel( m_pMlvObject ),
                                      getMlvWhiteLevel( m_pMlvObject ),

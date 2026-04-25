@@ -378,6 +378,12 @@ static uint64_t mlv_hash_llrawproc_state(uint64_t hash, const llrawprocObject_t 
     hash = mlv_hash_bytes(hash, &llrawproc->diso2, sizeof(llrawproc->diso2));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_auto_correction, sizeof(llrawproc->diso_auto_correction));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_averaging, sizeof(llrawproc->diso_averaging));
+    /* Mean23 playback override is part of the steady-state cache key: the
+     * same frame index produces different pixels with override on (mean23)
+     * vs off (AMaZE), so the processed-frame cache must keep both alive
+     * across a paused -> playing transition. See note at dualiso.c on the
+     * playback policy that flips this field on/off. */
+    hash = mlv_hash_bytes(hash, &llrawproc->diso_playback_force_mean23, sizeof(llrawproc->diso_playback_force_mean23));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_alias_map, sizeof(llrawproc->diso_alias_map));
     hash = mlv_hash_bytes(hash, &llrawproc->diso_frblending, sizeof(llrawproc->diso_frblending));
     hash = mlv_hash_bytes(hash, &llrawproc->dark_frame, sizeof(llrawproc->dark_frame));

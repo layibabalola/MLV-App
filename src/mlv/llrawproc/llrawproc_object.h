@@ -114,6 +114,15 @@ typedef struct
     int diso_black_delta;      // from 0 to 100, -1 = auto correct
 
     int diso_averaging;   // dual iso interpolation method, 0 = amaze-edge, 1 = mean23
+    /* Playback-only override: when non-zero, applyLLRawProcObject forces
+     * the HQ recon (dual_iso == 1) to use mean23 instead of whatever the
+     * receipt's diso_averaging selects. Cleared/restored automatically by
+     * the GUI when playback stops, mirroring the rowscale-mode override at
+     * platform/qt/DualIsoPlaybackPolicy.h. The receipt's authored value is
+     * left untouched for paused/scrubbing/export. Diagnostic env var
+     * MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE bypasses the override
+     * for A/B harness runs. */
+    int diso_playback_force_mean23;
     int diso_alias_map;   // flag for Alias Map switchin on/off
     int diso_frblending;  // flag for Fullres Blending switching on/off
     int dark_frame;       // flag for Dark Frame subtraction mode 0 = off, 1 = ext, 2 = int

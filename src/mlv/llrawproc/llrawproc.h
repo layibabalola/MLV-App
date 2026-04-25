@@ -104,6 +104,15 @@ enum { DISOI_AMAZE, DISOI_MEAN23 };
 int llrpGetDualIsoInterpolationMethod(mlvObject_t * video);
 void llrpSetDualIsoInterpolationMethod(mlvObject_t * video, int value);
 
+/* Playback-only override: when non-zero, applyLLRawProcObject forces the
+ * HQ dual ISO recon (dual_iso == DISO_20BIT) onto the mean23 interpolation
+ * regardless of what the receipt selected. The receipt's stored value is
+ * not modified, so paused/scrubbing/export keep the authored choice (e.g.
+ * AMaZE). Set/cleared by the GUI in MainWindow::applyEffectiveDualIsoPlaybackSettings
+ * based on effectiveDualIsoPlaybackRuntimeSettings(). */
+int llrpGetDualIsoPlaybackForceMean23(mlvObject_t * video);
+void llrpSetDualIsoPlaybackForceMean23(mlvObject_t * video, int value);
+
 int llrpGetDualIsoAliasMapMode(mlvObject_t * video);
 void llrpSetDualIsoAliasMapMode(mlvObject_t * video, int value);
 

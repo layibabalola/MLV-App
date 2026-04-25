@@ -64,6 +64,49 @@ static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_pixel_map_copy_count = 0;
 static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_dark_frame_copy_count = 0;
 static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_runtime_publish_count = 0;
 
+/* Diagnostic-only escape hatch: set MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE=1
+ * to make applyLLRawProcObject ignore the diso_playback_force_mean23 field
+ * and let the receipt's diso_averaging flow through untouched. This is the
+ * peer of MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE (which exists on the GUI
+ * side at platform/qt/DualIsoPlaybackPolicy.h:24-43); both are intended for
+ * A/B harness runs where we want to measure the cost of the override
+ * itself. NOT for production playback.
+ *
+ * Cached after first read so the per-frame fast-path stays branchless;
+ * tests reset it via llrpReinitMean23OverrideDispatchForTesting() (mirrors
+ * dualisoHqReinitDispatchForTesting at dualiso.c). */
+static int g_dualiso_playback_mean23_override_env_cache = -1;
+
+static int dualiso_playback_mean23_override_disabled_via_env(void)
+{
+    if (g_dualiso_playback_mean23_override_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE");
+        if (v && *v && strcmp(v, "0") != 0
+                  && strcmp(v, "false") != 0
+                  && strcmp(v, "FALSE") != 0
+                  && strcmp(v, "False") != 0)
+        {
+            g_dualiso_playback_mean23_override_env_cache = 1;
+        }
+        else
+        {
+            g_dualiso_playback_mean23_override_env_cache = 0;
+        }
+    }
+    return g_dualiso_playback_mean23_override_env_cache;
+}
+
+/* Test-only hook: force re-evaluation of the env-disable cache from the
+ * current process env. Mirrors dualisoHqReinitDispatchForTesting. Not in
+ * the public header; tests forward-declare it. */
+int llrpReinitMean23OverrideDispatchForTesting(void);
+int llrpReinitMean23OverrideDispatchForTesting(void)
+{
+    g_dualiso_playback_mean23_override_env_cache = -1;
+    return dualiso_playback_mean23_override_disabled_via_env();
+}
+
 static int llrawproc_worker_copy_pixel_map(pixel_map * destination,
                                            const pixel_map * source)
 {
@@ -555,6 +598,7 @@ llrawprocObject_t * initLLRawProcObject()
     llrawproc->diso_ev_correction = 0;
     llrawproc->diso_black_delta = 0;
     llrawproc->diso_averaging = 0;
+    llrawproc->diso_playback_force_mean23 = 0;
     llrawproc->diso_alias_map = 0;
     llrawproc->diso_frblending = 1;
     llrawproc->dark_frame = 0;
@@ -766,6 +810,24 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
     diso1 = shared->diso1;
     diso2 = shared->diso2;
     diso_averaging = shared->diso_averaging;
+    /* Playback-only fast-path override: when set by the GUI playback policy
+     * (platform/qt/DualIsoPlaybackPolicy.h), force HQ recon (dual_iso == 1)
+     * to use mean23 instead of AMaZE. mean23 is also a matched-pair recon,
+     * so the cast still closes; AMaZE costs ~150-200 ms p95 on 5K dual ISO,
+     * mean23 costs ~30-50 ms. The receipt's authored diso_averaging is
+     * preserved (the override only reads the flag here, never writes the
+     * shared field) so paused/scrubbing/export keep AMaZE.
+     *
+     * Cache invalidation: diso_playback_force_mean23 is hashed by
+     * mlv_hash_llrawproc_state, so the processed-frame cache slot signature
+     * differs between playback-active (override=1) and paused (override=0)
+     * — the same frame index produces two cache slots, and switching from
+     * playback to paused presents the AMaZE pixels not the mean23 ones. */
+    if (shared->diso_playback_force_mean23 != 0
+        && !dualiso_playback_mean23_override_disabled_via_env())
+    {
+        diso_averaging = 1; /* DISOI_MEAN23 */
+    }
     diso_alias_map = shared->diso_alias_map;
     diso_frblending = shared->diso_frblending;
     worker_diso_pattern = shared->diso_pattern;
@@ -1560,6 +1622,16 @@ int llrpGetDualIsoInterpolationMethod(mlvObject_t * video)
 void llrpSetDualIsoInterpolationMethod(mlvObject_t * video, int value)
 {
     video->llrawproc->diso_averaging = value;
+}
+
+int llrpGetDualIsoPlaybackForceMean23(mlvObject_t * video)
+{
+    return video->llrawproc->diso_playback_force_mean23;
+}
+
+void llrpSetDualIsoPlaybackForceMean23(mlvObject_t * video, int value)
+{
+    video->llrawproc->diso_playback_force_mean23 = value ? 1 : 0;
 }
 
 int llrpGetDualIsoAliasMapMode(mlvObject_t * video)

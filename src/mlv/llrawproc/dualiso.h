@@ -96,4 +96,13 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch);
 void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch);
 
+/* Test-only: counts how many times the HQ recon entered AMaZE (which == 0)
+ * vs mean23 (which == 1) since the last reset. Used by pipeline tests to
+ * verify the playback-mean23 override actually flipped the path without a
+ * full pixel diff. Implemented as thread-local counters in dualiso.c. */
+void dualiso_debug_note_hq_path(int which);
+void dualiso_debug_reset_hq_path_counters(void);
+unsigned long long dualiso_debug_hq_amaze_count(void);
+unsigned long long dualiso_debug_hq_mean23_count(void);
+
 #endif
