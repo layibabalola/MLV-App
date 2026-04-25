@@ -584,6 +584,13 @@ private:
         PlaybackPrepTask task;
         int preparedWidth = 0;
         int preparedHeight = 0;
+        // Bytes per scanline in preparedImage. Always rounded up to a
+        // multiple of 4 so the buffer is safe to wrap as a Format_RGB888
+        // QImage on the GUI thread (Qt requires 32-bit-aligned scanlines;
+        // an unpadded width*3 stride for odd widths overshoots the buffer
+        // by up to one row inside qt_convert_rgb888_to_rgb32_ssse3 and
+        // segfaults — see the 2026-04-24 crash investigation).
+        int preparedBytesPerLine = 0;
         uint8_t underOver = 0;
         double imageBuildMs = 0.0;
         std::vector<uint8_t> preparedImage;

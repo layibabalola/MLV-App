@@ -1353,11 +1353,18 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
     {
         result.preparedWidth = displayImage.width();
         result.preparedHeight = displayImage.height();
-        const int rowBytes = result.preparedWidth * 3;
-        const size_t preparedSize = static_cast<size_t>( rowBytes )
+        const int rowContentBytes = result.preparedWidth * 3;
+        // Pad each row up to a 4-byte boundary so the GUI side can wrap
+        // this buffer with a Format_RGB888 QImage without overshooting
+        // (Qt requires 32-bit-aligned scanlines; for odd widths,
+        // width*3 would lie about the stride and qt_convert_rgb888_to_rgb32_ssse3
+        // would read past the std::vector's end on the final row).
+        const int alignedBytesPerLine = (rowContentBytes + 3) & ~3;
+        result.preparedBytesPerLine = alignedBytesPerLine;
+        const size_t preparedSize = static_cast<size_t>( alignedBytesPerLine )
             * static_cast<size_t>( result.preparedHeight );
         result.preparedImage.resize( preparedSize );
-        if( displayImage.bytesPerLine() == rowBytes )
+        if( displayImage.bytesPerLine() == alignedBytesPerLine )
         {
             memcpy( result.preparedImage.data(), displayImage.constBits(), preparedSize );
         }
@@ -1365,9 +1372,9 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         {
             for( int y = 0; y < result.preparedHeight; ++y )
             {
-                memcpy( result.preparedImage.data() + static_cast<size_t>( y ) * rowBytes,
+                memcpy( result.preparedImage.data() + static_cast<size_t>( y ) * alignedBytesPerLine,
                         displayImage.constScanLine( y ),
-                        static_cast<size_t>( rowBytes ) );
+                        static_cast<size_t>( rowContentBytes ) );
             }
         }
     }
@@ -1586,7 +1593,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         {
             displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( result.preparedImage.data() ),
                                                 result.preparedWidth,
-                                                result.preparedHeight );
+                                                result.preparedHeight,
+                                                result.preparedBytesPerLine );
             displayImageOwnsData = false;
         }
     }

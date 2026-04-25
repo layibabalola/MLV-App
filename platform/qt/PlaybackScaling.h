@@ -119,10 +119,24 @@ inline bool playbackBuildFastScaledRgb8(const uint8_t *source,
     return true;
 }
 
-inline QImage playbackWrapRgb8Image(uint8_t *data, int width, int height)
+inline QImage playbackWrapRgb8Image(uint8_t *data, int width, int height, int bytesPerLine = 0)
 {
     if( !data || width <= 0 || height <= 0 ) return QImage();
-    return QImage( data, width, height, QImage::Format_RGB888 );
+    // Most RGB8 buffers in this codebase (playbackScaledImage8 from
+    // playbackBuildFastScaledRgb8, displayImageBacking, the rendered
+    // processed8 slot) are tightly packed at width*3 bytes/row, NOT
+    // padded to a 4-byte boundary. Qt's no-bytesPerLine constructor
+    // would compute an aligned stride and lie about the buffer layout
+    // for any width%4 != 0, leading to qt_convert_rgb888_to_rgb32_ssse3
+    // reading past the buffer end on the final row (SIGSEGV crash on
+    // 2026-04-24). Default the explicit bytesPerLine to the packed
+    // value so the QImage tells Qt the truth about the actual stride.
+    // Callers whose buffers ARE padded (e.g. PlaybackPrepResult after
+    // 2026-04-24, which intentionally pads to align scanlines for the
+    // GUI-side .convertToFormat path) MUST pass the padded stride
+    // explicitly.
+    const int bpl = (bytesPerLine > 0) ? bytesPerLine : (width * 3);
+    return QImage( data, width, height, bpl, QImage::Format_RGB888 );
 }
 
 inline QImage playbackBuildFastScaledImage(const uint8_t *source,
