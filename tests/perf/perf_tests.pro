@@ -19,6 +19,7 @@ SOURCES += \
     $$REPO_ROOT/src/ca_correct/CA_correct_RT.c \
     $$REPO_ROOT/src/matrix/matrix.c \
     $$REPO_ROOT/src/mlv/frame_caching.c \
+    $$REPO_ROOT/src/mlv/pipeline_stage_capture.c \
     $$REPO_ROOT/src/mlv/video_mlv.c \
     $$REPO_ROOT/src/mlv/video_mlv_misc.c \
     $$REPO_ROOT/src/mlv/audio_mlv.c \

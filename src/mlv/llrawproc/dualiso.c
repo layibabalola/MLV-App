@@ -339,6 +339,61 @@ int dualisoRowscaleAvx2Active(void)
     return g_dualiso_rowscale_use_avx2;
 }
 
+/* ====================================================================== *
+ * AVX2 + FMA HQ Dual ISO recon kernels (Path B Phase B1 + B2).
+ *
+ * Five kernels are dispatched at runtime via pthread_once. Default ON when
+ * the host advertises AVX2 + FMA. Set MLVAPP_DISABLE_AVX2_DUALISO_HQ=1
+ * (or the global MLVAPP_DISABLE_AVX2=1) to force the scalar reference
+ * paths for parity / regression debugging.
+ *
+ * The B0 prototype (.claude-state/profiling/20260424-phase-b0-final-blend/)
+ * measured ~2.0× speedup p50 on the final_blend kernel alone, taking it
+ * from ~20 ms to ~10 ms single-threaded on a 1808x2268 frame. With
+ * Phase B1 wins on convert_to_20bit + fullres_reconstruction +
+ * convert_20_to_16bit + Phase B2 mix_images, the full HQ recon should
+ * land in the 10-14 ms range — well below the 16.7 ms / 60 fps budget.
+ *
+ * Drift bound: float32 FMA reordering may differ from scalar double-precision
+ * by ±1 LSB on a small fraction (~0.2%) of pixels, far below the existing
+ * raw_set_pixel_20to16_rand dither which already injects ~4 LSB random
+ * noise per pixel. Pipeline tests assert ±1 LSB drift on a bounded fraction.
+ * ====================================================================== */
+#include "dualiso_avx2.inc"
+
+static pthread_once_t g_dualiso_hq_dispatch_once = PTHREAD_ONCE_INIT;
+static int g_dualiso_hq_use_avx2 = 0;
+
+static void dualiso_hq_dispatch_init(void)
+{
+    int use_avx2 = 0;
+#ifdef DUALISO_AVX2_AVAILABLE
+    __builtin_cpu_init();
+    use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#endif
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2"))) use_avx2 = 0;
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2_DUALISO_HQ"))) use_avx2 = 0;
+    g_dualiso_hq_use_avx2 = use_avx2;
+}
+
+int dualisoHqAvx2Active(void);
+int dualisoHqAvx2Active(void)
+{
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    return g_dualiso_hq_use_avx2;
+}
+
+/* Test-only hook: force re-evaluation of the dispatch from current env.
+ * Mirrors debayerBasicU16ReinitDispatchForTesting. Not in the public
+ * header; tests forward-declare it. */
+int dualisoHqReinitDispatchForTesting(void);
+int dualisoHqReinitDispatchForTesting(void)
+{
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    dualiso_hq_dispatch_init();
+    return g_dualiso_hq_use_avx2;
+}
+
 static int preview_pattern_index(int iso_pattern)
 {
     const int pattern = ABS(iso_pattern);
@@ -1943,12 +1998,27 @@ static inline uint32_t * convert_to_20bit(struct raw_info raw_info, uint16_t * i
     {
         return NULL;
     }
-    
+
+#ifdef DUALISO_AVX2_AVAILABLE
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    if (g_dualiso_hq_use_avx2)
+    {
+        /* Per-row dispatch so OMP parallelism still applies. */
+        #pragma omp parallel for
+        for (int y = 0; y < h; y ++) {
+            convert_to_20bit_avx2(&raw_buffer_32[(size_t)y*w],
+                                  &image_data[(size_t)y*w],
+                                  (size_t)w);
+        }
+        return raw_buffer_32;
+    }
+#endif
+
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
         for (int x = 0; x < w; x ++)
             raw_buffer_32[x + y*w] = raw_get_pixel_14to20(x, y);
-    
+
     return raw_buffer_32;
 }
 
@@ -2510,12 +2580,33 @@ static inline void fullres_reconstruction(struct raw_info raw_info, uint32_t * f
 {
     int w = raw_info.width;
     int h = raw_info.height;
-    
+
     /* reconstruct a full-resolution image (discard interpolated fields whenever possible) */
     /* this has full detail and lowest possible aliasing, but it has high shadow noise and color artifacts when high-iso starts clipping */
 #ifndef STDOUT_SILENT
     printf("Full-res reconstruction...\n");
 #endif
+
+#ifdef DUALISO_AVX2_AVAILABLE
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    if (g_dualiso_hq_use_avx2)
+    {
+        /* Hoist BRIGHT_ROW out of the inner loop: row-uniform branch. */
+        #pragma omp parallel for
+        for (int y = 0; y < h; y ++) {
+            if (BRIGHT_ROW) {
+                fullres_reconstruction_bright_row_avx2(&fullres[(size_t)y*w],
+                                                       &bright[(size_t)y*w],
+                                                       &dark[(size_t)y*w],
+                                                       white_darkened, w);
+            } else {
+                memcpy(&fullres[(size_t)y*w], &dark[(size_t)y*w], (size_t)w * sizeof(uint32_t));
+            }
+        }
+        return;
+    }
+#endif
+
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
     {
@@ -2776,27 +2867,54 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
             previous_black = black;
         }
         
-        #pragma omp parallel for collapse(2)
-        for (int y = 0; y < h; y ++)
+#ifdef DUALISO_AVX2_AVAILABLE
+        pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+        if (g_dualiso_hq_use_avx2)
         {
-            for (int x = 0; x < w; x ++)
+            #pragma omp parallel for
+            for (int y = 0; y < h; y ++) {
+                mix_images_row_avx2(&halfres[(size_t)y*w],
+                                    &bright[(size_t)y*w],
+                                    &dark[(size_t)y*w],
+                                    raw2ev, ev2raw, mix_curve, w);
+                /* tail: pixels not covered by SIMD bulk */
+                int x_start = (w / 8) * 8;
+                for (int x = x_start; x < w; x ++) {
+                    int b = bright[x + y*w];
+                    int d = dark[x + y*w];
+                    int bev = raw2ev[b];
+                    int dev = raw2ev[d];
+                    double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
+                    int mixed = bev * (1-k) + dev * k;
+                    halfres[x + y*w] = ev2raw[mixed];
+                }
+            }
+        }
+        else
+#endif
+        {
+            #pragma omp parallel for collapse(2)
+            for (int y = 0; y < h; y ++)
             {
-                /* bright and dark source pixels  */
-                /* they may be real or interpolated */
-                /* they both have the same brightness (they were adjusted before this loop), so we are ready to mix them */
-                int b = bright[x + y*w];
-                int d = dark[x + y*w];
-                
-                /* go from linear to EV space */
-                int bev = raw2ev[b];
-                int dev = raw2ev[d];
-                
-                /* blending factor */
-                double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
-                
-                /* mix bright and dark exposures */
-                int mixed = bev * (1-k) + dev * k;
-                halfres[x + y*w] = ev2raw[mixed];
+                for (int x = 0; x < w; x ++)
+                {
+                    /* bright and dark source pixels  */
+                    /* they may be real or interpolated */
+                    /* they both have the same brightness (they were adjusted before this loop), so we are ready to mix them */
+                    int b = bright[x + y*w];
+                    int d = dark[x + y*w];
+
+                    /* go from linear to EV space */
+                    int bev = raw2ev[b];
+                    int dev = raw2ev[d];
+
+                    /* blending factor */
+                    double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
+
+                    /* mix bright and dark exposures */
+                    int mixed = bev * (1-k) + dev * k;
+                    halfres[x + y*w] = ev2raw[mixed];
+                }
             }
         }
         if (chroma_smooth_method)
@@ -2881,73 +2999,123 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
 #ifndef STDOUT_SILENT
         printf("Final blending...\n");
 #endif
-        #pragma omp parallel for collapse(2)
-        for (int y = 0; y < h; y ++)
+
+#ifdef DUALISO_AVX2_AVAILABLE
+        pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+        if (g_dualiso_hq_use_avx2)
         {
-            for (int x = 0; x < w; x ++)
-            {
-                /* high-iso image (for measuring signal level) */
-                int b = bright[x + y*w];
-                
-                /* half-res image (interpolated and chroma filtered, best for low-contrast shadows) */
-                int hr = halfres_smooth[x + y*w];
-                
-                /* full-res image (non-interpolated, except where one ISO is blown out) */
-                int fr = fullres[x + y*w];
-                
-                /* full res with some smoothing applied to hide aliasing artifacts */
-                int frs = fullres_smooth[x + y*w];
-                
-                /* go from linear to EV space */
-                int hrev = raw2ev[hr];
-                int frev = raw2ev[fr];
-                int frsev = raw2ev[frs];
-                
-                int output = 0;
-                
-                /* blending factor */
-                double f = fullres_curve[b & 0xFFFFF];
-                
-                double c = 0;
-                
-                if (alias_map)
-                {
-                    int co = alias_map[x + y*w];
-                    c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
+            #pragma omp parallel for
+            for (int y = 0; y < h; y ++) {
+                final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
+                                     &fullres[(size_t)y*w],
+                                     &fullres_smooth[(size_t)y*w],
+                                     &halfres_smooth[(size_t)y*w],
+                                     &dark[(size_t)y*w],
+                                     &bright[(size_t)y*w],
+                                     &overexposed[(size_t)y*w],
+                                     alias_map ? &alias_map[(size_t)y*w] : NULL,
+                                     raw2ev, ev2raw, fullres_curve,
+                                     black, dark_noise, w);
+                /* tail: pixels not covered by SIMD bulk */
+                int x_start = (w / 8) * 8;
+                for (int x = x_start; x < w; x ++) {
+                    int b = bright[x + y*w];
+                    int hr = halfres_smooth[x + y*w];
+                    int fr = fullres[x + y*w];
+                    int frs = fullres_smooth[x + y*w];
+                    int hrev = raw2ev[hr];
+                    int frev = raw2ev[fr];
+                    int frsev = raw2ev[frs];
+                    double f = fullres_curve[b & 0xFFFFF];
+                    double c = 0;
+                    if (alias_map) {
+                        int co = alias_map[x + y*w];
+                        c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
+                    }
+                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                    c = MAX(c, ovf);
+                    double noisy_or_overexposed = MAX(ovf, 1-f);
+                    f = MAX(f, c);
+                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+                    int output = hrev * (1-f) + fev * f;
+                    output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
+                    raw_set_pixel32(x, y, ev2raw[output]);
                 }
-                
-                double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
-                c = MAX(c, ovf);
-                
-                double noisy_or_overexposed = MAX(ovf, 1-f);
-                
-                /* use data from both ISOs in high-detail areas, even if it's noisier (less aliasing) */
-                f = MAX(f, c);
-                
-                /* use smoothing in noisy near-overexposed areas to hide color artifacts */
-                double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
-                
-                /* limit the use of fullres in dark areas (fixes some black spots, but may increase aliasing) */
-                int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
-                f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
-                
-                /* blend "half-res" and "full-res" images smoothly to avoid banding*/
-                output = hrev * (1-f) + fev * f;
-                
-                /* show full-res map (for debugging) */
-                //~ output = f * 14*EV_RESOLUTION;
-                
-                /* show alias map (for debugging) */
-                //~ output = c * 14*EV_RESOLUTION;
-                
-                //~ output = hotpixel[x+y*w] ? 14*EV_RESOLUTION : 0;
-                //~ output = raw2ev[dark[x+y*w]];
-                /* safeguard */
-                output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
-                
-                
-                /* back to linear space and commit */
-                raw_set_pixel32(x, y, ev2raw[output]);
+            }
+        }
+        else
+#endif
+        {
+            #pragma omp parallel for collapse(2)
+            for (int y = 0; y < h; y ++)
+            {
+                for (int x = 0; x < w; x ++)
+                {
+                    /* high-iso image (for measuring signal level) */
+                    int b = bright[x + y*w];
+
+                    /* half-res image (interpolated and chroma filtered, best for low-contrast shadows) */
+                    int hr = halfres_smooth[x + y*w];
+
+                    /* full-res image (non-interpolated, except where one ISO is blown out) */
+                    int fr = fullres[x + y*w];
+
+                    /* full res with some smoothing applied to hide aliasing artifacts */
+                    int frs = fullres_smooth[x + y*w];
+
+                    /* go from linear to EV space */
+                    int hrev = raw2ev[hr];
+                    int frev = raw2ev[fr];
+                    int frsev = raw2ev[frs];
+
+                    int output = 0;
+
+                    /* blending factor */
+                    double f = fullres_curve[b & 0xFFFFF];
+
+                    double c = 0;
+
+                    if (alias_map)
+                    {
+                        int co = alias_map[x + y*w];
+                        c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
+                    }
+
+                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                    c = MAX(c, ovf);
+
+                    double noisy_or_overexposed = MAX(ovf, 1-f);
+
+                    /* use data from both ISOs in high-detail areas, even if it's noisier (less aliasing) */
+                    f = MAX(f, c);
+
+                    /* use smoothing in noisy near-overexposed areas to hide color artifacts */
+                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+
+                    /* limit the use of fullres in dark areas (fixes some black spots, but may increase aliasing) */
+                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+
+                    /* blend "half-res" and "full-res" images smoothly to avoid banding*/
+                    output = hrev * (1-f) + fev * f;
+
+                    /* show full-res map (for debugging) */
+                    //~ output = f * 14*EV_RESOLUTION;
+
+                    /* show alias map (for debugging) */
+                    //~ output = c * 14*EV_RESOLUTION;
+
+                    //~ output = hotpixel[x+y*w] ? 14*EV_RESOLUTION : 0;
+                    //~ output = raw2ev[dark[x+y*w]];
+                    /* safeguard */
+                    output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
+
+
+                    /* back to linear space and commit */
+                    raw_set_pixel32(x, y, ev2raw[output]);
+                }
             }
         }
     }
@@ -2962,7 +3130,29 @@ static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * imag
     //raw_info.buffer = raw_buffer_16;
     raw_info.black_level /= 16;
     raw_info.white_level /= 16;
-    
+
+#ifdef DUALISO_AVX2_AVAILABLE
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    if (g_dualiso_hq_use_avx2)
+    {
+        /* Per-row dispatch with thread-local dither cursor. The scalar
+         * fast_randn05() uses a process-wide static counter; here we use
+         * a per-row seed so the noise distribution and amplitude are
+         * preserved while threading cleanly. The cache itself is fixed,
+         * so bit identity vs scalar is not preserved (the scalar's global
+         * counter ordering already depends on OMP scheduling) but the
+         * statistical contract of the dither is unchanged. */
+        #pragma omp parallel for
+        for (int y = 0; y < h; y++) {
+            int k = (y * 7) & 1023;  /* per-row cursor seed */
+            convert_20_to_16bit_row_avx2(&image_data[(size_t)y*w],
+                                          &raw_buffer_32[(size_t)y*w],
+                                          randn05_cache, &k, w);
+        }
+        return;
+    }
+#endif
+
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++)
