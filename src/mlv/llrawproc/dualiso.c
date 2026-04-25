@@ -493,6 +493,55 @@ int dualisoHqReinitDispatchForTesting(void)
     return g_dualiso_hq_use_avx2;
 }
 
+/* ====================================================================== *
+ * Phase C4 — alias-map init err diff + 21-tap weighted Gaussian dispatch.
+ *
+ * Independent dispatch from g_dualiso_hq_use_avx2 so the parity test can
+ * isolate the alias-map kernels. Kill switch:
+ *   MLVAPP_DISABLE_AVX2_DUALISO_ALIAS_MAP=1   (also gated by the global
+ *   MLVAPP_DISABLE_AVX2=1).
+ *
+ * Both new kernels are byte-identical to scalar:
+ *   - init err diff: pure int32 arith (ABS/MIN/MAX/shifts), predicate masked
+ *     to zero on writes; matches scalar `continue` against a pre-zeroed
+ *     alias_map buffer.
+ *   - 21-tap Gaussian: int32 multiply-and-shift mirrors `* W / 1024` per
+ *     term-by-term, matching scalar truncation order; predicate preserves
+ *     prior alias_map[x] via _mm256_blendv_epi8.
+ * ====================================================================== */
+static pthread_once_t g_dualiso_alias_dispatch_once = PTHREAD_ONCE_INIT;
+static int g_dualiso_alias_use_avx2 = 0;
+
+static void dualiso_alias_dispatch_init(void)
+{
+    int use_avx2 = 0;
+#ifdef DUALISO_AVX2_AVAILABLE
+    __builtin_cpu_init();
+    use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#endif
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2"))) use_avx2 = 0;
+    if (dualiso_env_truthy(getenv("MLVAPP_DISABLE_AVX2_DUALISO_ALIAS_MAP"))) use_avx2 = 0;
+    g_dualiso_alias_use_avx2 = use_avx2;
+}
+
+int dualisoAliasMapAvx2Active(void);
+int dualisoAliasMapAvx2Active(void)
+{
+    pthread_once(&g_dualiso_alias_dispatch_once, dualiso_alias_dispatch_init);
+    return g_dualiso_alias_use_avx2;
+}
+
+/* Test-only hook: force re-evaluation of the dispatch from current env.
+ * Mirrors dualisoHqReinitDispatchForTesting. Not in the public header;
+ * tests forward-declare it. */
+int dualisoAliasMapReinitDispatchForTesting(void);
+int dualisoAliasMapReinitDispatchForTesting(void)
+{
+    pthread_once(&g_dualiso_alias_dispatch_once, dualiso_alias_dispatch_init);
+    dualiso_alias_dispatch_init();
+    return g_dualiso_alias_use_avx2;
+}
+
 static int preview_pattern_index(int iso_pattern)
 {
     const int pattern = ABS(iso_pattern);
@@ -2753,26 +2802,48 @@ static inline void build_alias_map(struct raw_info raw_info,
     /* build the aliasing maps (where it's likely to get aliasing) */
     /* do this by comparing fullres and halfres images */
     /* if the difference is small, we'll prefer halfres for less noise, otherwise fullres for less aliasing */
-    #pragma omp parallel for collapse(2)
-    for (int y = 0; y < h; y ++)
+#ifdef DUALISO_AVX2_AVAILABLE
+    pthread_once(&g_dualiso_alias_dispatch_once, dualiso_alias_dispatch_init);
+    if (g_dualiso_alias_use_avx2)
     {
-        for (int x = 0; x < w; x ++)
+        #pragma omp parallel for
+        for (int y = 0; y < h; y ++)
         {
-            /* do not compute alias map where we'll use fullres detail anyway */
-            if (fullres_curve[bright[x + y*w]] > fullres_thr)
-                continue;
-            
-            int f = fullres_smooth[x + y*w];
-            int h = halfres_smooth[x + y*w];
-            int fe = raw2ev[f];
-            int he = raw2ev[h];
-            int e_lin = ABS(f - h); /* error in linear space, for shadows (downweights noise) */
-            e_lin = MAX(e_lin - dark_noise*3/2, 0);
-            int e_log = ABS(fe - he); /* error in EV space, for highlights (highly sensitive to noise) */
-            alias_map[x + y*w] = MIN(MIN(e_lin/2, e_log/16), 65530);
+            build_alias_map_init_diff_row_avx2(&alias_map[(size_t)y * (size_t)w],
+                                                &fullres_smooth[(size_t)y * (size_t)w],
+                                                &halfres_smooth[(size_t)y * (size_t)w],
+                                                &bright[(size_t)y * (size_t)w],
+                                                raw2ev,
+                                                fullres_curve,
+                                                fullres_thr,
+                                                dark_noise,
+                                                w);
         }
     }
-    
+    else
+#endif
+    {
+        #pragma omp parallel for collapse(2)
+        for (int y = 0; y < h; y ++)
+        {
+            for (int x = 0; x < w; x ++)
+            {
+                /* do not compute alias map where we'll use fullres detail anyway */
+                if (fullres_curve[bright[x + y*w]] > fullres_thr)
+                    continue;
+
+                int f = fullres_smooth[x + y*w];
+                int h = halfres_smooth[x + y*w];
+                int fe = raw2ev[f];
+                int he = raw2ev[h];
+                int e_lin = ABS(f - h); /* error in linear space, for shadows (downweights noise) */
+                e_lin = MAX(e_lin - dark_noise*3/2, 0);
+                int e_log = ABS(fe - he); /* error in EV space, for highlights (highly sensitive to noise) */
+                alias_map[x + y*w] = MIN(MIN(e_lin/2, e_log/16), 65530);
+            }
+        }
+    }
+
     memcpy(alias_aux, alias_map, w * h * sizeof(uint16_t));
 #ifndef STDOUT_SILENT
     printf("Filtering alias map...\n");
@@ -2803,26 +2874,43 @@ static inline void build_alias_map(struct raw_info raw_info,
     printf("Smoothing alias map...\n");
 #endif
     /* gaussian blur */
-    #pragma omp parallel for collapse(2)
-    for (int y = 6; y < h-6; y ++)
+#ifdef DUALISO_AVX2_AVAILABLE
+    pthread_once(&g_dualiso_alias_dispatch_once, dualiso_alias_dispatch_init);
+    if (g_dualiso_alias_use_avx2)
     {
-        for (int x = 6; x < w-6; x ++)
+        #pragma omp parallel for
+        for (int y = 6; y < h-6; y ++)
         {
-            /* do not compute alias map where we'll use fullres detail anyway */
-            if (fullres_curve[bright[x + y*w]] > fullres_thr)
-                continue;
-            
-            int c =
-            (alias_aux[x+0 + (y+0) * w])+
-            (alias_aux[x+0 + (y-2) * w] + alias_aux[x-2 + (y+0) * w] + alias_aux[x+2 + (y+0) * w] + alias_aux[x+0 + (y+2) * w]) * 820 / 1024 +
-            (alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w]) * 657 / 1024 +
-            (alias_aux[x+0 + (y-2) * w] + alias_aux[x-2 + (y+0) * w] + alias_aux[x+2 + (y+0) * w] + alias_aux[x+0 + (y+2) * w]) * 421 / 1024 +
-            (alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w]) * 337 / 1024 +
-            (alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w]) * 173 / 1024 +
-            (alias_aux[x+0 + (y-6) * w] + alias_aux[x-6 + (y+0) * w] + alias_aux[x+6 + (y+0) * w] + alias_aux[x+0 + (y+6) * w]) * 139 / 1024 +
-            (alias_aux[x-2 + (y-6) * w] + alias_aux[x+2 + (y-6) * w] + alias_aux[x-6 + (y-2) * w] + alias_aux[x+6 + (y-2) * w] + alias_aux[x-6 + (y+2) * w] + alias_aux[x+6 + (y+2) * w] + alias_aux[x-2 + (y+6) * w] + alias_aux[x+2 + (y+6) * w]) * 111 / 1024 +
-            (alias_aux[x-2 + (y-6) * w] + alias_aux[x+2 + (y-6) * w] + alias_aux[x-6 + (y-2) * w] + alias_aux[x+6 + (y-2) * w] + alias_aux[x-6 + (y+2) * w] + alias_aux[x+6 + (y+2) * w] + alias_aux[x-2 + (y+6) * w] + alias_aux[x+2 + (y+6) * w]) * 57 / 1024;
-            alias_map[x + y * w] = c;
+            build_alias_map_gaussian_row_avx2(&alias_map[(size_t)y * (size_t)w],
+                                               alias_aux,
+                                               y, w,
+                                               bright, fullres_curve, fullres_thr);
+        }
+    }
+    else
+#endif
+    {
+        #pragma omp parallel for collapse(2)
+        for (int y = 6; y < h-6; y ++)
+        {
+            for (int x = 6; x < w-6; x ++)
+            {
+                /* do not compute alias map where we'll use fullres detail anyway */
+                if (fullres_curve[bright[x + y*w]] > fullres_thr)
+                    continue;
+
+                int c =
+                (alias_aux[x+0 + (y+0) * w])+
+                (alias_aux[x+0 + (y-2) * w] + alias_aux[x-2 + (y+0) * w] + alias_aux[x+2 + (y+0) * w] + alias_aux[x+0 + (y+2) * w]) * 820 / 1024 +
+                (alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w]) * 657 / 1024 +
+                (alias_aux[x+0 + (y-2) * w] + alias_aux[x-2 + (y+0) * w] + alias_aux[x+2 + (y+0) * w] + alias_aux[x+0 + (y+2) * w]) * 421 / 1024 +
+                (alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w]) * 337 / 1024 +
+                (alias_aux[x-2 + (y-2) * w] + alias_aux[x+2 + (y-2) * w] + alias_aux[x-2 + (y+2) * w] + alias_aux[x+2 + (y+2) * w]) * 173 / 1024 +
+                (alias_aux[x+0 + (y-6) * w] + alias_aux[x-6 + (y+0) * w] + alias_aux[x+6 + (y+0) * w] + alias_aux[x+0 + (y+6) * w]) * 139 / 1024 +
+                (alias_aux[x-2 + (y-6) * w] + alias_aux[x+2 + (y-6) * w] + alias_aux[x-6 + (y-2) * w] + alias_aux[x+6 + (y-2) * w] + alias_aux[x-6 + (y+2) * w] + alias_aux[x+6 + (y+2) * w] + alias_aux[x-2 + (y+6) * w] + alias_aux[x+2 + (y+6) * w]) * 111 / 1024 +
+                (alias_aux[x-2 + (y-6) * w] + alias_aux[x+2 + (y-6) * w] + alias_aux[x-6 + (y-2) * w] + alias_aux[x+6 + (y-2) * w] + alias_aux[x-6 + (y+2) * w] + alias_aux[x+6 + (y+2) * w] + alias_aux[x-2 + (y+6) * w] + alias_aux[x+2 + (y+6) * w]) * 57 / 1024;
+                alias_map[x + y * w] = c;
+            }
         }
     }
     
