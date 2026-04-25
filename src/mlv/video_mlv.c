@@ -3607,10 +3607,21 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
             return;
         }
 
+        /* Phase E7: render mutates llrawproc state (e.g. fpm_status, bpm_status
+         * transition from 0 to 1/2 on first frame) which is part of the cache
+         * state hash. Storing with the PRE-render `requested_signature` makes
+         * the slot unfindable on the next call -- the second call computes a
+         * fresh signature against the post-render state and misses the slot.
+         * The indirect path already handles this by recomputing
+         * `final_signature` after the render (line ~3467); mirror that here so
+         * cache reuse works for the direct8 path as well. */
+        const uint64_t stored_signature =
+            mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
+
         mlv_store_processed_frame_8bit_cache_with_scale(video,
                                                         frameIndex,
                                                         threads,
-                                                        requested_signature,
+                                                        stored_signature,
                                                         outputFrame,
                                                         rgb_frame_size,
                                                         1,

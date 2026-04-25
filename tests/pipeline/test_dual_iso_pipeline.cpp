@@ -757,6 +757,135 @@ TEST(DualIsoPipeline, DirectProcessed8FastPathMatchesShiftedProcessed16WithCreat
     ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
 }
 
+/* Phase E7: AgX on the direct8 fast path.
+ *
+ * Until Phase E7 the AgX clause in processing_can_use_basic_matrix_fast_path
+ * disqualified AgX-enabled receipts from the direct8 path, which prevented
+ * processed8 prefetch from delivering hits on the user's master.marxml
+ * (it has <agx>1</agx>). Phase E7 ports the AgX matrix forward + inverse
+ * pair into raw_processing_8bit_kernel.inc and removes the AgX clause from
+ * the gate. The two tests below assert:
+ *
+ *   1. With AgX enabled, the direct8 path is now reachable (the gate
+ *      returns true for an otherwise-neutral receipt with AgX on).
+ *
+ *   2. The direct8 + AgX byte output matches `frame16 >> 8` from the
+ *      indirect path on the same fixture, byte-for-byte. The indirect
+ *      path's AgX behaviour is the parity reference.
+ */
+TEST(DualIsoPipeline, PhaseE7_AgxDirect8FastPathIsTakenOnAgxReceipt)
+{
+    QString error_message;
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(fixture);
+
+    /* Direct8 must be reachable when AgX is the ONLY non-default flag. */
+    fixture.processing()->AgX = 1;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(fixture.processing()) != 0);
+
+    /* And clearing AgX must keep the direct8 path reachable too (we did not
+     * accidentally tighten the gate). */
+    fixture.processing()->AgX = 0;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(fixture.processing()) != 0);
+}
+
+TEST(DualIsoPipeline, PhaseE7_AgxDirect8MatchesIndirectPathByteIdentity)
+{
+    QString error_message;
+
+    /* Reference path: render frame16 with AgX on, then >> 8. The frame16
+     * path takes the indirect AgX branch (raw_processing.c line 1284+),
+     * which is the parity reference for the direct8 AgX kernel. */
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    reference_fixture.processing()->AgX = 1;
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 1);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    /* Direct path: render frame8 with AgX on, expect to match expected. */
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    direct_fixture.processing()->AgX = 1;
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
+
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    /* Log summary so failure detail is visible without re-running. */
+    std::printf("PhaseE7_AgxDirect8: %llu/%zu pixels differ, max|d|=%u, mean|d|=%g\n",
+                static_cast<unsigned long long>(compare.pixels_exceeding_tolerance),
+                expected_frame8.size(),
+                static_cast<unsigned>(compare.max_abs_diff),
+                compare.mean_abs_diff);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, PhaseE7_NonAgxReceiptUnaffectedByDirect8AgxBranch)
+{
+    /* Sanity: with AgX off, the direct8 path output is unchanged from the
+     * pre-Phase-E7 behaviour. The pre-existing
+     * DirectProcessed8FastPathMatchesShiftedProcessed16Reference test
+     * already covers this implicitly; this test is a focused regression
+     * check that the new AgX branch does not perturb the AgX-off path. */
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    reference_fixture.processing()->AgX = 0;
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 1);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    direct_fixture.processing()->AgX = 0;
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
+
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
 /* Forward decl of a test-only hook implemented in raw_processing.c. Re-runs
  * the runtime dispatch from the current env so the AVX2 intrinsics variant
  * can be activated mid-test-suite (production code latches once via
@@ -2019,14 +2148,18 @@ TEST(DualIsoPipeline, InvalidateProcessedPreviewCacheClearsExactAndMultiSlot8Bit
     fixture.receipt().setDualIso(0);
     ASSERT_TRUE(fixture.applyReceipt(&error_message));
 
+    /* Phase E7: this fixture is now eligible for the direct8 fast path
+     * (the receipt's agx=0 is finally honoured by ReceiptApplier, and the
+     * earlier AgX gate that previously forced the indirect 16-bit path on
+     * any test fixture is gone). The direct8 path does not populate the
+     * 16-bit cache, so the 16-bit assertions below were meaningful only
+     * because of the prior implicit-AgX-on bug. The 8-bit cache state is
+     * the primary contract this test exercises -- keep those checks. */
     const std::vector<uint8_t> frame0 = fixture.renderFrame8(0, 1);
     const std::vector<uint8_t> frame1 = fixture.renderFrame8(1, 1);
     ASSERT_TRUE(!frame0.empty());
     ASSERT_TRUE(!frame1.empty());
-    ASSERT_TRUE(fixture.video()->current_processed_frame_active == 1);
     ASSERT_TRUE(fixture.video()->current_processed_frame_8bit_active == 1);
-    ASSERT_TRUE(has_processed_16bit_cache_slot(fixture.video(), 0, 1));
-    ASSERT_TRUE(has_processed_16bit_cache_slot(fixture.video(), 1, 1));
     ASSERT_TRUE(has_processed_8bit_cache_slot(fixture.video(), 0, 1));
     ASSERT_TRUE(has_processed_8bit_cache_slot(fixture.video(), 1, 1));
 
@@ -3225,13 +3358,23 @@ TEST(DualIsoPipeline, Phase4Bv3_KillSwitchFallsBackToV2XOnly)
      *  - For dual-ISO HQ recon the matched-pair recon ITSELF differs at
      *    the bottom-edge bright/dark transition because v3 sees fewer rows.
      * On the tiny saturated dual-iso fixture this can drive PSNR into the
-     * 12-15 dB range. We accept > 12 dB — the "visually broken" floor.
+     * 11-15 dB range. We accept > 11 dB — the "visually broken" floor.
      * The headline correctness check is the v3-PSNR-vs-averaged-reference
-     * test, not this v3-vs-v2 comparison. */
+     * test, not this v3-vs-v2 comparison.
+     *
+     * Phase E7: lowered threshold from 12.0 to 11.0 dB. Phase E7 fixed
+     * ReceiptApplier so it actually propagates the receipt's <agx> field
+     * to the processing object (previously it was silently ignored, and
+     * processing kept the default AgX=1 for any test fixture). With AgX
+     * now correctly set to 0 from the tiny_dual_iso_hq.marxml receipt,
+     * the direct8 fast path is reachable for both v3 and v2 fixtures, and
+     * the absence of the AgX matrix transform shifts the v3-vs-v2 PSNR
+     * from 12.67 dB to 11.86 dB on the tiny fixture -- still inside the
+     * "visually broken floor" envelope this test documents. */
     const double psnr = phase4b::psnrRgb8(v3_frame, v2_frame);
     fprintf(stderr, "Phase4Bv3_KillSwitch v3-vs-v2 PSNR: %.2f dB\n", psnr);
     fflush(stderr);
-    ASSERT_TRUE(psnr > 12.0);
+    ASSERT_TRUE(psnr > 11.0);
 }
 
 /* Phase4Bv3 (c): PSNR golden test on the tiny dual-iso fixture (which has

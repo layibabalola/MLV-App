@@ -943,7 +943,21 @@ static int processing_has_neutral_local_tone_adjustments(const processingObject_
         && fabs(processing->shadows_highlights.highlights) < 0.01;
 }
 
-/* A private part of the processing machine */
+/* A private part of the processing machine.
+ *
+ * Phase E7: AgX is now handled in the direct8 fast path (see
+ * raw_processing_8bit_kernel.inc) so it no longer disqualifies the basic
+ * matrix path. The gate above remains the same shape; the AgX clause is
+ * intentionally removed because the kernel applies the forward AgX matrix
+ * before the gamma LUT and the inverse AgX matrix after the creative
+ * curves, byte-identical to the indirect path on neutral receipts.
+ *
+ * Note: this affects BOTH apply_processing_object's basic-matrix fast
+ * branch (line 1228) AND processing_can_use_direct_8bit_output (which
+ * gates the direct8 entry in applyProcessingObject8). The basic-matrix
+ * fast branch in apply_processing_object does not currently handle AgX,
+ * so we keep its AgX behaviour unchanged by re-checking AgX at that
+ * use-site -- see the explicit AgX-in-fast-branch guard there. */
 static int processing_can_use_basic_matrix_fast_path(const processingObject_t * processing)
 {
     return processing->use_cam_matrix > 0
@@ -951,8 +965,7 @@ static int processing_can_use_basic_matrix_fast_path(const processingObject_t * 
         && processing_has_neutral_local_tone_adjustments(processing)
         && !processing->highlight_reconstruction
         && !processing->gradient_enable
-        && processing->vignette_strength == 0
-        && !processing->AgX;
+        && processing->vignette_strength == 0;
 }
 
 static int processing_can_use_direct_8bit_output(const processingObject_t * processing)
@@ -1143,6 +1156,37 @@ static void apply_processing_object_8bit_fast_rows(processingObject_t * processi
 {
     pthread_once(&g_apply_processing_object_8bit_fast_rows_dispatch_once,
                  apply_processing_object_8bit_fast_rows_dispatch_init);
+    /* Phase E7: the AVX2 intrinsics variant does not know about AgX. When the
+     * receipt has AgX enabled, route to the autovec or scalar variant which
+     * handles AgX via the shared .inc kernel. The autovec variant is preferred
+     * when available; otherwise scalar. */
+#ifdef MLVAPP_AVX2_DISPATCH_AVAILABLE
+    if( processing->AgX
+     && g_apply_processing_object_8bit_fast_rows_use_avx2_intrin )
+    {
+        if( g_apply_processing_object_8bit_fast_rows_use_avx2 )
+        {
+            apply_processing_object_8bit_fast_rows_avx2(processing,
+                                                        imageX,
+                                                        rowStart,
+                                                        rowEnd,
+                                                        inputImage,
+                                                        outputImage,
+                                                        timing);
+        }
+        else
+        {
+            apply_processing_object_8bit_fast_rows_scalar(processing,
+                                                          imageX,
+                                                          rowStart,
+                                                          rowEnd,
+                                                          inputImage,
+                                                          outputImage,
+                                                          timing);
+        }
+        return;
+    }
+#endif
     g_apply_processing_object_8bit_fast_rows_fn(processing,
                                                 imageX,
                                                 rowStart,
@@ -1189,7 +1233,14 @@ void apply_processing_object( processingObject_t * processing,
     float * vm = vignetteMask;
     float * vmpix = vm;
 
-    const int use_basic_matrix_fast_path = processing_can_use_basic_matrix_fast_path(processing);
+    /* Phase E7: processing_can_use_basic_matrix_fast_path no longer rules
+     * out AgX (the direct8 kernel handles it). The 16-bit basic-matrix
+     * branch below at the `if( use_basic_matrix_fast_path )` use-site does
+     * not yet have an AgX code path, so we explicitly retain the previous
+     * behaviour for the 16-bit path -- AgX still routes through the
+     * generic per-pixel branch. */
+    const int use_basic_matrix_fast_path =
+        processing_can_use_basic_matrix_fast_path(processing) && !processing->AgX;
 
     /* For Y calculation */
     float rgb_to_Y[3] = {0.0f, 0.0f, 0.0f};

@@ -304,6 +304,23 @@ void ReceiptApplier::applyToMlv(ReceiptSettings *receipt,
         llrpResetBpmStatus( mlvObject );
     }
 
+    /* ---- AgX tonemap ----
+     * Phase E7: previously the AgX gate in processing_can_use_basic_matrix_fast_path
+     * returned false for AgX-on receipts, so the indirect path was taken regardless
+     * of what the receipt requested -- which masked the fact that ReceiptApplier
+     * never propagated <agx>0/1</agx> to the processing object. Now that AgX
+     * receipts can use the direct8 fast path, the AgX flag must reach the
+     * processing object verbatim, otherwise the runtime default of AgX=1 (set
+     * in initProcessingObject) sticks regardless of what the user requested. */
+    if( receipt->agx() )
+    {
+        processingEnableAgX( processingObject );
+    }
+    else
+    {
+        processingDisableAgX( processingObject );
+    }
+
     /* Final cache reset — ensures all settings take effect on next frame read */
     resetMlvCache( mlvObject );
     resetMlvCachedFrame( mlvObject );
