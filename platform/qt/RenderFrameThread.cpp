@@ -512,14 +512,50 @@ void RenderFrameThread::drawFrame( int slotIndex )
      && m_activePresentationPreparationOptions.targetHeight > 0 )
     {
         const double playbackScaleStart = mlv_stage_timing_now();
-        slot.playbackFastScaleActive =
-            playbackBuildFastScaledRgb8( slot.rawImage8.data(),
-                                         m_imageWidth,
-                                         m_imageHeight,
-                                         m_activePresentationPreparationOptions.targetWidth,
-                                         m_activePresentationPreparationOptions.targetHeight,
-                                         slot.playbackScaledImage8,
-                                         m_playbackScaleCache );
+
+        /* Phase 4D: when the render path returns a downsampled buffer
+         * (Phase 4B's scale=2/4 fast path), the source dimensions are smaller
+         * than the display target and nearest-neighbour upscale would produce
+         * visible jaggies / moire on diagonal edges.  Pick bilinear in that
+         * case; keep nearest for downscale (zoom > 100%) and for the
+         * scaleFactor==1 path so the existing default-on playback preview
+         * stays byte-identical until Phase 4B actually changes the source
+         * shape. */
+        const int sourceWidthForScaler = (playbackScaleFactor > 1)
+            ? std::max( 1, m_imageWidth / playbackScaleFactor )
+            : m_imageWidth;
+        const int sourceHeightForScaler = (playbackScaleFactor > 1)
+            ? std::max( 1, m_imageHeight / playbackScaleFactor )
+            : m_imageHeight;
+        const bool upscaling =
+            playbackScaleFactor > 1
+         && sourceWidthForScaler < m_activePresentationPreparationOptions.targetWidth
+         && sourceHeightForScaler < m_activePresentationPreparationOptions.targetHeight;
+        bool bilinearUsed = false;
+
+        if( upscaling )
+        {
+            slot.playbackFastScaleActive =
+                playbackBuildBilinearScaledRgb8( slot.rawImage8.data(),
+                                                 sourceWidthForScaler,
+                                                 sourceHeightForScaler,
+                                                 m_activePresentationPreparationOptions.targetWidth,
+                                                 m_activePresentationPreparationOptions.targetHeight,
+                                                 slot.playbackScaledImage8,
+                                                 m_playbackBilinearScaleCache );
+            bilinearUsed = slot.playbackFastScaleActive;
+        }
+        else
+        {
+            slot.playbackFastScaleActive =
+                playbackBuildFastScaledRgb8( slot.rawImage8.data(),
+                                             m_imageWidth,
+                                             m_imageHeight,
+                                             m_activePresentationPreparationOptions.targetWidth,
+                                             m_activePresentationPreparationOptions.targetHeight,
+                                             slot.playbackScaledImage8,
+                                             m_playbackScaleCache );
+        }
         if( slot.playbackFastScaleActive )
         {
             slot.playbackScaledWidth = m_activePresentationPreparationOptions.targetWidth;
@@ -527,12 +563,16 @@ void RenderFrameThread::drawFrame( int slotIndex )
         }
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_active"),
                                           slot.playbackFastScaleActive );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_bilinear"),
+                                          bilinearUsed );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_ms"),
                                           (mlv_stage_timing_now() - playbackScaleStart) * 1000.0 );
     }
     else
     {
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_active"),
+                                          false );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_bilinear"),
                                           false );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_ms"),
                                           0.0 );

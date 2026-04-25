@@ -234,6 +234,7 @@ private:
     int m_presentingSlotIndex;
     std::array<FrameSlot, kFrameSlotCount> m_frameSlots;
     FastPlaybackScaleCache m_playbackScaleCache;
+    BilinearPlaybackScaleCache m_playbackBilinearScaleCache;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
 
     void run( void );

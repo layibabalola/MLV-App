@@ -44,6 +44,7 @@ SOURCES += \
     $$REPO_ROOT/src/mlv/llrawproc/darkframe.c \
     $$REPO_ROOT/src/mlv/llrawproc/dualiso.c \
     $$REPO_ROOT/src/processing/raw_processing.c \
+    $$REPO_ROOT/src/processing/playback_downsample.c \
     $$REPO_ROOT/src/processing/blur_threaded.c \
     $$REPO_ROOT/src/processing/filter/filter.c \
     $$REPO_ROOT/src/processing/filter/genann/genann.c \
@@ -83,6 +84,7 @@ SOURCES += \
     $$REPO_ROOT/tests/pipeline/test_backend_parametric_shell.cpp \
     $$REPO_ROOT/tests/pipeline/test_backend_parametric_debayer_shell.cpp \
     $$REPO_ROOT/tests/pipeline/test_processing_filters.cpp \
+    $$REPO_ROOT/tests/pipeline/test_playback_scaling.cpp \
     $$REPO_ROOT/tests/pipeline/test_crash_forensics.cpp
 
 HEADERS += \
