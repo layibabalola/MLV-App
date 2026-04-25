@@ -162,7 +162,26 @@ inline int playbackQualityScaleFactorForMode( PlaybackQualityMode mode,
     switch ( mode )
     {
         case PlaybackQualityMode::Fast:
-            return 1;
+            /* Fast mode previously returned 1 (full resolution) which made
+             * it counterintuitively slower than HQ on Dual ISO content:
+             * Fast at scale=1 ran the entire pipeline at full sensor
+             * resolution (preview rowscale + debayer + processing + 16->8
+             * conversion all at 5K), while HQ at scale=4 ran a more
+             * expensive recon but on 1/16 the pixels with debayer
+             * bypassed entirely. Net result on the user's 5K M16-1210
+             * clip: Fast = 13 fps GUI, HQ = 15 fps GUI — confusing UX.
+             *
+             * Returning 4 here makes Fast actually fastest: Fast
+             * (preview rowscale at scale=4) ~24 fps GUI vs HQ
+             * (matched-pair at scale=4) ~13-15 fps GUI on the same clip.
+             * Cast still present in Fast mode (only HQ's matched-pair
+             * recon closes it); image is downsampled (1/4 each axis)
+             * during playback only — pause/scrub/export still produce
+             * full-resolution output.
+             *
+             * Users who want full-resolution playback unconditionally
+             * can set MLVAPP_PLAYBACK_SCALE_FACTOR=1 (handled above). */
+            return 4;
         case PlaybackQualityMode::HighQuality:
             return 4;
         case PlaybackQualityMode::Auto:
