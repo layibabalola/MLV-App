@@ -253,6 +253,22 @@ static void llrawproc_free_worker_state(llrawprocWorkerState_t * worker)
     worker->dng_white_level = 0;
 }
 
+void llrpInitWorkerState(llrawprocWorkerState_t * worker)
+{
+    if (!worker) return;
+
+    memset(worker, 0, sizeof(*worker));
+    worker->prev_black_level = -1;
+}
+
+void llrpFreeWorkerState(llrawprocWorkerState_t * worker)
+{
+    if (!worker) return;
+
+    llrawproc_free_worker_state(worker);
+    llrpInitWorkerState(worker);
+}
+
 static uint32_t llrawproc_next_version(uint32_t current_version)
 {
     current_version++;
@@ -700,12 +716,15 @@ void freeLLRawProcObject(mlvObject_t * video)
 }
 
 /* all low level raw processing takes place here */
-void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size)
+void applyLLRawProcObjectWorker(mlvObject_t * video,
+                                uint16_t * raw_image_buff,
+                                size_t raw_image_size,
+                                llrawprocWorkerState_t * supplied_worker)
 {
     const double apply_start = mlv_stage_timing_now();
     llrawprocObject_t * shared = video ? video->llrawproc : NULL;
     llrawprocWorkerState_t stack_worker;
-    llrawprocWorkerState_t * worker = NULL;
+    llrawprocWorkerState_t * worker = supplied_worker;
     int using_stack_worker = 0;
 
     g_llrawproc_last_shared_lock_ms = 0.0;
@@ -738,13 +757,20 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
     double dual_iso_ms = 0.0;
     double chroma_smooth_ms = 0.0;
 
-    memset(&stack_worker, 0, sizeof(stack_worker));
-    stack_worker.prev_black_level = -1;
-    worker = llrawproc_acquire_worker_state(video);
+    if (worker && !worker->raw2ev && !worker->ev2raw && worker->prev_black_level == 0)
+    {
+        worker->prev_black_level = -1;
+    }
     if (!worker)
     {
-        worker = &stack_worker;
-        using_stack_worker = 1;
+        memset(&stack_worker, 0, sizeof(stack_worker));
+        stack_worker.prev_black_level = -1;
+        worker = llrawproc_acquire_worker_state(video);
+        if (!worker)
+        {
+            worker = &stack_worker;
+            using_stack_worker = 1;
+        }
     }
 
     struct raw_info raw_info = video->RAWI.raw_info;
@@ -1431,6 +1457,11 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
     {
         llrawproc_free_worker_state(worker);
     }
+}
+
+void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size)
+{
+    applyLLRawProcObjectWorker(video, raw_image_buff, raw_image_size, NULL);
 }
 
 /* Phase 4B-v2: scaled-buffer entry point. Runs a SUBSET of the llrawproc

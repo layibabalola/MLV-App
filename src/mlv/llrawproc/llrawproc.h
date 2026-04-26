@@ -29,6 +29,12 @@ void freeLLRawProcObject(mlvObject_t * video);
 
 /* all low level raw processing takes place here */
 void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size);
+void llrpInitWorkerState(llrawprocWorkerState_t * worker);
+void llrpFreeWorkerState(llrawprocWorkerState_t * worker);
+void applyLLRawProcObjectWorker(mlvObject_t * video,
+                                uint16_t * raw_image_buff,
+                                size_t raw_image_size,
+                                llrawprocWorkerState_t * worker);
 
 /* Phase 4B-v2: scaled variant for the downsample-BEFORE-llrawproc path.
  * Runs the same pipeline as applyLLRawProcObject but on a buffer whose
