@@ -215,6 +215,7 @@ SOURCES += \
     GraphicsPickerScene.cpp \
     NoScrollSlider.cpp \
     ColorToolButton.cpp \
+    DecodeWorker.cpp \
     RenderFrameThread.cpp \
     GraphicsPolygonMoveItem.cpp \
     GradientElement.cpp \
@@ -356,6 +357,7 @@ HEADERS += MainWindow.h \
     GraphicsPickerScene.h \
     NoScrollSlider.h \
     ColorToolButton.h \
+    DecodeWorker.h \
     RenderFrameThread.h \
     GraphicsPolygonMoveItem.h \
     GradientElement.h \

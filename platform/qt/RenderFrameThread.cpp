@@ -7,6 +7,7 @@
 
 #include "RenderFrameThread.h"
 
+#include "DecodeWorker.h"
 #include "GpuDebayer.h"
 #include "Phase3Breadcrumbs.h"
 #include "PlaybackQualityPolicy.h"
@@ -79,12 +80,20 @@ RenderFrameThread::RenderFrameThread()
     m_renderingSlotIndex = -1;
     m_presentingSlotIndex = -1;
     m_phase3Mode.store( Phase3Mode::Disabled, std::memory_order_relaxed );
+    m_decodeWorker = nullptr;
+    m_decodeWorkerStop = false;
 }
 
 //Destructor
 RenderFrameThread::~RenderFrameThread()
 {
-
+    stop();
+    if( m_decodeWorker )
+    {
+        m_decodeWorker->wait();
+        delete m_decodeWorker;
+        m_decodeWorker = nullptr;
+    }
 }
 
 //Init all objects
@@ -93,6 +102,9 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     QMutexLocker locker(&m_mutex);
     m_frameReady = false;
     m_renderRequests.clear();
+    m_decodeRequests.clear();
+    m_decodeReadySlots.clear();
+    m_decodeWorkerStop = false;
     m_pMlvObject = pMlvObject;
     m_imageWidth = imageWidth;
     m_imageHeight = imageHeight;
@@ -166,7 +178,7 @@ bool RenderFrameThread::isFrameReady()
 bool RenderFrameThread::isIdle()
 {
     QMutexLocker locker(&m_mutex);
-    return !(m_renderFrame || m_renderingFrame);
+    return !(m_renderFrame || m_renderingFrame || phase3WorkInFlightLocked());
 }
 
 bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
@@ -331,13 +343,14 @@ void RenderFrameThread::stop()
 {
     QMutexLocker locker(&m_mutex);
     m_stop = true;
+    stopDecodeWorkerLocked();
     m_waitCondition.wakeAll();
 }
 
 void RenderFrameThread::lock()
 {
     m_mutex.lock();
-    while( m_renderFrame || m_renderingFrame )
+    while( m_renderFrame || m_renderingFrame || phase3WorkInFlightLocked() )
     {
         m_waitCondition.wait(&m_mutex);
     }
@@ -351,7 +364,466 @@ void RenderFrameThread::unlock()
 //Main loop of the thread
 void RenderFrameThread::run(void)
 {
-    runSerial();
+    runPhase3();
+}
+
+bool RenderFrameThread::phase3DecodeAheadActive( Phase3Mode mode ) const
+{
+    return mode == Phase3Mode::DecodeAheadOnly
+        && !phase3LiveFallbackActive()
+        && !phase3KillSwitchActive( mode );
+}
+
+void RenderFrameThread::ensureDecodeWorkerStartedLocked( void )
+{
+    if( m_decodeWorker ) return;
+    m_decodeWorkerStop = false;
+    m_decodeWorker = new DecodeWorker( this );
+    m_decodeWorker->start();
+}
+
+void RenderFrameThread::stopDecodeWorkerLocked( void )
+{
+    m_decodeWorkerStop = true;
+    m_decodeWaitCondition.wakeAll();
+}
+
+bool RenderFrameThread::phase3WorkInFlightLocked( void ) const
+{
+    if( !m_decodeRequests.empty() || !m_decodeReadySlots.empty() ) return true;
+    for( const FrameSlot &slot : m_frameSlots )
+    {
+        const SlotState state = slot.state.load( std::memory_order_acquire );
+        if( state == SlotState::Requested
+         || state == SlotState::Decoding
+         || state == SlotState::Decoded
+         || state == SlotState::Processing )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RenderFrameThread::queueDecodeRequestLocked( int slotIndex, const RenderRequest &request )
+{
+    if( slotIndex < 0 || slotIndex >= static_cast<int>( m_frameSlots.size() ) ) return;
+    FrameSlot &slot = m_frameSlots[slotIndex];
+    slot.resetMetadata();
+    slot.queuedRequest = request;
+    slot.frameNumber = request.frameNumber;
+    slot.requestSerial = request.requestSerial;
+    slot.outputMode = request.outputMode;
+    slot.phase3Mode = request.phase3Mode;
+    slot.presentationContext = request.presentationContext;
+    transitionSlotState( slotIndex,
+                         SlotState::Idle,
+                         SlotState::Requested,
+                         request.phase3Mode,
+                         request.frameNumber,
+                         request.requestSerial,
+                         "phase3-3b-decode-requested" );
+    m_decodeRequests.push_back( { slotIndex, request } );
+    m_decodeWaitCondition.wakeOne();
+}
+
+bool RenderFrameThread::takeDecodeRequestForWorker( DecodeQueueEntry *entry )
+{
+    QMutexLocker locker( &m_mutex );
+    while( !m_decodeWorkerStop && !m_stop && m_decodeRequests.empty() )
+    {
+        m_decodeWaitCondition.wait( &m_mutex );
+    }
+    if( m_decodeWorkerStop || m_stop ) return false;
+    if( m_decodeRequests.empty() ) return false;
+    if( entry ) *entry = m_decodeRequests.front();
+    m_decodeRequests.pop_front();
+    return true;
+}
+
+void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry )
+{
+    if( entry.slotIndex < 0 || entry.slotIndex >= static_cast<int>( m_frameSlots.size() ) )
+    {
+        return;
+    }
+
+    const bool stageCsvEnabled = stage_timing_csv_sink_enabled() != 0;
+    const uint8_t telemetryMode = static_cast<uint8_t>( entry.request.phase3Mode );
+    if( stageCsvEnabled )
+    {
+        stage_timing_csv_sink_write_event(
+            entry.request.frameNumber,
+            entry.request.requestSerial,
+            static_cast<uint8_t>( entry.slotIndex ),
+            MLV_STAGE_DECODE,
+            "enter",
+            mlv_stage_timing_now_ns(),
+            telemetryMode,
+            0 );
+    }
+
+    transitionSlotState( entry.slotIndex,
+                         SlotState::Requested,
+                         SlotState::Decoding,
+                         entry.request.phase3Mode,
+                         entry.request.frameNumber,
+                         entry.request.requestSerial,
+                         "phase3-3b-decoding" );
+
+    FrameSlot &slot = m_frameSlots[entry.slotIndex];
+    const size_t rawPixelCount =
+        static_cast<size_t>( qMax( 0, m_imageWidth ) )
+        * static_cast<size_t>( qMax( 0, m_imageHeight ) );
+    if( slot.rawImage16.size() < rawPixelCount )
+    {
+        slot.rawImage16.resize( rawPixelCount );
+    }
+    if( rawPixelCount > 0 && m_pMlvObject )
+    {
+        (void)getMlvRawFrameUint16( m_pMlvObject,
+                                    entry.request.frameNumber,
+                                    slot.rawImage16.data() );
+    }
+
+    if( stageCsvEnabled )
+    {
+        stage_timing_csv_sink_write_event(
+            entry.request.frameNumber,
+            entry.request.requestSerial,
+            static_cast<uint8_t>( entry.slotIndex ),
+            MLV_STAGE_DECODE,
+            "leave",
+            mlv_stage_timing_now_ns(),
+            telemetryMode,
+            0 );
+    }
+
+    transitionSlotState( entry.slotIndex,
+                         SlotState::Decoding,
+                         SlotState::Decoded,
+                         entry.request.phase3Mode,
+                         entry.request.frameNumber,
+                         entry.request.requestSerial,
+                         "phase3-3b-decoded" );
+}
+
+void RenderFrameThread::signalDecodeDoneFromWorker( int slotIndex )
+{
+    QMutexLocker locker( &m_mutex );
+    if( !m_stop && slotIndex >= 0 )
+    {
+        m_decodeReadySlots.push_back( slotIndex );
+    }
+    m_waitCondition.wakeAll();
+}
+
+int RenderFrameThread::waitForDecodedSlotLocked( void )
+{
+    while( !m_stop && m_decodeReadySlots.empty() )
+    {
+        m_waitCondition.wait( &m_mutex );
+    }
+    if( m_stop ) return -1;
+    const int slotIndex = m_decodeReadySlots.front();
+    m_decodeReadySlots.pop_front();
+    return slotIndex;
+}
+
+void RenderFrameThread::setupActiveRequestLocked( const RenderRequest &request, int slotIndex )
+{
+    m_activeFrameNumber = request.frameNumber;
+    m_activeOutputMode = request.outputMode;
+    m_activeUseGpuBilinearDebayer = request.useGpuBilinearDebayer;
+    m_activeFrameRequestSerial = request.requestSerial;
+    m_activeFrameRequestStageTime = request.requestStageTime;
+    m_activePresentationContext = request.presentationContext;
+    m_activePresentationPreparationOptions = request.presentationPreparationOptions;
+    m_renderingFrame = true;
+    m_renderingSlotIndex = slotIndex;
+}
+
+void RenderFrameThread::renderDecodedSlot( int slotIndex,
+                                           const RenderRequest &request,
+                                           Phase3Mode activePhase3Mode )
+{
+    const bool phase3Active = activePhase3Mode != Phase3Mode::Disabled;
+    const bool stageCsvEnabled =
+        !phase3Active && stage_timing_csv_sink_enabled() != 0;
+    const uint8_t telemetryMode = static_cast<uint8_t>( activePhase3Mode );
+    const uint64_t renderEnterNs =
+        stageCsvEnabled ? mlv_stage_timing_now_ns() : 0;
+    if( stageCsvEnabled )
+    {
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_DECODE,
+            "enter",
+            renderEnterNs,
+            telemetryMode,
+            0 );
+    }
+
+    const SlotState slotState = m_frameSlots[slotIndex].state.load( std::memory_order_acquire );
+    const bool consumeDecodedRaw =
+        activePhase3Mode == Phase3Mode::DecodeAheadOnly
+     && slotState == SlotState::Decoded
+     && !m_frameSlots[slotIndex].rawImage16.empty();
+    drawFrame( slotIndex,
+               consumeDecodedRaw ? m_frameSlots[slotIndex].rawImage16.data() : nullptr );
+    if( phase3Active )
+    {
+        m_frameSlots[slotIndex].phase3Mode = activePhase3Mode;
+    }
+    if( frame_checksum_enabled()
+     && !m_frameSlots[slotIndex].rawImage8.empty() )
+    {
+        const uint64_t checksum =
+            frame_checksum_compute( m_frameSlots[slotIndex].rawImage8.data(),
+                                    m_frameSlots[slotIndex].rawImage8.size() );
+        frame_checksum_log_record( static_cast<uint32_t>( request.frameNumber ),
+                                   checksum );
+    }
+    if( phase3Active )
+    {
+        emitPhase3StageTelemetry( request,
+                                  m_frameSlots[slotIndex],
+                                  slotIndex,
+                                  activePhase3Mode );
+    }
+    else if( stageCsvEnabled )
+    {
+        const uint64_t renderLeaveNs = mlv_stage_timing_now_ns();
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_DECODE,
+            "leave",
+            renderLeaveNs,
+            telemetryMode,
+            0 );
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_RECON,
+            "enter",
+            renderEnterNs,
+            telemetryMode,
+            0 );
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_RECON,
+            "leave",
+            renderLeaveNs,
+            telemetryMode,
+            0 );
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_PROCESS,
+            "enter",
+            renderEnterNs,
+            telemetryMode,
+            0 );
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_PROCESS,
+            "leave",
+            renderLeaveNs,
+            telemetryMode,
+            0 );
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_DISPLAY,
+            "enter",
+            renderEnterNs,
+            telemetryMode,
+            0 );
+        stage_timing_csv_sink_write_event(
+            request.frameNumber,
+            request.requestSerial,
+            static_cast<uint8_t>( slotIndex ),
+            MLV_STAGE_DISPLAY,
+            "leave",
+            renderLeaveNs,
+            telemetryMode,
+            0 );
+    }
+}
+
+void RenderFrameThread::publishRenderedSlot( int slotIndex,
+                                             const RenderRequest &request,
+                                             Phase3Mode activePhase3Mode )
+{
+    Q_UNUSED( request );
+    if( slotIndex < 0 || slotIndex >= static_cast<int>( m_frameSlots.size() ) )
+    {
+        return;
+    }
+    if( activePhase3Mode != Phase3Mode::Disabled )
+    {
+        transitionSlotState( slotIndex,
+                             SlotState::Decoded,
+                             SlotState::Processing,
+                             activePhase3Mode,
+                             m_frameSlots[slotIndex].frameNumber,
+                             m_frameSlots[slotIndex].requestSerial,
+                             "phase3-3b-processing" );
+        transitionSlotState( slotIndex,
+                             SlotState::Processing,
+                             SlotState::Ready,
+                             activePhase3Mode,
+                             m_frameSlots[slotIndex].frameNumber,
+                             m_frameSlots[slotIndex].requestSerial,
+                             "phase3-3b-ready" );
+    }
+    m_renderingFrame = false;
+    m_renderingSlotIndex = -1;
+    m_frameSlots[slotIndex].ready = true;
+    m_frameReady = true;
+    m_waitCondition.wakeAll();
+}
+
+void RenderFrameThread::runPhase3( void )
+{
+    m_mutex.lock();
+    ensureDecodeWorkerStartedLocked();
+    while( !m_stop )
+    {
+        while( !m_stop
+            && m_decodeReadySlots.empty()
+            && ( m_renderRequests.empty() || findFreeSlotLocked() < 0 ) )
+        {
+            m_waitCondition.wait( &m_mutex );
+        }
+        if( m_stop ) break;
+
+        if( !m_renderRequests.empty()
+         && findFreeSlotLocked() >= 0
+         && phase3DecodeAheadActive( m_renderRequests.front().phase3Mode ) )
+        {
+            const int slotIndex = findFreeSlotLocked();
+            const RenderRequest request = m_renderRequests.front();
+            m_renderRequests.pop_front();
+            m_renderFrame = !m_renderRequests.empty()
+                         || !m_decodeRequests.empty()
+                         || !m_decodeReadySlots.empty();
+            queueDecodeRequestLocked( slotIndex, request );
+        }
+
+        int slotIndex = -1;
+        RenderRequest request;
+        Phase3Mode activePhase3Mode = Phase3Mode::Disabled;
+        if( !m_decodeReadySlots.empty() )
+        {
+            slotIndex = waitForDecodedSlotLocked();
+            if( slotIndex < 0 ) break;
+            request = m_frameSlots[slotIndex].queuedRequest;
+            activePhase3Mode = request.phase3Mode;
+        }
+        else if( !m_renderRequests.empty() && findFreeSlotLocked() >= 0 )
+        {
+            slotIndex = findFreeSlotLocked();
+            request = m_renderRequests.front();
+            m_renderRequests.pop_front();
+            m_renderFrame = !m_renderRequests.empty();
+
+            const Phase3Mode requestedPhase3Mode = request.phase3Mode;
+            if( requestedPhase3Mode != Phase3Mode::Disabled )
+            {
+                if( phase3LiveFallbackActive() )
+                {
+                    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                    playbackQualityAutoFallbackEpochWriteToSettings(
+                        PlaybackQualityMode::Phase3Fast, nowMs );
+                    playbackQualityAutoFallbackEpochWriteToSettings(
+                        PlaybackQualityMode::Phase3HQ, nowMs );
+                    Phase3Breadcrumbs::push( static_cast<uint8_t>( slotIndex ),
+                                             0,
+                                             0,
+                                             mlv_stage_timing_now_ns(),
+                                             request.frameNumber,
+                                             request.requestSerial,
+                                             static_cast<uint8_t>( requestedPhase3Mode ),
+                                             "phase3-live-fallback" );
+                }
+                else if( !phase3KillSwitchActive( requestedPhase3Mode ) )
+                {
+                    activePhase3Mode = requestedPhase3Mode;
+                    transitionSlotState( slotIndex,
+                                         SlotState::Idle,
+                                         SlotState::Requested,
+                                         activePhase3Mode,
+                                         request.frameNumber,
+                                         request.requestSerial,
+                                         "phase3-requested" );
+                    transitionSlotState( slotIndex,
+                                         SlotState::Requested,
+                                         SlotState::Decoding,
+                                         activePhase3Mode,
+                                         request.frameNumber,
+                                         request.requestSerial,
+                                         "phase3-decoding" );
+                }
+            }
+        }
+        else
+        {
+            continue;
+        }
+
+        setupActiveRequestLocked( request, slotIndex );
+
+        if( !m_renderRequests.empty()
+         && findFreeSlotLocked() >= 0
+         && phase3DecodeAheadActive( m_renderRequests.front().phase3Mode ) )
+        {
+            const int nextSlotIndex = findFreeSlotLocked();
+            const RenderRequest nextRequest = m_renderRequests.front();
+            m_renderRequests.pop_front();
+            queueDecodeRequestLocked( nextSlotIndex, nextRequest );
+        }
+
+        m_mutex.unlock();
+        renderDecodedSlot( slotIndex, request, activePhase3Mode );
+        m_mutex.lock();
+
+        if( activePhase3Mode != Phase3Mode::Disabled
+         && m_frameSlots[slotIndex].state.load( std::memory_order_acquire ) == SlotState::Decoding )
+        {
+            transitionSlotState( slotIndex,
+                                 SlotState::Decoding,
+                                 SlotState::Decoded,
+                                 activePhase3Mode,
+                                 request.frameNumber,
+                                 request.requestSerial,
+                                 "phase3-decoded" );
+        }
+        publishRenderedSlot( slotIndex, request, activePhase3Mode );
+        m_mutex.unlock();
+        emit frameReady();
+        m_mutex.lock();
+    }
+    stopDecodeWorkerLocked();
+    m_stop = false;
+    m_mutex.unlock();
+    if( m_decodeWorker )
+    {
+        m_decodeWorker->wait();
+        delete m_decodeWorker;
+        m_decodeWorker = nullptr;
+    }
 }
 
 void RenderFrameThread::transitionSlotState( int slotIndex,
@@ -431,7 +903,11 @@ void RenderFrameThread::emitPhase3StageTelemetry( const RenderRequest &request,
         writeEvent( stage, "leave", ns );
     };
 
-    emitStage( MLV_STAGE_DECODE, durationNs( fieldMs( "raw_uint16_ms" ) ) );
+    const double decodeMs = fieldMs( "raw_uint16_ms" );
+    if( !( mode == Phase3Mode::DecodeAheadOnly && decodeMs <= 0.0 ) )
+    {
+        emitStage( MLV_STAGE_DECODE, durationNs( decodeMs ) );
+    }
     emitStage( MLV_STAGE_RECON, durationNs( reconMs ) );
     emitStage( MLV_STAGE_PROCESS, durationNs( processMs ) );
     emitStage( MLV_STAGE_DISPLAY,
@@ -733,7 +1209,7 @@ void RenderFrameThread::copySlotTelemetryLocked( const FrameSlot &slot )
 }
 
 //render the picture
-void RenderFrameThread::drawFrame( int slotIndex )
+void RenderFrameThread::drawFrame( int slotIndex, const uint16_t *decodedRawFrame )
 {
     FrameSlot &slot = m_frameSlots[slotIndex];
     slot.resetMetadata();
@@ -869,11 +1345,28 @@ void RenderFrameThread::drawFrame( int slotIndex )
     }
     else if( !slot.rawImage8.empty() )
     {
-        getMlvProcessedFrame8Scaled( m_pMlvObject,
-                                     frameNumber,
-                                     slot.rawImage8.data(),
-                                     mlvappEffectiveWorkerThreadCount(),
-                                     playbackScaleFactor );
+        bool renderedFromDecodedRaw = false;
+        if( decodedRawFrame )
+        {
+            renderedFromDecodedRaw =
+                getMlvProcessedFrame8ScaledFromRaw16( m_pMlvObject,
+                                                      frameNumber,
+                                                      decodedRawFrame,
+                                                      slot.rawImage8.data(),
+                                                      mlvappEffectiveWorkerThreadCount(),
+                                                      playbackScaleFactor ) != 0;
+        }
+        if( !renderedFromDecodedRaw )
+        {
+            getMlvProcessedFrame8Scaled( m_pMlvObject,
+                                         frameNumber,
+                                         slot.rawImage8.data(),
+                                         mlvappEffectiveWorkerThreadCount(),
+                                         playbackScaleFactor );
+        }
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("phase3_decoded_raw_consumed"),
+            renderedFromDecodedRaw );
         slot.dualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
         slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
         slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();

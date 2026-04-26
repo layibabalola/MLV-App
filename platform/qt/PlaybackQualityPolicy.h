@@ -392,7 +392,7 @@ inline Phase3Mode phase3ModeFor( PlaybackQualityMode mode )
     if ( !playbackQualityModeIsPhase3( mode ) ) return Phase3Mode::Disabled;
     if ( !playbackQualityPhase3ModeSelectable( mode ) ) return Phase3Mode::Disabled;
     if ( !playbackQualityPhase3AcknowledgedFromSettings() ) return Phase3Mode::Disabled;
-    return Phase3Mode::Full;
+    return Phase3Mode::DecodeAheadOnly;
 }
 
 inline int playbackQualityNextModeForCycle( int currentMode )
