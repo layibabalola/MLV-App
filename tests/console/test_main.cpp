@@ -52,6 +52,7 @@ int main(int argc, char ** argv)
     QCoreApplication app(argc, argv);
 
     std::string hash_output_path;
+    std::string test_filter;
     QString golden_input_path;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
@@ -63,7 +64,15 @@ int main(int argc, char ** argv)
             } else {
                 golden_input_path = repo_file_path(QStringLiteral("tests/fixtures/golden/hashes.json"));
             }
+        } else if (argument == "--gtest_filter" && (index + 1) < argc) {
+            test_filter = argv[++index];
+        } else if (argument.rfind("--gtest_filter=", 0) == 0) {
+            test_filter = argument.substr(std::string("--gtest_filter=").size());
         }
+    }
+
+    if (!test_filter.empty()) {
+        minitest::set_filter(test_filter);
     }
 
     const int failed = minitest::run_all();

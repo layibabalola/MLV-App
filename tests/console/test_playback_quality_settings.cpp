@@ -8,7 +8,8 @@
  *      QSettings dial.
  *   4. dualIsoPlaybackPreferHqMean23() consults the QSettings fallback when
  *      the env var is unset.
- *   5. playbackQualityScaleFactorForMode() returns 1/4/4 for Fast/HQ/Auto.
+ *   5. playbackQualityScaleFactorForMode() returns 4 for all persisted modes
+ *      unless the explicit scale-factor env var overrides it.
  *
  * Skips when QCoreApplication is unavailable (the harness installs one in
  * test_main.cpp; defensive check in case the test is reused). */
@@ -33,6 +34,8 @@ void clearAllPlaybackQualityKeys()
     set.remove( PlaybackQualitySettings::kKeyQualityMode() );
     set.remove( PlaybackQualitySettings::kKeyAutoTargetFps() );
     set.remove( PlaybackQualitySettings::kKeyShowQualityIndicator() );
+    set.remove( PlaybackQualitySettings::kKeyShowExperimentalPhase3Modes() );
+    set.remove( PlaybackQualitySettings::kKeyPhase3Acknowledged() );
     set.sync();
 }
 
@@ -130,9 +133,11 @@ TEST(PlaybackQualitySettings, ScaleFactorForMode)
     if ( !QCoreApplication::instance() ) SKIP_TEST( "Requires QCoreApplication" );
     unsetEnv();
 
-    ASSERT_EQ( 1, playbackQualityScaleFactorForMode( PlaybackQualityMode::Fast,        false ) );
+    ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Fast,        false ) );
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::HighQuality, false ) );
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Auto,        false ) );
+    ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Phase3Fast,  false ) );
+    ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Phase3HQ,    false ) );
 }
 
 TEST(PlaybackQualitySettings, EnvVarOverridesGuiHqMean23)
@@ -154,6 +159,8 @@ TEST(PlaybackQualitySettings, EnvVarOverridesGuiHqMean23)
     /* GUI mode HighQuality — should pick up HQ-mean23. */
     ASSERT_TRUE( playbackQualityWantsHqMean23( PlaybackQualityMode::HighQuality ) );
     ASSERT_TRUE( playbackQualityWantsHqMean23( PlaybackQualityMode::Auto ) );
+    ASSERT_FALSE( playbackQualityWantsHqMean23( PlaybackQualityMode::Phase3Fast ) );
+    ASSERT_TRUE( playbackQualityWantsHqMean23( PlaybackQualityMode::Phase3HQ ) );
 
     clearAllPlaybackQualityKeys();
 }

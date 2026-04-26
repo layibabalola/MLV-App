@@ -9,6 +9,7 @@
 
 #include "GpuDebayer.h"
 #include "Phase3Breadcrumbs.h"
+#include "PlaybackQualityPolicy.h"
 
 #include "../../src/batch/WorkerThreadCount.h"
 #include "../../src/processing/raw_processing.h"
@@ -16,6 +17,7 @@
 #include "debug/StageTimingCsvSink.h"
 #include "debug/StageTiming.h"
 #include <QDebug>
+#include <QDateTime>
 #include <QMutexLocker>
 
 #include <atomic>
@@ -292,7 +294,19 @@ void RenderFrameThread::unlock()
 void RenderFrameThread::run(void)
 {
     const Phase3Mode mode = phase3Mode();
-    if( mode == Phase3Mode::Disabled || phase3KillSwitchActive( mode ) )
+    if( mode == Phase3Mode::Disabled )
+    {
+        runSerial();
+        return;
+    }
+
+    if( phase3LiveFallbackActive() )
+    {
+        runPhase3( mode );
+        return;
+    }
+
+    if( phase3KillSwitchActive( mode ) )
     {
         runSerial();
         return;
@@ -303,7 +317,23 @@ void RenderFrameThread::run(void)
 
 void RenderFrameThread::runPhase3( Phase3Mode mode )
 {
-    Q_UNUSED( mode );
+    if( phase3LiveFallbackActive() )
+    {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        playbackQualityAutoFallbackEpochWriteToSettings(
+            PlaybackQualityMode::Phase3Fast, nowMs );
+        playbackQualityAutoFallbackEpochWriteToSettings(
+            PlaybackQualityMode::Phase3HQ, nowMs );
+        Phase3Breadcrumbs::push( 0, 0, 0,
+                                 mlv_stage_timing_now_ns(),
+                                 0,
+                                 0,
+                                 static_cast<uint8_t>( mode ),
+                                 "phase3-live-fallback" );
+        runSerial();
+        return;
+    }
+
     /* Phase B only installs the dispatch seam and rollback controls.
      * The parallel worker implementation lands behind later gates; until
      * then every non-disabled mode intentionally falls through to the proven

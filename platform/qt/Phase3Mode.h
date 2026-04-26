@@ -18,5 +18,6 @@ void phase3InitKillSwitches() noexcept;
 void phase3ReloadKillSwitchesForTest() noexcept;
 bool phase3KillSwitchActive(Phase3Mode mode) noexcept;
 void phase3SetLiveFallbackActive(bool active) noexcept;
+bool phase3LiveFallbackActive(void) noexcept;
 
 #endif // PHASE3MODE_H

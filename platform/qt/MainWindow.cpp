@@ -19,6 +19,8 @@ extern "C" {
 #include <QThread>
 #include <QTime>
 #include <QSettings>
+#include <QCryptographicHash>
+#include <QDateTime>
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
 #include <QDesktopWidget>
 #else
@@ -134,6 +136,35 @@ static std::atomic<int> g_playbackQualityActiveHqMirror{ -1 };
 
 namespace
 {
+constexpr const char * kPhase3PinnedClipNames[] = {
+    "M16-1210", "M15-1355", "M16-1327", "M29-1756"
+};
+
+static bool playbackQualityModeIntIsPhase3( int mode )
+{
+    return mode == static_cast<int>( PlaybackQualityMode::Phase3Fast )
+        || mode == static_cast<int>( PlaybackQualityMode::Phase3HQ );
+}
+
+static PlaybackQualityMode playbackQualityModeFromInt( int mode )
+{
+    if( mode < static_cast<int>( PlaybackQualityMode::Fast )
+     || mode > static_cast<int>( PlaybackQualityMode::Phase3HQ ) )
+    {
+        return PlaybackQualityMode::Fast;
+    }
+    return static_cast<PlaybackQualityMode>( mode );
+}
+
+static QString phase3ClipFingerprintForPath( const QString & path )
+{
+    if( path.isEmpty() ) return QString();
+    const QByteArray digest =
+        QCryptographicHash::hash( QFileInfo( path ).absoluteFilePath().toUtf8(),
+                                  QCryptographicHash::Sha256 ).toHex();
+    return QString::fromLatin1( digest.left( 16 ) );
+}
+
 static void convert_rgb16_to_rgb8(const uint16_t * source, uint8_t * destination, int pixelCount)
 {
     if( !source || !destination || pixelCount <= 0 ) return;
@@ -496,6 +527,7 @@ MainWindow::~MainWindow()
 {
     killTimer( m_timerId );
     killTimer( m_timerCacheId );
+    flushPhase3PlaybackTime( true );
 
     //Stop playback-prep worker before tearing down render state it may reference.
     {
@@ -2069,6 +2101,11 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_playToFirstFrameTargetFrame = requestedFrame;
         m_playToFirstFrameTargetFrameValid = true;
     }
+    if( m_pRenderThread )
+    {
+        m_pRenderThread->setPhase3Mode(
+            phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) ) );
+    }
 
     //Get frame from library
     if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
@@ -3276,6 +3313,26 @@ void MainWindow::initGui( void )
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityFast );
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityHQ );
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityAuto );
+    m_playbackQualityGroup->addAction( ui->actionPlaybackQualityPhase3Fast );
+    m_playbackQualityGroup->addAction( ui->actionPlaybackQualityPhase3HQ );
+
+    const QString phase3Tooltip = tr(
+        "Experimental Phase 3 pipeline parallelism. Falls back to serial "
+        "automatically on detected issues. Set MLVAPP_DISABLE_PHASE3=1 and "
+        "restart to disable. See docs/phase3_data_model.md." );
+    QAction * phase3Actions[] = {
+        ui->actionPlaybackQualityPhase3Fast,
+        ui->actionPlaybackQualityPhase3HQ
+    };
+    for( QAction * action : phase3Actions )
+    {
+        if( !action ) continue;
+        QFont font = action->font();
+        font.setItalic( true );
+        action->setFont( font );
+        action->setToolTip( phase3Tooltip );
+        action->setStatusTip( phase3Tooltip );
+    }
 
     m_playbackAutoTargetFpsGroup = new QActionGroup( this );
     m_playbackAutoTargetFpsGroup->setExclusive( true );
@@ -3450,6 +3507,8 @@ void MainWindow::initGui( void )
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityFast );
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityHQ );
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityAuto );
+        m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityPhase3Fast );
+        m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityPhase3HQ );
         m_pPlaybackQualityToolButtonMenu->addSeparator();
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackShowQualityIndicator );
         QMenu *pAutoTargetSub = new QMenu( tr( "Auto Target FPS" ),
@@ -3477,6 +3536,11 @@ void MainWindow::initGui( void )
                 "(HQ matched-pair, cast-closed), or Auto (adapts to target fps).\n"
                 "Keyboard shortcut: Q" ) );
         m_pPlaybackQualityToolButton->setCursor( Qt::PointingHandCursor );
+        m_pPlaybackQualityToolButton->setContextMenuPolicy( Qt::CustomContextMenu );
+        connect( m_pPlaybackQualityToolButton,
+                 &QWidget::customContextMenuRequested,
+                 this,
+                 &MainWindow::showPlaybackQualityContextMenu );
         ui->mainToolBar->addSeparator();
         ui->mainToolBar->addWidget( m_pPlaybackQualityToolButton );
     }
@@ -9749,6 +9813,47 @@ bool MainWindow::dualIsoPlaybackPreferHqMean23GuiFallback( void )
     return playbackQualityWantsHqMean23( playbackQualityModeFromSettings() );
 }
 
+void MainWindow::updatePhase3PlaybackQualityUi( void )
+{
+    const bool showPhase3Fast =
+        playbackQualityPhase3ModeSelectable( PlaybackQualityMode::Phase3Fast );
+    const bool showPhase3HQ =
+        playbackQualityPhase3ModeSelectable( PlaybackQualityMode::Phase3HQ );
+
+    if( ui->actionPlaybackQualityPhase3Fast )
+        ui->actionPlaybackQualityPhase3Fast->setVisible( showPhase3Fast );
+    if( ui->actionPlaybackQualityPhase3HQ )
+        ui->actionPlaybackQualityPhase3HQ->setVisible( showPhase3HQ );
+}
+
+bool MainWindow::maybeShowPhase3AcknowledgementDialog( int mode )
+{
+    if( !playbackQualityModeIntIsPhase3( mode ) ) return true;
+    if( playbackQualityPhase3AcknowledgedFromSettings() ) return true;
+
+    if( qApp && qApp->property( "phase3_unattended" ).toBool() )
+    {
+        playbackQualityPhase3AcknowledgedWriteToSettings( true );
+        return true;
+    }
+
+    QMessageBox msg( QMessageBox::Warning,
+                     tr( "Experimental playback engine" ),
+                     tr( "Experimental playback engine. It may fall back to the serial renderer "
+                         "if it detects a problem. Keep this off for important work unless you "
+                         "are deliberately dogfooding Phase 3." ),
+                     QMessageBox::Ok | QMessageBox::Cancel,
+                     this );
+    msg.setDetailedText( tr( "Set MLVAPP_DISABLE_PHASE3=1 and restart to disable Phase 3 playback modes. "
+                             "See docs/phase3_data_model.md." ) );
+    if( msg.exec() != QMessageBox::Ok )
+    {
+        return false;
+    }
+    playbackQualityPhase3AcknowledgedWriteToSettings( true );
+    return true;
+}
+
 void MainWindow::initPlaybackQualityFromSettings( void )
 {
     /* Install the HQ-mean23 GUI fallback so DualIsoPlaybackPolicy picks up
@@ -9760,7 +9865,13 @@ void MainWindow::initPlaybackQualityFromSettings( void )
                    PlaybackQualitySettings::kApplication() );
     int rawMode = set.value( PlaybackQualitySettings::kKeyQualityMode(),
                              PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
-    if ( rawMode < 0 || rawMode > 2 ) rawMode = 0;
+    if ( rawMode < 0 || rawMode > 4 ) rawMode = 0;
+    if ( playbackQualityModeIntIsPhase3( rawMode )
+      && ( !playbackQualityPhase3ModeSelectable( playbackQualityModeFromInt( rawMode ) )
+        || !playbackQualityPhase3AcknowledgedFromSettings() ) )
+    {
+        rawMode = 0;
+    }
     int rawTargetFps = set.value( PlaybackQualitySettings::kKeyAutoTargetFps(),
                                   PlaybackQualitySettings::kDefaultAutoTargetFps() ).toInt();
     if ( rawTargetFps != 24 && rawTargetFps != 30 && rawTargetFps != 60 ) rawTargetFps = 30;
@@ -9779,6 +9890,10 @@ void MainWindow::initPlaybackQualityFromSettings( void )
         ui->actionPlaybackQualityHQ->setChecked( rawMode == 1 );
     if ( ui->actionPlaybackQualityAuto )
         ui->actionPlaybackQualityAuto->setChecked( rawMode == 2 );
+    if ( ui->actionPlaybackQualityPhase3Fast )
+        ui->actionPlaybackQualityPhase3Fast->setChecked( rawMode == 3 );
+    if ( ui->actionPlaybackQualityPhase3HQ )
+        ui->actionPlaybackQualityPhase3HQ->setChecked( rawMode == 4 );
     if ( ui->actionPlaybackAutoTarget24 )
         ui->actionPlaybackAutoTarget24->setChecked( rawTargetFps == 24 );
     if ( ui->actionPlaybackAutoTarget30 )
@@ -9787,6 +9902,7 @@ void MainWindow::initPlaybackQualityFromSettings( void )
         ui->actionPlaybackAutoTarget60->setChecked( rawTargetFps == 60 );
     if ( ui->actionPlaybackShowQualityIndicator )
         ui->actionPlaybackShowQualityIndicator->setChecked( indicatorVisible );
+    updatePhase3PlaybackQualityUi();
 
     /* Seed active state without persisting (already loaded). */
     applyPlaybackQualityMode( rawMode, /*persist*/false, /*forceRefresh*/true );
@@ -9795,11 +9911,30 @@ void MainWindow::initPlaybackQualityFromSettings( void )
 
 void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh )
 {
-    if ( mode < 0 || mode > 2 ) mode = 0;
+    if ( mode < 0 || mode > 4 ) mode = 0;
+    const int previousMode = m_playbackQualityMode;
+    const bool selectingPhase3 = playbackQualityModeIntIsPhase3( mode );
+    const PlaybackQualityMode requestedMode = playbackQualityModeFromInt( mode );
+    if( selectingPhase3 && !playbackQualityPhase3ModeSelectable( requestedMode ) )
+    {
+        mode = 0;
+    }
+    if( selectingPhase3 && mode != 0 && persist
+     && !maybeShowPhase3AcknowledgementDialog( mode ) )
+    {
+        mode = previousMode;
+    }
+
     const bool changed = (mode != m_playbackQualityMode) || forceRefresh;
     m_playbackQualityMode = mode;
 
     const PlaybackQualityMode pqMode = static_cast<PlaybackQualityMode>( mode );
+    if( playbackQualityModeIsPhase3( pqMode )
+     && playbackQualityTierEnteredAtFromSettings( pqMode ) == 0 )
+    {
+        playbackQualityTierWriteToSettings(
+            pqMode, PlaybackQualityTier::Dev, QDateTime::currentMSecsSinceEpoch() );
+    }
     const bool dualIsoActive = false; /* sampler keys off DI dynamically */
     m_playbackQualityActiveScale = playbackQualityScaleFactorForMode( pqMode, dualIsoActive );
     m_playbackQualityActiveHq    = playbackQualityWantsHqMean23( pqMode );
@@ -9822,6 +9957,13 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
         ui->actionPlaybackQualityHQ->setChecked( mode == 1 );
     if ( ui->actionPlaybackQualityAuto )
         ui->actionPlaybackQualityAuto->setChecked( mode == 2 );
+    if ( ui->actionPlaybackQualityPhase3Fast )
+        ui->actionPlaybackQualityPhase3Fast->setChecked( mode == 3 );
+    if ( ui->actionPlaybackQualityPhase3HQ )
+        ui->actionPlaybackQualityPhase3HQ->setChecked( mode == 4 );
+    if ( m_pRenderThread )
+        m_pRenderThread->setPhase3Mode( phase3ModeFor( pqMode ) );
+    updatePhase3PlaybackQualityUi();
 
     /* Auto Target FPS is meaningful only when Auto mode is active — the
      * sampler reads it as the cadence threshold for switching between
@@ -9956,10 +10098,24 @@ void MainWindow::updatePlaybackQualityIndicator( void )
                           : tr( "Quality: Auto (Fast)" );
                 color = QStringLiteral( "#5DADE2" );
                 break;
+            case 3:
+                text = tr( "Quality: Fast* x%1" ).arg( scale );
+                color = QStringLiteral( "#F1C40F" );
+                break;
+            case 4:
+                text = tr( "Quality: HQ* x%1" ).arg( scale );
+                color = QStringLiteral( "#F1C40F" );
+                break;
             default:
                 text = tr( "Quality: ?" );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
+        }
+        if( playbackQualityModeIntIsPhase3( m_playbackQualityMode ) )
+        {
+            const PlaybackQualityTier tier =
+                playbackQualityTierFromSettings( playbackQualityModeFromInt( m_playbackQualityMode ) );
+            text += tr( " (%1)" ).arg( QString::fromLatin1( playbackQualityTierName( tier ) ) );
         }
     }
     if ( m_pPlaybackQualityIndicator && m_playbackQualityIndicatorVisible )
@@ -10031,6 +10187,16 @@ void MainWindow::on_actionPlaybackQualityAuto_triggered()
     applyPlaybackQualityMode( 2, /*persist*/true, /*forceRefresh*/false );
 }
 
+void MainWindow::on_actionPlaybackQualityPhase3Fast_triggered()
+{
+    applyPlaybackQualityMode( 3, /*persist*/true, /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackQualityPhase3HQ_triggered()
+{
+    applyPlaybackQualityMode( 4, /*persist*/true, /*forceRefresh*/false );
+}
+
 void MainWindow::on_actionPlaybackShowQualityIndicator_triggered()
 {
     const bool checked = ui->actionPlaybackShowQualityIndicator
@@ -10055,8 +10221,208 @@ void MainWindow::on_actionPlaybackAutoTarget60_triggered()
 
 void MainWindow::cyclePlaybackQualityMode( void )
 {
-    const int next = ( m_playbackQualityMode + 1 ) % 3;
+    const int next = playbackQualityNextModeForCycle( m_playbackQualityMode );
     applyPlaybackQualityMode( next, /*persist*/true, /*forceRefresh*/false );
+}
+
+QString MainWindow::activeClipPhase3Fingerprint( void ) const
+{
+    if( !m_pModel || SESSION_EMPTY || !ACTIVE_CLIP ) return QString();
+    return phase3ClipFingerprintForPath( ACTIVE_CLIP->getPath() );
+}
+
+QStringList MainWindow::pinnedClipFingerprintsForPhase3( void ) const
+{
+    QStringList fingerprints;
+    if( !m_pModel ) return fingerprints;
+    for( int row = 0; row < SESSION_CLIP_COUNT; ++row )
+    {
+        ClipInformation * clip = GET_CLIP( row );
+        if( !clip ) continue;
+        const QString path = clip->getPath();
+        const QString base = QFileInfo( path ).completeBaseName();
+        for( const char * pinnedName : kPhase3PinnedClipNames )
+        {
+            if( base.contains( QString::fromLatin1( pinnedName ),
+                               Qt::CaseInsensitive ) )
+            {
+                const QString fingerprint = phase3ClipFingerprintForPath( path );
+                if( !fingerprint.isEmpty() && !fingerprints.contains( fingerprint ) )
+                    fingerprints.append( fingerprint );
+            }
+        }
+    }
+    return fingerprints;
+}
+
+void MainWindow::notePhase3PlaybackTime( int measuredFrameMs )
+{
+    if( measuredFrameMs <= 0
+     || !playbackQualityModeIntIsPhase3( m_playbackQualityMode ) )
+    {
+        return;
+    }
+
+    const QString fingerprint = activeClipPhase3Fingerprint();
+    if( fingerprint.isEmpty() ) return;
+    if( m_phase3ClipPlaytimeFingerprint != fingerprint )
+    {
+        flushPhase3PlaybackTime( true );
+        m_phase3ClipPlaytimeFingerprint = fingerprint;
+    }
+
+    m_phase3ClipPlaytimePendingMs += measuredFrameMs;
+    m_phase3ClipPlaytimeSinceFlushMs += measuredFrameMs;
+    if( m_phase3ClipPlaytimeSinceFlushMs >= 60000 )
+    {
+        flushPhase3PlaybackTime( false );
+    }
+}
+
+void MainWindow::flushPhase3PlaybackTime( bool force )
+{
+    if( m_phase3ClipPlaytimeFingerprint.isEmpty()
+     || m_phase3ClipPlaytimePendingMs <= 0 )
+    {
+        return;
+    }
+
+    qint64 seconds = m_phase3ClipPlaytimePendingMs / 1000;
+    if( force && seconds == 0 ) seconds = 1;
+    if( seconds <= 0 && !force ) return;
+
+    const qint64 prior =
+        playbackQualityClipPlaytimeSecondsFromSettings( m_phase3ClipPlaytimeFingerprint );
+    playbackQualityClipPlaytimeSecondsWriteToSettings(
+        m_phase3ClipPlaytimeFingerprint, prior + seconds );
+    m_phase3ClipPlaytimePendingMs -= seconds * 1000;
+    if( m_phase3ClipPlaytimePendingMs < 0 ) m_phase3ClipPlaytimePendingMs = 0;
+    m_phase3ClipPlaytimeSinceFlushMs = 0;
+
+    if( playbackQualityModeIntIsPhase3( m_playbackQualityMode ) )
+    {
+        const PlaybackQualityMode mode = playbackQualityModeFromInt( m_playbackQualityMode );
+        QStringList validated = playbackQualityValidatedClipsFromSettings( mode );
+        if( !validated.contains( m_phase3ClipPlaytimeFingerprint )
+         && playbackQualityClipPlaytimeSecondsFromSettings( m_phase3ClipPlaytimeFingerprint )
+            >= PlaybackQualitySettings::kPinnedClipMinimumSeconds() )
+        {
+            validated.append( m_phase3ClipPlaytimeFingerprint );
+            playbackQualityValidatedClipsWriteToSettings( mode, validated );
+        }
+    }
+}
+
+QString MainWindow::playbackQualityTierStatusText( int mode ) const
+{
+    const PlaybackQualityMode pqMode = playbackQualityModeFromInt( mode );
+    const PlaybackQualityTier tier = playbackQualityTierFromSettings( pqMode );
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 enteredAt = playbackQualityTierEnteredAtFromSettings( pqMode );
+    const qint64 ageMs = enteredAt > 0 ? nowMs - enteredAt : 0;
+    const qint64 daysRemaining =
+        std::max<qint64>( 0, ( PlaybackQualitySettings::kTierMinimumAgeMs() - ageMs
+                              + 24LL * 60LL * 60LL * 1000LL - 1 )
+                            / ( 24LL * 60LL * 60LL * 1000LL ) );
+    const QStringList required = pinnedClipFingerprintsForPhase3();
+    const QStringList validated = playbackQualityValidatedClipsFromSettings( pqMode );
+    int missing = 0;
+    for( const QString & f : required )
+        if( !validated.contains( f ) ) ++missing;
+
+    return tr( "Tier: %1\nDays until next time gate: %2\nPinned clips available: %3\nPinned clips missing validation: %4" )
+        .arg( QString::fromLatin1( playbackQualityTierName( tier ) ) )
+        .arg( daysRemaining )
+        .arg( required.size() )
+        .arg( missing );
+}
+
+void MainWindow::promotePlaybackQualityTier( int mode, PlaybackQualityTier tier )
+{
+    const PlaybackQualityMode pqMode = playbackQualityModeFromInt( mode );
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    playbackQualityTierWriteToSettings( pqMode, tier, nowMs );
+    updatePhase3PlaybackQualityUi();
+    updatePlaybackQualityIndicator();
+}
+
+void MainWindow::demotePlaybackQualityTier( int mode )
+{
+    promotePlaybackQualityTier( mode, PlaybackQualityTier::Dev );
+}
+
+void MainWindow::showPlaybackQualityContextMenu( const QPoint &pos )
+{
+    Q_UNUSED( pos );
+    if( !m_pPlaybackQualityToolButton ) return;
+
+    QMenu menu( this );
+    const int mode = m_playbackQualityMode;
+    if( playbackQualityModeIntIsPhase3( mode ) )
+    {
+        const PlaybackQualityMode pqMode = playbackQualityModeFromInt( mode );
+        const PlaybackQualityTier tier = playbackQualityTierFromSettings( pqMode );
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool canDaily =
+            playbackQualityCanPromoteToDailyUse(
+                tier,
+                playbackQualityTierEnteredAtFromSettings( pqMode ),
+                nowMs,
+                playbackQualityAutoFallbackEpochFromSettings( pqMode ) );
+        const bool canPinned =
+            playbackQualityCanPromoteToPinnedClip(
+                tier,
+                playbackQualityTierEnteredAtFromSettings( pqMode ),
+                nowMs,
+                playbackQualityValidatedClipsFromSettings( pqMode ),
+                pinnedClipFingerprintsForPhase3() );
+        const QString modeName = mode == 3 ? tr( "Fast" ) : tr( "HQ" );
+        QAction * promoteDaily =
+            menu.addAction( tr( "Promote %1 (Experimental) to Daily-Use" ).arg( modeName ) );
+        promoteDaily->setEnabled( canDaily );
+        connect( promoteDaily, &QAction::triggered, this, [this, mode]() {
+            if( QMessageBox::question( this,
+                                       tr( "Promote Phase 3 mode" ),
+                                       tr( "Promote this Phase 3 mode to Daily-Use?" ) )
+                == QMessageBox::Yes )
+            {
+                promotePlaybackQualityTier( mode, PlaybackQualityTier::DailyUse );
+            }
+        } );
+        QAction * promotePinned =
+            menu.addAction( tr( "Promote %1 (Experimental) to Pinned-Clip" ).arg( modeName ) );
+        promotePinned->setEnabled( canPinned );
+        connect( promotePinned, &QAction::triggered, this, [this, mode]() {
+            if( QMessageBox::question( this,
+                                       tr( "Promote Phase 3 mode" ),
+                                       tr( "Promote this Phase 3 mode to Pinned-Clip?" ) )
+                == QMessageBox::Yes )
+            {
+                promotePlaybackQualityTier( mode, PlaybackQualityTier::PinnedClip );
+            }
+        } );
+        QAction * demote = menu.addAction( tr( "Demote %1 (Experimental)..." ).arg( modeName ) );
+        connect( demote, &QAction::triggered, this, [this, mode]() {
+            if( QMessageBox::question( this,
+                                       tr( "Demote Phase 3 mode" ),
+                                       tr( "Demote this Phase 3 mode to Dev?" ) )
+                == QMessageBox::Yes )
+            {
+                demotePlaybackQualityTier( mode );
+            }
+        } );
+        menu.addSeparator();
+    }
+
+    QAction * status = menu.addAction( tr( "Tier eligibility status..." ) );
+    connect( status, &QAction::triggered, this, [this, mode]() {
+        const int statusMode = playbackQualityModeIntIsPhase3( mode ) ? mode : 3;
+        QMessageBox::information( this,
+                                  tr( "Phase 3 tier eligibility" ),
+                                  playbackQualityTierStatusText( statusMode ) );
+    } );
+    menu.exec( m_pPlaybackQualityToolButton->mapToGlobal(
+        QPoint( 0, m_pPlaybackQualityToolButton->height() ) ) );
 }
 
 //Select the codec
@@ -12384,6 +12750,21 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     mlv_stage_timing_note_elapsed("drawFrameReady.overlay", displayFrame, m_lastDrawFrameReadyOverlayMs);
     m_lastDrawFrameReadyTotalMs = (mlv_stage_timing_now() - displayStart) * 1000.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.total", displayFrame, m_lastDrawFrameReadyTotalMs);
+    if( ui->actionPlay->isChecked()
+     && playbackQualityModeIntIsPhase3( m_playbackQualityMode ) )
+    {
+        if( m_phase3LastPresentedStageTime > 0.0
+         && displayStart >= m_phase3LastPresentedStageTime )
+        {
+            notePhase3PlaybackTime(
+                static_cast<int>( ( displayStart - m_phase3LastPresentedStageTime ) * 1000.0 ) );
+        }
+        m_phase3LastPresentedStageTime = displayStart;
+    }
+    else
+    {
+        m_phase3LastPresentedStageTime = 0.0;
+    }
     notePlayToFirstFramePresentation( displayFrame );
     if( m_pRenderThread )
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );

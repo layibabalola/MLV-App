@@ -71,6 +71,11 @@ void phase3SetLiveFallbackActive(bool active) noexcept
     g_liveFallback.store(active, std::memory_order_release);
 }
 
+bool phase3LiveFallbackActive(void) noexcept
+{
+    return g_liveFallback.load(std::memory_order_acquire);
+}
+
 bool phase3KillSwitchActive(Phase3Mode mode) noexcept
 {
     phase3InitKillSwitches();

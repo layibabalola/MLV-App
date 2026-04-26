@@ -222,6 +222,8 @@
      <addaction name="actionPlaybackQualityFast"/>
      <addaction name="actionPlaybackQualityHQ"/>
      <addaction name="actionPlaybackQualityAuto"/>
+     <addaction name="actionPlaybackQualityPhase3Fast"/>
+     <addaction name="actionPlaybackQualityPhase3HQ"/>
      <addaction name="separator"/>
      <addaction name="actionPlaybackShowQualityIndicator"/>
      <addaction name="menuPlaybackAutoTargetFps"/>
@@ -11045,6 +11047,44 @@ QGroupBox::indicator:checked:disabled {
    </property>
    <property name="statusTip">
     <string>Playback Quality: Auto. Samples cadence and falls back to Fast if the measured framerate misses the target.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackQualityPhase3Fast">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="font">
+    <font>
+     <italic>true</italic>
+    </font>
+   </property>
+   <property name="text">
+    <string>Fast (Experimental - pipeline parallel)</string>
+   </property>
+   <property name="toolTip">
+    <string>Experimental Phase 3 pipeline parallelism. Falls back to serial automatically on detected issues. Set MLVAPP_DISABLE_PHASE3=1 and restart to disable. See docs/phase3_data_model.md.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback Quality: Experimental Phase 3 Fast path.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackQualityPhase3HQ">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="font">
+    <font>
+     <italic>true</italic>
+    </font>
+   </property>
+   <property name="text">
+    <string>High Quality (Experimental - pipeline parallel)</string>
+   </property>
+   <property name="toolTip">
+    <string>Experimental Phase 3 pipeline parallelism. Falls back to serial automatically on detected issues. Set MLVAPP_DISABLE_PHASE3=1 and restart to disable. See docs/phase3_data_model.md.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback Quality: Experimental Phase 3 High Quality path.</string>
    </property>
   </action>
   <action name="actionPlaybackShowQualityIndicator">
