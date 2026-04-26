@@ -3509,6 +3509,8 @@ static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject
                                                                        int threads,
                                                                        int recordTelemetry)
 {
+    if (!video || !decodedRawFrame || !outputFrame || !processing) return 0;
+
     const int scaleFactor = video ? video->playback_scale_factor_active : 1;
     const int eff_scale = (scaleFactor > 1) ? scaleFactor : 1;
     const int full_w = (int)getMlvWidth(video);
@@ -3535,6 +3537,86 @@ static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject
                                           unprocessed_frame,
                                           eff_scale,
                                           threads))
+    {
+        memset(outputFrame, 0, (size_t)rgb_frame_size);
+        return 0;
+    }
+    if (recordTelemetry)
+    {
+        g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    }
+
+    if (syncProcessingLevels)
+    {
+        mlv_sync_processing_black_white_levels(video);
+    }
+
+    const double processing_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
+    applyProcessingObject8(processing,
+                           out_w,
+                           out_h,
+                           unprocessed_frame,
+                           outputFrame,
+                           threads,
+                           1,
+                           frameIndex);
+    if (recordTelemetry)
+    {
+        g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
+        g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
+        g_mlv_last_processed16_for_8bit_ms = g_mlv_last_processed16_total_ms;
+        g_mlv_last_processed16_to_8bit_ms = 0.0;
+        g_mlv_last_processed8_direct_path_active = 1;
+        mlv_stage_timing_note_elapsed("processed16_total", frameIndex, g_mlv_last_processed16_total_ms);
+        mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
+        mlv_stage_timing_note_elapsed("processed16_to_8bit", frameIndex, g_mlv_last_processed16_to_8bit_ms);
+    }
+
+    return 1;
+}
+
+static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(mlvObject_t * video,
+                                                                                processingObject_t * processing,
+                                                                                int syncProcessingLevels,
+                                                                                uint64_t frameIndex,
+                                                                                const uint16_t * reconnedRawFrame,
+                                                                                uint8_t * outputFrame,
+                                                                                int threads,
+                                                                                int recordTelemetry)
+{
+    if (!video || !reconnedRawFrame || !outputFrame || !processing) return 0;
+
+    const int scaleFactor = video ? video->playback_scale_factor_active : 1;
+    const int eff_scale = (scaleFactor > 1) ? scaleFactor : 1;
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int out_w = (eff_scale > 1) ? (full_w / eff_scale) : full_w;
+    const int out_h = (eff_scale > 1) ? (full_h / eff_scale) : full_h;
+
+    const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
+    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_frame_size);
+    if (!unprocessed_frame || eff_scale <= 1)
+    {
+        memset(outputFrame, 0, (size_t)rgb_frame_size);
+        return 0;
+    }
+
+    const double processed16_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
+    const double debayer_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
+    const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    if (eff_scale == 4)
+    {
+        pl_downsample_bayer_to_rgb_4x(reconnedRawFrame, full_w, full_h,
+                                      unprocessed_frame, bit_shift, threads);
+    }
+    else if (eff_scale == 2)
+    {
+        pl_downsample_bayer_to_rgb_2x(reconnedRawFrame, full_w, full_h,
+                                      unprocessed_frame, bit_shift, threads);
+    }
+    else
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
         return 0;
@@ -4079,6 +4161,81 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
                                                                      outputFrame,
                                                                      threads,
                                                                      1))
+    {
+        pthread_mutex_lock(&video->processed8_prefetch_mutex);
+        video->current_processed_frame_8bit_active = 0;
+        mlv_reset_processed_frame_8bit_cache_locked(video);
+        pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+        g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
+        return 0;
+    }
+
+    const uint64_t stored_signature =
+        mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
+    mlv_store_processed_frame_8bit_cache_with_scale(video,
+                                                    frameIndex,
+                                                    threads,
+                                                    stored_signature ? stored_signature : requested_signature,
+                                                    outputFrame,
+                                                    rgb_frame_size,
+                                                    1,
+                                                    0,
+                                                    normalizedScale);
+
+    g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
+    return 1;
+}
+
+int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
+                                                 uint64_t frameIndex,
+                                                 const uint16_t * reconnedRawFrame,
+                                                 uint8_t * outputFrame,
+                                                 int threads,
+                                                 int scaleFactor)
+{
+    const double total_start = mlv_stage_timing_now();
+    mlv_reset_last_raw_stage_telemetry();
+    g_mlv_last_raw_uint16_ms = 0.0;
+    g_mlv_last_llrawproc_ms = 0.0;
+    g_mlv_last_debayered_frame_ms = 0.0;
+    g_mlv_last_processing_ms = 0.0;
+    g_mlv_last_processed16_total_ms = 0.0;
+    g_mlv_last_processed16_for_8bit_ms = 0.0;
+    g_mlv_last_processed16_to_8bit_ms = 0.0;
+    g_mlv_last_processed8_total_ms = 0.0;
+    g_mlv_last_processed8_direct_path_active = 0;
+    g_mlv_last_processed8_prefetch_hit = 0;
+
+    if (!video || !reconnedRawFrame || !outputFrame) return 0;
+
+    const int normalizedScale = mlv_effective_playback_scale_factor(video, scaleFactor);
+    video->playback_scale_factor_active = normalizedScale;
+
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int out_w = (normalizedScale > 1) ? (full_w / normalizedScale) : full_w;
+    const int out_h = (normalizedScale > 1) ? (full_h / normalizedScale) : full_h;
+    const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
+    if (!mlv_can_use_direct_processed_frame8_path(video) || normalizedScale <= 1)
+    {
+        return 0;
+    }
+
+    const uint64_t requested_state_signature =
+        mlv_processed_frame_state_signature_with_scale(video, normalizedScale);
+    const uint64_t requested_signature =
+        mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex);
+
+    if (!mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(video,
+                                                                              video->processing,
+                                                                              1,
+                                                                              frameIndex,
+                                                                              reconnedRawFrame,
+                                                                              outputFrame,
+                                                                              threads,
+                                                                              1))
     {
         pthread_mutex_lock(&video->processed8_prefetch_mutex);
         video->current_processed_frame_8bit_active = 0;

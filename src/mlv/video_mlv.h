@@ -94,6 +94,12 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
                                          uint8_t * outputFrame,
                                          int threads,
                                          int scaleFactor);
+int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
+                                                 uint64_t frameIndex,
+                                                 const uint16_t * reconnedRawFrame,
+                                                 uint8_t * outputFrame,
+                                                 int threads,
+                                                 int scaleFactor);
 void getMlvProcessedFrame16Scaled(mlvObject_t * video,
                                   uint64_t frameIndex,
                                   uint16_t * outputFrame,

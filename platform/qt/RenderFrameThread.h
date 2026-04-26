@@ -24,6 +24,7 @@
 #include <vector>
 
 class DecodeWorker;
+class ReconWorker;
 
 class RenderFrameThread : public QThread
 {
@@ -43,6 +44,9 @@ public:
         Requested,
         Decoding,
         Decoded,
+        ReconReady,
+        Recon,
+        ProcessReady,
         Processing,
         Ready,
         Presenting
@@ -124,6 +128,12 @@ public:
     };
 
     struct DecodeQueueEntry
+    {
+        int slotIndex = -1;
+        RenderRequest request;
+    };
+
+    struct ReconQueueEntry
     {
         int slotIndex = -1;
         RenderRequest request;
@@ -273,10 +283,15 @@ private:
     BilinearPlaybackScaleCache m_playbackBilinearScaleCache;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
     DecodeWorker *m_decodeWorker;
+    ReconWorker *m_reconWorker;
     bool m_decodeWorkerStop;
+    bool m_reconWorkerStop;
     std::deque<DecodeQueueEntry> m_decodeRequests;
+    std::deque<ReconQueueEntry> m_reconRequests;
     std::deque<int> m_decodeReadySlots;
+    std::deque<int> m_processReadySlots;
     QWaitCondition m_decodeWaitCondition;
+    QWaitCondition m_reconWaitCondition;
 
     void run( void );
     void runSerial( void );
@@ -284,12 +299,18 @@ private:
     bool phase3DecodeAheadActive( Phase3Mode mode ) const;
     void ensureDecodeWorkerStartedLocked( void );
     void stopDecodeWorkerLocked( void );
+    void ensureReconWorkerStartedLocked( void );
+    void stopReconWorkerLocked( void );
     bool phase3WorkInFlightLocked( void ) const;
     void queueDecodeRequestLocked( int slotIndex, const RenderRequest &request );
     bool takeDecodeRequestForWorker( DecodeQueueEntry *entry );
     void decodeFrameForWorker( const DecodeQueueEntry &entry );
     void signalDecodeDoneFromWorker( int slotIndex );
+    bool takeReconRequestForWorker( ReconQueueEntry *entry );
+    void reconFrameForWorker( const ReconQueueEntry &entry, llrawprocWorkerState_t *workerState );
+    void signalReconDoneFromWorker( int slotIndex );
     int waitForDecodedSlotLocked( void );
+    int waitForProcessReadySlotLocked( void );
     void setupActiveRequestLocked( const RenderRequest &request, int slotIndex );
     void renderDecodedSlot( int slotIndex, const RenderRequest &request, Phase3Mode activePhase3Mode );
     void publishRenderedSlot( int slotIndex, const RenderRequest &request, Phase3Mode activePhase3Mode );
@@ -304,13 +325,16 @@ private:
                                    const FrameSlot &slot,
                                    int slotIndex,
                                    Phase3Mode mode ) const;
-    void drawFrame( int slotIndex, const uint16_t *decodedRawFrame = nullptr );
+    void drawFrame( int slotIndex,
+                    const uint16_t *decodedRawFrame = nullptr,
+                    bool decodedRawFrameAlreadyReconned = false );
     int findLatestReadySlotLocked( void ) const;
     int findFreeSlotLocked( void ) const;
     void releaseSlotLocked( int slotIndex );
     void copySlotTelemetryLocked( const FrameSlot &slot );
 
     friend class DecodeWorker;
+    friend class ReconWorker;
 };
 
 #endif // RENDERFRAMETHREAD_H

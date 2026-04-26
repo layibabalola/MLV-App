@@ -216,6 +216,7 @@ SOURCES += \
     NoScrollSlider.cpp \
     ColorToolButton.cpp \
     DecodeWorker.cpp \
+    ReconWorker.cpp \
     RenderFrameThread.cpp \
     GraphicsPolygonMoveItem.cpp \
     GradientElement.cpp \
@@ -348,8 +349,10 @@ HEADERS += MainWindow.h \
     ReceiptSettings.h \
     EditSliderValueDialog.h \
     DoubleClickLabel.h \
-    AudioWave.h \
-    ResizeLabel.h \
+           AudioWave.h \
+           DecodeWorker.h \
+           ReconWorker.h \
+           ResizeLabel.h \
     GraphicsZoomView.h \
     DarkStyle.h \
     JumpSlider.h \
@@ -357,7 +360,6 @@ HEADERS += MainWindow.h \
     GraphicsPickerScene.h \
     NoScrollSlider.h \
     ColorToolButton.h \
-    DecodeWorker.h \
     RenderFrameThread.h \
     GraphicsPolygonMoveItem.h \
     GradientElement.h \

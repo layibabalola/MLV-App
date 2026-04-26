@@ -145,6 +145,24 @@ TEST(Phase3Mode, Hierarchical3BKillSwitchDisablesItsSubphaseAndLater)
     ASSERT_TRUE(phase3KillSwitchActive(Phase3Mode::Full));
 }
 
+TEST(Phase3Mode, Hierarchical3CKillSwitchDisablesItsSubphaseAndLater)
+{
+    EnvGuard disableAll("MLVAPP_DISABLE_PHASE3");
+    EnvGuard disable3A("MLVAPP_DISABLE_PHASE3_3A");
+    EnvGuard disable3B("MLVAPP_DISABLE_PHASE3_3B");
+    EnvGuard disable3C("MLVAPP_DISABLE_PHASE3_3C");
+    EnvGuard disable3D("MLVAPP_DISABLE_PHASE3_3D");
+    clearPhase3KillSwitches();
+    qputenv("MLVAPP_DISABLE_PHASE3_3C", QByteArrayLiteral("1"));
+
+    phase3ReloadKillSwitchesForTest();
+
+    ASSERT_FALSE(phase3KillSwitchActive(Phase3Mode::DecodeAheadOnly));
+    ASSERT_FALSE(phase3KillSwitchActive(Phase3Mode::DecodeRecon));
+    ASSERT_TRUE(phase3KillSwitchActive(Phase3Mode::DecodeReconProcess));
+    ASSERT_TRUE(phase3KillSwitchActive(Phase3Mode::Full));
+}
+
 TEST(Phase3Mode, LiveFallbackUsesAtomicStateNotEnvironmentMutation)
 {
     EnvGuard disableAll("MLVAPP_DISABLE_PHASE3");

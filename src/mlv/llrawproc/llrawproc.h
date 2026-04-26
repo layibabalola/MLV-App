@@ -24,6 +24,10 @@
 #include "llrawproc_object.h"
 #include "../mlv_object.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 llrawprocObject_t * initLLRawProcObject();
 void freeLLRawProcObject(mlvObject_t * video);
 
@@ -191,5 +195,9 @@ int llrpGetDarkFrameExtStatus(mlvObject_t * video);
 int llrpGetDarkFrameIntStatus(mlvObject_t * video);
 
 int llrpValidateExtDarkFrame(mlvObject_t * video, char * df_filename, char * error_message);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -45,7 +45,7 @@ TEST(Phase3_EXP, QualityModeEnumIncludesPhase3)
     playbackQualityModeWriteToSettings( PlaybackQualityMode::Phase3HQ );
     ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Phase3HQ ),
                static_cast<int>( playbackQualityModeFromSettings() ) );
-    ASSERT_EQ( static_cast<int>( Phase3Mode::Full ),
+    ASSERT_EQ( static_cast<int>( Phase3Mode::DecodeReconProcess ),
                static_cast<int>( phase3ModeFor( PlaybackQualityMode::Phase3HQ ) ) );
 
     clearPhase3PlaybackQualityKeys();
@@ -66,7 +66,7 @@ TEST(Phase3_EXP, HiddenByDefaultUntilDogfoodGateOrTier)
     ASSERT_EQ( static_cast<int>( Phase3Mode::Disabled ),
                static_cast<int>( phase3ModeFor( PlaybackQualityMode::Phase3Fast ) ) );
     playbackQualityPhase3AcknowledgedWriteToSettings( true );
-    ASSERT_EQ( static_cast<int>( Phase3Mode::Full ),
+    ASSERT_EQ( static_cast<int>( Phase3Mode::DecodeReconProcess ),
                static_cast<int>( phase3ModeFor( PlaybackQualityMode::Phase3Fast ) ) );
 
     playbackQualityShowExperimentalPhase3ModesWriteToSettings( false );
