@@ -223,6 +223,8 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->frameNumber = slot.frameNumber;
         frame->requestSerial = slot.requestSerial;
         frame->outputMode = slot.outputMode;
+        frame->renderedImageWidth = slot.renderedImageWidth;
+        frame->renderedImageHeight = slot.renderedImageHeight;
         frame->playbackFastScaleActive = slot.playbackFastScaleActive;
         frame->playbackScaledWidth = slot.playbackScaledWidth;
         frame->playbackScaledHeight = slot.playbackScaledHeight;
@@ -760,9 +762,29 @@ void RenderFrameThread::drawFrame( int slotIndex )
      * today but the call routes through the *Scaled getters so the cache
      * key sees a different signature for scale=2 vs scale=1. */
     const int playbackScaleFactor = m_activePresentationContext.playbackScaleFactor;
+    int renderedImageWidth = m_imageWidth;
+    int renderedImageHeight = m_imageHeight;
+    if( m_pMlvObject
+     && ( outputMode == OutputProcessed8 || outputMode == OutputProcessed16 ) )
+    {
+        mlvFrameOutputDimensions( m_pMlvObject,
+                                  playbackScaleFactor,
+                                  &renderedImageWidth,
+                                  &renderedImageHeight );
+    }
+    if( renderedImageWidth <= 0 ) renderedImageWidth = m_imageWidth;
+    if( renderedImageHeight <= 0 ) renderedImageHeight = m_imageHeight;
+    slot.renderedImageWidth = renderedImageWidth;
+    slot.renderedImageHeight = renderedImageHeight;
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_playback_scale_factor_request"),
         playbackScaleFactor );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_rendered_width"),
+        renderedImageWidth );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_rendered_height"),
+        renderedImageHeight );
 
     if ( outputMode == OutputProcessed16 && !slot.rawImage16.empty() )
     {
@@ -877,12 +899,8 @@ void RenderFrameThread::drawFrame( int slotIndex )
          * scaleFactor==1 path so the existing default-on playback preview
          * stays byte-identical until Phase 4B actually changes the source
          * shape. */
-        const int sourceWidthForScaler = (playbackScaleFactor > 1)
-            ? std::max( 1, m_imageWidth / playbackScaleFactor )
-            : m_imageWidth;
-        const int sourceHeightForScaler = (playbackScaleFactor > 1)
-            ? std::max( 1, m_imageHeight / playbackScaleFactor )
-            : m_imageHeight;
+        const int sourceWidthForScaler = renderedImageWidth;
+        const int sourceHeightForScaler = renderedImageHeight;
         const bool upscaling =
             playbackScaleFactor > 1
          && sourceWidthForScaler < m_activePresentationPreparationOptions.targetWidth

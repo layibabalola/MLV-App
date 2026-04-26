@@ -12806,8 +12806,12 @@ void MainWindow::drawFrameReady()
     const bool zoomFitEnabled = ui->actionZoomFit->isChecked();
     const bool zebrasEnabled = ui->actionShowZebras->isChecked();
     const bool betterResizerEnabled = ui->actionBetterResizer->isChecked();
-    const int sourceWidth = getMlvWidth( m_pMlvObject );
-    const int sourceHeight = getMlvHeight( m_pMlvObject );
+    const int sourceWidth = readyFrame.renderedImageWidth > 0
+        ? readyFrame.renderedImageWidth
+        : getMlvWidth( m_pMlvObject );
+    const int sourceHeight = readyFrame.renderedImageHeight > 0
+        ? readyFrame.renderedImageHeight
+        : getMlvHeight( m_pMlvObject );
     const double stretchX = getHorizontalStretchFactor(false);
     const double stretchY = getVerticalStretchFactor(false);
     Qt::TransformationMode mode = Qt::FastTransformation;

@@ -78,6 +78,8 @@ public:
         uint32_t frameNumber = 0;
         uint64_t requestSerial = 0;
         OutputMode outputMode = OutputProcessed8;
+        int renderedImageWidth = 0;
+        int renderedImageHeight = 0;
         bool playbackFastScaleActive = false;
         int playbackScaledWidth = 0;
         int playbackScaledHeight = 0;
@@ -165,6 +167,8 @@ private:
         bool presenting = false;
         std::atomic<SlotState> state{ SlotState::Idle };
         Phase3Mode phase3Mode = Phase3Mode::Disabled;
+        int renderedImageWidth = 0;
+        int renderedImageHeight = 0;
         bool playbackFastScaleActive = false;
         int playbackScaledWidth = 0;
         int playbackScaledHeight = 0;
@@ -194,6 +198,8 @@ private:
             ready = false;
             presenting = false;
             phase3Mode = Phase3Mode::Disabled;
+            renderedImageWidth = 0;
+            renderedImageHeight = 0;
             playbackFastScaleActive = false;
             playbackScaledWidth = 0;
             playbackScaledHeight = 0;
