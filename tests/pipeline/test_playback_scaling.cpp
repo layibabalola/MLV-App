@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <omp.h>
 #include <vector>
 
 namespace {
@@ -232,6 +233,11 @@ TEST(PlaybackScaling, BilinearVsNearestOnDiagonalLine)
 
 TEST(PlaybackScaling, BilinearPerformance)
 {
+    if( omp_get_max_threads() <= 1 )
+    {
+        SKIP_TEST("Bilinear performance threshold requires a multi-threaded OpenMP runtime.");
+    }
+
     /* 1808x2268 -> 3616x4536: Phase 4B's scale=2 case where the half-res
      * render output has to be brought back up to the display target. */
     const int sourceWidth = 1808;

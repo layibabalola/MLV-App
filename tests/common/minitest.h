@@ -45,6 +45,17 @@ inline int & skip_count()
     return count;
 }
 
+inline std::string & active_filter()
+{
+    static std::string value;
+    return value;
+}
+
+inline void set_filter(const std::string & value)
+{
+    active_filter() = value;
+}
+
 inline void note_assertion()
 {
     assertion_count() += 1;
@@ -91,6 +102,28 @@ inline int run_all()
 {
     int failed = 0;
     for (const TestCase & test : registry()) {
+        const std::string test_name =
+            std::string(test.suite) + "." + std::string(test.name);
+        if (!active_filter().empty()) {
+            const std::string & filter = active_filter();
+            const bool suffix_wildcard =
+                !filter.empty() && filter[filter.size() - 1] == '*';
+            const std::string prefix =
+                suffix_wildcard ? filter.substr(0, filter.size() - 1) : filter;
+            if (suffix_wildcard) {
+                bool matches = test_name.compare(0, prefix.size(), prefix) == 0;
+                if (!matches && !prefix.empty() && prefix[prefix.size() - 1] == '_') {
+                    std::string dotted_prefix = prefix;
+                    dotted_prefix[dotted_prefix.size() - 1] = '.';
+                    matches = test_name.compare(0, dotted_prefix.size(), dotted_prefix) == 0;
+                }
+                if (!matches) {
+                    continue;
+                }
+            } else if (test_name != filter) {
+                continue;
+            }
+        }
         try {
             test.fn();
             std::cout << "[PASS] " << test.suite << "." << test.name << "\n";

@@ -15,9 +15,11 @@
 #include <QJsonObject>
 #include "../../src/mlv_include.h"
 #include "MainWindowGpuPreviewPolicy.h"
+#include "Phase3Mode.h"
 #include "PlaybackScaling.h"
 
 #include <array>
+#include <atomic>
 #include <deque>
 #include <vector>
 
@@ -129,6 +131,8 @@ public:
     double lastDualIsoPreviewRowscaleMilliseconds( void ) const;
     QJsonObject lastStageTimingTelemetry( void ) const;
     double lastFrameReadyEmitStageTime( void ) const;
+    void setPhase3Mode( Phase3Mode mode ) noexcept;
+    Phase3Mode phase3Mode( void ) const noexcept;
     void stop( void );
     void lock( void );
     void unlock( void );
@@ -232,12 +236,15 @@ private:
     int m_imageHeight;
     int m_renderingSlotIndex;
     int m_presentingSlotIndex;
+    std::atomic<Phase3Mode> m_phase3Mode;
     std::array<FrameSlot, kFrameSlotCount> m_frameSlots;
     FastPlaybackScaleCache m_playbackScaleCache;
     BilinearPlaybackScaleCache m_playbackBilinearScaleCache;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
 
     void run( void );
+    void runSerial( void );
+    void runPhase3( Phase3Mode mode );
     void drawFrame( int slotIndex );
     int findLatestReadySlotLocked( void ) const;
     int findFreeSlotLocked( void ) const;

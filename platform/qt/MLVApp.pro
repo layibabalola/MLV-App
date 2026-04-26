@@ -152,6 +152,13 @@ include(avx_optin.pri)
 SOURCES += \
     ClipInformation.cpp \
     CrashForensics.cpp \
+    Phase3Breadcrumbs.cpp \
+    Phase3Checksums.cpp \
+    Phase3Mode.cpp \
+    Phase3StageTelemetry.cpp \
+    ../../src/debug/ForceSingleThread.cpp \
+    ../../src/debug/FrameChecksum.cpp \
+    ../../src/debug/StageTimingCsvSink.cpp \
     RenameDialog.cpp \
     SessionModel.cpp \
     Updater/Updater.cpp \
@@ -278,6 +285,13 @@ macx: SOURCES += ../cocoa/avf_lib/avf_lib.m
 
 HEADERS += MainWindow.h \
            CrashForensics.h \
+           Phase3Breadcrumbs.h \
+           Phase3Checksums.h \
+           Phase3Mode.h \
+           Phase3StageTelemetry.h \
+           ../../src/debug/ForceSingleThread.h \
+           ../../src/debug/FrameChecksum.h \
+           ../../src/debug/StageTimingCsvSink.h \
            GpuDebayer.h \
            GpuPreviewProcessing.h \
     GpuDisplayViewport.h \

@@ -3,6 +3,9 @@
 #include "../common/test_artifacts.h"
 #include "../common/test_runtime.h"
 
+#include "../../src/debug/ForceSingleThread.h"
+#include "../../src/debug/StageTimingCsvSink.h"
+
 #include <QGuiApplication>
 #include <QFile>
 #include <QJsonDocument>
@@ -78,6 +81,7 @@ static bool compare_against_golden(const QString & golden_path, std::string * er
 int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
+    mlvapp_force_singlethread_init();
     test_runtime::prefer_desktop_opengl_on_windows();
 #ifdef Q_OS_WIN
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
@@ -91,21 +95,42 @@ int main(int argc, char ** argv)
     QGuiApplication app(argc, argv);
 
     std::string hash_output_path;
+    std::string stage_csv_path;
+    std::string test_filter;
     QString golden_input_path;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--hash-output" && (index + 1) < argc) {
             hash_output_path = argv[++index];
+        } else if (argument == "--profile-stages-to-csv" && (index + 1) < argc) {
+            stage_csv_path = argv[++index];
+        } else if (argument.rfind("--profile-stages-to-csv=", 0) == 0) {
+            stage_csv_path = argument.substr(std::string("--profile-stages-to-csv=").size());
         } else if (argument == "--check-golden") {
             if ((index + 1) < argc && std::string(argv[index + 1]).rfind("--", 0) != 0) {
                 golden_input_path = QString::fromLocal8Bit(argv[++index]);
             } else {
                 golden_input_path = repo_file_path(QStringLiteral("tests/fixtures/golden/pipeline_hashes.json"));
             }
+        } else if (argument == "--gtest_filter" && (index + 1) < argc) {
+            test_filter = argv[++index];
+        } else if (argument.rfind("--gtest_filter=", 0) == 0) {
+            test_filter = argument.substr(std::string("--gtest_filter=").size());
         }
     }
 
+    if (!test_filter.empty()) {
+        minitest::set_filter(test_filter);
+    }
+
+    if (!stage_csv_path.empty()
+        && stage_timing_csv_sink_open(stage_csv_path.c_str()) == 0) {
+        std::cerr << "[ERROR] Could not open stage CSV sink: " << stage_csv_path << "\n";
+        return 4;
+    }
+
     const int failed = minitest::run_all();
+    stage_timing_csv_sink_close();
 
     if (!hash_output_path.empty()) {
         std::string error_message;

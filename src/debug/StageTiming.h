@@ -19,6 +19,11 @@ extern "C" {
 
 enum { MLV_STAGE_TIMING_SNAPSHOT_CAPACITY = 32 };
 
+#define MLV_STAGE_DECODE   "decode"
+#define MLV_STAGE_RECON    "recon"
+#define MLV_STAGE_PROCESS  "process"
+#define MLV_STAGE_DISPLAY  "display"
+
 typedef struct
 {
     char stage[48];
@@ -33,7 +38,7 @@ typedef struct
     mlv_stage_timing_snapshot_entry_t entries[MLV_STAGE_TIMING_SNAPSHOT_CAPACITY];
 } mlv_stage_timing_snapshot_t;
 
-static MLV_STAGE_THREAD_LOCAL mlv_stage_timing_snapshot_t g_mlv_stage_timing_snapshot = { 0 };
+static MLV_STAGE_THREAD_LOCAL mlv_stage_timing_snapshot_t g_mlv_stage_timing_snapshot = {};
 
 static inline int mlv_stage_timing_enabled(void)
 {
@@ -69,6 +74,11 @@ static inline FILE * mlv_stage_timing_stream(void)
 static inline double mlv_stage_timing_now(void)
 {
     return omp_get_wtime();
+}
+
+static inline uint64_t mlv_stage_timing_now_ns(void)
+{
+    return (uint64_t)(mlv_stage_timing_now() * 1000000000.0);
 }
 
 static inline void mlv_stage_timing_reset_snapshot(void)

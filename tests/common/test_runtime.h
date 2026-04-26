@@ -8,6 +8,7 @@ namespace test_runtime {
 
 inline void force_single_threaded_pipeline()
 {
+    qputenv("MLVAPP_FORCE_SINGLETHREAD", QByteArrayLiteral("1"));
     qputenv("MLVAPP_FORCE_THREADS", QByteArrayLiteral("1"));
     qputenv("OMP_NUM_THREADS", QByteArrayLiteral("1"));
     qputenv("OMP_DYNAMIC", QByteArrayLiteral("FALSE"));

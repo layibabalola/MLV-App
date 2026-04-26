@@ -120,12 +120,17 @@ $repoRoot = Get-RepoRoot
 Ensure-RuntimePath
 if (-not $OutputRoot) {
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $OutputRoot = Join-Path $repoRoot ".claude\profiling\$timestamp"
+    $OutputRoot = Join-Path $repoRoot ".claude-state\profiling\$timestamp"
 }
 if (-not [System.IO.Path]::IsPathRooted($OutputRoot)) {
     $OutputRoot = Join-Path $repoRoot $OutputRoot
 }
 $OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
+$sensitiveClaudeRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".claude")).TrimEnd('\', '/') + '\'
+$normalizedOutputRoot = $OutputRoot.TrimEnd('\', '/') + '\'
+if ($normalizedOutputRoot.StartsWith($sensitiveClaudeRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "OutputRoot must not be under .claude; use .claude-state/profiling for scratch artifacts: $OutputRoot"
+}
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 
 $perfExePath = Ensure-PerfExe -Root $repoRoot -RequestedPerfExe $PerfExe

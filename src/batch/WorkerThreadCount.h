@@ -10,6 +10,13 @@
  * deterministically across machines. */
 inline int mlvappEffectiveWorkerThreadCount()
 {
+    bool singleThreadOk = false;
+    const int singleThread =
+        qEnvironmentVariableIntValue("MLVAPP_FORCE_SINGLETHREAD", &singleThreadOk);
+    if (singleThreadOk && singleThread > 0) {
+        return 1;
+    }
+
     bool ok = false;
     const int forced = qEnvironmentVariableIntValue("MLVAPP_FORCE_THREADS", &ok);
     if (ok && forced > 0) {

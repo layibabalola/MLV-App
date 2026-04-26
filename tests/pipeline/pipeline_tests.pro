@@ -13,6 +13,13 @@ SOURCES += \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
     $$REPO_ROOT/tests/common/repo_paths.cpp \
     $$REPO_ROOT/platform/qt/CrashForensics.cpp \
+    $$REPO_ROOT/platform/qt/Phase3Breadcrumbs.cpp \
+    $$REPO_ROOT/platform/qt/Phase3Checksums.cpp \
+    $$REPO_ROOT/platform/qt/Phase3Mode.cpp \
+    $$REPO_ROOT/platform/qt/Phase3StageTelemetry.cpp \
+    $$REPO_ROOT/src/debug/ForceSingleThread.cpp \
+    $$REPO_ROOT/src/debug/FrameChecksum.cpp \
+    $$REPO_ROOT/src/debug/StageTimingCsvSink.cpp \
     $$REPO_ROOT/platform/qt/GpuDebayer.cpp \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.cpp \
     $$REPO_ROOT/platform/qt/ReceiptSettings.cpp \
@@ -85,7 +92,9 @@ SOURCES += \
     $$REPO_ROOT/tests/pipeline/test_backend_parametric_debayer_shell.cpp \
     $$REPO_ROOT/tests/pipeline/test_processing_filters.cpp \
     $$REPO_ROOT/tests/pipeline/test_playback_scaling.cpp \
-    $$REPO_ROOT/tests/pipeline/test_crash_forensics.cpp
+    $$REPO_ROOT/tests/pipeline/test_crash_forensics.cpp \
+    $$REPO_ROOT/tests/pipeline/test_phase3_infrastructure.cpp \
+    $$REPO_ROOT/tests/pipeline/test_phase3_parity.cpp
 
 HEADERS += \
     $$REPO_ROOT/tests/common/minitest.h \
@@ -95,6 +104,13 @@ HEADERS += \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h \
     $$REPO_ROOT/platform/qt/CrashForensics.h \
+    $$REPO_ROOT/platform/qt/Phase3Breadcrumbs.h \
+    $$REPO_ROOT/platform/qt/Phase3Checksums.h \
+    $$REPO_ROOT/platform/qt/Phase3Mode.h \
+    $$REPO_ROOT/platform/qt/Phase3StageTelemetry.h \
+    $$REPO_ROOT/src/debug/ForceSingleThread.h \
+    $$REPO_ROOT/src/debug/FrameChecksum.h \
+    $$REPO_ROOT/src/debug/StageTimingCsvSink.h \
     $$REPO_ROOT/platform/qt/GpuDebayer.h \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
     $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.h \

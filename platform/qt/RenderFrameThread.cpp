@@ -8,12 +8,17 @@
 #include "RenderFrameThread.h"
 
 #include "GpuDebayer.h"
+#include "Phase3Breadcrumbs.h"
 
 #include "../../src/batch/WorkerThreadCount.h"
 #include "../../src/processing/raw_processing.h"
+#include "debug/FrameChecksum.h"
+#include "debug/StageTimingCsvSink.h"
 #include "debug/StageTiming.h"
 #include <QDebug>
 #include <QMutexLocker>
+
+#include <atomic>
 
 //Constructor
 RenderFrameThread::RenderFrameThread()
@@ -44,6 +49,7 @@ RenderFrameThread::RenderFrameThread()
     m_imageHeight = 0;
     m_renderingSlotIndex = -1;
     m_presentingSlotIndex = -1;
+    m_phase3Mode.store( Phase3Mode::Disabled, std::memory_order_relaxed );
 }
 
 //Destructor
@@ -250,6 +256,16 @@ double RenderFrameThread::lastFrameReadyEmitStageTime() const
     return m_lastFrameReadyEmitStageTime;
 }
 
+void RenderFrameThread::setPhase3Mode( Phase3Mode mode ) noexcept
+{
+    m_phase3Mode.store( mode, std::memory_order_release );
+}
+
+Phase3Mode RenderFrameThread::phase3Mode( void ) const noexcept
+{
+    return m_phase3Mode.load( std::memory_order_acquire );
+}
+
 //Stop the thread
 void RenderFrameThread::stop()
 {
@@ -274,6 +290,34 @@ void RenderFrameThread::unlock()
 
 //Main loop of the thread
 void RenderFrameThread::run(void)
+{
+    const Phase3Mode mode = phase3Mode();
+    if( mode == Phase3Mode::Disabled || phase3KillSwitchActive( mode ) )
+    {
+        runSerial();
+        return;
+    }
+
+    runPhase3( mode );
+}
+
+void RenderFrameThread::runPhase3( Phase3Mode mode )
+{
+    Q_UNUSED( mode );
+    /* Phase B only installs the dispatch seam and rollback controls.
+     * The parallel worker implementation lands behind later gates; until
+     * then every non-disabled mode intentionally falls through to the proven
+     * serial loop. */
+    Phase3Breadcrumbs::push( 0, 0, 0,
+                             mlv_stage_timing_now_ns(),
+                             0,
+                             0,
+                             static_cast<uint8_t>( mode ),
+                             "phase3-fallback" );
+    runSerial();
+}
+
+void RenderFrameThread::runSerial(void)
 {
     m_mutex.lock();
     while( !m_stop )
@@ -304,7 +348,99 @@ void RenderFrameThread::run(void)
         m_renderingFrame = true;
         m_renderingSlotIndex = slotIndex;
         m_mutex.unlock();
+        const bool stageCsvEnabled = stage_timing_csv_sink_enabled() != 0;
+        const uint8_t activePhase3Mode = static_cast<uint8_t>( phase3Mode() );
+        const uint64_t renderEnterNs =
+            stageCsvEnabled ? mlv_stage_timing_now_ns() : 0;
+        if( stageCsvEnabled )
+        {
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_DECODE,
+                "enter",
+                renderEnterNs,
+                activePhase3Mode,
+                0 );
+        }
         drawFrame( slotIndex );
+        if( frame_checksum_enabled()
+         && !m_frameSlots[slotIndex].rawImage8.empty() )
+        {
+            const uint64_t checksum =
+                frame_checksum_compute( m_frameSlots[slotIndex].rawImage8.data(),
+                                        m_frameSlots[slotIndex].rawImage8.size() );
+            frame_checksum_log_record( static_cast<uint32_t>( request.frameNumber ),
+                                       checksum );
+        }
+        if( stageCsvEnabled )
+        {
+            const uint64_t renderLeaveNs = mlv_stage_timing_now_ns();
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_DECODE,
+                "leave",
+                renderLeaveNs,
+                activePhase3Mode,
+                0 );
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_RECON,
+                "enter",
+                renderEnterNs,
+                activePhase3Mode,
+                0 );
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_RECON,
+                "leave",
+                renderLeaveNs,
+                activePhase3Mode,
+                0 );
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_PROCESS,
+                "enter",
+                renderEnterNs,
+                activePhase3Mode,
+                0 );
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_PROCESS,
+                "leave",
+                renderLeaveNs,
+                activePhase3Mode,
+                0 );
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_DISPLAY,
+                "enter",
+                renderEnterNs,
+                activePhase3Mode,
+                0 );
+            stage_timing_csv_sink_write_event(
+                request.frameNumber,
+                request.requestSerial,
+                static_cast<uint8_t>( slotIndex ),
+                MLV_STAGE_DISPLAY,
+                "leave",
+                renderLeaveNs,
+                activePhase3Mode,
+                0 );
+        }
         m_mutex.lock();
         m_renderingFrame = false;
         m_renderingSlotIndex = -1;

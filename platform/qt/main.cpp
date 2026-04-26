@@ -8,10 +8,12 @@
 #include "MainWindow.h"
 #include "MyApplication.h"
 #include "CrashForensics.h"
+#include "Phase3Mode.h"
 #include "../../src/batch/BatchContext.h"
 #include "../../src/batch/BatchRunner.h"
 #include "../../src/batch/BatchLogger.h"
 #include "../../src/batch/MlvTrim.h"
+#include "debug/ForceSingleThread.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -667,6 +669,8 @@ int main(int argc, char *argv[])
             .arg(VERSION_PATCH).arg(VERSION_BUILD));
     CrashForensics::install(argc, argv);
     CrashForensics::logStartupMetadata();
+    phase3InitKillSwitches();
+    mlvapp_force_singlethread_init();
 
     bool batch = hasBatchFlag(argc, argv);
     bool trim_mlv = hasTrimMlvFlag(argc, argv);

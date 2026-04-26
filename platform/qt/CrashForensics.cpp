@@ -8,6 +8,8 @@
 
 #include "CrashForensics.h"
 
+#include "Phase3Breadcrumbs.h"
+
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -247,6 +249,7 @@ LONG WINAPI crashExceptionFilter(EXCEPTION_POINTERS * exceptionInfo)
                   static_cast<unsigned long>(exceptionCode),
                   wroteDump ? 1 : 0);
     emergencyAppendLine(logPathW.c_str(), emergencyLine);
+    Phase3Breadcrumbs::dumpToWindowsLogFile(logPathW.c_str());
 
     return EXCEPTION_EXECUTE_HANDLER;
 }
