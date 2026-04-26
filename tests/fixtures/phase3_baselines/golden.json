@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "clips": [
+    {
+      "name": "tiny_dual_iso_hq",
+      "fixture": "tiny_dual_iso",
+      "receipt": "tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+      "threads": 1,
+      "frames": [
+        {
+          "frame": 0,
+          "format": "rgb16",
+          "sha256": "d93c546abde7b3c28d619b1a26c0f989124c211f587068784a14238e3bdb83bf"
+        },
+        {
+          "frame": 1,
+          "format": "rgb16",
+          "sha256": "8fd55f10054a7be94db4fe853cdd3a1b7889578d46a328be775ebdeec1543af7"
+        }
+      ]
+    }
+  ],
+  "psnr_checks": [
+    {
+      "name": "tiny_dual_iso_preview_vs_full_frame0",
+      "fixture": "tiny_dual_iso",
+      "full_receipt": "tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+      "preview_dual_iso_mode": 2,
+      "preview_interpolation": 1,
+      "preview_alias_map": 0,
+      "preview_fr_blending": 0,
+      "frame": 0,
+      "min_psnr_db": 8.5
+    },
+    {
+      "name": "tiny_dual_iso_preview_vs_full_frame1",
+      "fixture": "tiny_dual_iso",
+      "full_receipt": "tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+      "preview_dual_iso_mode": 2,
+      "preview_interpolation": 1,
+      "preview_alias_map": 0,
+      "preview_fr_blending": 0,
+      "frame": 1,
+      "min_psnr_db": 3.0
+    }
+  ]
+}

@@ -35,6 +35,17 @@ public:
         OutputDebayered16
     };
 
+    enum class SlotState : uint8_t
+    {
+        Idle = 0,
+        Requested,
+        Decoding,
+        Decoded,
+        Processing,
+        Ready,
+        Presenting
+    };
+
     struct ReadyFrame
     {
         struct PresentationContext
@@ -103,6 +114,7 @@ public:
         bool useGpuBilinearDebayer = false;
         uint64_t requestSerial = 0;
         double requestStageTime = 0.0;
+        Phase3Mode phase3Mode = Phase3Mode::Disabled;
         ReadyFrame::PresentationContext presentationContext;
         PresentationPreparationOptions presentationPreparationOptions;
     };
@@ -151,6 +163,8 @@ private:
         OutputMode outputMode = OutputProcessed8;
         bool ready = false;
         bool presenting = false;
+        std::atomic<SlotState> state{ SlotState::Idle };
+        Phase3Mode phase3Mode = Phase3Mode::Disabled;
         bool playbackFastScaleActive = false;
         int playbackScaledWidth = 0;
         int playbackScaledHeight = 0;
@@ -179,6 +193,7 @@ private:
             outputMode = OutputProcessed8;
             ready = false;
             presenting = false;
+            phase3Mode = Phase3Mode::Disabled;
             playbackFastScaleActive = false;
             playbackScaledWidth = 0;
             playbackScaledHeight = 0;
@@ -244,7 +259,17 @@ private:
 
     void run( void );
     void runSerial( void );
-    void runPhase3( Phase3Mode mode );
+    void transitionSlotState( int slotIndex,
+                              SlotState from,
+                              SlotState to,
+                              Phase3Mode mode,
+                              uint32_t frameNumber,
+                              uint64_t requestSerial,
+                              const char * context );
+    void emitPhase3StageTelemetry( const RenderRequest &request,
+                                   const FrameSlot &slot,
+                                   int slotIndex,
+                                   Phase3Mode mode ) const;
     void drawFrame( int slotIndex );
     int findLatestReadySlotLocked( void ) const;
     int findFreeSlotLocked( void ) const;

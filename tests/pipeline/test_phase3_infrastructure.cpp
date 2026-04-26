@@ -22,6 +22,7 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <QtGlobal>
+#include <QStringList>
 
 #include <cstdio>
 #include <cstring>
@@ -194,6 +195,66 @@ TEST(Phase3_TEL, StreamingSinkWritesPerEventCsvRows)
     ASSERT_TRUE(text.find("17,123,2,decode,leave,2000,4,9") != std::string::npos);
 }
 
+TEST(Phase3_TEL, ScaffoldSequenceWritesEightOrderedStageEvents)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("stages.csv"));
+
+    ASSERT_EQ(1, stage_timing_csv_sink_open(path.toLocal8Bit().constData()));
+    const char * stages[] = {
+        MLV_STAGE_DECODE,
+        MLV_STAGE_DECODE,
+        MLV_STAGE_RECON,
+        MLV_STAGE_RECON,
+        MLV_STAGE_PROCESS,
+        MLV_STAGE_PROCESS,
+        MLV_STAGE_DISPLAY,
+        MLV_STAGE_DISPLAY
+    };
+    const char * events[] = {
+        "enter",
+        "leave",
+        "enter",
+        "leave",
+        "enter",
+        "leave",
+        "enter",
+        "leave"
+    };
+    for( uint64_t i = 0; i < 8; ++i )
+    {
+        stage_timing_csv_sink_write_event( 21,
+                                           0x100000005ull,
+                                           3,
+                                           stages[i],
+                                           events[i],
+                                           1000 + i,
+                                           static_cast<uint8_t>( Phase3Mode::Full ),
+                                           11 );
+    }
+    stage_timing_csv_sink_close();
+
+    const QString text = QString::fromStdString(readTextFile(path)).trimmed();
+    const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    ASSERT_EQ(9, lines.size());
+    ASSERT_EQ(std::string("frame_idx,request_serial,slot,stage,event,ns,phase3_mode,clip_generation"),
+              lines[0].trimmed().toStdString());
+    for( int i = 0; i < 8; ++i )
+    {
+        const QStringList cells = lines[i + 1].trimmed().split(QLatin1Char(','));
+        ASSERT_EQ(8, cells.size());
+        ASSERT_EQ(std::string("21"), cells[0].toStdString());
+        ASSERT_EQ(std::string("4294967301"), cells[1].toStdString());
+        ASSERT_EQ(std::string("3"), cells[2].toStdString());
+        ASSERT_EQ(std::string(stages[i]), cells[3].toStdString());
+        ASSERT_EQ(std::string(events[i]), cells[4].toStdString());
+        ASSERT_EQ(1000 + i, cells[5].toInt());
+        ASSERT_EQ(std::string("4"), cells[6].toStdString());
+        ASSERT_EQ(std::string("11"), cells[7].toStdString());
+    }
+}
+
 TEST(Phase3Telemetry, BatchWriterRemainsAvailableForOfflineReports)
 {
     QTemporaryDir dir;
@@ -299,6 +360,25 @@ TEST(Phase3_CRA, RingWrapKeepsNewestBreadcrumbsInOrder)
     ASSERT_EQ(2u, crumbs.back().to_state);
     ASSERT_EQ(static_cast<uint8_t>(Phase3Mode::Full), crumbs.back().phase3_mode);
     ASSERT_EQ(std::string("test"), std::string(crumbs.back().context));
+}
+
+TEST(Phase3_CRA, BreadcrumbPreservesFullRequestSerial)
+{
+    Phase3Breadcrumbs::resetForTest();
+    const uint64_t requestSerial = 0x100000123ull;
+    Phase3Breadcrumbs::push(2,
+                            3,
+                            4,
+                            55,
+                            77,
+                            requestSerial,
+                            static_cast<uint8_t>(Phase3Mode::Full),
+                            "serial64");
+
+    const std::vector<Phase3Breadcrumbs::Breadcrumb> crumbs =
+        Phase3Breadcrumbs::getBreadcrumbsForTest();
+    ASSERT_EQ(static_cast<std::size_t>(1), crumbs.size());
+    ASSERT_EQ(requestSerial, crumbs.front().request_serial);
 }
 
 TEST(Phase3_CRA, DumpToFileIsCrashSafeText)

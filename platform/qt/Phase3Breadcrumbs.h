@@ -14,12 +14,12 @@ struct Breadcrumb
 {
     uint64_t timestamp_ns;
     uint32_t frame_idx;
-    uint32_t request_serial;
+    uint64_t request_serial;
     uint8_t slot_index;
     uint8_t from_state;
     uint8_t to_state;
     uint8_t phase3_mode;
-    char context[44];
+    char context[40];
 };
 #pragma pack(pop)
 
@@ -30,7 +30,7 @@ void push(uint8_t slotIndex,
           uint8_t toState,
           uint64_t timestampNs,
           uint32_t frameIdx,
-          uint32_t requestSerial,
+          uint64_t requestSerial,
           uint8_t phase3Mode,
           const char * context = nullptr) noexcept;
 void push(uint8_t slotIndex,

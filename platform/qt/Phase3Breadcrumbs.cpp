@@ -42,7 +42,7 @@ void unlockRing() noexcept
     g_ringLock.clear(std::memory_order_release);
 }
 
-void copyContext(char (&dest)[44], const char * context) noexcept
+void copyContext(char (&dest)[40], const char * context) noexcept
 {
     std::memset(dest, 0, sizeof(dest));
     if (!context) return;
@@ -88,7 +88,7 @@ void push(uint8_t slotIndex,
           uint8_t toState,
           uint64_t timestampNs,
           uint32_t frameIdx,
-          uint32_t requestSerial,
+          uint64_t requestSerial,
           uint8_t phase3Mode,
           const char * context) noexcept
 {
@@ -133,10 +133,10 @@ void dumpToFile(FILE * file) noexcept
         if (entry.sequence != sequence) continue;
         const Breadcrumb & crumb = entry.crumb;
         std::fprintf(file,
-                     "ns=%llu frame=%u request=%u slot=%u from=%u to=%u mode=%u context=%s\n",
+                     "ns=%llu frame=%u request=%llu slot=%u from=%u to=%u mode=%u context=%s\n",
                      static_cast<unsigned long long>(crumb.timestamp_ns),
                      static_cast<unsigned int>(crumb.frame_idx),
-                     static_cast<unsigned int>(crumb.request_serial),
+                     static_cast<unsigned long long>(crumb.request_serial),
                      static_cast<unsigned int>(crumb.slot_index),
                      static_cast<unsigned int>(crumb.from_state),
                      static_cast<unsigned int>(crumb.to_state),
@@ -200,10 +200,10 @@ void dumpToWindowsLogFile(const wchar_t * logPath) noexcept
         const Breadcrumb & crumb = entry.crumb;
         std::snprintf(line,
                       sizeof(line),
-                      "ns=%llu frame=%u request=%u slot=%u from=%u to=%u mode=%u context=%s\n",
+                      "ns=%llu frame=%u request=%llu slot=%u from=%u to=%u mode=%u context=%s\n",
                       static_cast<unsigned long long>(crumb.timestamp_ns),
                       static_cast<unsigned int>(crumb.frame_idx),
-                      static_cast<unsigned int>(crumb.request_serial),
+                      static_cast<unsigned long long>(crumb.request_serial),
                       static_cast<unsigned int>(crumb.slot_index),
                       static_cast<unsigned int>(crumb.from_state),
                       static_cast<unsigned int>(crumb.to_state),
