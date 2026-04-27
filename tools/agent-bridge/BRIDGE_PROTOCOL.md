@@ -1,6 +1,6 @@
 # Agent-Bridge Communication Protocol
 
-Version: 1.3
+Version: 1.4
 Transport: agent-bridge MCP server
 Applies to: any two agents sharing an agent-bridge instance
 
@@ -138,6 +138,86 @@ Claude -> Codex:
 Either direction:
   SESSION_UPDATE, USER_PREFERENCE, AUDIT_REQUEST
 ```
+
+## Bridge Feedback
+
+The user can teach both agents what to send or stop sending. Two commands:
+
+### `bridge learn`
+
+Use this after manually pasting something that should have been bridged automatically.
+
+```text
+bridge learn
+bridge learn: this should have been sent as AUDIT_REQUEST
+```
+
+The receiving agent will:
+1. Identify the missed pattern from context (type is optional -- agent infers if not given).
+2. Add a positive trigger rule to `%USERPROFILE%\.agent-bridge\routing-rules.json` under `learned_triggers`.
+3. Send `USER_PREFERENCE` to the peer so both sides apply it.
+4. Update `BRIDGE_PROTOCOL.md` trigger rules if the pattern is generally useful.
+
+### `bridge suppress`
+
+Use this after an auto-send that was noisy or unnecessary.
+
+```text
+bridge suppress
+bridge suppress: stop sending routine ACKs
+```
+
+The receiving agent will:
+1. Identify the noisy pattern from context.
+2. Add a negative rule to `routing-rules.json` under `suppressed_triggers`.
+3. Send `USER_PREFERENCE` to the peer.
+4. Apply immediately for the rest of the session.
+
+### `bridge rule status`
+
+List the active custom learned and suppressed rules.
+
+```text
+bridge rule status
+```
+
+### Routing rules file
+
+```text
+%USERPROFILE%\.agent-bridge\routing-rules.json
+```
+
+Shape (see `routing-rules.example.json` in this directory):
+
+```json
+{
+  "learned_triggers": [
+    {
+      "source": "codex",
+      "direction": "codex->claude",
+      "suggested_type": "AUDIT_REQUEST",
+      "pattern": "When Codex changes bridge tooling and asks for review, send AUDIT_REQUEST.",
+      "reason": "User manually pasted it; should auto-send next time.",
+      "learned_from_session": "<session-guid>",
+      "last_updated": "YYYY-MM-DD"
+    }
+  ],
+  "suppressed_triggers": [
+    {
+      "source": "claude",
+      "direction": "claude->codex",
+      "pattern": "Routine acknowledgement with no state change.",
+      "rule": "Do not auto-bridge routine acks unless they change state or unblock work.",
+      "learned_from_session": "<session-guid>",
+      "last_updated": "YYYY-MM-DD"
+    }
+  ],
+  "updated_at": "YYYY-MM-DD"
+}
+```
+
+Both agents load this file on session start and merge it with their built-in trigger heuristics.
+Suppressed rules take precedence over learned triggers.
 
 ## Examples
 

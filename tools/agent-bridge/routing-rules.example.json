@@ -1,0 +1,31 @@
+{
+  "_comment": "agent-bridge routing rules. Copy to %USERPROFILE%\\.agent-bridge\\routing-rules.json. Loaded by both agents on session start.",
+
+  "learned_triggers": [
+    {
+      "_comment": "Example: user had to manually paste an implementation summary after Codex changed bridge tooling.",
+      "source": "codex",
+      "direction": "codex->claude",
+      "suggested_type": "AUDIT_REQUEST",
+      "pattern": "When Codex changes bridge tooling and asks for Claude review, send AUDIT_REQUEST automatically.",
+      "reason": "User manually pasted it; should auto-send next time.",
+      "learned_from_session": "2bcb0bb1-6f31-42f4-9f8e-f6a957e62d40",
+      "last_updated": "2026-04-26"
+    }
+  ],
+
+  "suppressed_triggers": [
+    {
+      "_comment": "Example: user said stop sending routine ACKs.",
+      "source": "claude",
+      "direction": "claude->codex",
+      "pattern": "Routine acknowledgement with no new action, decision, or state change.",
+      "reason": "User said stop sending these.",
+      "rule": "Do not auto-bridge routine acknowledgements unless they change state or unblock work.",
+      "learned_from_session": "84b53694-2cd6-4b01-a1ce-c6215bd61f9d",
+      "last_updated": "2026-04-26"
+    }
+  ],
+
+  "updated_at": "2026-04-26"
+}
