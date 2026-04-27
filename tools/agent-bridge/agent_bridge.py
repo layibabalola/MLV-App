@@ -726,6 +726,27 @@ class AgentBridge:
             result,
         )
 
+    def _resolve_default_session(self, from_agent: str) -> str:
+        """Pick a sensible session_id when the caller didn't specify one.
+
+        Falls back to the rendezvous (project name) of the from_agent's
+        currently active session, so MCP-driven traffic gets per-project
+        backpressure instead of all sharing the global "default" bucket.
+        """
+        try:
+            agent = normalize_agent(from_agent)
+        except ValueError:
+            return DEFAULT_SESSION_ID
+        try:
+            registry = self._load_session_registry()
+        except Exception:
+            return DEFAULT_SESSION_ID
+        for project_name, project_entry in (registry.get("projects") or {}).items():
+            active = (project_entry or {}).get("active") or {}
+            if active.get(agent):
+                return project_name
+        return DEFAULT_SESSION_ID
+
     def _orphan_stats(self) -> Dict[str, Any]:
         total = 0
         oldest = None
@@ -744,13 +765,17 @@ class AgentBridge:
     def send_to_peer(self, from_agent: str, to_agent: str, message: str, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
             now = utc_now()
+            # If no session specified, route through the from_agent's active
+            # project session so backpressure is per-project rather than the
+            # shared global "default" bucket.
+            resolved_session = session_id or self._resolve_default_session(from_agent)
             event = {
                 "id": str(uuid.uuid4()),
                 "timestamp": now,
                 "action": "send_to_peer",
                 "from": (from_agent or "").strip().lower(),
                 "to": (to_agent or "").strip().lower(),
-                "session_id": session_id or DEFAULT_SESSION_ID,
+                "session_id": resolved_session,
                 "marker_target": None,
                 "marker_variant": None,
                 "hash": None,
@@ -766,7 +791,7 @@ class AgentBridge:
             try:
                 sender = normalize_agent(from_agent)
                 target = normalize_agent(to_agent)
-                session = normalize_session(session_id)
+                session = normalize_session(resolved_session)
             except ValueError as exc:
                 return reject(str(exc))
 
@@ -879,10 +904,13 @@ class AgentBridge:
         replace_existing_control: bool = True,
     ) -> BridgeResult:
         with self._locked():
+            # Same fallback policy as send_to_peer: route through the
+            # from_agent's active project session when session_id is omitted.
+            resolved_session = session_id or self._resolve_default_session(from_agent)
             try:
                 sender = normalize_agent(from_agent)
                 target = normalize_agent(to_agent)
-                session = normalize_session(session_id)
+                session = normalize_session(resolved_session)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
             control_name = (control_type or "").strip().upper()
