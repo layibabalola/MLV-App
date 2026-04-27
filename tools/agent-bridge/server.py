@@ -154,6 +154,39 @@ def check_inbox(agent: str, session_id: Optional[str] = None, mark_read: bool = 
     return as_dict(bridge.check_inbox(agent, session_id=session_id, mark_read=mark_read))
 
 
+@mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+def wait_inbox(
+    agent: str,
+    session_ids: Optional[list] = None,
+    timeout_seconds: int = 600,
+    mark_read: bool = False,
+) -> dict:
+    """Block until a new message arrives for the agent, or timeout elapses.
+
+    Use this for the "blocking-tool-call" wake pattern: the model is suspended
+    at the tool boundary while we wait, so idle time costs zero tokens.  Loop:
+    call wait_inbox -> handle returned messages -> call wait_inbox again.  On
+    timeout (data.timed_out=True), re-invoke immediately.
+
+    session_ids is an optional list of buckets to watch (e.g., ["mlv-app",
+    "default", "<your-GUID>"]).  Omit or pass None to watch every session.
+    Default mark_read=False so the caller decides when to mark consumed —
+    avoid silent-eat failures.
+
+    Note: requires the host's MCP tool_timeout to be at least timeout_seconds.
+    Codex: set tool_timeout_sec under [mcp_servers.agent_bridge] in
+    ~/.codex/config.toml.
+    """
+    return as_dict(
+        bridge.wait_inbox(
+            agent,
+            session_ids=session_ids,
+            timeout_seconds=timeout_seconds,
+            mark_read=mark_read,
+        )
+    )
+
+
 @mcp.tool(annotations=READ_ONLY)
 def peek_inbox(agent: str, session_id: Optional[str] = None) -> dict:
     """Return unread bridge messages for an agent without changing mailbox state."""

@@ -1031,6 +1031,127 @@ class AgentBridge:
                 },
             )
 
+    def wait_inbox(
+        self,
+        agent: str,
+        session_ids: Optional[List[str]] = None,
+        timeout_seconds: int = 600,
+        mark_read: bool = False,
+    ) -> BridgeResult:
+        """Block until a new message arrives for the agent or timeout elapses.
+
+        Designed for the "blocking-tool-call" wake pattern: the model is
+        suspended at the MCP tool boundary while we wait, so idle time costs
+        zero tokens.  Lets a peer agent sit in a tight loop:
+
+            while True:
+                msgs = wait_inbox(agent='codex', timeout_seconds=600)
+                if msgs.timed_out:
+                    continue          # immediately re-invoke, no token cost
+                handle(msgs)
+
+        Args:
+          agent:           Receiving agent ('claude' or 'codex').
+          session_ids:     Optional list of session buckets to watch.  None
+                           (or empty list) means "any session" — useful when
+                           the receiver doesn't know which bucket the sender
+                           used.  Typical value: [project_name, 'default',
+                           own_GUID].
+          timeout_seconds: Max wait (clamped 1..3600).  Caller should re-invoke
+                           on timeout — re-invocation is cheap.
+          mark_read:       Default False — return the message without marking,
+                           let the caller decide when to mark_read after they
+                           have actually surfaced it.  Avoids the silent-eat
+                           failure mode of consume_inbox.py.
+
+        Returns:
+          BridgeResult with status='messages' (and data.messages populated) or
+          status='timeout' (data.timed_out=True).  On rejection: status='rejected'.
+        """
+        try:
+            target = normalize_agent(agent)
+        except ValueError as exc:
+            return BridgeResult(False, "rejected", str(exc))
+
+        valid_sessions: Optional[set] = None
+        if session_ids:
+            try:
+                valid_sessions = {normalize_session(s) for s in session_ids}
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+        timeout_seconds = max(1, min(int(timeout_seconds or 600), 3600))
+        deadline = time.time() + timeout_seconds
+        poll_interval = 1.0
+
+        def _matches(row: Dict[str, Any]) -> bool:
+            if row.get("read_at") or row.get("superseded_at"):
+                return False
+            if valid_sessions is not None:
+                return row.get("session_id") in valid_sessions
+            return True
+
+        while True:
+            with self._locked():
+                path = self.inbox_path(target)
+                rows = read_jsonl(path)
+                unread = [row for row in rows if _matches(row)]
+                if unread:
+                    if mark_read:
+                        now = utc_now()
+                        unread_ids = {row["id"] for row in unread}
+                        for row in rows:
+                            if row.get("id") in unread_ids:
+                                row["read_at"] = now
+                        write_jsonl(path, rows)
+                        self._audit(
+                            {
+                                "id": str(uuid.uuid4()),
+                                "timestamp": now,
+                                "action": "wait_inbox",
+                                "agent": target,
+                                "session_ids": sorted(valid_sessions) if valid_sessions else None,
+                                "accepted": True,
+                                "reason": "delivered_and_marked",
+                                "message_count": len(unread),
+                            }
+                        )
+                    delivered = "\n\n".join(row["delivered_message"] for row in unread)
+                    return BridgeResult(
+                        True,
+                        "messages",
+                        delivered,
+                        {
+                            "count": len(unread),
+                            "messages": unread,
+                            "timed_out": False,
+                            "marked_read": mark_read,
+                        },
+                    )
+
+            # No matching unread.  Release lock, sleep, retry.
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_interval, remaining))
+
+        scope = ",".join(sorted(valid_sessions)) if valid_sessions else "any"
+        return BridgeResult(
+            True,
+            "timeout",
+            (
+                "wait_inbox timed out after %ds with no new messages for %s (sessions=%s). "
+                "Call again immediately to keep waiting — re-invocation is cheap."
+            )
+            % (timeout_seconds, target, scope),
+            {
+                "count": 0,
+                "messages": [],
+                "timed_out": True,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+
     def peek_inbox(self, agent: str, session_id: Optional[str] = None) -> BridgeResult:
         return self.check_inbox(agent, session_id=session_id, mark_read=False)
 
