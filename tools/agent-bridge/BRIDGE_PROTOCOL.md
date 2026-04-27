@@ -56,19 +56,69 @@ agent identity. A project where Claude does the implementation and Codex does
 review would invert the volume pattern from MLV-App. The routing rules and type
 tables are symmetric by design.
 
+## Project Identity and Rendezvous Naming
+
+**Convention over configuration.** The rendezvous channel name is derived automatically
+from the project root folder name. No config file required.
+
+```
+rendezvous = normalize(project_root_folder_name)
+
+normalize rules (apply in order):
+  1. lowercase
+  2. spaces → hyphens
+  3. keep only [a-z0-9-_], strip everything else
+```
+
+Examples:
+
+| Folder name | Rendezvous |
+|---|---|
+| `MLV-App` | `mlv-app` |
+| `AdversarialLLM-ClaudeCode` | `adversarialllm-claudecode` |
+| `My Cool Project` | `my-cool-project` |
+
+Both agents work in the same repo → same folder name → same rendezvous. Zero
+coordination required.
+
+**Override (optional):** If a `.agent-bridge.json` file exists at the project root
+with a `rendezvous` field, use that value instead. Reserved for cases where the
+folder name is genuinely wrong (legacy name, shared folder, etc.). Most projects
+will never need this file.
+
+```json
+{ "rendezvous": "my-override-name" }
+```
+
+**Multi-project:** Each project gets its own rendezvous and its own session state
+slot. You can have multiple projects paired simultaneously without interference.
+`session.json` is keyed by rendezvous name:
+
+```json
+{
+  "sessions": {
+    "mlv-app": { "claude_guid": "...", "codex_guid": "...", "status": "active" },
+    "adversarialllm-claudecode": { "claude_guid": "...", "codex_guid": "...", "status": "active" }
+  }
+}
+```
+
+Supersede is project-scoped: a new `mlv-app` session only supersedes old `mlv-app`
+sessions; other projects are untouched.
+
 ## Two-Channel Model
 
 The bridge uses two inbox channels with different roles:
 
 ```text
-Private GUID inbox  = normal work traffic (IMPLEMENTATION_SUMMARY, PHASE_DONE, AUDIT_RESULT, etc.)
-mlvapp rendezvous   = low-frequency control-plane traffic only (HANDSHAKE, HANDSHAKE_ACK, SESSION_UPDATE)
+Private GUID inbox    = normal work traffic (IMPLEMENTATION_SUMMARY, PHASE_DONE, AUDIT_RESULT, etc.)
+<rendezvous> channel  = low-frequency control-plane only (HANDSHAKE, HANDSHAKE_ACK, SESSION_UPDATE)
 ```
 
-Both agents poll/watch **both** channels after pairing:
+Both agents watch **both** channels after pairing:
 
-- **Private inbox**: active cadence (60s polling or watcher daemon).
-- **mlvapp**: low-frequency cadence (~5 min polling or watcher daemon).
+- **Private inbox**: file monitor (zero polling).
+- **Rendezvous channel**: low-frequency cadence (~5 min or watcher daemon).
 
 The separation keeps work traffic clean and the control plane always reachable without flooding it.
 
@@ -83,12 +133,14 @@ supersede without user intervention: starting a new session is the signal.
 Boot sequence on every new session:
 
 ```
-1. Read %USERPROFILE%\.agent-bridge\session.json (for peer GUID hint only)
-2. Generate a fresh own GUID
-3. Start watching own private inbox file (file monitor, not polling)
-4. Start watching mlvapp (low-frequency, for control-plane signals)
-5. Send HANDSHAKE to mlvapp with new GUID
-6. On HANDSHAKE_ACK: update session.json, begin normal bridging
+1. Derive rendezvous from project root folder name (normalize rule above)
+   or read .agent-bridge.json override if present
+2. Read %USERPROFILE%\.agent-bridge\session.json (for peer GUID hint under this rendezvous only)
+3. Generate a fresh own GUID
+4. Start watching own private inbox file (file monitor, not polling)
+5. Start watching <rendezvous> channel (low-frequency, for control-plane signals)
+6. Send HANDSHAKE to <rendezvous> with new GUID and project=<rendezvous>
+7. On HANDSHAKE_ACK: update session.json under this rendezvous key, begin normal bridging
 ```
 
 The peer, on receiving a HANDSHAKE while a prior session is active:
