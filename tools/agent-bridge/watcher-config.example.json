@@ -1,21 +1,29 @@
 {
-  "_comment": "agent-bridge watcher config. Copy to watcher-config.json and fill in your session GUIDs.",
+  "_comment": "agent-bridge watcher config. Copy to watcher-config.json. Point on_message_command at consume_inbox.py or a client wake command.",
   "sessions": [
     {
-      "_comment": "Claude's inbox — notify when Codex sends Claude a message",
+      "_comment": "Claude private inbox consumer",
       "agent": "claude",
       "session_id": "YOUR-CLAUDE-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-claude.jsonl",
       "on_message": "notify",
-      "on_message_command": null
+      "on_message_command": "py -3 C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\consume_inbox.py --state-dir C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state --agent claude --session-id YOUR-CLAUDE-SESSION-GUID"
     },
     {
-      "_comment": "Codex inbox — notify when Claude sends Codex a message",
+      "_comment": "Codex private inbox consumer",
       "agent": "codex",
       "session_id": "YOUR-CODEX-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-codex.jsonl",
       "on_message": "notify",
-      "on_message_command": null
+      "on_message_command": "py -3 C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\consume_inbox.py --state-dir C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state --agent codex --session-id YOUR-CODEX-SESSION-GUID"
+    },
+    {
+      "_comment": "Optional rendezvous/control-plane watch. Use the derived project rendezvous such as mlv-app.",
+      "agent": "codex",
+      "session_id": "mlv-app",
+      "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-codex.jsonl",
+      "on_message": "notify",
+      "on_message_command": "py -3 C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\consume_inbox.py --state-dir C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state --agent codex --session-id mlv-app"
     }
   ]
 }

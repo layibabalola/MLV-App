@@ -73,6 +73,32 @@ def send_to_peer(from_agent: str, to_agent: str, message: str, session_id: Optio
 
 
 @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+def send_control_message(
+    from_agent: str,
+    to_agent: str,
+    control_type: str,
+    summary: str,
+    body: str,
+    session_id: Optional[str] = None,
+    status: str = "info",
+    replace_existing_control: bool = True,
+) -> dict:
+    """Queue a high-priority control-plane message such as HANDSHAKE, HANDSHAKE_ACK, or SESSION_UPDATE."""
+    return as_dict(
+        bridge.send_control_message(
+            from_agent=from_agent,
+            to_agent=to_agent,
+            control_type=control_type,
+            summary=summary,
+            body=body,
+            session_id=session_id,
+            status=status,
+            replace_existing_control=replace_existing_control,
+        )
+    )
+
+
+@mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
 def check_inbox(agent: str, session_id: Optional[str] = None, mark_read: bool = True) -> dict:
     """Return unread bridge messages for an agent, optionally marking them read."""
     return as_dict(bridge.check_inbox(agent, session_id=session_id, mark_read=mark_read))
@@ -94,6 +120,36 @@ def mark_read(agent: str, message_id: str, session_id: Optional[str] = None) -> 
 def bridge_status(session_id: Optional[str] = None) -> dict:
     """Return bridge pause state, hop count, state directory, and unread counts."""
     return as_dict(bridge.bridge_status(session_id=session_id))
+
+
+@mcp.tool(annotations=READ_ONLY)
+def project_identity(cwd: Optional[str] = None) -> dict:
+    """Derive the canonical project root and rendezvous name from a repo/worktree path."""
+    return as_dict(bridge.project_identity(cwd=cwd))
+
+
+@mcp.tool(annotations=READ_ONLY)
+def evaluate_routing(source: str, direction: str, text: str) -> dict:
+    """Evaluate learned and suppressed routing rules for a candidate message."""
+    return as_dict(bridge.evaluate_routing(source=source, direction=direction, text=text))
+
+
+@mcp.tool(annotations=IDEMPOTENT_WRITE)
+def activate_session(agent: str, session_id: str, project: Optional[str] = None) -> dict:
+    """Mark a session as the current active chat for an agent/project and supersede older same-agent sessions."""
+    return as_dict(bridge.activate_session(agent=agent, session_id=session_id, project=project))
+
+
+@mcp.tool(annotations=READ_ONLY)
+def session_status(project: Optional[str] = None) -> dict:
+    """Return active and historical session registry data for a project."""
+    return as_dict(bridge.session_status(project=project))
+
+
+@mcp.tool(annotations=IDEMPOTENT_WRITE)
+def end_session(agent: str, session_id: str, project: Optional[str] = None) -> dict:
+    """Mark a session ended and notify the active peer session to stop sending there."""
+    return as_dict(bridge.end_session(agent=agent, session_id=session_id, project=project))
 
 
 @mcp.tool(annotations=IDEMPOTENT_WRITE)

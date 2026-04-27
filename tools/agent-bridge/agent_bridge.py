@@ -7,14 +7,20 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from json import JSONDecodeError
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from project_identity import derive_project_identity
+from routing_policy import evaluate_message
 
 AGENTS = {"claude", "codex"}
 DEFAULT_SESSION_ID = "default"
+DEFAULT_PROJECT = "default"
 DEFAULT_MAX_HOPS = 8
+MAX_MESSAGE_BYTES = 64 * 1024
+SESSION_RETENTION_DAYS = 30
 HANDOFF_RE = re.compile(r"\[\[handoff:(claude|codex)(?:\s+([a-z0-9_-]+))?\]\]", re.IGNORECASE)
 STOP_RE = re.compile(r"\[\[(done|handoff-to-user|pause-relay)\]\]", re.IGNORECASE)
 
@@ -49,6 +55,17 @@ def normalize_session(session_id: Optional[str]) -> str:
     return value
 
 
+def normalize_project(project: Optional[str]) -> str:
+    value = (project or DEFAULT_PROJECT).strip()
+    if not value:
+        return DEFAULT_PROJECT
+    if len(value) > 80:
+        raise ValueError("project must be 80 characters or fewer")
+    if not re.match(r"^[A-Za-z0-9_.:-]+$", value):
+        raise ValueError("project may only contain letters, numbers, dot, colon, dash, and underscore")
+    return value
+
+
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -73,11 +90,21 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
     rows: List[Dict[str, Any]] = []
+    quarantine: List[str] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if line:
-                rows.append(json.loads(line))
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    quarantine.append(line)
+    if quarantine:
+        qpath = path.with_suffix(".quarantine.jsonl")
+        with qpath.open("a", encoding="utf-8", newline="\n") as handle:
+            for bad in quarantine:
+                handle.write(bad)
+                handle.write("\n")
     return rows
 
 
@@ -127,6 +154,10 @@ class AgentBridge:
     @property
     def audit_path(self) -> Path:
         return self.state_dir / "messages.jsonl"
+
+    @property
+    def session_registry_path(self) -> Path:
+        return self.state_dir.parent / "session.json"
 
     @property
     def lock_path(self) -> Path:
@@ -201,12 +232,473 @@ class AgentBridge:
     def _audit(self, event: Dict[str, Any]) -> None:
         append_jsonl(self.audit_path, event)
 
+    def _default_session_registry(self) -> Dict[str, Any]:
+        return {
+            "projects": {},
+            "updated_at": utc_now(),
+        }
+
+    def _load_session_registry(self) -> Dict[str, Any]:
+        try:
+            registry = read_json(self.session_registry_path, self._default_session_registry())
+        except (JSONDecodeError, OSError):
+            corrupt_path = self.session_registry_path.with_name(
+                "session.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            )
+            if self.session_registry_path.exists():
+                self.session_registry_path.replace(corrupt_path)
+            registry = self._default_session_registry()
+        registry.setdefault("projects", {})
+        return registry
+
+    def _save_session_registry(self, registry: Dict[str, Any]) -> None:
+        self._prune_session_registry(registry)
+        registry["updated_at"] = utc_now()
+        write_json(self.session_registry_path, registry)
+
+    def _prune_session_registry(self, registry: Dict[str, Any]) -> None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=SESSION_RETENTION_DAYS)
+        for project_entry in registry.get("projects", {}).values():
+            sessions = project_entry.get("sessions", {})
+            stale: List[str] = []
+            for session_id, record in sessions.items():
+                if record.get("status") not in {"ended", "superseded"}:
+                    continue
+                stamp = (
+                    record.get("ended_at")
+                    or record.get("superseded_at")
+                    or record.get("last_seen_at")
+                    or record.get("created_at")
+                )
+                if not stamp:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(stamp)
+                except ValueError:
+                    continue
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt < cutoff:
+                    stale.append(session_id)
+            for session_id in stale:
+                sessions.pop(session_id, None)
+
+    def _project_registry(self, registry: Dict[str, Any], project: str) -> Dict[str, Any]:
+        projects = registry.setdefault("projects", {})
+        project_entry = projects.setdefault(
+            project,
+            {
+                "active": {},
+                "sessions": {},
+                "updated_at": utc_now(),
+            },
+        )
+        project_entry.setdefault("active", {})
+        project_entry.setdefault("sessions", {})
+        return project_entry
+
+    def _session_record(self, project_entry: Dict[str, Any], session_id: str, agent: str) -> Dict[str, Any]:
+        sessions = project_entry.setdefault("sessions", {})
+        record = sessions.setdefault(
+            session_id,
+            {
+                "agent": agent,
+                "created_at": utc_now(),
+                "activated_at": utc_now(),
+                "status": "active",
+            },
+        )
+        record.setdefault("agent", agent)
+        record.setdefault("created_at", utc_now())
+        record.setdefault("activated_at", utc_now())
+        return record
+
+    def _find_session_record(
+        self,
+        registry: Dict[str, Any],
+        session_id: str,
+        agent: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        for project_name, project_entry in registry.get("projects", {}).items():
+            record = project_entry.get("sessions", {}).get(session_id)
+            if not record:
+                continue
+            if agent and record.get("agent") != agent:
+                continue
+            active_session = project_entry.get("active", {}).get(record.get("agent"))
+            return {
+                "project": project_name,
+                "record": record,
+                "active_session": active_session,
+            }
+        return None
+
+    def _append_control_message(
+        self,
+        *,
+        target_agent: str,
+        session_id: str,
+        sender: str,
+        control_type: str,
+        summary: str,
+        body: str,
+        status: str = "info",
+        replace_existing_control: bool = False,
+    ) -> Optional[str]:
+        path = self.inbox_path(target_agent)
+        rows = read_jsonl(path)
+        unread = [
+            row for row in rows if row.get("session_id") == session_id and not row.get("read_at")
+        ]
+        if unread and not replace_existing_control:
+            return None
+        if unread and replace_existing_control:
+            kept = []
+            for row in rows:
+                if (
+                    row.get("session_id") == session_id
+                    and not row.get("read_at")
+                    and row.get("marker_variant") == "control"
+                ):
+                    continue
+                kept.append(row)
+            rows = kept
+            write_jsonl(path, rows)
+        now = utc_now()
+        message_id = str(uuid.uuid4())
+        delivered = "From %s:\nTYPE: %s\nSTATUS: %s\nSUMMARY: %s\nACTION_REQUESTED: none\n\n%s" % (
+            sender.capitalize(),
+            control_type,
+            status,
+            summary,
+            body,
+        )
+        append_jsonl(
+            self.inbox_path(target_agent),
+            {
+                "id": message_id,
+                "created_at": now,
+                "session_id": session_id,
+                "from": sender,
+                "to": target_agent,
+                "body": body,
+                "delivered_message": delivered,
+                "hash": sha256_text("%s\n%s\n%s\n%s\n%s" % (sender, target_agent, session_id, control_type, body)),
+                "marker_variant": "control",
+                "control_type": control_type,
+                "hop_count": 0,
+                "read_at": None,
+            },
+        )
+        return message_id
+
+    def _enqueue_control_message(
+        self,
+        *,
+        from_agent: str,
+        to_agent: str,
+        session_id: str,
+        control_type: str,
+        summary: str,
+        body: str,
+        status: str = "info",
+        replace_existing_control: bool = False,
+    ) -> BridgeResult:
+        message_id = self._append_control_message(
+            target_agent=to_agent,
+            session_id=session_id,
+            sender=from_agent,
+            control_type=control_type,
+            summary=summary,
+            body=body,
+            status=status,
+            replace_existing_control=replace_existing_control,
+        )
+        if message_id is None:
+            return BridgeResult(
+                False,
+                "rejected",
+                "Target %s already has unread non-control bridge mail for session %s." % (to_agent, session_id),
+            )
+        self._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": utc_now(),
+                "action": "send_control",
+                "accepted": True,
+                "from": from_agent,
+                "to": to_agent,
+                "session_id": session_id,
+                "control_type": control_type,
+                "message_id": message_id,
+            }
+        )
+        return BridgeResult(
+            True,
+            "queued",
+            "Queued control message %s for %s in session %s." % (control_type, to_agent, session_id),
+            {"id": message_id, "control_type": control_type},
+        )
+
     def _unread_for(self, agent: str, session_id: str) -> List[Dict[str, Any]]:
         return [
             row
             for row in read_jsonl(self.inbox_path(agent))
             if row.get("session_id") == session_id and not row.get("read_at")
         ]
+
+    def activate_session(
+        self,
+        agent: str,
+        session_id: str,
+        project: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(agent)
+                session = normalize_session(session_id)
+                project_name = normalize_project(project)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            registry = self._load_session_registry()
+            project_entry = self._project_registry(registry, project_name)
+            active = project_entry.setdefault("active", {})
+            sessions = project_entry.setdefault("sessions", {})
+            previous_local = active.get(owner)
+            previous_peer = active.get("claude" if owner == "codex" else "codex")
+
+            project_entry["updated_at"] = utc_now()
+
+            if previous_local and previous_local != session:
+                old_record = self._session_record(project_entry, previous_local, owner)
+                old_record["status"] = "superseded"
+                old_record["superseded_by"] = session
+                old_record["superseded_at"] = utc_now()
+                old_record["last_seen_at"] = utc_now()
+                self._append_control_message(
+                    target_agent=owner,
+                    session_id=previous_local,
+                    sender="bridge",
+                    control_type="SESSION_UPDATE",
+                    summary="Session superseded by newer %s session" % owner,
+                    body=(
+                        "A newer %s session for project %s is now active.\n\n"
+                        "New session id: %s\n"
+                        "Old session id: %s\n\n"
+                        "Stop bridge communication from this older session and let the newer chat take over."
+                    )
+                    % (owner, project_name, session, previous_local),
+                    replace_existing_control=True,
+                )
+
+            record = self._session_record(project_entry, session, owner)
+            record["status"] = "active"
+            record["project"] = project_name
+            record["activated_at"] = utc_now()
+            record["last_seen_at"] = utc_now()
+            if previous_peer:
+                record["paired_with"] = previous_peer
+
+            active[owner] = session
+
+            if previous_peer:
+                peer_agent = "claude" if owner == "codex" else "codex"
+                peer_record = self._session_record(project_entry, previous_peer, peer_agent)
+                peer_record["paired_with"] = session
+                peer_record["last_seen_at"] = utc_now()
+                self._append_control_message(
+                    target_agent=peer_agent,
+                    session_id=previous_peer,
+                    sender="bridge",
+                    control_type="SESSION_UPDATE",
+                    summary="Peer session updated for project %s" % project_name,
+                    body=(
+                        "The active %s session for project %s is now %s.\n\n"
+                        "When sending new bridge traffic, prefer the newest active peer session."
+                    )
+                    % (owner, project_name, session),
+                )
+
+            self._save_session_registry(registry)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "activate_session",
+                    "accepted": True,
+                    "agent": owner,
+                    "session_id": session,
+                    "project": project_name,
+                    "previous_local_session": previous_local,
+                    "active_peer_session": previous_peer,
+                }
+            )
+            return BridgeResult(
+                True,
+                "active",
+                "Activated %s session %s for project %s." % (owner, session, project_name),
+                {
+                    "agent": owner,
+                    "session_id": session,
+                    "project": project_name,
+                    "previous_local_session": previous_local,
+                    "active_peer_session": previous_peer,
+                    "registry_path": str(self.session_registry_path),
+                },
+            )
+
+    def session_status(self, project: Optional[str] = None) -> BridgeResult:
+        with self._locked():
+            try:
+                project_name = normalize_project(project)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            registry = self._load_session_registry()
+            project_entry = self._project_registry(registry, project_name)
+            return BridgeResult(
+                True,
+                "status",
+                "Project %s active sessions: claude=%s codex=%s"
+                % (
+                    project_name,
+                    project_entry.get("active", {}).get("claude"),
+                    project_entry.get("active", {}).get("codex"),
+                ),
+                {
+                    "project": project_name,
+                    "active": dict(project_entry.get("active", {})),
+                    "sessions": dict(project_entry.get("sessions", {})),
+                    "registry_path": str(self.session_registry_path),
+                },
+            )
+
+    def end_session(self, agent: str, session_id: str, project: Optional[str] = None) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(agent)
+                session = normalize_session(session_id)
+                project_name = normalize_project(project)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            registry = self._load_session_registry()
+            project_entry = self._project_registry(registry, project_name)
+            active = project_entry.setdefault("active", {})
+            record = self._session_record(project_entry, session, owner)
+            peer_agent = "claude" if owner == "codex" else "codex"
+            peer_session = active.get(peer_agent)
+            drained_messages = [
+                row for row in read_jsonl(self.inbox_path(owner))
+                if row.get("session_id") == session and not row.get("read_at")
+            ]
+            if drained_messages:
+                rows = read_jsonl(self.inbox_path(owner))
+                now = utc_now()
+                drained_ids = {row["id"] for row in drained_messages}
+                for row in rows:
+                    if row.get("id") in drained_ids:
+                        row["read_at"] = now
+                write_jsonl(self.inbox_path(owner), rows)
+
+            record["status"] = "ended"
+            record["ended_at"] = utc_now()
+            record["last_seen_at"] = utc_now()
+            if active.get(owner) == session:
+                active.pop(owner, None)
+
+            control = None
+            if peer_session:
+                control = self._enqueue_control_message(
+                    from_agent="bridge",
+                    to_agent=peer_agent,
+                    session_id=peer_session,
+                    control_type="SESSION_UPDATE",
+                    summary="Session ending for project %s" % project_name,
+                    body=(
+                        "The %s session %s for project %s has ended.\n\n"
+                        "Stop sending bridge traffic to that session until a new handshake arrives."
+                    )
+                    % (owner, session, project_name),
+                    replace_existing_control=False,
+                )
+
+            self._save_session_registry(registry)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "end_session",
+                    "accepted": True,
+                    "agent": owner,
+                    "session_id": session,
+                    "project": project_name,
+                    "peer_session": peer_session,
+                    "drained_messages": len(drained_messages),
+                }
+            )
+            return BridgeResult(
+                True,
+                "ended",
+                "Ended %s session %s for project %s." % (owner, session, project_name),
+                {
+                    "agent": owner,
+                    "session_id": session,
+                    "project": project_name,
+                    "peer_session": peer_session,
+                    "drained_messages": drained_messages,
+                    "control_result": None if control is None else dataclasses.asdict(control),
+                },
+            )
+
+    def project_identity(self, cwd: Optional[str] = None) -> BridgeResult:
+        try:
+            data = derive_project_identity(cwd)
+        except (ValueError, OSError) as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        return BridgeResult(
+            True,
+            "identity",
+            "Derived rendezvous %s from %s." % (data["rendezvous"], data["canonical_root"]),
+            data,
+        )
+
+    @property
+    def routing_rules_path(self) -> Path:
+        return self.state_dir.parent / "routing-rules.json"
+
+    def evaluate_routing(self, source: str, direction: str, text: str) -> BridgeResult:
+        try:
+            result = evaluate_message(
+                source=source,
+                direction=direction,
+                text=text,
+                rules_path=str(self.routing_rules_path),
+            )
+        except Exception as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        return BridgeResult(
+            True,
+            result["decision"],
+            "Routing decision: %s" % result["decision"],
+            result,
+        )
+
+    def _orphan_stats(self) -> Dict[str, Any]:
+        total = 0
+        oldest = None
+        for agent in sorted(AGENTS):
+            path = self.state_dir / ("orphaned-%s.jsonl" % agent)
+            if not path.exists():
+                continue
+            rows = read_jsonl(path)
+            total += len(rows)
+            for row in rows:
+                stamp = row.get("orphaned_at") or row.get("created_at")
+                if stamp and (oldest is None or stamp < oldest):
+                    oldest = stamp
+        return {"count": total, "oldest": oldest}
 
     def send_to_peer(self, from_agent: str, to_agent: str, message: str, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
@@ -262,10 +754,31 @@ class AgentBridge:
                 return reject("handoff marker targets %s but to is %s" % (marker["marker_target"], target))
             if not body:
                 return reject("message is empty after stripping markers")
+            body_bytes = len(body.encode("utf-8"))
+            if body_bytes > MAX_MESSAGE_BYTES:
+                return reject(
+                    "message too large (%dkb > 64kb). Link to the file instead of embedding raw output."
+                    % max(1, round(body_bytes / 1024))
+                )
 
             state = self._load_state()
             if state.get("paused"):
                 return reject("bridge is paused")
+
+            registry = self._load_session_registry()
+            sender_record = self._find_session_record(registry, session, agent=sender)
+            if sender_record:
+                record = sender_record["record"]
+                if record.get("status") != "active":
+                    return reject(
+                        "session %s for %s is %s and may not send bridge traffic"
+                        % (session, sender, record.get("status"))
+                    )
+                if sender_record.get("active_session") != session:
+                    return reject(
+                        "session %s for %s is no longer the active session for project %s"
+                        % (session, sender, sender_record["project"])
+                    )
 
             session_state = self._session_state(state, session)
             hop_count = int(session_state.get("hop_count", 0))
@@ -312,6 +825,42 @@ class AgentBridge:
             if marker["marker_variant"] == "human-review":
                 note += " Human review requested."
             return BridgeResult(True, "queued", note, {"id": event["id"], "hop_count": hop_count + 1})
+
+    def send_control_message(
+        self,
+        from_agent: str,
+        to_agent: str,
+        control_type: str,
+        summary: str,
+        body: str,
+        session_id: Optional[str] = None,
+        status: str = "info",
+        replace_existing_control: bool = True,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                sender = normalize_agent(from_agent)
+                target = normalize_agent(to_agent)
+                session = normalize_session(session_id)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            control_name = (control_type or "").strip().upper()
+            if not control_name:
+                return BridgeResult(False, "rejected", "control_type is required")
+            if not summary.strip():
+                return BridgeResult(False, "rejected", "summary is required")
+            if not body.strip():
+                return BridgeResult(False, "rejected", "body is required")
+            return self._enqueue_control_message(
+                from_agent=sender,
+                to_agent=target,
+                session_id=session,
+                control_type=control_name,
+                summary=summary.strip(),
+                body=body.strip(),
+                status=status.strip() or "info",
+                replace_existing_control=replace_existing_control,
+            )
 
     def check_inbox(self, agent: str, session_id: Optional[str] = None, mark_read: bool = True) -> BridgeResult:
         with self._locked():
@@ -420,10 +969,26 @@ class AgentBridge:
             state = self._load_state()
             session = normalize_session(session_id)
             session_state = self._session_state(state, session)
+            registry = self._load_session_registry()
             unread = {
                 agent: len(self._unread_for(agent, session))
                 for agent in sorted(AGENTS)
             }
+            rules_path = self.state_dir.parent / "routing-rules.json"
+            routing_rules = {
+                "path": str(rules_path),
+                "status": "missing",
+                "learned": 0,
+                "suppressed": 0,
+            }
+            if rules_path.exists():
+                try:
+                    rules = read_json(rules_path, {})
+                    routing_rules["status"] = "healthy"
+                    routing_rules["learned"] = len(rules.get("learned_triggers", []))
+                    routing_rules["suppressed"] = len(rules.get("suppressed_triggers", []))
+                except Exception:
+                    routing_rules["status"] = "unreadable"
             return BridgeResult(
                 True,
                 "status",
@@ -439,6 +1004,10 @@ class AgentBridge:
                     "max_hops": self.max_hops,
                     "unread": unread,
                     "state_dir": str(self.state_dir),
+                    "session_registry_path": str(self.session_registry_path),
+                    "session_registry_projects": sorted(registry.get("projects", {}).keys()),
+                    "orphaned": self._orphan_stats(),
+                    "routing_rules": routing_rules,
                 },
             )
 
