@@ -20,9 +20,16 @@ from routing_policy import evaluate_message
 AGENTS = {"claude", "codex"}
 DEFAULT_SESSION_ID = "default"
 DEFAULT_PROJECT = "default"
-DEFAULT_MAX_HOPS = 8
+DEFAULT_MAX_HOPS = 8  # retained as audit-only metadata; no longer enforced
 MAX_MESSAGE_BYTES = 64 * 1024
 SESSION_RETENTION_DAYS = 30
+# Per-pair rate limit: at most RATE_LIMIT_N accepted send_to_peer calls per
+# (from_agent, to_agent) pair within a rolling RATE_LIMIT_WINDOW_S window.
+# Replaces the old hop-count rejection (agreed via bridge HEURISTIC_SYNC
+# 2026-04-27) — runaway loops trip in seconds while normal conversation
+# never approaches the limit.
+RATE_LIMIT_N = 30
+RATE_LIMIT_WINDOW_S = 60
 HANDOFF_RE = re.compile(r"\[\[handoff:(claude|codex)(?:\s+([a-z0-9_-]+))?\]\]", re.IGNORECASE)
 STOP_RE = re.compile(r"\[\[(done|handoff-to-user|pause-relay)\]\]", re.IGNORECASE)
 
@@ -726,6 +733,43 @@ class AgentBridge:
             result,
         )
 
+    def _record_rate_limit_send(
+        self,
+        state: Dict[str, Any],
+        sender: str,
+        target: str,
+    ) -> None:
+        """Append the current timestamp to the per-pair rate-limit ring buffer.
+
+        Trims entries older than RATE_LIMIT_WINDOW_S so the buffer stays bounded.
+        Caller is responsible for persisting the state via _save_state.
+        """
+        rate_limits = state.setdefault("rate_limits", {})
+        key = "%s->%s" % (sender, target)
+        cutoff = time.time() - RATE_LIMIT_WINDOW_S
+        recent = [t for t in rate_limits.get(key, []) if isinstance(t, (int, float)) and t >= cutoff]
+        recent.append(time.time())
+        rate_limits[key] = recent
+
+    def _check_rate_limit(
+        self,
+        state: Dict[str, Any],
+        sender: str,
+        target: str,
+    ) -> Optional[str]:
+        """Return a rejection reason if the (sender, target) pair is over budget."""
+        rate_limits = state.get("rate_limits", {})
+        key = "%s->%s" % (sender, target)
+        cutoff = time.time() - RATE_LIMIT_WINDOW_S
+        recent = [t for t in rate_limits.get(key, []) if isinstance(t, (int, float)) and t >= cutoff]
+        if len(recent) >= RATE_LIMIT_N:
+            return (
+                "rate limit exceeded for %s -> %s (%d sends in last %ds; max %d). "
+                "Pause the bridge with pause_bridge or wait."
+                % (sender, target, len(recent), RATE_LIMIT_WINDOW_S, RATE_LIMIT_N)
+            )
+        return None
+
     def _resolve_default_session(self, from_agent: str) -> str:
         """Pick a sensible session_id when the caller didn't specify one.
 
@@ -849,8 +893,14 @@ class AgentBridge:
             session_state = self._session_state(state, session)
             hop_count = int(session_state.get("hop_count", 0))
             event["hop_count_before"] = hop_count
-            if hop_count >= self.max_hops:
-                return reject("max hop count reached for session %s" % session)
+            # NOTE: hop count is retained as audit metadata only — no longer
+            # rejected when over self.max_hops.  Per-pair rate limiting
+            # (below) replaces it as the loop-protection mechanism, agreed
+            # via bridge HEURISTIC_SYNC 2026-04-27.
+
+            rate_limit_reason = self._check_rate_limit(state, sender, target)
+            if rate_limit_reason:
+                return reject(rate_limit_reason)
 
             if body_hash in session_state.get("seen_hashes", []):
                 return reject("duplicate message hash for session %s" % session)
@@ -880,6 +930,7 @@ class AgentBridge:
             seen.append(body_hash)
             session_state["seen_hashes"] = seen[-50:]
             session_state["last_message_at"] = now
+            self._record_rate_limit_send(state, sender, target)
             self._save_state(state)
 
             event["accepted"] = True
