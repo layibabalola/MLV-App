@@ -342,11 +342,58 @@ Within Phases 1–3, start with **H-01/H-02** (shared identity utility) then **H
 
 | Phase | Owner | Status |
 |---|---|---|
-| 1 — Identity | Codex implements; Claude audits | Pending |
-| 2 — Ownership | Codex implements; Claude audits | Pending |
-| 3 — Control-plane | Codex implements; Claude audits | Pending |
-| 4 — File resilience | Codex implements; Claude audits | Pending |
-| 5 — Hygiene | Codex implements; Claude audits | Pending |
-| 6 — Routing rules | Codex implements; Claude audits | Pending |
-| 7 — Watcher wakeup | Both; Codex investigates trigger | Pending |
+| 1 — Identity | Codex implements; Claude audits | ✅ Done (efc6108e) |
+| 2 — Ownership | Codex implements; Claude audits | ✅ Done (efc6108e) |
+| 3 — Control-plane | Codex implements; Claude audits | ✅ Done (efc6108e) |
+| 4 — File resilience | Codex implements; Claude audits | ✅ Done — H-14 deferred |
+| 5 — Hygiene | Codex implements; Claude audits | ✅ Done (efc6108e) |
+| 6 — Routing rules | Codex implements; Claude audits | ✅ Done — H-22 deferred |
+| 7 — Watcher wakeup | Both; Codex investigates trigger | 🔄 In progress — engine built, wiring pending |
 | Known limits | Claude documents | Pending |
+
+### Audit notes (efc6108e, 2026-04-27)
+
+**Passed items:**
+- H-01/H-02: `project_identity.py` — `normalize_rendezvous()` is a single shared utility.
+  Worktree detection via `--git-common-dir` is the correct approach; test confirms
+  `festive-boyd-integration` worktree → `mlv-app`. Hash fallback, submodule warning,
+  CWD fallback all present.
+- H-03: `activate_session()` atomically supersedes old session, stores `activated_at`,
+  queues control message to old GUID, returns `active_peer_session` for routing.
+- H-04: `send_to_peer` checks registry; rejects with "superseded" if sender's session
+  is not the current active session for that agent/project. Test confirms.
+- H-05: `consume_inbox.py` detects `SESSION_UPDATE: superseded` and returns
+  `should_halt=True`. Wiring to actually stop the monitor is deployment-side (Phase 7).
+- H-06: `bootstrap_session.py` drains old GUID inbox before switching. Test confirms
+  one drained message in the `drained_previous_messages` field.
+- H-07: `activated_at` stored in session record; newest activation wins on conflict.
+- H-08: Replaceable control messages implemented in `_append_control_message` under
+  the filesystem lock. Test confirms second HANDSHAKE replaces first.
+- H-09: TEARDOWN (`end_session`) sends to peer's private GUID, not rendezvous. Correct.
+- H-10: HANDSHAKE retry with 2s/4s/8s backoff in `bootstrap_session.py`.
+- H-11: All state writes use atomic tmp+replace (`write_json`, `write_jsonl`).
+- H-12: Corrupt `session.json` → renamed to `session.corrupt.<timestamp>.json`,
+  fresh default loaded. No crash.
+- H-13: `read_jsonl` quarantines malformed lines to `.quarantine.jsonl`.
+- H-15: `_prune_session_registry` prunes ended/superseded sessions older than 30 days
+  on every write.
+- H-16: `bridge_status` returns orphan count, oldest orphan, routing rule counts.
+- H-17: 64KB cap enforced in `send_to_peer`. Rejection message is clear.
+- H-18: `bridge_status` returns paused state, hop count, unread per agent, orphan
+  stats, routing rules health, session registry project list.
+- H-19/H-20: `routing_policy.py` loads rules, applies suppressed before learned,
+  exposes `evaluate_message`. `evaluate_routing` MCP tool added to server.
+- H-21: Token matching in `_matches` handles fuzzy patterns.
+
+**Deferred / not yet addressed:**
+- H-14: File monitor recreation on deletion — not addressed. Remains a known gap for
+  Windows `tail -f` behavior. Acceptable for now.
+- H-22: Routing rule prune command — not implemented. Deferred to future polish.
+- H-16 (low-confidence NL feedback) — `_matches` doesn't report confidence level;
+  type stays unset if no `suggested_type` in rule. Acceptable for now.
+- H-23/H-24 (watcher wakeup wiring): Engine built (`bootstrap_session.py`,
+  `consume_inbox.py`). Deployment wiring (who calls these, when) is Phase 7.
+
+**Backward compat note:** Sessions not in the registry (pre-dating registry) are not
+blocked from sending — `_find_session_record` returns None, check is skipped. This is
+correct behavior for backward compatibility; it degrades gracefully.

@@ -44,6 +44,12 @@
   - `.\MLVApp.exe ...`
 - If the system reports missing `Qt6Core.dll` / `Qt6Network.dll` or entry-point lookup failures, rerun:
   - `C:\Qt\6.10.2\mingw_64\bin\windeployqt.exe <path-to-MLVApp.exe> --release --no-translations --no-compiler-runtime`
+- After every release build intended for manual dogfood or Explorer double-click launch, make the release folder self-contained for the MinGW runtime. Copy these DLLs from `C:\Qt\Tools\mingw1310_64\bin` into the directory containing `MLVApp.exe`, then verify they exist there:
+  - `libgcc_s_seh-1.dll`
+  - `libstdc++-6.dll`
+  - `libwinpthread-1.dll`
+  - `libgomp-1.dll`
+  - This is required even when command-line launches work, because Explorer does not inherit the Codex shell `PATH`.
 - For a repeatable launch with less chance of error, use:
   - `powershell -NoProfile -ExecutionPolicy Bypass -File .claude-state\\scripts\\run-mlvapp.ps1 -ExePath <path-to-MLVApp.exe> -Arguments '--help'`
   - if you changed Qt paths, pass `-QtBin ...` and `-MingwBin ...`.
