@@ -114,7 +114,7 @@ def build_private_entry(
             "project": project,
             "session_id": session_id,
             "inbox": str(inbox),
-            "on_message": existing.get("on_message", "notify") if isinstance(existing, dict) else "notify",
+            "on_message": existing.get("on_message", "log") if isinstance(existing, dict) else "log",
             "on_message_command": command,
         },
     )
@@ -137,7 +137,7 @@ def build_rendezvous_entry(
             "project": project,
             "session_id": project,
             "inbox": str(inbox),
-            "on_message": existing.get("on_message", "notify") if isinstance(existing, dict) else "notify",
+            "on_message": existing.get("on_message", "log") if isinstance(existing, dict) else "log",
             "on_message_command": command,
         },
     )
