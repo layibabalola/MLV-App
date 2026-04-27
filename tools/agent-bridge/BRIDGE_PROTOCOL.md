@@ -59,10 +59,13 @@ tables are symmetric by design.
 ## Project Identity and Rendezvous Naming
 
 **Convention over configuration.** The rendezvous channel name is derived automatically
-from the project root folder name. No config file required.
+from the canonical project root. No config file required.
+
+**Canonical root = git repo root**, not the current working directory or worktree path.
 
 ```
-rendezvous = normalize(project_root_folder_name)
+canonical_root = git rev-parse --show-toplevel
+rendezvous     = normalize(basename(canonical_root))
 
 normalize rules (apply in order):
   1. lowercase
@@ -70,18 +73,20 @@ normalize rules (apply in order):
   3. keep only [a-z0-9-_], strip everything else
 ```
 
-Examples:
+This anchors to the real project regardless of where the agent is running. A session
+in a worktree (`.../.claude/worktrees/festive-boyd-integration`) and a session in the
+main checkout (`C:\!Layi Wkspc\MLV-App`) both produce the same rendezvous:
 
-| Folder name | Rendezvous |
-|---|---|
-| `MLV-App` | `mlv-app` |
-| `AdversarialLLM-ClaudeCode` | `adversarialllm-claudecode` |
-| `My Cool Project` | `my-cool-project` |
+| Working directory | git root | Rendezvous |
+|---|---|---|
+| `C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration` | `C:\!Layi Wkspc\MLV-App` | `mlv-app` |
+| `C:\!Layi Wkspc\MLV-App` | `C:\!Layi Wkspc\MLV-App` | `mlv-app` |
+| `C:\!Layi Wkspc\AdversarialLLM-ClaudeCode` | `C:\!Layi Wkspc\AdversarialLLM-ClaudeCode` | `adversarialllm-claudecode` |
 
-Both agents work in the same repo → same folder name → same rendezvous. Zero
-coordination required.
+Both agents work in the same repo → same git root → same rendezvous. Zero
+coordination required even across worktrees.
 
-**Override (optional):** If a `.agent-bridge.json` file exists at the project root
+**Override (optional):** If a `.agent-bridge.json` file exists at the git root
 with a `rendezvous` field, use that value instead. Reserved for cases where the
 folder name is genuinely wrong (legacy name, shared folder, etc.). Most projects
 will never need this file.
@@ -89,6 +94,8 @@ will never need this file.
 ```json
 { "rendezvous": "my-override-name" }
 ```
+
+Precedence: `.agent-bridge.json` override → derived from git root folder name.
 
 **Multi-project:** Each project gets its own rendezvous and its own session state
 slot. You can have multiple projects paired simultaneously without interference.
@@ -133,8 +140,8 @@ supersede without user intervention: starting a new session is the signal.
 Boot sequence on every new session:
 
 ```
-1. Derive rendezvous from project root folder name (normalize rule above)
-   or read .agent-bridge.json override if present
+1. Derive rendezvous: run `git rev-parse --show-toplevel` to get canonical repo root,
+   normalize its basename; or read .agent-bridge.json override at git root if present
 2. Read %USERPROFILE%\.agent-bridge\session.json (for peer GUID hint under this rendezvous only)
 3. Generate a fresh own GUID
 4. Start watching own private inbox file (file monitor, not polling)
