@@ -72,36 +72,59 @@ Both agents poll/watch **both** channels after pairing:
 
 The separation keeps work traffic clean and the control plane always reachable without flooding it.
 
-## Session Resume and Partial Restart Handling
+## Session Boot and Automatic Supersede
 
-On every new agent session, run this boot sequence:
+**Every new agent session always sends a HANDSHAKE.** There is no silent resume.
+
+`session.json` is read on boot solely to find the peer's current GUID so the ACK can
+be routed quickly — it never skips the HANDSHAKE. This is what enables automatic
+supersede without user intervention: starting a new session is the signal.
+
+Boot sequence on every new session:
 
 ```
-1. Read %USERPROFILE%\.agent-bridge\session.json
-2. If it contains own GUID and peer GUID -> resume (skip full handshake)
-3. Start polling own private GUID inbox (active cadence)
-4. Start polling mlvapp (low-frequency, ~5 min)
-5. If session.json is missing or stale -> full HANDSHAKE via mlvapp rendezvous
+1. Read %USERPROFILE%\.agent-bridge\session.json (for peer GUID hint only)
+2. Generate a fresh own GUID
+3. Start watching own private inbox file (file monitor, not polling)
+4. Start watching mlvapp (low-frequency, for control-plane signals)
+5. Send HANDSHAKE to mlvapp with new GUID
+6. On HANDSHAKE_ACK: update session.json, begin normal bridging
 ```
 
-After pairing, **both agents keep polling mlvapp** at low frequency. This is what enables
-partial-restart detection mid-session:
+The peer, on receiving a HANDSHAKE while a prior session is active:
+
+```
+1. Send HANDSHAKE_ACK to new GUID
+2. Send SESSION_UPDATE: superseded to OLD GUID
+3. Update session.json to new GUIDs
+```
+
+The old session, on receiving SESSION_UPDATE: superseded:
+
+```
+1. File monitor fires (new line in inbox file)
+2. Call check_inbox, read the supersede signal
+3. Stop file monitor, stop sending bridge messages
+4. Surface note to user: "Newer session has taken over. Bridge closed here."
+```
+
+This means the user never needs to say anything. Opening a new session is enough.
 
 | Scenario | Behavior |
 |---|---|
-| Only Claude restarts | New Claude sends HANDSHAKE to mlvapp with new GUID. Codex sees it, sends HANDSHAKE_ACK to new GUID. Both update session.json. |
-| Only Codex restarts | New Codex sends HANDSHAKE to mlvapp with new GUID. Claude sees it, sends HANDSHAKE_ACK to new GUID. Both update session.json. |
-| Both restart | Each reads session.json first. If stale or conflicting, newest HANDSHAKE wins. |
-| session.json missing | Full handshake via mlvapp. |
-| User archives session without teardown | New session resumes same GUIDs from session.json. Peer keeps sending to same inbox. Seamless. |
-| User wants fresh start / done for now | Run `end bridge` before archiving (see below). |
+| User opens new session while old one still active | New session HANDSHAKEs → peer supersedes old → old session self-closes bridge. Automatic. |
+| User opens new session after archiving old one | Same — HANDSHAKE goes out, peer ACKs, session.json updated. |
+| Only Claude restarts (crash/reload) | Same boot sequence — HANDSHAKE out, peer ACKs. |
+| Only Codex restarts | New Codex HANDSHAKEs → Claude sees it via mlvapp watch → ACKs → Codex resumes. |
+| Both restart | Each sends HANDSHAKE; newest ACK wins; session.json updated. |
+| session.json missing | HANDSHAKE still goes out; peer GUID hint unavailable but mlvapp rendezvous works. |
+| User says `bridge end` | Explicit teardown — drains inbox, sends TEARDOWN, marks ended. Use only when fully done. |
 
-The watcher daemon watches both the private inbox JSONL and the mlvapp JSONL so that a
-restart HANDSHAKE wakes the running peer immediately rather than waiting for the next
-poll cycle.
+The watcher daemon watches both the private inbox file and the mlvapp file so supersede
+signals and restart HANDSHAKEs wake the running session immediately.
 
-Control messages carried on mlvapp after pairing: `HANDSHAKE`, `HANDSHAKE_ACK`,
-`SESSION_UPDATE`. Normal work messages must not use the rendezvous channel after pairing.
+Control messages carried on mlvapp: `HANDSHAKE`, `HANDSHAKE_ACK`, `SESSION_UPDATE`.
+Normal work messages must never use the rendezvous channel after pairing.
 
 ## Session Lifecycle
 
