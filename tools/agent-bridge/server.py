@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import atexit
 import dataclasses
 import os
@@ -155,13 +156,19 @@ def check_inbox(agent: str, session_id: Optional[str] = None, mark_read: bool = 
 
 
 @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
-def wait_inbox(
+async def wait_inbox(
     agent: str,
     session_ids: Optional[list] = None,
     timeout_seconds: int = 600,
     mark_read: bool = False,
 ) -> dict:
     """Block until a new message arrives for the agent, or timeout elapses.
+
+    Async wrapper that runs the blocking bridge.wait_inbox in a worker thread
+    via asyncio.to_thread().  This is critical: it keeps the MCP server's
+    asyncio event loop responsive so heartbeats and other tool calls aren't
+    starved during the wait.  Without this, an MCP host that polices stdio
+    activity will close the transport when the server appears silent.
 
     Use this for the "blocking-tool-call" wake pattern: the model is suspended
     at the tool boundary while we wait, so idle time costs zero tokens.  Loop:
@@ -177,14 +184,14 @@ def wait_inbox(
     Codex: set tool_timeout_sec under [mcp_servers.agent_bridge] in
     ~/.codex/config.toml.
     """
-    return as_dict(
-        bridge.wait_inbox(
-            agent,
-            session_ids=session_ids,
-            timeout_seconds=timeout_seconds,
-            mark_read=mark_read,
-        )
+    result = await asyncio.to_thread(
+        bridge.wait_inbox,
+        agent,
+        session_ids=session_ids,
+        timeout_seconds=timeout_seconds,
+        mark_read=mark_read,
     )
+    return as_dict(result)
 
 
 @mcp.tool(annotations=READ_ONLY)
