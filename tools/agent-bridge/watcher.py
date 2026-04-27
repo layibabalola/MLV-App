@@ -12,7 +12,10 @@ The config file lists sessions to watch. See watcher-config.example.json.
 """
 import argparse
 import json
+import os
+import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -149,7 +152,7 @@ def run_command_for_session(cmd: str, agent: str, session_id: str, messages: Lis
         return False
 
 
-def watch(config_path: Path) -> None:
+def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> None:
     with config_path.open("r", encoding="utf-8") as f:
         config = json.load(f)
 
@@ -177,7 +180,7 @@ def watch(config_path: Path) -> None:
     last_compact = time.monotonic()
 
     try:
-        while True:
+        while not (stop_event and stop_event.is_set()):
             # Periodic and size-triggered compaction
             if state_dir:
                 now = time.monotonic()
@@ -204,7 +207,7 @@ def watch(config_path: Path) -> None:
                     # Notify
                     if on_message == "toast":
                         notify_windows_toast(agent, session_id, new_msgs)
-                    else:
+                    elif on_message != "log":
                         notify_terminal(agent, session_id, new_msgs)
 
                     # Optional command hook (e.g. wake Codex automation)
@@ -223,8 +226,46 @@ def watch(config_path: Path) -> None:
     except KeyboardInterrupt:
         print("\n[agent-bridge] Watcher stopped.", flush=True)
 
+    print("[agent-bridge] Watcher exiting.", flush=True)
+
+
+def _write_pid(pid_path: Path) -> None:
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def _kill_stale(pid_path: Path) -> None:
+    """Kill any existing watcher process recorded in pid_path."""
+    if not pid_path.exists():
+        return
+    try:
+        old_pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        pid_path.unlink(missing_ok=True)
+        return
+    if old_pid == os.getpid():
+        return
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            PROCESS_TERMINATE = 0x0001
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, old_pid)
+            if handle:
+                ctypes.windll.kernel32.TerminateProcess(handle, 0)
+                ctypes.windll.kernel32.CloseHandle(handle)
+                print(f"[agent-bridge] Killed stale watcher PID {old_pid}.", flush=True)
+        else:
+            import signal as _signal
+            os.kill(old_pid, _signal.SIGTERM)
+            print(f"[agent-bridge] Sent SIGTERM to stale watcher PID {old_pid}.", flush=True)
+    except (ProcessLookupError, OSError):
+        pass  # already gone
+    pid_path.unlink(missing_ok=True)
+
 
 def main() -> None:
+    import signal
+    import atexit
+
     parser = argparse.ArgumentParser(description="agent-bridge inbox watcher daemon")
     parser.add_argument(
         "--config",
@@ -236,7 +277,32 @@ def main() -> None:
     if not config_path.exists():
         print(f"[agent-bridge] Config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
-    watch(config_path)
+
+    # Single-instance enforcement via PID file next to the config
+    pid_path = config_path.parent / "watcher.pid"
+    _kill_stale(pid_path)
+    _write_pid(pid_path)
+
+    def _cleanup() -> None:
+        try:
+            if pid_path.exists() and pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                pid_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    atexit.register(_cleanup)
+
+    _stop = threading.Event()
+
+    def _handle_signal(signum, frame):  # noqa: ANN001
+        print(f"\n[agent-bridge] Watcher received signal {signum}, shutting down.", flush=True)
+        _stop.set()
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    watch(config_path, stop_event=_stop)
+    _cleanup()
 
 
 if __name__ == "__main__":

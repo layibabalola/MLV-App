@@ -4,6 +4,8 @@ import dataclasses
 import hashlib
 import json
 import re
+import shutil
+import sys
 import threading
 import time
 import uuid
@@ -77,13 +79,27 @@ def read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
         return json.load(handle)
 
 
+def _atomic_replace(src: Path, dst: Path) -> None:
+    """Replace dst with src atomically.
+
+    Path.replace() / os.replace() can fail on Windows with ERROR_ACCESS_DENIED
+    when another process holds dst open without FILE_SHARE_DELETE (Python's
+    default open() does not request that sharing mode).  shutil.move() falls
+    back to a copy-then-delete strategy that works regardless.
+    """
+    if sys.platform == "win32":
+        shutil.move(str(src), str(dst))
+    else:
+        src.replace(dst)
+
+
 def write_json(path: Path, value: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    tmp.replace(path)
+    _atomic_replace(tmp, path)
 
 
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -122,7 +138,7 @@ def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True))
             handle.write("\n")
-    tmp.replace(path)
+    _atomic_replace(tmp, path)
 
 
 def strip_markers(message: str) -> Dict[str, Any]:
@@ -444,8 +460,29 @@ class AgentBridge:
         return [
             row
             for row in read_jsonl(self.inbox_path(agent))
-            if row.get("session_id") == session_id and not row.get("read_at")
+            if row.get("session_id") == session_id
+            and not row.get("read_at")
+            and not row.get("superseded_at")
         ]
+
+    def _retire_superseded_inbox(self, agent: str, superseded_session: str) -> int:
+        """Mark all unread inbox entries for a superseded session as retired.
+
+        Sets superseded_at on each matching row so backpressure checks ignore
+        them, while preserving them for audit history.  Returns the count of
+        rows retired.
+        """
+        inbox = self.inbox_path(agent)
+        rows = read_jsonl(inbox)
+        now = utc_now()
+        count = 0
+        for row in rows:
+            if row.get("session_id") == superseded_session and not row.get("read_at") and not row.get("superseded_at"):
+                row["superseded_at"] = now
+                count += 1
+        if count:
+            write_jsonl(inbox, rows)
+        return count
 
     def activate_session(
         self,
@@ -476,6 +513,10 @@ class AgentBridge:
                 old_record["superseded_by"] = session
                 old_record["superseded_at"] = utc_now()
                 old_record["last_seen_at"] = utc_now()
+                # Retire stale unread inbox entries for the superseded session so
+                # they no longer count toward backpressure.  The rows are kept
+                # for audit history (superseded_at is set, not deleted).
+                self._retire_superseded_inbox(owner, previous_local)
                 self._append_control_message(
                     target_agent=owner,
                     session_id=previous_local,

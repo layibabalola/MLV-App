@@ -1,5 +1,8 @@
 import argparse
+import atexit
 import dataclasses
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Optional
@@ -27,6 +30,53 @@ def parse_args() -> argparse.Namespace:
 args = parse_args()
 bridge = AgentBridge(Path(args.state_dir), max_hops=args.max_hops)
 mcp = FastMCP("agent-bridge")
+
+# --- PID hygiene: soft single-instance, graceful shutdown ---
+
+_pid_path = Path(args.state_dir) / "server.pid"
+
+
+def _kill_stale_server(pid_path: Path) -> None:
+    """Kill any stale server recorded in pid_path (best-effort, not strict)."""
+    if not pid_path.exists():
+        return
+    try:
+        old_pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return
+    if old_pid == os.getpid():
+        return
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            PROCESS_TERMINATE = 0x0001
+            h = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, old_pid)
+            if h:
+                ctypes.windll.kernel32.TerminateProcess(h, 0)
+                ctypes.windll.kernel32.CloseHandle(h)
+        else:
+            os.kill(old_pid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _cleanup_pid() -> None:
+    try:
+        if _pid_path.exists() and _pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            _pid_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _handle_sigterm(signum, frame):  # noqa: ANN001
+    _cleanup_pid()
+    sys.exit(0)
+
+
+_kill_stale_server(_pid_path)
+_pid_path.write_text(str(os.getpid()), encoding="utf-8")
+atexit.register(_cleanup_pid)
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 def as_dict(result):
