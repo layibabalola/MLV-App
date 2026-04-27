@@ -204,10 +204,25 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
                 new_msgs = [m for m in unread if m.get("id") not in seen_ids]
 
                 if new_msgs:
+                    # 'log' mode: emit a log line, do NOT run on_message_command
+                    # (the consumer would mark messages read silently — destructive).
+                    # The receiving agent is expected to be polled via Monitor or
+                    # equivalent and call check_inbox itself.
+                    if on_message == "log":
+                        for m in new_msgs:
+                            print(
+                                f"[agent-bridge] {utc_now()} -- new {agent} message id={m.get('id')} session=...{(session_id or '')[-8:]}",
+                                flush=True,
+                            )
+                        for m in new_msgs:
+                            seen_ids.add(m["id"])
+                        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
+                        continue
+
                     # Notify
                     if on_message == "toast":
                         notify_windows_toast(agent, session_id, new_msgs)
-                    elif on_message != "log":
+                    else:
                         notify_terminal(agent, session_id, new_msgs)
 
                     # Optional command hook (e.g. wake Codex automation)
