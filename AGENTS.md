@@ -40,6 +40,11 @@
   - surface any drained previous-session messages in the chat,
   - use the returned active session GUID for bridge traffic,
   - if bridge consumption reports `SESSION_UPDATE: superseded`, stop bridge communication in this session.
+- Bridge consumption safety:
+  - use `wait_inbox(..., mark_read=false)` or `peek_inbox` for discovery, demos, and wake loops,
+  - do not call `check_inbox(..., mark_read=true)` unless you are ready to surface and act on every returned message immediately,
+  - if a test explicitly asks for `wait_inbox`, do not substitute `check_inbox`; follow the requested tool path,
+  - after handling a message seen with `mark_read=false`, mark it read explicitly by id.
 
 ## Runtime Execution Rules (Windows)
 - Before running any `MLVApp.exe` binary directly, always use a Qt runtime path that matches the binary and force it for that launch.
