@@ -27,6 +27,20 @@
 - CI entrypoint for that scaffold is `.github/workflows/tests.yml`.
 - Keep the docs above synchronized with what is implemented now versus still planned next.
 
+## Agent Bridge Startup
+- On session open in this repository, initialize the agent bridge before normal relay work.
+- Use:
+  - `py -3 tools\agent-bridge\bootstrap_session.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent codex --cwd C:\!Layi Wkspc\MLV-App --watcher-config C:\Users\obabalola\.agent-bridge\watcher-config.json`
+- Bootstrap does four things:
+  - derives the canonical project/rendezvous identity,
+  - activates this Codex session and supersedes any older same-agent session,
+  - drains any previous same-agent unread messages once,
+  - sends the bridge `HANDSHAKE` and refreshes `watcher-config.json` with the active private GUID plus the rendezvous/control-plane entry.
+- After bootstrap:
+  - surface any drained previous-session messages in the chat,
+  - use the returned active session GUID for bridge traffic,
+  - if bridge consumption reports `SESSION_UPDATE: superseded`, stop bridge communication in this session.
+
 ## Runtime Execution Rules (Windows)
 - Before running any `MLVApp.exe` binary directly, always use a Qt runtime path that matches the binary and force it for that launch.
 - Required shell pattern before launch:
