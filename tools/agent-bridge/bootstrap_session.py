@@ -1,11 +1,13 @@
 import argparse
 import json
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_bridge import AgentBridge
+from configure_watcher import configure_watcher
 from project_identity import derive_project_identity
 
 
@@ -18,6 +20,7 @@ def bootstrap(
     session_id: Optional[str],
     project: Optional[str],
     handshake_retries: int,
+    watcher_config: Optional[Path] = None,
 ) -> Dict[str, Any]:
     bridge = AgentBridge(state_dir)
     identity = derive_project_identity(cwd)
@@ -59,6 +62,18 @@ def bootstrap(
         if attempt < handshake_retries - 1:
             time.sleep(delays[min(attempt, len(delays) - 1)])
 
+    watcher = None
+    if watcher_config is not None:
+        watcher = configure_watcher(
+            config_path=watcher_config,
+            state_dir=state_dir,
+            agent=agent,
+            project=project_name,
+            cwd=cwd,
+            python_executable=sys.executable,
+            consume_script=Path(__file__).with_name("consume_inbox.py"),
+        )
+
     return {
         "identity": identity,
         "project": project_name,
@@ -83,6 +98,7 @@ def bootstrap(
             "data": handshake.data,
             "attempts": attempt + 1,
         },
+        "watcher": watcher,
     }
 
 
@@ -95,6 +111,7 @@ def main() -> None:
     parser.add_argument("--session-id", help="Optional new session GUID; default generates one")
     parser.add_argument("--project", help="Optional explicit rendezvous/project name")
     parser.add_argument("--handshake-retries", type=int, default=3)
+    parser.add_argument("--watcher-config", help="Optional watcher-config.json to update for this active session")
     args = parser.parse_args()
 
     result = bootstrap(
@@ -105,6 +122,7 @@ def main() -> None:
         session_id=args.session_id,
         project=args.project,
         handshake_retries=args.handshake_retries,
+        watcher_config=Path(args.watcher_config) if args.watcher_config else None,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

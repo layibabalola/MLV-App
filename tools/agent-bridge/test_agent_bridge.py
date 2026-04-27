@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
+from configure_watcher import configure_watcher
+from consume_inbox import consume
 from project_identity import derive_project_identity, normalize_rendezvous
 from routing_policy import evaluate_message
 
@@ -95,6 +97,25 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(result["activation"]["ok"])
         self.assertTrue(result["handshake"]["ok"])
 
+    def test_bootstrap_updates_watcher_config(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        result = bootstrap(
+            state_dir=self.state_dir,
+            agent="codex",
+            cwd=str(ROOT),
+            previous_session_id=None,
+            session_id="codex-new",
+            project=None,
+            handshake_retries=1,
+            watcher_config=config_path,
+        )
+        self.assertIsNotNone(result["watcher"])
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+        session_ids = {entry["session_id"] for entry in config["sessions"]}
+        self.assertIn("codex-new", session_ids)
+        self.assertIn("mlv-app", session_ids)
+
     def test_end_session_marks_registry_and_notifies_peer(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
@@ -105,6 +126,37 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("Session ending", peer_inbox.message)
         status = bridge.session_status("mlv-app")
         self.assertEqual(status.data["sessions"]["claude-live"]["status"], "ended")
+
+    def test_consume_detects_supersede_halt(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.send_control_message(
+            "codex",
+            "claude",
+            "SESSION_UPDATE",
+            "Session superseded by newer claude session",
+            "A newer claude session is now active. Stop bridge communication.",
+            session_id="claude-old",
+        )
+        result = consume(self.state_dir, "claude", "claude-old", mark_read=True)
+        self.assertTrue(result["should_halt"])
+        self.assertEqual(result["halt_reason"], "superseded")
+        self.assertEqual(result["control_events"][0]["type"], "SESSION_UPDATE")
+
+    def test_consume_detects_ending_and_peek_leaves_unread(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.send_control_message(
+            "codex",
+            "claude",
+            "SESSION_UPDATE",
+            "Session ending for project mlv-app",
+            "The claude session has ended. Stop sending bridge traffic there.",
+            session_id="claude-live",
+        )
+        peek = consume(self.state_dir, "claude", "claude-live", mark_read=False)
+        self.assertTrue(peek["should_halt"])
+        self.assertEqual(peek["halt_reason"], "ended")
+        inbox = bridge.peek_inbox("claude", "claude-live")
+        self.assertEqual(inbox.status, "messages")
 
     def test_routing_policy_prefers_suppression(self) -> None:
         rules_path = self.tempdir / "routing-rules.json"
@@ -151,6 +203,51 @@ class AgentBridgeTests(unittest.TestCase):
         status = bridge.bridge_status("mlv-app")
         self.assertEqual(status.data["routing_rules"]["learned"], 1)
         self.assertEqual(status.data["orphaned"]["count"], 1)
+
+    def test_configure_watcher_replaces_same_agent_entries(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        session_registry = self.tempdir / "session.json"
+        session_registry.write_text(
+            json.dumps(
+                {
+                    "projects": {
+                        "mlv-app": {
+                            "active": {"codex": "codex-fresh"},
+                            "sessions": {
+                                "codex-fresh": {"agent": "codex", "status": "active"},
+                                "old-session": {"agent": "codex", "status": "superseded"},
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.write_text(
+            json.dumps(
+                {
+                    "sessions": [
+                        {"agent": "codex", "session_id": "old-session", "inbox": str(self.state_dir / "inbox-codex.jsonl")},
+                        {"agent": "claude", "session_id": "claude-live", "inbox": str(self.state_dir / "inbox-claude.jsonl")},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = configure_watcher(
+            config_path=config_path,
+            state_dir=self.state_dir,
+            agent="codex",
+            project=None,
+            cwd=str(ROOT),
+            python_executable="py",
+            consume_script=Path(__file__).with_name("consume_inbox.py"),
+        )
+        session_ids = {entry["session_id"] for entry in result["sessions"]}
+        self.assertIn("codex-fresh", session_ids)
+        self.assertIn("mlv-app", session_ids)
+        self.assertIn("claude-live", session_ids)
+        self.assertNotIn("old-session", session_ids)
 
 
 if __name__ == "__main__":

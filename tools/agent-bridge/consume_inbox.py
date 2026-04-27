@@ -8,31 +8,53 @@ from agent_bridge import AgentBridge
 
 def consume(state_dir: Path, agent: str, session_id: str, mark_read: bool = True) -> Dict[str, Any]:
     bridge = AgentBridge(state_dir)
-    result = bridge.check_inbox(agent, session_id=session_id, mark_read=mark_read)
+    result = bridge.peek_inbox(agent, session_id=session_id)
     if not result.ok or result.status == "empty":
         return {
             "ok": result.ok,
             "status": result.status,
             "message": result.message,
             "should_halt": False,
+            "control_events": [],
+            "acked_message_ids": [],
             "messages": [],
         }
 
     messages: List[Dict[str, Any]] = result.data.get("messages", [])
     should_halt = False
     halt_reason = None
+    control_events: List[Dict[str, Any]] = []
+    acked_message_ids: List[str] = []
     for msg in messages:
-        if msg.get("marker_variant") == "control" and msg.get("control_type") == "SESSION_UPDATE":
-            body = (msg.get("body") or "").casefold()
-            summary = (msg.get("delivered_message") or "").casefold()
-            if "superseded" in body or "superseded" in summary:
+        if msg.get("marker_variant") != "control":
+            continue
+        control_type = (msg.get("control_type") or "").upper()
+        body = (msg.get("body") or "")
+        summary = (msg.get("delivered_message") or "")
+        event = {
+            "id": msg.get("id"),
+            "type": control_type,
+            "body": body,
+            "summary": summary,
+        }
+        control_events.append(event)
+        lowered = (body + "\n" + summary).casefold()
+        if control_type == "SESSION_UPDATE":
+            if "superseded" in lowered:
                 should_halt = True
                 halt_reason = "superseded"
-                break
-            if "session ending" in body or "teardown" in body:
+            elif "session ending" in lowered or "teardown" in lowered or "has ended" in lowered:
                 should_halt = True
                 halt_reason = "ended"
-                break
+
+    if mark_read:
+        for msg in messages:
+            message_id = msg.get("id")
+            if not message_id:
+                continue
+            mark = bridge.mark_read(agent, message_id, session_id=session_id)
+            if mark.ok:
+                acked_message_ids.append(message_id)
 
     return {
         "ok": result.ok,
@@ -40,6 +62,8 @@ def consume(state_dir: Path, agent: str, session_id: str, mark_read: bool = True
         "message": result.message,
         "should_halt": should_halt,
         "halt_reason": halt_reason,
+        "control_events": control_events,
+        "acked_message_ids": acked_message_ids,
         "messages": messages,
     }
 

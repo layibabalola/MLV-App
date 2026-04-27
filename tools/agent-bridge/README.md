@@ -79,10 +79,19 @@ Use `bootstrap_session.py` to perform the startup handoff sequence:
 - derive project identity,
 - optionally drain the previous same-agent GUID once,
 - call `activate_session`,
-- retry `HANDSHAKE` control delivery up to 3 times.
+- retry `HANDSHAKE` control delivery up to 3 times,
+- optionally update a static `watcher-config.json` so the watcher follows the
+  newly active private GUID plus the rendezvous/control-plane session.
 
 ```powershell
 py -3 tools\agent-bridge\bootstrap_session.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent claude --cwd C:\!Layi Wkspc\MLV-App --previous-session-id 84b53694-2cd6-4b01-a1ce-c6215bd61f9d
+```
+
+To refresh a static watcher config independently of bootstrap, use
+`configure_watcher.py`:
+
+```powershell
+py -3 tools\agent-bridge\configure_watcher.py --config C:\Users\obabalola\.agent-bridge\watcher-config.json --state-dir C:\Users\obabalola\.agent-bridge\state --agent codex --cwd C:\!Layi Wkspc\MLV-App
 ```
 
 Use `send_control_message` for control-plane traffic such as `HANDSHAKE`,

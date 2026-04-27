@@ -124,21 +124,29 @@ def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, A
         notify_terminal(agent, session_id, messages)
 
 
-def run_command_for_message(cmd: str, agent: str, session_id: str, message: Dict[str, Any], inbox_path: Path) -> None:
+def run_command_for_session(cmd: str, agent: str, session_id: str, messages: List[Dict[str, Any]], inbox_path: Path) -> bool:
     import subprocess
 
+    if not messages:
+        return False
+    first = messages[0]
     env = {**__import__("os").environ}
     env["BRIDGE_AGENT"] = agent
     env["BRIDGE_SESSION"] = session_id
-    env["BRIDGE_MESSAGE_ID"] = str(message.get("id", ""))
-    env["BRIDGE_MESSAGE_FROM"] = str(message.get("from", ""))
-    env["BRIDGE_MESSAGE_TYPE"] = str(message.get("control_type", ""))
+    env["BRIDGE_MESSAGE_ID"] = str(first.get("id", ""))
+    env["BRIDGE_MESSAGE_FROM"] = str(first.get("from", ""))
+    env["BRIDGE_MESSAGE_TYPE"] = str(first.get("control_type", ""))
+    env["BRIDGE_MARKER_VARIANT"] = str(first.get("marker_variant", ""))
     env["BRIDGE_INBOX"] = str(inbox_path)
-    env["BRIDGE_BODY"] = str(message.get("body", ""))
+    env["BRIDGE_BODY"] = str(first.get("body", ""))
+    env["BRIDGE_MESSAGE_COUNT"] = str(len(messages))
+    env["BRIDGE_MESSAGE_IDS"] = json.dumps([msg.get("id") for msg in messages])
     try:
-        subprocess.Popen(cmd, shell=True, env=env)
+        proc = subprocess.Popen(cmd, shell=True, env=env)
+        return proc.pid is not None
     except Exception as exc:
         print(f"[agent-bridge] on_message_command failed: {exc}", flush=True)
+        return False
 
 
 def watch(config_path: Path) -> None:
@@ -193,9 +201,6 @@ def watch(config_path: Path) -> None:
                 new_msgs = [m for m in unread if m.get("id") not in seen_ids]
 
                 if new_msgs:
-                    for m in new_msgs:
-                        seen_ids.add(m["id"])
-
                     # Notify
                     if on_message == "toast":
                         notify_windows_toast(agent, session_id, new_msgs)
@@ -203,12 +208,15 @@ def watch(config_path: Path) -> None:
                         notify_terminal(agent, session_id, new_msgs)
 
                     # Optional command hook (e.g. wake Codex automation)
+                    command_ok = False
                     if on_message_command:
-                        for msg in new_msgs:
-                            run_command_for_message(on_message_command, agent, session_id, msg, inbox_path)
+                        command_ok = run_command_for_session(on_message_command, agent, session_id, new_msgs, inbox_path)
 
-                    # Persist seen IDs (keep last 500 to avoid unbounded growth)
-                    save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
+                    if not on_message_command or command_ok:
+                        for m in new_msgs:
+                            seen_ids.add(m["id"])
+                        # Persist seen IDs (keep last 500 to avoid unbounded growth)
+                        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
 
             time.sleep(POLL_INTERVAL_S)
 
