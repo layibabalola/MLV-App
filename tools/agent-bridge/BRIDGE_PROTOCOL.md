@@ -93,6 +93,8 @@ partial-restart detection mid-session:
 | Only Codex restarts | New Codex sends HANDSHAKE to mlvapp with new GUID. Claude sees it, sends HANDSHAKE_ACK to new GUID. Both update session.json. |
 | Both restart | Each reads session.json first. If stale or conflicting, newest HANDSHAKE wins. |
 | session.json missing | Full handshake via mlvapp. |
+| User archives session without teardown | New session resumes same GUIDs from session.json. Peer keeps sending to same inbox. Seamless. |
+| User wants fresh start / done for now | Run `end bridge` before archiving (see below). |
 
 The watcher daemon watches both the private inbox JSONL and the mlvapp JSONL so that a
 restart HANDSHAKE wakes the running peer immediately rather than waiting for the next
@@ -100,6 +102,39 @@ poll cycle.
 
 Control messages carried on mlvapp after pairing: `HANDSHAKE`, `HANDSHAKE_ACK`,
 `SESSION_UPDATE`. Normal work messages must not use the rendezvous channel after pairing.
+
+## Session Teardown
+
+By default, archiving a session and starting a new one is a **seamless resume**: the new
+session reads `session.json`, picks up the same GUIDs, and Codex keeps sending to the
+same inbox. No action needed.
+
+If you want to **fully end the bridge** — different project, done for the day, or a true
+fresh start with new GUIDs — say `end bridge` before archiving.
+
+### `end bridge`
+
+The receiving agent will:
+
+1. Send `SESSION_UPDATE` (TEARDOWN) to the peer via mlvapp.
+2. Peer stops sending to old GUIDs and goes quiet until next HANDSHAKE.
+3. Delete or mark `session.json` as stale.
+4. Stop polling.
+
+Next new session will see no `session.json` and do a full fresh HANDSHAKE.
+
+```text
+end bridge
+end bridge: done for today
+end bridge: switching projects
+```
+
+The key distinction:
+
+| Intent | Action |
+|---|---|
+| Continue tomorrow / resume context | Just archive. New session resumes seamlessly. |
+| True fresh start / stop bridging | Say `end bridge` first, then archive. |
 
 ## Session Pairing
 
