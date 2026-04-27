@@ -348,7 +348,7 @@ Within Phases 1–3, start with **H-01/H-02** (shared identity utility) then **H
 | 4 — File resilience | Codex implements; Claude audits | ✅ Done — H-14 deferred |
 | 5 — Hygiene | Codex implements; Claude audits | ✅ Done (efc6108e) |
 | 6 — Routing rules | Codex implements; Claude audits | ✅ Done — H-22 deferred |
-| 7 — Watcher wakeup | Both; Codex investigates trigger | 🔄 In progress — engine built, wiring pending |
+| 7 — Watcher wakeup | Both; Codex investigates trigger | ✅ Done (1b2ac34b) — Phase 7b (dynamic rebinding) deferred |
 | Known limits | Claude documents | Pending |
 
 ### Audit notes (efc6108e, 2026-04-27)
@@ -393,6 +393,36 @@ Within Phases 1–3, start with **H-01/H-02** (shared identity utility) then **H
   type stays unset if no `suggested_type` in rule. Acceptable for now.
 - H-23/H-24 (watcher wakeup wiring): Engine built (`bootstrap_session.py`,
   `consume_inbox.py`). Deployment wiring (who calls these, when) is Phase 7.
+
+### Audit notes (1b2ac34b, 2026-04-27) — Phase 7 first-pass wiring
+
+**Passed items:**
+- H-23 (Claude side): AGENTS.md already instructs bootstrap-on-open. File Monitor
+  (inbox-claude.jsonl) fires task-notifications. Rendezvous watch target added via
+  `configure_watcher.py`. Claude wiring is behavioral — no startup script needed.
+- H-23 (Codex side): `bootstrap_session.py` now accepts `--watcher-config` flag;
+  calls `configure_watcher()` after activation to repoint watcher at the new active
+  GUID. Per-session consume command wired via `on_message_command` in watcher config.
+- H-24 (disable empty polling): `watcher.py` is the primary wake signal. Seen-IDs
+  only persist when command dispatch succeeds — at-least-once delivery guarantee.
+- `configure_watcher.py` (new): reads session.json, derives active GUID, builds
+  private + rendezvous entries, replaces stale same-agent entries while preserving
+  unrelated-agent entries. Atomic write. Test confirms old-session replaced,
+  claude entry preserved, rendezvous added.
+- `consume_inbox.py` updated: peek-first, detect supersede/end signals, mark-read
+  only after handling. `should_halt` + `halt_reason` returned. --peek flag for
+  read-without-consuming. Tests confirm both supersede and ending halt paths.
+- `watcher.py` updated: per-session (not per-message) dispatch. Richer env vars
+  including `BRIDGE_MESSAGE_COUNT`, `BRIDGE_MESSAGE_IDS`, `BRIDGE_MARKER_VARIANT`.
+  Seen-IDs gated on `command_ok=True` — failed spawn = messages stay visible.
+- All 12 tests pass.
+
+**Accepted known gaps for Phase 7b:**
+- `watcher.py` does not reload config between poll cycles. A `configure_watcher` run
+  mid-session requires watcher restart to take effect. Phase 7b (dynamic session
+  rebinding from session.json) fixes this.
+- `is_managed_entry` in `configure_watcher.py` identifies entries by inbox path;
+  if state_dir is relocated, stale entries are orphaned harmlessly. Acceptable.
 
 **Backward compat note:** Sessions not in the registry (pre-dating registry) are not
 blocked from sending — `_find_session_record` returns None, check is skipped. This is
