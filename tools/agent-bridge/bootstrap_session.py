@@ -77,13 +77,12 @@ def bootstrap(
     new_session = session_id or str(uuid.uuid4())
     peer_agent = "claude" if agent == "codex" else "codex"
 
-    drained: List[Dict[str, Any]] = []
-    if previous_session_id and previous_session_id != new_session:
-        drained_result = bridge.check_inbox(agent, session_id=previous_session_id, mark_read=True)
-        if drained_result.ok and drained_result.status == "messages":
-            drained = drained_result.data.get("messages", [])
-
+    # activate_session auto-detects the previous same-agent session from the
+    # registry, drains its unread messages BEFORE stamping superseded_at, and
+    # returns them in data["drained_messages"].  This is atomic under the bridge
+    # lock so there is no TOCTOU window between reading the registry and retiring.
     activation = bridge.activate_session(agent=agent, session_id=new_session, project=project_name)
+    drained: List[Dict[str, Any]] = activation.data.get("drained_messages", []) if activation.ok else []
     peer_session = activation.data.get("active_peer_session") if activation.ok else None
 
     handshake = None

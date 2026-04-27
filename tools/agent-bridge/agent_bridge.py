@@ -491,6 +491,27 @@ class AgentBridge:
             write_jsonl(inbox, rows)
         return count
 
+    def _drain_and_retire_superseded_inbox(self, agent: str, superseded_session: str) -> List[Dict[str, Any]]:
+        """Collect, mark read, and retire all unread inbox entries for a superseded session.
+
+        Captures message bodies BEFORE stamping so callers can surface them to
+        the user.  Sets both read_at and superseded_at atomically in one write,
+        so a subsequent check_inbox or _unread_for will not re-surface them.
+        Returns the list of drained message dicts (snapshot before stamps).
+        """
+        inbox = self.inbox_path(agent)
+        rows = read_jsonl(inbox)
+        now = utc_now()
+        drained: List[Dict[str, Any]] = []
+        for row in rows:
+            if row.get("session_id") == superseded_session and not row.get("read_at") and not row.get("superseded_at"):
+                drained.append(dict(row))  # snapshot before stamping
+                row["read_at"] = now
+                row["superseded_at"] = now
+        if drained:
+            write_jsonl(inbox, rows)
+        return drained
+
     def activate_session(
         self,
         agent: str,
@@ -514,16 +535,19 @@ class AgentBridge:
 
             project_entry["updated_at"] = utc_now()
 
+            # Drain unread messages from the previous same-agent session BEFORE
+            # stamping superseded_at.  _drain_and_retire_superseded_inbox captures
+            # the bodies first, then sets both read_at and superseded_at in one
+            # write so they never resurface via check_inbox.  The drained list is
+            # returned in the BridgeResult so bootstrap can surface them to the user.
+            drained_messages: List[Dict[str, Any]] = []
             if previous_local and previous_local != session:
+                drained_messages = self._drain_and_retire_superseded_inbox(owner, previous_local)
                 old_record = self._session_record(project_entry, previous_local, owner)
                 old_record["status"] = "superseded"
                 old_record["superseded_by"] = session
                 old_record["superseded_at"] = utc_now()
                 old_record["last_seen_at"] = utc_now()
-                # Retire stale unread inbox entries for the superseded session so
-                # they no longer count toward backpressure.  The rows are kept
-                # for audit history (superseded_at is set, not deleted).
-                self._retire_superseded_inbox(owner, previous_local)
                 self._append_control_message(
                     target_agent=owner,
                     session_id=previous_local,
@@ -593,6 +617,7 @@ class AgentBridge:
                     "previous_local_session": previous_local,
                     "active_peer_session": previous_peer,
                     "registry_path": str(self.session_registry_path),
+                    "drained_messages": drained_messages,
                 },
             )
 
