@@ -113,17 +113,39 @@ def notify_terminal(agent: str, session_id: str, messages: List[Dict[str, Any]])
 
 
 def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, Any]]) -> None:
+    """Surface a Windows balloon tip via PowerShell.
+
+    Uses System.Windows.Forms.NotifyIcon — built into every Windows install,
+    no third-party dependency.  Stays silent on non-Windows or PowerShell
+    failure (falls back to terminal print).
+    """
+    if sys.platform != "win32":
+        notify_terminal(agent, session_id, messages)
+        return
+    body = messages[0].get("body", "")[:120].replace("\n", " ").replace("\r", " ")
+    title = f"agent-bridge: new message for {agent}"
+    # Single-quote escape for PowerShell single-quoted string literals
+    safe_title = title.replace("'", "''")
+    safe_body = body.replace("'", "''")
+    ps_script = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$b = New-Object System.Windows.Forms.NotifyIcon; "
+        "$b.Icon = [System.Drawing.SystemIcons]::Information; "
+        f"$b.BalloonTipTitle = '{safe_title}'; "
+        f"$b.BalloonTipText = '{safe_body}'; "
+        "$b.Visible = $true; "
+        "$b.ShowBalloonTip(5000); "
+        "Start-Sleep -Seconds 6; "
+        "$b.Dispose()"
+    )
     try:
-        from win10toast import ToastNotifier  # type: ignore
-        toaster = ToastNotifier()
-        summary = messages[0].get("body", "")[:60].replace("\n", " ")
-        toaster.show_toast(
-            f"agent-bridge: message for {agent}",
-            summary,
-            duration=5,
-            threaded=True,
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except ImportError:
+    except OSError:
         notify_terminal(agent, session_id, messages)
 
 
