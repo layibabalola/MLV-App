@@ -1,6 +1,6 @@
 # Agent-Bridge Communication Protocol
 
-Version: 1.4
+Version: 1.5
 Transport: agent-bridge MCP server
 Applies to: any two agents sharing an agent-bridge instance
 
@@ -35,6 +35,26 @@ without waiting for the user to relay manually.
 |---|---|---|
 | Codex | Code, tests, git, builds, execution | Implementation decisions, local refactors, test retries |
 | Claude | User conversation, memory, review/audit | Scope reasoning, memory updates, question answering |
+
+## Runtime Wake Model
+
+The bridge inbox is durable and symmetric: either agent can send to either peer.
+
+Message consumption is not necessarily symmetric. Each client has its own wake
+model:
+
+- **Active polling**: a scheduled chat/task periodically calls `peek_inbox`.
+- **External watcher**: a local daemon watches inbox files and triggers a consumer.
+- **Push-capable client**: a client may expose an API/event hook to wake on message.
+- **Manual fallback**: the user can explicitly ask an agent to check its inbox.
+
+Protocol rules must not assume a specific wake model. They only define when a
+message should be sent and how it should be shaped.
+
+Workload distribution (who sends more) is project-specific and not fixed by
+agent identity. A project where Claude does the implementation and Codex does
+review would invert the volume pattern from MLV-App. The routing rules and type
+tables are symmetric by design.
 
 ## Session Pairing
 
@@ -141,7 +161,7 @@ Either direction:
 
 ## Bridge Feedback
 
-The user can teach both agents what to send or stop sending. Two commands:
+The user can teach both agents what to send or stop sending. Three commands:
 
 ### `bridge learn`
 
@@ -158,13 +178,14 @@ The receiving agent will:
 3. Send `USER_PREFERENCE` to the peer so both sides apply it.
 4. Update `BRIDGE_PROTOCOL.md` trigger rules if the pattern is generally useful.
 
-### `bridge suppress`
+### `bridge suppress` / `stop bridging this`
 
 Use this after an auto-send that was noisy or unnecessary.
 
 ```text
 bridge suppress
 bridge suppress: stop sending routine ACKs
+stop bridging this
 ```
 
 The receiving agent will:
