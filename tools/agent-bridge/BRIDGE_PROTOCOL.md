@@ -204,6 +204,112 @@ This ensures a clean handoff even if the user forgets to say `bridge end` first.
 | True fresh start / stop bridging | `bridge end`, then archive. |
 | Check what's active | `bridge status` |
 
+## Self-Healing
+
+Self-healing here means: detect when a session is probably stale and recover safely —
+not a distributed-systems heartbeat, just enough to keep the bridge from getting stuck.
+
+### Session states
+
+Sessions carry a lifecycle state in `session.json`:
+
+```json
+{
+  "sessions": {
+    "<active-guid>": {
+      "agent": "claude",
+      "project": "mlvapp",
+      "status": "active",
+      "last_read_at": "2026-04-26T22:00:00Z"
+    },
+    "<old-guid>": {
+      "agent": "claude",
+      "project": "mlvapp",
+      "status": "superseded",
+      "superseded_by": "<active-guid>",
+      "superseded_at": "2026-04-26T21:00:00Z"
+    }
+  }
+}
+```
+
+Valid statuses:
+
+```text
+active       -> currently paired and polling
+paused       -> polling stopped, state retained for resume
+suspect      -> no read activity beyond timeout threshold; may be dead
+superseded   -> replaced by a newer session for the same agent/project
+ended        -> explicitly closed via bridge end
+```
+
+### Healing rules
+
+**Rule 1 — Heartbeat timeout (`active` → `suspect`)**
+
+If a session has no read activity for a configurable threshold (default: 24 hours),
+mark it `suspect`. Do not stop delivery or delete anything; just flag it.
+Threshold is a heuristic — burst workflows with long gaps may need a longer window.
+
+**Rule 2 — New handshake for same agent/project (`old` → `superseded`)**
+
+When a new HANDSHAKE arrives on mlvapp for the same agent/project role:
+- New session → `active`
+- Old session → `superseded` (record `superseded_by` and timestamp)
+- Peer sends `SESSION_UPDATE: superseded` to old GUID so any running old session
+  knows to stop
+
+**Rule 3 — Unread messages on a non-active session**
+
+```text
+Unread + active session    -> keep; deliver normally
+Unread + suspect session   -> keep; surface as warning on bridge status
+Unread + superseded/ended  -> rehome or quarantine (see below)
+```
+
+Rehome: if there is exactly one active successor session for the same agent/project,
+offer or perform rehome automatically. If ambiguous (multiple active sessions), do not
+auto-rehome — quarantine instead.
+
+**Rule 4 — `bridge end` drains before shutdown**
+
+Before marking a session `ended` and sending TEARDOWN:
+1. Read the inbox once and surface any unread messages to the user.
+2. User acknowledges or they are quarantined.
+3. Then send TEARDOWN and mark `ended`.
+
+No unread message is silently dropped on teardown.
+
+### Orphan quarantine
+
+Unread messages on dead/superseded sessions that cannot be rehomed move to:
+
+```text
+%USERPROFILE%\.agent-bridge\state\orphaned-claude.jsonl
+%USERPROFILE%\.agent-bridge\state\orphaned-codex.jsonl
+```
+
+Each entry carries metadata:
+
+```json
+{
+  "original_session_id": "...",
+  "orphaned_at": "...",
+  "reason": "session superseded",
+  "message": { ... }
+}
+```
+
+Quarantined messages are retained for 30 days (configurable), then pruned — never
+silently deleted while within the window. `bridge status` reports quarantine count.
+
+### What is never done
+
+- Silent deletion of unread messages.
+- Auto-rehome when there is ambiguity about the correct successor.
+- Marking a session `suspect` or `superseded` during active polling (only on timeout
+  or explicit new HANDSHAKE).
+
 ## Session Pairing
 
 Both agents run this flow on every new session.
