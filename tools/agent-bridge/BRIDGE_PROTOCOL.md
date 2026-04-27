@@ -103,38 +103,106 @@ poll cycle.
 Control messages carried on mlvapp after pairing: `HANDSHAKE`, `HANDSHAKE_ACK`,
 `SESSION_UPDATE`. Normal work messages must not use the rendezvous channel after pairing.
 
-## Session Teardown
+## Session Lifecycle
 
-By default, archiving a session and starting a new one is a **seamless resume**: the new
-session reads `session.json`, picks up the same GUIDs, and Codex keeps sending to the
-same inbox. No action needed.
+**Invariant: only one active session per agent/project should own a given private GUID.**
 
-If you want to **fully end the bridge** — different project, done for the day, or a true
-fresh start with new GUIDs — say `end bridge` before archiving.
+If a new session pairs, it supersedes any prior session. The old session must either
+be explicitly ended or receive a `SESSION_UPDATE: superseded` signal so it stops
+sending and consuming.
 
-### `end bridge`
+Without a stop signal you can get ghost sessions — old chats still polling the same
+inbox, still sending on stale GUIDs, racing with the new session.
+
+### Lifecycle commands
+
+```text
+bridge status   -> report current session GUIDs, active/paused/ended state
+bridge pause    -> stop polling temporarily; keep session state for resume
+bridge resume   -> resume polling current GUID; check inbox once immediately
+bridge end      -> permanently retire this session; notify peer to stop sending here
+```
+
+### `bridge status`
+
+Reports: current Claude GUID, Codex GUID, pairing state (active / paused / ended),
+last message time, and whether session.json is current.
+
+### `bridge pause`
+
+Use when stepping away temporarily but want to resume the same session later.
 
 The receiving agent will:
 
-1. Send `SESSION_UPDATE` (TEARDOWN) to the peer via mlvapp.
-2. Peer stops sending to old GUIDs and goes quiet until next HANDSHAKE.
-3. Delete or mark `session.json` as stale.
-4. Stop polling.
+1. Stop the polling loop.
+2. Stop sending new bridge messages.
+3. Mark `session.json` state as `paused`.
+4. Keep GUIDs intact — inbox messages accumulate for later.
 
-Next new session will see no `session.json` and do a full fresh HANDSHAKE.
+### `bridge resume`
+
+Resumes a paused session.
+
+The receiving agent will:
+
+1. Reload GUIDs from `session.json`.
+2. Mark state as `active`.
+3. Check inbox once immediately, then resume normal polling cadence.
+
+### `bridge end` / `end bridge`
+
+Use before archiving when you want a true fresh start — different project, done for
+the day, or explicitly retiring old GUIDs.
+
+The receiving agent will:
+
+1. Stop the polling loop.
+2. Send `SESSION_UPDATE` (TEARDOWN) to the peer's private GUID:
+   ```text
+   TYPE: SESSION_UPDATE
+   STATUS: info
+   SUMMARY: Session ending; stop sending to this GUID.
+   ACTION_REQUESTED: none
+   ```
+3. Mark `session.json` as ended/stale.
+4. Stop sending bridge messages.
+
+The peer, on receiving the TEARDOWN:
+
+1. Stops sending to the old GUID.
+2. Goes quiet until a new HANDSHAKE arrives.
+3. Updates `session.json` to reflect the ended state.
+
+Next new session sees stale `session.json` and does a full fresh HANDSHAKE.
 
 ```text
+bridge end
 end bridge
 end bridge: done for today
 end bridge: switching projects
 ```
 
-The key distinction:
+### Supersede on new pairing
+
+When a new session sends `HANDSHAKE` to mlvapp while an old session is still active,
+the running peer should treat this as an implicit supersede of the old pairing:
+
+1. Peer sends `HANDSHAKE_ACK` to the new GUID.
+2. Peer sends `SESSION_UPDATE: superseded` to the **old** GUID so the old session
+   knows to stop polling.
+3. Both update `session.json` to the new GUIDs.
+
+This ensures a clean handoff even if the user forgets to say `bridge end` first.
+
+### Summary
 
 | Intent | Action |
 |---|---|
 | Continue tomorrow / resume context | Just archive. New session resumes seamlessly. |
-| True fresh start / stop bridging | Say `end bridge` first, then archive. |
+| Step away briefly | `bridge pause` |
+| Come back after pause | `bridge resume` |
+| True fresh start / stop bridging | `bridge end`, then archive. |
+| Check what's active | `bridge status` |
 
 ## Session Pairing
 
