@@ -56,6 +56,51 @@ agent identity. A project where Claude does the implementation and Codex does
 review would invert the volume pattern from MLV-App. The routing rules and type
 tables are symmetric by design.
 
+## Two-Channel Model
+
+The bridge uses two inbox channels with different roles:
+
+```text
+Private GUID inbox  = normal work traffic (IMPLEMENTATION_SUMMARY, PHASE_DONE, AUDIT_RESULT, etc.)
+mlvapp rendezvous   = low-frequency control-plane traffic only (HANDSHAKE, HANDSHAKE_ACK, SESSION_UPDATE)
+```
+
+Both agents poll/watch **both** channels after pairing:
+
+- **Private inbox**: active cadence (60s polling or watcher daemon).
+- **mlvapp**: low-frequency cadence (~5 min polling or watcher daemon).
+
+The separation keeps work traffic clean and the control plane always reachable without flooding it.
+
+## Session Resume and Partial Restart Handling
+
+On every new agent session, run this boot sequence:
+
+```
+1. Read %USERPROFILE%\.agent-bridge\session.json
+2. If it contains own GUID and peer GUID -> resume (skip full handshake)
+3. Start polling own private GUID inbox (active cadence)
+4. Start polling mlvapp (low-frequency, ~5 min)
+5. If session.json is missing or stale -> full HANDSHAKE via mlvapp rendezvous
+```
+
+After pairing, **both agents keep polling mlvapp** at low frequency. This is what enables
+partial-restart detection mid-session:
+
+| Scenario | Behavior |
+|---|---|
+| Only Claude restarts | New Claude sends HANDSHAKE to mlvapp with new GUID. Codex sees it, sends HANDSHAKE_ACK to new GUID. Both update session.json. |
+| Only Codex restarts | New Codex sends HANDSHAKE to mlvapp with new GUID. Claude sees it, sends HANDSHAKE_ACK to new GUID. Both update session.json. |
+| Both restart | Each reads session.json first. If stale or conflicting, newest HANDSHAKE wins. |
+| session.json missing | Full handshake via mlvapp. |
+
+The watcher daemon watches both the private inbox JSONL and the mlvapp JSONL so that a
+restart HANDSHAKE wakes the running peer immediately rather than waiting for the next
+poll cycle.
+
+Control messages carried on mlvapp after pairing: `HANDSHAKE`, `HANDSHAKE_ACK`,
+`SESSION_UPDATE`. Normal work messages must not use the rendezvous channel after pairing.
+
 ## Session Pairing
 
 Both agents run this flow on every new session.
@@ -72,8 +117,7 @@ Responding agent (Codex by convention):
 2. Generate a GUID as its private inbox for this session.
 3. Send `HANDSHAKE_ACK` to the initiator's GUID, including its own GUID.
 4. Switch all outbound to the initiator's GUID.
-
-After pairing, the rendezvous channel is silent until a new session starts.
+5. Continue polling mlvapp at low frequency for future restart signals.
 
 ## Message Envelope
 
