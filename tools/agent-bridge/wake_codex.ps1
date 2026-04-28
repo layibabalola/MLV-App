@@ -26,7 +26,7 @@ param(
     [string]$Message              = "check bridge inbox",
     [string]$ThreadId             = "",
     [int]   $IdleThresholdSeconds = 5,
-    [int]   $MaxWaitSeconds       = 600,
+    [int]   $MaxWaitSeconds       = 60,
     [string]$LockFile             = "$env:USERPROFILE\.agent-bridge\wake_codex.lock",
     [switch]$DryRun,
     [switch]$FindOnly,
@@ -169,8 +169,10 @@ try {
     }
 
     if (-not $achieved) {
-        Write-Host ("[wake_codex] Max wait of " + $MaxWaitSeconds + "s expired without idle. Giving up.")
-        exit 1
+        Write-Host ("[wake_codex] Max wait of " + $MaxWaitSeconds + "s expired without idle. Forcibly injecting anyway — bridge delivery wins over user typing.")
+        # Fall through: inject regardless. User's in-progress draft (if any) will
+        # be wiped by the Ctrl+A+Delete in stage 5, and any keystrokes they're
+        # mid-typing may interleave with our SendKeys briefly.
     }
 
     # --- Stage 4: activate Codex (no foreground-skip — fire regardless) ---
