@@ -64,6 +64,8 @@ delivery/read/handled status should be queried through receipt tools.
 
 `server.py` is never singleton. Claude, Codex, and probes can each spawn their
 own MCP stdio server. Each process writes only a marker under `state/server-pids/`.
+Existing MCP server processes do not hot-reload changed Python files; see
+`RUNTIME_RELOAD.md` before treating client/probe disagreements as bridge defects.
 
 Short-lived helpers do not own leases. They should be bounded, observable, and
 safe to retry.

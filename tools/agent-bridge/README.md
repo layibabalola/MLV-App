@@ -7,6 +7,7 @@ Canonical docs:
 - `ARCHITECTURE.md` - current component model, protocol planes, receipts, process ownership, and recovery flow.
 - `STATE_LAYOUT.md` - durable files under `%USERPROFILE%\.agent-bridge`.
 - `SETTINGS.md` - supported `%USERPROFILE%\.agent-bridge\settings.json` runtime tuning surface.
+- `RUNTIME_RELOAD.md` - when MCP clients must be restarted to pick up bridge code changes.
 - `DEAD_CODE_DECISIONS.md` - explicit keep/wire/archive calls for ambiguous bridge helpers.
 - `REFACTOR_PLAN.md` - approved v1.1 roadmap and acceptance criteria.
 

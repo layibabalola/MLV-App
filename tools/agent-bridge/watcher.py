@@ -191,6 +191,11 @@ def _xml_esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+def _safe_toast_tag(value: Any) -> str:
+    tag = "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_", ".", ":"})[:64]
+    return tag or str(uuid.uuid4())
+
+
 def notify_windows_toast(
     agent: str,
     session_id: str,
@@ -232,7 +237,7 @@ def notify_windows_toast(
     sender_emoji = AGENT_EMOJI.get(from_agent, "👾")
     sound_uri = AGENT_SOUND.get(agent, "Notification.Default")
     toast_group = f"agent-bridge-{agent}"
-    toast_tag = str(msg.get("id") or uuid.uuid4()).replace("'", "")[:64]
+    toast_tag = _safe_toast_tag(msg.get("id") or uuid.uuid4())
 
     # Title: sender → recipient with per-agent robots
     title = f"{sender_emoji} {from_agent.capitalize()} → {recipient_emoji} {agent.capitalize()}"

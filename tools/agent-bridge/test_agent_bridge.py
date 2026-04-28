@@ -404,6 +404,19 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("$toastMaxInTray = 3", script)
         self.assertIn("$toast.Group = 'agent-bridge-codex'", script)
 
+    def test_windows_toast_tag_sanitizes_ps_line_breaks(self) -> None:
+        with patch("watcher.subprocess.Popen") as popen:
+            watcher.notify_windows_toast(
+                "codex",
+                "mlv-app",
+                [{"id": "bad'\r\nWrite-Host pwned", "body": "TYPE: SMOKE\nSUMMARY: toast tag"}],
+            )
+        args = popen.call_args.args[0]
+        encoded = args[args.index("-EncodedCommand") + 1]
+        script = base64.b64decode(encoded).decode("utf-16-le")
+        tag_line = next(line for line in script.splitlines() if line.startswith("$toast.Tag = "))
+        self.assertEqual(tag_line, "$toast.Tag = 'badWrite-Hostpwned'")
+
     def test_clear_bucket_and_reset_bucket_are_explicit_aliases(self) -> None:
         bridge = AgentBridge(self.state_dir)
         result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] bucket hello", session_id="mlv-app")
