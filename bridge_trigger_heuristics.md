@@ -52,10 +52,18 @@ Bridge-watch mode flag:
 
 Observe first, consume second.
 
+For bridge hygiene, distinguish `read` from `actioned`:
+
+- `read` means Codex has already surfaced the message body in this chat turn by `check_inbox`, `wait_inbox`, `peek_inbox`, or equivalent tooling.
+- `actioned` means Codex has completed the requested follow-up work.
+- These are not the same state. Do not leave a surfaced message unread in the bridge just because the follow-up work is still pending.
+
 - Use `wait_inbox(..., mark_read=false)` or `peek_inbox` for discovery, demos, and wake loops.
 - Do not call `check_inbox(..., mark_read=true)` unless you are ready to surface and act on every returned message immediately.
 - If a test explicitly asks for `wait_inbox`, do not substitute `check_inbox`.
 - After handling a message seen with `mark_read=false`, mark it read explicitly by id.
+- If a non-destructive read already surfaced the message body to Codex, mark it read in the bridge immediately, even if the requested action will be deferred to a later turn.
+- When deferring the actual work, say so explicitly as `read but not actioned yet` rather than implying the message remains unread.
 
 Inbox hygiene for bridge-related work:
 
@@ -76,6 +84,7 @@ Inbox hygiene for bridge-related work:
 - A hook may evolve to show non-destructive receipt/status summaries only after the receipt tools exist; it must never silently consume bridge messages.
 - If Claude or the user reports that Codex's bucket is blocking sends, immediately check Codex's private GUID bucket and project bucket non-destructively.
 - If unread messages are present, surface them, handle them, and mark them read by id before doing more bridge work.
+- If unread messages are present and the work cannot be completed in the same turn, mark them read anyway once surfaced, then track the remaining task separately in the conversation.
 - If both buckets are already empty, send a `BACKPRESSURE_STATUS` or `ROUTE_REPAIR` update to Claude with the checked buckets and ask them to retry from fresh state.
 
 ## Routing Heuristics

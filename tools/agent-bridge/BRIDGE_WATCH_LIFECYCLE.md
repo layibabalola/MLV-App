@@ -98,12 +98,22 @@ live turn explicitly re-enters `wait_inbox(...)`.
 
 Observe first, consume second.
 
+State meaning:
+
+- `read`: the bridge message body has already been surfaced to Codex in this chat turn
+- `actioned`: the requested follow-up work has been completed
+
+Do not conflate these states. A message can be `read` and still pending action.
+
 - use `wait_inbox(..., mark_read=false)` or `peek_inbox` for discovery and wake
   loops
 - do not use `check_inbox(..., mark_read=true)` unless ready to surface and act
   on every returned message immediately
 - if a test explicitly asks for `wait_inbox`, do not substitute `check_inbox`
 - mark messages read explicitly by id after handling
+- once a non-destructive read has surfaced a message body to Codex, mark it read
+  in the bridge immediately even if the requested action is deferred to a later
+  turn
 
 ## Recovery Model
 
