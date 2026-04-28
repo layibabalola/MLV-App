@@ -109,6 +109,10 @@ High-value auto-send categories:
   - confirmation that a restart fixed a previously broken bridge path
 - `AUDIT_RESULT`
   - verification of another agent's patch, diagnosis, or test result
+- `READINESS_ASSESSMENT`
+  - a score, acceptance judgement, hardening/readiness rating, or 10/10 feasibility analysis that changes what work is considered blocking versus polish
+- `RISK_DELTA`
+  - a newly identified live defect, production-risk cap, or test-coverage gap that materially changes the hardening score or next-step priority
 - `ACTION_REQUEST`
   - a concrete next step the other agent needs to do now
 - `PHASE_DONE`
@@ -119,6 +123,9 @@ Bridge spec discipline:
 - When drafting or materially changing a bridge design spec, protocol spec, lifecycle doc, or trigger heuristic, send `SPEC_REVIEW_REQUEST` to Claude automatically.
 - When beginning implementation of a shared bridge design, send `IMPLEMENTATION_START` before editing.
 - After committing shared bridge behavior, send `IMPLEMENTATION_UPDATE` with the commit hash, verification, and known follow-up gaps.
+- When giving or revising a bridge hardening score, smoke-test confidence score, roadmap-readiness judgement, or "can this reach 10/10 yet?" answer, send `READINESS_ASSESSMENT` to Claude automatically.
+- If the assessment names a live defect or a test gap that caps the score, also include `RISK_DELTA` details and whether the item is required for resilience or merely roadmap/config polish.
+- Distinguish current operational confidence from full roadmap completeness; do not collapse "smoke coverage can improve" into "all roadmap phases must be complete" without stating which missing items actually block hardening.
 - When changing this heuristics file, send `HEURISTIC_SYNC` to Claude and ask whether the same rule is useful on Claude's side.
 - If Codex realizes after the fact that a message should have been bridged, send the missed bridge message immediately, then update this heuristics file in the same turn so the miss becomes an explicit future trigger.
 
