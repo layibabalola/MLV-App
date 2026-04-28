@@ -206,11 +206,13 @@ def configure_watcher(
         if existing_private is None:
             existing_private = raw_entry
 
-    # Claude reads its own inbox via the in-process Monitor; the watcher must not
-    # consume messages on Claude's behalf (race: consume_inbox marks read before
-    # Claude's check_inbox runs). Only supply on_message_command for agents without
-    # an in-process monitor (currently: codex).
-    needs_consume_command = agent != "claude"
+    # The watcher's job is notification only (toast or terminal).
+    # Consumption — marking messages read — is each agent's own responsibility:
+    #   Claude: persistent Monitor → check_inbox → mark_read by id
+    #   Codex:  wait_inbox loop (returns messages and marks them read)
+    # Running consume_inbox.py from the watcher races with both mechanisms and
+    # silently eats messages before the agent can see them.
+    # on_message_command is therefore never generated.
 
     if active_session_id:
         managed_entries.append(
@@ -220,13 +222,7 @@ def configure_watcher(
                 session_id=str(active_session_id),
                 project=project_name,
                 inbox=inbox,
-                command=build_command(
-                    python_executable,
-                    consume_script,
-                    state_dir,
-                    agent,
-                    str(active_session_id),
-                ) if needs_consume_command else None,
+                command=None,
             )
         )
 
@@ -236,13 +232,7 @@ def configure_watcher(
             agent=agent,
             project=project_name,
             inbox=inbox,
-            command=build_command(
-                python_executable,
-                consume_script,
-                state_dir,
-                agent,
-                project_name,
-            ) if needs_consume_command else None,
+            command=None,
         )
     )
 
