@@ -600,6 +600,38 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(read_jsonl(inbox_path), [{"id": "ok"}])
         self.assertTrue(inbox_path.with_suffix(".quarantine.jsonl").exists())
 
+    def test_recover_state_scan_historical_reports_stale_root(self) -> None:
+        old_root = self.tempdir / "old-root"
+        new_root = self.tempdir / "new-root"
+        (old_root / "state").mkdir(parents=True)
+        (new_root / "state").mkdir(parents=True)
+        ensure_bridge_root_manifest(resolve_bridge_paths(bridge_root=new_root), reason="unit-test")
+        (old_root / "MOVED_TO.json").write_text(json.dumps({"active_root": str(new_root)}), encoding="utf-8")
+
+        report = recover_state(old_root / "state", scan_historical=True)
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["historical"]["redirect"]["target"], str(new_root))
+        self.assertEqual(report["historical"]["issues"][0]["code"], "root_is_stale")
+
+    def test_recover_state_scan_historical_reports_missing_source_redirect(self) -> None:
+        old_root = self.tempdir / "old-root"
+        new_root = self.tempdir / "new-root"
+        old_root.mkdir()
+        (new_root / "state").mkdir(parents=True)
+        paths = resolve_bridge_paths(bridge_root=new_root)
+        manifest = ensure_bridge_root_manifest(paths, reason="unit-test")
+        manifest["migration_history"].append(
+            {"source": str(old_root), "target": str(new_root), "tool": "unit-test", "reason": "partial"}
+        )
+        write_json(paths.manifest, manifest)
+
+        report = recover_state(new_root / "state", scan_historical=True)
+
+        self.assertFalse(report["ok"])
+        codes = [issue["code"] for issue in report["historical"]["issues"]]
+        self.assertIn("source_missing_moved_to", codes)
+
     def test_compact_reaps_only_stale_server_pid_markers(self) -> None:
         server_dir = self.state_dir / "server-pids"
         server_dir.mkdir(parents=True)

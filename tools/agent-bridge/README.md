@@ -213,6 +213,17 @@ py -3 tools\agent-bridge\recover_state.py --state-dir %USERPROFILE%\.agent-bridg
 Repair mode creates `state\backups\recovery-<timestamp>\` before replacing
 corrupt JSON object files or quarantining invalid JSONL rows.
 
+When bridge wakeups route to the wrong root, repeated inbox nudges are ignored,
+or a relocation may have partially completed, add `--scan-historical`:
+
+```powershell
+py -3 tools\agent-bridge\recover_state.py --state-dir %USERPROFILE%\.agent-bridge\state --scan-historical
+```
+
+Historical scan mode remains read-only. It reports stale roots with
+`MOVED_TO.json`, unreadable or mismatched active-root manifests, and migration
+history entries whose source root does not redirect to the active root.
+
 Use `compact.py` for read-row retention, audit rotation, and stale
 `server-pids/` marker cleanup:
 

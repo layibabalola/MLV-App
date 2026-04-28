@@ -72,6 +72,12 @@ Use `recover_state.py` to validate state and optionally repair corruption after 
 backup. Use `compact.py` to prune old read rows, rotate oversized audit logs, and
 reap stale `server-pids\server-<pid>.pid` markers.
 
+Use `recover_state.py --scan-historical` when clients appear split across bridge
+roots or repeated wake nudges are ignored. The scan is read-only and reports
+stale-root redirects, unreadable or mismatched `bridge-root.json` manifests, and
+partial migrations where the target manifest names a source root that lacks a
+matching `MOVED_TO.json`.
+
 Use `migrate_root.py` for bridge-root relocation. It is dry-run by default,
 refuses live watcher/MCP server markers unless `--force-while-running` is
 provided, and holds a `state\locks\migration.lock` singleton lease while
