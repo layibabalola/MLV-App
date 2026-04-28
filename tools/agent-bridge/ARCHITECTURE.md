@@ -12,6 +12,7 @@ an inbox is not the same thing as wake, read, or handled completion.
 |---|---|
 | `agent_bridge.py` | Compatibility facade and current orchestration layer for routing, inboxes, sessions, receipts, and diagnostics. |
 | `server.py` | Import-safe FastMCP server factory and stdio entrypoint. |
+| `server_wrapper.py` | Resolver-aware Desktop MCP launcher; rejects moved roots, audits startup, then execs `server.py` without proxying stdio. |
 | `core/storage.py` | JSON/JSONL helpers, atomic writes, schema-version helper, and quarantine of malformed JSONL rows. |
 | `core/addressing.py` | Typed address/message/sender models used by contract tests and routing seams. |
 | `core/routing.py` | Pure routing resolver for active/superseded/project/agent-level decisions. |

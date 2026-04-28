@@ -28,9 +28,9 @@ Add the server to `%USERPROFILE%\.codex\config.toml`:
 command = "py"
 args = [
   "-3",
-  "<repo>\\tools\\agent-bridge\\server.py",
-  "--state-dir",
-  "<state-dir>"
+  "<repo>\\tools\\agent-bridge\\server_wrapper.py",
+  "--bridge-root",
+  "<bridge-root>"
 ]
 ```
 
@@ -38,9 +38,10 @@ Do not add `tool_timeout_sec` or `startup_timeout_sec` unless your Codex build
 documents support for those keys. Codex Desktop 0.111.0 rejects them as an
 invalid transport config.
 
-Replace `<state-dir>` with the absolute path to your shared bridge state. If
-you use `%USERPROFILE%\.agent-bridge\state`, expand it to the real Windows path
-before putting it in Codex or Claude config.
+Replace `<bridge-root>` with the absolute path to your shared bridge root. If
+you use `%USERPROFILE%\.agent-bridge`, expand it to the real Windows path before
+putting it in Codex or Claude config. The wrapper resolves redirects before
+starting MCP and fails loudly if the configured root has moved.
 
 ## Claude Desktop
 
@@ -53,9 +54,9 @@ Add the server to `claude_desktop_config.json`:
       "command": "py",
       "args": [
         "-3",
-        "<repo>\\tools\\agent-bridge\\server.py",
-        "--state-dir",
-        "<state-dir>"
+        "<repo>\\tools\\agent-bridge\\server_wrapper.py",
+        "--bridge-root",
+        "<bridge-root>"
       ]
     }
   }

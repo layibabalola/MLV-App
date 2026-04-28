@@ -143,6 +143,47 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue((bridge_root / "bridge-root.json").exists())
         self.assertTrue((bridge_root / "watcher-config.json").exists())
 
+    def test_server_wrapper_print_command_resolves_bridge_root(self) -> None:
+        bridge_root = self.tempdir / "wrapper-root"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "server_wrapper.py"),
+                "--bridge-root",
+                str(bridge_root),
+                "--print-command",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertIn("server.py", result.stdout)
+        self.assertIn(str(bridge_root / "state"), result.stdout)
+        self.assertTrue((bridge_root / "bridge-root.json").exists())
+
+    def test_server_wrapper_rejects_moved_root_before_mcp_startup(self) -> None:
+        old_root = self.tempdir / "old-root"
+        new_root = self.tempdir / "new-root"
+        old_root.mkdir()
+        (old_root / "MOVED_TO.json").write_text(json.dumps({"active_root": str(new_root)}), encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "server_wrapper.py"),
+                "--bridge-root",
+                str(old_root),
+                "--print-command",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("agent-bridge root moved", result.stderr)
+
     def test_migrate_root_dry_run_does_not_create_target(self) -> None:
         source = self.tempdir / "source-root"
         target = self.tempdir / "target-root"
