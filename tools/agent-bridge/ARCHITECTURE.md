@@ -17,7 +17,7 @@ an inbox is not the same thing as wake, read, or handled completion.
 | `core/routing.py` | Pure routing resolver for active/superseded/project/agent-level decisions. |
 | `core/processes.py` | Process liveness, command hashing, role leases, heartbeats, and safe release. |
 | `bootstrap_session.py` | Session activation, previous-session drain, handshake, watcher config refresh, and watcher start. |
-| `watcher.py` | Singleton file watcher and wake dispatcher. It notifies only; it must not consume inbox messages. |
+| `watcher.py` | Singleton file watcher and wake dispatcher. It notifies only; it must not consume inbox messages. Helper-backed wake paths are receipt-verified before being recorded as seen. |
 | `configure_watcher.py` | Transactional watcher config writer with parent-thread guardrails. |
 | `wake_codex.ps1` | Codex Desktop wake helper. It is a wake trigger, not proof of delivery. |
 | `compact.py` | Inbox retention, audit rotation, and stale MCP server marker reaping. |
@@ -59,6 +59,18 @@ own MCP stdio server. Each process writes only a marker under `state/server-pids
 
 Short-lived helpers do not own leases. They should be bounded, observable, and
 safe to retry.
+
+## Wake Verification
+
+Wake spawn is not delivery. For Codex, `wake_codex.ps1` can exit successfully
+even if the synthetic input never submits a turn. The watcher therefore keeps
+helper-backed wake attempts in `watcher-state.json` as pending until the target
+inbox row gains `seen_at` or `read_at`.
+
+If no receipt appears after the grace period, the watcher retries the wake
+command. After the retry limit, it writes a `wake_delivery_failed` audit event,
+prints a terminal notification, and suppresses further automatic retries for
+that message id so the failure is visible instead of noisy.
 
 ## Recovery Model
 

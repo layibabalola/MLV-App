@@ -1,9 +1,13 @@
 """
 agent-bridge watcher daemon
 
-Watches bridge inbox JSONL files directly and triggers the consumer when an
-unread message arrives. No model tokens spent on empty checks. Headless --
-no toasts, no manual acknowledgement.
+Watches bridge inbox JSONL files directly and triggers wake notification when
+an unread message arrives. No model tokens are spent on empty checks.
+
+Wake helper exit code is not treated as delivery. For helper-backed wake paths
+(Codex), the watcher waits for receipt metadata (`seen_at` or `read_at`) before
+recording a message id in watcher-state. If no receipt appears, it retries with
+backoff and eventually records a visible delivery failure audit event.
 
 Usage:
     py -3 tools/agent-bridge/watcher.py --config tools/agent-bridge/watcher-config.json
@@ -17,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -34,6 +39,8 @@ except ImportError:
 POLL_INTERVAL_S = 2        # file-stat poll interval; cheap
 COMPACT_INTERVAL_S = 6 * 3600  # run compaction every 6 hours
 COMPACT_SIZE_MB = 1.0          # also compact if inbox exceeds this size
+WAKE_ACK_GRACE_PERIOD_S = 30
+WAKE_MAX_RETRIES = 3
 
 
 def utc_now() -> str:
@@ -83,6 +90,54 @@ def save_seen(state_path: Path, seen: Dict[str, Any]) -> None:
         json.dump(seen, f, indent=2, sort_keys=True)
         f.write("\n")
     tmp.replace(state_path)
+
+
+def _parse_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _message_by_id(inbox_path: Path, message_id: str) -> Optional[Dict[str, Any]]:
+    for row in read_jsonl(inbox_path):
+        if row.get("id") == message_id:
+            return row
+    return None
+
+
+def _message_has_wake_receipt(inbox_path: Path, message_id: str) -> bool:
+    row = _message_by_id(inbox_path, message_id)
+    if not row:
+        return True
+    return bool(row.get("seen_at") or row.get("read_at"))
+
+
+def _append_wake_audit(inbox_path: Path, event: Dict[str, Any]) -> None:
+    audit_path = inbox_path.parent / "messages.jsonl"
+    event.setdefault("id", str(uuid.uuid4()))
+    event.setdefault("timestamp", utc_now())
+    try:
+        with audit_path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(event, sort_keys=True))
+            handle.write("\n")
+    except OSError as exc:
+        print(f"[agent-bridge] failed to write wake audit event: {exc}", flush=True)
+
+
+def _save_watcher_state(state_path: Path, seen_ids: set, pending: List[Dict[str, Any]]) -> None:
+    save_seen(
+        state_path,
+        {
+            "seen_ids": list(seen_ids)[-500:],
+            "pending_wake_verifications": pending[-200:],
+        },
+    )
 
 
 def run_compaction(state_dir: Path) -> None:
@@ -313,12 +368,141 @@ def run_command_for_session(cmd: str, agent: str, session_id: str, messages: Lis
         return False
 
 
+def _process_pending_wake_verifications(
+    session_config: Dict[str, Any],
+    *,
+    pending: List[Dict[str, Any]],
+    seen_ids: set,
+    state_path: Path,
+    toasts_enabled: bool,
+    grace_period_seconds: int,
+    max_retries: int,
+) -> List[Dict[str, Any]]:
+    """Promote pending wake attempts to seen only after a receipt appears."""
+    agent = session_config["agent"]
+    session_id = session_config["session_id"]
+    inbox_path = Path(session_config["inbox"])
+    on_message_command: Optional[str] = session_config.get("on_message_command")
+    now = datetime.now(timezone.utc)
+    kept: List[Dict[str, Any]] = []
+    changed = False
+
+    for entry in pending:
+        if entry.get("agent") != agent or entry.get("session_id") != session_id:
+            kept.append(entry)
+            continue
+
+        message_id = str(entry.get("message_id", ""))
+        if not message_id:
+            changed = True
+            continue
+
+        if _message_has_wake_receipt(inbox_path, message_id):
+            seen_ids.add(message_id)
+            changed = True
+            print(
+                f"[agent-bridge] wake receipt verified for {agent} id={message_id} session=...{session_id[-8:]}",
+                flush=True,
+            )
+            continue
+
+        sent_at = _parse_dt(entry.get("sent_at"))
+        if sent_at and (now - sent_at).total_seconds() < grace_period_seconds:
+            kept.append(entry)
+            continue
+
+        retry_count = int(entry.get("retry_count") or 0)
+        if retry_count >= max_retries:
+            seen_ids.add(message_id)
+            changed = True
+            event = {
+                "action": "wake_delivery_failed",
+                "agent": agent,
+                "session_id": session_id,
+                "message_id": message_id,
+                "retry_count": retry_count,
+                "reason": "seen_at_not_observed_after_wake_retries",
+            }
+            _append_wake_audit(inbox_path, event)
+            notify_terminal(agent, session_id, [_message_by_id(inbox_path, message_id) or {"id": message_id, "body": "wake delivery failed"}])
+            print(
+                f"[agent-bridge] wake delivery failed for {agent} id={message_id} after {retry_count} retries",
+                flush=True,
+            )
+            continue
+
+        row = _message_by_id(inbox_path, message_id)
+        if not row or row.get("read_at"):
+            seen_ids.add(message_id)
+            changed = True
+            continue
+
+        if on_message_command:
+            command_ok = run_command_for_session(on_message_command, agent, session_id, [row], inbox_path)
+        else:
+            command_ok = False
+        retry_count += 1
+        entry["retry_count"] = retry_count
+        entry["sent_at"] = utc_now()
+        entry["last_retry_ok"] = command_ok
+        kept.append(entry)
+        changed = True
+        print(
+            f"[agent-bridge] wake receipt pending for {agent} id={message_id}; retry {retry_count}/{max_retries}",
+            flush=True,
+        )
+
+    if changed:
+        _save_watcher_state(state_path, seen_ids, kept)
+    return kept
+
+
+def _queue_pending_wake_verifications(
+    *,
+    pending: List[Dict[str, Any]],
+    agent: str,
+    session_id: str,
+    inbox_path: Path,
+    messages: List[Dict[str, Any]],
+    seen_ids: set,
+    state_path: Path,
+) -> List[Dict[str, Any]]:
+    existing_ids = {entry.get("message_id") for entry in pending}
+    now = utc_now()
+    changed = False
+    for message in messages:
+        message_id = str(message.get("id", ""))
+        if not message_id or message_id in existing_ids:
+            continue
+        if _message_has_wake_receipt(inbox_path, message_id):
+            seen_ids.add(message_id)
+            changed = True
+            continue
+        pending.append(
+            {
+                "message_id": message_id,
+                "agent": agent,
+                "session_id": session_id,
+                "inbox": str(inbox_path),
+                "sent_at": now,
+                "retry_count": 0,
+            }
+        )
+        existing_ids.add(message_id)
+        changed = True
+    if changed:
+        _save_watcher_state(state_path, seen_ids, pending)
+    return pending
+
+
 def process_session_once(
     session_config: Dict[str, Any],
     *,
     seen_ids: set,
     state_path: Path,
     toasts_enabled: bool,
+    grace_period_seconds: int = WAKE_ACK_GRACE_PERIOD_S,
+    max_retries: int = WAKE_MAX_RETRIES,
 ) -> List[str]:
     """Process one configured watcher session once.
 
@@ -336,8 +520,25 @@ def process_session_once(
     if not toasts_enabled and on_message == "toast":
         effective_on_message = "log"
 
+    state = load_seen(state_path)
+    pending: List[Dict[str, Any]] = list(state.get("pending_wake_verifications", []))
+    pending = _process_pending_wake_verifications(
+        session_config,
+        pending=pending,
+        seen_ids=seen_ids,
+        state_path=state_path,
+        toasts_enabled=toasts_enabled,
+        grace_period_seconds=grace_period_seconds,
+        max_retries=max_retries,
+    )
+    pending_ids = {
+        entry.get("message_id")
+        for entry in pending
+        if entry.get("agent") == agent and entry.get("session_id") == session_id
+    }
+
     unread = unread_for_session(inbox_path, session_id)
-    new_msgs = [m for m in unread if m.get("id") not in seen_ids]
+    new_msgs = [m for m in unread if m.get("id") not in seen_ids and m.get("id") not in pending_ids]
     if not new_msgs:
         return []
 
@@ -349,7 +550,7 @@ def process_session_once(
             )
         for m in new_msgs:
             seen_ids.add(m["id"])
-        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
+        _save_watcher_state(state_path, seen_ids, pending)
         return [m["id"] for m in new_msgs]
 
     if effective_on_message == "toast":
@@ -361,10 +562,22 @@ def process_session_once(
     if on_message_command:
         command_ok = run_command_for_session(on_message_command, agent, session_id, new_msgs, inbox_path)
 
-    if not on_message_command or command_ok:
+    if on_message_command and command_ok:
+        _queue_pending_wake_verifications(
+            pending=pending,
+            agent=agent,
+            session_id=session_id,
+            inbox_path=inbox_path,
+            messages=new_msgs,
+            seen_ids=seen_ids,
+            state_path=state_path,
+        )
+        return []
+
+    if not on_message_command:
         for m in new_msgs:
             seen_ids.add(m["id"])
-        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
+        _save_watcher_state(state_path, seen_ids, pending)
         return [m["id"] for m in new_msgs]
 
     return []

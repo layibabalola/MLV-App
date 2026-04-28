@@ -332,6 +332,78 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertNotIn("msg-failed-wake", seen_ids)
         self.assertFalse(state_path.exists(), "failed wake must not persist seen_ids")
 
+    def test_07b_wake_exit_zero_requires_seen_receipt_before_seen_ids(self) -> None:
+        """A successful wake command is not delivery until check_inbox sets seen_at.
+
+        This covers the live failure where wake_codex.ps1 typed text into the
+        Codex composer but Enter was lost. The wake helper exited 0, but Codex
+        never ran check_inbox, so the watcher must keep the message pending and
+        retry instead of marking it seen.
+        """
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-lost-input",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+        succeeded = Mock(returncode=0, stdout="", stderr="")
+        session_config = {
+            "agent": "codex",
+            "session_id": "codex-live",
+            "inbox": str(inbox_path),
+            "on_message": "notify",
+            "on_message_command": "fake-wake",
+        }
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run", return_value=succeeded) as run:
+            processed = watcher.process_session_once(
+                session_config,
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+                grace_period_seconds=30,
+            )
+            self.assertEqual(processed, [])
+            self.assertNotIn("msg-lost-input", seen_ids)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["pending_wake_verifications"][0]["message_id"], "msg-lost-input")
+
+            watcher.process_session_once(
+                session_config,
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+                grace_period_seconds=0,
+            )
+            self.assertEqual(run.call_count, 2)
+            self.assertNotIn("msg-lost-input", seen_ids)
+
+        message["seen_at"] = "2026-04-28T17:00:00+00:00"
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        watcher.process_session_once(
+            session_config,
+            seen_ids=seen_ids,
+            state_path=state_path,
+            toasts_enabled=True,
+            grace_period_seconds=0,
+        )
+        self.assertIn("msg-lost-input", seen_ids)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["pending_wake_verifications"], [])
+
     # ------------------------------------------------------------------
     # Test 8 & 9: configure_watcher race + sub-agent cannot mutate parent_thread_id
     # Invariant: #10. Phase 7.X infrastructure.
