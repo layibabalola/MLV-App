@@ -138,9 +138,11 @@ Codex Hook v1 is reminder-only:
 - must not call `consume_inbox.py`
 - may evolve to show receipt/status summaries only after non-destructive receipt
   tools exist
-- the attempted Codex Desktop `notify` integration is not considered active until
+- the attempted Codex Desktop `notify` integration is tested and not active unless
   `codex-bridge-reminder.log` records an automatic invocation with
   `force=False noToast=False`
+- the active Codex hook strategy is workflow-rule based: `AGENTS.md` requires
+  `codex_pre_response.ps1` and `codex_pre_final.ps1` around bridge-related responses
 
 ## Hardening Checklist
 

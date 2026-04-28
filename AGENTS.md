@@ -30,6 +30,11 @@
 ## Agent Bridge Startup
 - On session open in this repository, initialize the agent bridge before normal relay work.
 - For Codex-specific bridge heuristics, wake-loop behavior, and routing policy, also read `bridge_trigger_heuristics.md`.
+- Before any substantive bridge-related response, run:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_pre_response.ps1 -RepoRoot .`
+- Before any final response after bridge-related work, run:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_pre_final.ps1 -RepoRoot .`
+- These pre-response/pre-final scripts are workflow reminders, not consumers. They must not inspect message bodies, mark messages read, or replace explicit inbox hygiene.
 - Use:
   - `py -3 tools\agent-bridge\bootstrap_session.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent codex --cwd C:\!Layi Wkspc\MLV-App --watcher-config C:\Users\obabalola\.agent-bridge\watcher-config.json`
 - Bootstrap does four things:

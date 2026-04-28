@@ -51,7 +51,8 @@ Inbox hygiene for bridge-related work:
 - Surface and handle any relevant messages, then mark each handled message read by id.
 - Enter the persistent `wait_inbox` loop only when bridge-watch itself is the active task; for normal coding turns, use start/end inbox checks instead.
 - Hook v1 is reminder-only: it may remind Codex to run inbox hygiene, but it must not inspect message bodies, mark messages read, or call `consume_inbox.py`.
-- Current Codex Desktop `notify` hook status: not proven working. Do not rely on it unless `codex-bridge-reminder.log` shows an automatic entry with `force=False noToast=False`.
+- Current Codex Desktop `notify` hook status: tested and not firing in this Desktop thread. Do not rely on it unless `codex-bridge-reminder.log` shows an automatic entry with `force=False noToast=False`.
+- Active hook strategy is workflow-rule based: `AGENTS.md` requires `codex_pre_response.ps1` and `codex_pre_final.ps1` around bridge-related responses.
 - A hook may evolve to show non-destructive receipt/status summaries only after the receipt tools exist; it must never silently consume bridge messages.
 - If Claude or the user reports that Codex's bucket is blocking sends, immediately check Codex's private GUID bucket and project bucket non-destructively.
 - If unread messages are present, surface them, handle them, and mark them read by id before doing more bridge work.
