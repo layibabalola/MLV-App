@@ -171,6 +171,27 @@ def strip_markers(message: str) -> Dict[str, Any]:
     }
 
 
+def is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return exit_code.value == 259
+    try:
+        import os
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
 class AgentBridge:
     def __init__(self, state_dir: Path, max_hops: int = DEFAULT_MAX_HOPS) -> None:
         self.state_dir = Path(state_dir)
@@ -542,7 +563,14 @@ class AgentBridge:
                 "marker_variant": "control",
                 "control_type": control_type,
                 "hop_count": 0,
+                "seen_at": None,
+                "seen_by_session": None,
+                "seen_via": None,
                 "read_at": None,
+                "handled_at": None,
+                "handled_by_session": None,
+                "handled_status": None,
+                "failure_reason": None,
             },
         )
         return message_id
@@ -1127,7 +1155,14 @@ class AgentBridge:
                 "hash": body_hash,
                 "marker_variant": marker["marker_variant"],
                 "hop_count": hop_count + 1,
+                "seen_at": None,
+                "seen_by_session": None,
+                "seen_via": None,
                 "read_at": None,
+                "handled_at": None,
+                "handled_by_session": None,
+                "handled_status": None,
+                "failure_reason": None,
             }
             append_jsonl(self.inbox_path(target), inbox_row)
 
@@ -1462,6 +1497,178 @@ class AgentBridge:
                 {"message_id": target_id, "changed": changed},
             )
 
+    def _message_lifecycle_status(self, row: Dict[str, Any]) -> str:
+        if row.get("handled_status") == "failed" or row.get("failure_reason"):
+            return "failed"
+        if row.get("handled_at"):
+            return "handled"
+        if row.get("read_at"):
+            return "read"
+        if row.get("seen_at"):
+            return "seen"
+        return "queued"
+
+    def message_status(self, message_id: str) -> BridgeResult:
+        with self._locked():
+            target_id = (message_id or "").strip()
+            if not target_id:
+                return BridgeResult(False, "rejected", "message_id is required")
+
+            for agent in sorted(AGENTS):
+                for row in read_jsonl(self.inbox_path(agent)):
+                    if row.get("id") == target_id:
+                        status = self._message_lifecycle_status(row)
+                        return BridgeResult(
+                            True,
+                            status,
+                            "Message %s is %s." % (target_id, status),
+                            {
+                                "message": row,
+                                "agent": agent,
+                                "message_id": target_id,
+                                "lifecycle_status": status,
+                            },
+                        )
+            return BridgeResult(False, "not_found", "No message %s found." % target_id)
+
+    def mark_seen(
+        self,
+        agent: str,
+        message_id: str,
+        via: str,
+        session_id: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                target = normalize_agent(agent)
+                session = normalize_session(session_id) if session_id is not None else None
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            target_id = (message_id or "").strip()
+            seen_via = (via or "").strip()
+            if not target_id:
+                return BridgeResult(False, "rejected", "message_id is required")
+            if not seen_via:
+                return BridgeResult(False, "rejected", "via is required")
+
+            path = self.inbox_path(target)
+            rows = read_jsonl(path)
+            now = utc_now()
+            matched = False
+            changed = False
+            for row in rows:
+                if row.get("id") == target_id and (session is None or row.get("session_id") == session):
+                    matched = True
+                    if not row.get("seen_at"):
+                        row["seen_at"] = now
+                        row["seen_by_session"] = row.get("session_id")
+                        row["seen_via"] = seen_via
+                        changed = True
+                    break
+            if not matched:
+                return BridgeResult(False, "not_found", "No message %s for %s." % (target_id, target))
+            if changed:
+                write_jsonl(path, rows)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "action": "mark_seen",
+                    "agent": target,
+                    "session_id": session,
+                    "message_id": target_id,
+                    "via": seen_via,
+                    "accepted": True,
+                    "changed": changed,
+                }
+            )
+            return BridgeResult(
+                True,
+                "seen" if changed else "already_seen",
+                "Message %s is marked seen." % target_id,
+                {"message_id": target_id, "changed": changed},
+            )
+
+    def mark_handled(
+        self,
+        agent: str,
+        message_id: str,
+        status: str = "handled",
+        reason: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                target = normalize_agent(agent)
+                session = normalize_session(session_id) if session_id is not None else None
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            target_id = (message_id or "").strip()
+            handled_status = (status or "handled").strip().lower()
+            if not target_id:
+                return BridgeResult(False, "rejected", "message_id is required")
+            if handled_status not in {"handled", "failed", "ignored"}:
+                return BridgeResult(False, "rejected", "status must be handled, failed, or ignored")
+
+            path = self.inbox_path(target)
+            rows = read_jsonl(path)
+            now = utc_now()
+            matched = False
+            for row in rows:
+                if row.get("id") == target_id and (session is None or row.get("session_id") == session):
+                    matched = True
+                    row["handled_at"] = now
+                    row["handled_by_session"] = row.get("session_id")
+                    row["handled_status"] = handled_status
+                    row["failure_reason"] = (reason or None) if handled_status == "failed" else None
+                    break
+            if not matched:
+                return BridgeResult(False, "not_found", "No message %s for %s." % (target_id, target))
+            write_jsonl(path, rows)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "action": "mark_handled",
+                    "agent": target,
+                    "session_id": session,
+                    "message_id": target_id,
+                    "handled_status": handled_status,
+                    "failure_reason": reason,
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(
+                True,
+                handled_status,
+                "Message %s handled status is %s." % (target_id, handled_status),
+                {"message_id": target_id, "handled_status": handled_status},
+            )
+
+    def list_pending_receipts(self, agent: Optional[str] = None) -> BridgeResult:
+        with self._locked():
+            try:
+                agents = [normalize_agent(agent)] if agent else sorted(AGENTS)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            pending: List[Dict[str, Any]] = []
+            for target in agents:
+                for row in read_jsonl(self.inbox_path(target)):
+                    status = self._message_lifecycle_status(row)
+                    if status in {"queued", "seen", "read"}:
+                        item = dict(row)
+                        item["agent"] = target
+                        item["lifecycle_status"] = status
+                        pending.append(item)
+            return BridgeResult(
+                True,
+                "pending_receipts",
+                "%d pending receipt(s)." % len(pending),
+                {"count": len(pending), "messages": pending},
+            )
+
     def bridge_status(self, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
             state = self._load_state()
@@ -1508,6 +1715,70 @@ class AgentBridge:
                     "routing_rules": routing_rules,
                 },
             )
+
+    def bridge_process_status(self) -> BridgeResult:
+        """Report bridge background process health without mutating state."""
+        watcher_pid_path = self.state_dir.parent / "watcher.pid"
+        watcher: Dict[str, Any] = {
+            "expected": watcher_pid_path.exists(),
+            "pid_path": str(watcher_pid_path),
+            "running": False,
+            "pid": None,
+            "stale": False,
+        }
+        if watcher_pid_path.exists():
+            try:
+                pid = int(watcher_pid_path.read_text(encoding="utf-8").strip())
+                watcher["pid"] = pid
+                watcher["running"] = is_process_alive(pid)
+                watcher["stale"] = not watcher["running"]
+            except (OSError, ValueError):
+                watcher["stale"] = True
+
+        server_markers: List[Dict[str, Any]] = []
+        server_dir = self.state_dir / "server-pids"
+        if server_dir.exists():
+            for marker in sorted(server_dir.glob("server-*.pid")):
+                entry: Dict[str, Any] = {"path": str(marker), "pid": None, "running": False, "stale": False}
+                try:
+                    pid = int(marker.read_text(encoding="utf-8").strip())
+                    entry["pid"] = pid
+                    entry["running"] = is_process_alive(pid)
+                    entry["stale"] = not entry["running"]
+                except (OSError, ValueError):
+                    entry["stale"] = True
+                server_markers.append(entry)
+
+        lock_entries: List[Dict[str, Any]] = []
+        locks_dir = self.state_dir / "locks"
+        if locks_dir.exists():
+            for lock in sorted(locks_dir.glob("*.lock")):
+                lock_entries.append(
+                    {
+                        "path": str(lock),
+                        "name": lock.name,
+                        "updated_at": datetime.fromtimestamp(lock.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
+                    }
+                )
+
+        stale_servers = [entry for entry in server_markers if entry.get("stale")]
+        status = "healthy"
+        if watcher.get("stale") or stale_servers or lock_entries:
+            status = "attention"
+        return BridgeResult(
+            True,
+            status,
+            "Bridge process status: watcher=%s, server_markers=%d, stale_server_markers=%d."
+            % ("running" if watcher.get("running") else "not_running", len(server_markers), len(stale_servers)),
+            {
+                "watcher": watcher,
+                "mcp_server_markers": server_markers,
+                "mcp_server_marker_count": len(server_markers),
+                "stale_server_marker_count": len(stale_servers),
+                "locks": lock_entries,
+                "lock_count": len(lock_entries),
+            },
+        )
 
     def pause_bridge(self) -> BridgeResult:
         with self._locked():

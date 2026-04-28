@@ -436,54 +436,8 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
                     state_path=state_path,
                     toasts_enabled=toasts_enabled,
                 )
-                continue
-                agent = s["agent"]
-                session_id = s["session_id"]
-                inbox_path = Path(s["inbox"])
-                on_message = s.get("on_message", "notify")
-                on_message_command: Optional[str] = s.get("on_message_command")
 
-                # Global toasts_enabled=false overrides per-session toast to log
-                effective_on_message = on_message
-                if not toasts_enabled and on_message == "toast":
-                    effective_on_message = "log"
-
-                unread = unread_for_session(inbox_path, session_id)
-                new_msgs = [m for m in unread if m.get("id") not in seen_ids]
-
-                if new_msgs:
-                    # 'log' mode: emit a log line, do NOT run on_message_command
                     # (the consumer would mark messages read silently — destructive).
-                    # The receiving agent is expected to be polled via Monitor or
-                    # equivalent and call check_inbox itself.
-                    if effective_on_message == "log":
-                        for m in new_msgs:
-                            print(
-                                f"[agent-bridge] {utc_now()} -- new {agent} message id={m.get('id')} session=...{(session_id or '')[-8:]}",
-                                flush=True,
-                            )
-                        for m in new_msgs:
-                            seen_ids.add(m["id"])
-                        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
-                        continue
-
-                    # Notify
-                    if effective_on_message == "toast":
-                        notify_windows_toast(agent, session_id, new_msgs)
-                    else:
-                        notify_terminal(agent, session_id, new_msgs)
-
-                    # Optional command hook (e.g. wake Codex automation)
-                    command_ok = False
-                    if on_message_command:
-                        command_ok = run_command_for_session(on_message_command, agent, session_id, new_msgs, inbox_path)
-
-                    if not on_message_command or command_ok:
-                        for m in new_msgs:
-                            seen_ids.add(m["id"])
-                        # Persist seen IDs (keep last 500 to avoid unbounded growth)
-                        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
-
             time.sleep(POLL_INTERVAL_S)
 
     except KeyboardInterrupt:

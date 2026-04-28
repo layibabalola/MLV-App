@@ -150,6 +150,31 @@ class AgentBridgeTests(unittest.TestCase):
         after = bridge.peek_inbox("claude", session_id="mlv-app")
         self.assertEqual(after.status, "empty")
 
+    def test_message_receipts_track_seen_read_and_handled(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] receipt hello", session_id="mlv-app")
+        self.assertTrue(result.ok)
+        message_id = result.data["id"]
+
+        self.assertEqual(bridge.message_status(message_id).status, "queued")
+        seen = bridge.mark_seen("claude", message_id, via="unit-test")
+        self.assertTrue(seen.ok)
+        self.assertEqual(bridge.message_status(message_id).status, "seen")
+        read = bridge.mark_read("claude", message_id)
+        self.assertTrue(read.ok)
+        self.assertEqual(bridge.message_status(message_id).status, "read")
+        handled = bridge.mark_handled("claude", message_id, status="handled")
+        self.assertTrue(handled.ok)
+        self.assertEqual(bridge.message_status(message_id).status, "handled")
+        self.assertEqual(bridge.list_pending_receipts("claude").data["count"], 0)
+
+    def test_bridge_process_status_reports_without_mutation(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        status = bridge.bridge_process_status()
+        self.assertTrue(status.ok)
+        self.assertIn("watcher", status.data)
+        self.assertIn("mcp_server_marker_count", status.data)
+
     def test_control_message_replaces_prior_control(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.send_control_message(

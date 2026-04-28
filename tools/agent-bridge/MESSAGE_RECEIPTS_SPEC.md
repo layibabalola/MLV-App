@@ -1,6 +1,6 @@
 # Agent Bridge - Message Receipts And Status Spec
 
-**Status:** Approved for implementation by Claude; not yet implemented
+**Status:** Partially implemented - lifecycle fields and MCP tools landed; automatic `record_seen` integration remains planned
 **Authors:** Codex + Claude review
 **Motivation:** distinguish "delivered to inbox" from "seen, read, and handled" without creating ACK-message loops
 

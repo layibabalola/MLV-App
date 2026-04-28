@@ -199,9 +199,53 @@ def mark_read(agent: str, message_id: str, session_id: Optional[str] = None) -> 
 
 
 @mcp.tool(annotations=READ_ONLY)
+def message_status(message_id: str) -> dict:
+    """Return the queued/seen/read/handled/failed lifecycle status for one message."""
+    return as_dict(bridge.message_status(message_id))
+
+
+@mcp.tool(annotations=IDEMPOTENT_WRITE)
+def mark_seen(agent: str, message_id: str, via: str, session_id: Optional[str] = None) -> dict:
+    """Mark one bridge inbox message seen without marking it read or handled."""
+    return as_dict(bridge.mark_seen(agent, message_id, via=via, session_id=session_id))
+
+
+@mcp.tool(annotations=IDEMPOTENT_WRITE)
+def mark_handled(
+    agent: str,
+    message_id: str,
+    status: str = "handled",
+    reason: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Mark one bridge inbox message handled, failed, or ignored."""
+    return as_dict(
+        bridge.mark_handled(
+            agent,
+            message_id,
+            status=status,
+            reason=reason,
+            session_id=session_id,
+        )
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+def list_pending_receipts(agent: Optional[str] = None) -> dict:
+    """List messages that are queued/seen/read but not yet handled."""
+    return as_dict(bridge.list_pending_receipts(agent=agent))
+
+
+@mcp.tool(annotations=READ_ONLY)
 def bridge_status(session_id: Optional[str] = None) -> dict:
     """Return bridge pause state, hop count, state directory, and unread counts."""
     return as_dict(bridge.bridge_status(session_id=session_id))
+
+
+@mcp.tool(annotations=READ_ONLY)
+def bridge_process_status() -> dict:
+    """Return watcher, MCP server marker, lock, and heartbeat process health."""
+    return as_dict(bridge.bridge_process_status())
 
 
 @mcp.tool(annotations=READ_ONLY)

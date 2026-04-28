@@ -1,6 +1,6 @@
 # Agent Bridge - Process Ownership And Lease Spec
 
-**Status:** Approved for implementation by Claude; not yet implemented
+**Status:** Partially implemented - MCP server per-process markers and `bridge_process_status` landed; full daemon leases/heartbeats remain planned
 **Authors:** Codex + Claude review
 **Motivation:** prevent duplicate background daemons without killing valid client-owned MCP servers
 
