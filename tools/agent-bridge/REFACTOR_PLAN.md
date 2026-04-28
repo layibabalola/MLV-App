@@ -2,6 +2,16 @@
 
 **Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening execution is in progress: Phase 0 contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, and docs consolidation have landed. Deeper service extraction, property tests, and full concurrency stress coverage remain follow-up work.
 
+**Restart checkpoint (2026-04-28 16:00 America/Chicago):**
+- Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
+- Backups: `C:\Users\obabalola\.codex\config.toml.bak-20260428T160012` and `C:\Users\obabalola\AppData\Roaming\Claude\claude_desktop_config.json.bak-20260428T160012`.
+- Active Codex private bucket is `fadda757-5bbe-4a6c-9def-f27a04d118f4`; Codex notify config was corrected from superseded `9111dce5-3d33-4d06-b7a7-87dbf259b0c6`.
+- `recover_state.py --scan-historical` against `C:\Users\obabalola\.agent-bridge\state` is healthy; no stale-root or migration-history issues were reported.
+- Project-bucket backlog was surfaced and marked read for `3a6f6a03-b07a-4f87-91c7-88aef54b5ac7`, `ffcd534c-70ed-4229-bf5d-f12b270ed47f`, `82c724ec-ce33-4a20-ad1e-5c0ac5a1f05a`, `b3207397-7671-4a88-8243-d7204748b526`, and `1429d520-c80c-406f-852f-5b03a9513b51`.
+- Important correction: current `server_wrapper.py` resolves/rejects/audits and then `execv`s `server.py`; it does **not** monitor mtimes or auto-respawn on bridge code changes yet.
+- Post-restart first checks: run `recover_state.py --scan-historical`, verify `bridge_process_status` shows new runtime breadcrumbs for MCP servers, then check Codex private bucket plus `mlv-app`.
+- Next implementation priority after restart: Claude ACTION_REQUEST `82c724ec` asks for `wake_codex.ps1 -ExpectedTitleMarker` and `configure_watcher.py` `expected_window_marker` plumbing to prevent wrong-chat SendKeys injection.
+
 **Inputs synthesized:**
 - Claude first draft: bridge message `fd2b5d8c`
 - Codex first draft: bridge message `5161697e`
