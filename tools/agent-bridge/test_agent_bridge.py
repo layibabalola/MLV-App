@@ -209,8 +209,10 @@ class AgentBridgeTests(unittest.TestCase):
             project=None,
             handshake_retries=1,
             watcher_config=config_path,
+            start_watcher=False,
         )
         self.assertIsNotNone(result["watcher"])
+        self.assertEqual(result["watcher_process"]["status"], "not_started")
         with config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
         session_ids = {entry["session_id"] for entry in config["sessions"]}

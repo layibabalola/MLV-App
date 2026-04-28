@@ -70,6 +70,7 @@ def bootstrap(
     project: Optional[str],
     handshake_retries: int,
     watcher_config: Optional[Path] = None,
+    start_watcher: bool = True,
 ) -> Dict[str, Any]:
     bridge = AgentBridge(state_dir)
     identity = derive_project_identity(cwd)
@@ -129,7 +130,13 @@ def bootstrap(
             cwd=cwd,
             python_executable=sys.executable,
         )
-        watcher_process = ensure_watcher(watcher_config)
+        if start_watcher:
+            watcher_process = ensure_watcher(watcher_config)
+        else:
+            watcher_process = {
+                "status": "not_started",
+                "reason": "start_watcher_false",
+            }
 
     return {
         "identity": identity,
@@ -170,6 +177,11 @@ def main() -> None:
     parser.add_argument("--project", help="Optional explicit rendezvous/project name")
     parser.add_argument("--handshake-retries", type=int, default=3)
     parser.add_argument("--watcher-config", help="Optional watcher-config.json to update for this active session")
+    parser.add_argument(
+        "--no-start-watcher",
+        action="store_true",
+        help="Update watcher config without spawning the watcher daemon",
+    )
     args = parser.parse_args()
 
     result = bootstrap(
@@ -181,6 +193,7 @@ def main() -> None:
         project=args.project,
         handshake_retries=args.handshake_retries,
         watcher_config=Path(args.watcher_config) if args.watcher_config else None,
+        start_watcher=not args.no_start_watcher,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

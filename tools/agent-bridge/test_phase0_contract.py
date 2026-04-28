@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_bridge import AgentBridge
+from bootstrap_session import bootstrap
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -323,16 +324,31 @@ class Phase0ContractTests(unittest.TestCase):
     # Test 10: Bootstrap watcher-config test does not leak watcher subprocess
     # Invariant: cleanup hygiene
     # ------------------------------------------------------------------
-    @unittest.skip(
-        "Requires bootstrap to expose a 'start_watcher=False' parameter or "
-        "for ensure_watcher to return a tear-downable handle. Will be "
-        "enabled when Phase 1+ lands."
-    )
     def test_10_bootstrap_watcher_test_does_not_leak_subprocess(self) -> None:
         """The existing test_bootstrap_updates_watcher_config in
         test_agent_bridge.py emits a ResourceWarning because it spawns a
         real watcher subprocess that survives the test. Bootstrap must
         expose a no-watcher seam."""
+        config_path = self.tempdir / "watcher-config.json"
+
+        result = bootstrap(
+            state_dir=self.state_dir,
+            agent="codex",
+            cwd=str(ROOT),
+            previous_session_id=None,
+            session_id="codex-live",
+            project=None,
+            handshake_retries=1,
+            watcher_config=config_path,
+            start_watcher=False,
+        )
+
+        self.assertTrue(config_path.exists())
+        self.assertIsNotNone(result["watcher"])
+        self.assertEqual(
+            result["watcher_process"],
+            {"status": "not_started", "reason": "start_watcher_false"},
+        )
 
     # ------------------------------------------------------------------
     # Test 11: wait_inbox rejects non-string session_ids at MCP boundary
