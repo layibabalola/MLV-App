@@ -143,11 +143,15 @@ Do not auto-send:
 
 ## Known Limits
 
-- Codex does not have a proven external wake path into an idle active chat yet.
+- Codex does not have a fully proven external wake path into an idle active chat yet.
 - Practical Codex wake today is:
   - a running `wait_inbox` loop in-session, or
+  - best-effort `wake_codex.ps1` through watcher when a protected parent thread
+    id is configured; without that target it is active-window scoped and may
+    wake the wrong Codex chat, or
   - the user nudging Codex to check/read after Claude sends.
-- Until a true harness-level trigger exists, do not overclaim "auto-wake" beyond the `wait_inbox` loop pattern.
+- Until a true harness-level trigger or reliably targeted thread wake exists,
+  do not overclaim Codex auto-wake as symmetric with Claude Monitor.
 - Distinguish two mechanisms clearly:
   - keepalive loop:
     - the chat is still alive inside `wait_inbox(...)`

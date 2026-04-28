@@ -222,14 +222,14 @@ def configure_watcher(
         if existing_private is None:
             existing_private = raw_entry
 
-    # The watcher's job is notification only (toast) plus, for Codex, an
-    # automated wake into the running Codex Desktop session via SendKeys.
+    # The watcher's job is notification only (toast) plus, for Codex, a best-effort
+    # wake into Codex Desktop via deeplink + SendKeys.
     # Consumption is each agent's own responsibility:
     #   Claude: persistent Monitor -> check_inbox -> mark_read by id
-    #   Codex:  wake_codex.ps1 opens the active Codex Desktop thread deeplink
-    #           when CODEX_THREAD_ID is available, then synthesizes "check
-    #           bridge inbox". Codex does its own non-destructive check +
-    #           handle + mark_read pattern.
+    #   Codex:  wake_codex.ps1 opens the protected parent thread deeplink when a
+    #           trusted thread id is configured, then synthesizes "check bridge
+    #           inbox". Without that target it is active-window scoped, so docs
+    #           must not describe it as equivalent to Claude Monitor.
     # NEVER use consume_inbox.py from the watcher — it races with both agent
     # read paths and silently eats messages.
     wake_command: Optional[str] = None

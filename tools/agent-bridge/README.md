@@ -129,14 +129,17 @@ Wake paths for inbox notification:
   external wake script needed.
 - **Codex**: `wake_codex.ps1` is wired into `watcher-config.json` as the
   `on_message_command` for Codex entries. When the watcher detects a new
-  unread Codex message, it opens the active bridge thread with
+  unread Codex message, it attempts to open the protected bridge thread with
   `codex://threads/<CODEX_THREAD_ID>` and then synthesizes `check bridge inbox`
   + Enter into the Codex Desktop window via `[System.Windows.Forms.SendKeys]`.
   Codex then runs a turn, calls `check_inbox`, surfaces and handles the
-  message. The deeplink step prevents the wake trigger from landing in whichever
-  Codex chat happened to be visible.
+  message. This is reliable only when a protected parent thread id is configured
+  and the deeplink succeeds. Without that target, the helper is active-window
+  scoped and may type into whichever Codex chat is visible.
 
-Both wake paths are event-driven and zero-cost while idle. See
+Both wake paths are event-driven and zero-cost while idle, but they are not
+equally strong: Claude Monitor is chat-scoped, while Codex wake is only
+thread-scoped when the protected thread id path is active. See
 `BRIDGE_WATCH_LIFECYCLE.md` for details.
 
 Halt-condition detection (e.g. `SESSION_UPDATE: superseded`) is performed by

@@ -77,6 +77,12 @@ even if the synthetic input never submits a turn. The watcher therefore keeps
 helper-backed wake attempts in `watcher-state.json` as pending until the target
 inbox row gains `seen_at` or `read_at`.
 
+Codex wake is not equivalent to Claude Monitor. Claude Monitor is scoped to the
+active Claude conversation. Codex wake is only thread-scoped when the protected
+parent thread id is configured and the `codex://threads/<id>` navigation
+succeeds; otherwise it is an active-window SendKeys helper and can target the
+wrong Codex chat.
+
 If no receipt appears after the grace period, the watcher retries the wake
 command. After the retry limit, it writes a `wake_delivery_failed` audit event,
 prints a terminal notification, and suppresses further automatic retries for

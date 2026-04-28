@@ -6,7 +6,9 @@ and must NOT be wired into watcher.on_message_command. The watcher refuses
 to run any command containing "consume_inbox.py" precisely to prevent that
 mistake. The current wake architecture is:
     Claude: in-process Monitor + check_inbox + mark_read by id
-    Codex:  watcher → wake_codex.ps1 (SendKeys "check bridge inbox")
+    Codex:  watcher -> wake_codex.ps1 (deeplink + SendKeys "check bridge inbox")
+            when a protected parent thread id is configured; otherwise the
+            helper is active-window scoped and not equivalent to Claude Monitor.
 
 This script remains as a manual diagnostic / halt-condition detector for
 ad-hoc inspection from a shell. It uses peek_inbox under the hood and can

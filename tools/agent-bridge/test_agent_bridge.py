@@ -371,6 +371,21 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue(fresh.exists())
 
+    def test_compact_default_retains_fresh_dead_server_pid_markers(self) -> None:
+        server_dir = self.state_dir / "server-pids"
+        server_dir.mkdir(parents=True)
+        fresh_dead = server_dir / "server-0.pid"
+        fresh_dead.write_text("0\n", encoding="utf-8")
+
+        default_result = reap_stale_server_pids(self.state_dir)
+        self.assertEqual(default_result["removed"], 0)
+        self.assertTrue(fresh_dead.exists())
+        self.assertEqual(default_result["kept_fresh"], 1)
+
+        immediate_result = reap_stale_server_pids(self.state_dir, max_age_hours=0)
+        self.assertEqual(immediate_result["removed"], 1)
+        self.assertFalse(fresh_dead.exists())
+
     def test_compact_prunes_old_rotated_audit_logs(self) -> None:
         self.state_dir.mkdir(parents=True)
         old_log = self.state_dir / "messages.2025-01.jsonl"
