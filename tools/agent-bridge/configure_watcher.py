@@ -109,7 +109,7 @@ def build_private_entry(
     # should only toast (alert the user) and never consume messages on Claude's behalf.
     # on_message_command is only useful for agents without an in-process monitor (e.g. codex).
     entry: Dict[str, Any] = {
-        "_comment": "%s private inbox consumer for %s" % (agent.capitalize(), project),
+        "_comment": "%s private inbox watch for %s (notification only)" % (agent.capitalize(), project),
         "agent": agent,
         "kind": "private",
         "project": project,
@@ -119,7 +119,10 @@ def build_private_entry(
     }
     if command is not None:
         entry["on_message_command"] = command
-    return merge_entry(existing, entry)
+    merged = merge_entry(existing, entry)
+    if command is None:
+        merged.pop("on_message_command", None)
+    return merged
 
 
 def build_rendezvous_entry(
@@ -132,7 +135,7 @@ def build_rendezvous_entry(
 ) -> Dict[str, Any]:
     # Same rationale: Claude reads its own inbox via Monitor; no consume command needed.
     entry: Dict[str, Any] = {
-        "_comment": "Rendezvous/control-plane watch for %s" % project,
+        "_comment": "Rendezvous/control-plane watch for %s (notification only)" % project,
         "agent": agent,
         "kind": "rendezvous",
         "project": project,
@@ -142,7 +145,10 @@ def build_rendezvous_entry(
     }
     if command is not None:
         entry["on_message_command"] = command
-    return merge_entry(existing, entry)
+    merged = merge_entry(existing, entry)
+    if command is None:
+        merged.pop("on_message_command", None)
+    return merged
 
 
 def configure_watcher(

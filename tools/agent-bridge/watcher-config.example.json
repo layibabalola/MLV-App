@@ -1,29 +1,33 @@
 {
-  "_comment": "agent-bridge watcher config. Copy to watcher-config.json. Point on_message_command at consume_inbox.py or a client wake command.",
+  "_comment": "agent-bridge watcher config. The watcher is notification-only: use toast/log to alert, never consume messages from here.",
+  "toasts_enabled": true,
   "sessions": [
     {
-      "_comment": "Claude private inbox consumer",
+      "_comment": "Claude private inbox - toast only; Claude Monitor/check_inbox consumes explicitly.",
       "agent": "claude",
+      "kind": "private",
+      "project": "mlv-app",
       "session_id": "YOUR-CLAUDE-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-claude.jsonl",
-      "on_message": "notify",
-      "on_message_command": "py -3 C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\consume_inbox.py --state-dir C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state --agent claude --session-id YOUR-CLAUDE-SESSION-GUID"
+      "on_message": "toast"
     },
     {
-      "_comment": "Codex private inbox consumer",
+      "_comment": "Codex private inbox - toast only; wait_inbox/check_inbox consumes explicitly.",
       "agent": "codex",
+      "kind": "private",
+      "project": "mlv-app",
       "session_id": "YOUR-CODEX-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-codex.jsonl",
-      "on_message": "notify",
-      "on_message_command": "py -3 C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\consume_inbox.py --state-dir C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state --agent codex --session-id YOUR-CODEX-SESSION-GUID"
+      "on_message": "toast"
     },
     {
-      "_comment": "Optional rendezvous/control-plane watch. Use the derived project rendezvous such as mlv-app.",
+      "_comment": "Optional project rendezvous/control-plane watch.",
       "agent": "codex",
+      "kind": "rendezvous",
+      "project": "mlv-app",
       "session_id": "mlv-app",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-codex.jsonl",
-      "on_message": "notify",
-      "on_message_command": "py -3 C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\consume_inbox.py --state-dir C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state --agent codex --session-id mlv-app"
+      "on_message": "toast"
     }
   ]
 }

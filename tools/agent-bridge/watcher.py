@@ -263,6 +263,12 @@ def run_command_for_session(cmd: str, agent: str, session_id: str, messages: Lis
 
     if not messages:
         return False
+    if "consume_inbox.py" in cmd:
+        print(
+            f"[agent-bridge] refusing destructive on_message_command for {agent} session=...{(session_id or '')[-8:]}",
+            flush=True,
+        )
+        return True
     first = messages[0]
     env = {**__import__("os").environ}
     env["BRIDGE_AGENT"] = agent
