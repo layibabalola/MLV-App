@@ -283,9 +283,14 @@ def run_command_for_session(cmd: str, agent: str, session_id: str, messages: Lis
         return False
 
 
-def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> None:
+def _load_config(config_path: Path) -> Dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as f:
-        config = json.load(f)
+        return json.load(f)
+
+
+def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> None:
+    config = _load_config(config_path)
+    config_mtime = config_path.stat().st_mtime
 
     sessions = config.get("sessions", [])
     if not sessions:
@@ -300,7 +305,8 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
     # Derive state_dir from first inbox path (parent directory)
     state_dir = Path(sessions[0]["inbox"]).parent if sessions else None
 
-    print(f"[agent-bridge] Watcher started. Watching {len(sessions)} session(s). Poll every {POLL_INTERVAL_S}s.", flush=True)
+    toasts_enabled: bool = config.get("toasts_enabled", True)
+    print(f"[agent-bridge] Watcher started. Watching {len(sessions)} session(s). Poll every {POLL_INTERVAL_S}s. Toasts: {'on' if toasts_enabled else 'off'}.", flush=True)
     for s in sessions:
         print(f"  agent={s['agent']}  session=...{s['session_id'][-8:]}  inbox={s['inbox']}", flush=True)
 
@@ -312,6 +318,21 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
 
     try:
         while not (stop_event and stop_event.is_set()):
+            # Hot-reload config when the file changes (e.g. user toggles toasts_enabled)
+            try:
+                mtime = config_path.stat().st_mtime
+                if mtime != config_mtime:
+                    new_config = _load_config(config_path)
+                    new_toasts = new_config.get("toasts_enabled", True)
+                    if new_toasts != toasts_enabled:
+                        print(f"[agent-bridge] toasts_enabled changed: {'on' if new_toasts else 'off'}", flush=True)
+                        toasts_enabled = new_toasts
+                    sessions = new_config.get("sessions", sessions)
+                    config = new_config
+                    config_mtime = mtime
+            except Exception:
+                pass  # keep running on transient read errors
+
             # Periodic and size-triggered compaction
             if state_dir:
                 now = time.monotonic()
@@ -331,6 +352,11 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
                 on_message = s.get("on_message", "notify")
                 on_message_command: Optional[str] = s.get("on_message_command")
 
+                # Global toasts_enabled=false overrides per-session toast to log
+                effective_on_message = on_message
+                if not toasts_enabled and on_message == "toast":
+                    effective_on_message = "log"
+
                 unread = unread_for_session(inbox_path, session_id)
                 new_msgs = [m for m in unread if m.get("id") not in seen_ids]
 
@@ -339,7 +365,7 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
                     # (the consumer would mark messages read silently — destructive).
                     # The receiving agent is expected to be polled via Monitor or
                     # equivalent and call check_inbox itself.
-                    if on_message == "log":
+                    if effective_on_message == "log":
                         for m in new_msgs:
                             print(
                                 f"[agent-bridge] {utc_now()} -- new {agent} message id={m.get('id')} session=...{(session_id or '')[-8:]}",
@@ -351,7 +377,7 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
                         continue
 
                     # Notify
-                    if on_message == "toast":
+                    if effective_on_message == "toast":
                         notify_windows_toast(agent, session_id, new_msgs)
                     else:
                         notify_terminal(agent, session_id, new_msgs)
