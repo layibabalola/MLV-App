@@ -12,13 +12,14 @@
       "on_message": "toast"
     },
     {
-      "_comment": "Codex private inbox - toast only; wait_inbox/check_inbox consumes explicitly.",
+      "_comment": "Codex private inbox - toast + optional wake_codex.ps1; the helper should include -ThreadId when CODEX_THREAD_ID is known.",
       "agent": "codex",
       "kind": "private",
       "project": "mlv-app",
       "session_id": "YOUR-CODEX-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-codex.jsonl",
-      "on_message": "toast"
+      "on_message": "toast",
+      "on_message_command": "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\path\\to\\wake_codex.ps1 -ThreadId YOUR-CODEX-DESKTOP-THREAD-GUID"
     },
     {
       "_comment": "Optional project rendezvous/control-plane watch.",

@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -200,20 +201,25 @@ def configure_watcher(
     # automated wake into the running Codex Desktop session via SendKeys.
     # Consumption is each agent's own responsibility:
     #   Claude: persistent Monitor -> check_inbox -> mark_read by id
-    #   Codex:  wake_codex.ps1 synthesizes "check bridge inbox" into the live
-    #           Codex Desktop window, which causes Codex to do its own
-    #           non-destructive check + handle + mark_read pattern.
+    #   Codex:  wake_codex.ps1 opens the active Codex Desktop thread deeplink
+    #           when CODEX_THREAD_ID is available, then synthesizes "check
+    #           bridge inbox". Codex does its own non-destructive check +
+    #           handle + mark_read pattern.
     # NEVER use consume_inbox.py from the watcher — it races with both agent
     # read paths and silently eats messages.
     wake_command: Optional[str] = None
     if agent == "codex":
         wake_script = Path(__file__).with_name("wake_codex.ps1")
-        wake_command = subprocess.list2cmdline([
+        wake_args = [
             "powershell",
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", str(wake_script),
-        ])
+        ]
+        codex_thread_id = os.environ.get("CODEX_THREAD_ID")
+        if codex_thread_id:
+            wake_args.extend(["-ThreadId", codex_thread_id])
+        wake_command = subprocess.list2cmdline(wake_args)
 
     if active_session_id:
         managed_entries.append(

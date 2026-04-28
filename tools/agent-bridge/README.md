@@ -106,9 +106,12 @@ Wake paths for inbox notification:
   external wake script needed.
 - **Codex**: `wake_codex.ps1` is wired into `watcher-config.json` as the
   `on_message_command` for Codex entries. When the watcher detects a new
-  unread Codex message, it synthesizes `check bridge inbox` + Enter into the
-  Codex Desktop window via `[System.Windows.Forms.SendKeys]`. Codex then runs
-  a turn, calls `check_inbox`, surfaces and handles the message.
+  unread Codex message, it opens the active bridge thread with
+  `codex://threads/<CODEX_THREAD_ID>` and then synthesizes `check bridge inbox`
+  + Enter into the Codex Desktop window via `[System.Windows.Forms.SendKeys]`.
+  Codex then runs a turn, calls `check_inbox`, surfaces and handles the
+  message. The deeplink step prevents the wake trigger from landing in whichever
+  Codex chat happened to be visible.
 
 Both wake paths are event-driven and zero-cost while idle. See
 `BRIDGE_WATCH_LIFECYCLE.md` for details.

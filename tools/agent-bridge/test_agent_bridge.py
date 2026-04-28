@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -334,19 +335,26 @@ class AgentBridgeTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        result = configure_watcher(
-            config_path=config_path,
-            state_dir=self.state_dir,
-            agent="codex",
-            project=None,
-            cwd=str(ROOT),
-            python_executable="py",
-        )
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"}):
+            result = configure_watcher(
+                config_path=config_path,
+                state_dir=self.state_dir,
+                agent="codex",
+                project=None,
+                cwd=str(ROOT),
+                python_executable="py",
+            )
         session_ids = {entry["session_id"] for entry in result["sessions"]}
         self.assertIn("codex-fresh", session_ids)
         self.assertIn("mlv-app", session_ids)
         self.assertIn("claude-live", session_ids)
         self.assertNotIn("old-session", session_ids)
+        codex_commands = [
+            entry.get("on_message_command", "")
+            for entry in result["sessions"]
+            if entry.get("agent") == "codex"
+        ]
+        self.assertTrue(any("-ThreadId 019dcfe4-bd5d-7841-a7c1-2e8969a777c5" in command for command in codex_commands))
 
 
 if __name__ == "__main__":

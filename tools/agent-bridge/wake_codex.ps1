@@ -3,6 +3,9 @@
 # Invoked from watcher's on_message_command when a Codex bridge message arrives.
 #
 # Behavior:
+#   - If a Codex Desktop thread id is provided, opens codex://threads/<id> before
+#     injecting so the reserved trigger lands in the bridge chat, not whichever
+#     chat happened to be visible.
 #   - Waits for system-wide input idle (>= IdleThresholdSeconds) before injecting,
 #     so we don't clobber active typing — anywhere, not just in Codex.
 #   - Uses a lock file so concurrent wake invocations batch into one (the next
@@ -14,12 +17,14 @@
 #
 # Usage:
 #   .\wake_codex.ps1 [-Message "check bridge inbox"]
+#                    [-ThreadId "<codex-desktop-conversation-guid>"]
 #                    [-IdleThresholdSeconds 10]
 #                    [-MaxWaitSeconds 600]
 #                    [-DryRun] [-FindOnly]
 
 param(
     [string]$Message              = "check bridge inbox",
+    [string]$ThreadId             = "",
     [int]   $IdleThresholdSeconds = 10,
     [int]   $MaxWaitSeconds       = 600,
     [string]$LockFile             = "$env:USERPROFILE\.agent-bridge\wake_codex.lock",
@@ -61,6 +66,20 @@ function Get-CodexWindow {
         Select-Object -First 1
 }
 
+function Get-ForegroundCodexWindow {
+    $hWnd = [Win32Wake]::GetForegroundWindow()
+    if ($hWnd -eq [IntPtr]::Zero) {
+        return $null
+    }
+    $processId = 0
+    [Win32Wake]::GetWindowThreadProcessId($hWnd, [ref]$processId) | Out-Null
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($process -and $process.ProcessName -eq $ProcessName -and $process.MainWindowHandle -ne 0) {
+        return $process
+    }
+    return $null
+}
+
 function Get-WindowTitle {
     param([IntPtr]$hWnd)
     $sb = New-Object System.Text.StringBuilder 256
@@ -76,6 +95,26 @@ function Get-IdleSeconds {
     # Tick wraparound is harmless — uint subtraction stays correct modulo 2^32.
     $idleMs = ($now - $info.dwTime) -band 0xFFFFFFFF
     return [Math]::Round($idleMs / 1000.0, 1)
+}
+
+function Test-CodexThreadId {
+    param([string]$Value)
+    return $Value -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+function Open-CodexThread {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+    if (-not (Test-CodexThreadId -Value $Value)) {
+        Write-Host ("[wake_codex] WARNING: ThreadId is not a UUID, skipping codex://threads navigation: " + $Value)
+        return
+    }
+    $uri = "codex://threads/$Value"
+    Write-Host ("[wake_codex] Opening Codex thread deeplink: " + $uri)
+    Start-Process $uri
+    Start-Sleep -Milliseconds 1200
 }
 
 # --- Stage 1: locate ---
@@ -138,6 +177,22 @@ try {
     $prevFg      = [Win32Wake]::GetForegroundWindow()
     $prevFgTitle = Get-WindowTitle -hWnd $prevFg
     Write-Host ("[wake_codex] Foreground before: hwnd=" + $prevFg + " title=" + $prevFgTitle)
+
+    Open-CodexThread -Value $ThreadId
+
+    # The deeplink can create or retarget a Codex window. Prefer the foreground
+    # Codex window after navigation, then fall back to the first visible one.
+    $codex = Get-ForegroundCodexWindow
+    if (-not $codex) {
+        $codex = Get-CodexWindow
+    }
+    if (-not $codex) {
+        Write-Host "[wake_codex] No Codex window found after deeplink navigation. Aborting."
+        exit 1
+    }
+    $codexHwnd  = $codex.MainWindowHandle
+    $codexTitle = Get-WindowTitle -hWnd $codexHwnd
+    Write-Host ("[wake_codex] Target Codex after deeplink: PID=" + $codex.Id + " hwnd=" + $codexHwnd + " title=" + $codexTitle)
 
     $myThread    = [Win32Wake]::GetCurrentThreadId()
     $codexProcId = 0
