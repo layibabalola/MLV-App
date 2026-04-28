@@ -11,6 +11,7 @@ Default state root:
   watcher-config.json
   routing-rules.json
   watcher.pid
+  watcher.runtime.json
   state\
     state.json
     messages.jsonl
@@ -22,6 +23,7 @@ Default state root:
       watcher.lock
     server-pids\
       server-<pid>.pid
+      server-<pid>.json
     backups\
       recovery-<timestamp>\
 ```
@@ -62,6 +64,13 @@ Full migration tooling is still tracked in `REFACTOR_PLAN.md`.
 `locks\` contains singleton/scoped daemon leases. `watcher.lock` is JSON and
 contains `pid`, `command_line_hash`, `state_dir`, `started_at`, `heartbeat_at`,
 and `generation`.
+
+`watcher.pid` and `server-pids\server-<pid>.pid` remain compatibility PID
+markers. `watcher.runtime.json` and `server-pids\server-<pid>.json` are
+best-effort runtime breadcrumbs that record the process role, PID, resolved
+bridge root, state directory, command, and manifest identity when available.
+`bridge_process_status` reports these breadcrumbs and flags root mismatches as
+attention-worthy even when the process is still alive.
 
 `server-pids\` contains observation-only MCP server markers. Multiple markers are
 valid because each MCP client or probe may spawn its own `server.py`.

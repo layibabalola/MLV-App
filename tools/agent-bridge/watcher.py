@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
+from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
 from core.settings import BridgeSettings, load_settings, settings_path_for_state_dir
 
 # Compaction support (same directory -- import directly)
@@ -737,6 +738,21 @@ def _write_pid(pid_path: Path) -> None:
     pid_path.write_text(str(os.getpid()), encoding="utf-8")
 
 
+def _write_runtime_breadcrumb(config_path: Path, state_dir: Path, command: List[str]) -> Path:
+    runtime_path = config_path.parent / "watcher.runtime.json"
+    write_runtime_breadcrumb(
+        runtime_path,
+        build_runtime_breadcrumb(
+            state_dir=state_dir,
+            role="watcher",
+            command=command,
+            pid=os.getpid(),
+            config_path=config_path,
+        ),
+    )
+    return runtime_path
+
+
 def _kill_stale(pid_path: Path) -> None:
     """Kill any existing watcher process recorded in pid_path."""
     if not pid_path.exists():
@@ -806,12 +822,17 @@ def main() -> None:
     # Compatibility PID marker next to the config.
     pid_path = config_path.parent / "watcher.pid"
     _write_pid(pid_path)
+    runtime_path = _write_runtime_breadcrumb(config_path, state_dir, command)
 
     def _cleanup() -> None:
         try:
             if pid_path.exists() and pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
                 pid_path.unlink(missing_ok=True)
-        except OSError:
+            if runtime_path.exists():
+                runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+                if int(runtime.get("pid") or 0) == os.getpid():
+                    runtime_path.unlink(missing_ok=True)
+        except Exception:
             pass
         if generation:
             release_lease(lease_path, os.getpid(), generation)

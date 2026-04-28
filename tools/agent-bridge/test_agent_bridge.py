@@ -501,6 +501,42 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("watcher", status.data)
         self.assertIn("mcp_server_marker_count", status.data)
 
+    def test_bridge_process_status_includes_runtime_breadcrumbs(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        bridge_root = self.state_dir.parent
+        (bridge_root / "watcher.pid").write_text(str(os.getpid()), encoding="utf-8")
+        (bridge_root / "watcher.runtime.json").write_text(
+            json.dumps({"schema_version": 1, "role": "watcher", "pid": os.getpid(), "bridge_root": str(bridge_root)}),
+            encoding="utf-8",
+        )
+        server_dir = self.state_dir / "server-pids"
+        server_dir.mkdir(parents=True)
+        (server_dir / ("server-%s.pid" % os.getpid())).write_text(str(os.getpid()), encoding="utf-8")
+        (server_dir / ("server-%s.json" % os.getpid())).write_text(
+            json.dumps({"schema_version": 1, "role": "mcp_server", "pid": os.getpid(), "bridge_root": str(bridge_root)}),
+            encoding="utf-8",
+        )
+
+        status = AgentBridge(self.state_dir).bridge_process_status()
+
+        self.assertEqual(status.data["watcher"]["runtime"]["role"], "watcher")
+        self.assertEqual(status.data["mcp_server_markers"][0]["runtime"]["role"], "mcp_server")
+
+    def test_bridge_process_status_flags_runtime_root_mismatch(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        bridge_root = self.state_dir.parent
+        other_root = self.tempdir / "other-root"
+        (bridge_root / "watcher.pid").write_text(str(os.getpid()), encoding="utf-8")
+        (bridge_root / "watcher.runtime.json").write_text(
+            json.dumps({"schema_version": 1, "role": "watcher", "pid": os.getpid(), "bridge_root": str(other_root)}),
+            encoding="utf-8",
+        )
+
+        status = AgentBridge(self.state_dir).bridge_process_status()
+
+        self.assertEqual(status.status, "attention")
+        self.assertTrue(status.data["watcher"]["root_mismatch"])
+
     def test_process_lease_heartbeat_and_release(self) -> None:
         lock_path = self.state_dir / "locks" / "watcher.lock"
         acquired = acquire_singleton_lease(

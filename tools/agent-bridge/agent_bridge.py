@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from core.addressing import AgentInbox, MessageKind, ProjectInbox, SenderContext, SessionInbox
 from core.paths import routing_rules_path_for_state_dir, session_registry_path_for_state_dir, watcher_pid_path_for_state_dir
+from core.runtime import read_runtime_breadcrumb
 from core.routing import resolve_route
 from core.settings import load_settings
 from project_identity import derive_project_identity
@@ -1895,16 +1896,23 @@ class AgentBridge:
     def bridge_process_status(self) -> BridgeResult:
         """Report bridge background process health without mutating state."""
         watcher_pid_path = watcher_pid_path_for_state_dir(self.state_dir)
+        bridge_root = self.state_dir.parent
         watcher_lease_path = self.state_dir / "locks" / "watcher.lock"
+        watcher_runtime_path = watcher_pid_path.parent / "watcher.runtime.json"
         watcher: Dict[str, Any] = {
             "expected": watcher_pid_path.exists(),
             "pid_path": str(watcher_pid_path),
+            "runtime_path": str(watcher_runtime_path),
             "lease_path": str(watcher_lease_path),
             "running": False,
             "pid": None,
             "stale": False,
             "lease": None,
+            "runtime": read_runtime_breadcrumb(watcher_runtime_path),
         }
+        if watcher["runtime"] and watcher["runtime"].get("bridge_root") and Path(str(watcher["runtime"]["bridge_root"])) != bridge_root:
+            watcher["root_mismatch"] = True
+            watcher["stale"] = True
         if watcher_lease_path.exists():
             try:
                 watcher["lease"] = read_json(watcher_lease_path, {})
@@ -1922,7 +1930,7 @@ class AgentBridge:
                 if watcher["pid"] is None:
                     watcher["pid"] = pid
                     watcher["running"] = is_process_alive(pid)
-                    watcher["stale"] = not watcher["running"]
+                    watcher["stale"] = bool(watcher.get("stale")) or not watcher["running"]
             except (OSError, ValueError):
                 watcher["stale"] = True
 
@@ -1930,12 +1938,23 @@ class AgentBridge:
         server_dir = self.state_dir / "server-pids"
         if server_dir.exists():
             for marker in sorted(server_dir.glob("server-*.pid")):
-                entry: Dict[str, Any] = {"path": str(marker), "pid": None, "running": False, "stale": False}
+                runtime_path = marker.with_suffix(".json")
+                entry: Dict[str, Any] = {
+                    "path": str(marker),
+                    "runtime_path": str(runtime_path),
+                    "runtime": read_runtime_breadcrumb(runtime_path),
+                    "pid": None,
+                    "running": False,
+                    "stale": False,
+                }
+                if entry["runtime"] and entry["runtime"].get("bridge_root") and Path(str(entry["runtime"]["bridge_root"])) != bridge_root:
+                    entry["root_mismatch"] = True
+                    entry["stale"] = True
                 try:
                     pid = int(marker.read_text(encoding="utf-8").strip())
                     entry["pid"] = pid
                     entry["running"] = is_process_alive(pid)
-                    entry["stale"] = not entry["running"]
+                    entry["stale"] = bool(entry.get("stale")) or not entry["running"]
                 except (OSError, ValueError):
                     entry["stale"] = True
                 server_markers.append(entry)

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from agent_bridge import AgentBridge, add_common_args
+from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
 
 
 if sys.version_info < (3, 10):
@@ -69,12 +70,18 @@ def register_server_pid(state_dir: Path):
     """Create a per-process MCP server marker and return its cleanup callback."""
     pid_dir = Path(state_dir) / "server-pids"
     pid_path = pid_dir / f"server-{os.getpid()}.pid"
+    runtime_path = pid_dir / f"server-{os.getpid()}.json"
     pid_dir.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    write_runtime_breadcrumb(
+        runtime_path,
+        build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server", pid=os.getpid()),
+    )
 
     def cleanup() -> None:
         try:
             pid_path.unlink(missing_ok=True)
+            runtime_path.unlink(missing_ok=True)
         except OSError:
             pass
 
