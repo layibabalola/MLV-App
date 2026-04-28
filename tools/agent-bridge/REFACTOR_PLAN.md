@@ -231,6 +231,44 @@ Test pyramid around the new seams.
 - Old probe scripts
 - Legacy `default` compatibility shims
 
+### Phase 13 - Security review and threat model
+
+Treat the bridge as local-only infrastructure, but still hostile-input exposed:
+messages, config files, JSONL rows, environment variables, watcher commands,
+and desktop wake helpers can all be influenced by a compromised peer, stale
+state, or accidental operator input.
+
+- Write `SECURITY_REVIEW.md` with:
+  - trust boundaries: Claude, Codex, MCP clients, watcher, helper scripts,
+    shared state files, settings, and desktop UI wake surface
+  - threat model: command injection, path traversal, state tampering, message
+    spoofing, replay/dedupe bypass, denial of service/backpressure wedging,
+    stale-session takeover, prompt/log exfiltration, and unsafe destructive tools
+  - explicit assumptions: same-user local machine, no network listener, state
+    files not secret, bridge messages may contain sensitive prompts and must not
+    be silently copied elsewhere
+- Audit every shell/process boundary:
+  - `watcher.py` command execution
+  - `wake_codex.ps1` SendKeys/deeplink behavior
+  - `codex_*` hook scripts
+  - bootstrap/configure/recovery/compact/probe CLIs
+  - MCP tool inputs that can trigger filesystem writes or process spawning
+- Add tests for security-sensitive contracts:
+  - no shell-string construction for watcher commands after argv migration
+  - message ids / toast tags / delivered bodies cannot inject PowerShell lines
+  - helper paths are literal/quoted and do not traverse outside expected roots
+  - destructive tools reject `default`, missing buckets, and ambiguous targets
+  - `probe_server.py` cannot mutate live state without `--mutate`
+  - settings reject unknown keys and invalid types
+- Review state-file permissions and document the expected local-user security
+  posture. If permissions cannot be enforced portably, report it as an accepted
+  local-user trust assumption.
+- Produce a final security signoff with:
+  - findings ranked P0/P1/P2/P3
+  - fixed findings and regression tests
+  - accepted risks and why they are acceptable for a local bridge
+  - explicit "not reviewed" exclusions, if any
+
 ---
 
 ## Critical-Path Execution Order
@@ -283,6 +321,9 @@ Phase 7 (wake hardening)
 | 24 | All P1 reproduced bugs fixed with regression tests | 0 |
 | 25 | One canonical `ARCHITECTURE.md`; specs marked Implemented or Archived (none Proposed) | 10 |
 | 26 | Graceful shutdown leaves no stale locks / PIDs / leases | 6 |
+| 27 | Security threat model and trust boundaries documented | 13 |
+| 28 | Shell/process boundaries audited with injection/path tests where applicable | 13 |
+| 29 | Security signoff records fixed findings, accepted risks, and exclusions | 13 |
 
 ## Final 10/10 Validation Loop
 
@@ -325,6 +366,9 @@ This preserves the two-axis distinction agreed during hardening review:
 | Codex 0.111 config compatibility regression | Version-gated docs (Phase 10) |
 | Sub-agent context pollutes parent state mid-phase | Phase 0 contract test catches it; Phase 7.X enforces provenance allowlist |
 | Hypothesis dependency setup friction | Property tests are dev-only extra; Phase 0 doesn't depend on them |
+| Local command injection via watcher/helper boundaries | Phase 13 audits all process boundaries and adds injection/path tests |
+| Sensitive prompt leakage through bridge state/logs | Phase 13 documents local-user trust assumptions, retention, and accepted risks |
+| Destructive MCP tool misuse | Phase 13 validates ambiguous/destructive inputs reject by default |
 
 ---
 
@@ -337,6 +381,8 @@ This preserves the two-axis distinction agreed during hardening review:
 - Cross-platform watcher (Windows-only acceptable)
 - Web UI / wire protocol redesign
 - Resurrecting heartbeat automations
+- Formal third-party penetration test
+- Cryptographic identity, signatures, or encrypted-at-rest bridge state
 
 ---
 
