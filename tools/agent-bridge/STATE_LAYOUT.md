@@ -24,6 +24,11 @@ Default state root:
       recovery-<timestamp>\
 ```
 
+The root above is the current default. `REFACTOR_PLAN.md` Phase 13 tracks the
+planned configurable `--bridge-root` migration model, including a root manifest,
+stale-root redirects, and migration tooling. Until that phase lands, configure
+all clients with the same explicit `--state-dir` to avoid split-brain state.
+
 ## Root Files
 
 | Path | Owner | Purpose |

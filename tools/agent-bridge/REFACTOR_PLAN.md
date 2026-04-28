@@ -231,7 +231,51 @@ Test pyramid around the new seams.
 - Old probe scripts
 - Legacy `default` compatibility shims
 
-### Phase 13 - Security review and threat model
+### Phase 13 - Configurable bridge root and migration
+
+Make the bridge root a first-class, user-selected location instead of a
+hardcoded `%USERPROFILE%\.agent-bridge` convention. The goal is one coherent
+root that every MCP server, watcher, helper script, routing tool, and recovery
+tool resolves the same way.
+
+- Add a `BridgePaths` / root resolver used by all bridge code:
+  - discovery order: explicit `--bridge-root`, `AGENT_BRIDGE_ROOT`, optional
+    locator/redirect file, then `%USERPROFILE%\.agent-bridge`
+  - `--state-dir` remains supported for backward compatibility but is treated as
+    advanced/legacy; new docs prefer `--bridge-root`
+  - derived paths include `state\`, `session.json`, `settings.json`,
+    `watcher-config.json`, `routing-rules.json`, `bridge_watch_mode.flag`,
+    `watcher.pid`, logs, leases, and server markers
+- Add `bridge-root.json` manifest at the active root:
+  - stable `root_id`
+  - `schema_version`
+  - `active_root`
+  - created/migrated timestamps
+  - migration history with source, target, tool version, and reason
+- Add stale-root redirect manifests:
+  - old roots keep a small `MOVED_TO.json` / redirect record
+  - clients that start against a moved root fail loudly with the new path instead
+    of silently creating split-brain state
+- Add migration tooling:
+  - dry-run default
+  - validates source and target layout before copying
+  - detects/pauses watcher and warns about live MCP server processes
+  - backs up source before mutation
+  - copies root files plus `state\`
+  - rewrites watcher-config inbox paths
+  - writes migration audit events
+  - runs recovery/probe validation against the target root
+  - prints exact Claude/Codex MCP config snippets for the new root
+- Add tests for:
+  - resolver precedence and path derivation
+  - manifest creation and redirect detection
+  - migration dry-run vs mutate behavior
+  - watcher-config path rewrite
+  - stale-root startup rejection
+  - backward compatibility for `--state-dir`
+  - routing-rules/settings/session registry all resolving from the same root
+
+### Phase 14 - Security review and threat model
 
 Treat the bridge as local-only infrastructure, but still hostile-input exposed:
 messages, config files, JSONL rows, environment variables, watcher commands,
@@ -321,9 +365,13 @@ Phase 7 (wake hardening)
 | 24 | All P1 reproduced bugs fixed with regression tests | 0 |
 | 25 | One canonical `ARCHITECTURE.md`; specs marked Implemented or Archived (none Proposed) | 10 |
 | 26 | Graceful shutdown leaves no stale locks / PIDs / leases | 6 |
-| 27 | Security threat model and trust boundaries documented | 13 |
-| 28 | Shell/process boundaries audited with injection/path tests where applicable | 13 |
-| 29 | Security signoff records fixed findings, accepted risks, and exclusions | 13 |
+| 27 | Bridge root is configurable through one resolver used by all tools | 13 |
+| 28 | Root manifest and stale-root redirects prevent silent split-brain | 13 |
+| 29 | Migration tool dry-runs, backs up, rewrites paths, validates target, and prints new config snippets | 13 |
+| 30 | `--state-dir` compatibility remains tested while docs prefer `--bridge-root` | 13 |
+| 31 | Security threat model and trust boundaries documented | 14 |
+| 32 | Shell/process boundaries audited with injection/path tests where applicable | 14 |
+| 33 | Security signoff records fixed findings, accepted risks, and exclusions | 14 |
 
 ## Final 10/10 Validation Loop
 
@@ -366,9 +414,11 @@ This preserves the two-axis distinction agreed during hardening review:
 | Codex 0.111 config compatibility regression | Version-gated docs (Phase 10) |
 | Sub-agent context pollutes parent state mid-phase | Phase 0 contract test catches it; Phase 7.X enforces provenance allowlist |
 | Hypothesis dependency setup friction | Property tests are dev-only extra; Phase 0 doesn't depend on them |
-| Local command injection via watcher/helper boundaries | Phase 13 audits all process boundaries and adds injection/path tests |
-| Sensitive prompt leakage through bridge state/logs | Phase 13 documents local-user trust assumptions, retention, and accepted risks |
-| Destructive MCP tool misuse | Phase 13 validates ambiguous/destructive inputs reject by default |
+| Root relocation creates split-brain state | Phase 13 adds a single resolver, root manifest, stale-root redirects, and startup rejection for moved roots |
+| Migration loses or corrupts bridge history | Phase 13 migration is dry-run first, backup-before-mutate, and validates target with recovery/probe tools |
+| Local command injection via watcher/helper boundaries | Phase 14 audits all process boundaries and adds injection/path tests |
+| Sensitive prompt leakage through bridge state/logs | Phase 14 documents local-user trust assumptions, retention, and accepted risks |
+| Destructive MCP tool misuse | Phase 14 validates ambiguous/destructive inputs reject by default |
 
 ---
 
@@ -381,6 +431,9 @@ This preserves the two-axis distinction agreed during hardening review:
 - Cross-platform watcher (Windows-only acceptable)
 - Web UI / wire protocol redesign
 - Resurrecting heartbeat automations
+- Silent automatic bridge-root migration without explicit user approval
+- Editing Claude/Codex desktop config files during migration unless an explicit
+  future `--write-configs` mode is implemented and reviewed
 - Formal third-party penetration test
 - Cryptographic identity, signatures, or encrypted-at-rest bridge state
 
