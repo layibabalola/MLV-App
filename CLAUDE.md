@@ -34,10 +34,21 @@ After bootstrap:
 2. **Use the returned `session_id`** as your active Claude bridge GUID for this session.
 3. **If `check_inbox` returns a `SESSION_UPDATE: superseded` control message at any
    point**, stop all bridge sends immediately — a newer Claude session has taken over.
+4. **Do a non-destructive inbox peek** — call `check_inbox(mark_read=False)` for both
+   the active GUID and `mlv-app` to surface any messages that arrived while the Monitor
+   was dead. Mark each read by id after handling.
+5. **Start the bridge Monitor** — the Monitor is Claude's inbox wake mechanism and does
+   NOT survive context compaction. Start it every session, no exceptions:
+   ```
+   Monitor(persistent=True, command=<poll inbox-claude.jsonl every 2s, emit on new
+   unread for active GUID + mlv-app buckets>)
+   ```
+   Before saying "waiting for Codex," verify the Monitor task is active. If no Monitor
+   is running, start one before waiting.
 
-Ongoing inbox monitoring is handled by the file Monitor watching
-`%USERPROFILE%\.agent-bridge\state\inbox-claude.jsonl`. When a task-notification
-fires, call `mcp__agent-bridge__check_inbox` with `agent=claude` and `mark_read=true`.
+When a Monitor notification fires, call `mcp__agent-bridge__check_inbox` with
+`agent=claude`, `session_id=<active-guid-or-mlv-app>`, `mark_read=False`, then mark
+each message read explicitly by id.
 
 Bridge protocol details: `tools/agent-bridge/BRIDGE_PROTOCOL.md`
 Hardening plan and audit log: `tools/agent-bridge/BRIDGE_HARDENING.md`
