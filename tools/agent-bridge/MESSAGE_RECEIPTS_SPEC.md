@@ -146,10 +146,14 @@ Record semantic completion after the receiver has acted.
 
 This should not change `read_at`. Consumption and handling are separate facts.
 
-### `list_pending_receipts(agent=None, older_than_seconds=60)`
+### `list_pending_receipts(agent=None, limit=50, offset=0, body_preview_chars=240)`
 
-Return queued messages that have not progressed past `queued` or `seen` after a
-threshold. This is the diagnostic view for stuck collaboration.
+Return a bounded page of messages that have not progressed past `queued`, `seen`,
+or `read`. This is the diagnostic view for stuck collaboration.
+
+The response contains compact receipt summaries and truncated body previews, not
+full message bodies. Use `message_status(id)` for full inspection of one message.
+This keeps MCP responses bounded on busy bridges.
 
 ---
 

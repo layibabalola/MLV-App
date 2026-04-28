@@ -226,6 +226,40 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.message_status(message_id).status, "handled")
         self.assertEqual(bridge.list_pending_receipts("claude").data["count"], 0)
 
+    def test_list_pending_receipts_is_bounded_and_paginated(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        long_body = "x" * 1000
+        message_ids = []
+        for index in range(3):
+            result = bridge.send_to_peer(
+                "codex",
+                "claude",
+                "[[handoff:claude]] pending %d %s" % (index, long_body),
+                session_id="receipt-%d" % index,
+            )
+            self.assertTrue(result.ok)
+            message_ids.append(result.data["id"])
+
+        page = bridge.list_pending_receipts("claude", limit=2, offset=0, body_preview_chars=10)
+        self.assertTrue(page.ok)
+        self.assertEqual(page.data["total_count"], 3)
+        self.assertEqual(page.data["count"], 2)
+        self.assertTrue(page.data["has_more"])
+        first = page.data["messages"][0]
+        self.assertLessEqual(len(first["body_preview"]), 10)
+        self.assertTrue(first["body_truncated"])
+        self.assertLessEqual(len(first["delivered_preview"]), 10)
+        self.assertTrue(first["delivered_truncated"])
+
+        second_page = bridge.list_pending_receipts("claude", limit=2, offset=2, body_preview_chars=10)
+        self.assertEqual(second_page.data["count"], 1)
+        self.assertFalse(second_page.data["has_more"])
+        self.assertEqual(bridge.message_status(message_ids[0]).data["message"]["body"], "pending 0 " + long_body)
+
+        rejected = bridge.list_pending_receipts("claude", limit=0)
+        self.assertFalse(rejected.ok)
+        self.assertIn("limit", rejected.message)
+
     def test_check_inbox_records_seen_but_peek_stays_pure(self) -> None:
         bridge = AgentBridge(self.state_dir)
         result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] visible hello", session_id="mlv-app")

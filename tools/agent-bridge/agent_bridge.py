@@ -1614,6 +1614,50 @@ class AgentBridge:
             return "seen"
         return "queued"
 
+    def _truncate_preview(self, value: Any, max_chars: int) -> Dict[str, Any]:
+        text = "" if value is None else str(value)
+        if max_chars <= 0:
+            return {"preview": "", "truncated": bool(text), "length": len(text)}
+        return {
+            "preview": text[:max_chars],
+            "truncated": len(text) > max_chars,
+            "length": len(text),
+        }
+
+    def _receipt_summary(self, agent: str, row: Dict[str, Any], lifecycle_status: str, body_preview_chars: int) -> Dict[str, Any]:
+        body = self._truncate_preview(row.get("body", ""), body_preview_chars)
+        delivered = self._truncate_preview(row.get("delivered_message", ""), body_preview_chars)
+        return {
+            "id": row.get("id"),
+            "agent": agent,
+            "from": row.get("from"),
+            "to": row.get("to"),
+            "session_id": row.get("session_id"),
+            "inbox_level": row.get("inbox_level"),
+            "parent_project": row.get("parent_project"),
+            "created_at": row.get("created_at"),
+            "seen_at": row.get("seen_at"),
+            "seen_via": row.get("seen_via"),
+            "read_at": row.get("read_at"),
+            "handled_at": row.get("handled_at"),
+            "handled_status": row.get("handled_status"),
+            "failure_reason": row.get("failure_reason"),
+            "lifecycle_status": lifecycle_status,
+            "body_preview": body["preview"],
+            "body_truncated": body["truncated"],
+            "body_length": body["length"],
+            "delivered_preview": delivered["preview"],
+            "delivered_truncated": delivered["truncated"],
+            "delivered_length": delivered["length"],
+        }
+
+    def _bounded_int(self, name: str, value: Any, minimum: int, maximum: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("%s must be an integer" % name)
+        if value < minimum or value > maximum:
+            raise ValueError("%s must be between %d and %d" % (name, minimum, maximum))
+        return value
+
     def message_status(self, message_id: str) -> BridgeResult:
         with self._locked():
             target_id = (message_id or "").strip()
@@ -1753,10 +1797,19 @@ class AgentBridge:
                 {"message_id": target_id, "handled_status": handled_status},
             )
 
-    def list_pending_receipts(self, agent: Optional[str] = None) -> BridgeResult:
+    def list_pending_receipts(
+        self,
+        agent: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        body_preview_chars: int = 240,
+    ) -> BridgeResult:
         with self._locked():
             try:
                 agents = [normalize_agent(agent)] if agent else sorted(AGENTS)
+                page_limit = self._bounded_int("limit", limit, 1, 200)
+                page_offset = self._bounded_int("offset", offset, 0, 1_000_000)
+                preview_chars = self._bounded_int("body_preview_chars", body_preview_chars, 0, 4000)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
             pending: List[Dict[str, Any]] = []
@@ -1764,15 +1817,22 @@ class AgentBridge:
                 for row in read_jsonl(self.inbox_path(target)):
                     status = self._message_lifecycle_status(row)
                     if status in {"queued", "seen", "read"}:
-                        item = dict(row)
-                        item["agent"] = target
-                        item["lifecycle_status"] = status
-                        pending.append(item)
+                        pending.append(self._receipt_summary(target, row, status, preview_chars))
+            total_count = len(pending)
+            page = pending[page_offset:page_offset + page_limit]
             return BridgeResult(
                 True,
                 "pending_receipts",
-                "%d pending receipt(s)." % len(pending),
-                {"count": len(pending), "messages": pending},
+                "%d pending receipt(s); returning %d starting at offset %d."
+                % (total_count, len(page), page_offset),
+                {
+                    "count": len(page),
+                    "total_count": total_count,
+                    "limit": page_limit,
+                    "offset": page_offset,
+                    "has_more": page_offset + len(page) < total_count,
+                    "messages": page,
+                },
             )
 
     def bridge_status(self, session_id: Optional[str] = None) -> BridgeResult:

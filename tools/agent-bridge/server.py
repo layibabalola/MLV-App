@@ -196,9 +196,21 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         )
 
     @mcp.tool(annotations=READ_ONLY)
-    def list_pending_receipts(agent: Optional[str] = None) -> dict:
-        """List messages that are queued/seen/read but not yet handled."""
-        return as_dict(bridge.list_pending_receipts(agent=agent))
+    def list_pending_receipts(
+        agent: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        body_preview_chars: int = 240,
+    ) -> dict:
+        """List a bounded page of queued/seen/read receipt summaries."""
+        return as_dict(
+            bridge.list_pending_receipts(
+                agent=agent,
+                limit=limit,
+                offset=offset,
+                body_preview_chars=body_preview_chars,
+            )
+        )
 
     @mcp.tool(annotations=READ_ONLY)
     def bridge_status(session_id: Optional[str] = None) -> dict:

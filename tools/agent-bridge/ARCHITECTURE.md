@@ -85,7 +85,7 @@ that message id so the failure is visible instead of noisy.
 Use diagnostics in this order:
 
 1. `message_status(id)` for a stuck message.
-2. `list_pending_receipts(...)` for queued/seen/read but unhandled messages.
+2. `list_pending_receipts(...)` for a bounded page of queued/seen/read but unhandled receipt summaries.
 3. `bridge_process_status()` for watcher leases, stale locks, and server markers.
 4. `recover_state.py --state-dir <state-dir>` for corruption checks.
 5. `compact.py --state-dir <state-dir> --dry-run` for retention and stale marker cleanup.

@@ -83,6 +83,9 @@ Stop markers such as `[[DONE]]` and `[[HANDOFF-TO-USER]]` are not relayed.
 Use `clear_bucket` or `reset_bucket` to reset a named bucket's hop counter and duplicate-tracking state. `clear_inbox` and `reset_session` remain compatibility shims.
 
 For scheduled polling, use `peek_inbox` instead of `check_inbox`. `peek_inbox` is annotated read-only and never marks messages read. After a real message is handled, call `mark_read` with that message's `id`.
+Use `list_pending_receipts(limit=50, offset=0)` for bounded stuck-message
+diagnostics; it returns receipt summaries with truncated previews. Use
+`message_status(id)` to inspect a single message in full.
 
 Runtime state and audit logs live under `%USERPROFILE%\.agent-bridge\state`.
 The active cross-chat session registry lives at `%USERPROFILE%\.agent-bridge\session.json`.
