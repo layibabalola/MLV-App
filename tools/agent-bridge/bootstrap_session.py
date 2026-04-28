@@ -85,6 +85,15 @@ def bootstrap(
     drained: List[Dict[str, Any]] = activation.data.get("drained_messages", []) if activation.ok else []
     peer_session = activation.data.get("active_peer_session") if activation.ok else None
 
+    # Mark every drained message read immediately — they are surfaced in this
+    # output for the new session to handle; leaving them unread in the inbox
+    # causes them to re-appear as pending until the agent manually cleans up.
+    for msg in drained:
+        msg_id = msg.get("id")
+        msg_session = msg.get("session_id")
+        if msg_id:
+            bridge.mark_read(agent=agent, message_id=msg_id, session_id=msg_session)
+
     handshake = None
     delays = [2, 4, 8]
     for attempt in range(handshake_retries):
