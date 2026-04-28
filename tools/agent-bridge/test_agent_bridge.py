@@ -195,6 +195,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(len(result["drained_previous_messages"]), 1)
         self.assertTrue(result["activation"]["ok"])
         self.assertTrue(result["handshake"]["ok"])
+        self.assertEqual(bridge.peek_inbox("claude", session_id="mlv-app").status, "empty")
 
     def test_bootstrap_updates_watcher_config(self) -> None:
         config_path = self.tempdir / "watcher-config.json"
