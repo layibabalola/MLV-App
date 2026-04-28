@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
+from compact import reap_stale_server_pids
 from configure_watcher import configure_watcher
 from consume_inbox import consume
 from core.addressing import AgentInbox, MessageKind, SenderContext, SessionInbox
@@ -17,6 +19,7 @@ from core.processes import acquire_singleton_lease, heartbeat_lease, release_lea
 from core.routing import RoutingStatus, resolve_route
 from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
 from project_identity import derive_project_identity, normalize_rendezvous
+from recover_state import recover_state
 from routing_policy import evaluate_message
 
 
@@ -261,6 +264,40 @@ class AgentBridgeTests(unittest.TestCase):
 
         self.assertTrue(release_lease(lock_path, lease["pid"], lease["generation"]))
         self.assertFalse(lock_path.exists())
+
+    def test_recover_state_dry_run_and_repair(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        state_path = self.state_dir / "state.json"
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        state_path.write_text("{bad json", encoding="utf-8")
+        inbox_path.write_text('{"id":"ok"}\nnot-json\n', encoding="utf-8")
+
+        dry_run = recover_state(self.state_dir, repair=False)
+        self.assertFalse(dry_run["ok"])
+        self.assertFalse(dry_run["json"]["state"]["ok"])
+        self.assertEqual(dry_run["jsonl"]["inbox_codex"]["invalid_rows"], 1)
+        self.assertEqual(state_path.read_text(encoding="utf-8"), "{bad json")
+
+        repaired = recover_state(self.state_dir, repair=True)
+        self.assertFalse(repaired["ok"])
+        self.assertTrue(repaired["backups"])
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["sessions"], {})
+        self.assertEqual(read_jsonl(inbox_path), [{"id": "ok"}])
+        self.assertTrue(inbox_path.with_suffix(".quarantine.jsonl").exists())
+
+    def test_compact_reaps_only_stale_server_pid_markers(self) -> None:
+        server_dir = self.state_dir / "server-pids"
+        server_dir.mkdir(parents=True)
+        stale = server_dir / "server-999999.pid"
+        fresh = server_dir / "server-999998.pid"
+        stale.write_text("999999\n", encoding="utf-8")
+        fresh.write_text("999998\n", encoding="utf-8")
+        os.utime(stale, (0, 0))
+
+        result = reap_stale_server_pids(self.state_dir, max_age_hours=24)
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
 
     def test_clear_bucket_and_reset_bucket_are_explicit_aliases(self) -> None:
         bridge = AgentBridge(self.state_dir)

@@ -2,6 +2,13 @@
 
 Local MCP bridge for opt-in handoffs between Claude Desktop and Codex Desktop.
 
+Canonical docs:
+
+- `ARCHITECTURE.md` - current component model, protocol planes, receipts, process ownership, and recovery flow.
+- `STATE_LAYOUT.md` - durable files under `%USERPROFILE%\.agent-bridge`.
+- `DEAD_CODE_DECISIONS.md` - explicit keep/wire/archive calls for ambiguous bridge helpers.
+- `REFACTOR_PLAN.md` - approved v1.1 roadmap and acceptance criteria.
+
 ## Install
 
 Install the Python MCP SDK for Python 3:
@@ -12,18 +19,26 @@ py -3 -m pip install -r tools\agent-bridge\requirements.txt
 
 ## Codex Desktop
 
-Add the server to `C:\Users\obabalola\.codex\config.toml`:
+Add the server to `%USERPROFILE%\.codex\config.toml`:
 
 ```toml
 [mcp_servers.agent_bridge]
 command = "py"
 args = [
   "-3",
-  "C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\server.py",
+  "<repo>\\tools\\agent-bridge\\server.py",
   "--state-dir",
-  "C:\\Users\\obabalola\\.agent-bridge\\state"
+  "<state-dir>"
 ]
 ```
+
+Do not add `tool_timeout_sec` or `startup_timeout_sec` unless your Codex build
+documents support for those keys. Codex Desktop 0.111.0 rejects them as an
+invalid transport config.
+
+Replace `<state-dir>` with the absolute path to your shared bridge state. If
+you use `%USERPROFILE%\.agent-bridge\state`, expand it to the real Windows path
+before putting it in Codex or Claude config.
 
 ## Claude Desktop
 
@@ -36,9 +51,9 @@ Add the server to `claude_desktop_config.json`:
       "command": "py",
       "args": [
         "-3",
-        "C:\\!Layi Wkspc\\MLV-App\\.claude\\worktrees\\festive-boyd-integration\\tools\\agent-bridge\\server.py",
+        "<repo>\\tools\\agent-bridge\\server.py",
         "--state-dir",
-        "C:\\Users\\obabalola\\.agent-bridge\\state"
+        "<state-dir>"
       ]
     }
   }
@@ -84,14 +99,14 @@ Use `bootstrap_session.py` to perform the startup handoff sequence:
   newly active private GUID plus the rendezvous/control-plane session.
 
 ```powershell
-py -3 tools\agent-bridge\bootstrap_session.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent claude --cwd C:\!Layi Wkspc\MLV-App --previous-session-id 84b53694-2cd6-4b01-a1ce-c6215bd61f9d
+py -3 tools\agent-bridge\bootstrap_session.py --state-dir %USERPROFILE%\.agent-bridge\state --agent claude --cwd <project-root> --previous-session-id <previous-guid>
 ```
 
 To refresh a static watcher config independently of bootstrap, use
 `configure_watcher.py`:
 
 ```powershell
-py -3 tools\agent-bridge\configure_watcher.py --config C:\Users\obabalola\.agent-bridge\watcher-config.json --state-dir C:\Users\obabalola\.agent-bridge\state --agent codex --cwd C:\!Layi Wkspc\MLV-App
+py -3 tools\agent-bridge\configure_watcher.py --config %USERPROFILE%\.agent-bridge\watcher-config.json --state-dir %USERPROFILE%\.agent-bridge\state --agent codex --cwd <project-root>
 ```
 
 Use `send_control_message` for control-plane traffic such as `HANDSHAKE`,
@@ -127,8 +142,8 @@ When a new Claude or Codex chat starts while an older same-agent chat is still
 open, call `activate_session` for the new chat's GUID:
 
 ```text
-activate_session(agent="claude", session_id="<new-guid>", project="mlvapp")
-activate_session(agent="codex", session_id="<new-guid>", project="mlvapp")
+activate_session(agent="claude", session_id="<new-guid>", project="mlv-app")
+activate_session(agent="codex", session_id="<new-guid>", project="mlv-app")
 ```
 
 This does three things automatically:
@@ -142,7 +157,7 @@ If the opposite agent already has an active session, `activate_session` also
 returns that peer GUID so the new chat can immediately talk to its most recent
 "chatty cousin" without asking the user to relay anything.
 
-Use `session_status(project="mlvapp")` to inspect the current active pair and
+Use `session_status(project="mlv-app")` to inspect the current active pair and
 historical session records.
 Use `end_session(agent, session_id, project)` to cleanly retire a session and
 notify the active peer that it should stop sending there.
@@ -172,4 +187,24 @@ apply the persisted rules at decision time before auto-bridging:
 
 ```powershell
 py -3 tools\agent-bridge\routing_policy.py evaluate --source codex --direction codex->claude --text "This bridge tooling change needs Claude review"
+```
+
+## Recovery And Housekeeping
+
+Use `recover_state.py` first when state looks corrupt. It is validate-only by
+default and requires `--repair` before it writes:
+
+```powershell
+py -3 tools\agent-bridge\recover_state.py --state-dir %USERPROFILE%\.agent-bridge\state
+py -3 tools\agent-bridge\recover_state.py --state-dir %USERPROFILE%\.agent-bridge\state --repair
+```
+
+Repair mode creates `state\backups\recovery-<timestamp>\` before replacing
+corrupt JSON object files or quarantining invalid JSONL rows.
+
+Use `compact.py` for read-row retention, audit rotation, and stale
+`server-pids/` marker cleanup:
+
+```powershell
+py -3 tools\agent-bridge\compact.py --state-dir %USERPROFILE%\.agent-bridge\state --dry-run
 ```

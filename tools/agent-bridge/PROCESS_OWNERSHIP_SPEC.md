@@ -1,6 +1,6 @@
 # Agent Bridge - Process Ownership And Lease Spec
 
-**Status:** Partially implemented - MCP server per-process markers and `bridge_process_status` landed; full daemon leases/heartbeats remain planned
+**Status:** Implemented for current bridge-owned processes - watcher leases/heartbeats, MCP server per-process markers, and `bridge_process_status` landed. Monitor leases remain a future extension if Monitor startup becomes bridge-owned.
 **Authors:** Codex + Claude review
 **Motivation:** prevent duplicate background daemons without killing valid client-owned MCP servers
 
@@ -59,7 +59,7 @@ and must not be used to kill other live MCP server instances.
 
 ## Lease File Schema
 
-Each lease file should be JSON:
+Each lease file is JSON:
 
 ```json
 {
@@ -115,7 +115,7 @@ Freshness should be role-specific:
 
 ## Shutdown Rule
 
-Long-running singleton/scoped processes should handle:
+Long-running singleton/scoped processes handle:
 
 - `SIGINT`
 - `SIGTERM`
@@ -162,13 +162,13 @@ bridge state.
 
 ## `bridge_process_status` Tool
 
-Add a diagnostic MCP tool:
+Diagnostic MCP tool:
 
 ```python
 bridge_process_status(state_dir=None) -> dict
 ```
 
-Suggested response:
+Response shape:
 
 ```json
 {
@@ -202,21 +202,20 @@ PowerShell process spelunking, or raw JSONL inspection.
 
 ---
 
-## Implementation Plan
+## Implemented Behavior
 
-1. Add a small process ownership module for lease acquisition, heartbeat, validation,
-   and cleanup.
-2. Move watcher singleton behavior onto role lease `locks/watcher.lock`.
-3. Add optional monitor leases once monitor startup is automated or scripted. Store
-   monitor leases in shared bridge state so `bridge_process_status` can report them.
-4. Keep `server.py` on per-process markers only.
-5. Add read-only `bridge_process_status` to `AgentBridge` and `server.py`.
-6. Add an explicit `repair_process_locks` tool only if repair is needed later.
-7. Add tests for:
-   - stale singleton lease reclamation
-   - live singleton lease refusal
-   - corrupt lock handling without killing unrelated processes
-   - multiple `server.py` markers being valid
+1. `core/processes.py` owns lease acquisition, heartbeat, validation, and cleanup.
+2. `watcher.py` owns `locks/watcher.lock` and heartbeats it while polling.
+3. `bootstrap_session.ensure_watcher` uses the watcher lease before spawning.
+4. `server.py` writes per-process markers under `server-pids/` and never claims a
+   singleton lease.
+5. `bridge_process_status` reports watcher lease status, lock files, and MCP server
+   marker counts.
+6. `compact.py` reaps stale `server-pids/` markers opportunistically.
+7. Tests cover lease acquire/heartbeat/release and stale server marker reaping.
+
+Future extension: add monitor-scoped leases if Monitor startup becomes automated by
+the bridge itself. Today Monitor remains harness-owned on Claude's side.
 
 ---
 

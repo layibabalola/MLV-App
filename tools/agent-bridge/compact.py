@@ -22,6 +22,7 @@ so compaction cannot race with send_to_peer / mark_read.
 """
 import argparse
 import contextlib
+import os
 import json
 import sys
 import time
@@ -236,6 +237,83 @@ def should_compact(state_dir: Path, agent: str, threshold_mb: float = 1.0) -> bo
     return path.stat().st_size / (1024 * 1024) >= threshold_mb
 
 
+def is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return exit_code.value == 259
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def reap_stale_server_pids(
+    state_dir: Path,
+    max_age_hours: int = 24,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Remove stale MCP server markers without enforcing singleton semantics."""
+    server_dir = state_dir / "server-pids"
+    cutoff_seconds = max_age_hours * 60 * 60
+    checked = 0
+    removed: List[str] = []
+    kept_running = 0
+    kept_fresh = 0
+    errors: List[Dict[str, str]] = []
+
+    if server_dir.exists():
+        for marker in sorted(server_dir.glob("server-*.pid")):
+            checked += 1
+            try:
+                raw = marker.read_text(encoding="utf-8").strip()
+                pid = int(raw)
+            except (OSError, ValueError) as exc:
+                pid = 0
+                errors.append({"path": str(marker), "error": str(exc)})
+            running = is_process_alive(pid)
+            age_seconds = time.time() - marker.stat().st_mtime
+            if running:
+                kept_running += 1
+                continue
+            if age_seconds < cutoff_seconds:
+                kept_fresh += 1
+                continue
+            removed.append(str(marker))
+            if not dry_run:
+                try:
+                    marker.unlink()
+                except OSError as exc:
+                    errors.append({"path": str(marker), "error": str(exc)})
+
+    event = {
+        "id": str(uuid.uuid4()),
+        "timestamp": utc_now(),
+        "action": "reap_stale_server_pids",
+        "checked": checked,
+        "removed": len(removed),
+        "removed_paths": removed,
+        "kept_running": kept_running,
+        "kept_fresh": kept_fresh,
+        "max_age_hours": max_age_hours,
+        "dry_run": dry_run,
+        "errors": errors,
+    }
+    if not dry_run and removed:
+        append_jsonl(state_dir / "messages.jsonl", event)
+    return event
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -246,6 +324,7 @@ def main() -> None:
     parser.add_argument("--max-age-days", type=int, default=7)
     parser.add_argument("--keep-last-read", type=int, default=200)
     parser.add_argument("--audit-max-mb", type=float, default=5.0)
+    parser.add_argument("--server-pid-max-age-hours", type=int, default=24)
     parser.add_argument("--dry-run", action="store_true", help="Print actions without writing")
     args = parser.parse_args()
 
@@ -275,6 +354,19 @@ def main() -> None:
         any_work = True
         tag = "[DRY RUN] " if args.dry_run else ""
         print(f"{tag}rotated messages.jsonl ({rotate_result['size_mb']} MB) -> {rotate_result['rotated_to']}")
+
+    reaper_result = reap_stale_server_pids(
+        state_dir,
+        max_age_hours=args.server_pid_max_age_hours,
+        dry_run=args.dry_run,
+    )
+    if reaper_result["removed"] > 0 or args.dry_run:
+        any_work = True
+        tag = "[DRY RUN] " if args.dry_run else ""
+        print(
+            f"{tag}reaped server pid markers: checked {reaper_result['checked']}, "
+            f"removed {reaper_result['removed']}"
+        )
 
     if not any_work:
         print("Nothing to compact.")

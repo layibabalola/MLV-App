@@ -1,6 +1,6 @@
 # Agent Bridge - Message Receipts And Status Spec
 
-**Status:** Partially implemented - lifecycle fields and MCP tools landed; automatic `record_seen` integration remains planned
+**Status:** Implemented - lifecycle fields, MCP tools, and `record_seen` integration landed
 **Authors:** Codex + Claude review
 **Motivation:** distinguish "delivered to inbox" from "seen, read, and handled" without creating ACK-message loops
 
@@ -8,7 +8,7 @@
 
 ## Problem
 
-`send_to_peer` and `send_control_message` currently return `queued` when the bridge
+`send_to_peer` and `send_control_message` return `queued` when the bridge
 writes a row into the target inbox. That proves durable delivery to disk, but it does
 not answer the operational questions that matter during collaboration:
 
@@ -51,7 +51,7 @@ The default receipt path should be metadata plus query tools.
 
 ## Schema Additions
 
-Inbox rows should gain optional receipt fields:
+Inbox rows include optional receipt fields:
 
 ```json
 {
@@ -155,14 +155,14 @@ threshold. This is the diagnostic view for stuck collaboration.
 
 ## Read Tool Behavior
 
-Read tools should optionally update `seen_at`:
+Read tools optionally update `seen_at`:
 
-- `wait_inbox(..., mark_read=false)` should set `seen_at` on returned messages.
-- `check_inbox(..., mark_read=false)` should set `seen_at` unless `record_seen=false`.
-- `peek_inbox` should remain pure read-only by default. If we want seen tracking from
+- `wait_inbox(..., mark_read=false)` sets `seen_at` on returned messages.
+- `check_inbox(..., mark_read=false)` sets `seen_at` unless `record_seen=false`.
+- `peek_inbox` remains pure read-only by default. If we want seen tracking from
   peeks, add `record_seen=true` explicitly rather than changing the default.
 
-When a tool call uses `mark_read=true`, it should set both `seen_at` and `read_at`.
+When a tool call uses `mark_read=true`, it sets both `seen_at` and `read_at`.
 
 `mark_read` must not imply any `handled_status`. Consumption and semantic handling
 are separate facts.
@@ -197,7 +197,7 @@ log, not to the receiver's work inbox.
 
 ## Diagnostics This Enables
 
-For a message like `92dfd3f2`, `message_status` should be able to say:
+For a message like `92dfd3f2`, `message_status` can say:
 
 - `queued`: bridge delivered it, receiver has not noticed it
 - `seen`: receiver wake path noticed it, but it was not consumed
@@ -211,15 +211,15 @@ path, not Codex send delivery.
 
 ---
 
-## Implementation Plan
+## Implemented Behavior
 
-1. Add optional receipt fields to new inbox rows.
-2. Add `message_status(message_id)` to `AgentBridge` and `server.py`.
-3. Add `mark_seen(...)` and call it from `wait_inbox`/non-destructive `check_inbox`
-   with opt-out via `record_seen=false`.
-4. Add `mark_handled(...)` for explicit semantic completion.
-5. Add `list_pending_receipts(...)` for stuck-message diagnostics.
-6. Keep explicit ACK messages as opt-in protocol traffic only.
+1. New inbox rows include receipt fields.
+2. `message_status(message_id)` is exposed through `AgentBridge` and `server.py`.
+3. `mark_seen(...)` is available, and non-destructive `wait_inbox` / `check_inbox`
+   call it unless `record_seen=false`.
+4. `mark_handled(...)` records semantic completion.
+5. `list_pending_receipts(...)` surfaces stuck-message diagnostics.
+6. Explicit ACK messages remain opt-in protocol traffic only.
 
 ---
 

@@ -1,6 +1,6 @@
 # Agent Bridge Refactor — Canonical Plan v1.1
 
-**Status:** Approved by Claude and Codex (2026-04-28). Awaiting execution.
+**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening execution is in progress: Phase 0 contracts, receipts/status, import-safe MCP, watcher leases, explicit bucket tools, recovery diagnostics, and docs consolidation have landed. Deeper service extraction, property tests, and full concurrency stress coverage remain follow-up work.
 
 **Inputs synthesized:**
 - Claude first draft: bridge message `fd2b5d8c`
