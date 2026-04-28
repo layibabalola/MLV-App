@@ -15,16 +15,21 @@ Run:
     py -3 -m unittest tools.agent-bridge.test_phase0_contract -v
 """
 import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
+from configure_watcher import configure_watcher
+import probe_server
+import watcher
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -277,11 +282,6 @@ class Phase0ContractTests(unittest.TestCase):
     # Test 7: Wake command failure does NOT add to watcher seen_ids
     # Invariant: #7. THIS IS THE BUG WE HIT LIVE.
     # ------------------------------------------------------------------
-    @unittest.skip(
-        "Phase 7 infrastructure not yet present: requires watcher to use "
-        "subprocess.run with timeout + exit-code check + delivery markers. "
-        "Will be enabled when Phase 7 lands."
-    )
     def test_07_wake_command_failure_does_not_mark_seen(self) -> None:
         """When wake_codex.ps1 (or any on_message_command) exits non-zero,
         the watcher must NOT add the message id to seen_ids. The message
@@ -296,29 +296,105 @@ class Phase0ContractTests(unittest.TestCase):
         process object whose returncode is non-zero; trigger one poll cycle;
         assert seen_ids unchanged for the failed message.
         """
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-failed-wake",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+        failed = Mock(returncode=1, stdout="", stderr="boom")
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run", return_value=failed):
+            processed = watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake",
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(processed, [])
+        self.assertNotIn("msg-failed-wake", seen_ids)
+        self.assertFalse(state_path.exists(), "failed wake must not persist seen_ids")
 
     # ------------------------------------------------------------------
     # Test 8 & 9: configure_watcher race + sub-agent cannot mutate parent_thread_id
     # Invariant: #10. Phase 7.X infrastructure.
     # ------------------------------------------------------------------
-    @unittest.skip(
-        "Phase 7.X infrastructure not yet present: requires parent_thread_id "
-        "as a typed/protected config field with provenance allowlist. "
-        "Will be enabled when Phase 7.X lands."
-    )
     def test_08_concurrent_configure_watcher_preserves_parent_target(self) -> None:
         """Concurrent parent + sub-agent configure_watcher calls must
         preserve the parent's parent_thread_id setting. Sub-agent's
         ambient CODEX_THREAD_ID must not overwrite parent's."""
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        config_path = self.tempdir / "watcher-config.json"
+        parent_thread = "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"
+        subagent_thread = "11111111-1111-4111-8111-111111111111"
 
-    @unittest.skip(
-        "Phase 7.X infrastructure not yet present: parent_thread_id "
-        "provenance allowlist must reject non-parent writers."
-    )
+        configure_watcher(
+            config_path=config_path,
+            state_dir=self.state_dir,
+            agent="codex",
+            project="mlv-app",
+            cwd=str(ROOT),
+            python_executable=sys.executable,
+            parent_thread_id=parent_thread,
+            parent_thread_provenance="parent",
+        )
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": subagent_thread}):
+            configure_watcher(
+                config_path=config_path,
+                state_dir=self.state_dir,
+                agent="codex",
+                project="mlv-app",
+                cwd=str(ROOT),
+                python_executable=sys.executable,
+            )
+
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+        self.assertEqual(config["codex_parent_thread_id"], parent_thread)
+        commands = [
+            entry.get("on_message_command", "")
+            for entry in config["sessions"]
+            if entry.get("agent") == "codex"
+        ]
+        self.assertTrue(any(parent_thread in command for command in commands))
+        self.assertFalse(any(subagent_thread in command for command in commands))
+
     def test_09_sub_agent_cannot_mutate_parent_thread_id(self) -> None:
         """A configure_watcher call from a sub-agent context must be
         rejected when attempting to write parent_thread_id. Only a
         process proven to be the controlling parent may write it."""
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+
+        with self.assertRaises(ValueError):
+            configure_watcher(
+                config_path=self.tempdir / "watcher-config.json",
+                state_dir=self.state_dir,
+                agent="codex",
+                project="mlv-app",
+                cwd=str(ROOT),
+                python_executable=sys.executable,
+                parent_thread_id="11111111-1111-4111-8111-111111111111",
+                parent_thread_provenance="sub-agent",
+            )
 
     # ------------------------------------------------------------------
     # Test 10: Bootstrap watcher-config test does not leak watcher subprocess
@@ -354,14 +430,14 @@ class Phase0ContractTests(unittest.TestCase):
     # Test 11: wait_inbox rejects non-string session_ids at MCP boundary
     # Invariant: schema strictness
     # ------------------------------------------------------------------
-    @unittest.skip(
-        "Requires MCP boundary validation that doesn't yet exist as a "
-        "testable seam. Phase 8 will tighten wait_inbox session_ids "
-        "schema to list[str] explicitly."
-    )
     def test_11_wait_inbox_rejects_non_string_session_ids(self) -> None:
         """wait_inbox(session_ids=[123, None, 'ok']) must reject at the
         MCP boundary, not silently coerce or fail mid-loop."""
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.wait_inbox("codex", session_ids=[123, None, "ok"], timeout_seconds=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "rejected")
+        self.assertIn("list of strings", result.message)
 
     # ------------------------------------------------------------------
     # Test 12: clear_bucket clears associated dedupe / seen_hash state
@@ -397,13 +473,13 @@ class Phase0ContractTests(unittest.TestCase):
     # Test 13: Probe tooling cannot mutate live state without --mutate
     # Invariant: probe safety
     # ------------------------------------------------------------------
-    @unittest.skip(
-        "Requires probe_server.py to be reworked with argparse + --mutate "
-        "gate. Will be enabled when Phase 8 lands."
-    )
     def test_13_probe_server_default_does_not_mutate_live_state(self) -> None:
         """probe_server.py must default to read-only / temp-state mode.
         Mutating live bridge state must require explicit --mutate."""
+        parser = probe_server.build_parser()
+        args = parser.parse_args([])
+        self.assertFalse(args.mutate)
+        self.assertIsNone(args.state_dir)
 
 
 if __name__ == "__main__":

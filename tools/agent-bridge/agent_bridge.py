@@ -59,6 +59,8 @@ def normalize_agent(agent: str) -> str:
 
 
 def normalize_session(session_id: Optional[str]) -> str:
+    if session_id is not None and not isinstance(session_id, str):
+        raise ValueError("session_id must be a string")
     value = (session_id or DEFAULT_SESSION_ID).strip()
     if not value:
         return DEFAULT_SESSION_ID
@@ -1326,6 +1328,8 @@ class AgentBridge:
 
         valid_sessions: Optional[set] = None
         if session_ids:
+            if any(not isinstance(s, str) for s in session_ids):
+                return BridgeResult(False, "rejected", "session_ids must be a list of strings")
             try:
                 valid_sessions = {normalize_session(s) for s in session_ids}
             except ValueError as exc:

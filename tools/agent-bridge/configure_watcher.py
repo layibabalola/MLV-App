@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional, Set
 from project_identity import derive_project_identity
 
 
+PARENT_THREAD_ID_KEY = "codex_parent_thread_id"
+PARENT_THREAD_PROVENANCE_KEY = "codex_parent_thread_provenance"
+PARENT_THREAD_ALLOWED_PROVENANCE = {"parent", "bootstrap-parent"}
+
+
 def read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():
         return dict(default)
@@ -20,6 +25,17 @@ def read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def write_json(path: Path, value: Dict[str, Any]) -> None:
+    if path.exists():
+        try:
+            current = read_json(path, {})
+        except Exception:
+            current = {}
+        if (
+            current.get(PARENT_THREAD_ID_KEY)
+            and value.get(PARENT_THREAD_PROVENANCE_KEY) not in PARENT_THREAD_ALLOWED_PROVENANCE
+        ):
+            value[PARENT_THREAD_ID_KEY] = current.get(PARENT_THREAD_ID_KEY)
+            value[PARENT_THREAD_PROVENANCE_KEY] = current.get(PARENT_THREAD_PROVENANCE_KEY, "parent")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as handle:
@@ -145,6 +161,8 @@ def configure_watcher(
     project: Optional[str],
     cwd: Optional[str],
     python_executable: str,
+    parent_thread_id: Optional[str] = None,
+    parent_thread_provenance: Optional[str] = None,
 ) -> Dict[str, Any]:
     identity = derive_project_identity(cwd)
     project_name = project or identity["rendezvous"]
@@ -164,6 +182,11 @@ def configure_watcher(
             "sessions": [],
         },
     )
+    if agent == "codex" and parent_thread_id:
+        if parent_thread_provenance not in PARENT_THREAD_ALLOWED_PROVENANCE:
+            raise ValueError("parent_thread_id may only be written by an approved parent provenance")
+        config[PARENT_THREAD_ID_KEY] = parent_thread_id
+        config[PARENT_THREAD_PROVENANCE_KEY] = parent_thread_provenance
     sessions = config.get("sessions", [])
     if not isinstance(sessions, list):
         raise ValueError("%s sessions must be a JSON array" % config_path)
@@ -216,7 +239,7 @@ def configure_watcher(
             "-ExecutionPolicy", "Bypass",
             "-File", str(wake_script),
         ]
-        codex_thread_id = os.environ.get("CODEX_THREAD_ID")
+        codex_thread_id = config.get(PARENT_THREAD_ID_KEY) or os.environ.get("CODEX_THREAD_ID")
         if codex_thread_id:
             wake_args.extend(["-ThreadId", codex_thread_id])
         wake_command = subprocess.list2cmdline(wake_args)
@@ -256,6 +279,12 @@ def main() -> None:
     parser.add_argument("--project", help="Explicit project/rendezvous name; defaults to derived identity")
     parser.add_argument("--cwd", help="Workspace path used for project identity derivation")
     parser.add_argument("--python", default=sys.executable, help="Python executable used in on_message_command")
+    parser.add_argument("--parent-thread-id", help="Protected Codex parent thread id used for wake targeting")
+    parser.add_argument(
+        "--parent-thread-provenance",
+        choices=sorted(PARENT_THREAD_ALLOWED_PROVENANCE),
+        help="Proof that --parent-thread-id came from the controlling parent session",
+    )
     args = parser.parse_args()
 
     config = configure_watcher(
@@ -265,6 +294,8 @@ def main() -> None:
         project=args.project,
         cwd=args.cwd,
         python_executable=args.python,
+        parent_thread_id=args.parent_thread_id,
+        parent_thread_provenance=args.parent_thread_provenance,
     )
     print(json.dumps(config, indent=2, sort_keys=True))
 

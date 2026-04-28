@@ -282,11 +282,89 @@ def run_command_for_session(cmd: str, agent: str, session_id: str, messages: Lis
     env["BRIDGE_MESSAGE_COUNT"] = str(len(messages))
     env["BRIDGE_MESSAGE_IDS"] = json.dumps([msg.get("id") for msg in messages])
     try:
-        proc = subprocess.Popen(cmd, shell=True, env=env)
-        return proc.pid is not None
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            env=env,
+            timeout=90,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.stdout:
+            print(proc.stdout.rstrip(), flush=True)
+        if proc.stderr:
+            print(proc.stderr.rstrip(), flush=True)
+        if proc.returncode != 0:
+            print(
+                f"[agent-bridge] on_message_command exited {proc.returncode}; message remains retryable",
+                flush=True,
+            )
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        print("[agent-bridge] on_message_command timed out; message remains retryable", flush=True)
+        return False
     except Exception as exc:
         print(f"[agent-bridge] on_message_command failed: {exc}", flush=True)
         return False
+
+
+def process_session_once(
+    session_config: Dict[str, Any],
+    *,
+    seen_ids: set,
+    state_path: Path,
+    toasts_enabled: bool,
+) -> List[str]:
+    """Process one configured watcher session once.
+
+    Wake spawn is not delivery: ids are recorded in watcher-state only after
+    notification succeeds and any wake command exits cleanly. Failed wake
+    commands leave messages retryable for the next poll.
+    """
+    agent = session_config["agent"]
+    session_id = session_config["session_id"]
+    inbox_path = Path(session_config["inbox"])
+    on_message = session_config.get("on_message", "notify")
+    on_message_command: Optional[str] = session_config.get("on_message_command")
+
+    effective_on_message = on_message
+    if not toasts_enabled and on_message == "toast":
+        effective_on_message = "log"
+
+    unread = unread_for_session(inbox_path, session_id)
+    new_msgs = [m for m in unread if m.get("id") not in seen_ids]
+    if not new_msgs:
+        return []
+
+    if effective_on_message == "log":
+        for m in new_msgs:
+            print(
+                f"[agent-bridge] {utc_now()} -- new {agent} message id={m.get('id')} session=...{(session_id or '')[-8:]}",
+                flush=True,
+            )
+        for m in new_msgs:
+            seen_ids.add(m["id"])
+        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
+        return [m["id"] for m in new_msgs]
+
+    if effective_on_message == "toast":
+        notify_windows_toast(agent, session_id, new_msgs)
+    else:
+        notify_terminal(agent, session_id, new_msgs)
+
+    command_ok = False
+    if on_message_command:
+        command_ok = run_command_for_session(on_message_command, agent, session_id, new_msgs, inbox_path)
+
+    if not on_message_command or command_ok:
+        for m in new_msgs:
+            seen_ids.add(m["id"])
+        save_seen(state_path, {"seen_ids": list(seen_ids)[-500:]})
+        return [m["id"] for m in new_msgs]
+
+    return []
 
 
 def _load_config(config_path: Path) -> Dict[str, Any]:
@@ -352,6 +430,13 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
                     last_compact = now
 
             for s in sessions:
+                process_session_once(
+                    s,
+                    seen_ids=seen_ids,
+                    state_path=state_path,
+                    toasts_enabled=toasts_enabled,
+                )
+                continue
                 agent = s["agent"]
                 session_id = s["session_id"]
                 inbox_path = Path(s["inbox"])

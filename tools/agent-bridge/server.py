@@ -150,7 +150,7 @@ def check_inbox(
 @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
 async def wait_inbox(
     agent: str,
-    session_ids: Optional[list] = None,
+    session_ids: Optional[list[str]] = None,
     timeout_seconds: int = 600,
     mark_read: bool = False,
 ) -> dict:
