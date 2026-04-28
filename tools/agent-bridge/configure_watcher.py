@@ -212,13 +212,24 @@ def configure_watcher(
         if existing_private is None:
             existing_private = raw_entry
 
-    # The watcher's job is notification only (toast or terminal).
-    # Consumption — marking messages read — is each agent's own responsibility:
-    #   Claude: persistent Monitor → check_inbox → mark_read by id
-    #   Codex:  wait_inbox loop (returns messages and marks them read)
-    # Running consume_inbox.py from the watcher races with both mechanisms and
-    # silently eats messages before the agent can see them.
-    # on_message_command is therefore never generated.
+    # The watcher's job is notification only (toast) plus, for Codex, an
+    # automated wake into the running Codex Desktop session via SendKeys.
+    # Consumption is each agent's own responsibility:
+    #   Claude: persistent Monitor -> check_inbox -> mark_read by id
+    #   Codex:  wake_codex.ps1 synthesizes "check bridge inbox" into the live
+    #           Codex Desktop window, which causes Codex to do its own
+    #           non-destructive check + handle + mark_read pattern.
+    # NEVER use consume_inbox.py from the watcher — it races with both agent
+    # read paths and silently eats messages.
+    wake_command: Optional[str] = None
+    if agent == "codex":
+        wake_script = Path(__file__).with_name("wake_codex.ps1")
+        wake_command = subprocess.list2cmdline([
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", str(wake_script),
+        ])
 
     if active_session_id:
         managed_entries.append(
@@ -228,7 +239,7 @@ def configure_watcher(
                 session_id=str(active_session_id),
                 project=project_name,
                 inbox=inbox,
-                command=None,
+                command=wake_command,
             )
         )
 
@@ -238,7 +249,7 @@ def configure_watcher(
             agent=agent,
             project=project_name,
             inbox=inbox,
-            command=None,
+            command=wake_command,
         )
     )
 
