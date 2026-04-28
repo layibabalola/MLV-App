@@ -1,5 +1,5 @@
 {
-  "_comment": "agent-bridge watcher config. The watcher is notification-only: use toast/log to alert, never consume messages from here.",
+  "_comment": "agent-bridge watcher config. The watcher is notification-only: use toast/log to alert, never consume messages from here. Prefer settings.json for runtime tuning.",
   "toasts_enabled": true,
   "sessions": [
     {

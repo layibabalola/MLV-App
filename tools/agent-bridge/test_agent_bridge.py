@@ -12,12 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
-from compact import reap_stale_server_pids
+from compact import prune_audit_logs, reap_stale_server_pids
 from configure_watcher import configure_watcher
 from consume_inbox import consume
 from core.addressing import AgentInbox, MessageKind, SenderContext, SessionInbox
 from core.processes import acquire_singleton_lease, heartbeat_lease, release_lease
 from core.routing import RoutingStatus, resolve_route
+from core.settings import load_settings, settings_path_for_state_dir
 from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
 from project_identity import derive_project_identity, normalize_rendezvous
 from recover_state import recover_state
@@ -267,6 +268,41 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(release_lease(lock_path, lease["pid"], lease["generation"]))
         self.assertFalse(lock_path.exists())
 
+    def test_settings_defaults_and_validation(self) -> None:
+        settings = load_settings(self.state_dir)
+        self.assertEqual(settings.toast_expiry_minutes, 5)
+        self.assertTrue(settings.toasts_enabled)
+
+        settings_path = settings_path_for_state_dir(self.state_dir)
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "toast_expiry_minutes": 7,
+                    "toasts_enabled": False,
+                    "routing_rules_enabled": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = load_settings(self.state_dir)
+        self.assertEqual(loaded.toast_expiry_minutes, 7)
+        self.assertFalse(loaded.toasts_enabled)
+        self.assertFalse(loaded.routing_rules_enabled)
+
+        settings_path.write_text(json.dumps({"unsupported_knob": True}), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_settings(self.state_dir)
+
+    def test_evaluate_routing_respects_settings_gate(self) -> None:
+        settings_path_for_state_dir(self.state_dir).write_text(
+            json.dumps({"routing_rules_enabled": False}),
+            encoding="utf-8",
+        )
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.evaluate_routing("codex", "codex->claude", "bridge tooling")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "disabled")
+
     def test_recover_state_dry_run_and_repair(self) -> None:
         self.state_dir.mkdir(parents=True)
         state_path = self.state_dir / "state.json"
@@ -301,17 +337,38 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue(fresh.exists())
 
-    def test_windows_toast_expires_after_five_minutes(self) -> None:
+    def test_compact_prunes_old_rotated_audit_logs(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        old_log = self.state_dir / "messages.2025-01.jsonl"
+        fresh_log = self.state_dir / "messages.2026-04.jsonl"
+        quarantine = self.state_dir / "messages.quarantine.jsonl"
+        old_log.write_text("{}\n", encoding="utf-8")
+        fresh_log.write_text("{}\n", encoding="utf-8")
+        quarantine.write_text("not-json\n", encoding="utf-8")
+        os.utime(old_log, (0, 0))
+        os.utime(quarantine, (0, 0))
+
+        result = prune_audit_logs(self.state_dir, retention_days=1)
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse(old_log.exists())
+        self.assertTrue(fresh_log.exists())
+        self.assertTrue(quarantine.exists())
+
+    def test_windows_toast_uses_expiry_and_tray_cap_settings(self) -> None:
         with patch("watcher.subprocess.Popen") as popen:
             watcher.notify_windows_toast(
                 "codex",
                 "mlv-app",
                 [{"id": "msg-1", "body": "TYPE: SMOKE\nSUMMARY: toast expiry"}],
+                toast_expiry_minutes=7,
+                toast_max_in_tray=3,
             )
         args = popen.call_args.args[0]
         encoded = args[args.index("-EncodedCommand") + 1]
         script = base64.b64decode(encoded).decode("utf-16-le")
-        self.assertIn("$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(5)", script)
+        self.assertIn("$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(7)", script)
+        self.assertIn("$toastMaxInTray = 3", script)
+        self.assertIn("$toast.Group = 'agent-bridge-codex'", script)
 
     def test_clear_bucket_and_reset_bucket_are_explicit_aliases(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -514,6 +571,15 @@ class AgentBridgeTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        settings_path_for_state_dir(self.state_dir).write_text(
+            json.dumps(
+                {
+                    "wake_idle_threshold_seconds": 9,
+                    "wake_max_wait_seconds": 77,
+                }
+            ),
+            encoding="utf-8",
+        )
         with patch.dict("os.environ", {"CODEX_THREAD_ID": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"}):
             result = configure_watcher(
                 config_path=config_path,
@@ -534,6 +600,8 @@ class AgentBridgeTests(unittest.TestCase):
             if entry.get("agent") == "codex"
         ]
         self.assertTrue(any("-ThreadId 019dcfe4-bd5d-7841-a7c1-2e8969a777c5" in command for command in codex_commands))
+        self.assertTrue(any("-IdleThresholdSeconds 9" in command for command in codex_commands))
+        self.assertTrue(any("-MaxWaitSeconds 77" in command for command in codex_commands))
 
 
 if __name__ == "__main__":

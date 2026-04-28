@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from core.addressing import AgentInbox, MessageKind, ProjectInbox, SenderContext, SessionInbox
 from core.routing import resolve_route
+from core.settings import load_settings
 from project_identity import derive_project_identity
 from routing_policy import evaluate_message
 
@@ -221,6 +222,9 @@ class AgentBridge:
 
     def ensure_state_dir(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_settings(self):
+        return load_settings(self.state_dir)
 
     @contextlib.contextmanager
     def _locked(self):
@@ -898,6 +902,20 @@ class AgentBridge:
         return self.state_dir.parent / "routing-rules.json"
 
     def evaluate_routing(self, source: str, direction: str, text: str) -> BridgeResult:
+        try:
+            settings = self._load_settings()
+        except Exception as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        if not settings.routing_rules_enabled:
+            return BridgeResult(
+                True,
+                "disabled",
+                "Routing rules are disabled by settings.json.",
+                {
+                    "decision": "disabled",
+                    "rules_path": str(self.routing_rules_path),
+                },
+            )
         try:
             result = evaluate_message(
                 source=source,
@@ -1773,11 +1791,17 @@ class AgentBridge:
                 "status": "missing",
                 "learned": 0,
                 "suppressed": 0,
+                "enabled": True,
             }
+            try:
+                routing_rules["enabled"] = self._load_settings().routing_rules_enabled
+            except Exception as exc:
+                routing_rules["status"] = "settings_error: %s" % exc
             if rules_path.exists():
                 try:
                     rules = read_json(rules_path, {})
-                    routing_rules["status"] = "healthy"
+                    if not str(routing_rules.get("status", "")).startswith("settings_error"):
+                        routing_rules["status"] = "healthy"
                     routing_rules["learned"] = len(rules.get("learned_triggers", []))
                     routing_rules["suppressed"] = len(rules.get("suppressed_triggers", []))
                 except Exception:

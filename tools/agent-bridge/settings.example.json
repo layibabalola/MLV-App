@@ -1,0 +1,12 @@
+{
+  "toast_expiry_minutes": 5,
+  "toast_max_in_tray": 10,
+  "wake_idle_threshold_seconds": 5,
+  "wake_max_wait_seconds": 60,
+  "poll_interval_seconds": 2,
+  "compact_interval_hours": 6,
+  "audit_log_retention_days": 90,
+  "inbox_read_retention_days": 7,
+  "toasts_enabled": true,
+  "routing_rules_enabled": true
+}

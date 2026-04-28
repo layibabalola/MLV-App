@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from core.settings import load_settings
 from project_identity import derive_project_identity
 
 
@@ -167,6 +168,7 @@ def configure_watcher(
     identity = derive_project_identity(cwd)
     project_name = project or identity["rendezvous"]
     inbox = state_dir / ("inbox-%s.jsonl" % agent)
+    settings = load_settings(state_dir)
 
     registry = load_registry(state_dir)
     projects = registry.get("projects", {})
@@ -238,6 +240,8 @@ def configure_watcher(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", str(wake_script),
+            "-IdleThresholdSeconds", str(settings.wake_idle_threshold_seconds),
+            "-MaxWaitSeconds", str(settings.wake_max_wait_seconds),
         ]
         codex_thread_id = config.get(PARENT_THREAD_ID_KEY) or os.environ.get("CODEX_THREAD_ID")
         if codex_thread_id:

@@ -27,17 +27,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
+from core.settings import BridgeSettings, load_settings, settings_path_for_state_dir
 
 # Compaction support (same directory -- import directly)
 try:
-    from compact import compact_inbox, rotate_audit_log, should_compact
+    from compact import compact_inbox, prune_audit_logs, rotate_audit_log, should_compact
     _COMPACT_AVAILABLE = True
 except ImportError:
     _COMPACT_AVAILABLE = False
 
 
-POLL_INTERVAL_S = 2        # file-stat poll interval; cheap
-COMPACT_INTERVAL_S = 6 * 3600  # run compaction every 6 hours
 COMPACT_SIZE_MB = 1.0          # also compact if inbox exceeds this size
 WAKE_ACK_GRACE_PERIOD_S = 30
 WAKE_MAX_RETRIES = 3
@@ -140,13 +139,17 @@ def _save_watcher_state(state_path: Path, seen_ids: set, pending: List[Dict[str,
     )
 
 
-def run_compaction(state_dir: Path) -> None:
+def run_compaction(state_dir: Path, settings: BridgeSettings) -> None:
     if not _COMPACT_AVAILABLE:
         return
     try:
         from compact import AGENTS as _AGENTS
         for agent in _AGENTS:
-            result = compact_inbox(state_dir, agent)
+            result = compact_inbox(
+                state_dir,
+                agent,
+                max_age_days=settings.inbox_read_retention_days,
+            )
             if result["read_dropped"] > 0:
                 print(
                     f"[agent-bridge] compact inbox-{agent}.jsonl: "
@@ -155,6 +158,7 @@ def run_compaction(state_dir: Path) -> None:
                     flush=True,
                 )
         rotate_audit_log(state_dir)
+        prune_audit_logs(state_dir, retention_days=settings.audit_log_retention_days)
     except Exception as exc:
         print(f"[agent-bridge] compaction error: {exc}", flush=True)
 
@@ -187,7 +191,14 @@ def _xml_esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, Any]]) -> None:
+def notify_windows_toast(
+    agent: str,
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    *,
+    toast_expiry_minutes: int = 5,
+    toast_max_in_tray: int = 10,
+) -> None:
     """Surface a modern Windows 10/11 toast notification via WinRT.
 
     Uses Windows.UI.Notifications.ToastNotification (built into Windows 10/11,
@@ -220,6 +231,8 @@ def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, A
     recipient_emoji = AGENT_EMOJI.get(agent, "🤖")
     sender_emoji = AGENT_EMOJI.get(from_agent, "👾")
     sound_uri = AGENT_SOUND.get(agent, "Notification.Default")
+    toast_group = f"agent-bridge-{agent}"
+    toast_tag = str(msg.get("id") or uuid.uuid4()).replace("'", "")[:64]
 
     # Title: sender → recipient with per-agent robots
     title = f"{sender_emoji} {from_agent.capitalize()} → {recipient_emoji} {agent.capitalize()}"
@@ -273,7 +286,22 @@ def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, A
         "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
         "$xml.LoadXml($xmlStr.Trim())\n"
         "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)\n"
-        "$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(5)\n"
+        f"$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes({int(toast_expiry_minutes)})\n"
+        f"$toast.Tag = '{toast_tag}'\n"
+        f"$toast.Group = '{toast_group}'\n"
+        f"$toastMaxInTray = {int(toast_max_in_tray)}\n"
+        "if ($toastMaxInTray -gt 0) {\n"
+        "  try {\n"
+        "    $history = [Windows.UI.Notifications.ToastNotificationManager]::History\n"
+        "    $existing = @($history.GetHistory($appId) | Where-Object { $_.Group -eq $toast.Group })\n"
+        "    $overflow = $existing.Count - ($toastMaxInTray - 1)\n"
+        "    if ($overflow -gt 0) {\n"
+        "      $existing | Sort-Object -Property ExpirationTime | Select-Object -First $overflow | ForEach-Object {\n"
+        "        if ($_.Tag) { $history.Remove($_.Tag, $_.Group, $appId) }\n"
+        "      }\n"
+        "    }\n"
+        "  } catch {}\n"
+        "}\n"
         "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)\n"
     )
     try:
@@ -501,6 +529,8 @@ def process_session_once(
     seen_ids: set,
     state_path: Path,
     toasts_enabled: bool,
+    toast_expiry_minutes: int = 5,
+    toast_max_in_tray: int = 10,
     grace_period_seconds: int = WAKE_ACK_GRACE_PERIOD_S,
     max_retries: int = WAKE_MAX_RETRIES,
 ) -> List[str]:
@@ -554,7 +584,13 @@ def process_session_once(
         return [m["id"] for m in new_msgs]
 
     if effective_on_message == "toast":
-        notify_windows_toast(agent, session_id, new_msgs)
+        notify_windows_toast(
+            agent,
+            session_id,
+            new_msgs,
+            toast_expiry_minutes=toast_expiry_minutes,
+            toast_max_in_tray=toast_max_in_tray,
+        )
     else:
         notify_terminal(agent, session_id, new_msgs)
 
@@ -588,6 +624,12 @@ def _load_config(config_path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def _effective_toasts_enabled(config: Dict[str, Any], settings: BridgeSettings, settings_path: Path) -> bool:
+    if settings_path.exists():
+        return settings.toasts_enabled
+    return bool(config.get("toasts_enabled", settings.toasts_enabled))
+
+
 def watch(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
@@ -609,14 +651,22 @@ def watch(
     # Derive state_dir from first inbox path (parent directory)
     state_dir = Path(sessions[0]["inbox"]).parent if sessions else None
 
-    toasts_enabled: bool = config.get("toasts_enabled", True)
-    print(f"[agent-bridge] Watcher started. Watching {len(sessions)} session(s). Poll every {POLL_INTERVAL_S}s. Toasts: {'on' if toasts_enabled else 'off'}.", flush=True)
+    settings_path = settings_path_for_state_dir(state_dir) if state_dir else config_path.parent / "settings.json"
+    settings = load_settings(state_dir or config_path.parent / "state", settings_path=settings_path)
+    settings_mtime = settings_path.stat().st_mtime if settings_path.exists() else None
+
+    toasts_enabled = _effective_toasts_enabled(config, settings, settings_path)
+    print(
+        f"[agent-bridge] Watcher started. Watching {len(sessions)} session(s). "
+        f"Poll every {settings.poll_interval_seconds}s. Toasts: {'on' if toasts_enabled else 'off'}.",
+        flush=True,
+    )
     for s in sessions:
         print(f"  agent={s['agent']}  session=...{s['session_id'][-8:]}  inbox={s['inbox']}", flush=True)
 
     # Compact on startup
     if state_dir:
-        run_compaction(state_dir)
+        run_compaction(state_dir, settings)
 
     last_compact = time.monotonic()
 
@@ -624,31 +674,39 @@ def watch(
         while not (stop_event and stop_event.is_set()):
             if heartbeat:
                 heartbeat()
-            # Hot-reload config when the file changes (e.g. user toggles toasts_enabled)
+            # Hot-reload config when the file changes.
             try:
                 mtime = config_path.stat().st_mtime
                 if mtime != config_mtime:
                     new_config = _load_config(config_path)
-                    new_toasts = new_config.get("toasts_enabled", True)
-                    if new_toasts != toasts_enabled:
-                        print(f"[agent-bridge] toasts_enabled changed: {'on' if new_toasts else 'off'}", flush=True)
-                        toasts_enabled = new_toasts
                     sessions = new_config.get("sessions", sessions)
                     config = new_config
                     config_mtime = mtime
             except Exception:
                 pass  # keep running on transient read errors
+            try:
+                new_settings_mtime = settings_path.stat().st_mtime if settings_path.exists() else None
+                if new_settings_mtime != settings_mtime:
+                    settings = load_settings(state_dir or config_path.parent / "state", settings_path=settings_path)
+                    settings_mtime = new_settings_mtime
+                    print("[agent-bridge] settings.json reloaded", flush=True)
+                new_toasts = _effective_toasts_enabled(config, settings, settings_path)
+                if new_toasts != toasts_enabled:
+                    print(f"[agent-bridge] toasts_enabled changed: {'on' if new_toasts else 'off'}", flush=True)
+                    toasts_enabled = new_toasts
+            except Exception as exc:
+                print(f"[agent-bridge] settings reload error: {exc}", flush=True)
 
             # Periodic and size-triggered compaction
             if state_dir:
                 now = time.monotonic()
-                time_due = (now - last_compact) >= COMPACT_INTERVAL_S
+                time_due = (now - last_compact) >= (settings.compact_interval_hours * 3600)
                 size_due = _COMPACT_AVAILABLE and any(
                     should_compact(state_dir, s["agent"], COMPACT_SIZE_MB)
                     for s in sessions
                 )
                 if time_due or size_due:
-                    run_compaction(state_dir)
+                    run_compaction(state_dir, settings)
                     last_compact = now
 
             for s in sessions:
@@ -657,10 +715,12 @@ def watch(
                     seen_ids=seen_ids,
                     state_path=state_path,
                     toasts_enabled=toasts_enabled,
+                    toast_expiry_minutes=settings.toast_expiry_minutes,
+                    toast_max_in_tray=settings.toast_max_in_tray,
                 )
 
                     # (the consumer would mark messages read silently — destructive).
-            time.sleep(POLL_INTERVAL_S)
+            time.sleep(settings.poll_interval_seconds)
 
     except KeyboardInterrupt:
         print("\n[agent-bridge] Watcher stopped.", flush=True)

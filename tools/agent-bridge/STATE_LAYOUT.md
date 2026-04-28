@@ -5,6 +5,7 @@ Default state root:
 ```text
 %USERPROFILE%\.agent-bridge\
   session.json
+  settings.json
   watcher-config.json
   routing-rules.json
   watcher.pid
@@ -28,6 +29,7 @@ Default state root:
 | Path | Owner | Purpose |
 |---|---|---|
 | `session.json` | bridge session lifecycle | Active and historical Claude/Codex sessions per project. |
+| `settings.json` | user/runtime config | Optional supported tuning surface documented in `SETTINGS.md`. |
 | `watcher-config.json` | bootstrap/configure_watcher | Static watcher entries for private and project buckets. |
 | `routing-rules.json` | routing rules CLI/MCP | Optional learned/suppressed routing policy. |
 | `watcher.pid` | watcher/bootstrap compatibility | Legacy marker for the current watcher process. The lease is authoritative. |

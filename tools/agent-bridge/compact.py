@@ -7,6 +7,7 @@ Prunes read messages from inbox JSONL files while preserving:
   - The newest keep_last_read read messages even if older
 
 Rotates messages.jsonl by month when it exceeds audit_max_mb.
+Prunes rotated audit logs older than audit_retention_days.
 
 Usage:
     py -3 tools/agent-bridge/compact.py --state-dir <path> [options]
@@ -15,6 +16,8 @@ Options:
     --max-age-days N        Drop read messages older than N days (default: 7)
     --keep-last-read N      Always keep the N newest read messages (default: 200)
     --audit-max-mb N        Rotate audit log when it exceeds N MB (default: 5)
+    --audit-retention-days N
+                            Drop rotated messages.YYYY-MM.jsonl files older than N days (default: 90)
     --dry-run               Print what would be done without writing
 
 Safe to run at any time. Uses the same .lock directory as the MCP server,
@@ -24,6 +27,7 @@ import argparse
 import contextlib
 import os
 import json
+import re
 import sys
 import time
 import uuid
@@ -230,6 +234,51 @@ def rotate_audit_log(
     return event
 
 
+def prune_audit_logs(
+    state_dir: Path,
+    retention_days: int = 90,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Remove rotated audit logs older than retention_days."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    removed: List[str] = []
+    kept = 0
+    errors: List[Dict[str, str]] = []
+
+    for path in sorted(state_dir.glob("messages.*.jsonl")):
+        if not re.fullmatch(r"messages\.\d{4}-\d{2}\.jsonl", path.name):
+            continue
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        except OSError as exc:
+            errors.append({"path": str(path), "error": str(exc)})
+            continue
+        if mtime >= cutoff:
+            kept += 1
+            continue
+        removed.append(str(path))
+        if not dry_run:
+            try:
+                path.unlink()
+            except OSError as exc:
+                errors.append({"path": str(path), "error": str(exc)})
+
+    event = {
+        "id": str(uuid.uuid4()),
+        "timestamp": utc_now(),
+        "action": "prune_audit_logs",
+        "retention_days": retention_days,
+        "removed": len(removed),
+        "removed_paths": removed,
+        "kept": kept,
+        "dry_run": dry_run,
+        "errors": errors,
+    }
+    if not dry_run and removed:
+        append_jsonl(state_dir / "messages.jsonl", event)
+    return event
+
+
 def should_compact(state_dir: Path, agent: str, threshold_mb: float = 1.0) -> bool:
     path = state_dir / f"inbox-{agent}.jsonl"
     if not path.exists():
@@ -324,6 +373,7 @@ def main() -> None:
     parser.add_argument("--max-age-days", type=int, default=7)
     parser.add_argument("--keep-last-read", type=int, default=200)
     parser.add_argument("--audit-max-mb", type=float, default=5.0)
+    parser.add_argument("--audit-retention-days", type=int, default=90)
     parser.add_argument("--server-pid-max-age-hours", type=int, default=24)
     parser.add_argument("--dry-run", action="store_true", help="Print actions without writing")
     args = parser.parse_args()
@@ -354,6 +404,19 @@ def main() -> None:
         any_work = True
         tag = "[DRY RUN] " if args.dry_run else ""
         print(f"{tag}rotated messages.jsonl ({rotate_result['size_mb']} MB) -> {rotate_result['rotated_to']}")
+
+    prune_result = prune_audit_logs(
+        state_dir,
+        retention_days=args.audit_retention_days,
+        dry_run=args.dry_run,
+    )
+    if prune_result["removed"] > 0 or args.dry_run:
+        any_work = True
+        tag = "[DRY RUN] " if args.dry_run else ""
+        print(
+            f"{tag}pruned audit logs: kept {prune_result['kept']}, "
+            f"removed {prune_result['removed']}"
+        )
 
     reaper_result = reap_stale_server_pids(
         state_dir,

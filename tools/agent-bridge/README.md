@@ -6,6 +6,7 @@ Canonical docs:
 
 - `ARCHITECTURE.md` - current component model, protocol planes, receipts, process ownership, and recovery flow.
 - `STATE_LAYOUT.md` - durable files under `%USERPROFILE%\.agent-bridge`.
+- `SETTINGS.md` - supported `%USERPROFILE%\.agent-bridge\settings.json` runtime tuning surface.
 - `DEAD_CODE_DECISIONS.md` - explicit keep/wire/archive calls for ambiguous bridge helpers.
 - `REFACTOR_PLAN.md` - approved v1.1 roadmap and acceptance criteria.
 
@@ -85,6 +86,9 @@ For scheduled polling, use `peek_inbox` instead of `check_inbox`. `peek_inbox` i
 
 Runtime state and audit logs live under `%USERPROFILE%\.agent-bridge\state`.
 The active cross-chat session registry lives at `%USERPROFILE%\.agent-bridge\session.json`.
+Runtime settings, when present, live at `%USERPROFILE%\.agent-bridge\settings.json`.
+Copy `tools\agent-bridge\settings.example.json` as a starting point; unsupported
+keys are rejected so the settings surface stays intentionally small.
 
 Use `project_identity` to derive the canonical git-root-based rendezvous name.
 In worktrees this resolves through `git rev-parse --git-common-dir`, so both the

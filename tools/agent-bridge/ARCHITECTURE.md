@@ -16,6 +16,7 @@ an inbox is not the same thing as wake, read, or handled completion.
 | `core/addressing.py` | Typed address/message/sender models used by contract tests and routing seams. |
 | `core/routing.py` | Pure routing resolver for active/superseded/project/agent-level decisions. |
 | `core/processes.py` | Process liveness, command hashing, role leases, heartbeats, and safe release. |
+| `core/settings.py` | Constrained `%USERPROFILE%\.agent-bridge\settings.json` loader and validation. |
 | `bootstrap_session.py` | Session activation, previous-session drain, handshake, watcher config refresh, and watcher start. |
 | `watcher.py` | Singleton file watcher and wake dispatcher. It notifies only; it must not consume inbox messages. Helper-backed wake paths are receipt-verified before being recorded as seen. |
 | `configure_watcher.py` | Transactional watcher config writer with parent-thread guardrails. |
@@ -34,6 +35,13 @@ an inbox is not the same thing as wake, read, or handled completion.
 `default` is deprecated. New writes must use an explicit project bucket, session
 GUID, or typed agent-control path. Compatibility shims remain only where older
 callers still need them.
+
+## Settings
+
+Runtime settings are optional and live at
+`%USERPROFILE%\.agent-bridge\settings.json`. If the file is absent, defaults from
+`core/settings.py` apply. Unsupported keys are rejected so the settings surface
+stays intentionally small; see `SETTINGS.md` for the canonical list.
 
 ## Receipt Lifecycle
 
