@@ -485,18 +485,26 @@ class AgentBridge:
     ) -> Optional[str]:
         path = self.inbox_path(target_agent)
         rows = read_jsonl(path)
-        unread = [
-            row for row in rows if row.get("session_id") == session_id and not row.get("read_at")
+        matching_unread = [
+            row
+            for row in rows
+            if row.get("session_id") == session_id
+            and not row.get("read_at")
+            and row.get("marker_variant") == "control"
+            and row.get("control_type") == control_type
+            and row.get("from") == sender
         ]
-        if unread and not replace_existing_control:
+        if matching_unread and not replace_existing_control:
             return None
-        if unread and replace_existing_control:
+        if matching_unread and replace_existing_control:
             kept = []
             for row in rows:
                 if (
                     row.get("session_id") == session_id
                     and not row.get("read_at")
                     and row.get("marker_variant") == "control"
+                    and row.get("control_type") == control_type
+                    and row.get("from") == sender
                 ):
                     continue
                 kept.append(row)
@@ -788,14 +796,6 @@ class AgentBridge:
                 row for row in read_jsonl(self.inbox_path(owner))
                 if row.get("session_id") == session and not row.get("read_at")
             ]
-            if drained_messages:
-                rows = read_jsonl(self.inbox_path(owner))
-                now = utc_now()
-                drained_ids = {row["id"] for row in drained_messages}
-                for row in rows:
-                    if row.get("id") in drained_ids:
-                        row["read_at"] = now
-                write_jsonl(self.inbox_path(owner), rows)
 
             record["status"] = "ended"
             record["ended_at"] = utc_now()
@@ -831,6 +831,7 @@ class AgentBridge:
                     "project": project_name,
                     "peer_session": peer_session,
                     "drained_messages": len(drained_messages),
+                    "drained_marked_read": False,
                 }
             )
             return BridgeResult(
@@ -843,6 +844,7 @@ class AgentBridge:
                     "project": project_name,
                     "peer_session": peer_session,
                     "drained_messages": drained_messages,
+                    "drained_marked_read": False,
                     "control_result": None if control is None else dataclasses.asdict(control),
                 },
             )
@@ -1031,6 +1033,8 @@ class AgentBridge:
             delivery_bucket = delivery["bucket"]
             delivery_level = delivery["inbox_level"]
             parent_project = delivery.get("parent_project")
+            if delivery_level == INBOX_LEVEL_AGENT:
+                return reject("agent-level inbox %s is reserved for control/recovery traffic" % delivery_bucket)
             event["resolved_session_id"] = delivery_bucket
             event["inbox_level"] = delivery_level
             event["escalated_from"] = delivery.get("escalated_from")
@@ -1048,6 +1052,32 @@ class AgentBridge:
                         "session %s for %s is no longer the active session for project %s"
                         % (session, sender, sender_record["project"])
                     )
+            elif delivery_level == INBOX_LEVEL_SESSION:
+                delivery_info = self._bucket_info(registry, delivery_bucket)
+                delivery_record = delivery_info.get("record")
+                inactive_sender_sessions: List[str] = []
+                project_name_for_delivery = delivery_info.get("project")
+                if project_name_for_delivery:
+                    project_entry_for_delivery = (registry.get("projects") or {}).get(project_name_for_delivery, {})
+                    for candidate_id, candidate_record in (project_entry_for_delivery.get("sessions") or {}).items():
+                        if (
+                            isinstance(candidate_record, dict)
+                            and candidate_record.get("agent") == sender
+                            and candidate_record.get("status") != "active"
+                        ):
+                            inactive_sender_sessions.append(str(candidate_id))
+                if (
+                    delivery_record
+                    and delivery_record.get("agent") == target
+                    and delivery_record.get("status") == "active"
+                    and delivery_info.get("active_session") == delivery_bucket
+                    and session == delivery_bucket
+                    and inactive_sender_sessions
+                ):
+                    return reject(
+                        "sender session for %s is not proven active; superseded senders may not send to active target session %s"
+                        % (sender, delivery_bucket)
+                    )
 
             session_state = self._session_state(state, delivery_bucket)
             hop_count = int(session_state.get("hop_count", 0))
@@ -1064,13 +1094,16 @@ class AgentBridge:
             if body_hash in session_state.get("seen_hashes", []):
                 return reject("duplicate message hash for session %s" % delivery_bucket)
 
-            unread = self._unread_for(target, delivery_bucket)
-            if delivery_level == INBOX_LEVEL_SESSION and len(unread) >= SESSION_BACKPRESSURE_LIMIT:
-                return reject("target %s already has one unread message for session %s" % (target, delivery_bucket))
-            if delivery_level == INBOX_LEVEL_PROJECT and len(unread) >= PROJECT_BACKPRESSURE_LIMIT:
+            unread_work = [
+                row for row in self._unread_for(target, delivery_bucket)
+                if row.get("marker_variant") != "control"
+            ]
+            if delivery_level == INBOX_LEVEL_SESSION and len(unread_work) >= SESSION_BACKPRESSURE_LIMIT:
+                return reject("target %s already has one unread work message for session %s" % (target, delivery_bucket))
+            if delivery_level == INBOX_LEVEL_PROJECT and len(unread_work) >= PROJECT_BACKPRESSURE_LIMIT:
                 return reject(
                     "target %s project inbox %s is full (%d unread >= %d)"
-                    % (target, delivery_bucket, len(unread), PROJECT_BACKPRESSURE_LIMIT)
+                    % (target, delivery_bucket, len(unread_work), PROJECT_BACKPRESSURE_LIMIT)
                 )
 
             delivered = "From %s:\n%s" % (sender.capitalize(), body)
@@ -1189,22 +1222,24 @@ class AgentBridge:
         with self._locked():
             try:
                 target = normalize_agent(agent)
-                session = normalize_session(session_id)
+                session = None if session_id is None else normalize_session(session_id)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
 
             path = self.inbox_path(target)
             rows = read_jsonl(path)
             registry = self._load_session_registry()
-            buckets = [session]
-            if include_parents:
+            buckets: Optional[List[str]] = None
+            if session is not None:
+                buckets = [session]
+            if include_parents and session is not None and buckets is not None:
                 for parent in self._parent_buckets_for(registry, session):
                     if parent not in buckets:
                         buckets.append(parent)
             unread = [
                 row
                 for row in rows
-                if row.get("session_id") in buckets and not row.get("read_at")
+                if (buckets is None or row.get("session_id") in buckets) and not row.get("read_at")
             ]
             if mark_read and unread:
                 now = utc_now()
@@ -1228,10 +1263,14 @@ class AgentBridge:
                 )
 
             if not unread:
-                scope = "session %s" % session if not include_parents else "session %s (+parents)" % session
+                if session is None:
+                    scope = "all buckets"
+                else:
+                    scope = "session %s" % session if not include_parents else "session %s (+parents)" % session
                 return BridgeResult(True, "empty", "No unread bridge messages for %s in %s." % (target, scope))
 
             delivered = "\n\n".join(row["delivered_message"] for row in unread)
+            returned_buckets = sorted({str(row.get("session_id")) for row in unread})
             return BridgeResult(
                 True,
                 "messages",
@@ -1239,7 +1278,7 @@ class AgentBridge:
                 {
                     "count": len(unread),
                     "messages": unread,
-                    "buckets": buckets,
+                    "buckets": returned_buckets if buckets is None else buckets,
                 },
             )
 
@@ -1485,6 +1524,8 @@ class AgentBridge:
     def clear_inbox(self, agent: Optional[str] = None, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
             session = normalize_session(session_id)
+            if session == DEFAULT_SESSION_ID:
+                return BridgeResult(False, "rejected", "routing error: 'default' is deprecated; use an explicit bucket")
             targets = [normalize_agent(agent)] if agent else sorted(AGENTS)
             cleared = 0
             for target in targets:
@@ -1515,9 +1556,11 @@ class AgentBridge:
                 {"cleared": cleared, "reset_session": True},
             )
 
-    def reset_session(self, session_id: Optional[str] = None) -> BridgeResult:
+    def reset_session(self, agent_or_session_id: Optional[str] = None, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
-            session = normalize_session(session_id)
+            session = normalize_session(session_id if session_id is not None else agent_or_session_id)
+            if session == DEFAULT_SESSION_ID:
+                return BridgeResult(False, "rejected", "routing error: 'default' is deprecated; use an explicit bucket")
             state = self._load_state()
             removed = state.setdefault("sessions", {}).pop(session, None) is not None
             self._save_state(state)
