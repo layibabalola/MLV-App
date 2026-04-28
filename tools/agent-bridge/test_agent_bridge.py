@@ -13,6 +13,7 @@ from bootstrap_session import bootstrap
 from configure_watcher import configure_watcher
 from consume_inbox import consume
 from core.addressing import AgentInbox, MessageKind, SenderContext, SessionInbox
+from core.processes import acquire_singleton_lease, heartbeat_lease, release_lease
 from core.routing import RoutingStatus, resolve_route
 from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
 from project_identity import derive_project_identity, normalize_rendezvous
@@ -241,6 +242,25 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(status.ok)
         self.assertIn("watcher", status.data)
         self.assertIn("mcp_server_marker_count", status.data)
+
+    def test_process_lease_heartbeat_and_release(self) -> None:
+        lock_path = self.state_dir / "locks" / "watcher.lock"
+        acquired = acquire_singleton_lease(
+            lock_path,
+            role="watcher",
+            command=[sys.executable, "watcher.py"],
+            state_dir=self.state_dir,
+        )
+        self.assertTrue(acquired["acquired"])
+        lease = acquired["lease"]
+        self.assertTrue(heartbeat_lease(lock_path, lease["pid"], lease["generation"]))
+
+        bridge = AgentBridge(self.state_dir)
+        status = bridge.bridge_process_status()
+        self.assertEqual(status.data["watcher"]["lease"]["generation"], lease["generation"])
+
+        self.assertTrue(release_lease(lock_path, lease["pid"], lease["generation"]))
+        self.assertFalse(lock_path.exists())
 
     def test_clear_bucket_and_reset_bucket_are_explicit_aliases(self) -> None:
         bridge = AgentBridge(self.state_dir)

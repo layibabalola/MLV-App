@@ -19,7 +19,9 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
 
 # Compaction support (same directory -- import directly)
 try:
@@ -372,7 +374,11 @@ def _load_config(config_path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
-def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> None:
+def watch(
+    config_path: Path,
+    stop_event: Optional[threading.Event] = None,
+    heartbeat: Optional[Callable[[], None]] = None,
+) -> None:
     config = _load_config(config_path)
     config_mtime = config_path.stat().st_mtime
 
@@ -402,6 +408,8 @@ def watch(config_path: Path, stop_event: Optional[threading.Event] = None) -> No
 
     try:
         while not (stop_event and stop_event.is_set()):
+            if heartbeat:
+                heartbeat()
             # Hot-reload config when the file changes (e.g. user toggles toasts_enabled)
             try:
                 mtime = config_path.stat().st_mtime
@@ -495,9 +503,29 @@ def main() -> None:
         print(f"[agent-bridge] Config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Single-instance enforcement via PID file next to the config
+    config = _load_config(config_path)
+    sessions = config.get("sessions", [])
+    state_dir = Path(sessions[0]["inbox"]).parent if sessions else config_path.parent / "state"
+    command = [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path)]
+    lease_path = state_dir / "locks" / "watcher.lock"
+    acquired = acquire_singleton_lease(
+        lease_path,
+        role="watcher",
+        command=command,
+        state_dir=state_dir,
+        pid=os.getpid(),
+    )
+    if not acquired.get("acquired") and acquired.get("pid") != os.getpid():
+        print(
+            f"[agent-bridge] Watcher already running pid={acquired.get('pid')} hash={command_line_hash(command)}. Exiting.",
+            flush=True,
+        )
+        return
+    lease = acquired.get("lease", {})
+    generation = lease.get("generation")
+
+    # Compatibility PID marker next to the config.
     pid_path = config_path.parent / "watcher.pid"
-    _kill_stale(pid_path)
     _write_pid(pid_path)
 
     def _cleanup() -> None:
@@ -506,6 +534,8 @@ def main() -> None:
                 pid_path.unlink(missing_ok=True)
         except OSError:
             pass
+        if generation:
+            release_lease(lease_path, os.getpid(), generation)
 
     atexit.register(_cleanup)
 
@@ -518,7 +548,11 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    watch(config_path, stop_event=_stop)
+    def _heartbeat() -> None:
+        if generation:
+            heartbeat_lease(lease_path, os.getpid(), generation)
+
+    watch(config_path, stop_event=_stop, heartbeat=_heartbeat)
     _cleanup()
 
 

@@ -1807,19 +1807,34 @@ class AgentBridge:
     def bridge_process_status(self) -> BridgeResult:
         """Report bridge background process health without mutating state."""
         watcher_pid_path = self.state_dir.parent / "watcher.pid"
+        watcher_lease_path = self.state_dir / "locks" / "watcher.lock"
         watcher: Dict[str, Any] = {
             "expected": watcher_pid_path.exists(),
             "pid_path": str(watcher_pid_path),
+            "lease_path": str(watcher_lease_path),
             "running": False,
             "pid": None,
             "stale": False,
+            "lease": None,
         }
+        if watcher_lease_path.exists():
+            try:
+                watcher["lease"] = read_json(watcher_lease_path, {})
+                lease_pid = int((watcher["lease"] or {}).get("pid") or 0)
+                if lease_pid:
+                    watcher["pid"] = lease_pid
+                    watcher["running"] = is_process_alive(lease_pid)
+                    watcher["stale"] = not watcher["running"]
+            except Exception:
+                watcher["stale"] = True
         if watcher_pid_path.exists():
             try:
                 pid = int(watcher_pid_path.read_text(encoding="utf-8").strip())
-                watcher["pid"] = pid
-                watcher["running"] = is_process_alive(pid)
-                watcher["stale"] = not watcher["running"]
+                watcher["pid_marker"] = pid
+                if watcher["pid"] is None:
+                    watcher["pid"] = pid
+                    watcher["running"] = is_process_alive(pid)
+                    watcher["stale"] = not watcher["running"]
             except (OSError, ValueError):
                 watcher["stale"] = True
 
