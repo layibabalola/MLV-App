@@ -284,6 +284,33 @@ Phase 7 (wake hardening)
 | 25 | One canonical `ARCHITECTURE.md`; specs marked Implemented or Archived (none Proposed) | 10 |
 | 26 | Graceful shutdown leaves no stale locks / PIDs / leases | 6 |
 
+## Final 10/10 Validation Loop
+
+Smoke testing can raise operational confidence, but it does not replace roadmap
+completion. The final 10/10 hardening call happens only after every roadmap
+acceptance item above is either implemented or explicitly removed from scope by
+Codex + Claude + user agreement.
+
+After roadmap completion:
+
+1. Codex runs an iterative local smoke and failure-path suite until its own
+   `READINESS_ASSESSMENT` rates the bridge 10/10 or names concrete blockers.
+2. Codex sends Claude the test matrix, results, score, and remaining risks as an
+   `AUDIT_REQUEST` / `READINESS_ASSESSMENT`.
+3. Claude independently runs its own iterative smoke and failure-path suite
+   against the same implementation until Claude also rates the bridge 10/10 or
+   names concrete blockers.
+4. Any divergence becomes a `RISK_DELTA` and must be resolved by code, docs, or
+   explicit scope decision before either side calls the bridge 10/10.
+5. The final hardening score is canonical only when both agents agree and the
+   user accepts the result.
+
+This preserves the two-axis distinction agreed during hardening review:
+
+- operational confidence can improve through smoke coverage;
+- full hardening confidence requires completing the roadmap and validating the
+  failure paths that smoke alone cannot prove.
+
 ---
 
 ## Risk Register
