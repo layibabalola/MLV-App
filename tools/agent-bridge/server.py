@@ -130,9 +130,21 @@ def send_control_message(
 
 
 @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
-def check_inbox(agent: str, session_id: Optional[str] = None, mark_read: bool = True) -> dict:
-    """Return unread bridge messages for an agent, optionally marking them read."""
-    return as_dict(bridge.check_inbox(agent, session_id=session_id, mark_read=mark_read))
+def check_inbox(
+    agent: str,
+    session_id: Optional[str] = None,
+    mark_read: bool = False,
+    include_parents: bool = False,
+) -> dict:
+    """Return unread bridge messages for an agent, optionally including parent buckets and marking them read."""
+    return as_dict(
+        bridge.check_inbox(
+            agent,
+            session_id=session_id,
+            mark_read=mark_read,
+            include_parents=include_parents,
+        )
+    )
 
 
 @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
@@ -175,9 +187,9 @@ async def wait_inbox(
 
 
 @mcp.tool(annotations=READ_ONLY)
-def peek_inbox(agent: str, session_id: Optional[str] = None) -> dict:
+def peek_inbox(agent: str, session_id: Optional[str] = None, include_parents: bool = False) -> dict:
     """Return unread bridge messages for an agent without changing mailbox state."""
-    return as_dict(bridge.peek_inbox(agent, session_id=session_id))
+    return as_dict(bridge.peek_inbox(agent, session_id=session_id, include_parents=include_parents))
 
 
 @mcp.tool(annotations=IDEMPOTENT_WRITE)

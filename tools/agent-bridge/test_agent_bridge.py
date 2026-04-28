@@ -51,6 +51,104 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("superseded", result.message)
 
+    def test_superseded_target_session_escalates_to_project_bucket(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-old", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        bridge.activate_session("claude", "claude-new", project="mlv-app")
+
+        result = bridge.send_to_peer(
+            "codex",
+            "claude",
+            "[[handoff:claude]] hello to stale target",
+            session_id="claude-old",
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["resolved_session_id"], "mlv-app")
+        inbox = bridge.peek_inbox("claude", session_id="mlv-app")
+        self.assertEqual(inbox.status, "messages")
+        self.assertEqual(inbox.data["messages"][0]["inbox_level"], "project")
+        self.assertEqual(inbox.data["messages"][0]["escalated_from"], "claude-old")
+
+    def test_activate_session_promotes_unread_messages_to_project(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-old", project="mlv-app")
+        bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] old session message",
+            session_id="codex-old",
+        )
+
+        bridge.activate_session("codex", "codex-new", project="mlv-app")
+        project_inbox = bridge.peek_inbox("codex", session_id="mlv-app")
+        self.assertEqual(project_inbox.status, "messages")
+        row = project_inbox.data["messages"][0]
+        self.assertEqual(row["session_id"], "mlv-app")
+        self.assertEqual(row["inbox_level"], "project")
+        self.assertEqual(row["promoted_from"], "codex-old")
+
+    def test_check_inbox_include_parents_reads_project_bucket(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-old", project="mlv-app")
+        bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] old session message",
+            session_id="codex-old",
+        )
+        bridge.activate_session("codex", "codex-new", project="mlv-app")
+
+        result = bridge.check_inbox("codex", session_id="codex-new", include_parents=True, mark_read=False)
+        self.assertEqual(result.status, "messages")
+        self.assertEqual(result.data["messages"][0]["session_id"], "mlv-app")
+        self.assertEqual(result.data["buckets"], ["codex-new", "mlv-app"])
+
+    def test_default_bucket_is_rejected(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.send_to_peer(
+            "codex",
+            "claude",
+            "[[handoff:claude]] should fail",
+            session_id="default",
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("deprecated", result.message)
+
+    def test_unknown_explicit_session_bucket_is_preserved(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.send_to_peer(
+            "codex",
+            "claude",
+            "[[handoff:claude]] hello to unknown bucket",
+            session_id="future-session",
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["resolved_session_id"], "future-session")
+        self.assertEqual(result.data["inbox_level"], "session")
+        inbox = bridge.peek_inbox("claude", session_id="future-session")
+        self.assertEqual(inbox.status, "messages")
+        self.assertEqual(inbox.data["messages"][0]["session_id"], "future-session")
+
+    def test_mark_read_can_target_message_without_session_id(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-old", project="mlv-app")
+        bridge.send_to_peer(
+            "codex",
+            "claude",
+            "[[handoff:claude]] old session message",
+            session_id="claude-old",
+        )
+        bridge.activate_session("claude", "claude-new", project="mlv-app")
+        inbox = bridge.peek_inbox("claude", session_id="mlv-app")
+        self.assertEqual(inbox.status, "messages")
+        message_id = inbox.data["messages"][0]["id"]
+
+        result = bridge.mark_read("claude", session_id=None, message_id=message_id)
+        self.assertTrue(result.ok)
+        after = bridge.peek_inbox("claude", session_id="mlv-app")
+        self.assertEqual(after.status, "empty")
+
     def test_control_message_replaces_prior_control(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.send_control_message(
@@ -77,6 +175,7 @@ class AgentBridgeTests(unittest.TestCase):
 
     def test_bootstrap_drains_previous_and_sends_handshake(self) -> None:
         bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-old", project="mlv-app")
         bridge.send_to_peer(
             "codex",
             "claude",

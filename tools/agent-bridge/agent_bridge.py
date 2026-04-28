@@ -23,6 +23,11 @@ DEFAULT_PROJECT = "default"
 DEFAULT_MAX_HOPS = 8  # retained as audit-only metadata; no longer enforced
 MAX_MESSAGE_BYTES = 64 * 1024
 SESSION_RETENTION_DAYS = 30
+INBOX_LEVEL_SESSION = "session"
+INBOX_LEVEL_PROJECT = "project"
+INBOX_LEVEL_AGENT = "agent"
+SESSION_BACKPRESSURE_LIMIT = 1
+PROJECT_BACKPRESSURE_LIMIT = 5
 # Per-pair rate limit: at most RATE_LIMIT_N accepted send_to_peer calls per
 # (from_agent, to_agent) pair within a rolling RATE_LIMIT_WINDOW_S window.
 # Replaces the old hop-count rejection (agreed via bridge HEURISTIC_SYNC
@@ -356,6 +361,112 @@ class AgentBridge:
             }
         return None
 
+    def _bucket_info(self, registry: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+        if session_id in AGENTS:
+            return {
+                "bucket": session_id,
+                "inbox_level": INBOX_LEVEL_AGENT,
+                "parent_project": None,
+                "project": None,
+                "record": None,
+                "active_session": None,
+            }
+
+        projects = registry.get("projects", {}) or {}
+        if session_id in projects:
+            return {
+                "bucket": session_id,
+                "inbox_level": INBOX_LEVEL_PROJECT,
+                "parent_project": session_id,
+                "project": session_id,
+                "record": None,
+                "active_session": None,
+            }
+
+        found = self._find_session_record(registry, session_id)
+        if found:
+            return {
+                "bucket": session_id,
+                "inbox_level": INBOX_LEVEL_SESSION,
+                "parent_project": found["project"],
+                "project": found["project"],
+                "record": found["record"],
+                "active_session": found["active_session"],
+            }
+
+        return {
+            "bucket": session_id,
+            "inbox_level": INBOX_LEVEL_SESSION,
+            "parent_project": None,
+            "project": None,
+            "record": None,
+            "active_session": None,
+        }
+
+    def _parent_buckets_for(self, registry: Dict[str, Any], session_id: str) -> List[str]:
+        info = self._bucket_info(registry, session_id)
+        parent_project = info.get("parent_project")
+        if info["inbox_level"] == INBOX_LEVEL_SESSION:
+            buckets: List[str] = []
+            if parent_project:
+                buckets.append(parent_project)
+            return buckets
+        if info["inbox_level"] == INBOX_LEVEL_PROJECT:
+            return []
+        return []
+
+    def _resolve_delivery_bucket(
+        self,
+        registry: Dict[str, Any],
+        target_agent: str,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        info = self._bucket_info(registry, session_id)
+        if info["bucket"] == DEFAULT_SESSION_ID:
+            return {
+                "ok": False,
+                "reason": "routing error: 'default' is deprecated; use a named project bucket or the agent inbox",
+            }
+
+        if info["inbox_level"] == INBOX_LEVEL_SESSION:
+            record = info.get("record")
+            active_session = info.get("active_session")
+            if record and record.get("status") == "active" and active_session == session_id:
+                return {
+                    "ok": True,
+                    "bucket": session_id,
+                    "inbox_level": INBOX_LEVEL_SESSION,
+                    "parent_project": info.get("parent_project"),
+                    "escalated_from": None,
+                    "escalation_reason": None,
+                }
+            if info.get("project"):
+                return {
+                    "ok": True,
+                    "bucket": info["project"],
+                    "inbox_level": INBOX_LEVEL_PROJECT,
+                    "parent_project": info["project"],
+                    "escalated_from": session_id,
+                    "escalation_reason": "session_unavailable",
+                }
+            return {
+                "ok": True,
+                "bucket": session_id,
+                "inbox_level": INBOX_LEVEL_SESSION,
+                "parent_project": None,
+                "escalated_from": None,
+                "escalation_reason": None,
+            }
+
+        return {
+            "ok": True,
+            "bucket": info["bucket"],
+            "inbox_level": info["inbox_level"],
+            "parent_project": info.get("parent_project"),
+            "escalated_from": None,
+            "escalation_reason": None,
+        }
+
     def _append_control_message(
         self,
         *,
@@ -367,6 +478,10 @@ class AgentBridge:
         body: str,
         status: str = "info",
         replace_existing_control: bool = False,
+        inbox_level: Optional[str] = None,
+        parent_project: Optional[str] = None,
+        escalated_from: Optional[str] = None,
+        escalation_reason: Optional[str] = None,
     ) -> Optional[str]:
         path = self.inbox_path(target_agent)
         rows = read_jsonl(path)
@@ -402,6 +517,13 @@ class AgentBridge:
                 "id": message_id,
                 "created_at": now,
                 "session_id": session_id,
+                "inbox_level": inbox_level,
+                "parent_project": parent_project,
+                "promoted_from": None,
+                "promoted_at": None,
+                "orphaned_at": None,
+                "escalated_from": escalated_from,
+                "escalation_reason": escalation_reason,
                 "from": sender,
                 "to": target_agent,
                 "body": body,
@@ -426,6 +548,10 @@ class AgentBridge:
         body: str,
         status: str = "info",
         replace_existing_control: bool = False,
+        inbox_level: Optional[str] = None,
+        parent_project: Optional[str] = None,
+        escalated_from: Optional[str] = None,
+        escalation_reason: Optional[str] = None,
     ) -> BridgeResult:
         message_id = self._append_control_message(
             target_agent=to_agent,
@@ -436,6 +562,10 @@ class AgentBridge:
             body=body,
             status=status,
             replace_existing_control=replace_existing_control,
+            inbox_level=inbox_level,
+            parent_project=parent_project,
+            escalated_from=escalated_from,
+            escalation_reason=escalation_reason,
         )
         if message_id is None:
             return BridgeResult(
@@ -463,6 +593,18 @@ class AgentBridge:
             {"id": message_id, "control_type": control_type},
         )
 
+    def _row_inbox_level(self, registry: Dict[str, Any], row: Dict[str, Any]) -> str:
+        level = row.get("inbox_level")
+        if level in {INBOX_LEVEL_SESSION, INBOX_LEVEL_PROJECT, INBOX_LEVEL_AGENT}:
+            return level
+        return self._bucket_info(registry, row.get("session_id", DEFAULT_SESSION_ID))["inbox_level"]
+
+    def _row_parent_project(self, registry: Dict[str, Any], row: Dict[str, Any]) -> Optional[str]:
+        if row.get("parent_project"):
+            return row.get("parent_project")
+        info = self._bucket_info(registry, row.get("session_id", DEFAULT_SESSION_ID))
+        return info.get("parent_project")
+
     def _unread_for(self, agent: str, session_id: str) -> List[Dict[str, Any]]:
         return [
             row
@@ -472,45 +614,27 @@ class AgentBridge:
             and not row.get("superseded_at")
         ]
 
-    def _retire_superseded_inbox(self, agent: str, superseded_session: str) -> int:
-        """Mark all unread inbox entries for a superseded session as retired.
-
-        Sets superseded_at on each matching row so backpressure checks ignore
-        them, while preserving them for audit history.  Returns the count of
-        rows retired.
-        """
+    def _promote_superseded_inbox(self, agent: str, superseded_session: str, project_name: str) -> List[Dict[str, Any]]:
+        """Promote unread inbox entries from a superseded session to the project bucket."""
         inbox = self.inbox_path(agent)
         rows = read_jsonl(inbox)
         now = utc_now()
-        count = 0
+        promoted: List[Dict[str, Any]] = []
+        changed = False
         for row in rows:
             if row.get("session_id") == superseded_session and not row.get("read_at") and not row.get("superseded_at"):
-                row["superseded_at"] = now
-                count += 1
-        if count:
+                promoted.append(dict(row))
+                row["session_id"] = project_name
+                row["inbox_level"] = INBOX_LEVEL_PROJECT
+                row["parent_project"] = project_name
+                row["promoted_from"] = superseded_session
+                row["promoted_at"] = now
+                row["escalated_from"] = superseded_session
+                row["escalation_reason"] = "session_superseded"
+                changed = True
+        if changed:
             write_jsonl(inbox, rows)
-        return count
-
-    def _drain_and_retire_superseded_inbox(self, agent: str, superseded_session: str) -> List[Dict[str, Any]]:
-        """Collect, mark read, and retire all unread inbox entries for a superseded session.
-
-        Captures message bodies BEFORE stamping so callers can surface them to
-        the user.  Sets both read_at and superseded_at atomically in one write,
-        so a subsequent check_inbox or _unread_for will not re-surface them.
-        Returns the list of drained message dicts (snapshot before stamps).
-        """
-        inbox = self.inbox_path(agent)
-        rows = read_jsonl(inbox)
-        now = utc_now()
-        drained: List[Dict[str, Any]] = []
-        for row in rows:
-            if row.get("session_id") == superseded_session and not row.get("read_at") and not row.get("superseded_at"):
-                drained.append(dict(row))  # snapshot before stamping
-                row["read_at"] = now
-                row["superseded_at"] = now
-        if drained:
-            write_jsonl(inbox, rows)
-        return drained
+        return promoted
 
     def activate_session(
         self,
@@ -535,14 +659,12 @@ class AgentBridge:
 
             project_entry["updated_at"] = utc_now()
 
-            # Drain unread messages from the previous same-agent session BEFORE
-            # stamping superseded_at.  _drain_and_retire_superseded_inbox captures
-            # the bodies first, then sets both read_at and superseded_at in one
-            # write so they never resurface via check_inbox.  The drained list is
-            # returned in the BridgeResult so bootstrap can surface them to the user.
+            # Promote unread messages from the previous same-agent session to the
+            # durable project bucket instead of burying them on the superseded
+            # session.  The snapshot is returned for bootstrap/user visibility.
             drained_messages: List[Dict[str, Any]] = []
             if previous_local and previous_local != session:
-                drained_messages = self._drain_and_retire_superseded_inbox(owner, previous_local)
+                drained_messages = self._promote_superseded_inbox(owner, previous_local, project_name)
                 old_record = self._session_record(project_entry, previous_local, owner)
                 old_record["status"] = "superseded"
                 old_record["superseded_by"] = session
@@ -863,6 +985,8 @@ class AgentBridge:
                 session = normalize_session(resolved_session)
             except ValueError as exc:
                 return reject(str(exc))
+            if session == DEFAULT_SESSION_ID:
+                return reject("routing error: 'default' is deprecated; use a named project bucket or the agent inbox")
 
             marker = strip_markers(message)
             body = marker["body"]
@@ -901,6 +1025,16 @@ class AgentBridge:
                 return reject("bridge is paused")
 
             registry = self._load_session_registry()
+            delivery = self._resolve_delivery_bucket(registry, target, session)
+            if not delivery["ok"]:
+                return reject(delivery["reason"])
+            delivery_bucket = delivery["bucket"]
+            delivery_level = delivery["inbox_level"]
+            parent_project = delivery.get("parent_project")
+            event["resolved_session_id"] = delivery_bucket
+            event["inbox_level"] = delivery_level
+            event["escalated_from"] = delivery.get("escalated_from")
+            event["escalation_reason"] = delivery.get("escalation_reason")
             sender_record = self._find_session_record(registry, session, agent=sender)
             if sender_record:
                 record = sender_record["record"]
@@ -915,7 +1049,7 @@ class AgentBridge:
                         % (session, sender, sender_record["project"])
                     )
 
-            session_state = self._session_state(state, session)
+            session_state = self._session_state(state, delivery_bucket)
             hop_count = int(session_state.get("hop_count", 0))
             event["hop_count_before"] = hop_count
             # NOTE: hop count is retained as audit metadata only — no longer
@@ -928,17 +1062,29 @@ class AgentBridge:
                 return reject(rate_limit_reason)
 
             if body_hash in session_state.get("seen_hashes", []):
-                return reject("duplicate message hash for session %s" % session)
+                return reject("duplicate message hash for session %s" % delivery_bucket)
 
-            unread = self._unread_for(target, session)
-            if unread:
-                return reject("target %s already has one unread message for session %s" % (target, session))
+            unread = self._unread_for(target, delivery_bucket)
+            if delivery_level == INBOX_LEVEL_SESSION and len(unread) >= SESSION_BACKPRESSURE_LIMIT:
+                return reject("target %s already has one unread message for session %s" % (target, delivery_bucket))
+            if delivery_level == INBOX_LEVEL_PROJECT and len(unread) >= PROJECT_BACKPRESSURE_LIMIT:
+                return reject(
+                    "target %s project inbox %s is full (%d unread >= %d)"
+                    % (target, delivery_bucket, len(unread), PROJECT_BACKPRESSURE_LIMIT)
+                )
 
             delivered = "From %s:\n%s" % (sender.capitalize(), body)
             inbox_row = {
                 "id": event["id"],
                 "created_at": now,
-                "session_id": session,
+                "session_id": delivery_bucket,
+                "inbox_level": delivery_level,
+                "parent_project": parent_project,
+                "promoted_from": None,
+                "promoted_at": None,
+                "orphaned_at": None,
+                "escalated_from": delivery.get("escalated_from"),
+                "escalation_reason": delivery.get("escalation_reason"),
                 "from": sender,
                 "to": target,
                 "body": body,
@@ -963,10 +1109,22 @@ class AgentBridge:
             event["hop_count_after"] = hop_count + 1
             self._audit(event)
 
-            note = "Queued message for %s in session %s." % (target, session)
+            note = "Queued message for %s in session %s." % (target, delivery_bucket)
             if marker["marker_variant"] == "human-review":
                 note += " Human review requested."
-            return BridgeResult(True, "queued", note, {"id": event["id"], "hop_count": hop_count + 1})
+            return BridgeResult(
+                True,
+                "queued",
+                note,
+                {
+                    "id": event["id"],
+                    "hop_count": hop_count + 1,
+                    "resolved_session_id": delivery_bucket,
+                    "inbox_level": delivery_level,
+                    "escalated_from": delivery.get("escalated_from"),
+                    "escalation_reason": delivery.get("escalation_reason"),
+                },
+            )
 
     def send_control_message(
         self,
@@ -989,6 +1147,12 @@ class AgentBridge:
                 session = normalize_session(resolved_session)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
+            if session == DEFAULT_SESSION_ID:
+                return BridgeResult(
+                    False,
+                    "rejected",
+                    "routing error: 'default' is deprecated; use a named project bucket or the agent inbox",
+                )
             control_name = (control_type or "").strip().upper()
             if not control_name:
                 return BridgeResult(False, "rejected", "control_type is required")
@@ -996,18 +1160,32 @@ class AgentBridge:
                 return BridgeResult(False, "rejected", "summary is required")
             if not body.strip():
                 return BridgeResult(False, "rejected", "body is required")
+            registry = self._load_session_registry()
+            delivery = self._resolve_delivery_bucket(registry, target, session)
+            if not delivery["ok"]:
+                return BridgeResult(False, "rejected", delivery["reason"])
             return self._enqueue_control_message(
                 from_agent=sender,
                 to_agent=target,
-                session_id=session,
+                session_id=delivery["bucket"],
                 control_type=control_name,
                 summary=summary.strip(),
                 body=body.strip(),
                 status=status.strip() or "info",
                 replace_existing_control=replace_existing_control,
+                inbox_level=delivery["inbox_level"],
+                parent_project=delivery.get("parent_project"),
+                escalated_from=delivery.get("escalated_from"),
+                escalation_reason=delivery.get("escalation_reason"),
             )
 
-    def check_inbox(self, agent: str, session_id: Optional[str] = None, mark_read: bool = True) -> BridgeResult:
+    def check_inbox(
+        self,
+        agent: str,
+        session_id: Optional[str] = None,
+        mark_read: bool = False,
+        include_parents: bool = False,
+    ) -> BridgeResult:
         with self._locked():
             try:
                 target = normalize_agent(agent)
@@ -1017,10 +1195,16 @@ class AgentBridge:
 
             path = self.inbox_path(target)
             rows = read_jsonl(path)
+            registry = self._load_session_registry()
+            buckets = [session]
+            if include_parents:
+                for parent in self._parent_buckets_for(registry, session):
+                    if parent not in buckets:
+                        buckets.append(parent)
             unread = [
                 row
                 for row in rows
-                if row.get("session_id") == session and not row.get("read_at")
+                if row.get("session_id") in buckets and not row.get("read_at")
             ]
             if mark_read and unread:
                 now = utc_now()
@@ -1036,6 +1220,7 @@ class AgentBridge:
                         "action": "check_inbox",
                         "agent": target,
                         "session_id": session,
+                        "include_parents": include_parents,
                         "accepted": True,
                         "reason": "marked_read",
                         "message_count": len(unread),
@@ -1043,7 +1228,8 @@ class AgentBridge:
                 )
 
             if not unread:
-                return BridgeResult(True, "empty", "No unread bridge messages for %s in session %s." % (target, session))
+                scope = "session %s" % session if not include_parents else "session %s (+parents)" % session
+                return BridgeResult(True, "empty", "No unread bridge messages for %s in %s." % (target, scope))
 
             delivered = "\n\n".join(row["delivered_message"] for row in unread)
             return BridgeResult(
@@ -1053,6 +1239,7 @@ class AgentBridge:
                 {
                     "count": len(unread),
                     "messages": unread,
+                    "buckets": buckets,
                 },
             )
 
@@ -1177,14 +1364,14 @@ class AgentBridge:
             },
         )
 
-    def peek_inbox(self, agent: str, session_id: Optional[str] = None) -> BridgeResult:
-        return self.check_inbox(agent, session_id=session_id, mark_read=False)
+    def peek_inbox(self, agent: str, session_id: Optional[str] = None, include_parents: bool = False) -> BridgeResult:
+        return self.check_inbox(agent, session_id=session_id, mark_read=False, include_parents=include_parents)
 
     def mark_read(self, agent: str, message_id: str, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
             try:
                 target = normalize_agent(agent)
-                session = normalize_session(session_id)
+                session = normalize_session(session_id) if session_id is not None else None
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
 
@@ -1198,7 +1385,7 @@ class AgentBridge:
             matched = False
             changed = False
             for row in rows:
-                if row.get("id") == target_id and row.get("session_id") == session:
+                if row.get("id") == target_id and (session is None or row.get("session_id") == session):
                     matched = True
                     if not row.get("read_at"):
                         row["read_at"] = now
@@ -1206,6 +1393,8 @@ class AgentBridge:
                     break
 
             if not matched:
+                if session is None:
+                    return BridgeResult(False, "not_found", "No message %s for %s." % (target_id, target))
                 return BridgeResult(False, "not_found", "No message %s for %s in session %s." % (target_id, target, session))
 
             if changed:
