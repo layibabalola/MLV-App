@@ -10,7 +10,7 @@ from core.paths import (
     ensure_bridge_root_manifest,
     utc_now,
 )
-from core.processes import is_process_alive
+from core.processes import acquire_singleton_lease, is_process_alive, release_lease
 from core.storage import append_jsonl, read_json, write_json
 
 
@@ -31,6 +31,26 @@ def _is_under(path: Path, root: Path) -> bool:
         return True
     except (OSError, ValueError):
         return False
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    if not path.exists():
+        return False
+    if hasattr(path.stat(), "st_file_attributes"):
+        return bool(path.stat().st_file_attributes & 0x400)
+    return False
+
+
+def _assert_source_redirect_writable(source_root: Path) -> Optional[str]:
+    probe = source_root / ".moved_to.write-test.tmp"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return None
+    except OSError as exc:
+        return str(exc)
 
 
 def _live_processes(source_root: Path) -> List[Dict[str, Any]]:
@@ -125,6 +145,8 @@ def migrate_root(
     target_root: Path,
     apply: bool = False,
     force_while_running: bool = False,
+    allow_reparse_target: bool = False,
+    skip_redirect: bool = False,
     reason: str = "manual",
 ) -> Dict[str, Any]:
     source = Path(source_root)
@@ -135,6 +157,12 @@ def migrate_root(
         return {"ok": False, "status": "rejected", "reason": "source and target roots are the same"}
     if _is_under(target, source):
         return {"ok": False, "status": "rejected", "reason": "target root must not be inside source root"}
+    if _is_reparse_or_symlink(target) and not allow_reparse_target:
+        return {
+            "ok": False,
+            "status": "rejected",
+            "reason": "target root is a symlink or reparse point; pass --allow-reparse-target to accept that risk",
+        }
     if target.exists() and any(target.iterdir()):
         return {"ok": False, "status": "rejected", "reason": "target root exists and is not empty", "target_root": str(target)}
 
@@ -146,12 +174,23 @@ def migrate_root(
             "reason": "live bridge processes detected; stop them or pass --force-while-running",
             "live_processes": live,
         }
+    if apply and not skip_redirect:
+        redirect_error = _assert_source_redirect_writable(source)
+        if redirect_error:
+            return {
+                "ok": False,
+                "status": "old_root_readonly",
+                "reason": "old root is not writable; pass --skip-redirect to accept split-brain risk",
+                "error": redirect_error,
+            }
 
     plan = {
         "source_root": str(source),
         "target_root": str(target),
         "apply": apply,
         "force_while_running": force_while_running,
+        "allow_reparse_target": allow_reparse_target,
+        "skip_redirect": skip_redirect,
         "live_processes": live,
         "steps": [
             "backup_source_root",
@@ -165,33 +204,53 @@ def migrate_root(
     if not apply:
         return {"ok": True, "status": "dry_run", "plan": plan}
 
-    backup_root = source.parent / ("%s.backup-%s" % (source.name, _backup_stamp()))
-    shutil.copytree(source, backup_root)
-    shutil.copytree(source, target)
-    watcher_rewrite = _rewrite_watcher_config(target, source)
-    manifest = _write_target_manifest(target, source, reason=reason)
-    moved = _write_moved_to(source, target, manifest)
-    audit = {
-        "id": "migration-%s" % _backup_stamp(),
-        "timestamp": utc_now(),
-        "action": "migrate_root",
-        "source_root": str(source),
-        "target_root": str(target),
-        "backup_root": str(backup_root),
-        "watcher_config": watcher_rewrite,
-        "force_while_running": force_while_running,
-        "accepted": True,
-    }
-    append_jsonl(bridge_paths_for_root(target).state_dir / "messages.jsonl", audit)
-    return {
-        "ok": True,
-        "status": "migrated",
-        "plan": plan,
-        "backup_root": str(backup_root),
-        "watcher_config": watcher_rewrite,
-        "manifest": manifest,
-        "moved_to": moved,
-    }
+    source_paths = bridge_paths_for_root(source)
+    lease_path = source_paths.locks_dir / "migration.lock"
+    lease_result = acquire_singleton_lease(
+        lease_path,
+        role="migration",
+        command=["migrate_root.py", str(source), str(target)],
+        state_dir=source_paths.state_dir,
+    )
+    if not lease_result.get("acquired"):
+        return {
+            "ok": False,
+            "status": "migration_in_progress",
+            "reason": "another migration already owns the migration lease",
+            "lease": lease_result.get("lease"),
+        }
+    lease = lease_result["lease"]
+    try:
+        backup_root = source.parent / ("%s.backup-%s" % (source.name, _backup_stamp()))
+        shutil.copytree(source, backup_root)
+        shutil.copytree(source, target)
+        watcher_rewrite = _rewrite_watcher_config(target, source)
+        manifest = _write_target_manifest(target, source, reason=reason)
+        moved = None if skip_redirect else _write_moved_to(source, target, manifest)
+        audit = {
+            "id": "migration-%s" % _backup_stamp(),
+            "timestamp": utc_now(),
+            "action": "migrate_root",
+            "source_root": str(source),
+            "target_root": str(target),
+            "backup_root": str(backup_root),
+            "watcher_config": watcher_rewrite,
+            "force_while_running": force_while_running,
+            "skip_redirect": skip_redirect,
+            "accepted": True,
+        }
+        append_jsonl(bridge_paths_for_root(target).state_dir / "messages.jsonl", audit)
+        return {
+            "ok": True,
+            "status": "migrated",
+            "plan": plan,
+            "backup_root": str(backup_root),
+            "watcher_config": watcher_rewrite,
+            "manifest": manifest,
+            "moved_to": moved,
+        }
+    finally:
+        release_lease(lease_path, int(lease["pid"]), str(lease["generation"]))
 
 
 def main() -> None:
@@ -204,6 +263,16 @@ def main() -> None:
         action="store_true",
         help="Allow migration while live watcher/MCP markers are running. This can create split-brain until clients restart.",
     )
+    parser.add_argument(
+        "--allow-reparse-target",
+        action="store_true",
+        help="Allow target root to be a symlink or reparse point.",
+    )
+    parser.add_argument(
+        "--skip-redirect",
+        action="store_true",
+        help="Do not write MOVED_TO.json at the old root. This accepts split-brain risk.",
+    )
     parser.add_argument("--reason", default="manual", help="Migration reason recorded in bridge-root.json")
     args = parser.parse_args()
 
@@ -212,6 +281,8 @@ def main() -> None:
         target_root=Path(args.target_root),
         apply=args.apply,
         force_while_running=args.force_while_running,
+        allow_reparse_target=args.allow_reparse_target,
+        skip_redirect=args.skip_redirect,
         reason=args.reason,
     )
     print(json.dumps(result, indent=2, sort_keys=True))

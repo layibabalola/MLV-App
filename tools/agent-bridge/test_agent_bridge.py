@@ -204,6 +204,40 @@ class AgentBridgeTests(unittest.TestCase):
             resolve_bridge_paths(bridge_root=source)
         self.assertEqual(raised.exception.target, target)
 
+    def test_migrate_root_refuses_existing_migration_lease(self) -> None:
+        source = self.tempdir / "source-root"
+        target = self.tempdir / "target-root"
+        (source / "state" / "locks").mkdir(parents=True)
+        command = ["migrate_root.py", str(source), str(target)]
+        lease_path = source / "state" / "locks" / "migration.lock"
+        acquired = acquire_singleton_lease(
+            lease_path,
+            role="migration",
+            command=command,
+            state_dir=source / "state",
+            pid=os.getpid(),
+        )
+        self.assertTrue(acquired["acquired"])
+        try:
+            result = migrate_root(source_root=source, target_root=target, apply=True)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "migration_in_progress")
+        finally:
+            lease = acquired["lease"]
+            release_lease(lease_path, int(lease["pid"]), str(lease["generation"]))
+
+    def test_migrate_root_skip_redirect_leaves_no_moved_to(self) -> None:
+        source = self.tempdir / "source-root"
+        target = self.tempdir / "target-root"
+        (source / "state").mkdir(parents=True)
+        (source / "session.json").write_text(json.dumps({"projects": {}}), encoding="utf-8")
+
+        result = migrate_root(source_root=source, target_root=target, apply=True, skip_redirect=True)
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["moved_to"])
+        self.assertFalse((source / "MOVED_TO.json").exists())
+
     def test_unicode_normalization_falls_back_to_hash(self) -> None:
         value = normalize_rendezvous("Проект")
         self.assertTrue(value.startswith("project-"))

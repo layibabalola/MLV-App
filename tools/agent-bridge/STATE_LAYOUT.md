@@ -74,6 +74,10 @@ reap stale `server-pids\server-<pid>.pid` markers.
 
 Use `migrate_root.py` for bridge-root relocation. It is dry-run by default,
 refuses live watcher/MCP server markers unless `--force-while-running` is
-provided, copies the source root to the target, rewrites watcher inbox paths,
-and writes `MOVED_TO.json` at the old root so stale clients fail with the new
-active root path.
+provided, and holds a `state\locks\migration.lock` singleton lease while
+applying. By default it refuses symlink/reparse targets and requires the old
+root to be writable so it can write `MOVED_TO.json`; `--allow-reparse-target`
+and `--skip-redirect` are explicit risk-acceptance flags. Apply mode copies the
+source root to the target, rewrites watcher inbox paths, and writes
+`MOVED_TO.json` at the old root so stale clients fail with the new active root
+path.
