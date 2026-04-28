@@ -195,6 +195,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "dry_run")
         self.assertFalse(target.exists())
+        self.assertIn("server_wrapper.py", " ".join(result["plan"]["mcp_config_snippets"]["codex_toml"]["mcp_servers.agent_bridge"]["args"]))
 
     def test_migrate_root_refuses_live_markers_without_force(self) -> None:
         source = self.tempdir / "source-root"
@@ -241,6 +242,8 @@ class AgentBridgeTests(unittest.TestCase):
         manifest = json.loads((target / "bridge-root.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["active_root"], str(target))
         self.assertEqual(manifest["migration_history"][-1]["reason"], "unit-test")
+        self.assertTrue(result["validation"]["ok"])
+        self.assertIn("claude_desktop_config", result["mcp_config_snippets"])
         with self.assertRaises(BridgeRootMovedError) as raised:
             resolve_bridge_paths(bridge_root=source)
         self.assertEqual(raised.exception.target, target)

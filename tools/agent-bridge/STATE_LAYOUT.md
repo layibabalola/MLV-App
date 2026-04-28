@@ -95,4 +95,7 @@ root to be writable so it can write `MOVED_TO.json`; `--allow-reparse-target`
 and `--skip-redirect` are explicit risk-acceptance flags. Apply mode copies the
 source root to the target, rewrites watcher inbox paths, and writes
 `MOVED_TO.json` at the old root so stale clients fail with the new active root
-path.
+path. Migration output includes wrapper-based Claude/Codex Desktop MCP config
+snippets for the target root and a read-only target validation report from
+`recover_state.py --scan-historical`; update Desktop configs and restart both
+clients after applying a root move.

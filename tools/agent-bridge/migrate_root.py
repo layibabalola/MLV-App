@@ -139,6 +139,28 @@ def _write_moved_to(source_root: Path, target_root: Path, target_manifest: Dict[
     return moved
 
 
+def _mcp_config_snippets(target_root: Path) -> Dict[str, Any]:
+    wrapper = Path(__file__).with_name("server_wrapper.py")
+    args = ["-3", str(wrapper), "--bridge-root", str(target_root)]
+    return {
+        "codex_toml": {
+            "mcp_servers.agent_bridge": {
+                "command": "py",
+                "args": args,
+            }
+        },
+        "claude_desktop_config": {
+            "mcpServers": {
+                "agent-bridge": {
+                    "command": "py",
+                    "args": args,
+                }
+            }
+        },
+        "restart_required": "Restart Claude Desktop and Codex Desktop after updating MCP config.",
+    }
+
+
 def migrate_root(
     *,
     source_root: Path,
@@ -199,7 +221,10 @@ def migrate_root(
             "write_target_manifest",
             "write_source_moved_to",
             "write_migration_audit",
+            "validate_target_root",
+            "print_mcp_config_snippets",
         ],
+        "mcp_config_snippets": _mcp_config_snippets(target),
     }
     if not apply:
         return {"ok": True, "status": "dry_run", "plan": plan}
@@ -240,6 +265,12 @@ def migrate_root(
             "accepted": True,
         }
         append_jsonl(bridge_paths_for_root(target).state_dir / "messages.jsonl", audit)
+        try:
+            from recover_state import recover_state
+
+            validation = recover_state(bridge_paths_for_root(target).state_dir, scan_historical=True)
+        except Exception as exc:
+            validation = {"ok": False, "error": str(exc)}
         return {
             "ok": True,
             "status": "migrated",
@@ -248,6 +279,8 @@ def migrate_root(
             "watcher_config": watcher_rewrite,
             "manifest": manifest,
             "moved_to": moved,
+            "validation": validation,
+            "mcp_config_snippets": _mcp_config_snippets(target),
         }
     finally:
         release_lease(lease_path, int(lease["pid"]), str(lease["generation"]))

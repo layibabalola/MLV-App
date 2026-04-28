@@ -225,6 +225,13 @@ Historical scan mode remains read-only. It reports stale roots with
 `MOVED_TO.json`, unreadable or mismatched active-root manifests, and migration
 history entries whose source root does not redirect to the active root.
 
+Root migrations use `migrate_root.py`. Dry-run and apply output include
+Claude/Codex Desktop MCP config snippets that point at `server_wrapper.py
+--bridge-root <target>`. Apply mode also validates the target root with the
+historical scan. After applying a migration, update both Desktop MCP configs and
+restart Claude Desktop and Codex Desktop so their MCP servers start from the new
+root.
+
 Use `compact.py` for read-row retention, audit rotation, and stale
 `server-pids/` marker cleanup:
 
