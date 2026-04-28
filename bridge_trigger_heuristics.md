@@ -8,14 +8,17 @@ For the operational lifecycle spec, see `tools/agent-bridge/BRIDGE_WATCH_LIFECYC
 
 ## Session Startup
 
-After bridge bootstrap succeeds, start Codex-side inbox monitoring for the active session.
-Session start is the preferred moment to enter the loop, but the loop is not considered active until Codex explicitly calls `wait_inbox(...)` in a live turn.
+After bridge bootstrap succeeds, perform Codex-side inbox hygiene for the active session.
+Do not start a persistent blocking `wait_inbox` loop in the main working chat by default.
+
+Use a blocking loop only for a short, explicit smoke test or a deliberately parked bridge-watch session.
+The loop is not considered active until Codex explicitly calls `wait_inbox(...)` in a live turn.
 
 - Preferred loop:
   - call `wait_inbox(agent="codex", session_ids=["mlv-app", "<active-guid>"], timeout_seconds=55, mark_read=false)`
 - Use `55` seconds so the call returns before the MCP host's default `60` second timeout.
-- Re-invoke immediately on timeout. Do not pause and do not wait for user input.
-- The goal is a near-continuous blocking loop:
+- During an explicit wait-loop test, re-invoke immediately on timeout. Do not pause and do not wait for user input.
+- The goal of that test loop is near-continuous blocking:
   - `wait_inbox` returns
   - handle or discard
   - `wait_inbox` again
@@ -33,9 +36,9 @@ Session start is the preferred moment to enter the loop, but the loop is not con
   - the user explicitly ends or clears the session
   - the chat is compacted and the prior live turn is no longer running
   - a newer Codex session takes over and this session is no longer the active owner
+  - the user steers or interrupts the conversation
 - Any normal user message interrupts the active `wait_inbox` chain.
-- If this session is in bridge-watch mode, the user's question type does not matter: after responding, re-enter `wait_inbox` instead of ending the turn.
-- Only stop re-entering the loop when bridge-watch mode is explicitly exited or a stop condition applies.
+- In the main working chat, do not auto-reenter `wait_inbox` after answering an interrupted user message; the UI/harness can leave the user unable to interact normally.
 
 ## Consumption Safety
 
@@ -51,10 +54,10 @@ Inbox hygiene for bridge-related work:
 - At the start of any bridge-related coding, design, audit, or protocol turn, check Codex's private GUID bucket and the project bucket non-destructively.
 - At the end of that turn, check the same buckets again before the final response.
 - Surface and handle any relevant messages, then mark each handled message read by id.
-- Enter the persistent `wait_inbox` loop when bridge-watch mode is active; while active, re-enter the loop after every user response regardless of question type.
+- Do not enter a persistent `wait_inbox` loop in the main working chat unless the user explicitly requests a short smoke test.
 - Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex sends a final answer and ends the turn, Codex is not continuously monitoring.
 - Workflow hooks can remind Codex to check or enter `wait_inbox`, but they cannot resume an already-ended turn or create continuous monitoring by themselves.
-- If the user asks for continuous bridge monitoring, stop normal response work and enter the `wait_inbox` loop as the active task.
+- If the user asks for continuous bridge monitoring, explain that a blocking loop captures the main chat and recommend an external wake/notification path instead.
 - Hook v1 is reminder-only: it may remind Codex to run inbox hygiene, but it must not inspect message bodies, mark messages read, or call `consume_inbox.py`.
 - Current Codex Desktop `notify` hook status: tested and not firing in this Desktop thread. Do not rely on it unless `codex-bridge-reminder.log` shows an automatic entry with `force=False noToast=False`.
 - Active hook strategy is workflow-rule based: `AGENTS.md` requires `codex_pre_response.ps1` and `codex_pre_final.ps1` around bridge-related responses.

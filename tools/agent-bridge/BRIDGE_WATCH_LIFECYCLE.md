@@ -8,8 +8,9 @@ hierarchical inbox redesign.
 
 ## Goal
 
-Keep Codex in a near-continuous blocking `wait_inbox(...)` loop so bridge
-messages arrive with zero idle-token cost while the loop is active.
+Define the limits of Codex-side `wait_inbox(...)` loops. A blocking loop can
+wake on bridge messages while active, but it captures the main working chat and
+should not be the default operating mode.
 
 ## States
 
@@ -27,20 +28,22 @@ Use these two states consistently:
 
 Preferred start point:
 
-- session start, immediately after bridge bootstrap succeeds
+- only during an explicit short smoke test or a deliberately parked bridge-watch
+  session
 
 Rules:
 
-- session start is the preferred time to enter bridge watch
+- session start should perform inbox hygiene, not automatically start a blocking
+  loop in the main working chat
 - bridge watch is not active until Codex explicitly calls `wait_inbox(...)`
   in a live turn
 - use:
   - `wait_inbox(agent="codex", session_ids=["mlv-app", "<active-guid>"], timeout_seconds=55, mark_read=false)`
 - use `55` seconds to stay below the practical `60` second MCP host timeout
 
-## Steady-State Loop
+## Explicit Test Loop
 
-The intended loop is:
+When a blocking loop is explicitly requested, the intended loop is:
 
 1. call `wait_inbox(..., timeout_seconds=55, mark_read=false)`
 2. if a message arrives:
@@ -66,20 +69,22 @@ Bridge watch should stop when any of these are true:
 - a newer Codex session takes over and this session is no longer the active
   owner
 - bridge-watch mode is explicitly exited
+- the user steers or interrupts the conversation in the main working chat
 
 ## Interruptions
 
 Any normal user message interrupts the active `wait_inbox` chain.
 
-If bridge-watch mode is active, the user's question type does not matter.
-After responding to the user, re-enter the loop instead of ending the turn.
+In the main working chat, do not auto-reenter `wait_inbox` after responding to
+an interrupted user message. The UI/harness can leave the user unable to
+interact normally while a shell command is running.
 
-Only stop re-entering the loop when bridge-watch mode is explicitly exited or
-a stop condition applies.
+Re-enter only if the user explicitly asks for another short wait-loop test.
 
 Treat each of these as a loop-break event:
 
 - normal user interruption
+- steered interruption
 - compaction
 - app restart
 - thread clear/end
