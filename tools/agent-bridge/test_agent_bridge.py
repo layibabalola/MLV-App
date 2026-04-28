@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from core.routing import RoutingStatus, resolve_route
 from core.settings import load_settings, settings_path_for_state_dir
 from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
 from project_identity import derive_project_identity, normalize_rendezvous
+from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session
 from recover_state import recover_state
 from routing_policy import evaluate_message
 import watcher
@@ -129,8 +131,28 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(inbox.data["messages"][0]["inbox_level"], "project")
         self.assertEqual(inbox.data["messages"][0]["escalated_from"], "claude-old")
 
+    def test_active_sender_can_send_to_active_target_even_with_superseded_history(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-old-1", project="mlv-app")
+        bridge.activate_session("claude", "claude-old-2", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+
+        result = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] active sender to active target still works",
+            session_id="codex-live",
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["resolved_session_id"], "codex-live")
+        inbox = bridge.peek_inbox("codex", session_id="codex-live")
+        self.assertEqual(inbox.status, "messages")
+        self.assertIn("active sender to active target still works", inbox.message)
+
     def test_activate_session_promotes_unread_messages_to_project(self) -> None:
         bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
         bridge.activate_session("codex", "codex-old", project="mlv-app")
         bridge.send_to_peer(
             "claude",
@@ -149,6 +171,7 @@ class AgentBridgeTests(unittest.TestCase):
 
     def test_check_inbox_include_parents_reads_project_bucket(self) -> None:
         bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
         bridge.activate_session("codex", "codex-old", project="mlv-app")
         bridge.send_to_peer(
             "claude",
@@ -191,6 +214,7 @@ class AgentBridgeTests(unittest.TestCase):
 
     def test_mark_read_can_target_message_without_session_id(self) -> None:
         bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
         bridge.activate_session("claude", "claude-old", project="mlv-app")
         bridge.send_to_peer(
             "codex",
@@ -497,6 +521,7 @@ class AgentBridgeTests(unittest.TestCase):
 
     def test_bootstrap_drains_previous_and_sends_handshake(self) -> None:
         bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
         bridge.activate_session("claude", "claude-old", project="mlv-app")
         bridge.send_to_peer(
             "codex",
@@ -539,6 +564,77 @@ class AgentBridgeTests(unittest.TestCase):
         session_ids = {entry["session_id"] for entry in config["sessions"]}
         self.assertIn("codex-new", session_ids)
         self.assertIn("mlv-app", session_ids)
+
+    def test_recover_bridge_session_bootstraps_when_unbootstrapped(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        result = recover_bridge_session(
+            state_dir=self.state_dir,
+            agent="codex",
+            cwd=str(ROOT),
+            watcher_config=config_path,
+            start_watcher=False,
+        )
+        self.assertEqual(result["status"], "bootstrapped")
+        self.assertEqual(result["before"]["bridge_state"], "UNBOOTSTRAPPED")
+        self.assertEqual(result["after"]["bridge_state"], "BOOTSTRAPPED_NOT_WATCHING")
+        self.assertIsNotNone(result["bootstrap"])
+        self.assertTrue(config_path.exists())
+
+    def test_recover_bridge_session_reports_healthy_existing_runtime(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        bootstrap(
+            state_dir=self.state_dir,
+            agent="codex",
+            cwd=str(ROOT),
+            previous_session_id=None,
+            session_id="codex-live",
+            project=None,
+            handshake_retries=1,
+            watcher_config=config_path,
+            start_watcher=False,
+        )
+        lock_path = self.state_dir / "locks" / "watcher.lock"
+        acquired = acquire_singleton_lease(
+            lock_path,
+            role="watcher",
+            command=[sys.executable, "watcher.py"],
+            state_dir=self.state_dir,
+            pid=os.getpid(),
+        )
+        self.assertTrue(acquired["acquired"])
+        (self.tempdir / "watcher.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+        result = recover_bridge_session(
+            state_dir=self.state_dir,
+            agent="codex",
+            cwd=str(ROOT),
+            watcher_config=config_path,
+            start_watcher=False,
+        )
+        self.assertEqual(result["status"], "already_healthy")
+        self.assertEqual(result["after"]["bridge_state"], "WATCHING")
+
+    def test_inspect_bridge_runtime_reports_bootstrapped_not_watching(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        bootstrap(
+            state_dir=self.state_dir,
+            agent="codex",
+            cwd=str(ROOT),
+            previous_session_id=None,
+            session_id="codex-live",
+            project=None,
+            handshake_retries=1,
+            watcher_config=config_path,
+            start_watcher=False,
+        )
+        summary = inspect_bridge_runtime(
+            state_dir=self.state_dir,
+            agent="codex",
+            cwd=str(ROOT),
+            watcher_config=config_path,
+        )
+        self.assertEqual(summary["bridge_state"], "BOOTSTRAPPED_NOT_WATCHING")
+        self.assertEqual(summary["active_session_id"], "codex-live")
 
     def test_end_session_marks_registry_and_notifies_peer(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -689,6 +785,42 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(any("-ThreadId 019dcfe4-bd5d-7841-a7c1-2e8969a777c5" in command for command in codex_commands))
         self.assertTrue(any("-IdleThresholdSeconds 9" in command for command in codex_commands))
         self.assertTrue(any("-MaxWaitSeconds 77" in command for command in codex_commands))
+
+    def test_codex_bridge_reminder_reports_unbootstrapped_and_recovery_hint(self) -> None:
+        script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
+        log_path = self.tempdir / "codex-bridge-reminder.log"
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WorkspaceRoot",
+                str(ROOT),
+                "-ProjectBucket",
+                "mlv-app",
+                "-SessionRegistryPath",
+                str(self.tempdir / "missing-session.json"),
+                "-WatcherConfigPath",
+                str(self.tempdir / "missing-watcher-config.json"),
+                "-WatcherPidPath",
+                str(self.tempdir / "missing-watcher.pid"),
+                "-BridgeWatchFlagPath",
+                str(self.tempdir / "missing-watch.flag"),
+                "-SettingsPath",
+                str(self.tempdir / "missing-settings.json"),
+                "-LogPath",
+                str(log_path),
+                "-NoToast",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("Bridge state: UNBOOTSTRAPPED", result.stdout)
+        self.assertIn("recover_bridge_session.py", result.stdout)
 
 
 if __name__ == "__main__":

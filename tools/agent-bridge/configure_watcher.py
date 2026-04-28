@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core.settings import load_settings
+from core.paths import session_registry_path_for_state_dir
 from project_identity import derive_project_identity
 
 
@@ -47,7 +48,7 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
 
 def load_registry(state_dir: Path) -> Dict[str, Any]:
     return read_json(
-        state_dir.parent / "session.json",
+        session_registry_path_for_state_dir(state_dir),
         {
             "projects": {},
         },

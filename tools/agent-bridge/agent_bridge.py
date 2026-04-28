@@ -1,4 +1,5 @@
 import argparse
+import copy
 import contextlib
 import dataclasses
 import hashlib
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from core.addressing import AgentInbox, MessageKind, ProjectInbox, SenderContext, SessionInbox
+from core.paths import routing_rules_path_for_state_dir, session_registry_path_for_state_dir, watcher_pid_path_for_state_dir
 from core.routing import resolve_route
 from core.settings import load_settings
 from project_identity import derive_project_identity
@@ -211,7 +213,7 @@ class AgentBridge:
 
     @property
     def session_registry_path(self) -> Path:
-        return self.state_dir.parent / "session.json"
+        return session_registry_path_for_state_dir(self.state_dir)
 
     @property
     def lock_path(self) -> Path:
@@ -307,6 +309,10 @@ class AgentBridge:
             registry = self._default_session_registry()
         registry.setdefault("projects", {})
         return registry
+
+    def session_registry_view(self) -> Dict[str, Any]:
+        with self._locked():
+            return copy.deepcopy(self._load_session_registry())
 
     def _save_session_registry(self, registry: Dict[str, Any]) -> None:
         self._prune_session_registry(registry)
@@ -899,7 +905,7 @@ class AgentBridge:
 
     @property
     def routing_rules_path(self) -> Path:
-        return self.state_dir.parent / "routing-rules.json"
+        return routing_rules_path_for_state_dir(self.state_dir)
 
     def evaluate_routing(self, source: str, direction: str, text: str) -> BridgeResult:
         try:
@@ -1130,17 +1136,15 @@ class AgentBridge:
                 and requested_bucket_info.get("active_session") == session
             ):
                 project_for_target = requested_bucket_info.get("project")
-                inactive_sender_sessions: List[str] = []
                 if project_for_target:
                     project_entry = (registry.get("projects") or {}).get(project_for_target, {})
-                    for candidate_id, candidate_record in (project_entry.get("sessions") or {}).items():
-                        if (
-                            isinstance(candidate_record, dict)
-                            and candidate_record.get("agent") == sender
-                            and candidate_record.get("status") != "active"
-                        ):
-                            inactive_sender_sessions.append(str(candidate_id))
-                if inactive_sender_sessions and not self._find_session_record(registry, session, agent=sender):
+                sender_active_session = (project_entry.get("active") or {}).get(sender) if project_for_target else None
+                sender_record = (
+                    (project_entry.get("sessions") or {}).get(sender_active_session)
+                    if project_for_target and sender_active_session
+                    else None
+                )
+                if not isinstance(sender_record, dict) or sender_record.get("status") != "active":
                     return reject(
                         "superseded sender session for %s is not proven active; cannot send to active target session %s"
                         % (sender, session)
@@ -1845,7 +1849,7 @@ class AgentBridge:
                 agent: len(self._unread_for(agent, session))
                 for agent in sorted(AGENTS)
             }
-            rules_path = self.state_dir.parent / "routing-rules.json"
+            rules_path = routing_rules_path_for_state_dir(self.state_dir)
             routing_rules = {
                 "path": str(rules_path),
                 "status": "missing",
@@ -1890,7 +1894,7 @@ class AgentBridge:
 
     def bridge_process_status(self) -> BridgeResult:
         """Report bridge background process health without mutating state."""
-        watcher_pid_path = self.state_dir.parent / "watcher.pid"
+        watcher_pid_path = watcher_pid_path_for_state_dir(self.state_dir)
         watcher_lease_path = self.state_dir / "locks" / "watcher.lock"
         watcher: Dict[str, Any] = {
             "expected": watcher_pid_path.exists(),

@@ -58,6 +58,7 @@ class Phase0ContractTests(unittest.TestCase):
         """
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
         bridge.send_to_peer(
             "codex", "claude",
             "[[handoff:claude]] private bucket message",
@@ -80,36 +81,38 @@ class Phase0ContractTests(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # Test 2: Superseded sender cannot send work to active target bucket
+    # Test 2: Sender must be provably active to send work to active target bucket
     # Invariant: #1
     # ------------------------------------------------------------------
-    def test_02_superseded_sender_cannot_send_to_active_target_bucket(self) -> None:
-        """A superseded sender should be rejected when sending normal work to
-        the target's active bucket — not just to its own session bucket.
+    def test_02_sender_must_have_an_active_session_to_send_to_active_target_bucket(self) -> None:
+        """Normal work addressed at an active target bucket must be rejected
+        if the sender agent cannot be proven active in that project.
 
-        Current behavior: send_to_peer only verifies sender liveness when the
-        addressed session_id matches the sender's own. Normal work addressing
-        the target bucket bypasses this check. Reproduced by Codex.
+        send_to_peer() carries `from_agent` plus a target bucket, but not the
+        sender session id. That means the strongest sound contract here is:
+        the bridge must prove the sender agent currently has an active session
+        in the project before accepting active-target routing. It cannot
+        distinguish which historical sender thread invoked the call once both
+        active and superseded sender sessions exist.
         """
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-old", project="mlv-app")
         bridge.activate_session("codex", "codex-active", project="mlv-app")
-        bridge.activate_session("claude", "claude-new", project="mlv-app")
-        # claude-old is now superseded by claude-new.
+        registry = bridge._load_session_registry()
+        registry["projects"]["mlv-app"]["active"].pop("claude", None)
+        bridge._save_session_registry(registry)
 
-        # claude-old sends normal work addressed at codex-active's bucket
-        # (NOT addressed at its own claude-old bucket).
         result = bridge.send_to_peer(
             "claude", "codex",
-            "[[handoff:codex]] should be rejected - sender is superseded",
+            "[[handoff:codex]] should be rejected - sender is not proven active",
             session_id="codex-active",
         )
 
         self.assertFalse(
             result.ok,
-            "Superseded sender must not be able to send work to active target",
+            "Sender without an active session must not be able to send work to active target",
         )
-        self.assertIn("superseded", result.message.lower())
+        self.assertIn("not proven active", result.message.lower())
 
     # ------------------------------------------------------------------
     # Test 3: Agent-level bucket rejects normal work; accepts control/recovery
@@ -525,6 +528,7 @@ class Phase0ContractTests(unittest.TestCase):
         """
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
 
         # Send a message
         body = "[[handoff:claude]] dedupe test message body"

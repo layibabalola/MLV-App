@@ -3,6 +3,8 @@ param(
     [string]$ProjectBucket = "mlv-app",
     [string]$PrivateBucket = "",
     [string]$SessionRegistryPath = "",
+    [string]$WatcherConfigPath = "",
+    [string]$WatcherPidPath = "",
     [string]$BridgeWatchFlagPath = "",
     [string]$SettingsPath = "",
     [string]$LogPath = "",
@@ -21,6 +23,12 @@ if (-not $WorkspaceRoot) {
 }
 if (-not $SessionRegistryPath) {
     $SessionRegistryPath = Join-Path $bridgeRoot "session.json"
+}
+if (-not $WatcherConfigPath) {
+    $WatcherConfigPath = Join-Path $bridgeRoot "watcher-config.json"
+}
+if (-not $WatcherPidPath) {
+    $WatcherPidPath = Join-Path $bridgeRoot "watcher.pid"
 }
 if (-not $BridgeWatchFlagPath) {
     $BridgeWatchFlagPath = Join-Path $bridgeRoot "bridge_watch_mode.flag"
@@ -92,6 +100,96 @@ function Get-ReminderToastsEnabled {
     return $false
 }
 
+function Read-JsonObject {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    try {
+        return Get-Content -Raw $Path | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Test-WatcherRunning {
+    param(
+        [string]$PidPath
+    )
+
+    if (-not (Test-Path $PidPath)) {
+        return $false
+    }
+
+    try {
+        $pidValue = [int](Get-Content -Raw $PidPath).Trim()
+        $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+        return $null -ne $proc
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-BridgeRoot {
+    param(
+        [string[]]$CandidatePaths,
+        [string]$Fallback
+    )
+
+    foreach ($candidate in $CandidatePaths) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        $parent = Split-Path -Parent $candidate
+        if (-not [string]::IsNullOrWhiteSpace($parent)) {
+            return $parent
+        }
+    }
+
+    return $Fallback
+}
+
+function Get-BridgeRuntimeState {
+    param(
+        [string]$RegistryPath,
+        [string]$WatcherConfigPath,
+        [string]$WatcherPidPath,
+        [string]$ProjectName,
+        [string]$PrivateSession
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PrivateSession)) {
+        return "UNBOOTSTRAPPED"
+    }
+
+    $watcherRunning = Test-WatcherRunning -PidPath $WatcherPidPath
+    $config = Read-JsonObject -Path $WatcherConfigPath
+    $privateEntry = $false
+    $projectEntry = $false
+    if ($null -ne $config -and $null -ne $config.sessions) {
+        foreach ($entry in $config.sessions) {
+            if ($null -eq $entry -or $entry.agent -ne "codex") {
+                continue
+            }
+            if ($entry.kind -eq "private" -and $entry.session_id -eq $PrivateSession) {
+                $privateEntry = $true
+            }
+            if ($entry.kind -eq "rendezvous" -and $entry.session_id -eq $ProjectName) {
+                $projectEntry = $true
+            }
+        }
+    }
+
+    if ($watcherRunning -and $privateEntry -and $projectEntry) {
+        return "WATCHING"
+    }
+    return "BOOTSTRAPPED_NOT_WATCHING"
+}
+
 $cwd = (Get-Location).Path
 $timestamp = (Get-Date).ToUniversalTime().ToString("o")
 $logDir = Split-Path -Parent $LogPath
@@ -108,9 +206,20 @@ if (-not $Force -and -not (Test-IsUnderPath -Path $cwd -Root $WorkspaceRoot)) {
 $resolvedPrivateBucket = Resolve-ActivePrivateBucket -RegistryPath $SessionRegistryPath -ProjectName $ProjectBucket -Fallback $PrivateBucket
 $watchModeActive = Test-Path $BridgeWatchFlagPath
 $toastEnabled = Get-ReminderToastsEnabled -Path $SettingsPath
+$bridgeState = Get-BridgeRuntimeState -RegistryPath $SessionRegistryPath -WatcherConfigPath $WatcherConfigPath -WatcherPidPath $WatcherPidPath -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket
+$resolvedBridgeRoot = Resolve-BridgeRoot -CandidatePaths @($SessionRegistryPath, $WatcherConfigPath, $WatcherPidPath, $SettingsPath, $BridgeWatchFlagPath, $LogPath) -Fallback $bridgeRoot
+$resolvedStateDir = Join-Path $resolvedBridgeRoot "state"
 
+$stateLine = "Bridge state: $bridgeState"
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
+Write-Output $stateLine
 Write-Output $message
+
+if ($bridgeState -eq "UNBOOTSTRAPPED") {
+    Write-Output "Recovery: run py -3 tools\agent-bridge\recover_bridge_session.py --state-dir `"$resolvedStateDir`" --agent codex --cwd . --watcher-config `"$WatcherConfigPath`""
+} elseif ($bridgeState -eq "BOOTSTRAPPED_NOT_WATCHING") {
+    Write-Output "Recovery: run the same recover_bridge_session.py command to re-arm watcher/config state for this project."
+}
 
 if ($watchModeActive) {
     Write-Output "BRIDGE-WATCH MODE ACTIVE ($HookPhase reminder only; not hard enforcement)."
@@ -119,7 +228,7 @@ if ($watchModeActive) {
     Write-Output "Do not use a persistent wait_inbox loop in the main working chat unless the user explicitly asked for that short test."
 }
 
-"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket watch_mode=$watchModeActive toast_enabled=$toastEnabled" | Add-Content -Path $LogPath -Encoding UTF8
+"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled" | Add-Content -Path $LogPath -Encoding UTF8
 
 if ($NoToast -or -not $toastEnabled) {
     exit 0
@@ -133,9 +242,9 @@ try {
     $notify.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
     $notify.BalloonTipTitle = "Codex bridge reminder"
     if ($watchModeActive) {
-        $notify.BalloonTipText = "Bridge-watch mode active. Check private bucket $resolvedPrivateBucket, then re-enter wait_inbox only for explicit bridge-watch tests."
+        $notify.BalloonTipText = "Bridge state: $bridgeState. Bridge-watch mode active. Check private bucket $resolvedPrivateBucket, then re-enter wait_inbox only for explicit bridge-watch tests."
     } else {
-        $notify.BalloonTipText = $message
+        $notify.BalloonTipText = "$stateLine`n$message"
     }
     $notify.Visible = $true
     $notify.ShowBalloonTip(7000)
