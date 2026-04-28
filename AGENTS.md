@@ -29,6 +29,7 @@
 
 ## Agent Bridge Startup
 - On session open in this repository, initialize the agent bridge before normal relay work.
+- For Codex-specific bridge heuristics, wake-loop behavior, and routing policy, also read `bridge_trigger_heuristics.md`.
 - Use:
   - `py -3 tools\agent-bridge\bootstrap_session.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent codex --cwd C:\!Layi Wkspc\MLV-App --watcher-config C:\Users\obabalola\.agent-bridge\watcher-config.json`
 - Bootstrap does four things:
@@ -40,18 +41,7 @@
   - surface any drained previous-session messages in the chat,
   - use the returned active session GUID for bridge traffic,
   - if bridge consumption reports `SESSION_UPDATE: superseded`, stop bridge communication in this session.
-- Bridge consumption safety:
-  - use `wait_inbox(..., mark_read=false)` or `peek_inbox` for discovery, demos, and wake loops,
-  - do not call `check_inbox(..., mark_read=true)` unless you are ready to surface and act on every returned message immediately,
-  - if a test explicitly asks for `wait_inbox`, do not substitute `check_inbox`; follow the requested tool path,
-  - after handling a message seen with `mark_read=false`, mark it read explicitly by id.
-- Continuous inbox monitoring (run this after bootstrap every session):
-  - After bootstrap completes, enter a `wait_inbox` loop so Claude messages arrive without the user having to nudge you.
-  - Loop pattern: call `wait_inbox(agent="codex", session_ids=["mlv-app", "<your-active-GUID>"], timeout_seconds=55, mark_read=false)`.
-    Use 55s so you re-invoke before the MCP host's default 60s tool timeout fires.
-  - On return: if `data.timed_out` is true, re-invoke immediately (zero token cost while waiting).
-  - If messages are present, surface them, handle them, mark each read by id, then re-invoke.
-  - If `SESSION_UPDATE: superseded` arrives, stop the loop — a newer Codex session has taken over.
+  - start the Codex-side `wait_inbox` loop described in `bridge_trigger_heuristics.md`.
 
 ## Runtime Execution Rules (Windows)
 - Before running any `MLVApp.exe` binary directly, always use a Qt runtime path that matches the binary and force it for that launch.
