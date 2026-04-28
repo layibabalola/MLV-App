@@ -12,6 +12,9 @@ from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
 from configure_watcher import configure_watcher
 from consume_inbox import consume
+from core.addressing import AgentInbox, MessageKind, SenderContext, SessionInbox
+from core.routing import RoutingStatus, resolve_route
+from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
 from project_identity import derive_project_identity, normalize_rendezvous
 from routing_policy import evaluate_message
 
@@ -36,6 +39,54 @@ class AgentBridgeTests(unittest.TestCase):
         value = normalize_rendezvous("Проект")
         self.assertTrue(value.startswith("project-"))
         self.assertEqual(len(value), len("project-") + 8)
+
+    def test_core_storage_quarantines_bad_jsonl_and_versions_state(self) -> None:
+        state_path = self.tempdir / "state.json"
+        write_json(state_path, with_schema_version({"paused": False}))
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["schema_version"], 1)
+
+        inbox = self.tempdir / "inbox.jsonl"
+        append_jsonl(inbox, {"id": "ok"})
+        with inbox.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("{bad json\n")
+        rows = read_jsonl(inbox)
+        self.assertEqual(rows, [{"id": "ok"}])
+        self.assertTrue(inbox.with_suffix(".quarantine.jsonl").exists())
+
+    def test_core_routing_rejects_inactive_work_and_escalates_dead_session(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        bridge.activate_session("claude", "claude-old", project="mlv-app")
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        registry = bridge._load_session_registry()
+
+        inactive_sender = SenderContext("claude", "claude-old", "mlv-app")
+        rejected = resolve_route(
+            sender=inactive_sender,
+            target=SessionInbox("mlv-app", "codex", "codex-live"),
+            kind=MessageKind.WORK,
+            registry=registry,
+        )
+        self.assertEqual(rejected.status, RoutingStatus.REJECTED)
+
+        active_sender = SenderContext("codex", "codex-live", "mlv-app")
+        escalated = resolve_route(
+            sender=active_sender,
+            target=SessionInbox("mlv-app", "claude", "claude-old"),
+            kind=MessageKind.WORK,
+            registry=registry,
+        )
+        self.assertEqual(escalated.status, RoutingStatus.ESCALATED)
+        self.assertEqual(escalated.bucket, "mlv-app")
+
+        control = resolve_route(
+            sender=active_sender,
+            target=AgentInbox("claude"),
+            kind=MessageKind.CONTROL,
+            registry=registry,
+        )
+        self.assertTrue(control.ok)
+        self.assertEqual(control.inbox_level, "agent")
 
     def test_superseded_session_cannot_send(self) -> None:
         bridge = AgentBridge(self.state_dir)
