@@ -217,15 +217,22 @@ try {
     }
 
     if ($DryRun) {
-        Write-Host ("[wake_codex] DryRun. Would clear composer + send: " + $Message + " + Enter. Restoring focus.")
+        Write-Host ("[wake_codex] DryRun. Would clear composer + send: " + $Message + " + Ctrl+Enter (steer). Restoring focus.")
         Start-Sleep -Milliseconds 200
         [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
         exit 0
     }
 
-    # --- Stage 5: clear composer + send keystrokes + Enter ---
+    # --- Stage 5: clear composer + send keystrokes + Ctrl+Enter (steer) ---
     # Ctrl+A + Delete wipes any draft text in the composer. Trade-off the user
     # has explicitly accepted: bridge message delivery > preserving in-progress drafts.
+    #
+    # Ctrl+Enter (NOT plain Enter): in Codex Desktop, Ctrl+Enter is the "Steer"
+    # action — it interrupts whatever Codex is currently doing and forces
+    # immediate handling of the submitted message. Plain Enter just queues
+    # behind the current turn. We always want bridge wakes to steer, so the
+    # "check bridge inbox" trigger is actioned now, not after Codex finishes
+    # whatever it was thinking about.
     [System.Windows.Forms.SendKeys]::SendWait("^a")
     Start-Sleep -Milliseconds 60
     [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")
@@ -233,8 +240,8 @@ try {
 
     [System.Windows.Forms.SendKeys]::SendWait($Message)
     Start-Sleep -Milliseconds 100
-    [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-    Write-Host ("[wake_codex] Sent: " + $Message + " + Enter (composer cleared first)")
+    [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
+    Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; composer cleared first)")
 
     # --- Stage 6: restore previous foreground ---
     Start-Sleep -Milliseconds 200
