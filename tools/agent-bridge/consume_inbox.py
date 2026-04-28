@@ -1,3 +1,25 @@
+"""
+consume_inbox.py — CLI diagnostic for inspecting one bridge inbox session.
+
+NARROWED SCOPE (2026-04-28): this script is NOT part of the live wake path
+and must NOT be wired into watcher.on_message_command. The watcher refuses
+to run any command containing "consume_inbox.py" precisely to prevent that
+mistake. The current wake architecture is:
+    Claude: in-process Monitor + check_inbox + mark_read by id
+    Codex:  watcher → wake_codex.ps1 (SendKeys "check bridge inbox")
+
+This script remains as a manual diagnostic / halt-condition detector for
+ad-hoc inspection from a shell. It uses peek_inbox under the hood and can
+optionally mark messages read after surfacing them. Halt detection looks
+for SESSION_UPDATE: superseded / ended in control messages.
+
+Usage (peek only, non-destructive):
+    py -3 consume_inbox.py --state-dir <dir> --agent claude --session-id <guid> --peek
+
+Usage (consume, destructive — only for manual cleanup):
+    py -3 consume_inbox.py --state-dir <dir> --agent claude --session-id <guid>
+"""
+
 import argparse
 import json
 from pathlib import Path

@@ -27,21 +27,6 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def build_command(python_executable: str, consume_script: Path, state_dir: Path, agent: str, session_id: str) -> str:
-    return subprocess.list2cmdline(
-        [
-            python_executable,
-            str(consume_script),
-            "--state-dir",
-            str(state_dir),
-            "--agent",
-            agent,
-            "--session-id",
-            session_id,
-        ]
-    )
-
-
 def load_registry(state_dir: Path) -> Dict[str, Any]:
     return read_json(
         state_dir.parent / "session.json",
@@ -159,7 +144,6 @@ def configure_watcher(
     project: Optional[str],
     cwd: Optional[str],
     python_executable: str,
-    consume_script: Path,
 ) -> Dict[str, Any]:
     identity = derive_project_identity(cwd)
     project_name = project or identity["rendezvous"]
@@ -266,11 +250,6 @@ def main() -> None:
     parser.add_argument("--project", help="Explicit project/rendezvous name; defaults to derived identity")
     parser.add_argument("--cwd", help="Workspace path used for project identity derivation")
     parser.add_argument("--python", default=sys.executable, help="Python executable used in on_message_command")
-    parser.add_argument(
-        "--consume-script",
-        default=str(Path(__file__).with_name("consume_inbox.py")),
-        help="Path to consume_inbox.py",
-    )
     args = parser.parse_args()
 
     config = configure_watcher(
@@ -280,7 +259,6 @@ def main() -> None:
         project=args.project,
         cwd=args.cwd,
         python_executable=args.python,
-        consume_script=Path(args.consume_script),
     )
     print(json.dumps(config, indent=2, sort_keys=True))
 

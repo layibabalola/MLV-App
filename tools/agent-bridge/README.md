@@ -99,12 +99,24 @@ Use `send_control_message` for control-plane traffic such as `HANDSHAKE`,
 slots so a newer handshake can supersede an older unread handshake instead of
 being blocked by the normal one-unread work-message rule.
 
-Use `consume_inbox.py` in a watcher/consumer path to detect control-plane halt
-conditions such as `SESSION_UPDATE: superseded`:
+Wake paths for inbox notification:
 
-```powershell
-py -3 tools\agent-bridge\consume_inbox.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent claude --session-id <guid>
-```
+- **Claude**: persistent in-process `Monitor` (started at session bootstrap; reads
+  `inbox-claude.jsonl` and surfaces unread messages into the next turn). No
+  external wake script needed.
+- **Codex**: `wake_codex.ps1` is wired into `watcher-config.json` as the
+  `on_message_command` for Codex entries. When the watcher detects a new
+  unread Codex message, it synthesizes `check bridge inbox` + Enter into the
+  Codex Desktop window via `[System.Windows.Forms.SendKeys]`. Codex then runs
+  a turn, calls `check_inbox`, surfaces and handles the message.
+
+Both wake paths are event-driven and zero-cost while idle. See
+`BRIDGE_WATCH_LIFECYCLE.md` for details.
+
+Halt-condition detection (e.g. `SESSION_UPDATE: superseded`) is performed by
+each agent inside its normal `check_inbox` flow — there is no longer a
+separate watcher/consumer step for it. The previous `consume_inbox.py` helper
+is retained only as a CLI diagnostic; do not wire it into the watcher path.
 
 ## Active Session Supersede
 

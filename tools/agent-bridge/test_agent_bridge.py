@@ -341,7 +341,6 @@ class AgentBridgeTests(unittest.TestCase):
             project=None,
             cwd=str(ROOT),
             python_executable="py",
-            consume_script=Path(__file__).with_name("consume_inbox.py"),
         )
         session_ids = {entry["session_id"] for entry in result["sessions"]}
         self.assertIn("codex-fresh", session_ids)

@@ -128,7 +128,6 @@ def bootstrap(
             project=project_name,
             cwd=cwd,
             python_executable=sys.executable,
-            consume_script=Path(__file__).with_name("consume_inbox.py"),
         )
         watcher_process = ensure_watcher(watcher_config)
 

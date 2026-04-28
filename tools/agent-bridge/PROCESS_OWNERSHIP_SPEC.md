@@ -28,7 +28,8 @@ The correct rule is role-specific ownership:
 | `watcher.py` | Strict singleton | state dir |
 | Monitor / notification tailer | Scoped singleton | agent + session + watched buckets |
 | `server.py` MCP stdio server | Multi-instance | pid marker only |
-| `consume_inbox.py` | Short-lived helper | no lease |
+| `wake_codex.ps1` | Short-lived helper (CLI-style) | no lease |
+| `consume_inbox.py` | Short-lived helper (CLI diagnostic only — NOT wake path) | no lease |
 | `bootstrap_session.py` | Short-lived helper | no lease |
 | probes and diagnostics | Short-lived helper | no lease |
 
@@ -148,7 +149,8 @@ Rules:
 
 Short-lived helpers do not take singleton leases:
 
-- `consume_inbox.py`
+- `wake_codex.ps1` (Codex wake — fires from watcher.on_message_command)
+- `consume_inbox.py` (CLI diagnostic only — never wired into watcher)
 - `bootstrap_session.py`
 - direct MCP probes
 - one-off diagnostics
