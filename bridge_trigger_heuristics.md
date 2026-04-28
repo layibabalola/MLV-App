@@ -44,6 +44,18 @@ Observe first, consume second.
 - If a test explicitly asks for `wait_inbox`, do not substitute `check_inbox`.
 - After handling a message seen with `mark_read=false`, mark it read explicitly by id.
 
+Inbox hygiene for bridge-related work:
+
+- At the start of any bridge-related coding, design, audit, or protocol turn, check Codex's private GUID bucket and the project bucket non-destructively.
+- At the end of that turn, check the same buckets again before the final response.
+- Surface and handle any relevant messages, then mark each handled message read by id.
+- Enter the persistent `wait_inbox` loop only when bridge-watch itself is the active task; for normal coding turns, use start/end inbox checks instead.
+- Hook v1 is reminder-only: it may remind Codex to run inbox hygiene, but it must not inspect message bodies, mark messages read, or call `consume_inbox.py`.
+- A hook may evolve to show non-destructive receipt/status summaries only after the receipt tools exist; it must never silently consume bridge messages.
+- If Claude or the user reports that Codex's bucket is blocking sends, immediately check Codex's private GUID bucket and project bucket non-destructively.
+- If unread messages are present, surface them, handle them, and mark them read by id before doing more bridge work.
+- If both buckets are already empty, send a `BACKPRESSURE_STATUS` or `ROUTE_REPAIR` update to Claude with the checked buckets and ask them to retry from fresh state.
+
 ## Routing Heuristics
 
 Bridge messages automatically when the user would otherwise need to paste them manually.
@@ -56,6 +68,12 @@ High-value auto-send categories:
   - shared operating rules, consumption rules, or message-shape changes
 - `HEURISTIC_SYNC`
   - changes to bridge-trigger behavior or what should auto-send
+- `SPEC_REVIEW_REQUEST`
+  - new or materially changed bridge specs, protocol docs, lifecycle docs, or design notes that need peer review before implementation
+- `IMPLEMENTATION_START`
+  - starting code changes that implement a shared bridge design, protocol behavior, or cross-agent workflow
+- `IMPLEMENTATION_UPDATE`
+  - finishing or committing code changes that implement shared bridge behavior, especially when the peer agent was expected to review the design
 - `RESTART_ACK`
   - confirmation that a restart fixed a previously broken bridge path
 - `AUDIT_RESULT`
@@ -64,6 +82,14 @@ High-value auto-send categories:
   - a concrete next step the other agent needs to do now
 - `PHASE_DONE`
   - a meaningful milestone ready for peer review
+
+Bridge spec discipline:
+
+- When drafting or materially changing a bridge design spec, protocol spec, lifecycle doc, or trigger heuristic, send `SPEC_REVIEW_REQUEST` to Claude automatically.
+- When beginning implementation of a shared bridge design, send `IMPLEMENTATION_START` before editing.
+- After committing shared bridge behavior, send `IMPLEMENTATION_UPDATE` with the commit hash, verification, and known follow-up gaps.
+- When changing this heuristics file, send `HEURISTIC_SYNC` to Claude and ask whether the same rule is useful on Claude's side.
+- If Codex realizes after the fact that a message should have been bridged, send the missed bridge message immediately, then update this heuristics file in the same turn so the miss becomes an explicit future trigger.
 
 Do not auto-send:
 

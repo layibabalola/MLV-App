@@ -130,6 +130,15 @@ Treat `Stop` hooks as recovery helpers only:
 - useful for logging, reminders, or external orchestration
 - not a substitute for maintaining the active `wait_inbox(...)` loop
 
+Codex Hook v1 is reminder-only:
+
+- may remind Codex to run inbox hygiene after a turn
+- must not inspect message bodies
+- must not mark messages read
+- must not call `consume_inbox.py`
+- may evolve to show receipt/status summaries only after non-destructive receipt
+  tools exist
+
 ## Hardening Checklist
 
 Before calling bridge watch hardened, verify all of these:
