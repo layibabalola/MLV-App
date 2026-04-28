@@ -1919,6 +1919,10 @@ class AgentBridge:
                 {"cleared": cleared, "reset_session": True},
             )
 
+    def clear_bucket(self, bucket: str, agent: Optional[str] = None) -> BridgeResult:
+        """Explicitly clear one named bucket; compatibility wrapper over clear_inbox."""
+        return self.clear_inbox(agent=agent, session_id=bucket)
+
     def reset_session(self, agent_or_session_id: Optional[str] = None, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
             session = normalize_session(session_id if session_id is not None else agent_or_session_id)
@@ -1938,6 +1942,10 @@ class AgentBridge:
                 }
             )
             return BridgeResult(True, "reset", "Reset bridge session %s." % session, {"removed_existing": removed})
+
+    def reset_bucket(self, bucket: str) -> BridgeResult:
+        """Explicitly reset one named bucket; compatibility wrapper over reset_session."""
+        return self.reset_session(session_id=bucket)
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:

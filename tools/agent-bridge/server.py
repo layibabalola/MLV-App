@@ -251,9 +251,19 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         return as_dict(bridge.clear_inbox(agent=agent, session_id=session_id))
 
     @mcp.tool(annotations=DESTRUCTIVE_WRITE)
+    def clear_bucket(bucket: str, agent: Optional[str] = None) -> dict:
+        """Clear queued inbox messages and reset dedupe state for an explicit bucket."""
+        return as_dict(bridge.clear_bucket(bucket=bucket, agent=agent))
+
+    @mcp.tool(annotations=DESTRUCTIVE_WRITE)
     def reset_session(session_id: Optional[str] = None) -> dict:
         """Reset hop and duplicate-tracking state for a session."""
         return as_dict(bridge.reset_session(session_id=session_id))
+
+    @mcp.tool(annotations=DESTRUCTIVE_WRITE)
+    def reset_bucket(bucket: str) -> dict:
+        """Reset hop and duplicate-tracking state for an explicit bucket."""
+        return as_dict(bridge.reset_bucket(bucket=bucket))
 
     return mcp
 

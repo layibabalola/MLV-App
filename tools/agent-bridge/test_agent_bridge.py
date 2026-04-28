@@ -242,6 +242,20 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("watcher", status.data)
         self.assertIn("mcp_server_marker_count", status.data)
 
+    def test_clear_bucket_and_reset_bucket_are_explicit_aliases(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] bucket hello", session_id="mlv-app")
+        self.assertTrue(result.ok)
+
+        cleared = bridge.clear_bucket("mlv-app", agent="claude")
+        self.assertTrue(cleared.ok)
+        self.assertEqual(bridge.peek_inbox("claude", "mlv-app").status, "empty")
+        self.assertFalse(bridge.clear_bucket("default").ok)
+
+        reset = bridge.reset_bucket("mlv-app")
+        self.assertTrue(reset.ok)
+        self.assertFalse(bridge.reset_bucket("default").ok)
+
     def test_control_message_replaces_prior_control(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.send_control_message(
