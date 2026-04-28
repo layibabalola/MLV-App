@@ -35,6 +35,7 @@
 - Before any final response after bridge-related work, run:
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_pre_final.ps1 -RepoRoot .`
 - These pre-response/pre-final scripts are workflow reminders, not consumers. They must not inspect message bodies, mark messages read, or replace explicit inbox hygiene.
+- Treat them as best-effort only in this Codex Desktop thread. If a trivial nudge or other minimal prompt bypasses them, do not claim they provided reliable wake behavior.
 - For explicit parked bridge-watch tests only, use:
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action on`
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action off`

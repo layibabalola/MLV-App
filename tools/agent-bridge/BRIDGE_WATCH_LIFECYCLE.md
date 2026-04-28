@@ -150,6 +150,7 @@ Codex Hook v1 is reminder-only:
 - must not mark messages read
 - must not call `consume_inbox.py`
 - must not claim hard enforcement of `wait_inbox` re-entry
+- is not a proven wake mechanism for trivial nudges in this Codex Desktop thread unless the reminder log shows it actually fired for that turn
 - may evolve to show receipt/status summaries only after non-destructive receipt
   tools exist
 - the attempted Codex Desktop `notify` integration is tested and not active unless
