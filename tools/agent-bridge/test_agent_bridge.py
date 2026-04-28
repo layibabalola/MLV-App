@@ -219,6 +219,22 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.message_status(message_id).status, "handled")
         self.assertEqual(bridge.list_pending_receipts("claude").data["count"], 0)
 
+    def test_check_inbox_records_seen_but_peek_stays_pure(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] visible hello", session_id="mlv-app")
+        self.assertTrue(result.ok)
+        message_id = result.data["id"]
+
+        peeked = bridge.peek_inbox("claude", "mlv-app")
+        self.assertEqual(peeked.status, "messages")
+        self.assertEqual(bridge.message_status(message_id).status, "queued")
+
+        checked = bridge.check_inbox("claude", "mlv-app", mark_read=False)
+        self.assertEqual(checked.status, "messages")
+        status = bridge.message_status(message_id)
+        self.assertEqual(status.status, "seen")
+        self.assertEqual(status.data["message"]["seen_via"], "check_inbox")
+
     def test_bridge_process_status_reports_without_mutation(self) -> None:
         bridge = AgentBridge(self.state_dir)
         status = bridge.bridge_process_status()

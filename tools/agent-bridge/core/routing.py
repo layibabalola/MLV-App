@@ -74,11 +74,15 @@ def resolve_route(
         )
 
     if kind == MessageKind.WORK and not sender_is_active(registry, sender):
+        record = _session_record(registry, sender.project, sender.sender_session_id)
+        detail = "sender session is not active"
+        if record and record.get("status"):
+            detail = "sender session is %s" % record.get("status")
         return RoutingDecision(
             RoutingStatus.REJECTED,
             None,
             None,
-            reason="sender session is not active",
+            reason=detail,
         )
 
     if isinstance(target, AgentInbox):

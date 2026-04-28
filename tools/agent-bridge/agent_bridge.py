@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from core.addressing import AgentInbox, MessageKind, ProjectInbox, SenderContext, SessionInbox
+from core.routing import resolve_route
 from project_identity import derive_project_identity
 from routing_policy import evaluate_message
 
@@ -985,6 +987,38 @@ class AgentBridge:
                     oldest = stamp
         return {"count": total, "oldest": oldest}
 
+    def _sender_context_for_route(
+        self,
+        registry: Dict[str, Any],
+        sender: str,
+        requested_session: str,
+        project_hint: Optional[str],
+    ) -> Optional[SenderContext]:
+        found = self._find_session_record(registry, requested_session, agent=sender)
+        if found:
+            return SenderContext(sender, requested_session, found["project"])
+        if project_hint:
+            project_entry = (registry.get("projects") or {}).get(project_hint, {})
+            active_session = (project_entry.get("active") or {}).get(sender)
+            if active_session:
+                return SenderContext(sender, str(active_session), project_hint)
+        return None
+
+    def _address_for_route(
+        self,
+        target: str,
+        delivery_bucket: str,
+        delivery_level: str,
+        parent_project: Optional[str],
+    ):
+        if delivery_level == INBOX_LEVEL_AGENT:
+            return AgentInbox(target)
+        if delivery_level == INBOX_LEVEL_PROJECT:
+            return ProjectInbox(delivery_bucket, target)
+        if delivery_level == INBOX_LEVEL_SESSION and parent_project:
+            return SessionInbox(parent_project, target, delivery_bucket)
+        return None
+
     def send_to_peer(self, from_agent: str, to_agent: str, message: str, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
             now = utc_now()
@@ -1069,45 +1103,42 @@ class AgentBridge:
             event["inbox_level"] = delivery_level
             event["escalated_from"] = delivery.get("escalated_from")
             event["escalation_reason"] = delivery.get("escalation_reason")
-            sender_record = self._find_session_record(registry, session, agent=sender)
-            if sender_record:
-                record = sender_record["record"]
-                if record.get("status") != "active":
-                    return reject(
-                        "session %s for %s is %s and may not send bridge traffic"
-                        % (session, sender, record.get("status"))
-                    )
-                if sender_record.get("active_session") != session:
-                    return reject(
-                        "session %s for %s is no longer the active session for project %s"
-                        % (session, sender, sender_record["project"])
-                    )
-            elif delivery_level == INBOX_LEVEL_SESSION:
-                delivery_info = self._bucket_info(registry, delivery_bucket)
-                delivery_record = delivery_info.get("record")
+            requested_bucket_info = self._bucket_info(registry, session)
+            if (
+                delivery_level == INBOX_LEVEL_SESSION
+                and requested_bucket_info.get("record")
+                and requested_bucket_info["record"].get("agent") == target
+                and requested_bucket_info["record"].get("status") == "active"
+                and requested_bucket_info.get("active_session") == session
+            ):
+                project_for_target = requested_bucket_info.get("project")
                 inactive_sender_sessions: List[str] = []
-                project_name_for_delivery = delivery_info.get("project")
-                if project_name_for_delivery:
-                    project_entry_for_delivery = (registry.get("projects") or {}).get(project_name_for_delivery, {})
-                    for candidate_id, candidate_record in (project_entry_for_delivery.get("sessions") or {}).items():
+                if project_for_target:
+                    project_entry = (registry.get("projects") or {}).get(project_for_target, {})
+                    for candidate_id, candidate_record in (project_entry.get("sessions") or {}).items():
                         if (
                             isinstance(candidate_record, dict)
                             and candidate_record.get("agent") == sender
                             and candidate_record.get("status") != "active"
                         ):
                             inactive_sender_sessions.append(str(candidate_id))
-                if (
-                    delivery_record
-                    and delivery_record.get("agent") == target
-                    and delivery_record.get("status") == "active"
-                    and delivery_info.get("active_session") == delivery_bucket
-                    and session == delivery_bucket
-                    and inactive_sender_sessions
-                ):
+                if inactive_sender_sessions and not self._find_session_record(registry, session, agent=sender):
                     return reject(
-                        "sender session for %s is not proven active; superseded senders may not send to active target session %s"
-                        % (sender, delivery_bucket)
+                        "superseded sender session for %s is not proven active; cannot send to active target session %s"
+                        % (sender, session)
                     )
+            project_hint = parent_project or (delivery_bucket if delivery_level == INBOX_LEVEL_PROJECT else None)
+            sender_context = self._sender_context_for_route(registry, sender, session, project_hint)
+            target_address = self._address_for_route(target, delivery_bucket, delivery_level, parent_project)
+            if sender_context and target_address:
+                route = resolve_route(
+                    sender=sender_context,
+                    target=target_address,
+                    kind=MessageKind.WORK,
+                    registry=registry,
+                )
+                if not route.ok:
+                    return reject(route.reason or "routing rejected")
 
             session_state = self._session_state(state, delivery_bucket)
             hop_count = int(session_state.get("hop_count", 0))
@@ -1255,6 +1286,7 @@ class AgentBridge:
         session_id: Optional[str] = None,
         mark_read: bool = False,
         include_parents: bool = False,
+        record_seen: bool = True,
     ) -> BridgeResult:
         with self._locked():
             try:
@@ -1278,6 +1310,31 @@ class AgentBridge:
                 for row in rows
                 if (buckets is None or row.get("session_id") in buckets) and not row.get("read_at")
             ]
+            if unread and record_seen:
+                now = utc_now()
+                unread_ids = {row["id"] for row in unread}
+                changed_seen = False
+                for row in rows:
+                    if row.get("id") in unread_ids and not row.get("seen_at"):
+                        row["seen_at"] = now
+                        row["seen_by_session"] = row.get("session_id")
+                        row["seen_via"] = "check_inbox"
+                        changed_seen = True
+                if changed_seen:
+                    write_jsonl(path, rows)
+                    self._audit(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "timestamp": now,
+                            "action": "mark_seen",
+                            "agent": target,
+                            "session_id": session,
+                            "via": "check_inbox",
+                            "accepted": True,
+                            "message_count": len(unread),
+                        }
+                    )
+
             if mark_read and unread:
                 now = utc_now()
                 unread_ids = {row["id"] for row in unread}
@@ -1325,6 +1382,7 @@ class AgentBridge:
         session_ids: Optional[List[str]] = None,
         timeout_seconds: int = 600,
         mark_read: bool = False,
+        record_seen: bool = True,
     ) -> BridgeResult:
         """Block until a new message arrives for the agent or timeout elapses.
 
@@ -1387,6 +1445,30 @@ class AgentBridge:
                 rows = read_jsonl(path)
                 unread = [row for row in rows if _matches(row)]
                 if unread:
+                    if record_seen:
+                        now = utc_now()
+                        unread_ids = {row["id"] for row in unread}
+                        changed_seen = False
+                        for row in rows:
+                            if row.get("id") in unread_ids and not row.get("seen_at"):
+                                row["seen_at"] = now
+                                row["seen_by_session"] = row.get("session_id")
+                                row["seen_via"] = "wait_inbox"
+                                changed_seen = True
+                        if changed_seen:
+                            write_jsonl(path, rows)
+                            self._audit(
+                                {
+                                    "id": str(uuid.uuid4()),
+                                    "timestamp": now,
+                                    "action": "mark_seen",
+                                    "agent": target,
+                                    "session_ids": sorted(valid_sessions) if valid_sessions else None,
+                                    "via": "wait_inbox",
+                                    "accepted": True,
+                                    "message_count": len(unread),
+                                }
+                            )
                     if mark_read:
                         now = utc_now()
                         unread_ids = {row["id"] for row in unread}
@@ -1443,7 +1525,13 @@ class AgentBridge:
         )
 
     def peek_inbox(self, agent: str, session_id: Optional[str] = None, include_parents: bool = False) -> BridgeResult:
-        return self.check_inbox(agent, session_id=session_id, mark_read=False, include_parents=include_parents)
+        return self.check_inbox(
+            agent,
+            session_id=session_id,
+            mark_read=False,
+            include_parents=include_parents,
+            record_seen=False,
+        )
 
     def mark_read(self, agent: str, message_id: str, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():

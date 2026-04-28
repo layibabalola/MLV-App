@@ -135,6 +135,7 @@ def check_inbox(
     session_id: Optional[str] = None,
     mark_read: bool = False,
     include_parents: bool = False,
+    record_seen: bool = True,
 ) -> dict:
     """Return unread bridge messages for an agent, optionally including parent buckets and marking them read."""
     return as_dict(
@@ -143,6 +144,7 @@ def check_inbox(
             session_id=session_id,
             mark_read=mark_read,
             include_parents=include_parents,
+            record_seen=record_seen,
         )
     )
 
@@ -153,6 +155,7 @@ async def wait_inbox(
     session_ids: Optional[list[str]] = None,
     timeout_seconds: int = 600,
     mark_read: bool = False,
+    record_seen: bool = True,
 ) -> dict:
     """Block until a new message arrives for the agent, or timeout elapses.
 
@@ -182,6 +185,7 @@ async def wait_inbox(
         session_ids=session_ids,
         timeout_seconds=timeout_seconds,
         mark_read=mark_read,
+        record_seen=record_seen,
     )
     return as_dict(result)
 
