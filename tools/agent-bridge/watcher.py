@@ -112,19 +112,128 @@ def notify_terminal(agent: str, session_id: str, messages: List[Dict[str, Any]])
     )
 
 
-def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, Any]]) -> None:
-    """Surface a Windows balloon tip via PowerShell.
+def _parse_message_fields(body: str) -> Dict[str, str]:
+    """Extract TYPE, SUMMARY, STATUS, ACTION_REQUESTED from a structured message body."""
+    fields: Dict[str, str] = {}
+    for line in body.splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            key = key.strip().upper()
+            if key in {"TYPE", "SUMMARY", "STATUS", "ACTION_REQUESTED"}:
+                fields[key] = val.strip()
+                if len(fields) == 4:
+                    break
+    return fields
 
-    Uses System.Windows.Forms.NotifyIcon — built into every Windows install,
-    no third-party dependency.  Stays silent on non-Windows or PowerShell
-    failure (falls back to terminal print).
+
+def _xml_esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, Any]]) -> None:
+    """Surface a modern Windows 10/11 toast notification via WinRT.
+
+    Uses Windows.UI.Notifications.ToastNotification (built into Windows 10/11,
+    no third-party dependency).  Parses TYPE/SUMMARY/STATUS from structured
+    message bodies so the notification title and body are human-readable rather
+    than raw protocol text.
+
+    Falls back to a legacy NotifyIcon balloon on WinRT failure (e.g. older OS,
+    notification policy, PowerShell unavailable).
     """
     if sys.platform != "win32":
         notify_terminal(agent, session_id, messages)
         return
+
+    import base64
+
+    msg = messages[0]
+    fields = _parse_message_fields(msg.get("body", ""))
+    from_agent = msg.get("from", "unknown")
+
+    msg_type = fields.get("TYPE", "")
+    summary = fields.get("SUMMARY", "")
+    status = fields.get("STATUS", "info").lower()
+    action = fields.get("ACTION_REQUESTED", "").lower()
+
+    # Per-agent identity: emoji + sound
+    # 🤖 = Claude  |  👾 = Codex
+    AGENT_EMOJI = {"claude": "🤖", "codex": "👾"}
+    AGENT_SOUND = {"claude": "Notification.Reminder", "codex": "Notification.IM"}
+    recipient_emoji = AGENT_EMOJI.get(agent, "🤖")
+    sender_emoji = AGENT_EMOJI.get(from_agent, "👾")
+    sound_uri = AGENT_SOUND.get(agent, "Notification.Default")
+
+    # Title: sender → recipient with per-agent robots
+    title = f"{sender_emoji} {from_agent.capitalize()} → {recipient_emoji} {agent.capitalize()}"
+
+    # Body line 1: [TYPE] Summary, or raw body preview
+    if msg_type and summary:
+        line1 = f"[{msg_type}] {summary}"
+    elif summary:
+        line1 = summary
+    elif msg_type:
+        line1 = f"[{msg_type}]"
+    else:
+        line1 = msg.get("body", "").replace("\n", " ")[:140]
+
+    # Status prefix and truncate
+    status_prefix = {"pass": "✅ ", "fail": "❌ ", "blocked": "\U0001f6ab "}.get(status, "")
+    line1 = (status_prefix + line1)[:160]
+
+    # Footer: action hint + session fingerprint
+    session_tail = ("…" + session_id[-8:]) if session_id else ""
+    if action and action not in {"none", ""}:
+        line2 = f"⚡ {action}  ·  agent-bridge {session_tail}"
+    else:
+        line2 = f"agent-bridge  ·  {session_tail}"
+
+    # Build toast XML (ToastGeneric: three text nodes = title / body / footer)
+    toast_xml = (
+        f'<toast><audio src="ms-winsoundevent:{sound_uri}"/>'
+        '<visual><binding template="ToastGeneric">'
+        f"<text>{_xml_esc(title)}</text>"
+        f"<text>{_xml_esc(line1)}</text>"
+        f"<text>{_xml_esc(line2)}</text>"
+        "</binding></visual></toast>"
+    )
+
+    # Use the registered Windows PowerShell app-id so Windows always allows the
+    # toast without requiring our own app identity registration.
+    ps_app_id = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+
+    # Pass the script via -EncodedCommand (Base64 UTF-16LE) to avoid all
+    # shell-escaping issues with the XML payload.
+    ps_code = (
+        "[Windows.UI.Notifications.ToastNotificationManager,"
+        " Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null\n"
+        "[Windows.Data.Xml.Dom.XmlDocument,"
+        " Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime] | Out-Null\n"
+        f"$appId = '{ps_app_id}'\n"
+        "$xmlStr = @'\n"
+        + toast_xml + "\n"
+        "'@\n"
+        "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
+        "$xml.LoadXml($xmlStr.Trim())\n"
+        "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)\n"
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)\n"
+    )
+    try:
+        ps_b64 = base64.b64encode(ps_code.encode("utf-16-le")).decode("ascii")
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", ps_b64],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
+        _notify_windows_balloon(agent, session_id, messages)
+
+
+def _notify_windows_balloon(agent: str, session_id: str, messages: List[Dict[str, Any]]) -> None:
+    """Legacy NotifyIcon balloon fallback (Windows 7+ compatible)."""
     body = messages[0].get("body", "")[:120].replace("\n", " ").replace("\r", " ")
     title = f"agent-bridge: new message for {agent}"
-    # Single-quote escape for PowerShell single-quoted string literals
     safe_title = title.replace("'", "''")
     safe_body = body.replace("'", "''")
     ps_script = (
