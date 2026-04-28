@@ -103,21 +103,23 @@ def build_private_entry(
     session_id: str,
     project: str,
     inbox: Path,
-    command: str,
+    command: Optional[str],
 ) -> Dict[str, Any]:
-    return merge_entry(
-        existing,
-        {
-            "_comment": "%s private inbox consumer for %s" % (agent.capitalize(), project),
-            "agent": agent,
-            "kind": "private",
-            "project": project,
-            "session_id": session_id,
-            "inbox": str(inbox),
-            "on_message": existing.get("on_message", "toast") if isinstance(existing, dict) else "toast",
-            "on_message_command": command,
-        },
-    )
+    # Claude has an in-process Monitor that reads the inbox directly — the watcher
+    # should only toast (alert the user) and never consume messages on Claude's behalf.
+    # on_message_command is only useful for agents without an in-process monitor (e.g. codex).
+    entry: Dict[str, Any] = {
+        "_comment": "%s private inbox consumer for %s" % (agent.capitalize(), project),
+        "agent": agent,
+        "kind": "private",
+        "project": project,
+        "session_id": session_id,
+        "inbox": str(inbox),
+        "on_message": existing.get("on_message", "toast") if isinstance(existing, dict) else "toast",
+    }
+    if command is not None:
+        entry["on_message_command"] = command
+    return merge_entry(existing, entry)
 
 
 def build_rendezvous_entry(
@@ -126,21 +128,21 @@ def build_rendezvous_entry(
     agent: str,
     project: str,
     inbox: Path,
-    command: str,
+    command: Optional[str],
 ) -> Dict[str, Any]:
-    return merge_entry(
-        existing,
-        {
-            "_comment": "Rendezvous/control-plane watch for %s" % project,
-            "agent": agent,
-            "kind": "rendezvous",
-            "project": project,
-            "session_id": project,
-            "inbox": str(inbox),
-            "on_message": existing.get("on_message", "toast") if isinstance(existing, dict) else "toast",
-            "on_message_command": command,
-        },
-    )
+    # Same rationale: Claude reads its own inbox via Monitor; no consume command needed.
+    entry: Dict[str, Any] = {
+        "_comment": "Rendezvous/control-plane watch for %s" % project,
+        "agent": agent,
+        "kind": "rendezvous",
+        "project": project,
+        "session_id": project,
+        "inbox": str(inbox),
+        "on_message": existing.get("on_message", "toast") if isinstance(existing, dict) else "toast",
+    }
+    if command is not None:
+        entry["on_message_command"] = command
+    return merge_entry(existing, entry)
 
 
 def configure_watcher(
@@ -204,6 +206,12 @@ def configure_watcher(
         if existing_private is None:
             existing_private = raw_entry
 
+    # Claude reads its own inbox via the in-process Monitor; the watcher must not
+    # consume messages on Claude's behalf (race: consume_inbox marks read before
+    # Claude's check_inbox runs). Only supply on_message_command for agents without
+    # an in-process monitor (currently: codex).
+    needs_consume_command = agent != "claude"
+
     if active_session_id:
         managed_entries.append(
             build_private_entry(
@@ -218,7 +226,7 @@ def configure_watcher(
                     state_dir,
                     agent,
                     str(active_session_id),
-                ),
+                ) if needs_consume_command else None,
             )
         )
 
@@ -234,7 +242,7 @@ def configure_watcher(
                 state_dir,
                 agent,
                 project_name,
-            ),
+            ) if needs_consume_command else None,
         )
     )
 
