@@ -19,10 +19,14 @@ $args = @(
     $script,
     "-WorkspaceRoot",
     $root,
+    "-HookPhase",
+    "response",
     "-ProjectBucket",
     "mlv-app",
-    "-PrivateBucket",
-    "9111dce5-3d33-4d06-b7a7-87dbf259b0c6"
+    "-SessionRegistryPath",
+    "C:\Users\obabalola\.agent-bridge\session.json",
+    "-BridgeWatchFlagPath",
+    "C:\Users\obabalola\.agent-bridge\bridge_watch_mode.flag"
 )
 
 if ($NoToast) {

@@ -35,6 +35,10 @@
 - Before any final response after bridge-related work, run:
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_pre_final.ps1 -RepoRoot .`
 - These pre-response/pre-final scripts are workflow reminders, not consumers. They must not inspect message bodies, mark messages read, or replace explicit inbox hygiene.
+- For explicit parked bridge-watch tests only, use:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action on`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action off`
+- Bridge-watch mode is reminder-only. It makes the hooks front-load a louder `wait_inbox` reminder, but it does not hard-enforce tool usage and it does not change the main chat default.
 - Use:
   - `py -3 tools\agent-bridge\bootstrap_session.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent codex --cwd C:\!Layi Wkspc\MLV-App --watcher-config C:\Users\obabalola\.agent-bridge\watcher-config.json`
 - Bootstrap does four things:
@@ -46,7 +50,7 @@
   - surface any drained previous-session messages in the chat,
   - use the returned active session GUID for bridge traffic,
   - if bridge consumption reports `SESSION_UPDATE: superseded`, stop bridge communication in this session.
-  - start the Codex-side `wait_inbox` loop described in `bridge_trigger_heuristics.md`.
+  - do not start a persistent `wait_inbox` loop in the main working chat by default; only use it for an explicit short smoke test or parked bridge-watch session described in `bridge_trigger_heuristics.md`.
 
 ## Runtime Execution Rules (Windows)
 - Before running any `MLVApp.exe` binary directly, always use a Qt runtime path that matches the binary and force it for that launch.

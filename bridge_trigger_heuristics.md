@@ -14,6 +14,14 @@ Do not start a persistent blocking `wait_inbox` loop in the main working chat by
 Use a blocking loop only for a short, explicit smoke test or a deliberately parked bridge-watch session.
 The loop is not considered active until Codex explicitly calls `wait_inbox(...)` in a live turn.
 
+Bridge-watch mode flag:
+
+- Toggle it explicitly with:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action on`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action off`
+- The flag enables louder pre-response/pre-final reminders only.
+- It is not hard enforcement and does not override the main-chat default away from start/end inbox hygiene.
+
 - Preferred loop:
   - call `wait_inbox(agent="codex", session_ids=["mlv-app", "<active-guid>"], timeout_seconds=55, mark_read=false)`
 - Use `55` seconds so the call returns before the MCP host's default `60` second timeout.
@@ -59,6 +67,7 @@ Inbox hygiene for bridge-related work:
 - Do not enter a persistent `wait_inbox` loop in the main working chat unless the user explicitly requests a short smoke test.
 - Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex sends a final answer and ends the turn, Codex is not continuously monitoring.
 - Workflow hooks can remind Codex to check or enter `wait_inbox`, but they cannot resume an already-ended turn or create continuous monitoring by themselves.
+- If bridge-watch mode is on, treat the hook output as a high-salience reminder for explicit watch tests only, not as proof that a persistent loop belongs in the main chat.
 - If the user asks for continuous bridge monitoring, explain that a blocking loop captures the main chat and recommend an external wake/notification path instead.
 - Hook v1 is reminder-only: it may remind Codex to run inbox hygiene, but it must not inspect message bodies, mark messages read, or call `consume_inbox.py`.
 - Current Codex Desktop `notify` hook status: tested and not firing in this Desktop thread. Do not rely on it unless `codex-bridge-reminder.log` shows an automatic entry with `force=False noToast=False`.

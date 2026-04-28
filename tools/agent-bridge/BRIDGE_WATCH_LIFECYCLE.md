@@ -145,9 +145,11 @@ Treat `Stop` hooks as recovery helpers only:
 Codex Hook v1 is reminder-only:
 
 - may remind Codex to run inbox hygiene after a turn
+- may front-load a louder reminder when `bridge_watch_mode.flag` is present
 - must not inspect message bodies
 - must not mark messages read
 - must not call `consume_inbox.py`
+- must not claim hard enforcement of `wait_inbox` re-entry
 - may evolve to show receipt/status summaries only after non-destructive receipt
   tools exist
 - the attempted Codex Desktop `notify` integration is tested and not active unless
@@ -155,6 +157,15 @@ Codex Hook v1 is reminder-only:
   `force=False noToast=False`
 - the active Codex hook strategy is workflow-rule based: `AGENTS.md` requires
   `codex_pre_response.ps1` and `codex_pre_final.ps1` around bridge-related responses
+
+Bridge-watch mode helper:
+
+- `tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action on`
+  enables a high-salience reminder mode for short explicit bridge-watch tests
+- `tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action off`
+  returns the hook behavior to normal reminder mode
+- this helper does not create automation and does not make the main working chat
+  safe for indefinite blocking waits
 
 ## Hardening Checklist
 
