@@ -22,6 +22,7 @@ from core.processes import acquire_singleton_lease, heartbeat_lease, release_lea
 from core.routing import RoutingStatus, resolve_route
 from core.settings import load_settings, settings_path_for_state_dir
 from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
+from migrate_root import migrate_root
 from project_identity import derive_project_identity, normalize_rendezvous
 from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session
 from recover_state import recover_state
@@ -104,6 +105,17 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(first["active_root"], str(paths.root))
         self.assertEqual(first["migration_history"][0]["reason"], "unit-test")
 
+    def test_bridge_root_manifest_rejects_mismatched_active_root(self) -> None:
+        paths = resolve_bridge_paths(bridge_root=self.tempdir / "manifest-root")
+        paths.root.mkdir()
+        (paths.manifest).write_text(
+            json.dumps({"schema_version": 1, "root_id": "root-id", "active_root": str(self.tempdir / "other-root")}),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ValueError):
+            ensure_bridge_root_manifest(paths, reason="unit-test")
+
     def test_bootstrap_cli_accepts_bridge_root_and_writes_manifest(self) -> None:
         bridge_root = self.tempdir / "cli-root"
         result = subprocess.run(
@@ -130,6 +142,67 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(data["session_id"], "codex-cli")
         self.assertTrue((bridge_root / "bridge-root.json").exists())
         self.assertTrue((bridge_root / "watcher-config.json").exists())
+
+    def test_migrate_root_dry_run_does_not_create_target(self) -> None:
+        source = self.tempdir / "source-root"
+        target = self.tempdir / "target-root"
+        (source / "state").mkdir(parents=True)
+        (source / "session.json").write_text("{}", encoding="utf-8")
+
+        result = migrate_root(source_root=source, target_root=target)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "dry_run")
+        self.assertFalse(target.exists())
+
+    def test_migrate_root_refuses_live_markers_without_force(self) -> None:
+        source = self.tempdir / "source-root"
+        target = self.tempdir / "target-root"
+        (source / "state").mkdir(parents=True)
+        (source / "watcher.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+        result = migrate_root(source_root=source, target_root=target)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "live_processes")
+        self.assertEqual(result["live_processes"][0]["kind"], "watcher")
+
+    def test_migrate_root_apply_rewrites_watcher_and_writes_redirect(self) -> None:
+        source = self.tempdir / "source-root"
+        target = self.tempdir / "target-root"
+        source_state = source / "state"
+        source_state.mkdir(parents=True)
+        (source / "session.json").write_text(json.dumps({"projects": {}}), encoding="utf-8")
+        (source / "watcher-config.json").write_text(
+            json.dumps(
+                {
+                    "sessions": [
+                        {
+                            "agent": "codex",
+                            "kind": "private",
+                            "session_id": "codex-live",
+                            "inbox": str(source_state / "inbox-codex.jsonl"),
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = migrate_root(source_root=source, target_root=target, apply=True, reason="unit-test")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "migrated")
+        moved = json.loads((source / "MOVED_TO.json").read_text(encoding="utf-8"))
+        self.assertEqual(moved["active_root"], str(target))
+        config = json.loads((target / "watcher-config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["sessions"][0]["inbox"], str(target / "state" / "inbox-codex.jsonl"))
+        manifest = json.loads((target / "bridge-root.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["active_root"], str(target))
+        self.assertEqual(manifest["migration_history"][-1]["reason"], "unit-test")
+        with self.assertRaises(BridgeRootMovedError) as raised:
+            resolve_bridge_paths(bridge_root=source)
+        self.assertEqual(raised.exception.target, target)
 
     def test_unicode_normalization_falls_back_to_hash(self) -> None:
         value = normalize_rendezvous("Проект")

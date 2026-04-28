@@ -71,3 +71,9 @@ valid because each MCP client or probe may spawn its own `server.py`.
 Use `recover_state.py` to validate state and optionally repair corruption after a
 backup. Use `compact.py` to prune old read rows, rotate oversized audit logs, and
 reap stale `server-pids\server-<pid>.pid` markers.
+
+Use `migrate_root.py` for bridge-root relocation. It is dry-run by default,
+refuses live watcher/MCP server markers unless `--force-while-running` is
+provided, copies the source root to the target, rewrites watcher inbox paths,
+and writes `MOVED_TO.json` at the old root so stale clients fail with the new
+active root path.

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+from .storage import write_json
+
 
 DEFAULT_BRIDGE_DIRNAME = ".agent-bridge"
 MOVED_TO_FILENAME = "MOVED_TO.json"
@@ -98,6 +100,13 @@ def _read_json_object(path: Path) -> Dict[str, Any]:
     return data
 
 
+def _canonical_key(path: Path) -> str:
+    try:
+        return str(path.resolve()).lower()
+    except OSError:
+        return str(path.absolute()).lower()
+
+
 def detect_moved_root(bridge_root: Path) -> Optional[Dict[str, Any]]:
     moved_to = Path(bridge_root) / MOVED_TO_FILENAME
     if not moved_to.exists():
@@ -149,6 +158,11 @@ def ensure_bridge_root_manifest(paths: BridgePaths, *, reason: str = "initialize
         manifest = _read_json_object(paths.manifest)
         if manifest.get("schema_version", 0) > ROOT_MANIFEST_SCHEMA_VERSION:
             raise ValueError("%s schema_version is newer than this bridge supports" % paths.manifest)
+        if not manifest.get("root_id"):
+            raise ValueError("%s is missing root_id" % paths.manifest)
+        active_root = manifest.get("active_root")
+        if not isinstance(active_root, str) or _canonical_key(Path(active_root)) != _canonical_key(paths.root):
+            raise ValueError("%s active_root does not match %s" % (paths.manifest, paths.root))
         return manifest
 
     now = utc_now()
@@ -168,9 +182,7 @@ def ensure_bridge_root_manifest(paths: BridgePaths, *, reason: str = "initialize
             }
         ],
     }
-    with paths.manifest.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(manifest, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    write_json(paths.manifest, manifest)
     return manifest
 
 
