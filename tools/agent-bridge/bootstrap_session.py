@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from agent_bridge import AgentBridge
 from configure_watcher import configure_watcher
+from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths
 from core.processes import acquire_singleton_lease, build_lease, command_line_hash, is_process_alive, lease_status, write_lease
 from project_identity import derive_project_identity
 
@@ -197,7 +198,8 @@ def bootstrap(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bootstrap an agent-bridge session takeover")
-    parser.add_argument("--state-dir", required=True, help="Bridge state directory")
+    parser.add_argument("--bridge-root", help="Bridge root directory; preferred over --state-dir")
+    parser.add_argument("--state-dir", help="Legacy bridge state directory")
     parser.add_argument("--agent", required=True, choices=("claude", "codex"))
     parser.add_argument("--cwd", help="Workspace path used for project identity derivation")
     parser.add_argument("--previous-session-id", help="Old same-agent session GUID to drain before takeover")
@@ -211,16 +213,22 @@ def main() -> None:
         help="Update watcher config without spawning the watcher daemon",
     )
     args = parser.parse_args()
+    paths = resolve_bridge_paths(
+        bridge_root=Path(args.bridge_root) if args.bridge_root else None,
+        state_dir=Path(args.state_dir) if args.state_dir else None,
+    )
+    if args.bridge_root:
+        ensure_bridge_root_manifest(paths, reason="bootstrap")
 
     result = bootstrap(
-        state_dir=Path(args.state_dir),
+        state_dir=paths.state_dir,
         agent=args.agent,
         cwd=args.cwd,
         previous_session_id=args.previous_session_id,
         session_id=args.session_id,
         project=args.project,
         handshake_retries=args.handshake_retries,
-        watcher_config=Path(args.watcher_config) if args.watcher_config else None,
+        watcher_config=Path(args.watcher_config) if args.watcher_config else (paths.watcher_config if args.bridge_root else None),
         start_watcher=not args.no_start_watcher,
     )
     print(json.dumps(result, indent=2, sort_keys=True))

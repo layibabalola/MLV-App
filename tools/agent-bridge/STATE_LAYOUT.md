@@ -4,6 +4,8 @@ Default state root:
 
 ```text
 %USERPROFILE%\.agent-bridge\
+  bridge-root.json
+  MOVED_TO.json          (only after this root is relocated)
   session.json
   settings.json
   watcher-config.json
@@ -24,15 +26,21 @@ Default state root:
       recovery-<timestamp>\
 ```
 
-The root above is the current default. `REFACTOR_PLAN.md` Phase 13 tracks the
-planned configurable `--bridge-root` migration model, including a root manifest,
-stale-root redirects, and migration tooling. Until that phase lands, configure
-all clients with the same explicit `--state-dir` to avoid split-brain state.
+The root above is the default when neither `--bridge-root` nor
+`AGENT_BRIDGE_ROOT` is provided. New bridge CLIs should prefer `--bridge-root`;
+`--state-dir` remains available as a legacy/advanced compatibility flag.
+
+Phase 13 root resolution is landing incrementally. The current resolver derives
+all root files from one `BridgePaths` object, rejects stale roots with
+`MOVED_TO.json`, and follows bounded redirect chains with cycle detection.
+Full migration tooling is still tracked in `REFACTOR_PLAN.md`.
 
 ## Root Files
 
 | Path | Owner | Purpose |
 |---|---|---|
+| `bridge-root.json` | bridge root resolver | Active root manifest with stable `root_id`, schema version, and migration history. |
+| `MOVED_TO.json` | migration tooling | Stale-root redirect. Startup against a moved root fails loudly with the active root path. |
 | `session.json` | bridge session lifecycle | Active and historical Claude/Codex sessions per project. |
 | `settings.json` | user/runtime config | Optional supported tuning surface documented in `SETTINGS.md`. |
 | `watcher-config.json` | bootstrap/configure_watcher | Static watcher entries for private and project buckets. |

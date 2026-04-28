@@ -72,6 +72,12 @@ Inbox hygiene for bridge-related work:
 - At the end of that turn, check the same buckets again before the final response.
 - In bridge-focused conversations, do that end-of-turn inbox check before every final response, even if the user message was only a question about process or UX.
 - Surface and handle any relevant messages, then mark each handled message read by id.
+- Treat `check bridge inbox` during active bridge work as an interrupt, not as a stopping point:
+  - check both buckets non-destructively,
+  - surface and mark read any messages that were surfaced,
+  - answer the inbox status,
+  - then resume the previously active implementation or investigation unless the user explicitly says to pause, stop, wait, or only report status.
+- If resuming would be unsafe because the inbox message changes priority or requires a restart, say that explicitly and switch to the newly higher-priority work.
 - Do not enter a persistent `wait_inbox` loop in the main working chat unless the user explicitly requests a short smoke test.
 - Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex sends a final answer and ends the turn, Codex is not continuously monitoring.
 - Workflow hooks can remind Codex to check or enter `wait_inbox`, but they cannot resume an already-ended turn or create continuous monitoring by themselves.

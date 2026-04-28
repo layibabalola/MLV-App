@@ -17,6 +17,7 @@ from compact import prune_audit_logs, reap_stale_server_pids
 from configure_watcher import configure_watcher
 from consume_inbox import consume
 from core.addressing import AgentInbox, MessageKind, SenderContext, SessionInbox
+from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, resolve_bridge_paths
 from core.processes import acquire_singleton_lease, heartbeat_lease, release_lease
 from core.routing import RoutingStatus, resolve_route
 from core.settings import load_settings, settings_path_for_state_dir
@@ -43,6 +44,92 @@ class AgentBridgeTests(unittest.TestCase):
         identity = derive_project_identity(str(ROOT))
         self.assertEqual(identity["rendezvous"], "mlv-app")
         self.assertTrue(identity["canonical_root"].endswith("MLV-App"))
+
+    def test_bridge_paths_resolve_explicit_root_env_and_state_dir(self) -> None:
+        explicit_root = self.tempdir / "explicit-root"
+        env_root = self.tempdir / "env-root"
+        legacy_state = self.tempdir / "legacy-root" / "state"
+
+        explicit = resolve_bridge_paths(
+            bridge_root=explicit_root,
+            env={"AGENT_BRIDGE_ROOT": str(env_root), "USERPROFILE": str(self.tempdir)},
+        )
+        self.assertEqual(explicit.root, explicit_root)
+        self.assertEqual(explicit.state_dir, explicit_root / "state")
+        self.assertEqual(explicit.watcher_config, explicit_root / "watcher-config.json")
+
+        from_env = resolve_bridge_paths(env={"AGENT_BRIDGE_ROOT": str(env_root), "USERPROFILE": str(self.tempdir)})
+        self.assertEqual(from_env.root, env_root)
+
+        legacy = resolve_bridge_paths(state_dir=legacy_state, env={"USERPROFILE": str(self.tempdir)})
+        self.assertEqual(legacy.root, self.tempdir / "legacy-root")
+
+    def test_bridge_paths_reject_moved_root(self) -> None:
+        source = self.tempdir / "old-root"
+        target = self.tempdir / "new-root"
+        source.mkdir()
+        (source / "MOVED_TO.json").write_text(
+            json.dumps({"active_root": str(target), "migration_history": [{"source": str(source), "target": str(target)}]}),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(BridgeRootMovedError) as raised:
+            resolve_bridge_paths(bridge_root=source)
+        self.assertEqual(raised.exception.target, target)
+
+    def test_bridge_paths_follow_moved_root_chain_and_reject_cycles(self) -> None:
+        root_a = self.tempdir / "root-a"
+        root_b = self.tempdir / "root-b"
+        root_c = self.tempdir / "root-c"
+        for root in (root_a, root_b, root_c):
+            root.mkdir()
+        (root_a / "MOVED_TO.json").write_text(json.dumps({"active_root": str(root_b)}), encoding="utf-8")
+        (root_b / "MOVED_TO.json").write_text(json.dumps({"active_root": str(root_c)}), encoding="utf-8")
+
+        with self.assertRaises(BridgeRootMovedError) as raised:
+            resolve_bridge_paths(bridge_root=root_a)
+        self.assertEqual(raised.exception.target, root_c)
+        self.assertEqual(raised.exception.chain, [root_a, root_b, root_c])
+
+        (root_c / "MOVED_TO.json").write_text(json.dumps({"active_root": str(root_a)}), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            resolve_bridge_paths(bridge_root=root_a)
+
+    def test_bridge_root_manifest_is_created_once(self) -> None:
+        paths = resolve_bridge_paths(bridge_root=self.tempdir / "manifest-root")
+        first = ensure_bridge_root_manifest(paths, reason="unit-test")
+        second = ensure_bridge_root_manifest(paths, reason="ignored")
+        self.assertEqual(first["root_id"], second["root_id"])
+        self.assertEqual(first["schema_version"], 1)
+        self.assertEqual(first["active_root"], str(paths.root))
+        self.assertEqual(first["migration_history"][0]["reason"], "unit-test")
+
+    def test_bootstrap_cli_accepts_bridge_root_and_writes_manifest(self) -> None:
+        bridge_root = self.tempdir / "cli-root"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "bootstrap_session.py"),
+                "--bridge-root",
+                str(bridge_root),
+                "--agent",
+                "codex",
+                "--cwd",
+                str(ROOT),
+                "--session-id",
+                "codex-cli",
+                "--handshake-retries",
+                "1",
+                "--no-start-watcher",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(result.stdout)
+        self.assertEqual(data["session_id"], "codex-cli")
+        self.assertTrue((bridge_root / "bridge-root.json").exists())
+        self.assertTrue((bridge_root / "watcher-config.json").exists())
 
     def test_unicode_normalization_falls_back_to_hash(self) -> None:
         value = normalize_rendezvous("Проект")

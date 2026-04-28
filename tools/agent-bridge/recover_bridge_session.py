@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap, ensure_watcher
 from configure_watcher import configure_watcher
-from core.paths import watcher_config_path_for_state_dir
+from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths, watcher_config_path_for_state_dir
 from project_identity import derive_project_identity
 
 
@@ -216,7 +216,8 @@ def _suggested_next_actions(summary: Dict[str, Any], *, start_watcher: bool) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Recover or verify Codex/Claude bridge session health")
-    parser.add_argument("--state-dir", required=True, help="Bridge state directory")
+    parser.add_argument("--bridge-root", help="Bridge root directory; preferred over --state-dir")
+    parser.add_argument("--state-dir", help="Legacy bridge state directory")
     parser.add_argument("--agent", required=True, choices=("claude", "codex"))
     parser.add_argument("--cwd", help="Workspace path used for project identity derivation")
     parser.add_argument("--project", help="Optional explicit rendezvous/project name")
@@ -228,13 +229,19 @@ def main() -> None:
         help="Bootstrap a fresh session even if one already exists; this supersedes the current session for this agent.",
     )
     args = parser.parse_args()
+    paths = resolve_bridge_paths(
+        bridge_root=Path(args.bridge_root) if args.bridge_root else None,
+        state_dir=Path(args.state_dir) if args.state_dir else None,
+    )
+    if args.bridge_root:
+        ensure_bridge_root_manifest(paths, reason="recover_bridge_session")
 
     result = recover_bridge_session(
-        state_dir=Path(args.state_dir),
+        state_dir=paths.state_dir,
         agent=args.agent,
         cwd=args.cwd,
         project=args.project,
-        watcher_config=Path(args.watcher_config) if args.watcher_config else None,
+        watcher_config=Path(args.watcher_config) if args.watcher_config else paths.watcher_config,
         start_watcher=not args.no_start_watcher,
         force_takeover=args.force_takeover,
     )

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core.settings import load_settings
-from core.paths import session_registry_path_for_state_dir
+from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths, session_registry_path_for_state_dir
 from project_identity import derive_project_identity
 
 
@@ -278,8 +278,9 @@ def configure_watcher(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update watcher-config.json from agent-bridge session state")
-    parser.add_argument("--config", required=True, help="Path to watcher-config.json")
-    parser.add_argument("--state-dir", required=True, help="Bridge state directory")
+    parser.add_argument("--bridge-root", help="Bridge root directory; preferred over --state-dir")
+    parser.add_argument("--config", help="Path to watcher-config.json")
+    parser.add_argument("--state-dir", help="Legacy bridge state directory")
     parser.add_argument("--agent", required=True, choices=("claude", "codex"))
     parser.add_argument("--project", help="Explicit project/rendezvous name; defaults to derived identity")
     parser.add_argument("--cwd", help="Workspace path used for project identity derivation")
@@ -291,10 +292,16 @@ def main() -> None:
         help="Proof that --parent-thread-id came from the controlling parent session",
     )
     args = parser.parse_args()
+    paths = resolve_bridge_paths(
+        bridge_root=Path(args.bridge_root) if args.bridge_root else None,
+        state_dir=Path(args.state_dir) if args.state_dir else None,
+    )
+    if args.bridge_root:
+        ensure_bridge_root_manifest(paths, reason="configure_watcher")
 
     config = configure_watcher(
-        config_path=Path(args.config),
-        state_dir=Path(args.state_dir),
+        config_path=Path(args.config) if args.config else paths.watcher_config,
+        state_dir=paths.state_dir,
         agent=args.agent,
         project=args.project,
         cwd=args.cwd,
