@@ -65,14 +65,17 @@ Bridge watch should stop when any of these are true:
 - the chat is compacted and the prior live turn is no longer running
 - a newer Codex session takes over and this session is no longer the active
   owner
-- the current task is no longer bridge watch
+- bridge-watch mode is explicitly exited
 
 ## Interruptions
 
 Any normal user message interrupts the active `wait_inbox` chain.
 
-After responding to the user, re-enter the loop only if bridge watch remains
-the current task.
+If bridge-watch mode is active, the user's question type does not matter.
+After responding to the user, re-enter the loop instead of ending the turn.
+
+Only stop re-entering the loop when bridge-watch mode is explicitly exited or
+a stop condition applies.
 
 Treat each of these as a loop-break event:
 

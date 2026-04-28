@@ -33,7 +33,9 @@ Session start is the preferred moment to enter the loop, but the loop is not con
   - the user explicitly ends or clears the session
   - the chat is compacted and the prior live turn is no longer running
   - a newer Codex session takes over and this session is no longer the active owner
-- Any normal user message interrupts the active `wait_inbox` chain; after responding, re-enter the loop only if bridge-watch remains the current task.
+- Any normal user message interrupts the active `wait_inbox` chain.
+- If this session is in bridge-watch mode, the user's question type does not matter: after responding, re-enter `wait_inbox` instead of ending the turn.
+- Only stop re-entering the loop when bridge-watch mode is explicitly exited or a stop condition applies.
 
 ## Consumption Safety
 
@@ -49,8 +51,8 @@ Inbox hygiene for bridge-related work:
 - At the start of any bridge-related coding, design, audit, or protocol turn, check Codex's private GUID bucket and the project bucket non-destructively.
 - At the end of that turn, check the same buckets again before the final response.
 - Surface and handle any relevant messages, then mark each handled message read by id.
-- Enter the persistent `wait_inbox` loop only when bridge-watch itself is the active task; for normal coding turns, use start/end inbox checks instead.
-- Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex is answering the user normally, Codex is not continuously monitoring.
+- Enter the persistent `wait_inbox` loop when bridge-watch mode is active; while active, re-enter the loop after every user response regardless of question type.
+- Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex sends a final answer and ends the turn, Codex is not continuously monitoring.
 - Workflow hooks can remind Codex to check or enter `wait_inbox`, but they cannot resume an already-ended turn or create continuous monitoring by themselves.
 - If the user asks for continuous bridge monitoring, stop normal response work and enter the `wait_inbox` loop as the active task.
 - Hook v1 is reminder-only: it may remind Codex to run inbox hygiene, but it must not inspect message bodies, mark messages read, or call `consume_inbox.py`.
