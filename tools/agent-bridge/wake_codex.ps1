@@ -25,7 +25,7 @@
 param(
     [string]$Message              = "check bridge inbox",
     [string]$ThreadId             = "",
-    [int]   $IdleThresholdSeconds = 10,
+    [int]   $IdleThresholdSeconds = 5,
     [int]   $MaxWaitSeconds       = 600,
     [string]$LockFile             = "$env:USERPROFILE\.agent-bridge\wake_codex.lock",
     [switch]$DryRun,
