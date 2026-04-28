@@ -338,6 +338,20 @@ class AgentBridgeTests(unittest.TestCase):
         )
         self.assertTrue(load_settings(self.state_dir).codex_bridge_reminder_toasts_enabled)
 
+    def test_codex_startup_hooks_avoid_personal_paths(self) -> None:
+        paths = [
+            ROOT / "AGENTS.md",
+            Path(__file__).resolve().parent / "codex_bridge_reminder.ps1",
+            Path(__file__).resolve().parent / "codex_bridge_watch_mode.ps1",
+            Path(__file__).resolve().parent / "codex_pre_response.ps1",
+            Path(__file__).resolve().parent / "codex_pre_final.ps1",
+        ]
+        forbidden = ["C:\\Users\\obabalola", "C:\\!Layi Wkspc"]
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for value in forbidden:
+                self.assertNotIn(value, text, "%s contains personal path %s" % (path.name, value))
+
     def test_evaluate_routing_respects_settings_gate(self) -> None:
         settings_path_for_state_dir(self.state_dir).write_text(
             json.dumps({"routing_rules_enabled": False}),

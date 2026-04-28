@@ -41,7 +41,7 @@
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\agent-bridge\codex_bridge_watch_mode.ps1 -Action off`
 - Bridge-watch mode is reminder-only. It makes the hooks front-load a louder `wait_inbox` reminder, but it does not hard-enforce tool usage and it does not change the main chat default.
 - Use:
-  - `py -3 tools\agent-bridge\bootstrap_session.py --state-dir C:\Users\obabalola\.agent-bridge\state --agent codex --cwd C:\!Layi Wkspc\MLV-App --watcher-config C:\Users\obabalola\.agent-bridge\watcher-config.json`
+  - `py -3 tools\agent-bridge\bootstrap_session.py --state-dir "$env:USERPROFILE\.agent-bridge\state" --agent codex --cwd . --watcher-config "$env:USERPROFILE\.agent-bridge\watcher-config.json"`
 - Bootstrap does four things:
   - derives the canonical project/rendezvous identity,
   - activates this Codex session and supersedes any older same-agent session,

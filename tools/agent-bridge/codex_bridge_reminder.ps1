@@ -1,11 +1,11 @@
 param(
-    [string]$WorkspaceRoot = "C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration",
+    [string]$WorkspaceRoot = "",
     [string]$ProjectBucket = "mlv-app",
     [string]$PrivateBucket = "",
-    [string]$SessionRegistryPath = "C:\Users\obabalola\.agent-bridge\session.json",
-    [string]$BridgeWatchFlagPath = "C:\Users\obabalola\.agent-bridge\bridge_watch_mode.flag",
-    [string]$SettingsPath = "C:\Users\obabalola\.agent-bridge\settings.json",
-    [string]$LogPath = "C:\Users\obabalola\.agent-bridge\state\codex-bridge-reminder.log",
+    [string]$SessionRegistryPath = "",
+    [string]$BridgeWatchFlagPath = "",
+    [string]$SettingsPath = "",
+    [string]$LogPath = "",
     [ValidateSet("response", "final")]
     [string]$HookPhase = "response",
     [switch]$Force,
@@ -13,6 +13,24 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$userProfile = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath("UserProfile") }
+$bridgeRoot = Join-Path $userProfile ".agent-bridge"
+if (-not $WorkspaceRoot) {
+    $WorkspaceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
+}
+if (-not $SessionRegistryPath) {
+    $SessionRegistryPath = Join-Path $bridgeRoot "session.json"
+}
+if (-not $BridgeWatchFlagPath) {
+    $BridgeWatchFlagPath = Join-Path $bridgeRoot "bridge_watch_mode.flag"
+}
+if (-not $SettingsPath) {
+    $SettingsPath = Join-Path $bridgeRoot "settings.json"
+}
+if (-not $LogPath) {
+    $LogPath = Join-Path $bridgeRoot "state\codex-bridge-reminder.log"
+}
 
 function Test-IsUnderPath {
     param(

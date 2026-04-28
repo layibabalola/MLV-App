@@ -1,10 +1,15 @@
 param(
     [ValidateSet("on", "off", "status")]
     [string]$Action = "status",
-    [string]$FlagPath = "C:\Users\obabalola\.agent-bridge\bridge_watch_mode.flag"
+    [string]$FlagPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $FlagPath) {
+    $userProfile = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath("UserProfile") }
+    $FlagPath = Join-Path $userProfile ".agent-bridge\bridge_watch_mode.flag"
+}
 
 $flag = [System.IO.Path]::GetFullPath($FlagPath)
 $flagDir = Split-Path -Parent $flag
