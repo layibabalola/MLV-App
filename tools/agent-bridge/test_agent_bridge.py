@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -21,6 +22,7 @@ from core.storage import append_jsonl, read_jsonl, with_schema_version, write_js
 from project_identity import derive_project_identity, normalize_rendezvous
 from recover_state import recover_state
 from routing_policy import evaluate_message
+import watcher
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -298,6 +300,18 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(result["removed"], 1)
         self.assertFalse(stale.exists())
         self.assertTrue(fresh.exists())
+
+    def test_windows_toast_expires_after_five_minutes(self) -> None:
+        with patch("watcher.subprocess.Popen") as popen:
+            watcher.notify_windows_toast(
+                "codex",
+                "mlv-app",
+                [{"id": "msg-1", "body": "TYPE: SMOKE\nSUMMARY: toast expiry"}],
+            )
+        args = popen.call_args.args[0]
+        encoded = args[args.index("-EncodedCommand") + 1]
+        script = base64.b64decode(encoded).decode("utf-16-le")
+        self.assertIn("$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(5)", script)
 
     def test_clear_bucket_and_reset_bucket_are_explicit_aliases(self) -> None:
         bridge = AgentBridge(self.state_dir)

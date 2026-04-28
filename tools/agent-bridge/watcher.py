@@ -218,6 +218,7 @@ def notify_windows_toast(agent: str, session_id: str, messages: List[Dict[str, A
         "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
         "$xml.LoadXml($xmlStr.Trim())\n"
         "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)\n"
+        "$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(5)\n"
         "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)\n"
     )
     try:
