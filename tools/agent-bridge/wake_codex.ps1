@@ -7,12 +7,12 @@
 #     injecting so the reserved trigger lands in the bridge chat, not whichever
 #     chat happened to be visible.
 #   - Waits for system-wide input idle (>= IdleThresholdSeconds) before injecting,
-#     so we don't clobber active typing — anywhere, not just in Codex.
+#     so we don't clobber active typing - anywhere, not just in Codex.
 #   - Uses a lock file so concurrent wake invocations batch into one (the next
 #     "check bridge inbox" will surface every unread message anyway).
 #   - Activates Codex regardless of current foreground (user reading Codex
 #     counts as idle from the OS's POV; the message still needs to be delivered).
-#   - Clears the composer (Ctrl+A + Delete) before injection — any draft text
+#   - Clears the composer (Ctrl+A + Delete) before injection - any draft text
 #     the user left in the box will be wiped. This is a deliberate trade-off.
 #
 # Usage:
@@ -92,7 +92,7 @@ function Get-IdleSeconds {
     $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
     [Win32Wake]::GetLastInputInfo([ref]$info) | Out-Null
     $now = [Win32Wake]::GetTickCount()
-    # Tick wraparound is harmless — uint subtraction stays correct modulo 2^32.
+    # Tick wraparound is harmless - uint subtraction stays correct modulo 2^32.
     $idleMs = ($now - $info.dwTime) -band 0xFFFFFFFF
     return [Math]::Round($idleMs / 1000.0, 1)
 }
@@ -132,7 +132,7 @@ if ($FindOnly) {
     exit 0
 }
 
-# --- Stage 2: lock — only one wake instance polls/injects at a time ---
+# --- Stage 2: lock - only one wake instance polls/injects at a time ---
 $lockDir = Split-Path -Parent $LockFile
 if (-not (Test-Path $lockDir)) {
     New-Item -ItemType Directory -Path $lockDir | Out-Null
@@ -149,7 +149,7 @@ if (Test-Path $LockFile) {
     }
 }
 
-# Take lock — store PID so stale-detection can verify
+# Take lock - store PID so stale-detection can verify
 $PID | Set-Content -Path $LockFile -NoNewline
 
 try {
@@ -169,13 +169,13 @@ try {
     }
 
     if (-not $achieved) {
-        Write-Host ("[wake_codex] Max wait of " + $MaxWaitSeconds + "s expired without idle. Forcibly injecting anyway — bridge delivery wins over user typing.")
+        Write-Host ("[wake_codex] Max wait of " + $MaxWaitSeconds + "s expired without idle. Forcibly injecting anyway - bridge delivery wins over user typing.")
         # Fall through: inject regardless. User's in-progress draft (if any) will
         # be wiped by the Ctrl+A+Delete in stage 5, and any keystrokes they're
         # mid-typing may interleave with our SendKeys briefly.
     }
 
-    # --- Stage 4: activate Codex (no foreground-skip — fire regardless) ---
+    # --- Stage 4: activate Codex (no foreground-skip - fire regardless) ---
     $prevFg      = [Win32Wake]::GetForegroundWindow()
     $prevFgTitle = Get-WindowTitle -hWnd $prevFg
     Write-Host ("[wake_codex] Foreground before: hwnd=" + $prevFg + " title=" + $prevFgTitle)
@@ -230,7 +230,7 @@ try {
     # has explicitly accepted: bridge message delivery > preserving in-progress drafts.
     #
     # Ctrl+Enter (NOT plain Enter): in Codex Desktop, Ctrl+Enter is the "Steer"
-    # action — it interrupts whatever Codex is currently doing and forces
+    # action - it interrupts whatever Codex is currently doing and forces
     # immediate handling of the submitted message. Plain Enter just queues
     # behind the current turn. We always want bridge wakes to steer, so the
     # "check bridge inbox" trigger is actioned now, not after Codex finishes
