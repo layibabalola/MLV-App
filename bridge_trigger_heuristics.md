@@ -50,6 +50,9 @@ Inbox hygiene for bridge-related work:
 - At the end of that turn, check the same buckets again before the final response.
 - Surface and handle any relevant messages, then mark each handled message read by id.
 - Enter the persistent `wait_inbox` loop only when bridge-watch itself is the active task; for normal coding turns, use start/end inbox checks instead.
+- Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex is answering the user normally, Codex is not continuously monitoring.
+- Workflow hooks can remind Codex to check or enter `wait_inbox`, but they cannot resume an already-ended turn or create continuous monitoring by themselves.
+- If the user asks for continuous bridge monitoring, stop normal response work and enter the `wait_inbox` loop as the active task.
 - Hook v1 is reminder-only: it may remind Codex to run inbox hygiene, but it must not inspect message bodies, mark messages read, or call `consume_inbox.py`.
 - Current Codex Desktop `notify` hook status: tested and not firing in this Desktop thread. Do not rely on it unless `codex-bridge-reminder.log` shows an automatic entry with `force=False noToast=False`.
 - Active hook strategy is workflow-rule based: `AGENTS.md` requires `codex_pre_response.ps1` and `codex_pre_final.ps1` around bridge-related responses.

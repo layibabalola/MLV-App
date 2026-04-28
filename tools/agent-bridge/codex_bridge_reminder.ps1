@@ -37,7 +37,7 @@ if (-not $Force -and -not (Test-IsUnderPath -Path $cwd -Root $WorkspaceRoot)) {
     exit 0
 }
 
-$message = "Bridge hygiene: check Codex private bucket $PrivateBucket and project bucket $ProjectBucket, or enter wait_inbox if bridge-watch is the task."
+$message = "Bridge hygiene: check Codex private bucket $PrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
 Write-Output $message
 "$timestamp reminded project=$ProjectBucket private=$PrivateBucket" | Add-Content -Path $LogPath -Encoding UTF8
 

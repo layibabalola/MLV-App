@@ -120,6 +120,9 @@ Do not confuse keepalive with post-turn recovery.
 - keepalive loop:
   - the chat is still alive inside `wait_inbox(...)`
   - this is the primary wake mechanism
+- continuous monitoring:
+  - active only while a live turn is blocked inside `wait_inbox(...)`
+  - not active while Codex is answering normal user messages
 - post-turn recovery:
   - the turn has already ended
   - hooks such as `Stop` may run external recovery logic
@@ -129,6 +132,7 @@ Treat `Stop` hooks as recovery helpers only:
 
 - useful for logging, reminders, or external orchestration
 - not a substitute for maintaining the active `wait_inbox(...)` loop
+- unable to make an already-ended turn call `wait_inbox(...)`
 
 Codex Hook v1 is reminder-only:
 
