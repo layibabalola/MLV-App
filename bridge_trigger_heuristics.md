@@ -51,8 +51,10 @@ Observe first, consume second.
 
 Inbox hygiene for bridge-related work:
 
+- If the active conversation is itself about bridge behavior, routing, wake paths, hooks, or inbox hygiene, treat every user turn in that conversation as bridge-related.
 - At the start of any bridge-related coding, design, audit, or protocol turn, check Codex's private GUID bucket and the project bucket non-destructively.
 - At the end of that turn, check the same buckets again before the final response.
+- In bridge-focused conversations, do that end-of-turn inbox check before every final response, even if the user message was only a question about process or UX.
 - Surface and handle any relevant messages, then mark each handled message read by id.
 - Do not enter a persistent `wait_inbox` loop in the main working chat unless the user explicitly requests a short smoke test.
 - Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex sends a final answer and ends the turn, Codex is not continuously monitoring.
