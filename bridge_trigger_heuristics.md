@@ -130,8 +130,8 @@ Do not auto-send:
 
 ## Routing Discipline
 
-- Prefer project or active GUID session buckets over `default` whenever known.
-- Treat `default` as fallback-only, since it is a shared chokepoint.
+- Prefer project or active GUID session buckets; do not route new bridge traffic through `default`.
+- Treat explicit `default` sends or destructive operations as protocol errors, not fallbacks.
 - If a send is blocked by unread mail, inspect which bucket is blocked before assuming transport failure.
 
 ## Known Limits

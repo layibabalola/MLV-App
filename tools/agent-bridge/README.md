@@ -64,7 +64,7 @@ Please review this from Claude.
 Stop markers such as `[[DONE]]` and `[[HANDOFF-TO-USER]]` are not relayed.
 `[[pause-relay]]` pauses the bridge and is not relayed.
 
-Use `clear_inbox` or `reset_session` to reset a session's hop counter and duplicate-tracking state.
+Use `clear_bucket` or `reset_bucket` to reset a named bucket's hop counter and duplicate-tracking state. `clear_inbox` and `reset_session` remain compatibility shims.
 
 For scheduled polling, use `peek_inbox` instead of `check_inbox`. `peek_inbox` is annotated read-only and never marks messages read. After a real message is handled, call `mark_read` with that message's `id`.
 
