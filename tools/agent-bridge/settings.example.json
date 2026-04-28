@@ -8,5 +8,6 @@
   "audit_log_retention_days": 90,
   "inbox_read_retention_days": 7,
   "toasts_enabled": true,
+  "codex_bridge_reminder_toasts_enabled": false,
   "routing_rules_enabled": true
 }

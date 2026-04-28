@@ -321,11 +321,22 @@ class AgentBridgeTests(unittest.TestCase):
         loaded = load_settings(self.state_dir)
         self.assertEqual(loaded.toast_expiry_minutes, 7)
         self.assertFalse(loaded.toasts_enabled)
+        self.assertFalse(loaded.codex_bridge_reminder_toasts_enabled)
         self.assertFalse(loaded.routing_rules_enabled)
 
         settings_path.write_text(json.dumps({"unsupported_knob": True}), encoding="utf-8")
         with self.assertRaises(ValueError):
             load_settings(self.state_dir)
+
+    def test_codex_bridge_reminder_toasts_are_opt_in(self) -> None:
+        settings = load_settings(self.state_dir)
+        self.assertFalse(settings.codex_bridge_reminder_toasts_enabled)
+
+        settings_path_for_state_dir(self.state_dir).write_text(
+            json.dumps({"codex_bridge_reminder_toasts_enabled": True}),
+            encoding="utf-8",
+        )
+        self.assertTrue(load_settings(self.state_dir).codex_bridge_reminder_toasts_enabled)
 
     def test_evaluate_routing_respects_settings_gate(self) -> None:
         settings_path_for_state_dir(self.state_dir).write_text(

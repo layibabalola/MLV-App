@@ -15,6 +15,7 @@ class BridgeSettings:
     audit_log_retention_days: int = 90
     inbox_read_retention_days: int = 7
     toasts_enabled: bool = True
+    codex_bridge_reminder_toasts_enabled: bool = False
     routing_rules_enabled: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -34,7 +35,7 @@ _BOUNDS = {
     "inbox_read_retention_days": (1, 3650),
 }
 
-_BOOL_FIELDS = {"toasts_enabled", "routing_rules_enabled"}
+_BOOL_FIELDS = {"toasts_enabled", "codex_bridge_reminder_toasts_enabled", "routing_rules_enabled"}
 _KNOWN_FIELDS = set(DEFAULT_SETTINGS.to_dict())
 
 

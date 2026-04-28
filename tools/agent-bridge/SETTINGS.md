@@ -24,6 +24,7 @@ answered yes:
 | `audit_log_retention_days` | `90` | `1..3650` | Rotated audit-log retention. |
 | `inbox_read_retention_days` | `7` | `1..3650` | Read inbox row retention during compaction. |
 | `toasts_enabled` | `true` | boolean | Watcher toast/log mode. |
+| `codex_bridge_reminder_toasts_enabled` | `false` | boolean | Windows balloon toast for Codex workflow hygiene reminders; stdout reminder still prints either way. |
 | `routing_rules_enabled` | `true` | boolean | Learned/suppressed routing-rule evaluation. |
 
 ## Example
@@ -39,6 +40,7 @@ answered yes:
   "audit_log_retention_days": 90,
   "inbox_read_retention_days": 7,
   "toasts_enabled": true,
+  "codex_bridge_reminder_toasts_enabled": false,
   "routing_rules_enabled": true
 }
 ```

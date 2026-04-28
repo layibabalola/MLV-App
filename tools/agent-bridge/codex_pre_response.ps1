@@ -26,7 +26,9 @@ $args = @(
     "-SessionRegistryPath",
     "C:\Users\obabalola\.agent-bridge\session.json",
     "-BridgeWatchFlagPath",
-    "C:\Users\obabalola\.agent-bridge\bridge_watch_mode.flag"
+    "C:\Users\obabalola\.agent-bridge\bridge_watch_mode.flag",
+    "-SettingsPath",
+    "C:\Users\obabalola\.agent-bridge\settings.json"
 )
 
 if ($NoToast) {

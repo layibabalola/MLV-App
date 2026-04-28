@@ -4,6 +4,7 @@ param(
     [string]$PrivateBucket = "",
     [string]$SessionRegistryPath = "C:\Users\obabalola\.agent-bridge\session.json",
     [string]$BridgeWatchFlagPath = "C:\Users\obabalola\.agent-bridge\bridge_watch_mode.flag",
+    [string]$SettingsPath = "C:\Users\obabalola\.agent-bridge\settings.json",
     [string]$LogPath = "C:\Users\obabalola\.agent-bridge\state\codex-bridge-reminder.log",
     [ValidateSet("response", "final")]
     [string]$HookPhase = "response",
@@ -52,6 +53,27 @@ function Resolve-ActivePrivateBucket {
     return $Fallback
 }
 
+function Get-ReminderToastsEnabled {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $false
+    }
+
+    try {
+        $settings = Get-Content -Raw $Path | ConvertFrom-Json
+        if ($null -ne $settings.codex_bridge_reminder_toasts_enabled) {
+            return [bool]$settings.codex_bridge_reminder_toasts_enabled
+        }
+    } catch {
+        return $false
+    }
+
+    return $false
+}
+
 $cwd = (Get-Location).Path
 $timestamp = (Get-Date).ToUniversalTime().ToString("o")
 $logDir = Split-Path -Parent $LogPath
@@ -67,6 +89,7 @@ if (-not $Force -and -not (Test-IsUnderPath -Path $cwd -Root $WorkspaceRoot)) {
 
 $resolvedPrivateBucket = Resolve-ActivePrivateBucket -RegistryPath $SessionRegistryPath -ProjectName $ProjectBucket -Fallback $PrivateBucket
 $watchModeActive = Test-Path $BridgeWatchFlagPath
+$toastEnabled = Get-ReminderToastsEnabled -Path $SettingsPath
 
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
 Write-Output $message
@@ -78,9 +101,9 @@ if ($watchModeActive) {
     Write-Output "Do not use a persistent wait_inbox loop in the main working chat unless the user explicitly asked for that short test."
 }
 
-"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket watch_mode=$watchModeActive" | Add-Content -Path $LogPath -Encoding UTF8
+"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket watch_mode=$watchModeActive toast_enabled=$toastEnabled" | Add-Content -Path $LogPath -Encoding UTF8
 
-if ($NoToast) {
+if ($NoToast -or -not $toastEnabled) {
     exit 0
 }
 
