@@ -273,6 +273,14 @@ Waypoint rule:
   - call `list_pending_bridge_actions(owner_agent="codex")` or otherwise inspect the durable pending ledger,
   - if actionable in-scope items remain and there is no real blocker, continue by doing the highest-priority pending item instead of stopping,
   - if the item should not be worked now, explicitly say why it remains `parked`, `displaced`, or `blocked`.
+- During an active implementation stretch, the highest-priority actionable ledger item is the default active task.
+- User process/debugging questions do not automatically replace that active task:
+  - answer them briefly,
+  - then immediately resume the highest-priority actionable ledger item,
+  - unless the user explicitly reprioritized the work or the answer revealed a real blocker or hidden-risk decision.
+- Do not let meta-work, status narration, or workflow discussion quietly become the new main task when a higher-priority actionable ledger item already exists.
+- If a different item becomes the new active task, say why explicitly:
+  - `Reprioritizing from SH2 auto-rollback to <item> because <reason>.`
 - Do not rely on memory alone for “what’s next” once a turn is about to end.
 - The pending-action ledger is the final anti-drop backstop for work Codex has already committed to actioning.
 - If the user or Claude enumerates Codex-side pending work, reconcile the durable pending-action ledger in that same work stretch:
