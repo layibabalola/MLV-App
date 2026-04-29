@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 from .paths import ROOT_MANIFEST_FILENAME, bridge_root_for_state_dir
 from .storage import read_json, write_json
 
+PEER_RUNTIME_SCHEMA_VERSION = 2
+
 
 def _manifest_identity(bridge_root: Path) -> Dict[str, Any]:
     manifest_path = Path(bridge_root) / ROOT_MANIFEST_FILENAME
@@ -76,21 +78,55 @@ def build_peer_runtime_breadcrumb(
     project: str,
     desktop_thread_id: Optional[str] = None,
     bootstrap_command: Optional[List[str]] = None,
+    bootstrap_origin: str = "unknown",
+    bootstrap_thread_id: Optional[str] = None,
+    bootstrap_parent_thread_id: Optional[str] = None,
+    trusted_parent_session_id: Optional[str] = None,
+    subagent_signals: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     bridge_root = bridge_root_for_state_dir(Path(state_dir))
     breadcrumb: Dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": PEER_RUNTIME_SCHEMA_VERSION,
         "agent": agent,
         "session_id": session_id,
         "project": project,
         "desktop_app": "codex-desktop" if agent == "codex" else "claude-desktop",
+        "bootstrap_origin": bootstrap_origin,
+        "bootstrap_pid": os.getpid(),
+        "bootstrap_parent_pid": os.getppid() if hasattr(os, "getppid") else None,
+        "subagent_signals": dict(subagent_signals or {}),
         "written_by_pid": os.getpid(),
         "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "bootstrap_command": bootstrap_command or sys.argv,
     }
     if desktop_thread_id:
         breadcrumb["desktop_thread_id"] = desktop_thread_id
+    if bootstrap_thread_id:
+        breadcrumb["bootstrap_thread_id"] = bootstrap_thread_id
+    if bootstrap_parent_thread_id:
+        breadcrumb["bootstrap_parent_thread_id"] = bootstrap_parent_thread_id
+    if trusted_parent_session_id:
+        breadcrumb["trusted_parent_session_id"] = trusted_parent_session_id
     if agent == "codex":
         breadcrumb["deeplink_template"] = "codex://threads/{thread_id}"
     breadcrumb.update(_manifest_identity(bridge_root))
     return breadcrumb
+
+
+def normalize_peer_runtime_breadcrumb(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not data or data.get("unreadable"):
+        return data
+    normalized = dict(data)
+    schema_version = int(normalized.get("schema_version") or 1)
+    normalized["schema_version"] = schema_version
+    normalized.setdefault("bootstrap_origin", "unknown")
+    normalized.setdefault(
+        "subagent_signals",
+        {
+            "env_marker": None,
+            "process_depth": None,
+            "parent_thread_id_mismatch": False,
+            "mcp_tag": None,
+        },
+    )
+    return normalized

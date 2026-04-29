@@ -41,6 +41,7 @@ PROJECT_BACKPRESSURE_LIMIT = 5
 # never approaches the limit.
 RATE_LIMIT_N = 30
 RATE_LIMIT_WINDOW_S = 60
+SESSION_REGISTRY_SCHEMA_VERSION = 2
 HANDOFF_RE = re.compile(r"\[\[handoff:(claude|codex)(?:\s+([a-z0-9_-]+))?\]\]", re.IGNORECASE)
 STOP_RE = re.compile(r"\[\[(done|handoff-to-user|pause-relay)\]\]", re.IGNORECASE)
 
@@ -294,6 +295,7 @@ class AgentBridge:
 
     def _default_session_registry(self) -> Dict[str, Any]:
         return {
+            "schema_version": SESSION_REGISTRY_SCHEMA_VERSION,
             "projects": {},
             "updated_at": utc_now(),
         }
@@ -308,7 +310,22 @@ class AgentBridge:
             if self.session_registry_path.exists():
                 self.session_registry_path.replace(corrupt_path)
             registry = self._default_session_registry()
+        registry["schema_version"] = max(int(registry.get("schema_version") or 1), SESSION_REGISTRY_SCHEMA_VERSION)
         registry.setdefault("projects", {})
+        for project_entry in registry.get("projects", {}).values():
+            if not isinstance(project_entry, dict):
+                continue
+            project_entry.setdefault("active", {})
+            project_entry.setdefault("sessions", {})
+            trusted = project_entry.setdefault("trusted_parent", {})
+            for agent in sorted(AGENTS):
+                trusted.setdefault(agent, {"session_id": None, "promoted_at": None})
+            for session_id, record in project_entry.get("sessions", {}).items():
+                if not isinstance(record, dict):
+                    continue
+                record.setdefault("session_id", session_id)
+                record.setdefault("bootstrap_origin", "unknown")
+                record.setdefault("bootstrap_promoted_to_trusted", False)
         return registry
 
     def session_registry_view(self) -> Dict[str, Any]:
@@ -354,11 +371,18 @@ class AgentBridge:
             {
                 "active": {},
                 "sessions": {},
+                "trusted_parent": {
+                    "claude": {"session_id": None, "promoted_at": None},
+                    "codex": {"session_id": None, "promoted_at": None},
+                },
                 "updated_at": utc_now(),
             },
         )
         project_entry.setdefault("active", {})
         project_entry.setdefault("sessions", {})
+        trusted = project_entry.setdefault("trusted_parent", {})
+        for agent in sorted(AGENTS):
+            trusted.setdefault(agent, {"session_id": None, "promoted_at": None})
         return project_entry
 
     def _session_record(self, project_entry: Dict[str, Any], session_id: str, agent: str) -> Dict[str, Any]:
@@ -366,16 +390,26 @@ class AgentBridge:
         record = sessions.setdefault(
             session_id,
             {
+                "session_id": session_id,
                 "agent": agent,
                 "created_at": utc_now(),
                 "activated_at": utc_now(),
                 "status": "active",
+                "bootstrap_origin": "unknown",
+                "bootstrap_promoted_to_trusted": False,
             },
         )
         record.setdefault("agent", agent)
+        record.setdefault("session_id", session_id)
         record.setdefault("created_at", utc_now())
         record.setdefault("activated_at", utc_now())
+        record.setdefault("bootstrap_origin", "unknown")
+        record.setdefault("bootstrap_promoted_to_trusted", False)
         return record
+
+    def _trusted_parent_info(self, project_entry: Dict[str, Any], agent: str) -> Dict[str, Any]:
+        trusted = project_entry.setdefault("trusted_parent", {})
+        return trusted.setdefault(agent, {"session_id": None, "promoted_at": None})
 
     def _find_session_record(
         self,
@@ -692,6 +726,9 @@ class AgentBridge:
         agent: str,
         session_id: str,
         project: Optional[str] = None,
+        bootstrap_origin: str = "unknown",
+        allow_supersede: bool = True,
+        trusted_parent_eligible: bool = False,
     ) -> BridgeResult:
         with self._locked():
             try:
@@ -707,14 +744,28 @@ class AgentBridge:
             sessions = project_entry.setdefault("sessions", {})
             previous_local = active.get(owner)
             previous_peer = active.get("claude" if owner == "codex" else "codex")
+            previous_local_record = None
+            if previous_local:
+                previous_local_record = self._session_record(project_entry, previous_local, owner)
 
             project_entry["updated_at"] = utc_now()
+            activation_status = "active"
 
             # Promote unread messages from the previous same-agent session to the
             # durable project bucket instead of burying them on the superseded
             # session.  The snapshot is returned for bootstrap/user visibility.
             drained_messages: List[Dict[str, Any]] = []
-            if previous_local and previous_local != session:
+            should_supersede = bool(previous_local and previous_local != session)
+            if (
+                should_supersede
+                and not allow_supersede
+                and previous_local_record
+                and previous_local_record.get("status") == "active"
+                and previous_local_record.get("bootstrap_origin") == "parent"
+            ):
+                should_supersede = False
+                activation_status = "registered_secondary"
+            if should_supersede:
                 drained_messages = self._promote_superseded_inbox(owner, previous_local, project_name)
                 old_record = self._session_record(project_entry, previous_local, owner)
                 old_record["status"] = "superseded"
@@ -738,14 +789,17 @@ class AgentBridge:
                 )
 
             record = self._session_record(project_entry, session, owner)
-            record["status"] = "active"
+            record["status"] = "active" if activation_status == "active" else "secondary"
             record["project"] = project_name
             record["activated_at"] = utc_now()
             record["last_seen_at"] = utc_now()
+            record["bootstrap_origin"] = bootstrap_origin
+            record["bootstrap_promoted_to_trusted"] = False
             if previous_peer:
                 record["paired_with"] = previous_peer
 
-            active[owner] = session
+            if activation_status == "active":
+                active[owner] = session
 
             if previous_peer:
                 peer_agent = "claude" if owner == "codex" else "codex"
@@ -762,8 +816,14 @@ class AgentBridge:
                         "The active %s session for project %s is now %s.\n\n"
                         "When sending new bridge traffic, prefer the newest active peer session."
                     )
-                    % (owner, project_name, session),
+                    % (owner, project_name, active.get(owner) or session),
                 )
+
+            trusted_info = self._trusted_parent_info(project_entry, owner)
+            if trusted_parent_eligible and activation_status == "active":
+                trusted_info["session_id"] = session
+                trusted_info["promoted_at"] = utc_now()
+                record["bootstrap_promoted_to_trusted"] = True
 
             self._save_session_registry(registry)
             self._audit(
@@ -777,11 +837,13 @@ class AgentBridge:
                     "project": project_name,
                     "previous_local_session": previous_local,
                     "active_peer_session": previous_peer,
+                    "bootstrap_origin": bootstrap_origin,
+                    "activation_status": activation_status,
                 }
             )
             return BridgeResult(
                 True,
-                "active",
+                activation_status,
                 "Activated %s session %s for project %s." % (owner, session, project_name),
                 {
                     "agent": owner,
@@ -789,6 +851,9 @@ class AgentBridge:
                     "project": project_name,
                     "previous_local_session": previous_local,
                     "active_peer_session": previous_peer,
+                    "bootstrap_origin": bootstrap_origin,
+                    "trusted_parent_session": trusted_info.get("session_id"),
+                    "trusted_parent_promoted_at": trusted_info.get("promoted_at"),
                     "registry_path": str(self.session_registry_path),
                     "drained_messages": drained_messages,
                 },
@@ -814,8 +879,10 @@ class AgentBridge:
                 ),
                 {
                     "project": project_name,
+                    "schema_version": registry.get("schema_version"),
                     "active": dict(project_entry.get("active", {})),
                     "sessions": dict(project_entry.get("sessions", {})),
+                    "trusted_parent": dict(project_entry.get("trusted_parent", {})),
                     "registry_path": str(self.session_registry_path),
                 },
             )

@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
 from core.runtime import (
     build_runtime_breadcrumb,
+    normalize_peer_runtime_breadcrumb,
     peer_runtime_path_for_state_dir,
     read_runtime_breadcrumb,
     write_runtime_breadcrumb,
@@ -48,7 +49,7 @@ except ImportError:
 COMPACT_SIZE_MB = 1.0          # also compact if inbox exceeds this size
 WAKE_ACK_GRACE_PERIOD_S = 30
 WAKE_MAX_RETRIES = 3
-WAKE_PERMANENT_EXIT_CODES = {3}
+WAKE_PERMANENT_EXIT_CODES = {3, 11}
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
 
 
@@ -87,12 +88,18 @@ def unread_for_session(inbox_path: Path, session_id: str) -> List[Dict[str, Any]
 
 def load_seen(state_path: Path) -> Dict[str, Any]:
     if not state_path.exists():
-        return {"seen_ids": [], "pending_wake_verifications": [], "paused_wake_messages": []}
+        return {
+            "seen_ids": [],
+            "pending_wake_verifications": [],
+            "paused_wake_messages": [],
+            "unknown_origin_warnings": [],
+        }
     with state_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("seen_ids", [])
     data.setdefault("pending_wake_verifications", [])
     data.setdefault("paused_wake_messages", [])
+    data.setdefault("unknown_origin_warnings", [])
     return data
 
 
@@ -148,6 +155,7 @@ def _save_watcher_state(
     seen_ids: set,
     pending: List[Dict[str, Any]],
     paused_messages: Optional[List[Dict[str, Any]]] = None,
+    unknown_origin_warnings: Optional[List[str]] = None,
 ) -> None:
     save_seen(
         state_path,
@@ -155,6 +163,7 @@ def _save_watcher_state(
             "seen_ids": list(seen_ids)[-500:],
             "pending_wake_verifications": pending[-200:],
             "paused_wake_messages": (paused_messages or [])[-200:],
+            "unknown_origin_warnings": (unknown_origin_warnings or [])[-200:],
         },
     )
 
@@ -399,6 +408,9 @@ def _permanent_wake_event(
     elif returncode == 3:
         action = "wake_skipped_wrong_chat"
         event_reason = "wrong_chat_detected"
+    elif returncode == 11:
+        action = "wake_skipped_bad_provenance"
+        event_reason = reason or "bad_provenance"
     elif returncode == 2 and not reason:
         action = "wake_skipped_config_error"
         event_reason = "config_error"
@@ -530,7 +542,7 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
     agent = str(session_config.get("agent") or "")
     state_dir = inbox_path.parent
     peer_path = peer_runtime_path_for_state_dir(state_dir, agent)
-    peer = read_runtime_breadcrumb(peer_path)
+    peer = normalize_peer_runtime_breadcrumb(read_runtime_breadcrumb(peer_path))
     if not peer or peer.get("unreadable"):
         return {
             "ok": False,
@@ -542,6 +554,21 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
                 "stdout": "",
                 "stderr": f"peer runtime breadcrumb unavailable: {peer_path}",
                 "reason": "no_peer_breadcrumb",
+            },
+        }
+
+    bootstrap_origin = str(peer.get("bootstrap_origin") or "unknown").strip().lower()
+    if bootstrap_origin == "subagent":
+        return {
+            "ok": False,
+            "command": None,
+            "result": {
+                "ok": False,
+                "returncode": 11,
+                "retryable": False,
+                "stdout": "",
+                "stderr": f"peer runtime breadcrumb has subagent provenance: {peer_path}",
+                "reason": "bad_provenance_subagent",
             },
         }
 
@@ -585,7 +612,41 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
             },
         }
 
-    return {"ok": True, "command": _format_template(template, mapping)}
+    return {"ok": True, "command": _format_template(template, mapping), "peer": peer}
+
+
+def _warn_unknown_origin_once(
+    *,
+    state_path: Path,
+    seen_ids: set,
+    pending: List[Dict[str, Any]],
+    paused_messages: List[Dict[str, Any]],
+    session_key: str,
+    inbox_path: Path,
+    agent: str,
+    session_id: str,
+) -> None:
+    state = load_seen(state_path)
+    warned = set(str(item) for item in state.get("unknown_origin_warnings", []))
+    if session_key in warned:
+        return
+    warned.add(session_key)
+    _append_wake_audit(
+        inbox_path,
+        {
+            "action": "unknown_origin_warning",
+            "agent": agent,
+            "session_id": session_id,
+            "reason": "peer_runtime_bootstrap_origin_unknown",
+        },
+    )
+    _save_watcher_state(
+        state_path,
+        seen_ids,
+        pending,
+        paused_messages,
+        sorted(warned),
+    )
 
 
 def run_command_for_session(
@@ -882,6 +943,7 @@ def process_session_once(
     state = load_seen(state_path)
     pending: List[Dict[str, Any]] = list(state.get("pending_wake_verifications", []))
     paused_messages: List[Dict[str, Any]] = list(state.get("paused_wake_messages", []))
+    unknown_origin_warnings: List[str] = list(state.get("unknown_origin_warnings", []))
     bridge_paused = _bridge_is_paused(inbox_path.parent)
     if not bridge_paused:
         filtered_paused_messages = [
@@ -891,7 +953,7 @@ def process_session_once(
         ]
         if len(filtered_paused_messages) != len(paused_messages):
             paused_messages = filtered_paused_messages
-            _save_watcher_state(state_path, seen_ids, pending, paused_messages)
+            _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
     pending = _process_pending_wake_verifications(
         session_config,
         pending=pending,
@@ -948,7 +1010,7 @@ def process_session_once(
             )
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
         return [m["id"] for m in new_msgs]
 
     if effective_on_message == "toast":
@@ -978,6 +1040,19 @@ def process_session_once(
     command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
     if command_configured:
         resolved = _resolve_command_template(session_config, inbox_path)
+        peer = resolved.get("peer") or {}
+        if str(peer.get("bootstrap_origin") or "").lower() == "unknown":
+            session_key = "%s:%s" % (agent, session_id)
+            _warn_unknown_origin_once(
+                state_path=state_path,
+                seen_ids=seen_ids,
+                pending=pending,
+                paused_messages=paused_messages,
+                session_key=session_key,
+                inbox_path=inbox_path,
+                agent=agent,
+                session_id=session_id,
+            )
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
@@ -996,7 +1071,7 @@ def process_session_once(
                 seen_ids=seen_ids,
                 result=command_result,
             )
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
         return []
 
     if command_configured and command_result.get("ok"):
@@ -1015,7 +1090,7 @@ def process_session_once(
     if not command_configured:
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
         return [m["id"] for m in new_msgs]
 
     return []

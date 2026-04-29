@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent_bridge import AgentBridge
 from configure_watcher import PARENT_THREAD_ID_KEY, configure_watcher
@@ -14,6 +14,53 @@ from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths
 from core.processes import acquire_singleton_lease, build_lease, command_line_hash, is_process_alive, lease_status, write_lease
 from core.runtime import build_peer_runtime_breadcrumb, peer_runtime_path_for_state_dir, write_runtime_breadcrumb
 from project_identity import derive_project_identity
+
+SUBAGENT_ENV_MARKERS = {
+    "codex": ("CODEX_SUBAGENT", "CODEX_SUBAGENT_ID"),
+    "claude": ("CLAUDE_SUBAGENT", "CLAUDE_AGENT_DEPTH"),
+}
+THREAD_ENV_KEYS = {
+    "codex": ("CODEX_THREAD_ID", "CODEX_PARENT_THREAD_ID"),
+    "claude": ("CLAUDE_THREAD_ID", "CLAUDE_PARENT_THREAD_ID"),
+}
+MAX_NORMAL_BOOTSTRAP_DEPTH = 3
+
+
+def detect_bootstrap_origin(
+    *,
+    agent: str,
+    env: Optional[Dict[str, str]] = None,
+    process_depth: Optional[int] = None,
+) -> Tuple[str, Dict[str, Any]]:
+    source_env = dict(os.environ) if env is None else env
+    normalized_agent = "codex" if agent == "codex" else "claude"
+    signals: Dict[str, Any] = {
+        "env_marker": None,
+        "process_depth": process_depth,
+        "parent_thread_id_mismatch": False,
+        "mcp_tag": None,
+    }
+
+    for marker in SUBAGENT_ENV_MARKERS.get(normalized_agent, ()):
+        value = str(source_env.get(marker) or "").strip()
+        if value and value != "0":
+            signals["env_marker"] = f"{marker}={value}"
+            return "subagent", signals
+
+    thread_key, parent_thread_key = THREAD_ENV_KEYS[normalized_agent]
+    thread_id = str(source_env.get(thread_key) or "").strip()
+    parent_thread_id = str(source_env.get(parent_thread_key) or "").strip()
+    if parent_thread_id and thread_id and parent_thread_id != thread_id:
+        signals["parent_thread_id_mismatch"] = True
+        return "subagent", signals
+
+    if process_depth is not None and process_depth > MAX_NORMAL_BOOTSTRAP_DEPTH:
+        signals["process_depth"] = process_depth
+        return "unknown", signals
+
+    if not thread_id:
+        return "unknown", signals
+    return "parent", signals
 
 
 def _state_dir_from_watcher_config(watcher_config: Path) -> Path:
@@ -104,6 +151,18 @@ def _desktop_thread_id_from_env(agent: str) -> Optional[str]:
     return None
 
 
+def _parent_thread_id_from_env(agent: str) -> Optional[str]:
+    key = "CODEX_PARENT_THREAD_ID" if agent == "codex" else "CLAUDE_PARENT_THREAD_ID"
+    value = os.environ.get(key)
+    return value.strip() if value else None
+
+
+def _thread_id_from_env(agent: str) -> Optional[str]:
+    key = "CODEX_THREAD_ID" if agent == "codex" else "CLAUDE_THREAD_ID"
+    value = os.environ.get(key)
+    return value.strip() if value else None
+
+
 def _desktop_thread_id_for_bootstrap(agent: str, watcher_config: Optional[Path]) -> Optional[str]:
     if watcher_config is not None and watcher_config.exists():
         try:
@@ -134,12 +193,59 @@ def bootstrap(
     project_name = project or identity["rendezvous"]
     new_session = session_id or str(uuid.uuid4())
     peer_agent = "claude" if agent == "codex" else "codex"
+    bootstrap_origin, subagent_signals = detect_bootstrap_origin(agent=agent)
+
+    bridge._audit(
+        {
+            "id": str(uuid.uuid4()),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+            "action": "bootstrap_origin_resolved",
+            "agent": agent,
+            "session_id": new_session,
+            "project": project_name,
+            "origin": bootstrap_origin,
+            "signals": subagent_signals,
+            "accepted": True,
+        }
+    )
+    if bootstrap_origin == "subagent":
+        bridge._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                "action": "bootstrap_subagent_refused",
+                "agent": agent,
+                "session_id": new_session,
+                "project": project_name,
+                "signals": subagent_signals,
+                "accepted": False,
+            }
+        )
+        return {
+            "identity": identity,
+            "project": project_name,
+            "agent": agent,
+            "session_id": new_session,
+            "peer_agent": peer_agent,
+            "bootstrap_origin": bootstrap_origin,
+            "subagent_signals": subagent_signals,
+            "refused": True,
+            "refusal_reason": "subagent bootstrap refused; only the parent thread should run bootstrap_session.py",
+            "exit_code": 3,
+        }
 
     # activate_session auto-detects the previous same-agent session from the
     # registry, drains its unread messages BEFORE stamping superseded_at, and
     # returns them in data["drained_messages"].  This is atomic under the bridge
     # lock so there is no TOCTOU window between reading the registry and retiring.
-    activation = bridge.activate_session(agent=agent, session_id=new_session, project=project_name)
+    activation = bridge.activate_session(
+        agent=agent,
+        session_id=new_session,
+        project=project_name,
+        bootstrap_origin=bootstrap_origin,
+        allow_supersede=bootstrap_origin != "unknown",
+        trusted_parent_eligible=bootstrap_origin == "parent",
+    )
     drained: List[Dict[str, Any]] = activation.data.get("drained_messages", []) if activation.ok else []
     peer_session = activation.data.get("active_peer_session") if activation.ok else None
 
@@ -159,6 +265,11 @@ def bootstrap(
         project=project_name,
         desktop_thread_id=desktop_thread_id,
         bootstrap_command=[sys.executable, *sys.argv],
+        bootstrap_origin=bootstrap_origin,
+        bootstrap_thread_id=_thread_id_from_env(agent),
+        bootstrap_parent_thread_id=_parent_thread_id_from_env(agent),
+        trusted_parent_session_id=activation.data.get("trusted_parent_session") if activation.ok else None,
+        subagent_signals=subagent_signals,
     )
     write_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent), peer_breadcrumb)
 
@@ -233,6 +344,8 @@ def bootstrap(
         "watcher": watcher,
         "watcher_process": watcher_process,
         "peer_runtime": peer_breadcrumb,
+        "bootstrap_origin": bootstrap_origin,
+        "subagent_signals": subagent_signals,
     }
 
 
@@ -272,6 +385,8 @@ def main() -> None:
         start_watcher=not args.no_start_watcher,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
+    if result.get("refused"):
+        sys.exit(int(result.get("exit_code") or 3))
 
 
 if __name__ == "__main__":

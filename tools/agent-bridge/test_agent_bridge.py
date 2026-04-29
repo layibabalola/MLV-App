@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_bridge import AgentBridge
-from bootstrap_session import bootstrap
+from bootstrap_session import bootstrap, detect_bootstrap_origin
 from compact import prune_audit_logs, reap_stale_server_pids
 from configure_watcher import configure_watcher
 from consume_inbox import consume
@@ -906,6 +906,7 @@ class AgentBridgeTests(unittest.TestCase):
             )
         self.assertIsNotNone(result["watcher"])
         self.assertEqual(result["watcher_process"]["status"], "not_started")
+        self.assertEqual(result["bootstrap_origin"], "parent")
         with config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
         session_ids = {entry["session_id"] for entry in config["sessions"]}
@@ -919,8 +920,68 @@ class AgentBridgeTests(unittest.TestCase):
             )
         )
         breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["schema_version"], 2)
         self.assertEqual(breadcrumb["session_id"], "codex-new")
         self.assertEqual(breadcrumb["desktop_thread_id"], "019dcfe4-bd5d-7841-a7c1-2e8969a777c5")
+        self.assertEqual(breadcrumb["bootstrap_origin"], "parent")
+
+    def test_detect_bootstrap_origin_subagent_via_thread_mismatch(self) -> None:
+        origin, signals = detect_bootstrap_origin(
+            agent="codex",
+            env={
+                "CODEX_THREAD_ID": "child-thread",
+                "CODEX_PARENT_THREAD_ID": "parent-thread",
+            },
+        )
+        self.assertEqual(origin, "subagent")
+        self.assertTrue(signals["parent_thread_id_mismatch"])
+
+    def test_detect_bootstrap_origin_unknown_when_thread_missing(self) -> None:
+        origin, signals = detect_bootstrap_origin(agent="codex", env={})
+        self.assertEqual(origin, "unknown")
+        self.assertIsNone(signals["env_marker"])
+
+    def test_bootstrap_refuses_subagent_origin(self) -> None:
+        with patch.dict("os.environ", {"CODEX_SUBAGENT": "1", "CODEX_THREAD_ID": "child-thread"}):
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-subagent",
+                project=None,
+                handshake_retries=1,
+            )
+        self.assertTrue(result["refused"])
+        self.assertEqual(result["exit_code"], 3)
+        status = AgentBridge(self.state_dir).session_status("mlv-app")
+        self.assertEqual(status.data["active"].get("codex"), None)
+
+    def test_unknown_origin_session_does_not_supersede_parent(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        first = bridge.activate_session(
+            "codex",
+            "codex-parent",
+            project="mlv-app",
+            bootstrap_origin="parent",
+            allow_supersede=True,
+            trusted_parent_eligible=True,
+        )
+        self.assertEqual(first.status, "active")
+
+        second = bridge.activate_session(
+            "codex",
+            "codex-unknown",
+            project="mlv-app",
+            bootstrap_origin="unknown",
+            allow_supersede=False,
+            trusted_parent_eligible=False,
+        )
+        self.assertEqual(second.status, "registered_secondary")
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-parent")
+        self.assertEqual(status.data["sessions"]["codex-unknown"]["status"], "secondary")
+        self.assertEqual(status.data["trusted_parent"]["codex"]["session_id"], "codex-parent")
 
     def test_recover_bridge_session_bootstraps_when_unbootstrapped(self) -> None:
         config_path = self.tempdir / "watcher-config.json"

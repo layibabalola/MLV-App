@@ -1,7 +1,7 @@
 # Agent-Bridge Communication Protocol
 
-**Status:** Implemented v1.6 (bumped 2026-04-29). Adds wake-script exit code
-table, failure reason taxonomy aligned to multi-layer presence
+**Status:** Implemented v1.7 (bumped 2026-04-29). Adds wake-script exit code
+table, provenance-aware wake refusal, failure reason taxonomy aligned to multi-layer presence
 (`BRIDGE_PRESENCE_SPEC.md`), audit event registry, and consolidated message
 type registry including types added 2026-04-28 (`WAIT_DECLARED`,
 `HEURISTIC_SYNC_ACK`, `PROTOCOL_SYNC_ACK`, `ACTION_REQUEST_RESPONSE`,
@@ -10,7 +10,7 @@ type registry including types added 2026-04-28 (`WAIT_DECLARED`,
 `CROSS_PROJECT_PAIR_REQUEST/ACCEPT/REJECT/EXPIRE/REVOKE/PROMOTE`).
 EXCHANGE_CLOSED close-marker convention added per 2026-04-28 heuristic.
 
-Version: 1.6
+Version: 1.7
 Transport: agent-bridge MCP server (local FS in v1; LAN sync in v2; cloud
 WebSocket in v3 — see `BRIDGE_TRANSPORT_ABSTRACTION_SPEC.md`)
 Applies to: any two agents sharing an agent-bridge instance
@@ -35,6 +35,7 @@ these codes; the watcher routes wake decisions accordingly.
 | 8 | Tenant mismatch (tenant_scope layer down; cloud only) | Mark seen; audit `wake_skipped_auth_block` | Yes | No |
 | 9 | Active pairing expired or revoked | Mark seen; audit `wake_skipped_pairing_invalid` with sub-reason | Yes | No (require re-pair) |
 | 10 | Peer busy (receptive layer down) | Defer; drain on next inbox-check | No (defer) | On natural inbox-check |
+| 11 | Peer breadcrumb has bad provenance (`bootstrap_origin = subagent`) | Mark seen; audit `wake_skipped_bad_provenance` | Yes | No |
 
 `watcher.WAKE_PERMANENT_EXIT_CODES` includes the codes that mark the
 message seen and suppress retries: {2, 3, 7, 8, 9}. Codes 4, 5, 10 defer
@@ -55,6 +56,7 @@ layer failures and watcher exit codes. Cross-referenced by
 | `wake_skipped_wrong_project` | exit 7 | project_scope layer mismatch |
 | `wake_skipped_auth_block` | exit 8 | tenant_scope layer mismatch (cloud only) |
 | `wake_skipped_pairing_invalid` | exit 9 | active_pairing expired/revoked; sub-reason in payload |
+| `wake_skipped_bad_provenance` | exit 11 | peer runtime breadcrumb came from a sub-agent bootstrap and must not be used as a wake target |
 | `wake_skipped_breaker_open` | per-session circuit breaker | Per `WAKE_HARDENING_SPEC.md` D2; suppressed after 5 failures in 5 min |
 | `wake_dropped_peer_absent_overflow` | pending queue full | `pending_peer_absent` exceeded 100-entry cap; FIFO eviction |
 | `wake_dropped_*_ttl` | pending queue TTL expiry | Entry older than 24h evicted |
@@ -82,7 +84,11 @@ event actions:
 | `wake_skipped_wrong_project` | watcher | project_scope mismatch | active_project, expected_project |
 | `wake_skipped_auth_block` | watcher | tenant_scope mismatch | active_tenant, expected_tenant |
 | `wake_skipped_pairing_invalid` | watcher | active_pairing expired/revoked | link_id?, sub_reason |
+| `wake_skipped_bad_provenance` | watcher | Peer breadcrumb resolved to bad provenance | breadcrumb_origin, message_id |
 | `wake_skipped_no_peer` | watcher | Peer breadcrumb missing | breadcrumb_path |
+| `bootstrap_origin_resolved` | bootstrap_session | Bootstrap origin was evaluated | origin, signals |
+| `bootstrap_subagent_refused` | bootstrap_session | Confident sub-agent bootstrap was refused | signals, session_id |
+| `unknown_origin_warning` | watcher | Wake proceeded against unknown-origin breadcrumb with warning | session_id |
 | `wake_skipped_breaker_open` | watcher | Circuit breaker open | session_id, consecutive_failures, opened_at |
 | `wake_breaker_open` | watcher | Breaker transitioned open (one event per transition) | exit_code_distribution, threshold |
 | `wake_breaker_closed` | watcher | Breaker auto-closed or manually resumed | reason: idle\|resume_call |
