@@ -105,6 +105,10 @@ Inbox hygiene for bridge-related work:
   - surface and mark read any messages that were surfaced,
   - answer the inbox status,
   - then resume the previously active implementation or investigation unless the user explicitly says to pause, stop, wait, or only report status.
+- After any interrupt that surfaces a message but does not truly displace the current task:
+  - explicitly classify the result as `resume`, `displaced`, or `parked`,
+  - if the surfaced message creates follow-up work that will not be actioned immediately, record it in the pending-action ledger with `record_pending_bridge_action(...)`,
+  - then return to the previously committed task as the next substantive action.
 - If resuming would be unsafe because the inbox message changes priority or requires a restart, say that explicitly and switch to the newly higher-priority work.
 - Do not enter a persistent `wait_inbox` loop in the main working chat unless the user explicitly requests a short smoke test.
 - Continuous monitoring is only active while a live turn is blocked inside `wait_inbox`. If Codex sends a final answer and ends the turn, Codex is not continuously monitoring.
@@ -136,6 +140,12 @@ Committed-task rule:
 - If priority changes, say that explicitly in the chat, e.g.:
   - `Inbox check surfaced a higher-priority action request, so I’m switching from heuristic edit to that.`
 - If the interrupt was only status or hygiene and did not change priority, resume the committed task immediately rather than treating the interruption as a stopping point.
+- Handling an interrupt is not completion of the interrupted task.
+- After answering an interrupt, the very next substantive action must be one of:
+  - resume the interrupted edit or implementation step,
+  - explicitly mark it `displaced`,
+  - explicitly mark it `parked`.
+- If the interrupt created a deferred obligation, write it to the pending-action ledger before resuming so the obligation survives long work stretches and compaction.
 
 Declared wait-state rule:
 
@@ -219,6 +229,16 @@ Interrupt-discipline rule:
   - renewal point for an open `WORKING_ON_IT`.
 - Sender-side quiet mode is part of the same discipline:
   - if Codex knows Claude is in a protected execution window, avoid sending non-urgent traffic unless it changes priority, is the one allowed watchdog reminder, or the user explicitly asked for live relay.
+
+Workflow-strategy sync rule:
+
+- If Codex creates or changes a bridge workflow strategy, operating rule, or durable coordination mechanism that Claude should know about, Codex must:
+  - update the local heuristics/spec/doc first,
+  - send Claude the matching `HEURISTIC_SYNC`, `SPEC_PROPOSAL`, or `IMPLEMENTATION_UPDATE` in the same work stretch,
+  - explicitly ask Claude to mirror the strategy or propose the minimal symmetric contract if a direct mirror is not appropriate,
+  - include a short justification for why symmetry matters, e.g. preventing drift, preserving compaction safety, or keeping interrupt handling consistent across both agents.
+- Do not treat “shared implementation sent” as equivalent to “mirror requested”.
+- If the strategy is bridge-core rather than Codex-local UX, the default assumption is that Claude should mirror it unless there is a concrete reason not to.
 - The reciprocal expectation applies to Codex as well when Claude is the one executing.
 
 Waypoint rule:
