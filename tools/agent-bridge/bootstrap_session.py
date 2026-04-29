@@ -144,6 +144,149 @@ def _terminate_process(pid: int, *, timeout_seconds: float = 5.0) -> bool:
     return True
 
 
+def _command_line_contains_path(command_line: str, path: Path) -> bool:
+    haystack = command_line.replace('"', "").replace("'", "").lower()
+    needle = str(path).replace('"', "").replace("'", "").lower()
+    return needle in haystack
+
+
+def _enumerate_watcher_processes() -> List[Dict[str, Any]]:
+    if sys.platform == "win32":
+        script = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.CommandLine -like '*watcher.py*' } | "
+            "Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate | "
+            "ConvertTo-Json -Compress"
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return []
+        try:
+            parsed = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return []
+        rows = parsed if isinstance(parsed, list) else [parsed]
+        return [
+            {
+                "pid": row.get("ProcessId"),
+                "parent_pid": row.get("ParentProcessId"),
+                "command_line": row.get("CommandLine") or "",
+                "started_at": row.get("CreationDate"),
+            }
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,args="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    rows = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3 or "watcher.py" not in parts[2]:
+            continue
+        rows.append({"pid": parts[0], "parent_pid": parts[1], "command_line": parts[2], "started_at": None})
+    return rows
+
+
+def sweep_orphan_watchers(
+    watcher_config: Path,
+    state_dir: Optional[Path] = None,
+    bridge: Optional[AgentBridge] = None,
+) -> Dict[str, Any]:
+    resolved_state_dir = state_dir or _state_dir_from_watcher_config(watcher_config)
+    watcher_script_path = Path(__file__).with_name("watcher.py")
+    watcher_script = watcher_script_path.resolve()
+    resolved_config = watcher_config.resolve()
+    lease_path = resolved_state_dir / "locks" / "watcher.lock"
+    lease_pid: Optional[int] = None
+    try:
+        lease = read_lease(lease_path)
+        lease_pid = int(lease.get("pid") or 0) or None
+    except Exception:
+        lease_pid = None
+
+    bridge_for_audit = bridge or AgentBridge(resolved_state_dir)
+    killed: List[Dict[str, Any]] = []
+    candidates = 0
+    for process in _enumerate_watcher_processes():
+        try:
+            pid = int(process.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0 or pid == os.getpid():
+            continue
+        command_line = str(process.get("command_line") or "")
+        if not command_line or "watcher.py" not in command_line:
+            continue
+        if not (
+            _command_line_contains_path(command_line, watcher_script)
+            or _command_line_contains_path(command_line, watcher_script_path)
+        ):
+            continue
+        if not (
+            _command_line_contains_path(command_line, resolved_config)
+            or _command_line_contains_path(command_line, watcher_config)
+        ):
+            continue
+        candidates += 1
+        if lease_pid is not None and pid == lease_pid:
+            continue
+
+        stopped = _terminate_process(pid)
+        record = {
+            "pid": pid,
+            "parent_pid": process.get("parent_pid"),
+            "started_at": process.get("started_at"),
+            "stopped": stopped,
+            "command_preview": command_line[:500],
+        }
+        killed.append(record)
+        bridge_for_audit._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                "action": "orphan_watcher_killed",
+                "accepted": True,
+                "pid": pid,
+                "parent_pid": process.get("parent_pid"),
+                "started_at": process.get("started_at"),
+                "stopped": stopped,
+                "lease_pid": lease_pid,
+                "watcher_config": str(resolved_config),
+                "command_preview": command_line[:500],
+            }
+        )
+
+    return {
+        "status": "swept" if killed else "no_orphans",
+        "candidate_count": candidates,
+        "orphan_count": len(killed),
+        "lease_pid": lease_pid,
+        "killed": killed,
+    }
+
+
 def restart_watcher_for_code_change(watcher_config: Path, state_dir: Optional[Path] = None) -> Dict[str, Any]:
     resolved_state_dir = state_dir or _state_dir_from_watcher_config(watcher_config)
     pid_path = watcher_config.parent / "watcher.pid"
@@ -518,6 +661,7 @@ def bootstrap(
     watcher = None
     watcher_process = None
     watcher_restart_check = None
+    watcher_orphan_sweep = None
     if watcher_config is not None:
         watcher = configure_watcher(
             config_path=watcher_config,
@@ -538,7 +682,9 @@ def bootstrap(
                     and watcher_process.get("status") == "started"
                 ):
                     watcher_process["status"] = "restarted_code_changed"
+            watcher_orphan_sweep = sweep_orphan_watchers(watcher_config, state_dir=state_dir, bridge=bridge)
         else:
+            watcher_orphan_sweep = sweep_orphan_watchers(watcher_config, state_dir=state_dir, bridge=bridge)
             watcher_process = {
                 "status": "not_started",
                 "reason": "start_watcher_false",
@@ -571,6 +717,7 @@ def bootstrap(
         "watcher": watcher,
         "watcher_process": watcher_process,
         "watcher_restart_check": watcher_restart_check,
+        "watcher_orphan_sweep": watcher_orphan_sweep,
         "peer_runtime": peer_breadcrumb,
         "bootstrap_origin": bootstrap_origin,
         "detected_bootstrap_origin": detected_bootstrap_origin,

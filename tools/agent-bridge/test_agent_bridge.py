@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_bridge import AgentBridge
-from bootstrap_session import bootstrap, detect_bootstrap_origin, restart_watcher_for_code_change, watcher_code_signature
+from bootstrap_session import bootstrap, detect_bootstrap_origin, restart_watcher_for_code_change, sweep_orphan_watchers, watcher_code_signature
 from compact import prune_audit_logs, reap_stale_server_pids
 from configure_watcher import configure_watcher
 from consume_inbox import consume
@@ -1461,6 +1461,95 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertFalse((self.tempdir / "watcher.pid").exists())
         self.assertFalse((self.state_dir / "locks" / "watcher.lock").exists())
 
+    def test_sweep_orphan_watchers_kills_non_lease_processes(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        config_path = self.tempdir / "watcher-config.json"
+        other_config = self.tempdir / "other-config.json"
+        watcher_script = Path(__file__).resolve().parent / "watcher.py"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "locks").mkdir(parents=True, exist_ok=True)
+        write_json(
+            self.state_dir / "locks" / "watcher.lock",
+            {
+                "pid": 111,
+                "role": "watcher",
+                "command": ["py", str(watcher_script), "--config", str(config_path)],
+                "heartbeat_at": "2026-04-29T00:00:00+00:00",
+            },
+        )
+        processes = [
+            {
+                "pid": 111,
+                "parent_pid": 1,
+                "started_at": "lease-start",
+                "command_line": f'py "{watcher_script}" --config "{config_path}"',
+            },
+            {
+                "pid": 222,
+                "parent_pid": 1,
+                "started_at": "orphan-start",
+                "command_line": f'py "{watcher_script}" --config "{config_path}"',
+            },
+            {
+                "pid": 333,
+                "parent_pid": 1,
+                "started_at": "other-config",
+                "command_line": f'py "{watcher_script}" --config "{other_config}"',
+            },
+        ]
+
+        with patch("bootstrap_session._enumerate_watcher_processes", return_value=processes), patch(
+            "bootstrap_session._terminate_process", return_value=True
+        ) as terminate:
+            result = sweep_orphan_watchers(config_path, state_dir=self.state_dir, bridge=bridge)
+
+        self.assertEqual(result["status"], "swept")
+        self.assertEqual(result["lease_pid"], 111)
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["orphan_count"], 1)
+        self.assertEqual(result["killed"][0]["pid"], 222)
+        terminate.assert_called_once_with(222)
+        audit_rows = read_jsonl(self.state_dir / "messages.jsonl")
+        self.assertTrue(
+            any(
+                row.get("action") == "orphan_watcher_killed" and row.get("pid") == 222
+                for row in audit_rows
+            )
+        )
+
+    def test_sweep_orphan_watchers_preserves_lease_holder(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        watcher_script = Path(__file__).resolve().parent / "watcher.py"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "locks").mkdir(parents=True, exist_ok=True)
+        write_json(
+            self.state_dir / "locks" / "watcher.lock",
+            {
+                "pid": 111,
+                "role": "watcher",
+                "command": ["py", str(watcher_script), "--config", str(config_path)],
+                "heartbeat_at": "2026-04-29T00:00:00+00:00",
+            },
+        )
+
+        with patch(
+            "bootstrap_session._enumerate_watcher_processes",
+            return_value=[
+                {
+                    "pid": 111,
+                    "parent_pid": 1,
+                    "started_at": "lease-start",
+                    "command_line": f'py "{watcher_script}" --config "{config_path}"',
+                }
+            ],
+        ), patch("bootstrap_session._terminate_process") as terminate:
+            result = sweep_orphan_watchers(config_path, state_dir=self.state_dir)
+
+        self.assertEqual(result["status"], "no_orphans")
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["orphan_count"], 0)
+        terminate.assert_not_called()
+
     def test_bootstrap_restarts_watcher_when_code_signature_missing_by_default(self) -> None:
         class FakeProcess:
             pid = 525252
@@ -1491,7 +1580,9 @@ class AgentBridgeTests(unittest.TestCase):
             return_value={"canonical_root": str(ROOT), "rendezvous": "mlv-app", "source": "unit-test"},
         ), patch("bootstrap_session.is_process_alive", return_value=True), patch(
             "bootstrap_session._terminate_process", return_value=True
-        ), patch("bootstrap_session.subprocess.Popen", return_value=FakeProcess()):
+        ), patch("bootstrap_session.subprocess.Popen", return_value=FakeProcess()), patch(
+            "bootstrap_session.sweep_orphan_watchers", return_value={"status": "no_orphans"}
+        ):
             result = bootstrap(
                 state_dir=self.state_dir,
                 agent="codex",
@@ -1510,6 +1601,30 @@ class AgentBridgeTests(unittest.TestCase):
         lease = json.loads((self.state_dir / "locks" / "watcher.lock").read_text(encoding="utf-8"))
         self.assertEqual(lease["pid"], 525252)
         self.assertEqual(lease["watcher_code_signature"]["signature"], watcher_code_signature()["signature"])
+
+    def test_bootstrap_runs_orphan_sweep_by_default(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"}, clear=True), patch(
+            "bootstrap_session.derive_project_identity",
+            return_value={"canonical_root": str(ROOT), "rendezvous": "mlv-app", "source": "unit-test"},
+        ), patch(
+            "configure_watcher.derive_project_identity",
+            return_value={"canonical_root": str(ROOT), "rendezvous": "mlv-app", "source": "unit-test"},
+        ), patch("bootstrap_session.sweep_orphan_watchers", return_value={"status": "no_orphans"}) as sweep:
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-sweep",
+                project="mlv-app",
+                handshake_retries=1,
+                watcher_config=config_path,
+                start_watcher=False,
+            )
+
+        sweep.assert_called_once()
+        self.assertEqual(result["watcher_orphan_sweep"]["status"], "no_orphans")
 
     def test_bootstrap_can_skip_watcher_code_restart_for_debugging(self) -> None:
         config_path = self.tempdir / "watcher-config.json"
