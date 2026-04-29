@@ -38,6 +38,7 @@ PENDING_BRIDGE_ACTIONS_SCHEMA_VERSION = 1
 WAKE_BREAKER_SCHEMA_VERSION = 1
 EXECUTION_STATE_SCHEMA_VERSION = 1
 EXECUTION_PROOF_TIMEOUT_S = 120
+NON_ACTIONABLE_PENDING_EXECUTION_STATES = {"blocked", "parked", "displaced", "completed"}
 INBOX_LEVEL_SESSION = "session"
 INBOX_LEVEL_PROJECT = "project"
 INBOX_LEVEL_AGENT = "agent"
@@ -2299,6 +2300,8 @@ class AgentBridge:
                 copy.deepcopy(action)
                 for action in pending.get("actions", [])
                 if action.get("owner_agent") == owner and action.get("status") == "pending"
+                and str(action.get("execution_state") or "").strip().lower()
+                not in NON_ACTIONABLE_PENDING_EXECUTION_STATES
             ]
             candidates.sort(key=_sort_key)
             next_action = candidates[0] if candidates else None

@@ -754,6 +754,23 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIsNone(result.data["action"])
         self.assertEqual(result.data["count"], 0)
 
+    def test_next_pending_bridge_action_skips_parked_and_blocked_items(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.record_pending_bridge_action("codex", "Parked item", priority="urgent")
+        bridge.record_pending_bridge_action("codex", "Blocked item", priority="high")
+        bridge.record_pending_bridge_action("codex", "Actionable item", priority="normal")
+        pending = bridge._load_pending_actions()
+        actions = pending["actions"]
+        actions[0]["execution_state"] = "parked"
+        actions[1]["execution_state"] = "blocked"
+        bridge._save_pending_actions(pending)
+
+        result = bridge.next_pending_bridge_action("codex")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "next_pending_bridge_action")
+        self.assertEqual(result.data["action"]["summary"], "Actionable item")
+
     def test_execution_task_requires_explicit_displacement_and_records_progress(self) -> None:
         bridge = AgentBridge(self.state_dir)
         action = bridge.record_pending_bridge_action(
@@ -2145,6 +2162,66 @@ class AgentBridgeTests(unittest.TestCase):
 
         self.assertIn("ledger_top=normal action-1 Drain this item", result.stdout)
         self.assertIn("FINAL-GUARD: execution is idle but the Codex ledger is not empty", result.stdout)
+
+    def test_codex_bridge_reminder_final_guard_ignores_parked_ledger_items(self) -> None:
+        script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
+        bridge_root = self.tempdir / "parked-bridge-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "pending-actions.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {
+                            "id": "action-1",
+                            "owner_agent": "codex",
+                            "summary": "Parked item",
+                            "priority": "urgent",
+                            "status": "pending",
+                            "execution_state": "parked",
+                            "created_at": "2026-04-29T00:00:00+00:00",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WorkspaceRoot",
+                str(ROOT),
+                "-ProjectBucket",
+                "mlv-app",
+                "-SessionRegistryPath",
+                str(bridge_root / "session.json"),
+                "-WatcherConfigPath",
+                str(bridge_root / "watcher-config.json"),
+                "-WatcherPidPath",
+                str(bridge_root / "watcher.pid"),
+                "-BridgeWatchFlagPath",
+                str(bridge_root / "missing-watch.flag"),
+                "-SettingsPath",
+                str(bridge_root / "settings.json"),
+                "-LogPath",
+                str(self.tempdir / "parked-codex-bridge-reminder.log"),
+                "-HookPhase",
+                "final",
+                "-NoToast",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertIn("ledger=empty", result.stdout)
+        self.assertNotIn("FINAL-GUARD", result.stdout)
 
 
 if __name__ == "__main__":

@@ -215,6 +215,10 @@ function Get-NextPendingBridgeActionDigest {
         if ([string]$action.status -ne "pending") {
             continue
         }
+        $executionState = ([string]$action.execution_state).Trim().ToLowerInvariant()
+        if ($executionState -in @("blocked", "parked", "displaced", "completed")) {
+            continue
+        }
 
         $priority = [string]$action.priority
         if (-not $priorityOrder.ContainsKey($priority)) {
