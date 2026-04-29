@@ -35,6 +35,7 @@ param(
     [switch]$DryRun,
     [switch]$FindOnly,
     [switch]$PrintInnerCommand,
+    [switch]$TestInputSize,
     [string]$ProcessName          = "Codex",
     [switch]$RunInnerWake
 )
@@ -194,7 +195,7 @@ function Send-AltTap {
     $inputs[1].type = [Win32Wake]::INPUT_KEYBOARD
     $inputs[1].ki.wVk = [Win32Wake]::VK_MENU
     $inputs[1].ki.dwFlags = [Win32Wake]::KEYEVENTF_KEYUP
-    $inputSize = [System.Runtime.InteropServices.Marshal]::SizeOf([Win32Wake+INPUT])
+    $inputSize = [System.Runtime.InteropServices.Marshal]::SizeOf($inputs[0])
     $sent = [Win32Wake]::SendInput(2, $inputs, $inputSize)
     if ($sent -ne 2) {
         Write-Host ("[wake_codex] WARNING: SendInput ALT-tap sent " + $sent + "/2 input events.")
@@ -277,6 +278,20 @@ function Invoke-CodexComposerUiaFallback {
         Write-Host ("[wake_codex] UIA fallback failed: " + $_.Exception.Message)
         return $false
     }
+}
+
+function Test-Win32InputSize {
+    $sample = New-Object 'Win32Wake+INPUT'
+    $size = [System.Runtime.InteropServices.Marshal]::SizeOf($sample)
+    Write-Host ("[wake_codex] Win32 INPUT size=" + $size)
+    return $size -gt 0
+}
+
+if ($TestInputSize) {
+    if (Test-Win32InputSize) {
+        exit 0
+    }
+    exit 1
 }
 
 if ($PrintInnerCommand -and -not $RunInnerWake) {

@@ -279,6 +279,27 @@ class AgentBridgeTests(unittest.TestCase):
         helper = text.split("function Invoke-CodexForegroundAttempt", 1)[1].split("if ($PrintInnerCommand", 1)[0]
         self.assertLess(helper.index("BringWindowToTop"), helper.index("SetForegroundWindow"))
 
+    def test_wake_codex_input_size_smoke_runs_under_powershell(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-TestInputSize",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Win32 INPUT size=", result.stdout)
+
     def test_migrate_root_dry_run_does_not_create_target(self) -> None:
         source = self.tempdir / "source-root"
         target = self.tempdir / "target-root"
