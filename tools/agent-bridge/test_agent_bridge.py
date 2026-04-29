@@ -2086,6 +2086,66 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("Bridge state: UNBOOTSTRAPPED", result.stdout)
         self.assertIn("recover_bridge_session.py", result.stdout)
 
+    def test_codex_bridge_reminder_final_guard_when_ledger_pending_and_execution_idle(self) -> None:
+        script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
+        bridge_root = self.tempdir / "bridge-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "pending-actions.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "actions": [
+                        {
+                            "id": "action-1",
+                            "owner_agent": "codex",
+                            "summary": "Drain this item",
+                            "priority": "normal",
+                            "status": "pending",
+                            "created_at": "2026-04-29T00:00:00+00:00",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        log_path = self.tempdir / "codex-bridge-reminder.log"
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WorkspaceRoot",
+                str(ROOT),
+                "-ProjectBucket",
+                "mlv-app",
+                "-SessionRegistryPath",
+                str(bridge_root / "session.json"),
+                "-WatcherConfigPath",
+                str(bridge_root / "watcher-config.json"),
+                "-WatcherPidPath",
+                str(bridge_root / "watcher.pid"),
+                "-BridgeWatchFlagPath",
+                str(bridge_root / "missing-watch.flag"),
+                "-SettingsPath",
+                str(bridge_root / "settings.json"),
+                "-LogPath",
+                str(log_path),
+                "-HookPhase",
+                "final",
+                "-NoToast",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertIn("ledger_top=normal action-1 Drain this item", result.stdout)
+        self.assertIn("FINAL-GUARD: execution is idle but the Codex ledger is not empty", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

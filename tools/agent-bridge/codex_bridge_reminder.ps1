@@ -381,6 +381,8 @@ $resolvedStateDir = Join-Path $resolvedBridgeRoot "state"
 $heuristicsDigest = Get-HeuristicsDigest -WorkspaceRoot $WorkspaceRoot
 $executionDigest = Get-ActiveExecutionDigest -StateDir $resolvedStateDir -OwnerAgent "codex"
 $ledgerDigest = Get-NextPendingBridgeActionDigest -StateDir $resolvedStateDir -OwnerAgent "codex"
+$ledgerHasPending = $ledgerDigest.StartsWith("ledger_top=")
+$executionIdle = $executionDigest.banner -eq "execution=idle"
 
 $stateLine = "Bridge state: $bridgeState"
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
@@ -390,6 +392,9 @@ Write-Output $message
 Write-Output $digestLine
 if ($executionDigest.resume) {
     Write-Output $executionDigest.resume
+}
+if ($HookPhase -eq "final" -and $executionIdle -and $ledgerHasPending) {
+    Write-Output "FINAL-GUARD: execution is idle but the Codex ledger is not empty. Do not send a final response until the top item is worked, blocked, parked, or explicitly displaced."
 }
 
 if ($bridgeState -eq "UNBOOTSTRAPPED") {
@@ -405,7 +410,7 @@ if ($watchModeActive) {
     Write-Output "Do not use a persistent wait_inbox loop in the main working chat unless the user explicitly asked for that short test."
 }
 
-"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest'" | Add-Content -Path $LogPath -Encoding UTF8
+"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest' final_guard=$($HookPhase -eq "final" -and $executionIdle -and $ledgerHasPending)" | Add-Content -Path $LogPath -Encoding UTF8
 
 if ($NoToast -or -not $toastEnabled) {
     exit 0

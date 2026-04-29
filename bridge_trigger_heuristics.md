@@ -361,6 +361,11 @@ Waypoint rule:
     - active private/project buckets
     - heuristics/rule version marker
     - top pending ledger item
+  - on pre-final, if execution is idle and the Codex ledger has a top pending item, the reminder must surface an explicit `FINAL-GUARD` warning:
+    - do not send the final response yet,
+    - either work the top item,
+    - or classify it as `blocked`, `parked`, or `displaced`.
+  - Treat that warning as a failed stop-condition, not as informational text.
   - after compaction, the carry-forward summary should preserve at least:
     - the top ledger item id + summary,
     - whether inbox was clear,
