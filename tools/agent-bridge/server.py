@@ -455,6 +455,11 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         """Clear the wake circuit breaker for one session."""
         return as_dict(bridge.resume_wake_for_session(session_id=session_id))
 
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def nudge_peer(agent: str, session_id: str) -> dict:
+        """Request one receiver wake attempt; grants a one-shot breaker bypass when needed."""
+        return as_dict(bridge.nudge_peer(agent=agent, session_id=session_id))
+
     @mcp.tool(annotations=DESTRUCTIVE_WRITE)
     def clear_inbox(agent: Optional[str] = None, session_id: Optional[str] = None) -> dict:
         """Clear queued inbox messages and reset hop/dedup state for a session."""

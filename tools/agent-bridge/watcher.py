@@ -209,6 +209,13 @@ def _normalize_breaker_session(record: Optional[Dict[str, Any]]) -> Dict[str, An
     data.setdefault("last_success_at", None)
     data.setdefault("exit_code_distribution", {})
     data.setdefault("notified_open_at", None)
+    try:
+        data["bypass_grants"] = max(0, int(data.get("bypass_grants") or 0))
+    except (TypeError, ValueError):
+        data["bypass_grants"] = 0
+    data.setdefault("last_bypass_granted_at", None)
+    data.setdefault("last_bypass_consumed_at", None)
+    data.setdefault("last_bypass_reason", None)
     return data
 
 
@@ -256,16 +263,15 @@ def _close_breaker(
     _save_wake_breakers(state_path, payload)
 
 
-def _breaker_is_open(
+def _breaker_recovery_mode(
     *,
     state_path: Path,
     session_id: str,
-    inbox_path: Optional[Path] = None,
-) -> bool:
+) -> str:
     payload = _load_wake_breakers(state_path)
     record = payload.get("sessions", {}).get(session_id)
     if not record:
-        return False
+        return "closed"
     normalized = _normalize_breaker_session(record)
     last_failure = _parse_dt(normalized.get("last_failure_at"))
     now = datetime.now(timezone.utc)
@@ -274,9 +280,72 @@ def _breaker_is_open(
         and last_failure is not None
         and (now - last_failure).total_seconds() >= WAKE_BREAKER_IDLE_CLOSE_S
     ):
+        return "idle"
+    if normalized.get("breaker_state") == "open" and int(normalized.get("bypass_grants") or 0) > 0:
+        return "bypass"
+    if normalized.get("breaker_state") == "open":
+        return "open"
+    return "closed"
+
+
+def _consume_breaker_recovery(
+    *,
+    state_path: Path,
+    session_id: str,
+    mode: str,
+    inbox_path: Optional[Path] = None,
+    agent: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> None:
+    if mode == "idle":
         _close_breaker(state_path=state_path, session_id=session_id, reason="idle", inbox_path=inbox_path)
+        if inbox_path is not None:
+            _append_wake_audit(
+                inbox_path,
+                {
+                    "action": "wake_breaker_autoclose_retry",
+                    "agent": agent,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                },
+            )
+        return
+    if mode != "bypass":
+        return
+    payload = _load_wake_breakers(state_path)
+    sessions = payload.setdefault("sessions", {})
+    record = _normalize_breaker_session(sessions.get(session_id))
+    grants = int(record.get("bypass_grants") or 0)
+    if record.get("breaker_state") != "open" or grants <= 0:
+        return
+    record["bypass_grants"] = grants - 1
+    record["last_bypass_consumed_at"] = utc_now()
+    sessions[session_id] = record
+    _save_wake_breakers(state_path, payload)
+    if inbox_path is not None:
+        _append_wake_audit(
+            inbox_path,
+            {
+                "action": "wake_breaker_bypass_consumed",
+                "agent": agent,
+                "session_id": session_id,
+                "message_id": message_id,
+                "remaining_bypass_grants": record["bypass_grants"],
+            },
+        )
+
+
+def _breaker_is_open(
+    *,
+    state_path: Path,
+    session_id: str,
+    inbox_path: Optional[Path] = None,
+) -> bool:
+    mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+    if mode == "idle":
+        _consume_breaker_recovery(state_path=state_path, session_id=session_id, mode=mode, inbox_path=inbox_path)
         return False
-    return normalized.get("breaker_state") == "open"
+    return mode == "open"
 
 
 def _record_wake_failure(
@@ -1127,7 +1196,8 @@ def _process_pending_wake_verifications(
             changed = True
             continue
 
-        if _breaker_is_open(state_path=state_path, session_id=session_id, inbox_path=inbox_path):
+        breaker_mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+        if breaker_mode == "open":
             seen_ids.add(message_id)
             changed = True
             _append_wake_audit(
@@ -1170,6 +1240,14 @@ def _process_pending_wake_verifications(
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
+            _consume_breaker_recovery(
+                state_path=state_path,
+                session_id=session_id,
+                mode=breaker_mode,
+                inbox_path=inbox_path,
+                agent=agent,
+                message_id=message_id,
+            )
             wake_fire_history = _record_wake_fire(
                 session_id=session_id,
                 seen_ids=seen_ids,
@@ -1402,15 +1480,47 @@ def process_session_once(
         if entry.get("agent") == agent and entry.get("session_id") == session_id
     }
 
+    command_configured = bool(on_message_command or on_message_command_template)
     unread = unread_for_session(inbox_path, session_id)
     new_msgs = [
         m for m in unread
         if m.get("id") not in seen_ids and m.get("id") not in pending_ids and m.get("id") not in paused_ids
     ]
+    if command_configured and not new_msgs:
+        recovery_mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+        if recovery_mode in {"idle", "bypass"}:
+            recovery_candidates = [
+                m for m in unread
+                if m.get("id") not in pending_ids and m.get("id") not in paused_ids
+            ]
+            if recovery_candidates:
+                recovery_message = recovery_candidates[0]
+                recovery_id = str(recovery_message.get("id", ""))
+                if recovery_id in seen_ids:
+                    seen_ids.remove(recovery_id)
+                    _save_watcher_state(
+                        state_path,
+                        seen_ids,
+                        pending,
+                        paused_messages,
+                        unknown_origin_warnings,
+                        wake_fire_history,
+                        toasted_ids,
+                    )
+                _append_wake_audit(
+                    inbox_path,
+                    {
+                        "action": "wake_recovery_backlog_selected",
+                        "agent": agent,
+                        "session_id": session_id,
+                        "message_id": recovery_id,
+                        "mode": recovery_mode,
+                    },
+                )
+                new_msgs = [recovery_message]
     if not new_msgs:
         return []
 
-    command_configured = bool(on_message_command or on_message_command_template)
     if effective_on_message == "log":
         if bridge_paused and command_configured:
             _queue_paused_wake_messages(
@@ -1503,7 +1613,8 @@ def process_session_once(
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
-            if _breaker_is_open(state_path=state_path, session_id=session_id, inbox_path=inbox_path):
+            breaker_mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+            if breaker_mode == "open":
                 for message in new_msgs:
                     message_id = str(message.get("id", ""))
                     if not message_id:
@@ -1555,6 +1666,14 @@ def process_session_once(
                         },
                     )
                 return []
+            _consume_breaker_recovery(
+                state_path=state_path,
+                session_id=session_id,
+                mode=breaker_mode,
+                inbox_path=inbox_path,
+                agent=agent,
+                message_id=str(new_msgs[0].get("id", "")) if new_msgs else None,
+            )
             wake_fire_history = _record_wake_fire(
                 session_id=session_id,
                 seen_ids=seen_ids,

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1032,6 +1033,175 @@ class AgentBridgeTests(unittest.TestCase):
         after = bridge.bridge_process_status()
         self.assertEqual(after.data["wake_breakers"]["open_session_count"], 0)
         self.assertEqual(bridge.wake_breaker_status("codex-live").data["session"], None)
+
+    def test_nudge_peer_grants_bypass_and_watcher_consumes_seen_backlog(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        inbox = bridge.inbox_path("codex")
+        append_jsonl(
+            inbox,
+            {
+                "id": "msg-1",
+                "created_at": "2026-04-29T00:00:00+00:00",
+                "session_id": "codex-live",
+                "from": "claude",
+                "to": "codex",
+                "body": "wake me",
+                "marker_variant": None,
+                "read_at": None,
+                "seen_at": None,
+            },
+        )
+        write_json(
+            bridge.watcher_state_path,
+            {
+                "seen_ids": ["msg-1"],
+                "toasted_ids": [],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+            },
+        )
+        recent_failure = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        write_json(
+            bridge.wake_breaker_path,
+            {
+                "schema_version": 1,
+                "sessions": {
+                    "codex-live": {
+                        "breaker_state": "open",
+                        "opened_at": recent_failure,
+                        "last_failure_at": recent_failure,
+                        "failures": [{"at": recent_failure, "code": "1"}],
+                    }
+                },
+            },
+        )
+
+        grant = bridge.nudge_peer("codex", "codex-live")
+        self.assertTrue(grant.ok)
+        self.assertEqual(grant.status, "granted")
+
+        with patch("watcher.run_command_for_session", return_value={"ok": True, "returncode": 0, "retryable": False}):
+            watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox),
+                    "on_message": "notify",
+                    "on_message_command": "py",
+                },
+                seen_ids={"msg-1"},
+                state_path=bridge.watcher_state_path,
+                toasts_enabled=False,
+            )
+
+        self.assertEqual(bridge.wake_breaker_status("codex-live").data["session"], None)
+        actions = [row.get("action") for row in read_jsonl(bridge.audit_path)]
+        self.assertIn("wake_breaker_bypass_granted", actions)
+        self.assertIn("wake_recovery_backlog_selected", actions)
+        self.assertIn("wake_breaker_bypass_consumed", actions)
+
+    def test_watcher_autoclose_retries_one_seen_backlog_message(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        inbox = bridge.inbox_path("codex")
+        append_jsonl(
+            inbox,
+            {
+                "id": "msg-2",
+                "created_at": "2026-04-29T00:00:00+00:00",
+                "session_id": "codex-live",
+                "from": "claude",
+                "to": "codex",
+                "body": "retry me",
+                "marker_variant": None,
+                "read_at": None,
+                "seen_at": None,
+            },
+        )
+        write_json(
+            bridge.watcher_state_path,
+            {
+                "seen_ids": ["msg-2"],
+                "toasted_ids": [],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+            },
+        )
+        old_failure = (datetime.now(timezone.utc) - timedelta(minutes=16)).isoformat(timespec="seconds")
+        write_json(
+            bridge.wake_breaker_path,
+            {
+                "schema_version": 1,
+                "sessions": {
+                    "codex-live": {
+                        "breaker_state": "open",
+                        "opened_at": old_failure,
+                        "last_failure_at": old_failure,
+                        "failures": [{"at": old_failure, "code": "1"}],
+                    }
+                },
+            },
+        )
+
+        with patch("watcher.run_command_for_session", return_value={"ok": True, "returncode": 0, "retryable": False}):
+            watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox),
+                    "on_message": "notify",
+                    "on_message_command": "py",
+                },
+                seen_ids={"msg-2"},
+                state_path=bridge.watcher_state_path,
+                toasts_enabled=False,
+            )
+
+        self.assertEqual(bridge.wake_breaker_status("codex-live").data["session"], None)
+        actions = [row.get("action") for row in read_jsonl(bridge.audit_path)]
+        self.assertIn("wake_recovery_backlog_selected", actions)
+        self.assertIn("wake_breaker_autoclose_retry", actions)
+
+    def test_backpressure_rejection_rearms_existing_unread_for_nudge(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        first = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] first unread",
+            session_id="codex-live",
+        )
+        self.assertTrue(first.ok)
+        write_json(
+            bridge.watcher_state_path,
+            {
+                "seen_ids": [first.data["id"]],
+                "toasted_ids": [],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+            },
+        )
+
+        second = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] second unread",
+            session_id="codex-live",
+        )
+
+        self.assertFalse(second.ok)
+        watcher_state = json.loads(bridge.watcher_state_path.read_text(encoding="utf-8"))
+        self.assertNotIn(first.data["id"], watcher_state["seen_ids"])
+        actions = [row.get("action") for row in read_jsonl(bridge.audit_path)]
+        self.assertIn("backpressure_rejected_nudge_attempted", actions)
 
     def test_process_lease_heartbeat_and_release(self) -> None:
         lock_path = self.state_dir / "locks" / "watcher.lock"

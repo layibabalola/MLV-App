@@ -1,7 +1,8 @@
 # Agent Bridge - Wake Recovery Loops Spec
 
-**Status:** Proposed
-**Authors:** Claude (proposal); Codex review pending
+**Status:** Implemented for WR1/WR2/WR3 v1; optional WR1a held-send retry
+remains deferred.
+**Authors:** Claude (proposal); Codex implementation
 **Tier:** Tier 1 - direct response to recovery gaps observed 2026-04-29 13:53 UTC after Layers 1-4 shipped (commit d97eaf9c)
 **Depends on:** Layers 1-4 from `WAKE_HARDENING_SPEC.md` + d97eaf9c (D2 breaker, rate limit, parent kill, mark_read backfill) - all of which are live.
 **Motivation:** Layers 1-4 prevent wake storms by tripping the D2 breaker after consecutive failures. Trade-off: when the breaker opens, there's no auto-recovery path beyond the 15-min idle auto-close, which silently re-arms the closed state but does NOT drain accumulated backlog. Today (2026-04-29) we observed: 5 wake failures opened the breaker at 13:53:15 UTC; subsequent messages emitted `wake_skipped_breaker_open`; user manually pasted "check bridge inbox" two hours later (15:52:59 UTC). The receiver may have recovered well before that - we never tried again.
@@ -13,6 +14,35 @@ This spec adds three independent recovery loops so the system self-heals from br
 - **WR3** (time-driven): when the D2 breaker auto-closes after idle, fire one wake to drain the backlog instead of silently re-arming
 
 All three respect the wake-storm safety properties: rate limit (Layer 3) holds, breaker (Layer 4) is preserved as the storm prevention; only WR2 can bypass the breaker, and only on explicit user intent with a 60-second cooldown.
+
+---
+
+## Implemented Behavior
+
+Implemented in the bridge code path:
+
+- WR1: `send_to_peer` backpressure rejection re-arms the existing unread
+  receiver message for the watcher when the breaker is closed and the wake
+  pre-fire rate limit is not active. Audit events distinguish attempted,
+  breaker-blocked, rate-limited, and no-unread outcomes.
+- WR2: `nudge_peer`, `resume_bridge`, and stale `mark_read` grant one-shot
+  breaker bypasses through `wake-failure-windows.json`. The watcher consumes a
+  bypass on the next eligible wake attempt; success closes the breaker, failure
+  keeps the breaker open and records a normal wake failure.
+- WR3: the watcher selects one unread backlog message when an idle breaker is
+  ready to auto-close, removes that message from watcher seen-state if needed,
+  and fires one wake subject to the normal wake pre-fire rate limit.
+
+Implementation note: v1 dispatch is watcher-poll driven rather than direct MCP
+tool invocation of the wake script. This keeps a single wake execution path and
+preserves the existing watcher timeout, rate-limit, provenance, and audit
+guards.
+
+Deferred:
+
+- WR1a held-send retry remains optional and off the shipped path.
+- The health panel surfacing for breaker/recovery state remains tracked by
+  `BRIDGE_HEALTH_PANEL_SPEC.md`.
 
 ---
 

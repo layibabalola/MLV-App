@@ -36,6 +36,10 @@ MAX_MESSAGE_BYTES = 64 * 1024
 SESSION_RETENTION_DAYS = 30
 PENDING_BRIDGE_ACTIONS_SCHEMA_VERSION = 1
 WAKE_BREAKER_SCHEMA_VERSION = 1
+WAKE_BREAKER_BYPASS_COOLDOWN_S = 60
+BREAKER_BYPASS_STALE_MIN = 15
+WAKE_PREFIRE_LIMIT = 2
+WAKE_PREFIRE_WINDOW_S = 10
 EXECUTION_STATE_SCHEMA_VERSION = 1
 EXECUTION_PROOF_TIMEOUT_S = 120
 NON_ACTIONABLE_PENDING_EXECUTION_STATES = {"blocked", "parked", "displaced", "completed"}
@@ -66,6 +70,18 @@ class BridgeResult:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def normalize_agent(agent: str) -> str:
@@ -238,6 +254,10 @@ class AgentBridge:
     @property
     def wake_breaker_path(self) -> Path:
         return self.state_dir / "wake-failure-windows.json"
+
+    @property
+    def watcher_state_path(self) -> Path:
+        return self.state_dir.parent / "watcher-state.json"
 
     @property
     def lock_path(self) -> Path:
@@ -1602,11 +1622,25 @@ class AgentBridge:
                 if row.get("marker_variant") != "control"
             ]
             if delivery_level == INBOX_LEVEL_SESSION and len(unread_work) >= SESSION_BACKPRESSURE_LIMIT:
-                return reject("target %s already has one unread work message for session %s" % (target, delivery_bucket))
+                reason = "target %s already has one unread work message for session %s" % (target, delivery_bucket)
+                event["backpressure_nudge"] = self._request_backpressure_nudge(
+                    agent=target,
+                    session=delivery_bucket,
+                    reason="session_backpressure",
+                )
+                return reject(reason)
             if delivery_level == INBOX_LEVEL_PROJECT and len(unread_work) >= PROJECT_BACKPRESSURE_LIMIT:
-                return reject(
+                reason = (
                     "target %s project inbox %s is full (%d unread >= %d)"
                     % (target, delivery_bucket, len(unread_work), PROJECT_BACKPRESSURE_LIMIT)
+                )
+                event["backpressure_nudge"] = self._request_backpressure_nudge(
+                    agent=target,
+                    session=delivery_bucket,
+                    reason="project_backpressure",
+                )
+                return reject(
+                    reason
                 )
 
             delivered = "From %s:\n%s" % (sender.capitalize(), body)
@@ -1992,9 +2026,11 @@ class AgentBridge:
             now = utc_now()
             matched = False
             changed = False
+            matched_row: Optional[Dict[str, Any]] = None
             for row in rows:
                 if row.get("id") == target_id and (session is None or row.get("session_id") == session):
                     matched = True
+                    matched_row = row
                     if not row.get("read_at"):
                         row["read_at"] = now
                         changed = True
@@ -2009,6 +2045,21 @@ class AgentBridge:
                 if session is None:
                     return BridgeResult(False, "not_found", "No message %s for %s." % (target_id, target))
                 return BridgeResult(False, "not_found", "No message %s for %s in session %s." % (target_id, target, session))
+
+            stale_bypass = None
+            if matched_row is not None:
+                created_at = parse_iso_datetime(matched_row.get("created_at"))
+                row_session = str(matched_row.get("session_id") or "")
+                if (
+                    row_session
+                    and created_at is not None
+                    and (datetime.now(timezone.utc) - created_at) >= timedelta(minutes=BREAKER_BYPASS_STALE_MIN)
+                ):
+                    stale_bypass = self._grant_wake_breaker_bypass(
+                        row_session,
+                        reason="stale_mark_read",
+                        granted_by=target,
+                    )
 
             if changed:
                 write_jsonl(path, rows)
@@ -2029,8 +2080,145 @@ class AgentBridge:
                 True,
                 "marked_read" if changed else "already_read",
                 "Message %s is marked read." % target_id,
-                {"message_id": target_id, "changed": changed},
+                {"message_id": target_id, "changed": changed, "stale_bypass": stale_bypass},
             )
+
+    def _normalize_wake_breaker_session(self, record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        data = dict(record or {})
+        data.setdefault("failures", [])
+        data.setdefault("breaker_state", "closed")
+        data.setdefault("opened_at", None)
+        data.setdefault("last_failure_at", None)
+        data.setdefault("last_success_at", None)
+        data.setdefault("exit_code_distribution", {})
+        data.setdefault("notified_open_at", None)
+        try:
+            data["bypass_grants"] = max(0, int(data.get("bypass_grants") or 0))
+        except (TypeError, ValueError):
+            data["bypass_grants"] = 0
+        data.setdefault("last_bypass_granted_at", None)
+        data.setdefault("last_bypass_consumed_at", None)
+        data.setdefault("last_bypass_reason", None)
+        return data
+
+    def _grant_wake_breaker_bypass(
+        self,
+        session: str,
+        *,
+        reason: str,
+        granted_by: str,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+        sessions = payload.setdefault("sessions", {})
+        record = self._normalize_wake_breaker_session(sessions.get(session))
+        if record.get("breaker_state") != "open":
+            return {"granted": False, "status": "breaker_closed", "session_id": session}
+        now_dt = datetime.now(timezone.utc)
+        last_grant = parse_iso_datetime(record.get("last_bypass_granted_at"))
+        if (
+            not force
+            and last_grant is not None
+            and (now_dt - last_grant).total_seconds() < WAKE_BREAKER_BYPASS_COOLDOWN_S
+        ):
+            return {
+                "granted": False,
+                "status": "cooldown",
+                "session_id": session,
+                "cooldown_seconds": WAKE_BREAKER_BYPASS_COOLDOWN_S,
+            }
+        record["bypass_grants"] = int(record.get("bypass_grants") or 0) + 1
+        record["last_bypass_granted_at"] = utc_now()
+        record["last_bypass_reason"] = reason
+        sessions[session] = record
+        payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
+        payload["updated_at"] = utc_now()
+        write_json(self.wake_breaker_path, payload)
+        self._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": utc_now(),
+                "action": "wake_breaker_bypass_granted",
+                "accepted": True,
+                "session_id": session,
+                "reason": reason,
+                "granted_by": granted_by,
+                "bypass_grants": record["bypass_grants"],
+            }
+        )
+        return {
+            "granted": True,
+            "status": "granted",
+            "session_id": session,
+            "bypass_grants": record["bypass_grants"],
+        }
+
+    def _wake_breaker_open_for_session(self, session: str) -> bool:
+        payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+        record = self._normalize_wake_breaker_session((payload.get("sessions") or {}).get(session))
+        return record.get("breaker_state") == "open"
+
+    def _wake_prefire_limited_for_session(self, session: str) -> bool:
+        state = read_json(
+            self.watcher_state_path,
+            {"seen_ids": [], "pending_wake_verifications": [], "wake_fire_history": []},
+        )
+        now_dt = datetime.now(timezone.utc)
+        recent = []
+        for item in state.get("wake_fire_history", []):
+            if str(item.get("session_id") or "") != session:
+                continue
+            fired_at = parse_iso_datetime(item.get("at"))
+            if fired_at is not None and (now_dt - fired_at).total_seconds() <= WAKE_PREFIRE_WINDOW_S:
+                recent.append(item)
+        return len(recent) >= WAKE_PREFIRE_LIMIT
+
+    def _request_backpressure_nudge(self, *, agent: str, session: str, reason: str) -> Dict[str, Any]:
+        if self._wake_breaker_open_for_session(session):
+            status = "backpressure_rejected_no_nudge_breaker_open"
+            result = {"status": status, "session_id": session, "reason": "wake_breaker_open"}
+        elif self._wake_prefire_limited_for_session(session):
+            status = "backpressure_rejected_no_nudge_rate_limited"
+            result = {"status": status, "session_id": session, "reason": "wake_rate_limited"}
+        else:
+            unread_work = [
+                row for row in self._unread_for(agent, session)
+                if row.get("marker_variant") != "control"
+            ]
+            if not unread_work:
+                status = "backpressure_rejected_no_nudge_no_unread"
+                result = {"status": status, "session_id": session, "reason": "no_unread_work"}
+            else:
+                message_id = str(unread_work[0].get("id") or "")
+                watcher_state = read_json(
+                    self.watcher_state_path,
+                    {"seen_ids": [], "toasted_ids": [], "pending_wake_verifications": [], "paused_wake_messages": [], "unknown_origin_warnings": [], "wake_fire_history": []},
+                )
+                seen_ids = [str(item) for item in watcher_state.get("seen_ids", [])]
+                changed = message_id in seen_ids
+                if changed:
+                    watcher_state["seen_ids"] = [item for item in seen_ids if item != message_id]
+                    write_json(self.watcher_state_path, watcher_state)
+                status = "backpressure_rejected_nudge_attempted"
+                result = {
+                    "status": status,
+                    "session_id": session,
+                    "message_id": message_id,
+                    "wake_rearmed": changed,
+                }
+        self._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": utc_now(),
+                "action": result["status"],
+                "accepted": True,
+                "agent": agent,
+                "session_id": session,
+                "trigger_reason": reason,
+                **{k: v for k, v in result.items() if k not in {"status"}},
+            }
+        )
+        return result
 
     def wake_breaker_status(self, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
@@ -2089,6 +2277,38 @@ class AgentBridge:
                 "cleared" if changed else "already_clear",
                 "Wake breaker cleared for %s." % session,
                 {"session_id": session, "changed": changed},
+            )
+
+    def nudge_peer(self, agent: str, session_id: str) -> BridgeResult:
+        with self._locked():
+            try:
+                target = normalize_agent(agent)
+                session = normalize_session(session_id)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            if self._wake_breaker_open_for_session(session):
+                grant = self._grant_wake_breaker_bypass(
+                    session,
+                    reason="nudge_peer",
+                    granted_by=target,
+                    force=False,
+                )
+                return BridgeResult(
+                    True,
+                    grant["status"],
+                    "Wake bypass %s for %s." % (grant["status"], session),
+                    {"agent": target, "session_id": session, "wake_bypass": grant},
+                )
+            nudge = self._request_backpressure_nudge(
+                agent=target,
+                session=session,
+                reason="nudge_peer",
+            )
+            return BridgeResult(
+                True,
+                nudge["status"],
+                "Wake nudge %s for %s." % (nudge["status"], session),
+                {"agent": target, "session_id": session, "nudge": nudge},
             )
 
     def _message_lifecycle_status(self, row: Dict[str, Any]) -> str:
@@ -3047,8 +3267,31 @@ class AgentBridge:
             state = self._load_state()
             state["paused"] = False
             self._save_state(state)
-            self._audit({"id": str(uuid.uuid4()), "timestamp": utc_now(), "action": "resume_bridge", "accepted": True})
-            return BridgeResult(True, "active", "Bridge resumed.")
+            payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+            open_sessions = [
+                session_id
+                for session_id, record in (payload.get("sessions") or {}).items()
+                if self._normalize_wake_breaker_session(record).get("breaker_state") == "open"
+            ]
+            grants = [
+                self._grant_wake_breaker_bypass(
+                    str(session_id),
+                    reason="resume_bridge",
+                    granted_by="system",
+                    force=True,
+                )
+                for session_id in open_sessions
+            ]
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "resume_bridge",
+                    "accepted": True,
+                    "wake_bypass_grants": grants,
+                }
+            )
+            return BridgeResult(True, "active", "Bridge resumed.", {"wake_bypass_grants": grants})
 
     def clear_inbox(self, agent: Optional[str] = None, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
