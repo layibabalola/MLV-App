@@ -324,6 +324,13 @@ Waypoint rule:
   - answer them briefly,
   - then immediately resume the highest-priority actionable ledger item,
   - unless the user explicitly reprioritized the work or the answer revealed a real blocker or hidden-risk decision.
+- Explicit reprioritization rule:
+  - a user process/debugging/meta question does **not** by itself reprioritize away from the active ledger item,
+  - treat those turns as brief interrupt work unless the user clearly says to pause, switch, stop, or implement the process/meta topic itself,
+  - after answering a meta/process question, the default next action is to resume draining the top actionable ledger item in the same turn.
+- Supersession note:
+  - this supersedes any looser interpretation that `the latest user prompt automatically becomes the whole-turn main task`,
+  - the latest prompt controls the next answer, but not the post-answer execution path unless it clearly changes implementation priority.
 - Do not let meta-work, status narration, or workflow discussion quietly become the new main task when a higher-priority actionable ledger item already exists.
 - If a different item becomes the new active task, say why explicitly:
   - `Reprioritizing from SH2 auto-rollback to <item> because <reason>.`
