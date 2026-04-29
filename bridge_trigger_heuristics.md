@@ -76,6 +76,15 @@ For bridge hygiene, distinguish `read` from `actioned`:
 - After handling a message seen with `mark_read=false`, mark it read explicitly by id.
 - If a non-destructive read already surfaced the message body to Codex, mark it read in the bridge immediately, even if the requested action will be deferred to a later turn.
 - When deferring the actual work, say so explicitly as `read but not actioned yet` rather than implying the message remains unread.
+- If a surfaced bridge message contains substantive review, a proposal, a requested answer, or a priority-changing signal, do not treat inbox hygiene as the completed task.
+- After surfacing such a message, Codex must do one of these in the same work stretch:
+  - send the bridge reply,
+  - say explicitly that the item is `read but parked` and why,
+  - or say explicitly that another higher-priority item displaced it.
+- If the message did not actually change priority, resume the interrupted implementation or investigation immediately after the inbox report instead of stopping at status.
+- A bridge inbox check is complete only when both states are true:
+  - surfaced messages were marked read,
+  - any substantive surfaced message was either actioned, explicitly parked, or explicitly displaced.
 
 For bridge coordination, distinguish `follow-on work exists` from `I am blocked waiting`:
 
@@ -137,6 +146,102 @@ Declared wait-state rule:
 - A real wait state must be concrete enough to bridge.
 - If the wait cannot be articulated that concretely, it is not a blocking wait state and must not be described as one.
 
+`WORKING_ON_IT` contract:
+
+- Treat `WORKING_ON_IT` as a work-state contract, not a courtesy ping.
+- After sending `WORKING_ON_IT`, Codex enters a protected execution window for the named task.
+- During that window, Codex should only do one of these:
+  - execute the promised work,
+  - answer a true higher-priority interrupt,
+  - renew the `WORKING_ON_IT`,
+  - close it with `IMPLEMENTATION_UPDATE`, `SPEC_REVIEW_RESULT`, `PARKED`, `DISPLACED`, or `TIMED_OUT`.
+- Do not let general status discussion, repeated planning, or routine inbox hygiene become the new main task while a `WORKING_ON_IT` is open.
+- Every `WORKING_ON_IT` must name the next concrete checkpoint when possible, e.g.:
+  - first patch landed,
+  - tests running,
+  - commit created,
+  - review drafted.
+- If Codex gave an ETA, Codex must either:
+  - hit that checkpoint and close the loop before the ETA, or
+  - send a renewed `WORKING_ON_IT` before the ETA expires.
+- If no ETA was given, Codex must still send a renewal once it becomes clear the work will not close in the same work stretch.
+- `WORKING_ON_IT` does not authorize silence. It only buys time until the next explicit state transition.
+- If Codex is interrupted by `check bridge inbox` or a status question while a `WORKING_ON_IT` is open:
+  - answer briefly,
+  - classify the task as `resume`, `displaced`, or `parked`,
+  - then follow that classification immediately.
+- Default classification is `resume`. If Codex does not explicitly say otherwise, it must return to the protected task immediately after the interrupt.
+- A stale `WORKING_ON_IT` is a coordination miss even if the user did not complain.
+
+`WORKING_ON_IT` watchdog strategy:
+
+- Do not use a blind periodic heartbeat as the primary fix.
+- Preferred backstop is a conditional watchdog that arms only when a `WORKING_ON_IT` is sent.
+- The watchdog should fire at the declared ETA, or at a conservative default threshold if no ETA was given.
+- The watchdog reminder should ask for a valid next state, not a vague status:
+  - `IMPLEMENTATION_UPDATE`
+  - renewed `WORKING_ON_IT`
+  - `PARKED`
+  - `DISPLACED`
+  - `TIMED_OUT`
+- Treat the watchdog as detection/escalation only. It does not replace the protected execution-window rule above.
+
+Interrupt-discipline rule:
+
+- Bridge coordination must not become the reason execution stalls.
+- During active implementation windows (`WORKING_ON_IT`, `IMPLEMENTATION_START`, or an explicit committed edit), treat bridge traffic by class:
+  - `urgent`:
+    - true blockers
+    - synchronous `confirm ... before ...` gates
+    - watchdog reminders at threshold
+    - explicit user override
+    - these may interrupt execution immediately
+  - `important but non-urgent`:
+    - audits
+    - spec reviews
+    - status digests
+    - design proposals
+    - these should usually be `read and parked` until the next checkpoint
+  - `informational`:
+    - ACKs
+    - closed-loop summaries
+    - passive status with `ACTION_REQUESTED: none`
+    - these must not steal the active work slot
+- Default rule: execution wins over non-urgent coordination traffic.
+- If a non-urgent message is surfaced during protected execution:
+  - mark it read,
+  - if needed, send `WORKING_ON_IT` or explicitly park it,
+  - resume the protected task immediately.
+- Process non-urgent coordination at explicit checkpoints when possible, e.g.:
+  - first patch landed,
+  - tests started or finished,
+  - commit created,
+  - renewal point for an open `WORKING_ON_IT`.
+- Sender-side quiet mode is part of the same discipline:
+  - if Codex knows Claude is in a protected execution window, avoid sending non-urgent traffic unless it changes priority, is the one allowed watchdog reminder, or the user explicitly asked for live relay.
+- The reciprocal expectation applies to Codex as well when Claude is the one executing.
+
+Waypoint rule:
+
+- A successful checkpoint is not automatically a stopping point.
+- If the user asked Codex to `keep going`, `iterate until done`, or gave another open-ended execution instruction, treat a commit, green test run, or completed slice as a waypoint, not an endpoint.
+- After every substantive checkpoint, Codex must explicitly decide one of:
+  - `continue next slice`
+  - `blocked`
+  - `done because the user-requested scope is actually complete`
+- If known in-scope work still remains and there is no real blocker, default to `continue next slice`.
+- Do not let `slice complete` silently become `request complete`.
+- Before ending a long-running implementation turn after a commit or verification checkpoint, Codex should sanity-check:
+  - are there still known remaining items in scope?
+  - did the user explicitly ask for continued iteration?
+  - is there a natural next slice already identified?
+- If the answers are `yes`, `yes`, and `yes`, continue rather than close.
+- Only stop after a successful checkpoint when one of these is true:
+  - all requested work is complete,
+  - a real blocker exists,
+  - the user redirected the task,
+  - the next step has hidden consequences that require explicit confirmation.
+
 Closed-on-send exclusion:
 
 - When summarizing `still in flight`, `open threads`, or `waiting on Claude`, do not include messages whose `ACTION_REQUESTED` is `none`.
@@ -180,6 +285,7 @@ Bridge spec discipline:
 - When drafting or materially changing a bridge design spec, protocol spec, lifecycle doc, or trigger heuristic, send `SPEC_REVIEW_REQUEST` to Claude automatically.
 - When beginning implementation of a shared bridge design, send `IMPLEMENTATION_START` before editing.
 - After committing shared bridge behavior, send `IMPLEMENTATION_UPDATE` with the commit hash, verification, and known follow-up gaps.
+- Treat a substantive bridge commit as incomplete until the matching peer sync message has been sent in the same work stretch.
 - When giving or revising a bridge hardening score, smoke-test confidence score, roadmap-readiness judgement, or "can this reach 10/10 yet?" answer, send `READINESS_ASSESSMENT` to Claude automatically.
 - If the assessment names a live defect or a test gap that caps the score, also include `RISK_DELTA` details and whether the item is required for resilience or merely roadmap/config polish.
 - Distinguish current operational confidence from full roadmap completeness; do not collapse "smoke coverage can improve" into "all roadmap phases must be complete" without stating which missing items actually block hardening.
