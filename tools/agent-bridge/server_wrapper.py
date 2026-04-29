@@ -1,5 +1,5 @@
 import argparse
-import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -81,7 +81,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     except Exception as exc:
         print("agent-bridge server wrapper audit failed: %s" % exc, file=sys.stderr, flush=True)
 
-    os.execv(sys.executable, command)
+    # subprocess.run rather than os.execv: on Windows, os.execv does not quote
+    # argv elements containing spaces, so a server.py path under "C:\!Layi Wkspc\..."
+    # gets re-tokenized and Python fails with `can't find '__main__' module in '...'`.
+    completed = subprocess.run(command)
+    sys.exit(completed.returncode)
 
 
 if __name__ == "__main__":

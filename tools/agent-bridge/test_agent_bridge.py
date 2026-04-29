@@ -184,6 +184,41 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("agent-bridge root moved", result.stderr)
 
+    def test_server_wrapper_launches_server_with_space_in_bridge_root(self) -> None:
+        # Regression for the os.execv-on-Windows argv-quoting bug fixed at
+        # server_wrapper.py:84. Pre-fix, os.execv joined argv elements with
+        # bare spaces, so a server.py path containing a space (e.g. under
+        # "C:\!Layi Wkspc\...") was re-tokenized in the child and Python
+        # exited with "can't find '__main__' module in 'C:\\!Layi'".
+        # Forces the failure surface by deliberately putting a space in the
+        # bridge-root path; asserts the wrapper reached past the audit
+        # breadcrumb (proving exec/spawn was attempted) and the child did
+        # not see a mangled argv. See memory/windows_execv_quoting.md.
+        bridge_root = self.tempdir / "path with space" / "root"
+        bridge_root.parent.mkdir(parents=True, exist_ok=True)
+        wrapper = Path(__file__).resolve().parent / "server_wrapper.py"
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(wrapper), "--bridge-root", str(bridge_root)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            stderr = proc.stderr
+        except subprocess.TimeoutExpired as exc:
+            stderr_raw = exc.stderr
+            if isinstance(stderr_raw, bytes):
+                stderr = stderr_raw.decode("utf-8", errors="replace")
+            else:
+                stderr = stderr_raw or ""
+
+        self.assertNotIn("can't find '__main__' module", stderr)
+        audit_log = bridge_root / "state" / "messages.jsonl"
+        self.assertTrue(audit_log.exists(), f"wrapper did not reach audit; stderr={stderr!r}")
+        self.assertIn("mcp_server_wrapper_launch", audit_log.read_text(encoding="utf-8"))
+
     def test_migrate_root_dry_run_does_not_create_target(self) -> None:
         source = self.tempdir / "source-root"
         target = self.tempdir / "target-root"
