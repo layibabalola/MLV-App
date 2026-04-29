@@ -144,6 +144,23 @@ A new read-write tool for self-healing orphaned buckets.
 - [ ] Sends an internal audit event `bootstrap_rotation_routed_messages` with count
 - [ ] Tests: synthetic inbox with unread rows in old bucket; after rotation, rows are reachable from new active session
 
+### SR8 - Backpressure rejection auto-nudges receiver
+
+**Motivation:** when `send_to_peer` is rejected because the receiver already has unread work, the current behavior is "fail and tell sender." The receiver is not nudged to drain. This produces a deadlock-like state where the sender knows there's an issue but has no path to escalate, and the receiver may be idle and would happily drain if poked. Observed 2026-04-29 ~13:53 UTC: send refused due to abe057cc unread; no nudge fired; user had to paste "check bridge inbox" manually two hours later.
+
+- [ ] When `send_to_peer` returns `error_kind="backpressure_unread_work"`, server SHALL ALSO attempt to fire a wake nudge to the receiver before returning the error
+- [ ] Wake nudge honors all wake-storm protections (Layer 3 rate limit, Layer 4 D2 breaker) - it does NOT bypass them, so a receiver in a known-bad state still doesn't get spammed
+- [ ] Audit event `backpressure_rejected_with_nudge` per occurrence (or `backpressure_rejected_no_nudge_breaker_open` if breaker prevented the nudge)
+- [ ] The rejection error message tells the caller whether the nudge fired or was suppressed
+- [ ] Optional SR8a: server holds the queued send for up to N seconds (default 30) after the receiver marks_read, then writes it; sender's MCP call awaits up to that ceiling. Behind a flag for v1; can ship in a follow-on commit
+- [ ] Tests:
+  - `test_sr8_backpressure_rejection_fires_nudge_when_breaker_closed`
+  - `test_sr8_backpressure_rejection_skips_nudge_when_breaker_open`
+  - `test_sr8_backpressure_rejection_emits_correct_audit_event_per_path`
+  - `test_sr8_nudge_honors_rate_limit` (rapid backpressures don't escape Layer 3)
+  - (SR8a) `test_sr8a_held_send_writes_after_receiver_drains`
+  - (SR8a) `test_sr8a_held_send_times_out_returns_error`
+
 ---
 
 ## Failure Modes
@@ -200,9 +217,9 @@ A new read-write tool for self-healing orphaned buckets.
 
 **SR-Phase 4 (optional):** SR5 param rename. Backwards-compat deprecation cycle.
 
-**SR-Phase 5:** SR6 + SR7. Documentation cleanup + bootstrap-rotation safety.
+**SR-Phase 5:** SR6 + SR7 + SR8. Documentation cleanup + bootstrap-rotation safety + backpressure auto-nudge. SR8 sits in Phase 5 (not earlier) because it depends on Layers 1-4 wake protections being live, which they now are post-d97eaf9c.
 
-Phases 1-3 are the high-value work. 4-5 are polish.
+Phases 1-3 are the high-value work. 4-5 are polish + recovery loops.
 
 ---
 

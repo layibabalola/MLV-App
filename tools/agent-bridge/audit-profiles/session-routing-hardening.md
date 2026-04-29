@@ -93,6 +93,23 @@
 - [ ] Tests:
   - `test_bootstrap_rotation_rekeys_old_bucket_unread`
 
+### SR8 - Backpressure rejection auto-nudges receiver
+
+- [ ] `send_to_peer` rejection with `error_kind="backpressure_unread_work"` ALSO attempts a wake nudge before returning
+- [ ] Nudge honors Layer 3 rate limit and Layer 4 D2 breaker (does NOT bypass)
+- [ ] Audit event distinguishes nudge-fired vs nudge-suppressed-by-breaker
+- [ ] Rejection error message reports nudge state to caller
+- [ ] (Optional SR8a) Held-send retry: server queues the rejected send for up to N seconds, writes after receiver drains; sender's MCP call awaits up to ceiling; behind flag in v1
+- [ ] Tests:
+  - `test_sr8_backpressure_rejection_fires_nudge_when_breaker_closed`
+  - `test_sr8_backpressure_rejection_skips_nudge_when_breaker_open`
+  - `test_sr8_backpressure_rejection_emits_correct_audit_event_per_path`
+  - `test_sr8_nudge_honors_rate_limit`
+  - (SR8a) `test_sr8a_held_send_writes_after_receiver_drains`
+  - (SR8a) `test_sr8a_held_send_times_out_returns_error`
+
+**Important pushback:** SR8 must NOT bypass Layer 4 D2 breaker. Whole-system safety property. Audit profile fail-fast: if a commit ships SR8 with breaker bypass, STATUS=fail regardless of other coverage.
+
 ---
 
 ## Required test pass
