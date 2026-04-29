@@ -1023,6 +1023,34 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertTrue(any(row.get("action") == "wake_breaker_open" for row in audit_rows))
         self.assertTrue(any(row.get("action") == "wake_skipped_breaker_open" and row.get("message_id") == "msg-breaker-suppressed" for row in audit_rows))
 
+    def test_07j_focus_steal_exit_does_not_open_wake_breaker(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path = self.tempdir / "watcher-state.json"
+
+        with patch("watcher.notify_terminal"):
+            for _ in range(10):
+                watcher._record_wake_failure(
+                    state_path=state_path,
+                    agent="codex",
+                    session_id="codex-live",
+                    code="12",
+                    inbox_path=inbox_path,
+                )
+
+        breaker_path = self.state_dir / "wake-failure-windows.json"
+        if breaker_path.exists():
+            breaker_state = json.loads(breaker_path.read_text(encoding="utf-8"))
+            self.assertNotIn("codex-live", breaker_state.get("sessions", {}))
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        exempt_events = [row for row in audit_rows if row.get("action") == "wake_failure_breaker_exempt"]
+        self.assertEqual(len(exempt_events), 10)
+        self.assertTrue(all(row.get("code") == "12" for row in exempt_events))
+
     def test_07k_resume_wake_for_session_clears_breaker(self) -> None:
         bridge = AgentBridge(self.state_dir)
         inbox_path = self.state_dir / "inbox-codex.jsonl"

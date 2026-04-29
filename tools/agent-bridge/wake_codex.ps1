@@ -202,7 +202,7 @@ if (-not $RunInnerWake) {
         if (-not $child.WaitForExit($TotalRuntimeTimeoutSeconds * 1000)) {
             Write-Host ("[wake_codex] Total runtime exceeded " + $TotalRuntimeTimeoutSeconds + "s. Killing stuck wake helper.")
             Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
-            exit 1
+            exit 15
         }
         exit $child.ExitCode
     } finally {
@@ -249,7 +249,7 @@ try {
     }
     if (-not $codex) {
         Write-Host "[wake_codex] No Codex window found after deeplink navigation. Aborting."
-        exit 1
+        exit 14
     }
     $codexHwnd  = $codex.MainWindowHandle
     $codexTitle = Get-WindowTitle -hWnd $codexHwnd
@@ -273,8 +273,8 @@ try {
 
     $nowFg = [Win32Wake]::GetForegroundWindow()
     if ($nowFg -ne $codexHwnd) {
-        Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground. Aborting."
-        exit 1
+        Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground; likely blocked by Windows focus-steal protection. Aborting."
+        exit 12
     }
 
     if ($DryRun) {

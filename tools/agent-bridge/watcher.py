@@ -51,6 +51,9 @@ COMPACT_SIZE_MB = 1.0          # also compact if inbox exceeds this size
 WAKE_ACK_GRACE_PERIOD_S = 30
 WAKE_MAX_RETRIES = 3
 WAKE_PERMANENT_EXIT_CODES = {3, 11}
+WAKE_FOCUS_STEAL_EXIT_CODE = 12
+WAKE_BREAKER_EXEMPT_EXIT_CODES = {WAKE_FOCUS_STEAL_EXIT_CODE}
+WAKE_BREAKER_EXEMPT_EXIT_CODE_STRINGS = {str(item) for item in WAKE_BREAKER_EXEMPT_EXIT_CODES}
 WAKE_PREFIRE_LIMIT = 2
 WAKE_PREFIRE_WINDOW_S = 10
 WAKE_PREFIRE_DEFER_S = 10
@@ -282,12 +285,25 @@ def _record_wake_failure(
     code: str,
     inbox_path: Path,
 ) -> bool:
+    code_text = str(code or "unknown")
+    if code_text in WAKE_BREAKER_EXEMPT_EXIT_CODE_STRINGS:
+        _append_wake_audit(
+            inbox_path,
+            {
+                "action": "wake_failure_breaker_exempt",
+                "agent": agent,
+                "session_id": session_id,
+                "code": code_text,
+                "reason": "focus_steal_blocked",
+            },
+        )
+        return False
     payload = _load_wake_breakers(state_path)
     sessions = payload.setdefault("sessions", {})
     record = _normalize_breaker_session(sessions.get(session_id))
     now = datetime.now(timezone.utc)
     record = _breaker_prune_failures(record, now)
-    record["failures"].append({"at": now.isoformat(timespec="seconds"), "code": code})
+    record["failures"].append({"at": now.isoformat(timespec="seconds"), "code": code_text})
     record["last_failure_at"] = now.isoformat(timespec="seconds")
     record = _breaker_prune_failures(record, now)
     was_open = record.get("breaker_state") == "open"
