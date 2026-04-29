@@ -31,6 +31,7 @@ param(
     [string]$LockFile             = "$env:USERPROFILE\.agent-bridge\wake_codex.lock",
     [switch]$DryRun,
     [switch]$FindOnly,
+    [switch]$PrintInnerCommand,
     [string]$ProcessName          = "Codex",
     [switch]$RunInnerWake
 )
@@ -89,6 +90,32 @@ function Get-WindowTitle {
     return $sb.ToString()
 }
 
+function ConvertTo-PowerShellSingleQuotedLiteral {
+    param([string]$Value)
+    if ($null -eq $Value) {
+        return "''"
+    }
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function New-InnerWakeCommand {
+    $innerCommandParts = @(
+        "& " + (ConvertTo-PowerShellSingleQuotedLiteral $PSCommandPath),
+        "-RunInnerWake",
+        "-Message " + (ConvertTo-PowerShellSingleQuotedLiteral $Message),
+        "-ThreadId " + (ConvertTo-PowerShellSingleQuotedLiteral $ThreadId),
+        "-IdleThresholdSeconds " + [string]$IdleThresholdSeconds,
+        "-MaxWaitSeconds " + [string]$MaxWaitSeconds,
+        "-TotalRuntimeTimeoutSeconds " + [string]$TotalRuntimeTimeoutSeconds,
+        "-LockFile " + (ConvertTo-PowerShellSingleQuotedLiteral $LockFile),
+        "-ProcessName " + (ConvertTo-PowerShellSingleQuotedLiteral $ProcessName)
+    )
+    if ($DryRun) {
+        $innerCommandParts += "-DryRun"
+    }
+    return ($innerCommandParts -join " ")
+}
+
 function Get-IdleSeconds {
     $info = New-Object Win32Wake+LASTINPUTINFO
     $info.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
@@ -117,6 +144,11 @@ function Open-CodexThread {
     Write-Host ("[wake_codex] Opening Codex thread deeplink: " + $uri)
     Start-Process $uri
     Start-Sleep -Milliseconds 1200
+}
+
+if ($PrintInnerCommand -and -not $RunInnerWake) {
+    Write-Host (New-InnerWakeCommand)
+    exit 0
 }
 
 # --- Stage 1: locate ---
@@ -156,31 +188,15 @@ if (-not $RunInnerWake) {
     $PID | Set-Content -Path $LockFile -NoNewline
 
     try {
+        $innerCommand = New-InnerWakeCommand
+        $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($innerCommand))
         $argumentList = @(
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
-            "-File",
-            $PSCommandPath,
-            "-RunInnerWake",
-            "-Message",
-            $Message,
-            "-ThreadId",
-            $ThreadId,
-            "-IdleThresholdSeconds",
-            [string]$IdleThresholdSeconds,
-            "-MaxWaitSeconds",
-            [string]$MaxWaitSeconds,
-            "-TotalRuntimeTimeoutSeconds",
-            [string]$TotalRuntimeTimeoutSeconds,
-            "-LockFile",
-            $LockFile,
-            "-ProcessName",
-            $ProcessName
+            "-EncodedCommand",
+            $encodedCommand
         )
-        if ($DryRun) {
-            $argumentList += "-DryRun"
-        }
 
         $child = Start-Process -FilePath "powershell.exe" -ArgumentList $argumentList -WindowStyle Hidden -PassThru
         if (-not $child.WaitForExit($TotalRuntimeTimeoutSeconds * 1000)) {

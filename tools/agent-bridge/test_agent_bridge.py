@@ -220,6 +220,46 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(audit_log.exists(), f"wrapper did not reach audit; stderr={stderr!r}")
         self.assertIn("mcp_server_wrapper_launch", audit_log.read_text(encoding="utf-8"))
 
+    def test_wake_codex_builds_quoted_inner_command_for_space_paths(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        lock_dir = self.tempdir / "path with space"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_dir / "wake codex lock.txt"
+
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-Message",
+                "check bridge inbox from test",
+                "-ThreadId",
+                "",
+                "-IdleThresholdSeconds",
+                "0",
+                "-MaxWaitSeconds",
+                "1",
+                "-TotalRuntimeTimeoutSeconds",
+                "5",
+                "-PrintInnerCommand",
+                "-LockFile",
+                str(lock_file),
+                "-ProcessName",
+                "__codex_missing_process__",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"& '{script}'", result.stdout)
+        self.assertIn(f"-LockFile '{lock_file}'", result.stdout)
+        self.assertIn("-Message 'check bridge inbox from test'", result.stdout)
+
     def test_migrate_root_dry_run_does_not_create_target(self) -> None:
         source = self.tempdir / "source-root"
         target = self.tempdir / "target-root"
