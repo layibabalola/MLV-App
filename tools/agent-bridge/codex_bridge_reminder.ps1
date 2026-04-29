@@ -153,6 +153,121 @@ function Resolve-BridgeRoot {
     return $Fallback
 }
 
+function Get-HeuristicsDigest {
+    param(
+        [string]$WorkspaceRoot
+    )
+
+    $heuristicsPath = Join-Path $WorkspaceRoot "bridge_trigger_heuristics.md"
+    if (-not (Test-Path $heuristicsPath)) {
+        return "rules=missing"
+    }
+
+    $version = $null
+    try {
+        $version = (git -C $WorkspaceRoot log -1 --format=%h -- bridge_trigger_heuristics.md 2>$null | Select-Object -First 1).Trim()
+    } catch {
+        $version = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        try {
+            $version = (Get-Item $heuristicsPath).LastWriteTimeUtc.ToString("yyyyMMddTHHmmssZ")
+        } catch {
+            $version = "unknown"
+        }
+    }
+
+    return "rules=$version active=inbox_end+ledger_every_turn"
+}
+
+function Get-NextPendingBridgeActionDigest {
+    param(
+        [string]$StateDir,
+        [string]$OwnerAgent = "codex"
+    )
+
+    $path = Join-Path $StateDir "pending-actions.json"
+    if (-not (Test-Path $path)) {
+        return "ledger=empty"
+    }
+
+    try {
+        $payload = Get-Content -Raw $path | ConvertFrom-Json
+    } catch {
+        return "ledger=unreadable"
+    }
+
+    $priorityOrder = @{
+        urgent = 0
+        high = 1
+        normal = 2
+        low = 3
+    }
+
+    $pending = @()
+    foreach ($action in @($payload.actions)) {
+        if ($null -eq $action) {
+            continue
+        }
+        if ([string]$action.owner_agent -ne $OwnerAgent) {
+            continue
+        }
+        if ([string]$action.status -ne "pending") {
+            continue
+        }
+
+        $priority = [string]$action.priority
+        if (-not $priorityOrder.ContainsKey($priority)) {
+            $priority = "normal"
+        }
+
+        $dueBucket = 1
+        $dueValue = [datetimeoffset]::MaxValue
+        if (-not [string]::IsNullOrWhiteSpace([string]$action.due_at)) {
+            try {
+                $dueValue = [datetimeoffset]::Parse([string]$action.due_at)
+                $dueBucket = 0
+            } catch {
+                $dueValue = [datetimeoffset]::MaxValue
+                $dueBucket = 1
+            }
+        }
+
+        $createdValue = [datetimeoffset]::MaxValue
+        if (-not [string]::IsNullOrWhiteSpace([string]$action.created_at)) {
+            try {
+                $createdValue = [datetimeoffset]::Parse([string]$action.created_at)
+            } catch {
+                $createdValue = [datetimeoffset]::MaxValue
+            }
+        }
+
+        $pending += [pscustomobject]@{
+            action = $action
+            priorityRank = $priorityOrder[$priority]
+            dueBucket = $dueBucket
+            dueValue = $dueValue
+            createdValue = $createdValue
+        }
+    }
+
+    if ($pending.Count -eq 0) {
+        return "ledger=empty"
+    }
+
+    $top = $pending |
+        Sort-Object priorityRank, dueBucket, dueValue, createdValue |
+        Select-Object -First 1
+
+    $summary = [string]$top.action.summary
+    if ($summary.Length -gt 72) {
+        $summary = $summary.Substring(0, 69) + "..."
+    }
+    $priority = [string]$top.action.priority
+    $actionId = [string]$top.action.id
+    return "ledger_top=$priority $actionId $summary"
+}
+
 function Get-BridgeRuntimeState {
     param(
         [string]$RegistryPath,
@@ -209,11 +324,15 @@ $toastEnabled = Get-ReminderToastsEnabled -Path $SettingsPath
 $bridgeState = Get-BridgeRuntimeState -RegistryPath $SessionRegistryPath -WatcherConfigPath $WatcherConfigPath -WatcherPidPath $WatcherPidPath -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket
 $resolvedBridgeRoot = Resolve-BridgeRoot -CandidatePaths @($SessionRegistryPath, $WatcherConfigPath, $WatcherPidPath, $SettingsPath, $BridgeWatchFlagPath, $LogPath) -Fallback $bridgeRoot
 $resolvedStateDir = Join-Path $resolvedBridgeRoot "state"
+$heuristicsDigest = Get-HeuristicsDigest -WorkspaceRoot $WorkspaceRoot
+$ledgerDigest = Get-NextPendingBridgeActionDigest -StateDir $resolvedStateDir -OwnerAgent "codex"
 
 $stateLine = "Bridge state: $bridgeState"
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
+$digestLine = "Bridge digest: $heuristicsDigest ; $ledgerDigest"
 Write-Output $stateLine
 Write-Output $message
+Write-Output $digestLine
 
 if ($bridgeState -eq "UNBOOTSTRAPPED") {
     Write-Output "Recovery: run py -3 tools\agent-bridge\recover_bridge_session.py --state-dir `"$resolvedStateDir`" --agent codex --cwd . --watcher-config `"$WatcherConfigPath`""
@@ -228,7 +347,7 @@ if ($watchModeActive) {
     Write-Output "Do not use a persistent wait_inbox loop in the main working chat unless the user explicitly asked for that short test."
 }
 
-"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled" | Add-Content -Path $LogPath -Encoding UTF8
+"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' ledger='$ledgerDigest'" | Add-Content -Path $LogPath -Encoding UTF8
 
 if ($NoToast -or -not $toastEnabled) {
     exit 0
@@ -244,7 +363,7 @@ try {
     if ($watchModeActive) {
         $notify.BalloonTipText = "Bridge state: $bridgeState. Bridge-watch mode active. Check private bucket $resolvedPrivateBucket, then re-enter wait_inbox only for explicit bridge-watch tests."
     } else {
-        $notify.BalloonTipText = "$stateLine`n$message"
+        $notify.BalloonTipText = "$stateLine`n$digestLine"
     }
     $notify.Visible = $true
     $notify.ShowBalloonTip(7000)

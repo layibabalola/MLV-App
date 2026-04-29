@@ -337,6 +337,16 @@ Waypoint rule:
 - Workflow implication:
   - the ledger is not just a memory aid; it is the default source of truth for `what Codex should do next`,
   - if the current conversation turns meta while actionable ledger items remain, the turn should snap back to the top item after the meta answer unless the user clearly changed priority.
+- Rehydration requirement:
+  - the pre-response/pre-final reminder path should surface a compact bridge digest when available:
+    - bridge state
+    - active private/project buckets
+    - heuristics/rule version marker
+    - top pending ledger item
+  - after compaction, the carry-forward summary should preserve at least:
+    - the top ledger item id + summary,
+    - whether inbox was clear,
+    - and the currently active bridge-rule digest or equivalent reminder.
 
 Closed-on-send exclusion:
 
