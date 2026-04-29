@@ -17,6 +17,7 @@ The config file lists sessions to watch. See watcher-config.example.json.
 import argparse
 import json
 import os
+import shlex
 import string
 import subprocess
 import sys
@@ -48,6 +49,7 @@ COMPACT_SIZE_MB = 1.0          # also compact if inbox exceeds this size
 WAKE_ACK_GRACE_PERIOD_S = 30
 WAKE_MAX_RETRIES = 3
 WAKE_PERMANENT_EXIT_CODES = {3}
+LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
 
 
 def utc_now() -> str:
@@ -392,6 +394,8 @@ def _permanent_wake_event(
     event_reason = reason or "permanent_wake_failure"
     if reason == "no_peer_breadcrumb":
         action = "wake_skipped_no_peer"
+    elif reason == "config_error":
+        action = "wake_skipped_config_error"
     elif returncode == 3:
         action = "wake_skipped_wrong_chat"
         event_reason = "wrong_chat_detected"
@@ -459,11 +463,69 @@ def _format_template(template: Union[str, Sequence[str]], mapping: Dict[str, str
     return [str(value).format_map(mapping) for value in template]
 
 
+def _legacy_command_to_argv(command: str) -> Dict[str, Any]:
+    raw = str(command or "").strip()
+    if not raw:
+        return {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "returncode": 2,
+                "retryable": False,
+                "stdout": "",
+                "stderr": "legacy on_message_command is empty",
+                "reason": "config_error",
+            },
+        }
+    forbidden = sorted({ch for ch in raw if ch in LEGACY_COMMAND_FORBIDDEN_CHARS})
+    if forbidden:
+        return {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "returncode": 2,
+                "retryable": False,
+                "stdout": "",
+                "stderr": "legacy on_message_command contains forbidden shell metacharacter(s): %s" % "".join(forbidden),
+                "reason": "config_error",
+            },
+        }
+    try:
+        argv = shlex.split(raw, posix=False)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "returncode": 2,
+                "retryable": False,
+                "stdout": "",
+                "stderr": "legacy on_message_command could not be parsed safely: %s" % exc,
+                "reason": "config_error",
+            },
+        }
+    if not argv:
+        return {
+            "ok": False,
+            "result": {
+                "ok": False,
+                "returncode": 2,
+                "retryable": False,
+                "stdout": "",
+                "stderr": "legacy on_message_command produced empty argv",
+                "reason": "config_error",
+            },
+        }
+    return {"ok": True, "command": argv}
+
+
 def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) -> Dict[str, Any]:
     template = session_config.get("on_message_command_template")
     if not template:
         command = session_config.get("on_message_command")
-        return {"ok": bool(command), "command": command}
+        if not command:
+            return {"ok": False, "command": None}
+        return _legacy_command_to_argv(str(command))
 
     agent = str(session_config.get("agent") or "")
     state_dir = inbox_path.parent
@@ -537,6 +599,11 @@ def run_command_for_session(
 
     if not messages:
         return {"ok": False, "returncode": None, "retryable": False, "stdout": "", "stderr": ""}
+    if isinstance(cmd, str):
+        legacy = _legacy_command_to_argv(cmd)
+        if not legacy.get("ok"):
+            return legacy["result"]
+        cmd = legacy["command"]
     command_text = " ".join(str(part) for part in cmd) if not isinstance(cmd, str) else cmd
     if "consume_inbox.py" in command_text:
         print(
@@ -558,8 +625,8 @@ def run_command_for_session(
     env["BRIDGE_MESSAGE_IDS"] = json.dumps([msg.get("id") for msg in messages])
     try:
         proc = subprocess.run(
-            cmd if isinstance(cmd, str) else list(cmd),
-            shell=isinstance(cmd, str),
+            list(cmd),
+            shell=False,
             env=env,
             timeout=90,
             stdout=subprocess.PIPE,

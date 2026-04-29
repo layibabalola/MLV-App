@@ -134,9 +134,10 @@ Wake paths for inbox notification:
   time the watcher resolves placeholders from the active peer runtime
   breadcrumb (`peer-codex.runtime.json`), especially the current protected
   `desktop_thread_id`, then runs `wake_codex.ps1`. Managed templates are
-  expanded as argv arrays rather than shell strings; only legacy inline
-  `on_message_command` entries still use the older shell-string compatibility
-  path. The helper deeplinks to `codex://threads/<CODEX_THREAD_ID>` and
+  expanded as argv arrays rather than shell strings. Legacy inline
+  `on_message_command` entries remain as a temporary compatibility form, but
+  they are now coerced to argv or rejected as config errors instead of being
+  run through a shell. The helper deeplinks to `codex://threads/<CODEX_THREAD_ID>` and
   synthesizes `check bridge inbox` + Enter into the Codex Desktop window via
   `[System.Windows.Forms.SendKeys]`.
   Codex then runs a turn, calls `check_inbox`, surfaces and handles the

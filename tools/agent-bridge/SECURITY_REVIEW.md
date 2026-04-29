@@ -40,13 +40,11 @@ must be resolved before the bridge can be called fully hardened.
   - `pause_bridge` now gates watcher-fired wake commands
   - managed watcher templates now execute as argv arrays instead of shell
     strings
-- Open risk:
-  - legacy inline `on_message_command` entries still execute through the older
-    shell-string compatibility path.
+- legacy inline `on_message_command` entries are now coerced to argv and
+  rejected if they contain shell metacharacters or cannot be parsed safely
 - Required follow-up:
-  - retire legacy inline shell-string commands after the deprecation window,
-    then keep regression tests proving managed helper invocations stay argv
-    shaped.
+  - retire the legacy inline compatibility form after the deprecation window,
+    then keep regression tests proving helper invocations stay argv shaped.
 
 ### `wake_codex.ps1`
 
@@ -93,15 +91,16 @@ must be resolved before the bridge can be called fully hardened.
 
 ## Findings
 
-### P1 - Legacy inline watcher commands still use shell strings
+### P1 - Legacy inline watcher commands remain a compatibility surface
 
 - Surface: `tools/agent-bridge/watcher.py`
-- Risk: command injection or quoting ambiguity if a legacy helper command is
-  left in place or hand-edited unsafely.
-- Current mitigation: managed watcher commands now execute as argv arrays, so
-  the remaining risk is constrained to the legacy compatibility path.
-- Required fix: remove the shell-string compatibility path once the migration
-  window closes.
+- Risk: hand-edited legacy helper strings may still be malformed or surprising,
+  even though they are no longer executed through a shell.
+- Current mitigation: both managed templates and legacy inline commands are now
+  executed as argv arrays; suspicious legacy strings are rejected as config
+  errors with no retry loop.
+- Required fix: remove the legacy compatibility path once the migration window
+  closes.
 
 ### P2 - Wake helper remains UI-focus sensitive
 
@@ -126,11 +125,13 @@ must be resolved before the bridge can be called fully hardened.
   notifications surface.
 - Settings validation has explicit coverage for unknown keys and invalid types.
 - Managed watcher templates now execute as argv arrays with regression coverage.
+- Legacy inline watcher commands are now parsed to argv or rejected as config
+  errors instead of running through `shell=True`.
 - Probe tooling remains non-mutating by default.
 
 ## Not Yet Fully Reviewed
 
-- Retirement of the legacy inline shell-string watcher compatibility path.
+- Retirement of the legacy inline watcher compatibility path itself.
 - A line-by-line audit of every historical proposal doc for stale security
   claims.
 - Windows filesystem permission posture beyond the same-user trust model.
@@ -138,8 +139,8 @@ must be resolved before the bridge can be called fully hardened.
 ## Exit Criteria For Final Security Signoff
 
 - Managed watcher commands execute as argv arrays without `shell=True`, and the
-  legacy shell-string compatibility path is either removed or explicitly
-  accepted as a bounded residual risk.
+  legacy compatibility path is either removed or explicitly accepted as a
+  bounded residual risk.
 - Security-sensitive contracts have regression tests for:
   - helper invocation shape
   - settings key/type rejection

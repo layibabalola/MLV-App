@@ -672,6 +672,88 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(state["paused_wake_messages"], [])
         self.assertEqual(state["pending_wake_verifications"][0]["message_id"], "msg-resume")
 
+    def test_07h_legacy_inline_command_is_coerced_to_argv_without_shell(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-legacy-inline",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+        succeeded = Mock(returncode=0, stdout="", stderr="")
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run", return_value=succeeded) as run:
+            watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake -ThreadId 019dcfe4-bd5d-7841-a7c1-2e8969a777c5",
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(run.call_args.args[0], ["fake-wake", "-ThreadId", "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"])
+        self.assertFalse(run.call_args.kwargs["shell"])
+
+    def test_07i_legacy_inline_command_with_shell_metacharacters_is_rejected(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-legacy-bad",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run") as run:
+            processed = watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake ; injected",
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(processed, [])
+        self.assertFalse(run.called)
+        self.assertIn("msg-legacy-bad", seen_ids)
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        config_events = [row for row in audit_rows if row.get("action") == "wake_skipped_config_error"]
+        self.assertEqual(len(config_events), 1)
+        self.assertEqual(config_events[0]["message_id"], "msg-legacy-bad")
+
     # ------------------------------------------------------------------
     # Test 8 & 9: configure_watcher race + sub-agent cannot mutate parent_thread_id
     # Invariant: #10. Phase 7.X infrastructure.
