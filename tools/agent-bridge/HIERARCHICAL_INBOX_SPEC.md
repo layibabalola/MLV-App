@@ -1,7 +1,11 @@
 # Agent Bridge - Hierarchical Inbox Design Spec (v2)
 
-**Status:** Initial implementation landed; orphan handling and agent-level recovery remain follow-up work
-**Authors:** Claude (`a16b6e4f`) + Codex (`9111dce5`), converged 2026-04-28
+**Status:** Implemented for the supersession path; orphan handling rules
+specified below 2026-04-29 (open for Codex implementation as a follow-up
+commit). Agent-level recovery rules also specified below; implementation
+follows after orphan handling lands.
+**Authors:** Claude (`a16b6e4f`) + Codex (`9111dce5`), converged 2026-04-28;
+orphan/agent-level rules added 2026-04-29 by Claude.
 **Supersedes:** flat `session_id` routing in `agent_bridge.py` v1
 
 ---
@@ -93,11 +97,134 @@ need to know the hierarchy; promotion is receiver-side.
 | State | Cause | Handling |
 |---|---|---|
 | `superseded` | Session ended cleanly; newer session registered | Promote unread to project immediately |
-| `orphaned` | Session vanished without supersede notice (crash, compaction without bootstrap, Desktop killed) | Apply longer TTL before promotion; flag messages with `orphaned_at` |
+| `orphaned` | Session vanished without supersede notice (crash, compaction without bootstrap, Desktop killed) | Apply orphan-detection TTL before promotion; flag messages with `orphaned_at` |
 
-Current implementation only handles `superseded` sessions. `orphaned` is a planned
-follow-up so crash-only disappearance can be promoted without requiring a clean
-session takeover.
+### Orphan Handling Specification (2026-04-29)
+
+A session is **orphaned** (vs cleanly superseded) when ALL of the following
+hold:
+
+1. The session is registered as active in `session.json` for some agent.
+2. The session's last heartbeat in `session.json` is older than the orphan
+   detection threshold (`ORPHAN_TTL_SECONDS`, default 300s = 5 min).
+3. There is no newer session for the same agent in the same project (which
+   would otherwise trigger normal supersession).
+4. The session's MCP server marker (if any) is missing or stale per the
+   `mcp_server` presence layer in `BRIDGE_PRESENCE_SPEC.md`.
+
+**Heartbeat source:** `session.json` records `last_heartbeat_at` per session,
+updated on each MCP tool call from that session. Bridge-d (the watcher's
+forward-compat role per `ARCHITECTURE.md`) is responsible for stamping this
+field on every inbound MCP request.
+
+**Orphan detection cadence:** the watcher checks for orphaned sessions on
+each poll cycle (every 2s) but only acts when the heartbeat-staleness
+threshold is exceeded. Costs ~5ms per check; cheap.
+
+**Orphan promotion path:**
+
+1. When a session is detected as orphaned, the bridge sets
+   `agents.<agent>.<session_id>.status = "orphaned"` in `session.json`
+   and stamps `orphaned_at` (current UTC).
+2. All unread messages in that session's bucket are scanned and rewritten:
+   - `session_id` rewritten to project rendezvous (e.g. `mlv-app`)
+   - `inbox_level` rewritten from `"session"` to `"project"`
+   - `escalation_reason` set to `"session_orphaned"`
+   - `promoted_from` set to the orphaned session GUID
+   - `orphaned_at` set on each message (so audit shows when promotion
+     occurred relative to orphan detection)
+3. Receiver finds promoted messages at the project bucket on next
+   `check_inbox(session_id="<project>")`.
+
+**Why a different threshold than supersession:** clean supersession
+promotes immediately because we know the session is dead-and-replaced.
+Orphan detection waits 5 minutes because:
+- A transient process pause (debugger, OS suspend) shouldn't trigger
+  premature promotion
+- The 5-minute threshold balances "user notices their messages got
+  promoted while their session was just slow to respond" against
+  "messages stuck forever in a dead session bucket"
+- Tunable via `settings.json`'s `orphan_ttl_seconds` (forward-compat
+  per `BRIDGE_SCHEMA_EVOLUTION_SPEC.md`)
+
+**Recovery from orphan:** if a session's heartbeat resumes (process was
+just paused, not dead), bridge-d:
+1. Detects fresh heartbeat in `session.json`
+2. Transitions session status from `orphaned` back to `active`
+3. New messages can again target the session bucket
+4. Already-promoted messages STAY at project level (no demote-back); the
+   sender's intent was satisfied by promotion. The session can read its
+   own messages from the project bucket on next `check_inbox` with
+   `include_parents=True` or `session_id="<project>"`.
+
+**Edge case — both peers orphan simultaneously:** if both Claude and Codex
+sessions are orphaned at the same time (e.g. machine sleep), promotions
+happen independently per agent. On wake, both sessions either re-register
+(supersession path) or recover (orphan→active transition). Either path is
+correct.
+
+### Agent-Level Recovery Specification (2026-04-29)
+
+Agent-level inbox is the deepest fallback when neither session nor
+project routing applies. Specification:
+
+**When the agent inbox accepts a message:**
+
+The agent-level bucket (key: `agent:<name>`) accepts incoming messages
+ONLY when ALL of the following hold:
+
+1. The message's `to` field names a known agent (`claude` or `codex`)
+2. The message has NO `parent_project` field set (i.e., not project-scoped)
+3. The control-type field is in the agent-level allowlist:
+   `ROUTE_REPAIR`, `SESSION_REHOME`, `RESTART_ACK`, `HANDSHAKE`
+   (when project not yet known), `SESSION_UPDATE` (supersede/orphan
+   notices), `BRIDGE_BOOTSTRAP_REPAIR`
+
+**Sender side:** sender explicitly addresses agent inbox via
+`session_id="agent:<name>"` parameter. Default routing never escalates
+to agent level automatically — preserving the principle that work
+traffic must not flow there.
+
+**Reader side:** agent-level inbox is consumed by the
+`bootstrap_session.py` activation path on session start (drains repair
+messages first), and by explicit operator-tool reads via
+`recover_state.py`. The watcher does NOT fire wake on agent-inbox
+messages — they're recovery-only and don't need active-wake delivery.
+
+**Backpressure:** none. Per `Backpressure Table` above, agent inbox is
+the recovery path and must never be blocked.
+
+**Retention:** agent-level messages have a 30-day retention. After 30
+days, `compact.py` archives to `messages.jsonl` and removes from the
+inbox to prevent unbounded growth. Compaction-archived messages remain
+queryable via `recover_state.py --scan-historical`.
+
+**Supersession does NOT promote to agent level.** Promotion goes
+session → project (per Receiver-Side Promotion above). Agent-level is
+exclusively for control/recovery traffic that was originally addressed
+there. Promoting work traffic to agent-level would violate the "routine
+work forbidden" invariant.
+
+### Acceptance Criteria
+
+- H1. Orphan detection: session with stale heartbeat (>5min default)
+  and no superseding session triggers `orphaned_at` stamp; tests assert
+  the threshold and the lack of double-promotion when supersession also
+  applies.
+- H2. Orphan promotion: messages in orphaned session bucket are
+  rewritten with `escalation_reason = "session_orphaned"`,
+  `promoted_from = "<old_session_id>"`, `orphaned_at` timestamp; tests
+  assert.
+- H3. Orphan recovery: session heartbeat resumption transitions status
+  back to `active`; already-promoted messages stay at project level;
+  tests assert.
+- H4. Agent-level inbox accepts only allowlisted control types; rejects
+  work traffic with `escalation_reason = "agent_inbox_rejects_work"`;
+  tests assert.
+- H5. Agent-level retention: messages older than 30 days are archived by
+  `compact.py`; tests assert with mocked clock.
+- H6. Both peers orphaned simultaneously: promotion and recovery are
+  agent-independent; tests assert no cross-agent interference.
 
 ---
 

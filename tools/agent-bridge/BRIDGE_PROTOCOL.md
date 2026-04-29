@@ -1,15 +1,102 @@
 # Agent-Bridge Communication Protocol
 
-**Status:** Implemented v1.5; new types added 2026-04-28 (`WAIT_DECLARED`,
+**Status:** Implemented v1.6 (bumped 2026-04-29). Adds wake-script exit code
+table, failure reason taxonomy aligned to multi-layer presence
+(`BRIDGE_PRESENCE_SPEC.md`), audit event registry, and consolidated message
+type registry including types added 2026-04-28 (`WAIT_DECLARED`,
 `HEURISTIC_SYNC_ACK`, `PROTOCOL_SYNC_ACK`, `ACTION_REQUEST_RESPONSE`,
 `SPEC_REVIEW_ACK`, `SPEC_REVIEW_REQUEST`, `SPEC_REVIEW_RESULT`,
 `SPEC_REVIEW_RESULT_ACK`, `IMPLEMENTATION_UPDATE`,
-`CROSS_PROJECT_PAIR_REQUEST/ACCEPT/REJECT/EXPIRE/REVOKE/PROMOTE` per
-cross-project pairing spec in flight). EXCHANGE_CLOSED close-marker
-convention added per 2026-04-28 heuristic.
-Version: 1.5
-Transport: agent-bridge MCP server
+`CROSS_PROJECT_PAIR_REQUEST/ACCEPT/REJECT/EXPIRE/REVOKE/PROMOTE`).
+EXCHANGE_CLOSED close-marker convention added per 2026-04-28 heuristic.
+
+Version: 1.6
+Transport: agent-bridge MCP server (local FS in v1; LAN sync in v2; cloud
+WebSocket in v3 — see `BRIDGE_TRANSPORT_ABSTRACTION_SPEC.md`)
 Applies to: any two agents sharing an agent-bridge instance
+
+## Wake Script Exit Codes
+
+Authoritative table; cross-referenced by `watcher.py`,
+`BRIDGE_PRESENCE_SPEC.md`, `WAKE_HARDENING_SPEC.md`, and audit event
+schemas. Wake scripts (`wake_codex.ps1`, future `wake_claude.ps1`) emit
+these codes; the watcher routes wake decisions accordingly.
+
+| Code | Meaning | Watcher behavior | Mark seen | Retry |
+|---|---|---|---|---|
+| 0 | Wake delivered (SendKeys completed) | Receipt-verification path | On `seen_at` ack | On grace-period expiry |
+| 1 | Transient (foreground race, idle wait, breadcrumb stale, handshake pending) | Standard retry per `WAKE_MAX_RETRIES` | After max retries | Yes |
+| 2 | Config error (bad ThreadId UUID, missing required arg) | Mark seen; audit `wake_skipped_config_error` | Yes | No |
+| 3 | (reserved for Phase B UUID-mismatch check; currently unused after Phase A title-revert) | Mark seen; audit `wake_skipped_wrong_chat`; permanent | Yes | No |
+| 4 | Peer process missing (os_process layer down) | Defer; `pending_peer_absent` queue; 30s/1m/2m/5m backoff | No (defer) | On peer rejoin |
+| 5 | Peer present but not bootstrapped (bridge_bootstrap layer down) | Defer; `pending_bootstrap` queue | No (defer) | On bootstrap event |
+| 6 | Active peer superseded (active_peer layer down) | Auto-redirect via registry to current peer | No (redirected) | Implicit redirect |
+| 7 | Wrong project (project_scope layer down) | Mark seen; audit `wake_skipped_wrong_project` | Yes | No |
+| 8 | Tenant mismatch (tenant_scope layer down; cloud only) | Mark seen; audit `wake_skipped_auth_block` | Yes | No |
+| 9 | Active pairing expired or revoked | Mark seen; audit `wake_skipped_pairing_invalid` with sub-reason | Yes | No (require re-pair) |
+| 10 | Peer busy (receptive layer down) | Defer; drain on next inbox-check | No (defer) | On natural inbox-check |
+
+`watcher.WAKE_PERMANENT_EXIT_CODES` includes the codes that mark the
+message seen and suppress retries: {2, 3, 7, 8, 9}. Codes 4, 5, 10 defer
+without marking seen.
+
+## Failure Reason Taxonomy
+
+`failure_reason` field on inbox rows uses an enum aligned with presence
+layer failures and watcher exit codes. Cross-referenced by
+`MESSAGE_RECEIPTS_SPEC.md`.
+
+| Value | Source | Meaning |
+|---|---|---|
+| `wake_skipped_config_error` | exit 2 | Wake script saw a config error before invoking SendKeys |
+| `wake_skipped_wrong_chat` | exit 3 (reserved) | Future Phase B UUID check detected wrong chat |
+| `wake_skipped_no_peer` | breadcrumb missing | Peer breadcrumb absent; cannot resolve target |
+| `wake_skipped_paused` | pause.json present | `pause_bridge` is active per `WAKE_HARDENING_SPEC.md` D1 |
+| `wake_skipped_wrong_project` | exit 7 | project_scope layer mismatch |
+| `wake_skipped_auth_block` | exit 8 | tenant_scope layer mismatch (cloud only) |
+| `wake_skipped_pairing_invalid` | exit 9 | active_pairing expired/revoked; sub-reason in payload |
+| `wake_skipped_breaker_open` | per-session circuit breaker | Per `WAKE_HARDENING_SPEC.md` D2; suppressed after 5 failures in 5 min |
+| `wake_dropped_peer_absent_overflow` | pending queue full | `pending_peer_absent` exceeded 100-entry cap; FIFO eviction |
+| `wake_dropped_*_ttl` | pending queue TTL expiry | Entry older than 24h evicted |
+| `wake_delivery_failed` | retry exhaustion | All `WAKE_MAX_RETRIES` exhausted without `seen_at` receipt |
+
+## Audit Event Registry
+
+`messages.jsonl` contains an append-only audit log. Event records use
+`{action, agent, session_id, message_id?, timestamp, ...payload}`. Known
+event actions:
+
+| Action | Fired by | When | Payload highlights |
+|---|---|---|---|
+| `send_to_peer` | bridge MCP | Outbound message queued | hop_count, resolved_session_id, inbox_level, escalated_from |
+| `check_inbox` | bridge MCP | Inbox read | count, agent, session_id, mark_read |
+| `mark_read` | bridge MCP | Receipt update | message_id |
+| `mark_seen` | bridge MCP | Receipt update | message_id, seen_via |
+| `mark_handled` | bridge MCP | Receipt update | message_id, handled_status |
+| `activate_session` | bootstrap_session | Session registered | previous_local_session, drained_messages count |
+| `send_control` | bridge | Control message routed | control_type |
+| `mcp_server_wrapper_launch` | server_wrapper | Wrapper started a `server.py` | command, parent_pid |
+| `mcp_server_self_restarted` | wrapper Phase 2 | Auto-restart on bridge code change | old_child_pid, new_child_pid, changed_files, elapsed_ms |
+| `wake_skipped_paused` | watcher | Pause was active when wake would have fired | message_id |
+| `wake_skipped_wrong_chat` | watcher | Phase B UUID-mismatch (reserved) | window_title?, expected_thread_id |
+| `wake_skipped_wrong_project` | watcher | project_scope mismatch | active_project, expected_project |
+| `wake_skipped_auth_block` | watcher | tenant_scope mismatch | active_tenant, expected_tenant |
+| `wake_skipped_pairing_invalid` | watcher | active_pairing expired/revoked | link_id?, sub_reason |
+| `wake_skipped_no_peer` | watcher | Peer breadcrumb missing | breadcrumb_path |
+| `wake_skipped_breaker_open` | watcher | Circuit breaker open | session_id, consecutive_failures, opened_at |
+| `wake_breaker_open` | watcher | Breaker transitioned open (one event per transition) | exit_code_distribution, threshold |
+| `wake_breaker_closed` | watcher | Breaker auto-closed or manually resumed | reason: idle\|resume_call |
+| `wake_delivery_failed` | watcher | All retries exhausted | retry_count, exit_codes_observed |
+| `wake_dropped_peer_absent_overflow` | watcher | Pending queue capacity hit | dropped_message_id, queue_size |
+| `wake_dropped_peer_absent_ttl` | watcher | Pending queue TTL eviction | dropped_message_id, age_hours |
+| `presence_layer_change` | bridge-d | Any presence layer transitioned state | layer, from_state, to_state |
+| `peer_breadcrumb_missing` | watcher | Phase B breadcrumb read failed | breadcrumb_path, expected_pid? |
+| `migrate_root_apply` | migrate_root.py | Phase 13 root relocation | source_root, target_root |
+| `phase14_security_signoff` | tail-end gate | Phase 14 security review complete | reviewer_session, residual_risks |
+
+New audit event actions get added to this table as they're introduced;
+unknown action values are tolerated (forward compat) but should map to a
+registered enum on the next protocol bump.
 
 ## Purpose
 

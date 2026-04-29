@@ -1,6 +1,9 @@
 # Agent Bridge - Message Receipts And Status Spec
 
-**Status:** Implemented - lifecycle fields, MCP tools, and `record_seen` integration landed
+**Status:** Implemented - lifecycle fields, MCP tools, and `record_seen`
+integration landed. `failure_reason` taxonomy now aligned with
+`BRIDGE_PRESENCE_SPEC.md` multi-layer presence model and `BRIDGE_PROTOCOL.md`
+v1.6 audit event registry; cross-references added 2026-04-29.
 **Authors:** Codex + Claude review
 **Motivation:** distinguish "delivered to inbox" from "seen, read, and handled" without creating ACK-message loops
 
@@ -94,6 +97,34 @@ Accepted `handled_status` values:
 - `superseded`
 
 All fields are optional for backward compatibility.
+
+### `failure_reason` enum (aligned with presence layers)
+
+When `handled_status = "failed"` OR when the bridge marks the message
+seen due to a presence-layer failure, `failure_reason` is set to one of
+the values defined in `BRIDGE_PROTOCOL.md` "Failure Reason Taxonomy"
+section. Reproduced here for convenience; `BRIDGE_PROTOCOL.md` is
+authoritative:
+
+- `wake_skipped_config_error`
+- `wake_skipped_wrong_chat`
+- `wake_skipped_no_peer`
+- `wake_skipped_paused`
+- `wake_skipped_wrong_project`
+- `wake_skipped_auth_block`
+- `wake_skipped_pairing_invalid`
+- `wake_skipped_breaker_open`
+- `wake_dropped_peer_absent_overflow`
+- `wake_dropped_*_ttl`
+- `wake_delivery_failed`
+
+Each value corresponds to a specific presence layer failure or watcher
+disposition. Sender-facing UX in `BRIDGE_PRESENCE_SPEC.md` Decision
+Matrix section maps each value to a user-visible message.
+
+Forward-compat: senders/readers MUST tolerate unknown `failure_reason`
+values (treat as "failed for unstated reason" + log) to allow protocol
+evolution without coordinated client updates.
 
 ---
 

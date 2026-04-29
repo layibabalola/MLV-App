@@ -5,13 +5,19 @@ Default state root:
 ```text
 %USERPROFILE%\.agent-bridge\
   bridge-root.json
-  MOVED_TO.json          (only after this root is relocated)
+  MOVED_TO.json                       (only after this root is relocated)
+  machine.json                        (forward-compat: stable per-machine UUID)
   session.json
   settings.json
   watcher-config.json
   routing-rules.json
   watcher.pid
   watcher.runtime.json
+  peer-claude.runtime.json            (Phase B; written by bootstrap)
+  peer-codex.runtime.json             (Phase B; written by bootstrap)
+  presence-claude.runtime.json        (multi-layer presence; written by bridge-d)
+  presence-codex.runtime.json         (multi-layer presence; written by bridge-d)
+  pause.json                          (D1 wake hardening; only when paused)
   state\
     state.json
     messages.jsonl
@@ -19,13 +25,23 @@ Default state root:
     inbox-codex.jsonl
     orphaned-claude.jsonl
     orphaned-codex.jsonl
+    pending_peer_absent.jsonl         (presence exit code 4 deferred queue)
+    pending_bootstrap.jsonl           (presence exit code 5 deferred queue)
+    pending_busy.jsonl                (presence exit code 10 deferred queue)
+    wake-failure-windows.json         (D2 circuit breaker per-session state)
+    cross-project-pairs\              (cross-project pairing state, when active)
+      <link_id>.json
     locks\
       watcher.lock
+      migration.lock                  (held during migrate_root.py apply)
     server-pids\
       server-<pid>.pid
       server-<pid>.json
     backups\
       recovery-<timestamp>\
+    tenants\                          (forward-compat for multi-tenant cloud; absent in v1)
+      <tenant_id>\
+        ...                           (per-tenant scoped subset of the above)
 ```
 
 The root above is the default when neither `--bridge-root` nor
@@ -43,20 +59,30 @@ Full migration tooling is still tracked in `REFACTOR_PLAN.md`.
 |---|---|---|
 | `bridge-root.json` | bridge root resolver | Active root manifest with stable `root_id`, schema version, and migration history. |
 | `MOVED_TO.json` | migration tooling | Stale-root redirect. Startup against a moved root fails loudly with the active root path. |
-| `session.json` | bridge session lifecycle | Active and historical Claude/Codex sessions per project. |
+| `machine.json` | bootstrap (forward-compat) | Stable per-machine UUID + bootstrap timestamp; populates `originator_machine_id` field on outbound rows for future LAN/cloud conflict resolution. Optional in v1; required for v2/v3. |
+| `session.json` | bridge session lifecycle | Active and historical Claude/Codex sessions per project. Source of truth for `bridge_bootstrap` and `active_peer` presence layers. |
 | `settings.json` | user/runtime config | Optional supported tuning surface documented in `SETTINGS.md`. |
 | `watcher-config.json` | bootstrap/configure_watcher | Static watcher entries for private and project buckets. |
 | `routing-rules.json` | routing rules CLI/MCP | Optional learned/suppressed routing policy. |
 | `watcher.pid` | watcher/bootstrap compatibility | Legacy marker for the current watcher process. The lease is authoritative. |
+| `watcher.runtime.json` | watcher | Runtime breadcrumb (role, PID, command, bridge_root, manifest identity); read by `bridge_process_status` and the `bridge_d` presence layer. |
+| `peer-<agent>.runtime.json` | bootstrap | Peer identity breadcrumb per Phase B (`PHASE_B_BREADCRUMB_DESIGN.md`): session_id, desktop_thread_id, deeplink_template, written_by_pid. Source of truth for the `peer_breadcrumb` presence layer. |
+| `presence-<agent>.runtime.json` | bridge-d | Multi-layer presence record per `BRIDGE_PRESENCE_SPEC.md`: 10 layer states + overall verdict, recomputed every 30s. |
+| `pause.json` | `pause_bridge` MCP tool | When present, signals bridge-d to skip `on_message_command` invocations. Schema: `{schema_version, paused, paused_at, paused_by_session, scope}`. Deleted by `resume_bridge`. |
 
 ## `state\` Files
 
 | Path | Purpose |
 |---|---|
-| `state.json` | Pause flag, per-bucket dedupe/rate-limit/session metadata. |
-| `messages.jsonl` | Audit log for sends, reads, receipts, sessions, compaction, and recovery actions. |
-| `inbox-<agent>.jsonl` | Durable inbox rows for Claude and Codex. |
-| `orphaned-<agent>.jsonl` | Future orphan handling path; absent when unused. |
+| `state.json` | Pause flag (legacy; superseded by `pause.json` at root for v1+), per-bucket dedupe/rate-limit/session metadata. |
+| `messages.jsonl` | Audit log for sends, reads, receipts, sessions, compaction, recovery, presence layer transitions, and wake events. See `BRIDGE_PROTOCOL.md` for the audit event taxonomy. |
+| `inbox-<agent>.jsonl` | Durable inbox rows for Claude and Codex. Each row carries `to`, `from`, `session_id`, `parent_project`, receipt fields, and (forward-compat) `tenant_id` + `originator_machine_id`. |
+| `orphaned-<agent>.jsonl` | Orphan-handling path per `HIERARCHICAL_INBOX_SPEC.md`: messages whose target session no longer exists are routed here for agent-level recovery. Absent when unused. |
+| `pending_peer_absent.jsonl` | Deferred queue for presence exit code 4 (peer process missing). Drained on os_process layer rejoin. Capped at 100 entries; FIFO eviction with audit. |
+| `pending_bootstrap.jsonl` | Deferred queue for presence exit code 5 (peer not bootstrapped). Drained on bridge_bootstrap layer transition to ok. |
+| `pending_busy.jsonl` | Deferred queue for presence exit code 10 (peer busy in long task). Drained on next `check_inbox` audit event by target agent. |
+| `wake-failure-windows.json` | Per-session circuit-breaker state per `WAKE_HARDENING_SPEC.md` D2: rolling failure windows, breaker state, exit-code distribution metadata. |
+| `cross-project-pairs/<link_id>.json` | Cross-project pairing state per the in-flight cross-project spec: tier, expiration, advisor/executor, audit references. |
 | `*.quarantine.jsonl` | Malformed JSONL rows preserved by storage/recovery tools. |
 
 ## Process State
