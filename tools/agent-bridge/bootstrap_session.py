@@ -297,7 +297,7 @@ def bootstrap(
     handshake_retries: int,
     watcher_config: Optional[Path] = None,
     start_watcher: bool = True,
-    restart_watcher_if_code_changed: bool = False,
+    restart_watcher_if_code_changed: bool = True,
 ) -> Dict[str, Any]:
     bridge = AgentBridge(state_dir)
     identity = derive_project_identity(cwd)
@@ -521,11 +521,20 @@ def main() -> None:
         action="store_true",
         help="Update watcher config without spawning the watcher daemon",
     )
-    parser.add_argument(
+    restart_group = parser.add_mutually_exclusive_group()
+    restart_group.add_argument(
         "--restart-watcher-if-code-changed",
+        dest="restart_watcher_if_code_changed",
         action="store_true",
-        help="Before ensuring watcher, restart an existing watcher whose wake/bootstrap code signature is stale",
+        help="Compatibility no-op: stale wake/bootstrap watcher code is restarted by default",
     )
+    restart_group.add_argument(
+        "--no-restart-watcher-if-code-changed",
+        dest="restart_watcher_if_code_changed",
+        action="store_false",
+        help="Debug only: keep an existing watcher running even if its wake/bootstrap code signature is stale",
+    )
+    parser.set_defaults(restart_watcher_if_code_changed=True)
     args = parser.parse_args()
     paths = resolve_bridge_paths(
         bridge_root=Path(args.bridge_root) if args.bridge_root else None,

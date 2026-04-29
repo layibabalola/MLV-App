@@ -1385,7 +1385,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertFalse((self.tempdir / "watcher.pid").exists())
         self.assertFalse((self.state_dir / "locks" / "watcher.lock").exists())
 
-    def test_bootstrap_restarts_watcher_when_code_signature_missing(self) -> None:
+    def test_bootstrap_restarts_watcher_when_code_signature_missing_by_default(self) -> None:
         class FakeProcess:
             pid = 525252
 
@@ -1426,7 +1426,6 @@ class AgentBridgeTests(unittest.TestCase):
                 handshake_retries=1,
                 watcher_config=config_path,
                 start_watcher=True,
-                restart_watcher_if_code_changed=True,
             )
 
         self.assertEqual(result["watcher_process"]["status"], "restarted_code_changed")
@@ -1435,6 +1434,52 @@ class AgentBridgeTests(unittest.TestCase):
         lease = json.loads((self.state_dir / "locks" / "watcher.lock").read_text(encoding="utf-8"))
         self.assertEqual(lease["pid"], 525252)
         self.assertEqual(lease["watcher_code_signature"]["signature"], watcher_code_signature()["signature"])
+
+    def test_bootstrap_can_skip_watcher_code_restart_for_debugging(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "locks").mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"sessions": [{"inbox": str(self.state_dir / "inbox-codex.jsonl")}]}),
+            encoding="utf-8",
+        )
+        (self.tempdir / "watcher.pid").write_text("424242", encoding="utf-8")
+        write_json(
+            self.state_dir / "locks" / "watcher.lock",
+            {
+                "pid": 424242,
+                "role": "watcher",
+                "command": ["py", "watcher.py"],
+                "heartbeat_at": "2026-04-29T00:00:00+00:00",
+            },
+        )
+
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"}, clear=True), patch(
+            "bootstrap_session.derive_project_identity",
+            return_value={"canonical_root": str(ROOT), "rendezvous": "mlv-app", "source": "unit-test"},
+        ), patch(
+            "configure_watcher.derive_project_identity",
+            return_value={"canonical_root": str(ROOT), "rendezvous": "mlv-app", "source": "unit-test"},
+        ), patch("bootstrap_session.is_process_alive", return_value=True), patch(
+            "bootstrap_session._terminate_process", return_value=True
+        ) as terminate:
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-debug-no-restart",
+                project="mlv-app",
+                handshake_retries=1,
+                watcher_config=config_path,
+                start_watcher=True,
+                restart_watcher_if_code_changed=False,
+            )
+
+        self.assertEqual(result["watcher_process"]["status"], "already_running")
+        self.assertIsNone(result["watcher_restart_check"])
+        self.assertEqual(result["watcher_process"]["pid"], 424242)
+        terminate.assert_not_called()
 
     def test_unknown_origin_session_does_not_supersede_parent(self) -> None:
         bridge = AgentBridge(self.state_dir)
