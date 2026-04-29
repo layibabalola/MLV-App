@@ -1,8 +1,8 @@
 # Final 10/10 Validation Loop - Operational Runbook
 
-**Status:** Proposed runbook; canonical 10/10 process lives in
-`REFACTOR_PLAN.md` (commit `0ebb4b10`); this doc is the operational
-detail expansion.
+**Status:** Active tail-end runbook. The canonical 10/10 gate still lives in
+`REFACTOR_PLAN.md`; this doc is the operational expansion for when the core
+bridge roadmap is actually ready to enter the loop.
 **Authors:** Claude
 **When:** This loop runs at tail-end of the bridge roadmap, after all
 acceptance criteria are met and Phase 14 security review completes.
@@ -18,20 +18,28 @@ tail-end gate; per-feature contract tests stay inline.
    `tools/agent-bridge/REFACTOR_PLAN.md` against current state. Any
    item marked "open" must be either (a) closed via Codex commit + Claude
    audit, or (b) explicitly removed from scope by user with rationale.
-2. **All specs marked Implemented or Archived.** Per criterion 25, no
-   spec doc may remain in "Proposed" state. Run:
+2. **All in-scope core-bridge specs marked Implemented, Archived, or
+   explicitly Partial with remaining gaps called out.** Per criterion 25, the
+   core bridge docs should not carry stale "Proposed" status by the time the
+   loop starts. Parallel/out-of-scope design tracks such as cross-project
+   pairing are excluded until they are explicitly pulled into scope. Run:
    ```bash
    grep -n "^\*\*Status:\*\* Proposed" tools/agent-bridge/*.md
    ```
-   Expected: empty output.
+   Expected: no remaining Proposed statuses for docs that are part of the
+   accepted core bridge roadmap.
 3. **Phase 14 security review complete.** All eight threat additions
    from msg `2071358b` either implemented or explicitly accepted as
    residual risk. Audit log must show `phase14_security_signoff` event.
-4. **Cross-project pairing: tier-1 tests green.** Per
-   `CROSS_PROJECT_PAIR_TEST_MATRIX.md`, tier-1 tests A1-G4 + R1-R6 all
-   passing.
-5. **Wake hardening shipped.** D1 (pause_bridge gating) + D2 (circuit
-   breaker) per `WAKE_HARDENING_SPEC.md` both green.
+4. **Any explicitly in-scope extension tracks green.** If cross-project pairing
+   has been accepted into the main bridge scope by user + Claude + Codex, use
+   `CROSS_PROJECT_PAIR_TEST_MATRIX.md` and require the agreed tier-1 set to
+   pass. Otherwise, this step is skipped as out of scope for the core bridge
+   10/10 call.
+5. **Wake hardening shipped for the accepted scope.** D1 (pause_bridge
+   gating) must be green. D2 (circuit breaker) must be green if it remains in
+   scope for the 10/10 call; otherwise it must be explicitly deferred with user
+   agreement and documented residual risk.
 6. **Both agents agree on scope.** Send a `READINESS_CHECK` to peer:
    "Are we both ready to enter the Final 10/10 Validation Loop? List any
    blockers." If either side names blockers, return to step 1.

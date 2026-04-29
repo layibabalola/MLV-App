@@ -15,8 +15,8 @@ watcher's exit-3 infrastructure left over from Phase A revert.
 
 Each agent's bootstrap writes a peer-identity breadcrumb to the bridge root.
 The watcher reads the breadcrumb at fire time to resolve the active peer's
-desktop_thread_id and verify it against the foreground after deeplink
-navigation. Breadcrumb is the source of truth for "who is the active peer
+desktop_thread_id and, in a future stronger version, may verify it against the
+foreground after deeplink navigation. Breadcrumb is the source of truth for "who is the active peer
 right now"; watcher-config drops hardcoded session_ids and ThreadIds.
 
 ---
@@ -113,12 +113,11 @@ expanding `on_message_command_template`:
 4. Substitute `{desktop_thread_id}` (and other placeholders) into
    `on_message_command_template`.
 5. Pass the resolved desktop_thread_id to `wake_codex.ps1` (or equivalent)
-   as `-ExpectedThreadId` (NEW PARAM, replaces the removed
-   `-ExpectedTitleMarker`).
+   as the ordinary `-ThreadId` wake target.
 
 **Wake script (`wake_codex.ps1`, post-Phase-B):**
 
-1. Receive `-ExpectedThreadId <UUID>` from watcher.
+1. Receive `-ThreadId <UUID>` from watcher.
 2. Open `codex://threads/<UUID>` deeplink as today.
 3. After `SetForegroundWindow` succeeds, validate the foreground window
    actually corresponds to that thread. **How?** Two candidate mechanisms:
@@ -135,8 +134,8 @@ expanding `on_message_command_template`:
      SetForegroundWindow failure but don't re-verify after.
 4. **Recommended Phase B v1: option C with the watcher's exit-3
    infrastructure preserved for option A or B in v2.** That is, Phase B
-   ships the breadcrumb writers + watcher template-resolution + new
-   `-ExpectedThreadId` param plumbing, but the wake script itself doesn't
+   ships the breadcrumb writers + watcher template-resolution + ordinary
+   `-ThreadId` plumbing, but the wake script itself doesn't
    actually verify post-foreground (yet). Verification is plumbed in
    later when Codex Desktop or UIA-based reading is available.
 
@@ -156,7 +155,7 @@ watcher-config.
   "agent": "codex",
   "session_id": "74e288cf-...",
   "kind": "private",
-  "on_message_command": "powershell ... -ThreadId 019dd71b-..."
+  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}"]
 }
 ```
 
@@ -165,25 +164,19 @@ watcher-config.
 ```json
 {
   "agent": "codex",
-  "session_id_source": "peer_breadcrumb",
   "kind": "private",
-  "on_message_command_template": "powershell ... -ExpectedThreadId {desktop_thread_id}"
+  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}"]
 }
 ```
-
-`session_id_source: "peer_breadcrumb"` tells the watcher to NOT track the
-session_id as part of dedup keys for this entry; instead, dedup by
-breadcrumb's session_id at fire time.
 
 `on_message_command_template` uses placeholders that the watcher resolves
 from breadcrumb. Placeholders: `{desktop_thread_id}`, `{session_id}`,
 `{deeplink_template}` (if needed in future), `{agent}`.
 
-**Backward compat:** existing `on_message_command` (literal string) and
-hardcoded `session_id` continue to work for one release. Watcher detects
-the schema by presence of `_template` suffix or `_source` suffix and
-routes accordingly. Bootstrap rewrites watcher-config to template form;
-old form continues to load until next bootstrap.
+**Backward compat:** existing `on_message_command` (literal string) still
+loads as a compatibility path, but it is now coerced to argv or rejected as a
+config error instead of running through a shell. Bootstrap rewrites
+watcher-config to template form.
 
 ---
 
@@ -245,7 +238,8 @@ old form continues to load until next bootstrap.
 6. `test_breadcrumb_bridge_root_mismatch_refused` — breadcrumb's
    `bridge_root` differs from watcher's; treated as missing.
 7. `test_legacy_inline_command_still_works` — watcher honors old-form
-   `on_message_command` for one release.
+   `on_message_command` only as a temporary compatibility path and coerces it
+   to argv.
 
 **Integration:**
 
@@ -270,12 +264,12 @@ old form continues to load until next bootstrap.
   breadcrumbs atomically; tests assert.
 - B3. Watcher resolves `on_message_command_template` from breadcrumb at
   fire time; `peer_breadcrumb_missing` audit event on missing file.
-- B4. `wake_codex.ps1` accepts `-ExpectedThreadId <UUID>`. v1 doesn't yet
-  verify post-foreground (deferred to Phase B.2 with UIA or filesystem
-  correlation), but the param is plumbed through and the value reaches
-  the script.
-- B5. Watcher continues to honor legacy inline form for one release;
-  test asserts.
+- B4. `wake_codex.ps1` accepts the breadcrumb-resolved `-ThreadId <UUID>` and
+  uses it for direct thread navigation. Stronger post-foreground verification
+  remains deferred to a future Phase B.2.
+- B5. Watcher continues to honor legacy inline form only as a temporary
+  compatibility path; it is coerced to argv or rejected as config error, and
+  tests assert that behavior.
 - B6. Two-side end-to-end test passes.
 
 ---

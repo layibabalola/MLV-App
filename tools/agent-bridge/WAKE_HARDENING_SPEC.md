@@ -48,58 +48,45 @@ This spec covers D1 + D2; D3 is closing via Phase A revert + Phase B.
 
 ### Current state
 
-`pause_bridge` MCP tool sets a flag in bridge state (`paused: true` in
-some registry). The bridge's send_to_peer / check_inbox / message_status
-functions check this flag. The **watcher does not** — it polls inbox
-files independently and fires `on_message_command` on any new unread
-message regardless of pause state.
+The branch now stores pause state in bridge `state.json` (`paused: true`),
+and the watcher checks that state before firing wake commands. While paused,
+toast/log notifications still surface, but autonomous `on_message_command`
+invocation is skipped and audited as `wake_skipped_paused`. The remaining
+open items in D1 are mostly contract clarity questions, not the original
+"stop button doesn't stop" bug.
 
-### Proposed fix
+### Implemented in this branch
 
-1. Pause flag location: `<bridge-root>/state/pause.json` with schema:
-   ```json
-   {
-     "schema_version": 1,
-     "paused": true,
-     "paused_at": "2026-04-29T03:00:00+00:00",
-     "paused_by_session": "<guid>",
-     "scope": "all_wake_commands"
-   }
-   ```
-2. Watcher reads pause.json on each poll cycle (already polling every 2s,
-   adding one stat call is cheap). Caches mtime; only re-reads on change.
-3. When `paused: true`:
-   - Watcher continues to TOAST on new messages (preserves user
-     awareness)
-   - Watcher SKIPS `on_message_command` invocation
-   - Watcher logs `wake_skipped_paused` audit event with message_id
-   - Watcher does NOT mark message seen (user explicitly paused; on
-     resume, the message gets normal handling)
-4. `resume_bridge` MCP tool deletes pause.json; watcher's next poll
-   detects mtime change, resumes wake firings.
-5. **Hard refusal-by-default** for new pause requests when pause.json
-   exists with a different `paused_by_session` — prevents accidental
-   "double pause" stomping.
+1. `pause_bridge` and `resume_bridge` continue to write the canonical bridge
+   paused flag in `state.json`.
+2. Watcher checks paused state per poll cycle before firing wake commands.
+3. While paused:
+   - watcher still emits toast/log notification
+   - watcher skips `on_message_command`
+   - watcher appends `wake_skipped_paused`
+   - watcher does not mark the message seen just because wake was suppressed
+4. After resume:
+   - paused wake-suppressed messages become eligible for normal wake handling
+   - the watcher resumes normal receipt-driven behavior
 
 ### Acceptance criteria
 
-- W1. `pause_bridge` writes pause.json atomically; watcher detects within
-  one poll cycle.
+- W1. `pause_bridge` writes canonical paused state and watcher detects it
+  within one poll cycle.
 - W2. While paused, new inbox messages do NOT fire `on_message_command`;
   audit log contains `wake_skipped_paused` events with reason.
 - W3. While paused, `on_message: "toast"` STILL fires (user sees new
   messages).
-- W4. `resume_bridge` removes pause.json; first message after resume fires
+- W4. `resume_bridge` clears the paused state; first message after resume fires
   wake normally.
-- W5. `pause_bridge` while already paused with a different owner: refused.
+- W5. If ownership semantics for pause are later introduced, they must be
+  explicit. They are not part of the current shipped slice.
 
 ### Tests
 
-- `test_pause_bridge_writes_pause_marker`
 - `test_watcher_skips_wake_command_when_paused`
 - `test_watcher_still_emits_toast_when_paused`
-- `test_resume_bridge_removes_pause_marker_and_unblocks_watcher`
-- `test_pause_bridge_refuses_double_pause_from_different_owner`
+- `test_resume_bridge_removes_pause_state_and_unblocks_watcher`
 
 ---
 
@@ -216,8 +203,8 @@ in the 2026-04-28 update).
 ## Migration plan
 
 **Phase W1 - pause_bridge gating** (D1)
-- Add `pause.json` schema and writer to `pause_bridge` MCP tool
-- Watcher reads pause.json each poll; skip `on_message_command` when
+- Use canonical paused state in bridge `state.json`
+- Watcher reads paused state each poll; skip `on_message_command` when
   paused; toast still fires
 - Tests W1-W5
 
@@ -227,9 +214,9 @@ in the 2026-04-28 update).
 - `resume_wake_for_session` MCP tool
 - Tests C1-C7
 
-These phases are independent and can ship in either order. W1 is smaller
-and addresses the user-perception bug ("the stop button doesn't stop");
-W2 prevents retry storms even without explicit pause.
+These phases are independent. W1 is now effectively shipped on this branch and
+addresses the user-perception bug ("the stop button doesn't stop"). W2 remains
+the substantive open wake-loop follow-up.
 
 ---
 

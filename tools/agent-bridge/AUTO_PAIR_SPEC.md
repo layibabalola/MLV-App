@@ -390,7 +390,8 @@ Monitor-handles-it case.
 - Add `on_message_command_template` to watcher-config schema.
 - `run_command_for_session` resolves placeholders at fire time.
 - Bootstrap rewrites watcher-config to use template form. Old inline
-  form continues to work for one release.
+  form continues only as a temporary compatibility path and is now
+  coerced to argv or rejected as config error rather than run through a shell.
 - Add tests: template resolution, missing breadcrumb path, hot-reload.
 
 **Phase D - Symmetric `wake_claude.ps1`:**
@@ -535,8 +536,9 @@ recorded inline below.
 - A4. Missing peer breadcrumb is treated as a permanent no-retry wake skip
   (`wake_skipped_no_peer`). Exit-code-3 no-retry handling remains reserved
   infrastructure for a future UUID-aware wrong-chat verifier.
-- A5. Watcher continues to honor legacy inline `on_message_command` for
-  one release (deprecation buffer); test asserts.
+- A5. Watcher continues to honor legacy inline `on_message_command` only as a
+  temporary compatibility path; legacy strings are coerced to argv or rejected
+  as config error, and tests assert that behavior.
 - A6. Symmetric `wake_claude.ps1` remains deferred; when it ships it should
   use the same template/breadcrumb contract.
 - A7. Settings gate: hardcoded enabled, escape hatch via legacy inline
