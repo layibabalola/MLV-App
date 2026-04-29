@@ -92,11 +92,25 @@ def register_server_pid(state_dir: Path):
     return cleanup
 
 
+def _jsonable(obj):
+    """Coerce MCP SDK pydantic models (ToolAnnotations, Icon, etc.) to plain dicts.
+
+    Used as the `default=` callable for json.dump / json.dumps calls in this
+    module so that tool-manifest serialization survives MCP SDK objects that
+    aren't JSON-native.
+    """
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(exclude_none=True)
+    if dataclasses.is_dataclass(obj):
+        return dataclasses.asdict(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
+        json.dump(value, handle, indent=2, sort_keys=True, default=_jsonable)
         handle.write("\n")
     tmp.replace(path)
 
@@ -117,7 +131,9 @@ def write_tool_manifest(*, state_dir: Path, mcp: FastMCP) -> dict:
         tools.append(tool_payload)
     tool_names = [tool["name"] for tool in tools]
     signature_payload = {"tool_names": tool_names, "tools": tools}
-    signature = hashlib.sha256(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()
+    signature = hashlib.sha256(
+        json.dumps(signature_payload, sort_keys=True, default=_jsonable).encode("utf-8")
+    ).hexdigest()
     manifest = {
         "schema_version": TOOL_MANIFEST_SCHEMA_VERSION,
         "generated_at": build_runtime_breadcrumb(state_dir=state_dir, role="mcp_server", pid=os.getpid())["timestamp"],
@@ -135,13 +151,27 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
     mcp = FastMCP("agent-bridge")
 
     @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
-    def send_to_peer(from_agent: str, to_agent: str, message: str, session_id: Optional[str] = None) -> dict:
+    def send_to_peer(
+        from_agent: str,
+        to_agent: str,
+        message: str,
+        session_id: Optional[str] = None,
+        target_session_id: Optional[str] = None,
+    ) -> dict:
         """Queue a handoff message for the peer agent.
 
         The message must contain [[handoff:claude]] or [[handoff:codex]] matching
         to_agent. The marker is stripped before delivery.
         """
-        return as_dict(bridge.send_to_peer(from_agent, to_agent, message, session_id=session_id))
+        return as_dict(
+            bridge.send_to_peer(
+                from_agent,
+                to_agent,
+                message,
+                session_id=session_id,
+                target_session_id=target_session_id,
+            )
+        )
 
     @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
     def send_control_message(
@@ -434,6 +464,11 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
     def session_status(project: Optional[str] = None) -> dict:
         """Return active and historical session registry data for a project."""
         return as_dict(bridge.session_status(project=project))
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def truedup_session_routing(agent: str, dry_run: bool = True, mode: str = "rekey") -> dict:
+        """Find and optionally rekey/quarantine inbox rows in orphaned session buckets."""
+        return as_dict(bridge.truedup_session_routing(agent=agent, dry_run=dry_run, mode=mode))
 
     @mcp.tool(annotations=IDEMPOTENT_WRITE)
     def end_session(agent: str, session_id: str, project: Optional[str] = None) -> dict:

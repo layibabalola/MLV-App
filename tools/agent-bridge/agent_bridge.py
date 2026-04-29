@@ -784,9 +784,13 @@ class AgentBridge:
         append_jsonl(
             self.inbox_path(target_agent),
             {
+                "schema_version": 2,
                 "id": message_id,
                 "created_at": now,
                 "session_id": session_id,
+                "from_session_id": None,
+                "to_session_id": session_id,
+                "from_session_id_kind": "unknown",
                 "inbox_level": inbox_level,
                 "parent_project": parent_project,
                 "promoted_from": None,
@@ -901,11 +905,16 @@ class AgentBridge:
         for row in rows:
             if row.get("session_id") == superseded_session and not row.get("read_at") and not row.get("superseded_at"):
                 promoted.append(dict(row))
+                row["schema_version"] = max(2, int(row.get("schema_version") or 1))
                 row["session_id"] = project_name
+                row["to_session_id"] = project_name
+                row.setdefault("from_session_id", None)
+                row.setdefault("from_session_id_kind", "unknown")
                 row["inbox_level"] = INBOX_LEVEL_PROJECT
                 row["parent_project"] = project_name
                 row["promoted_from"] = superseded_session
                 row["promoted_at"] = now
+                row["superseded_bucket_at"] = now
                 row["escalated_from"] = superseded_session
                 row["escalation_reason"] = "session_superseded"
                 changed = True
@@ -959,6 +968,21 @@ class AgentBridge:
                 activation_status = "registered_secondary"
             if should_supersede:
                 drained_messages = self._promote_superseded_inbox(owner, previous_local, project_name)
+                if drained_messages:
+                    self._audit(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "timestamp": utc_now(),
+                            "action": "bootstrap_rotation_routed_messages",
+                            "accepted": True,
+                            "agent": owner,
+                            "from_session_id": previous_local,
+                            "to_session_id": project_name,
+                            "project": project_name,
+                            "count": len(drained_messages),
+                            "mode": "promote_to_project_bucket",
+                        }
+                    )
                 old_record = self._session_record(project_entry, previous_local, owner)
                 old_record["status"] = "superseded"
                 old_record["superseded_by"] = session
@@ -1077,6 +1101,148 @@ class AgentBridge:
                     "trusted_parent": dict(project_entry.get("trusted_parent", {})),
                     "registry_path": str(self.session_registry_path),
                 },
+            )
+
+    def _routing_buckets_for_agent(self, registry: Dict[str, Any], agent: str) -> Dict[str, Any]:
+        valid = {agent}
+        active_targets: List[Dict[str, str]] = []
+        project_targets: List[str] = []
+        for project_name, project_entry in (registry.get("projects") or {}).items():
+            valid.add(project_name)
+            project_targets.append(project_name)
+            active_session = (project_entry.get("active") or {}).get(agent)
+            if active_session:
+                active_targets.append({"project": project_name, "session_id": str(active_session)})
+            for session_id, record in (project_entry.get("sessions") or {}).items():
+                if not isinstance(record, dict) or record.get("agent") != agent:
+                    continue
+                if record.get("status") in {"active", "secondary", "superseded"}:
+                    valid.add(str(session_id))
+        if active_targets:
+            target = active_targets[0]
+            return {
+                "valid": valid,
+                "target_session_id": target["session_id"],
+                "target_inbox_level": INBOX_LEVEL_SESSION,
+                "target_parent_project": target["project"],
+            }
+        fallback_project = project_targets[0] if project_targets else DEFAULT_PROJECT
+        valid.add(fallback_project)
+        return {
+            "valid": valid,
+            "target_session_id": fallback_project,
+            "target_inbox_level": INBOX_LEVEL_PROJECT,
+            "target_parent_project": fallback_project,
+        }
+
+    def truedup_session_routing(self, agent: str, dry_run: bool = True, mode: str = "rekey") -> BridgeResult:
+        with self._locked():
+            try:
+                target = normalize_agent(agent)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            action_mode = (mode or "rekey").strip().lower()
+            if action_mode not in {"rekey", "quarantine"}:
+                return BridgeResult(False, "rejected", "mode must be 'rekey' or 'quarantine'")
+
+            registry = self._load_session_registry()
+            routing = self._routing_buckets_for_agent(registry, target)
+            valid_buckets = routing["valid"]
+            target_bucket = routing["target_session_id"]
+            inbox = self.inbox_path(target)
+            rows = read_jsonl(inbox)
+            now = utc_now()
+            orphans = []
+            for index, row in enumerate(rows):
+                bucket = str(row.get("session_id") or "")
+                if bucket in valid_buckets:
+                    continue
+                orphans.append(
+                    {
+                        "index": index,
+                        "id": row.get("id"),
+                        "session_id": bucket,
+                        "from": row.get("from"),
+                        "to": row.get("to"),
+                        "control_type": row.get("control_type"),
+                        "target_session_id": target_bucket,
+                    }
+                )
+
+            if dry_run:
+                return BridgeResult(
+                    True,
+                    "dry_run",
+                    "Found %d orphaned routing row(s) for %s." % (len(orphans), target),
+                    {"agent": target, "mode": action_mode, "dry_run": True, "orphans": orphans, "count": len(orphans)},
+                )
+
+            touched = []
+            if action_mode == "rekey":
+                for item in orphans:
+                    row = rows[item["index"]]
+                    old_bucket = str(row.get("session_id") or "")
+                    row["schema_version"] = 2
+                    row["session_id"] = target_bucket
+                    row["to_session_id"] = target_bucket
+                    row.setdefault("from_session_id", None)
+                    row.setdefault("from_session_id_kind", "unknown")
+                    row["inbox_level"] = routing["target_inbox_level"]
+                    row["parent_project"] = routing["target_parent_project"]
+                    row["session_truedup_from"] = old_bucket
+                    row["session_truedup_at"] = now
+                    row["escalated_from"] = old_bucket
+                    row["escalation_reason"] = "session_truedup_rekey"
+                    touched.append({"id": row.get("id"), "from_session_id": old_bucket, "to_session_id": target_bucket})
+                    self._audit(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "timestamp": now,
+                            "action": "session_truedup_rekeyed",
+                            "accepted": True,
+                            "agent": target,
+                            "message_id": row.get("id"),
+                            "from_session_id": old_bucket,
+                            "to_session_id": target_bucket,
+                        }
+                    )
+                if orphans:
+                    write_jsonl(inbox, rows)
+            else:
+                orphan_path = inbox.with_suffix(".orphan.jsonl")
+                orphan_indexes = {item["index"] for item in orphans}
+                kept = []
+                for index, row in enumerate(rows):
+                    if index not in orphan_indexes:
+                        kept.append(row)
+                        continue
+                    old_bucket = str(row.get("session_id") or "")
+                    moved = dict(row)
+                    moved["orphaned_at"] = now
+                    moved["session_truedup_from"] = old_bucket
+                    moved["session_truedup_at"] = now
+                    append_jsonl(orphan_path, moved)
+                    touched.append({"id": row.get("id"), "from_session_id": old_bucket, "orphan_path": str(orphan_path)})
+                    self._audit(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "timestamp": now,
+                            "action": "session_truedup_quarantined",
+                            "accepted": True,
+                            "agent": target,
+                            "message_id": row.get("id"),
+                            "from_session_id": old_bucket,
+                            "orphan_path": str(orphan_path),
+                        }
+                    )
+                if orphans:
+                    write_jsonl(inbox, kept)
+
+            return BridgeResult(
+                True,
+                "applied",
+                "Applied %s truedup to %d row(s) for %s." % (action_mode, len(touched), target),
+                {"agent": target, "mode": action_mode, "dry_run": False, "count": len(touched), "touched": touched},
             )
 
     def repair_bootstrap_provenance(
@@ -1471,13 +1637,33 @@ class AgentBridge:
             return SessionInbox(parent_project, target, delivery_bucket)
         return None
 
-    def send_to_peer(self, from_agent: str, to_agent: str, message: str, session_id: Optional[str] = None) -> BridgeResult:
+    def send_to_peer(
+        self,
+        from_agent: str,
+        to_agent: str,
+        message: str,
+        session_id: Optional[str] = None,
+        target_session_id: Optional[str] = None,
+    ) -> BridgeResult:
         with self._locked():
             now = utc_now()
             # If no session specified, route through the from_agent's active
             # project session so backpressure is per-project rather than the
             # shared global "default" bucket.
-            resolved_session = session_id or self._resolve_default_session(from_agent)
+            if session_id and target_session_id:
+                try:
+                    old_session = normalize_session(session_id)
+                    new_session = normalize_session(target_session_id)
+                except ValueError as exc:
+                    return BridgeResult(False, "rejected", str(exc))
+                if old_session != new_session:
+                    return BridgeResult(
+                        False,
+                        "rejected",
+                        "session_id and target_session_id disagree; use target_session_id only",
+                    )
+            deprecated_session_param_used = bool(session_id and not target_session_id)
+            resolved_session = target_session_id or session_id or self._resolve_default_session(from_agent)
             event = {
                 "id": str(uuid.uuid4()),
                 "timestamp": now,
@@ -1490,6 +1676,7 @@ class AgentBridge:
                 "hash": None,
                 "accepted": False,
                 "reason": None,
+                "deprecated_session_id_param_used": deprecated_session_param_used,
             }
 
             def reject(reason: str) -> BridgeResult:
@@ -1601,6 +1788,12 @@ class AgentBridge:
                 )
                 if not route.ok:
                     return reject(route.reason or "routing rejected")
+            sender_session_id = sender_context.sender_session_id if sender_context else None
+            sender_origin = None
+            if sender_session_id:
+                sender_record_info = self._find_session_record(registry, sender_session_id, agent=sender)
+                if sender_record_info:
+                    sender_origin = sender_record_info["record"].get("bootstrap_origin")
 
             session_state = self._session_state(state, delivery_bucket)
             hop_count = int(session_state.get("hop_count", 0))
@@ -1645,9 +1838,13 @@ class AgentBridge:
 
             delivered = "From %s:\n%s" % (sender.capitalize(), body)
             inbox_row = {
+                "schema_version": 2,
                 "id": event["id"],
                 "created_at": now,
                 "session_id": delivery_bucket,
+                "from_session_id": sender_session_id,
+                "to_session_id": delivery_bucket,
+                "from_session_id_kind": sender_origin or "unknown",
                 "inbox_level": delivery_level,
                 "parent_project": parent_project,
                 "promoted_from": None,

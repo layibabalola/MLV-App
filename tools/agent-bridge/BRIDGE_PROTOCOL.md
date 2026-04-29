@@ -70,7 +70,7 @@ event actions:
 
 | Action | Fired by | When | Payload highlights |
 |---|---|---|---|
-| `send_to_peer` | bridge MCP | Outbound message queued | hop_count, resolved_session_id, inbox_level, escalated_from |
+| `send_to_peer` | bridge MCP | Outbound message queued | hop_count, resolved_session_id, inbox_level, escalated_from, deprecated_session_id_param_used |
 | `check_inbox` | bridge MCP | Inbox read | count, agent, session_id, mark_read |
 | `mark_read` | bridge MCP | Receipt update | message_id |
 | `mark_seen` | bridge MCP | Receipt update | message_id, seen_via |
@@ -94,6 +94,15 @@ event actions:
 | `wake_skipped_breaker_open` | watcher | Circuit breaker open | session_id, consecutive_failures, opened_at |
 | `wake_breaker_open` | watcher | Breaker transitioned open (one event per transition) | exit_code_distribution, threshold |
 | `wake_breaker_closed` | watcher | Breaker auto-closed or manually resumed | reason: idle\|resume_call |
+| `wake_breaker_bypass_granted` | bridge MCP | User action granted one-shot wake breaker bypass | session_id, reason, bypass_grants |
+| `wake_breaker_bypass_consumed` | watcher | Watcher consumed a one-shot wake breaker bypass | session_id, message_id, remaining_bypass_grants |
+| `wake_breaker_autoclose_retry` | watcher | Idle breaker auto-close selected one backlog message for retry | session_id, message_id |
+| `backpressure_rejected_nudge_attempted` | bridge MCP | Backpressure rejection re-armed an existing unread message for watcher retry | session_id, message_id |
+| `backpressure_rejected_no_nudge_breaker_open` | bridge MCP | Backpressure nudge skipped because breaker is open | session_id |
+| `backpressure_rejected_no_nudge_rate_limited` | bridge MCP | Backpressure nudge skipped by wake pre-fire rate limit | session_id |
+| `session_truedup_rekeyed` | bridge MCP | Orphaned inbox row rekeyed to a valid receiver bucket | message_id, from_session_id, to_session_id |
+| `session_truedup_quarantined` | bridge MCP | Orphaned inbox row moved to an orphan file | message_id, from_session_id, orphan_path |
+| `bootstrap_rotation_routed_messages` | bridge MCP/bootstrap | Unread old-session rows promoted during session rotation | from_session_id, to_session_id, count |
 | `wake_delivery_failed` | watcher | All retries exhausted | retry_count, exit_codes_observed |
 | `wake_dropped_peer_absent_overflow` | watcher | Pending queue capacity hit | dropped_message_id, queue_size |
 | `wake_dropped_peer_absent_ttl` | watcher | Pending queue TTL eviction | dropped_message_id, age_hours |
@@ -511,6 +520,24 @@ Responding agent (Codex by convention):
 3. Send `HANDSHAKE_ACK` to the initiator's GUID, including its own GUID.
 4. Switch all outbound to the initiator's GUID.
 5. Continue polling mlvapp at low frequency for future restart signals.
+
+## Inbox Row Routing Metadata
+
+New inbox rows use `schema_version: 2` and carry routing metadata in the row,
+not only in the natural-language body:
+
+- `from_session_id`: sender's active session at queue time when known.
+- `to_session_id`: intended receiver bucket after routing resolution.
+- `from_session_id_kind`: sender bootstrap provenance, usually `parent`,
+  `subagent`, or `unknown`.
+
+The legacy `session_id` field remains the physical bucket key for backward
+compatibility. Body-level `FROM_SESSION:` and `TO_SESSION:` lines are advisory
+only; row fields are the source of truth for automated routing and recovery.
+
+`send_to_peer(..., target_session_id=...)` is the preferred name for the
+receiver bucket. The older `session_id` parameter remains a compatibility alias
+and is audited when used.
 
 ## Message Envelope
 

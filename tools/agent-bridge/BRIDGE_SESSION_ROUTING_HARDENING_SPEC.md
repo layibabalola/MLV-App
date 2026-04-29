@@ -1,8 +1,8 @@
 # Agent Bridge - Session Routing Hardening Spec
 
-**Status:** Partially implemented. SR-Phase 1 server-side receiver-bucket
-validation/default resolution has shipped; SR-Phases 2-5 remain active roadmap
-work.
+**Status:** Implemented for SR1-SR7 v1. Optional long-tail cleanup remains only
+where explicitly called out, such as eventual removal of the legacy
+`session_id` alias after a compatibility window.
 **Authors:** Claude (proposal); Codex implementation/review
 **Tier:** Tier 1 - ASAP single-machine fix; the fourth toast storm of 2026-04-29 was triggered by this footgun
 **Motivation:** On 2026-04-29 ~13:41 UTC, Claude called `send_to_peer(to_agent="codex", session_id="<claude-session-guid>", ...)`. The message was queued into `inbox-codex.jsonl` keyed by a Claude session GUID. The Codex watcher only polls (a) Codex's active session bucket and (b) the project rendezvous bucket - it does NOT poll buckets keyed by Claude GUIDs. Result: the AUDIT_RESULT was orphaned in a bucket nobody watches. No toast, no wake, no delivery. When I corrected the route to `session_id="<codex-session-guid>"`, the new (correct-bucket) message immediately triggered the fourth wake-storm of the day - because the running watcher was pre-d97eaf9c and lacked Layers 1-4. This spec hardens the path so the misroute and the storm-from-misroute can't both happen.
@@ -14,11 +14,12 @@ The misroute is one symptom of a broader weakness: **session identity at the row
 ## Implemented Status
 
 Shipped behavior rejects `send_to_peer` calls where `session_id` names the
-sender's session instead of the receiver bucket, and preserves the active
-project default-resolution path for omitted sessions. Remaining work is tracked
-as the separate ledger item `Ship session-routing hardening remainder`: row-level
-route metadata, schema-aware compaction, orphan cleanup/truedup tooling,
-optional parameter rename, bootstrap-rotation safety, and documentation cleanup.
+sender's session instead of the receiver bucket, preserves the active project
+default-resolution path for omitted sessions, writes v2 row-level routing
+metadata, exposes `target_session_id` as the preferred receiver-bucket name,
+provides `truedup_session_routing` for orphan recovery, and audits bootstrap
+rotation promotion of unread old-session rows. Body-level `FROM_SESSION:` /
+`TO_SESSION:` lines are now advisory; row fields are the routing source of truth.
 
 ---
 

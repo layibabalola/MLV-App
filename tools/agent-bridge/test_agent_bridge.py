@@ -484,6 +484,39 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("belongs to claude session", result.message)
         self.assertIn("receiver bucket for codex", result.message)
 
+    def test_send_to_peer_writes_v2_route_metadata(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app", bootstrap_origin="parent")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+
+        result = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] route metadata",
+            target_session_id="codex-live",
+        )
+
+        self.assertTrue(result.ok)
+        inbox = bridge.peek_inbox("codex", session_id="codex-live")
+        row = inbox.data["messages"][0]
+        self.assertEqual(row["schema_version"], 2)
+        self.assertEqual(row["from_session_id"], "claude-live")
+        self.assertEqual(row["to_session_id"], "codex-live")
+        self.assertEqual(row["from_session_id_kind"], "parent")
+
+    def test_target_session_id_alias_rejects_conflict(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] conflict",
+            session_id="codex-live",
+            target_session_id="codex-other",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("target_session_id", result.message)
+
     def test_superseded_target_session_escalates_to_project_bucket(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-old", project="mlv-app")
@@ -540,6 +573,8 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(row["session_id"], "mlv-app")
         self.assertEqual(row["inbox_level"], "project")
         self.assertEqual(row["promoted_from"], "codex-old")
+        actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
+        self.assertIn("bootstrap_rotation_routed_messages", actions)
 
     def test_check_inbox_include_parents_reads_project_bucket(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -557,6 +592,66 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(result.status, "messages")
         self.assertEqual(result.data["messages"][0]["session_id"], "mlv-app")
         self.assertEqual(result.data["buckets"], ["codex-new", "mlv-app"])
+
+    def test_truedup_session_routing_dry_run_and_rekey(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        append_jsonl(
+            bridge.inbox_path("codex"),
+            {
+                "id": "orphan-1",
+                "created_at": "2026-04-29T00:00:00+00:00",
+                "session_id": "claude-live",
+                "from": "claude",
+                "to": "codex",
+                "body": "misrouted",
+                "read_at": None,
+                "seen_at": None,
+            },
+        )
+
+        dry_run = bridge.truedup_session_routing("codex", dry_run=True)
+        self.assertTrue(dry_run.ok)
+        self.assertEqual(dry_run.data["count"], 1)
+        self.assertEqual(dry_run.data["orphans"][0]["session_id"], "claude-live")
+
+        applied = bridge.truedup_session_routing("codex", dry_run=False, mode="rekey")
+        self.assertTrue(applied.ok)
+        self.assertEqual(applied.data["count"], 1)
+        row = read_jsonl(bridge.inbox_path("codex"))[0]
+        self.assertEqual(row["session_id"], "codex-live")
+        self.assertEqual(row["to_session_id"], "codex-live")
+        self.assertEqual(row["session_truedup_from"], "claude-live")
+
+        second = bridge.truedup_session_routing("codex", dry_run=True)
+        self.assertEqual(second.data["count"], 0)
+
+    def test_truedup_session_routing_quarantines_orphans(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        append_jsonl(
+            bridge.inbox_path("codex"),
+            {
+                "id": "orphan-2",
+                "created_at": "2026-04-29T00:00:00+00:00",
+                "session_id": "claude-live",
+                "from": "claude",
+                "to": "codex",
+                "body": "misrouted",
+                "read_at": None,
+                "seen_at": None,
+            },
+        )
+
+        applied = bridge.truedup_session_routing("codex", dry_run=False, mode="quarantine")
+
+        self.assertTrue(applied.ok)
+        self.assertEqual(read_jsonl(bridge.inbox_path("codex")), [])
+        orphan_path = bridge.inbox_path("codex").with_suffix(".orphan.jsonl")
+        quarantined = read_jsonl(orphan_path)
+        self.assertEqual(quarantined[0]["id"], "orphan-2")
+        actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
+        self.assertIn("session_truedup_quarantined", actions)
 
     def test_default_bucket_is_rejected(self) -> None:
         bridge = AgentBridge(self.state_dir)
