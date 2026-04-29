@@ -1,7 +1,8 @@
 # Agent Bridge - Bootstrap Provenance Spec
 
-**Status:** Codex-side implementation shipped for BP2-BP10; BP11 symmetric
-Claude implementation remains parked.
+**Status:** Codex-side implementation shipped for BP2-BP10. BP11 symmetric
+Claude wake/provenance enforcement is explicitly scoped out of v1 until Claude
+Desktop exposes a verified thread deeplink and runtime provenance surface.
 **Authors:** Codex (original framing 2026-04-29 in response to user "configuration by convention" direction); Claude (codification + scope refinements)
 **Convention:** *Bootstrap is parent-only by default; sub-agent bootstrap attempts are rejected, and any accidental success is automatically rolled back to the last trusted parent session.*
 **Motivation:** the Confucius incident (2026-04-29) revealed that bootstrap can capture a sub-agent's CODEX_THREAD_ID and bind the bridge to a sub-agent chat instead of the user's intended bridge chat. Treating sub-agent bootstrap as a first-class fault — with prevention, detection, and self-heal rules — closes this class of failure without requiring user designation of the bridge chat.
@@ -13,10 +14,22 @@ Claude implementation remains parked.
 Shipped Codex-side behavior includes bootstrap-origin detection, conservative
 unknown-origin handling, subagent refusal/retargeting, trusted-parent tracking,
 unknown-to-parent reclassification coverage, watcher refusal for bad Codex
-provenance, trusted-parent drift refusal, and rollback/freeze paths. The
-remaining unsatisfied acceptance criterion is BP11: symmetric Claude-side
-provenance handling, which is tracked separately because Claude desktop exposes
-a different runtime surface.
+provenance, trusted-parent drift refusal, and rollback/freeze paths.
+
+BP11 is resolved for v1 by explicit scope boundary, not by code symmetry:
+Claude-side wake/provenance enforcement requires a verified Claude Desktop
+thread deeplink and a reliable way to distinguish parent Claude chats from
+Claude subagents. This tree does not contain a shipped `wake_claude.ps1`, and
+the existing specs still mark `claude://threads/<id>` as unverified. Until that
+surface exists, Claude remains protected by MCP/session routing, receipts,
+backpressure, process supervision, and human/manual foreground use rather than
+automatic desktop wake injection.
+
+Accepted v1 risk: Codex cannot automatically wake and provenance-verify Claude
+Desktop cold-start chats with the same strength now used for Codex Desktop.
+Mitigation: keep `wake_claude.ps1` and Claude parent-only wake targeting as a
+future feature request/Phase D item; do not invent an unverified SendKeys path
+that could recreate the wrong-chat class on Claude.
 
 ---
 
@@ -393,7 +406,11 @@ v1.6 → v1.7 with exit code 11, new audit events, new message types (`ROUTE_REP
 
 ### Phase BP.6 — Symmetric Claude implementation
 
-Mirror on claude side with appropriate env var detection. Tests BP11.
+Scoped out of v1 until Claude Desktop exposes a verified thread-addressable
+wake surface and parent/subagent provenance signal. Do not implement a
+best-guess SendKeys-only `wake_claude.ps1`; it would be weaker than the Codex
+parent-thread path and risks reintroducing wrong-chat injection on the Claude
+side.
 
 ### Phase BP.7 — Codex Desktop / Claude Code feature requests
 

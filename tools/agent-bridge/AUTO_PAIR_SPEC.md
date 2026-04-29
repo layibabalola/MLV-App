@@ -397,9 +397,11 @@ Monitor-handles-it case.
 - Add tests: template resolution, missing breadcrumb path, hot-reload.
 
 **Phase D - Symmetric `wake_claude.ps1`:**
-- Mirror the script for Claude Desktop direction (cold-start case).
-- Watcher fires it on codex -> claude messages.
-- Add tests parallel to `wake_codex.ps1`.
+- Deferred until Claude Desktop exposes a verified thread-addressable wake
+  surface. Do not ship a best-guess SendKeys-only implementation; BP11 documents
+  this as an explicit v1 scope boundary.
+- When the surface exists, watcher can fire it on codex -> claude messages with
+  tests parallel to `wake_codex.ps1`.
 
 **Phase E (optional) - SendKeys "register" payload + agent-side handler:**
 - Add `register_as_bridge_peer.ps1` helper.
