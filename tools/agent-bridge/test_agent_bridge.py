@@ -1061,6 +1061,46 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(status.data["sessions"]["codex-unknown"]["status"], "secondary")
         self.assertEqual(status.data["trusted_parent"]["codex"]["session_id"], "codex-parent")
 
+    def test_unknown_origin_session_reclassifies_to_parent_on_rebootstrap(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        with patch.dict("os.environ", {}, clear=True):
+            first = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-live",
+                project=None,
+                handshake_retries=1,
+                watcher_config=config_path,
+                start_watcher=False,
+            )
+        self.assertEqual(first["bootstrap_origin"], "unknown")
+        project_name = first["project"]
+        initial_status = AgentBridge(self.state_dir).session_status(project_name)
+        self.assertEqual(initial_status.data["sessions"]["codex-live"]["bootstrap_origin"], "unknown")
+
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"}, clear=True):
+            second = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-live",
+                project=None,
+                handshake_retries=1,
+                watcher_config=config_path,
+                start_watcher=False,
+            )
+        self.assertEqual(second["bootstrap_origin"], "parent")
+        status = AgentBridge(self.state_dir).session_status(project_name)
+        self.assertEqual(status.data["active"]["codex"], "codex-live")
+        self.assertEqual(status.data["sessions"]["codex-live"]["bootstrap_origin"], "parent")
+        self.assertEqual(status.data["trusted_parent"]["codex"]["session_id"], "codex-live")
+        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["bootstrap_origin"], "parent")
+        self.assertEqual(breadcrumb["desktop_thread_id"], "019dcfe4-bd5d-7841-a7c1-2e8969a777c5")
+
     def test_repair_bootstrap_provenance_rolls_back_to_trusted_parent(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
