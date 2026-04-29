@@ -339,6 +339,49 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(state["seen_ids"], [])
         self.assertEqual(state["pending_wake_verifications"], [])
 
+    def test_07a_toast_notification_dedupes_across_wake_retries(self) -> None:
+        """A retryable wake must not show the same toast on every poll.
+
+        Toast visibility is separate from wake delivery: a failed command leaves
+        the message retryable, but the user only needs one notification per
+        message id while it remains unread.
+        """
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-toast-retry",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "TYPE: ACTION_REQUEST\nSUMMARY: toast once",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+        failed = Mock(returncode=1, stdout="", stderr="boom")
+        session_config = {
+            "agent": "codex",
+            "session_id": "codex-live",
+            "inbox": str(inbox_path),
+            "on_message": "toast",
+            "on_message_command": "fake-wake",
+        }
+
+        with patch("watcher.notify_windows_toast") as toast, patch("watcher.subprocess.run", return_value=failed) as run:
+            watcher.process_session_once(session_config, seen_ids=seen_ids, state_path=state_path, toasts_enabled=True)
+            watcher.process_session_once(session_config, seen_ids=seen_ids, state_path=state_path, toasts_enabled=True)
+
+        self.assertEqual(toast.call_count, 1)
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn("msg-toast-retry", seen_ids)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertIn("msg-toast-retry", state["toasted_ids"])
+
     def test_07b_wake_exit_zero_requires_seen_receipt_before_seen_ids(self) -> None:
         """A successful wake command is not delivery until check_inbox sets seen_at.
 

@@ -101,6 +101,7 @@ def load_seen(state_path: Path) -> Dict[str, Any]:
     if not state_path.exists():
         return {
             "seen_ids": [],
+            "toasted_ids": [],
             "pending_wake_verifications": [],
             "paused_wake_messages": [],
             "unknown_origin_warnings": [],
@@ -109,6 +110,7 @@ def load_seen(state_path: Path) -> Dict[str, Any]:
     with state_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("seen_ids", [])
+    data.setdefault("toasted_ids", [])
     data.setdefault("pending_wake_verifications", [])
     data.setdefault("paused_wake_messages", [])
     data.setdefault("unknown_origin_warnings", [])
@@ -426,11 +428,15 @@ def _save_watcher_state(
     paused_messages: Optional[List[Dict[str, Any]]] = None,
     unknown_origin_warnings: Optional[List[str]] = None,
     wake_fire_history: Optional[List[Dict[str, Any]]] = None,
+    toasted_ids: Optional[set] = None,
 ) -> None:
+    if toasted_ids is None:
+        toasted_ids = set(str(item) for item in load_seen(state_path).get("toasted_ids", []))
     save_seen(
         state_path,
         {
             "seen_ids": list(seen_ids)[-500:],
+            "toasted_ids": list(toasted_ids)[-500:],
             "pending_wake_verifications": pending[-200:],
             "paused_wake_messages": (paused_messages or [])[-200:],
             "unknown_origin_warnings": (unknown_origin_warnings or [])[-200:],
@@ -1360,6 +1366,7 @@ def process_session_once(
     paused_messages: List[Dict[str, Any]] = list(state.get("paused_wake_messages", []))
     unknown_origin_warnings: List[str] = list(state.get("unknown_origin_warnings", []))
     wake_fire_history: List[Dict[str, Any]] = list(state.get("wake_fire_history", []))
+    toasted_ids: set = set(str(item) for item in state.get("toasted_ids", []))
     bridge_paused = _bridge_is_paused(inbox_path.parent)
     if not bridge_paused:
         filtered_paused_messages = [
@@ -1369,7 +1376,7 @@ def process_session_once(
         ]
         if len(filtered_paused_messages) != len(paused_messages):
             paused_messages = filtered_paused_messages
-            _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
+            _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history, toasted_ids)
     pending = _process_pending_wake_verifications(
         session_config,
         pending=pending,
@@ -1435,13 +1442,28 @@ def process_session_once(
         return [m["id"] for m in new_msgs]
 
     if effective_on_message == "toast":
-        notify_windows_toast(
-            agent,
-            session_id,
-            new_msgs,
-            toast_expiry_minutes=toast_expiry_minutes,
-            toast_max_in_tray=toast_max_in_tray,
-        )
+        toast_msgs = [m for m in new_msgs if str(m.get("id", "")) not in toasted_ids]
+        if toast_msgs:
+            notify_windows_toast(
+                agent,
+                session_id,
+                toast_msgs,
+                toast_expiry_minutes=toast_expiry_minutes,
+                toast_max_in_tray=toast_max_in_tray,
+            )
+            for message in toast_msgs:
+                message_id = str(message.get("id", ""))
+                if message_id:
+                    toasted_ids.add(message_id)
+            _save_watcher_state(
+                state_path,
+                seen_ids,
+                pending,
+                paused_messages,
+                unknown_origin_warnings,
+                wake_fire_history,
+                toasted_ids,
+            )
     else:
         notify_terminal(agent, session_id, new_msgs)
 
