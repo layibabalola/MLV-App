@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -11,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent_bridge import AgentBridge
 from configure_watcher import PARENT_THREAD_ID_KEY, configure_watcher
 from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths
-from core.processes import acquire_singleton_lease, build_lease, command_line_hash, is_process_alive, lease_status, write_lease
+from core.processes import acquire_singleton_lease, build_lease, command_line_hash, is_process_alive, lease_status, read_lease, write_lease
 from core.runtime import build_peer_runtime_breadcrumb, peer_runtime_path_for_state_dir, write_runtime_breadcrumb
 from project_identity import derive_project_identity
 
@@ -24,6 +25,14 @@ THREAD_ENV_KEYS = {
     "claude": ("CLAUDE_THREAD_ID", "CLAUDE_PARENT_THREAD_ID"),
 }
 MAX_NORMAL_BOOTSTRAP_DEPTH = 3
+WATCHER_RESTART_CODE_FILES = (
+    "watcher.py",
+    "wake_codex.ps1",
+    "bootstrap_session.py",
+    "configure_watcher.py",
+    "agent_bridge.py",
+    "core/runtime.py",
+)
 
 
 def detect_bootstrap_origin(
@@ -72,6 +81,106 @@ def _state_dir_from_watcher_config(watcher_config: Path) -> Path:
     except Exception:
         pass
     return watcher_config.parent / "state"
+
+
+def watcher_code_signature() -> Dict[str, Any]:
+    base_dir = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    files: List[Dict[str, Any]] = []
+    for relative in WATCHER_RESTART_CODE_FILES:
+        path = base_dir / relative
+        entry: Dict[str, Any] = {"path": str(path), "relative_path": relative}
+        try:
+            data = path.read_bytes()
+            stat = path.stat()
+        except OSError as exc:
+            entry["error"] = str(exc)
+            data = b""
+        else:
+            entry["sha256"] = hashlib.sha256(data).hexdigest()
+            entry["mtime_ns"] = stat.st_mtime_ns
+            entry["size"] = stat.st_size
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(data)
+        digest.update(b"\0")
+        files.append(entry)
+    return {"schema_version": 1, "signature": digest.hexdigest(), "files": files}
+
+
+def _watcher_code_restart_reason(lease_path: Path, current_signature: Dict[str, Any]) -> Optional[str]:
+    if not lease_path.exists():
+        return "missing_lease"
+    try:
+        lease = read_lease(lease_path)
+    except Exception:
+        return "unreadable_lease"
+    previous = lease.get("watcher_code_signature")
+    if not isinstance(previous, dict) or not previous.get("signature"):
+        return "missing_signature"
+    if previous.get("signature") != current_signature.get("signature"):
+        return "signature_changed"
+    return None
+
+
+def _terminate_process(pid: int, *, timeout_seconds: float = 5.0) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        else:
+            import signal as _signal
+
+            os.kill(pid, _signal.SIGTERM)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def restart_watcher_for_code_change(watcher_config: Path, state_dir: Optional[Path] = None) -> Dict[str, Any]:
+    resolved_state_dir = state_dir or _state_dir_from_watcher_config(watcher_config)
+    pid_path = watcher_config.parent / "watcher.pid"
+    lease_path = resolved_state_dir / "locks" / "watcher.lock"
+    current_signature = watcher_code_signature()
+    pid_path_exists = pid_path.exists()
+    reason = _watcher_code_restart_reason(lease_path, current_signature)
+    if reason == "missing_lease" and not pid_path_exists:
+        return {"status": "no_existing_watcher", "reason": reason, "watcher_code_signature": current_signature}
+    if not reason:
+        return {"status": "current", "reason": None, "watcher_code_signature": current_signature}
+
+    pid: Optional[int] = None
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            pid = None
+    if pid is None:
+        try:
+            lease = read_lease(lease_path)
+            pid = int(lease.get("pid") or 0) or None
+        except Exception:
+            pid = None
+
+    stopped = False
+    if pid is not None and is_process_alive(pid):
+        stopped = _terminate_process(pid)
+    pid_path.unlink(missing_ok=True)
+    lease_path.unlink(missing_ok=True)
+    return {
+        "status": "restart_required",
+        "reason": reason,
+        "pid": pid,
+        "stopped": stopped,
+        "watcher_code_signature": current_signature,
+    }
 
 
 def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -128,6 +237,7 @@ def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Di
         state_dir=resolved_state_dir,
         pid=proc.pid,
     )
+    lease_record["watcher_code_signature"] = watcher_code_signature()
     write_lease(lease_path, lease_record)
     pid_path.write_text(str(proc.pid), encoding="utf-8")
     return {
@@ -187,6 +297,7 @@ def bootstrap(
     handshake_retries: int,
     watcher_config: Optional[Path] = None,
     start_watcher: bool = True,
+    restart_watcher_if_code_changed: bool = False,
 ) -> Dict[str, Any]:
     bridge = AgentBridge(state_dir)
     identity = derive_project_identity(cwd)
@@ -332,6 +443,7 @@ def bootstrap(
 
     watcher = None
     watcher_process = None
+    watcher_restart_check = None
     if watcher_config is not None:
         watcher = configure_watcher(
             config_path=watcher_config,
@@ -342,7 +454,16 @@ def bootstrap(
             python_executable=sys.executable,
         )
         if start_watcher:
+            if restart_watcher_if_code_changed:
+                watcher_restart_check = restart_watcher_for_code_change(watcher_config, state_dir=state_dir)
             watcher_process = ensure_watcher(watcher_config, state_dir=state_dir)
+            if watcher_restart_check is not None:
+                watcher_process["code_restart_check"] = watcher_restart_check
+                if (
+                    watcher_restart_check.get("status") == "restart_required"
+                    and watcher_process.get("status") == "started"
+                ):
+                    watcher_process["status"] = "restarted_code_changed"
         else:
             watcher_process = {
                 "status": "not_started",
@@ -375,6 +496,7 @@ def bootstrap(
         },
         "watcher": watcher,
         "watcher_process": watcher_process,
+        "watcher_restart_check": watcher_restart_check,
         "peer_runtime": peer_breadcrumb,
         "bootstrap_origin": bootstrap_origin,
         "detected_bootstrap_origin": detected_bootstrap_origin,
@@ -399,6 +521,11 @@ def main() -> None:
         action="store_true",
         help="Update watcher config without spawning the watcher daemon",
     )
+    parser.add_argument(
+        "--restart-watcher-if-code-changed",
+        action="store_true",
+        help="Before ensuring watcher, restart an existing watcher whose wake/bootstrap code signature is stale",
+    )
     args = parser.parse_args()
     paths = resolve_bridge_paths(
         bridge_root=Path(args.bridge_root) if args.bridge_root else None,
@@ -417,6 +544,7 @@ def main() -> None:
         handshake_retries=args.handshake_retries,
         watcher_config=Path(args.watcher_config) if args.watcher_config else (paths.watcher_config if args.bridge_root else None),
         start_watcher=not args.no_start_watcher,
+        restart_watcher_if_code_changed=args.restart_watcher_if_code_changed,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     if result.get("refused"):
