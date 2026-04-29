@@ -1,6 +1,7 @@
 # Wake Hardening Spec - Pause Gating, Circuit Breaker, Title-Marker Lessons
 
-**Status:** Proposed
+**Status:** Partially implemented. D1 pause gating is now landed in the
+working tree; D2 circuit-breaker follow-up remains open.
 **Authors:** Claude
 **Motivation:** capture three wake-loop-suppression concerns that Codex's
 2026-04-28 SPEC_REVIEW_RESULT explicitly kept OUT of `AUTO_PAIR_SPEC`:

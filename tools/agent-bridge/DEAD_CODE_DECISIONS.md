@@ -13,6 +13,8 @@
 | `bridge_watch_mode.flag` | Keep, opt-in state. | Useful for deliberate bridge-watch sessions, not normal coding turns. |
 | `consume_inbox.py` | Keep as CLI diagnostic only. | It must not be wired into watcher wake paths because consuming without surfacing caused message loss. |
 | `probe_server.py` | Keep, safe-by-default probe. | Live mutation requires `--mutate`; default probe uses temp state. |
+| `ExpectedTitleMarker` / title-marker wake verification | Archive; do not rewire. | User-directed rollback after fail-closed behavior on this Windows host. Direct thread navigation plus peer breadcrumbs is the supported path. |
+| Legacy inline `on_message_command` watcher entries | Keep temporarily as compatibility only. | Managed configs should migrate to `on_message_command_template` + peer breadcrumb resolution; inline commands remain a short deprecation buffer, not the forward path. |
 | `clear_inbox` / `reset_session` | Keep as compatibility shims. | New code should prefer `clear_bucket` / `reset_bucket`; shims must not silently target `default`. |
 | `default` bucket | Deprecated. | It has no stable protocol semantics. Use project bucket, session GUID, or agent-level control path. |
 

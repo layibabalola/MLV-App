@@ -17,6 +17,7 @@ The config file lists sessions to watch. See watcher-config.example.json.
 import argparse
 import json
 import os
+import string
 import subprocess
 import sys
 import threading
@@ -24,10 +25,15 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
-from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
+from core.runtime import (
+    build_runtime_breadcrumb,
+    peer_runtime_path_for_state_dir,
+    read_runtime_breadcrumb,
+    write_runtime_breadcrumb,
+)
 from core.settings import BridgeSettings, load_settings, settings_path_for_state_dir
 
 # Compaction support (same directory -- import directly)
@@ -79,9 +85,13 @@ def unread_for_session(inbox_path: Path, session_id: str) -> List[Dict[str, Any]
 
 def load_seen(state_path: Path) -> Dict[str, Any]:
     if not state_path.exists():
-        return {"seen_ids": []}
+        return {"seen_ids": [], "pending_wake_verifications": [], "paused_wake_messages": []}
     with state_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    data.setdefault("seen_ids", [])
+    data.setdefault("pending_wake_verifications", [])
+    data.setdefault("paused_wake_messages", [])
+    return data
 
 
 def save_seen(state_path: Path, seen: Dict[str, Any]) -> None:
@@ -131,14 +141,32 @@ def _append_wake_audit(inbox_path: Path, event: Dict[str, Any]) -> None:
         print(f"[agent-bridge] failed to write wake audit event: {exc}", flush=True)
 
 
-def _save_watcher_state(state_path: Path, seen_ids: set, pending: List[Dict[str, Any]]) -> None:
+def _save_watcher_state(
+    state_path: Path,
+    seen_ids: set,
+    pending: List[Dict[str, Any]],
+    paused_messages: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     save_seen(
         state_path,
         {
             "seen_ids": list(seen_ids)[-500:],
             "pending_wake_verifications": pending[-200:],
+            "paused_wake_messages": (paused_messages or [])[-200:],
         },
     )
+
+
+def _bridge_is_paused(state_dir: Path) -> bool:
+    state_path = state_dir / "state.json"
+    if not state_path.exists():
+        return False
+    try:
+        with state_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(data.get("paused"))
 
 
 def run_compaction(state_dir: Path, settings: BridgeSettings) -> None:
@@ -359,13 +387,24 @@ def _permanent_wake_event(
     returncode: int,
     result: Dict[str, Any],
 ) -> Dict[str, Any]:
+    reason = str(result.get("reason") or "")
+    action = "wake_command_failed_permanently"
+    event_reason = reason or "permanent_wake_failure"
+    if reason == "no_peer_breadcrumb":
+        action = "wake_skipped_no_peer"
+    elif returncode == 3:
+        action = "wake_skipped_wrong_chat"
+        event_reason = "wrong_chat_detected"
+    elif returncode == 2 and not reason:
+        action = "wake_skipped_config_error"
+        event_reason = "config_error"
     event = {
-        "action": "wake_skipped_wrong_chat" if returncode == 3 else "wake_command_failed_permanently",
+        "action": action,
         "agent": agent,
         "session_id": session_id,
         "message_id": message_id,
         "returncode": returncode,
-        "reason": "wrong_chat_detected" if returncode == 3 else "permanent_wake_failure",
+        "reason": event_reason,
     }
     stdout = str(result.get("stdout") or "").strip()
     stderr = str(result.get("stderr") or "").strip()
@@ -403,12 +442,103 @@ def _mark_permanent_wake_failure(
     )
 
 
-def run_command_for_session(cmd: str, agent: str, session_id: str, messages: List[Dict[str, Any]], inbox_path: Path) -> Dict[str, Any]:
+def _template_required_fields(template: Union[str, Sequence[str]]) -> set[str]:
+    formatter = string.Formatter()
+    values = [template] if isinstance(template, str) else list(template)
+    required: set[str] = set()
+    for value in values:
+        for _, field_name, _, _ in formatter.parse(str(value)):
+            if field_name:
+                required.add(field_name)
+    return required
+
+
+def _format_template(template: Union[str, Sequence[str]], mapping: Dict[str, str]) -> Union[str, List[str]]:
+    if isinstance(template, str):
+        return template.format_map(mapping)
+    return [str(value).format_map(mapping) for value in template]
+
+
+def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) -> Dict[str, Any]:
+    template = session_config.get("on_message_command_template")
+    if not template:
+        command = session_config.get("on_message_command")
+        return {"ok": bool(command), "command": command}
+
+    agent = str(session_config.get("agent") or "")
+    state_dir = inbox_path.parent
+    peer_path = peer_runtime_path_for_state_dir(state_dir, agent)
+    peer = read_runtime_breadcrumb(peer_path)
+    if not peer or peer.get("unreadable"):
+        return {
+            "ok": False,
+            "command": None,
+            "result": {
+                "ok": False,
+                "returncode": 2,
+                "retryable": False,
+                "stdout": "",
+                "stderr": f"peer runtime breadcrumb unavailable: {peer_path}",
+                "reason": "no_peer_breadcrumb",
+            },
+        }
+
+    desktop_thread_id = str(peer.get("desktop_thread_id") or "").strip()
+    if not desktop_thread_id:
+        return {
+            "ok": False,
+            "command": None,
+            "result": {
+                "ok": False,
+                "returncode": 2,
+                "retryable": False,
+                "stdout": "",
+                "stderr": f"peer runtime breadcrumb missing desktop_thread_id: {peer_path}",
+                "reason": "no_peer_breadcrumb",
+            },
+        }
+
+    deeplink_template = str(peer.get("deeplink_template") or "")
+    deeplink_uri = deeplink_template.format(thread_id=desktop_thread_id) if deeplink_template else ""
+    mapping = {
+        "desktop_thread_id": desktop_thread_id,
+        "session_id": str(peer.get("session_id") or ""),
+        "project": str(peer.get("project") or ""),
+        "deeplink_uri": deeplink_uri,
+    }
+
+    required_fields = _template_required_fields(template)
+    missing = sorted(name for name in required_fields if not mapping.get(name))
+    if missing:
+        return {
+            "ok": False,
+            "command": None,
+            "result": {
+                "ok": False,
+                "returncode": 2,
+                "retryable": False,
+                "stdout": "",
+                "stderr": "peer runtime breadcrumb missing field(s): %s" % ", ".join(missing),
+                "reason": "no_peer_breadcrumb",
+            },
+        }
+
+    return {"ok": True, "command": _format_template(template, mapping)}
+
+
+def run_command_for_session(
+    cmd: Union[str, Sequence[str]],
+    agent: str,
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    inbox_path: Path,
+) -> Dict[str, Any]:
     import subprocess
 
     if not messages:
         return {"ok": False, "returncode": None, "retryable": False, "stdout": "", "stderr": ""}
-    if "consume_inbox.py" in cmd:
+    command_text = " ".join(str(part) for part in cmd) if not isinstance(cmd, str) else cmd
+    if "consume_inbox.py" in command_text:
         print(
             f"[agent-bridge] refusing destructive on_message_command for {agent} session=...{(session_id or '')[-8:]}",
             flush=True,
@@ -428,8 +558,8 @@ def run_command_for_session(cmd: str, agent: str, session_id: str, messages: Lis
     env["BRIDGE_MESSAGE_IDS"] = json.dumps([msg.get("id") for msg in messages])
     try:
         proc = subprocess.run(
-            cmd,
-            shell=True,
+            cmd if isinstance(cmd, str) else list(cmd),
+            shell=isinstance(cmd, str),
             env=env,
             timeout=90,
             stdout=subprocess.PIPE,
@@ -472,6 +602,8 @@ def _process_pending_wake_verifications(
     toasts_enabled: bool,
     grace_period_seconds: int,
     max_retries: int,
+    bridge_paused: bool,
+    paused_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Promote pending wake attempts to seen only after a receipt appears."""
     agent = session_config["agent"]
@@ -506,6 +638,10 @@ def _process_pending_wake_verifications(
             kept.append(entry)
             continue
 
+        if bridge_paused:
+            kept.append(entry)
+            continue
+
         retry_count = int(entry.get("retry_count") or 0)
         if retry_count >= max_retries:
             seen_ids.add(message_id)
@@ -532,8 +668,11 @@ def _process_pending_wake_verifications(
             changed = True
             continue
 
-        if on_message_command:
-            command_result = run_command_for_session(on_message_command, agent, session_id, [row], inbox_path)
+        resolved = _resolve_command_template(session_config, inbox_path)
+        if resolved.get("result") is not None:
+            command_result = resolved["result"]
+        elif resolved.get("command"):
+            command_result = run_command_for_session(resolved["command"], agent, session_id, [row], inbox_path)
         else:
             command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
         if not command_result.get("ok") and not command_result.get("retryable", True):
@@ -559,7 +698,7 @@ def _process_pending_wake_verifications(
         )
 
     if changed:
-        _save_watcher_state(state_path, seen_ids, kept)
+        _save_watcher_state(state_path, seen_ids, kept, paused_messages)
     return kept
 
 
@@ -572,6 +711,7 @@ def _queue_pending_wake_verifications(
     messages: List[Dict[str, Any]],
     seen_ids: set,
     state_path: Path,
+    paused_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     existing_ids = {entry.get("message_id") for entry in pending}
     now = utc_now()
@@ -597,8 +737,51 @@ def _queue_pending_wake_verifications(
         existing_ids.add(message_id)
         changed = True
     if changed:
-        _save_watcher_state(state_path, seen_ids, pending)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
     return pending
+
+
+def _queue_paused_wake_messages(
+    *,
+    paused_messages: List[Dict[str, Any]],
+    agent: str,
+    session_id: str,
+    inbox_path: Path,
+    messages: List[Dict[str, Any]],
+    pending: List[Dict[str, Any]],
+    seen_ids: set,
+    state_path: Path,
+) -> List[Dict[str, Any]]:
+    existing_ids = {entry.get("message_id") for entry in paused_messages}
+    changed = False
+    for message in messages:
+        message_id = str(message.get("id", ""))
+        if not message_id or message_id in existing_ids:
+            continue
+        paused_messages.append(
+            {
+                "message_id": message_id,
+                "agent": agent,
+                "session_id": session_id,
+                "inbox": str(inbox_path),
+                "paused_at": utc_now(),
+            }
+        )
+        existing_ids.add(message_id)
+        _append_wake_audit(
+            inbox_path,
+            {
+                "action": "wake_skipped_paused",
+                "agent": agent,
+                "session_id": session_id,
+                "message_id": message_id,
+                "reason": "bridge_paused",
+            },
+        )
+        changed = True
+    if changed:
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
+    return paused_messages
 
 
 def process_session_once(
@@ -623,6 +806,7 @@ def process_session_once(
     inbox_path = Path(session_config["inbox"])
     on_message = session_config.get("on_message", "notify")
     on_message_command: Optional[str] = session_config.get("on_message_command")
+    on_message_command_template: Optional[str] = session_config.get("on_message_command_template")
 
     effective_on_message = on_message
     if not toasts_enabled and on_message == "toast":
@@ -630,6 +814,17 @@ def process_session_once(
 
     state = load_seen(state_path)
     pending: List[Dict[str, Any]] = list(state.get("pending_wake_verifications", []))
+    paused_messages: List[Dict[str, Any]] = list(state.get("paused_wake_messages", []))
+    bridge_paused = _bridge_is_paused(inbox_path.parent)
+    if not bridge_paused:
+        filtered_paused_messages = [
+            entry
+            for entry in paused_messages
+            if not (entry.get("agent") == agent and entry.get("session_id") == session_id)
+        ]
+        if len(filtered_paused_messages) != len(paused_messages):
+            paused_messages = filtered_paused_messages
+            _save_watcher_state(state_path, seen_ids, pending, paused_messages)
     pending = _process_pending_wake_verifications(
         session_config,
         pending=pending,
@@ -638,19 +833,47 @@ def process_session_once(
         toasts_enabled=toasts_enabled,
         grace_period_seconds=grace_period_seconds,
         max_retries=max_retries,
+        bridge_paused=bridge_paused,
+        paused_messages=paused_messages,
     )
     pending_ids = {
         entry.get("message_id")
         for entry in pending
         if entry.get("agent") == agent and entry.get("session_id") == session_id
     }
+    paused_ids = {
+        entry.get("message_id")
+        for entry in paused_messages
+        if entry.get("agent") == agent and entry.get("session_id") == session_id
+    }
 
     unread = unread_for_session(inbox_path, session_id)
-    new_msgs = [m for m in unread if m.get("id") not in seen_ids and m.get("id") not in pending_ids]
+    new_msgs = [
+        m for m in unread
+        if m.get("id") not in seen_ids and m.get("id") not in pending_ids and m.get("id") not in paused_ids
+    ]
     if not new_msgs:
         return []
 
+    command_configured = bool(on_message_command or on_message_command_template)
     if effective_on_message == "log":
+        if bridge_paused and command_configured:
+            _queue_paused_wake_messages(
+                paused_messages=paused_messages,
+                agent=agent,
+                session_id=session_id,
+                inbox_path=inbox_path,
+                messages=new_msgs,
+                pending=pending,
+                seen_ids=seen_ids,
+                state_path=state_path,
+            )
+            for m in new_msgs:
+                print(
+                    f"[agent-bridge] {utc_now()} -- wake suppressed while paused for {agent} id={m.get('id')} session=...{(session_id or '')[-8:]}",
+                    flush=True,
+                )
+            return []
         for m in new_msgs:
             print(
                 f"[agent-bridge] {utc_now()} -- new {agent} message id={m.get('id')} session=...{(session_id or '')[-8:]}",
@@ -658,7 +881,7 @@ def process_session_once(
             )
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
         return [m["id"] for m in new_msgs]
 
     if effective_on_message == "toast":
@@ -672,11 +895,28 @@ def process_session_once(
     else:
         notify_terminal(agent, session_id, new_msgs)
 
-    command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
-    if on_message_command:
-        command_result = run_command_for_session(on_message_command, agent, session_id, new_msgs, inbox_path)
+    if bridge_paused and command_configured:
+        _queue_paused_wake_messages(
+            paused_messages=paused_messages,
+            agent=agent,
+            session_id=session_id,
+            inbox_path=inbox_path,
+            messages=new_msgs,
+            pending=pending,
+            seen_ids=seen_ids,
+            state_path=state_path,
+        )
+        return []
 
-    if on_message_command and not command_result.get("ok") and not command_result.get("retryable", True):
+    command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
+    if command_configured:
+        resolved = _resolve_command_template(session_config, inbox_path)
+        if resolved.get("result") is not None:
+            command_result = resolved["result"]
+        elif resolved.get("command"):
+            command_result = run_command_for_session(resolved["command"], agent, session_id, new_msgs, inbox_path)
+
+    if command_configured and not command_result.get("ok") and not command_result.get("retryable", True):
         for message in new_msgs:
             message_id = str(message.get("id", ""))
             if not message_id:
@@ -689,10 +929,10 @@ def process_session_once(
                 seen_ids=seen_ids,
                 result=command_result,
             )
-        _save_watcher_state(state_path, seen_ids, pending)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
         return []
 
-    if on_message_command and command_result.get("ok"):
+    if command_configured and command_result.get("ok"):
         _queue_pending_wake_verifications(
             pending=pending,
             agent=agent,
@@ -701,13 +941,14 @@ def process_session_once(
             messages=new_msgs,
             seen_ids=seen_ids,
             state_path=state_path,
+            paused_messages=paused_messages,
         )
         return []
 
-    if not on_message_command:
+    if not command_configured:
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
         return [m["id"] for m in new_msgs]
 
     return []

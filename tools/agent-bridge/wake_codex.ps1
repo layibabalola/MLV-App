@@ -25,7 +25,6 @@
 param(
     [string]$Message              = "check bridge inbox",
     [string]$ThreadId             = "",
-    [string]$ExpectedTitleMarker  = "",
     [int]   $IdleThresholdSeconds = 5,
     [int]   $MaxWaitSeconds       = 60,
     [string]$LockFile             = "$env:USERPROFILE\.agent-bridge\wake_codex.lock",
@@ -101,20 +100,6 @@ function Get-IdleSeconds {
 function Test-CodexThreadId {
     param([string]$Value)
     return $Value -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-}
-
-function Test-ExpectedTitleMarker {
-    param(
-        [string]$Title,
-        [string]$Marker
-    )
-    if ([string]::IsNullOrWhiteSpace($Marker)) {
-        return $true
-    }
-    if ([string]::IsNullOrWhiteSpace($Title)) {
-        return $false
-    }
-    return $Title.IndexOf($Marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Open-CodexThread {
@@ -231,11 +216,6 @@ try {
     if ($nowFg -ne $codexHwnd) {
         Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground. Aborting."
         exit 1
-    }
-    $nowTitle = Get-WindowTitle -hWnd $nowFg
-    if (-not (Test-ExpectedTitleMarker -Title $nowTitle -Marker $ExpectedTitleMarker)) {
-        Write-Host ("[wake_codex] WARNING: foreground window title '" + $nowTitle + "' does not contain expected marker '" + $ExpectedTitleMarker + "'. Aborting to avoid wrong-chat injection.")
-        exit 3
     }
 
     if ($DryRun) {

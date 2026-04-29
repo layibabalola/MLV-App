@@ -19,6 +19,7 @@ from consume_inbox import consume
 from core.addressing import AgentInbox, MessageKind, SenderContext, SessionInbox
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, resolve_bridge_paths
 from core.processes import acquire_singleton_lease, heartbeat_lease, release_lease
+from core.runtime import peer_runtime_path_for_state_dir, read_runtime_breadcrumb
 from core.routing import RoutingStatus, resolve_route
 from core.settings import load_settings, settings_path_for_state_dir
 from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
@@ -661,6 +662,10 @@ class AgentBridgeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_settings(self.state_dir)
 
+        settings_path.write_text(json.dumps({"toasts_enabled": "yes"}), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_settings(self.state_dir)
+
     def test_codex_bridge_reminder_toasts_are_opt_in(self) -> None:
         settings = load_settings(self.state_dir)
         self.assertFalse(settings.codex_bridge_reminder_toasts_enabled)
@@ -887,17 +892,18 @@ class AgentBridgeTests(unittest.TestCase):
 
     def test_bootstrap_updates_watcher_config(self) -> None:
         config_path = self.tempdir / "watcher-config.json"
-        result = bootstrap(
-            state_dir=self.state_dir,
-            agent="codex",
-            cwd=str(ROOT),
-            previous_session_id=None,
-            session_id="codex-new",
-            project=None,
-            handshake_retries=1,
-            watcher_config=config_path,
-            start_watcher=False,
-        )
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"}):
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-new",
+                project=None,
+                handshake_retries=1,
+                watcher_config=config_path,
+                start_watcher=False,
+            )
         self.assertIsNotNone(result["watcher"])
         self.assertEqual(result["watcher_process"]["status"], "not_started")
         with config_path.open("r", encoding="utf-8") as handle:
@@ -905,6 +911,16 @@ class AgentBridgeTests(unittest.TestCase):
         session_ids = {entry["session_id"] for entry in config["sessions"]}
         self.assertIn("codex-new", session_ids)
         self.assertIn("mlv-app", session_ids)
+        codex_entries = [entry for entry in config["sessions"] if entry.get("agent") == "codex"]
+        self.assertTrue(
+            any(
+                "{desktop_thread_id}" in " ".join(entry.get("on_message_command_template", []))
+                for entry in codex_entries
+            )
+        )
+        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["session_id"], "codex-new")
+        self.assertEqual(breadcrumb["desktop_thread_id"], "019dcfe4-bd5d-7841-a7c1-2e8969a777c5")
 
     def test_recover_bridge_session_bootstraps_when_unbootstrapped(self) -> None:
         config_path = self.tempdir / "watcher-config.json"
@@ -1119,14 +1135,14 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("claude-live", session_ids)
         self.assertNotIn("old-session", session_ids)
         codex_commands = [
-            entry.get("on_message_command", "")
+            entry.get("on_message_command_template", "")
             for entry in result["sessions"]
             if entry.get("agent") == "codex"
         ]
-        self.assertTrue(any("-ThreadId 019dcfe4-bd5d-7841-a7c1-2e8969a777c5" in command for command in codex_commands))
-        self.assertTrue(any("-IdleThresholdSeconds 9" in command for command in codex_commands))
-        self.assertTrue(any("-MaxWaitSeconds 77" in command for command in codex_commands))
-        self.assertTrue(any("-ExpectedTitleMarker mlv-app" in command for command in codex_commands))
+        self.assertTrue(any("-ThreadId {desktop_thread_id}" in " ".join(command) for command in codex_commands))
+        self.assertTrue(any("-IdleThresholdSeconds 9" in " ".join(command) for command in codex_commands))
+        self.assertTrue(any("-MaxWaitSeconds 77" in " ".join(command) for command in codex_commands))
+        self.assertFalse(any("-ExpectedTitleMarker" in " ".join(command) for command in codex_commands))
 
     def test_codex_bridge_reminder_reports_unbootstrapped_and_recovery_hint(self) -> None:
         script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"

@@ -1,7 +1,9 @@
 # Phase B - Peer Breadcrumb Detailed Design
 
-**Status:** Proposed
-**Authors:** Claude (proposal); Codex implementation pending
+**Status:** Partially implemented. Bootstrap breadcrumb writing, watcher
+fire-time template resolution, and managed argv-template watcher config are
+landed in the working tree; UUID-based foreground verification remains open.
+**Authors:** Claude (proposal); Codex implementation in progress
 **Parent spec:** `AUTO_PAIR_SPEC.md`, Migration Plan Phase B
 **Motivation:** replace stale-config dependency with breadcrumb-driven peer
 identity discovery; provide UUID-based identity proof to plug into the

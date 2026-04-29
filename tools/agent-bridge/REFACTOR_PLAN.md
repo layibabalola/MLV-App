@@ -10,7 +10,12 @@
 - Project-bucket backlog was surfaced and marked read for `3a6f6a03-b07a-4f87-91c7-88aef54b5ac7`, `ffcd534c-70ed-4229-bf5d-f12b270ed47f`, `82c724ec-ce33-4a20-ad1e-5c0ac5a1f05a`, `b3207397-7671-4a88-8243-d7204748b526`, and `1429d520-c80c-406f-852f-5b03a9513b51`.
 - Important correction: current `server_wrapper.py` resolves/rejects/audits and then `execv`s `server.py`; it does **not** monitor mtimes or auto-respawn on bridge code changes yet.
 - Post-restart first checks: run `recover_state.py --scan-historical`, verify `bridge_process_status` shows new runtime breadcrumbs for MCP servers, then check Codex private bucket plus `mlv-app`.
-- Next implementation priority after restart: Claude ACTION_REQUEST `82c724ec` asks for `wake_codex.ps1 -ExpectedTitleMarker` and `configure_watcher.py` `expected_window_marker` plumbing to prevent wrong-chat SendKeys injection.
+- Historical note: Claude ACTION_REQUEST `82c724ec` originally asked for
+  `wake_codex.ps1 -ExpectedTitleMarker` and matching watcher-config
+  plumbing. User direction on 2026-04-28 removed the title-marker layer as
+  a dead-end heuristic on this Windows host. Current follow-up priority is
+  breadcrumb-driven peer identity plus fire-time watcher command-template
+  resolution (see `AUTO_PAIR_SPEC.md` and `PHASE_B_BREADCRUMB_DESIGN.md`).
 
 **Inputs synthesized:**
 - Claude first draft: bridge message `fd2b5d8c`

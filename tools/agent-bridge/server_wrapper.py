@@ -1,12 +1,37 @@
 import argparse
 import subprocess
 import sys
+import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import BinaryIO, Dict, List, Optional, Sequence, Set
 
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, resolve_bridge_paths
-from core.storage import append_jsonl
 from core.runtime import build_runtime_breadcrumb
+from core.storage import append_jsonl
+
+
+DEFAULT_POLL_INTERVAL_SECONDS = 2.0
+DEFAULT_DEBOUNCE_SECONDS = 1.0
+DEFAULT_IDLE_SECONDS = 0.5
+DEFAULT_TERMINATE_TIMEOUT_SECONDS = 5.0
+DEFAULT_RESTART_WINDOW_SECONDS = 30.0
+DEFAULT_MAX_RESTARTS_PER_WINDOW = 4
+DEFAULT_CHUNK_SIZE = 65536
+DEFAULT_LOOP_SLEEP_SECONDS = 0.05
+
+
+@dataclass(frozen=True)
+class SupervisorConfig:
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
+    debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS
+    idle_seconds: float = DEFAULT_IDLE_SECONDS
+    terminate_timeout_seconds: float = DEFAULT_TERMINATE_TIMEOUT_SECONDS
+    restart_window_seconds: float = DEFAULT_RESTART_WINDOW_SECONDS
+    max_restarts_per_window: int = DEFAULT_MAX_RESTARTS_PER_WINDOW
+    chunk_size: int = DEFAULT_CHUNK_SIZE
+    loop_sleep_seconds: float = DEFAULT_LOOP_SLEEP_SECONDS
 
 
 def build_server_command(*, server_path: Path, state_dir: Path, max_hops: int, passthrough: List[str]) -> List[str]:
@@ -42,6 +67,358 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     args, passthrough = parser.parse_known_args(argv)
     args.passthrough = passthrough
     return args
+
+
+def _binary_reader(stream: object) -> BinaryIO:
+    return getattr(stream, "buffer", stream)
+
+
+def _binary_writer(stream: object) -> BinaryIO:
+    return getattr(stream, "buffer", stream)
+
+
+def _watch_bridge_code_files(base_dir: Path) -> List[Path]:
+    return sorted(path for path in Path(base_dir).rglob("*.py") if "__pycache__" not in path.parts)
+
+
+def _snapshot_mtimes(paths: Sequence[Path]) -> Dict[Path, Optional[int]]:
+    snapshot: Dict[Path, Optional[int]] = {}
+    for path in paths:
+        try:
+            snapshot[path] = path.stat().st_mtime_ns
+        except FileNotFoundError:
+            snapshot[path] = None
+    return snapshot
+
+
+def _close_pipe(pipe: Optional[BinaryIO]) -> None:
+    if pipe is None:
+        return
+    try:
+        pipe.close()
+    except OSError:
+        return
+
+
+class ServerSupervisor:
+    def __init__(
+        self,
+        *,
+        command: Sequence[str],
+        state_dir: Path,
+        watch_paths: Sequence[Path],
+        config: Optional[SupervisorConfig] = None,
+        stdin_stream: Optional[BinaryIO] = None,
+        stdout_stream: Optional[BinaryIO] = None,
+        stderr_target: Optional[int] = None,
+        now_fn=time.monotonic,
+    ) -> None:
+        self.command = list(command)
+        self.state_dir = Path(state_dir)
+        self.watch_paths = [Path(path) for path in watch_paths]
+        self.config = config or SupervisorConfig()
+        self.stdin_stream = stdin_stream or _binary_reader(sys.stdin)
+        self.stdout_stream = stdout_stream or _binary_writer(sys.stdout)
+        self.stderr_target = stderr_target
+        self.now_fn = now_fn
+
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._child: Optional[subprocess.Popen[bytes]] = None
+        self._stdout_threads: Dict[int, threading.Thread] = {}
+        self._stdin_thread: Optional[threading.Thread] = None
+        self._watch_thread: Optional[threading.Thread] = None
+        self._restart_in_progress = False
+        self._pending_changed_files: Set[Path] = set()
+        self._last_change_time: Optional[float] = None
+        self._last_io_time = self.now_fn()
+        self._restart_history: List[float] = []
+        self._stdin_eof = False
+        self._thread_error: Optional[BaseException] = None
+
+    def run(self) -> int:
+        try:
+            self._spawn_child()
+            self._stdin_thread = threading.Thread(target=self._pump_parent_stdin, name="agent-bridge-wrapper-stdin", daemon=True)
+            self._stdin_thread.start()
+            self._watch_thread = threading.Thread(target=self._watch_for_code_changes, name="agent-bridge-wrapper-watch", daemon=True)
+            self._watch_thread.start()
+
+            while True:
+                if self._thread_error is not None:
+                    self._report_error("agent-bridge server wrapper worker failed: %s" % self._thread_error)
+                    return 1
+
+                if self._restart_is_due():
+                    if not self._restart_child():
+                        return 1
+                    continue
+
+                child = self._current_child()
+                if child is None:
+                    return 1
+
+                exit_code = child.poll()
+                if exit_code is not None and not self._is_restarting():
+                    self._join_stdout_thread(child.pid)
+                    return exit_code
+
+                if self._stop_event.wait(self.config.loop_sleep_seconds):
+                    if self._thread_error is not None:
+                        self._report_error("agent-bridge server wrapper worker failed: %s" % self._thread_error)
+                        return 1
+                    return 1
+        finally:
+            self._stop_event.set()
+            self._shutdown_child()
+            self._join_all_stdout_threads()
+
+    def _spawn_child(self) -> subprocess.Popen[bytes]:
+        child = subprocess.Popen(
+            self.command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr_target,
+            bufsize=0,
+        )
+        stdout_thread = threading.Thread(
+            target=self._pump_child_stdout,
+            args=(child,),
+            name="agent-bridge-wrapper-stdout-%s" % child.pid,
+            daemon=True,
+        )
+        with self._state_lock:
+            self._child = child
+            self._stdout_threads[child.pid] = stdout_thread
+            stdin_eof = self._stdin_eof
+        if stdin_eof and child.stdin is not None:
+            _close_pipe(child.stdin)
+        stdout_thread.start()
+        return child
+
+    def _pump_parent_stdin(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                chunk = self.stdin_stream.read(self.config.chunk_size)
+                if not chunk:
+                    with self._state_lock:
+                        self._stdin_eof = True
+                        child = self._child
+                    if child is not None and child.stdin is not None:
+                        _close_pipe(child.stdin)
+                    return
+
+                self._note_io()
+                pending = bytes(chunk)
+                while pending and not self._stop_event.is_set():
+                    child_stdin = self._current_child_stdin()
+                    if child_stdin is None:
+                        self._stop_event.wait(self.config.loop_sleep_seconds)
+                        continue
+                    try:
+                        child_stdin.write(pending)
+                        child_stdin.flush()
+                        pending = b""
+                    except (BrokenPipeError, OSError, ValueError):
+                        self._stop_event.wait(self.config.loop_sleep_seconds)
+        except BaseException as exc:
+            self._thread_error = exc
+            self._stop_event.set()
+
+    def _pump_child_stdout(self, child: subprocess.Popen[bytes]) -> None:
+        try:
+            if child.stdout is None:
+                return
+            while not self._stop_event.is_set():
+                chunk = child.stdout.read(self.config.chunk_size)
+                if not chunk:
+                    return
+                self._note_io()
+                self.stdout_stream.write(chunk)
+                self.stdout_stream.flush()
+        except BaseException as exc:
+            self._thread_error = exc
+            self._stop_event.set()
+        finally:
+            _close_pipe(child.stdout)
+
+    def _watch_for_code_changes(self) -> None:
+        try:
+            previous = _snapshot_mtimes(self.watch_paths)
+            while not self._stop_event.wait(self.config.poll_interval_seconds):
+                current = _snapshot_mtimes(self.watch_paths)
+                changed = [path for path in self.watch_paths if current.get(path) != previous.get(path)]
+                previous = current
+                if not changed:
+                    continue
+                now = self.now_fn()
+                with self._state_lock:
+                    self._pending_changed_files.update(changed)
+                    self._last_change_time = now
+        except BaseException as exc:
+            self._thread_error = exc
+            self._stop_event.set()
+
+    def _restart_is_due(self) -> bool:
+        with self._state_lock:
+            if self._restart_in_progress or not self._pending_changed_files or self._last_change_time is None:
+                return False
+            now = self.now_fn()
+            if now - self._last_change_time < self.config.debounce_seconds:
+                return False
+            if now - self._last_io_time < self.config.idle_seconds:
+                return False
+            child = self._child
+        return child is not None and child.poll() is None
+
+    def _restart_child(self) -> bool:
+        with self._state_lock:
+            changed_files = sorted(str(path) for path in self._pending_changed_files)
+            self._pending_changed_files.clear()
+            self._last_change_time = None
+            self._restart_in_progress = True
+            child = self._child
+
+        if child is None:
+            with self._state_lock:
+                self._restart_in_progress = False
+            return False
+
+        restart_at = self.now_fn()
+        if self._restart_limit_reached(restart_at, changed_files):
+            with self._state_lock:
+                self._restart_in_progress = False
+            self._shutdown_child()
+            self._stop_event.set()
+            return False
+
+        old_child_pid = child.pid
+        restart_started = self.now_fn()
+        self._terminate_child(child)
+        self._join_stdout_thread(old_child_pid)
+        try:
+            new_child = self._spawn_child()
+        except Exception as exc:
+            with self._state_lock:
+                self._restart_in_progress = False
+            self._report_error("agent-bridge server wrapper restart failed: %s" % exc)
+            self._stop_event.set()
+            return False
+
+        elapsed_ms = int((self.now_fn() - restart_started) * 1000)
+        with self._state_lock:
+            cutoff = restart_at - self.config.restart_window_seconds
+            self._restart_history = [stamp for stamp in self._restart_history if stamp >= cutoff]
+            self._restart_history.append(restart_at)
+            self._restart_in_progress = False
+
+        self._append_audit_event(
+            action="mcp_server_self_restarted",
+            old_child_pid=old_child_pid,
+            new_child_pid=new_child.pid,
+            changed_files=changed_files,
+            elapsed_ms=elapsed_ms,
+        )
+        return True
+
+    def _restart_limit_reached(self, restart_at: float, changed_files: List[str]) -> bool:
+        with self._state_lock:
+            cutoff = restart_at - self.config.restart_window_seconds
+            recent = [stamp for stamp in self._restart_history if stamp >= cutoff]
+        if len(recent) < self.config.max_restarts_per_window - 1:
+            return False
+        self._append_audit_event(
+            action="mcp_server_self_restart_aborted_loop",
+            changed_files=changed_files,
+            attempted_restart_count=len(recent) + 1,
+            restart_window_seconds=self.config.restart_window_seconds,
+        )
+        self._report_error("agent-bridge server wrapper aborted restart loop protection")
+        return True
+
+    def _terminate_child(self, child: subprocess.Popen[bytes]) -> None:
+        if child.stdin is not None:
+            _close_pipe(child.stdin)
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=self.config.terminate_timeout_seconds)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=self.config.terminate_timeout_seconds)
+        _close_pipe(child.stdout)
+
+    def _shutdown_child(self) -> None:
+        child = self._current_child()
+        if child is None:
+            return
+        if child.poll() is None:
+            self._terminate_child(child)
+
+    def _current_child(self) -> Optional[subprocess.Popen[bytes]]:
+        with self._state_lock:
+            return self._child
+
+    def _current_child_stdin(self) -> Optional[BinaryIO]:
+        with self._state_lock:
+            child = self._child
+        if child is None or child.poll() is not None or child.stdin is None:
+            return None
+        return child.stdin
+
+    def _is_restarting(self) -> bool:
+        with self._state_lock:
+            return self._restart_in_progress
+
+    def _join_stdout_thread(self, child_pid: int) -> None:
+        with self._state_lock:
+            thread = self._stdout_threads.pop(child_pid, None)
+        if thread is not None:
+            thread.join(timeout=self.config.terminate_timeout_seconds)
+
+    def _join_all_stdout_threads(self) -> None:
+        with self._state_lock:
+            threads = list(self._stdout_threads.items())
+            self._stdout_threads.clear()
+        for _, thread in threads:
+            thread.join(timeout=self.config.terminate_timeout_seconds)
+
+    def _note_io(self) -> None:
+        with self._state_lock:
+            self._last_io_time = self.now_fn()
+
+    def _append_audit_event(self, *, action: str, **extra: object) -> None:
+        try:
+            event = build_runtime_breadcrumb(state_dir=self.state_dir, role="mcp_server_wrapper", command=self.command)
+            event["action"] = action
+            event.update(extra)
+            append_jsonl(self.state_dir / "messages.jsonl", event)
+        except Exception as exc:
+            self._report_error("agent-bridge server wrapper audit failed: %s" % exc)
+
+    def _report_error(self, message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
+
+def run_supervisor(
+    *,
+    command: Sequence[str],
+    state_dir: Path,
+    watch_paths: Sequence[Path],
+    config: Optional[SupervisorConfig] = None,
+    stdin_stream: Optional[BinaryIO] = None,
+    stdout_stream: Optional[BinaryIO] = None,
+    stderr_target: Optional[int] = None,
+) -> int:
+    return ServerSupervisor(
+        command=command,
+        state_dir=Path(state_dir),
+        watch_paths=watch_paths,
+        config=config,
+        stdin_stream=stdin_stream,
+        stdout_stream=stdout_stream,
+        stderr_target=stderr_target,
+    ).run()
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -81,11 +458,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     except Exception as exc:
         print("agent-bridge server wrapper audit failed: %s" % exc, file=sys.stderr, flush=True)
 
-    # subprocess.run rather than os.execv: on Windows, os.execv does not quote
-    # argv elements containing spaces, so a server.py path under "C:\!Layi Wkspc\..."
-    # gets re-tokenized and Python fails with `can't find '__main__' module in '...'`.
-    completed = subprocess.run(command)
-    sys.exit(completed.returncode)
+    exit_code = run_supervisor(
+        command=command,
+        state_dir=paths.state_dir,
+        watch_paths=_watch_bridge_code_files(server_path.parent),
+    )
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

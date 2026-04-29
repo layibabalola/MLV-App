@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -108,6 +107,7 @@ def build_private_entry(
     project: str,
     inbox: Path,
     command: Optional[str],
+    command_template: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     # Claude has an in-process Monitor that reads the inbox directly — the watcher
     # should only toast (alert the user) and never consume messages on Claude's behalf.
@@ -123,9 +123,13 @@ def build_private_entry(
     }
     if command is not None:
         entry["on_message_command"] = command
+    if command_template is not None:
+        entry["on_message_command_template"] = command_template
     merged = merge_entry(existing, entry)
     if command is None:
         merged.pop("on_message_command", None)
+    if command_template is None:
+        merged.pop("on_message_command_template", None)
     return merged
 
 
@@ -136,6 +140,7 @@ def build_rendezvous_entry(
     project: str,
     inbox: Path,
     command: Optional[str],
+    command_template: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     # Same rationale: Claude reads its own inbox via Monitor; no consume command needed.
     entry: Dict[str, Any] = {
@@ -149,9 +154,13 @@ def build_rendezvous_entry(
     }
     if command is not None:
         entry["on_message_command"] = command
+    if command_template is not None:
+        entry["on_message_command_template"] = command_template
     merged = merge_entry(existing, entry)
     if command is None:
         merged.pop("on_message_command", None)
+    if command_template is None:
+        merged.pop("on_message_command_template", None)
     return merged
 
 
@@ -234,21 +243,18 @@ def configure_watcher(
     # NEVER use consume_inbox.py from the watcher — it races with both agent
     # read paths and silently eats messages.
     wake_command: Optional[str] = None
+    wake_command_template: Optional[List[str]] = None
     if agent == "codex":
         wake_script = Path(__file__).with_name("wake_codex.ps1")
-        wake_args = [
+        wake_command_template = [
             "powershell",
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", str(wake_script),
             "-IdleThresholdSeconds", str(settings.wake_idle_threshold_seconds),
             "-MaxWaitSeconds", str(settings.wake_max_wait_seconds),
-            "-ExpectedTitleMarker", project_name,
+            "-ThreadId", "{desktop_thread_id}",
         ]
-        codex_thread_id = config.get(PARENT_THREAD_ID_KEY) or os.environ.get("CODEX_THREAD_ID")
-        if codex_thread_id:
-            wake_args.extend(["-ThreadId", codex_thread_id])
-        wake_command = subprocess.list2cmdline(wake_args)
 
     if active_session_id:
         managed_entries.append(
@@ -259,6 +265,7 @@ def configure_watcher(
                 project=project_name,
                 inbox=inbox,
                 command=wake_command,
+                command_template=wake_command_template,
             )
         )
 
@@ -269,6 +276,7 @@ def configure_watcher(
             project=project_name,
             inbox=inbox,
             command=wake_command,
+            command_template=wake_command_template,
         )
     )
 

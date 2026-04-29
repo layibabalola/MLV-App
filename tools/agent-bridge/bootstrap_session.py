@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -8,9 +9,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_bridge import AgentBridge
-from configure_watcher import configure_watcher
+from configure_watcher import PARENT_THREAD_ID_KEY, configure_watcher
 from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths
 from core.processes import acquire_singleton_lease, build_lease, command_line_hash, is_process_alive, lease_status, write_lease
+from core.runtime import build_peer_runtime_breadcrumb, peer_runtime_path_for_state_dir, write_runtime_breadcrumb
 from project_identity import derive_project_identity
 
 
@@ -89,6 +91,32 @@ def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Di
     }
 
 
+def _desktop_thread_id_from_env(agent: str) -> Optional[str]:
+    candidates = []
+    if agent == "codex":
+        candidates.extend(["CODEX_THREAD_ID", "CODEX_PARENT_THREAD_ID"])
+    else:
+        candidates.extend(["CLAUDE_THREAD_ID", "CLAUDE_DESKTOP_THREAD_ID"])
+    for key in candidates:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return None
+
+
+def _desktop_thread_id_for_bootstrap(agent: str, watcher_config: Optional[Path]) -> Optional[str]:
+    if watcher_config is not None and watcher_config.exists():
+        try:
+            data = json.loads(watcher_config.read_text(encoding="utf-8"))
+            if agent == "codex":
+                value = data.get(PARENT_THREAD_ID_KEY)
+                if value:
+                    return str(value)
+        except Exception:
+            pass
+    return _desktop_thread_id_from_env(agent)
+
+
 def bootstrap(
     *,
     state_dir: Path,
@@ -122,6 +150,17 @@ def bootstrap(
         msg_id = msg.get("id")
         if msg_id:
             bridge.mark_read(agent=agent, message_id=msg_id, session_id=None)
+
+    desktop_thread_id = _desktop_thread_id_for_bootstrap(agent, watcher_config)
+    peer_breadcrumb = build_peer_runtime_breadcrumb(
+        state_dir=state_dir,
+        agent=agent,
+        session_id=new_session,
+        project=project_name,
+        desktop_thread_id=desktop_thread_id,
+        bootstrap_command=[sys.executable, *sys.argv],
+    )
+    write_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent), peer_breadcrumb)
 
     handshake = None
     delays = [2, 4, 8]
@@ -193,6 +232,7 @@ def bootstrap(
         },
         "watcher": watcher,
         "watcher_process": watcher_process,
+        "peer_runtime": peer_breadcrumb,
     }
 
 

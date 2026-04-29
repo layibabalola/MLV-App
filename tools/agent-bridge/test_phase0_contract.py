@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
 from configure_watcher import configure_watcher
+from core.runtime import peer_runtime_path_for_state_dir, write_runtime_breadcrumb
 import probe_server
 import watcher
 
@@ -460,6 +461,217 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(len(wrong_chat_events), 1)
         self.assertEqual(wrong_chat_events[0]["message_id"], "msg-wrong-chat")
 
+    def test_07d_watcher_resolves_command_template_from_peer_breadcrumb(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-template",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        write_runtime_breadcrumb(
+            peer_runtime_path_for_state_dir(self.state_dir, "codex"),
+            {
+                "schema_version": 1,
+                "agent": "codex",
+                "session_id": "codex-live",
+                "project": "mlv-app",
+                "desktop_thread_id": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5",
+                "deeplink_template": "codex://threads/{thread_id}",
+            },
+        )
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+        succeeded = Mock(returncode=0, stdout="", stderr="")
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run", return_value=succeeded) as run:
+            watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "project": "mlv-app",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command_template": ["fake-wake", "-ThreadId", "{desktop_thread_id}"],
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(run.call_args.args[0], ["fake-wake", "-ThreadId", "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"])
+        self.assertFalse(run.call_args.kwargs["shell"])
+
+    def test_07e_missing_peer_breadcrumb_marks_seen_without_retry(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-no-peer",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run") as run:
+            processed = watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "project": "mlv-app",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command_template": ["fake-wake", "-ThreadId", "{desktop_thread_id}"],
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(processed, [])
+        self.assertFalse(run.called)
+        self.assertIn("msg-no-peer", seen_ids)
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        no_peer_events = [row for row in audit_rows if row.get("action") == "wake_skipped_no_peer"]
+        self.assertEqual(len(no_peer_events), 1)
+        self.assertEqual(no_peer_events[0]["message_id"], "msg-no-peer")
+
+    def test_07f_watcher_skips_wake_command_when_bridge_paused(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-paused",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+        (self.state_dir / "state.json").write_text(
+            json.dumps({"paused": True, "sessions": {}, "updated_at": "2026-04-29T00:00:00+00:00"}) + "\n",
+            encoding="utf-8",
+        )
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+
+        with patch("watcher.notify_terminal") as notify, patch("watcher.subprocess.run") as run:
+            processed = watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake",
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(processed, [])
+        self.assertFalse(run.called)
+        self.assertEqual(notify.call_count, 1)
+        self.assertNotIn("msg-paused", seen_ids)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["pending_wake_verifications"], [])
+        self.assertEqual(state["paused_wake_messages"][0]["message_id"], "msg-paused")
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        paused_events = [row for row in audit_rows if row.get("action") == "wake_skipped_paused"]
+        self.assertEqual(len(paused_events), 1)
+        self.assertEqual(paused_events[0]["message_id"], "msg-paused")
+
+    def test_07g_paused_wake_message_retries_after_resume(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-resume",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+        state_file = self.state_dir / "state.json"
+        state_file.write_text(
+            json.dumps({"paused": True, "sessions": {}, "updated_at": "2026-04-29T00:00:00+00:00"}) + "\n",
+            encoding="utf-8",
+        )
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run") as run:
+            watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake",
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+            self.assertFalse(run.called)
+
+            state_file.write_text(
+                json.dumps({"paused": False, "sessions": {}, "updated_at": "2026-04-29T00:01:00+00:00"}) + "\n",
+                encoding="utf-8",
+            )
+            run.return_value = Mock(returncode=0, stdout="", stderr="")
+            watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake",
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(run.call_count, 1)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["paused_wake_messages"], [])
+        self.assertEqual(state["pending_wake_verifications"][0]["message_id"], "msg-resume")
+
     # ------------------------------------------------------------------
     # Test 8 & 9: configure_watcher race + sub-agent cannot mutate parent_thread_id
     # Invariant: #10. Phase 7.X infrastructure.
@@ -498,12 +710,12 @@ class Phase0ContractTests(unittest.TestCase):
             config = json.load(handle)
         self.assertEqual(config["codex_parent_thread_id"], parent_thread)
         commands = [
-            entry.get("on_message_command", "")
+            entry.get("on_message_command_template", "")
             for entry in config["sessions"]
             if entry.get("agent") == "codex"
         ]
-        self.assertTrue(any(parent_thread in command for command in commands))
-        self.assertFalse(any(subagent_thread in command for command in commands))
+        self.assertTrue(any("{desktop_thread_id}" in " ".join(command) for command in commands))
+        self.assertFalse(any(subagent_thread in " ".join(command) for command in commands))
 
     def test_09_sub_agent_cannot_mutate_parent_thread_id(self) -> None:
         """A configure_watcher call from a sub-agent context must be

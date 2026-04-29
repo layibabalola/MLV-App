@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -61,3 +62,35 @@ def read_runtime_breadcrumb(path: Path) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         return {"path": str(path), "error": str(exc), "unreadable": True}
     return data if isinstance(data, dict) else {"path": str(path), "error": "not a JSON object", "unreadable": True}
+
+
+def peer_runtime_path_for_state_dir(state_dir: Path, agent: str) -> Path:
+    return bridge_root_for_state_dir(Path(state_dir)) / f"peer-{agent}.runtime.json"
+
+
+def build_peer_runtime_breadcrumb(
+    *,
+    state_dir: Path,
+    agent: str,
+    session_id: str,
+    project: str,
+    desktop_thread_id: Optional[str] = None,
+    bootstrap_command: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    bridge_root = bridge_root_for_state_dir(Path(state_dir))
+    breadcrumb: Dict[str, Any] = {
+        "schema_version": 1,
+        "agent": agent,
+        "session_id": session_id,
+        "project": project,
+        "desktop_app": "codex-desktop" if agent == "codex" else "claude-desktop",
+        "written_by_pid": os.getpid(),
+        "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "bootstrap_command": bootstrap_command or sys.argv,
+    }
+    if desktop_thread_id:
+        breadcrumb["desktop_thread_id"] = desktop_thread_id
+    if agent == "codex":
+        breadcrumb["deeplink_template"] = "codex://threads/{thread_id}"
+    breadcrumb.update(_manifest_identity(bridge_root))
+    return breadcrumb

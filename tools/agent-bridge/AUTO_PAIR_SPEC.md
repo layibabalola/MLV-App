@@ -1,7 +1,9 @@
 # Agent Bridge - Auto-Pair And Wrong-Chat Defense Spec
 
-**Status:** Phase A landed in working tree (uncommitted at time of spec
-update); Phases B-C planned; Phases D-E speculative pending Q1 verification
+**Status:** Title-marker Phase A shipped historically, then was intentionally
+retired on 2026-04-28. Current tree direction is Phase B/C groundwork:
+peer-runtime breadcrumbs plus fire-time watcher command-template resolution.
+Phases D-E remain speculative pending Q1 verification.
 **Authors:** Claude (proposal); Codex review and Phase A implementation
 **Motivation:** eliminate the hardcoded `session_id` and `desktop_thread_id`
 in `watcher-config.json` that go stale when either side rotates threads, and
@@ -432,20 +434,22 @@ No new user-facing settings. The mechanism is internal infrastructure.
    handles missing file without crashing.
 4. `test_watcher_command_template_substitution` - placeholders resolved
    from breadcrumb.
-5. `test_wake_codex_exit_3_on_title_mismatch` - mock foreground window with
-   wrong title, assert exit 3.
-6. `test_watcher_treats_exit_3_as_permanent` - no retry, message marked
-   seen, audit event written.
+5. `test_watcher_treats_missing_breadcrumb_as_permanent_no_retry` - no retry,
+   message marked seen with `wake_skipped_no_peer`.
+6. `test_watcher_treats_exit_3_as_permanent` - preserve generic no-retry
+   infrastructure for a future UUID-based wrong-chat verifier.
 7. `test_watcher_legacy_inline_command_still_works` - one-release
    deprecation buffer.
 
 **Integration:**
 
 8. End-to-end: Claude bootstraps, Codex bootstraps, Claude sends, watcher
-   resolves breadcrumb, wake fires, title-verifies, succeeds.
+   resolves breadcrumb, wake fires, deeplink succeeds, Codex handles the
+   message.
 9. End-to-end with stale breadcrumb: Codex bootstraps with thread A, user
-   switches to thread B without re-bootstrapping; wake fires, title-verifies
-   against A's pattern, exits 3, message marked seen, no loop.
+   switches to thread B without re-bootstrapping; wake fires against stale
+   thread metadata and the follow-up UUID-aware verifier path is expected to
+   own rejection once implemented.
 10. End-to-end Codex -> Claude with `wake_claude.ps1`.
 
 ---
@@ -525,16 +529,16 @@ recorded inline below.
   matching the schema; tests assert format and overwrite semantics.
 - A2. Watcher reads the breadcrumb at fire time and substitutes
   placeholders into `on_message_command_template`.
-- A3. `wake_codex.ps1` reads foreground window title after
-  SetForegroundWindow and exits 3 if it does not match the breadcrumb's
-  pattern; tests assert this on mocked windows.
-- A4. Watcher treats exit code 3 as permanent: marks message seen,
-  appends `wake_skipped_wrong_chat` audit event with offending title, no
-  retry; test asserts no retry counter increment.
+- A3. Managed Codex watcher config is template-based and no longer emits an
+  `ExpectedTitleMarker` argument; the active peer breadcrumb is the source
+  of thread-targeting data.
+- A4. Missing peer breadcrumb is treated as a permanent no-retry wake skip
+  (`wake_skipped_no_peer`). Exit-code-3 no-retry handling remains reserved
+  infrastructure for a future UUID-aware wrong-chat verifier.
 - A5. Watcher continues to honor legacy inline `on_message_command` for
   one release (deprecation buffer); test asserts.
-- A6. Symmetric `wake_claude.ps1` ships behind the same template/breadcrumb
-  contract; tests parallel to `wake_codex.ps1`.
+- A6. Symmetric `wake_claude.ps1` remains deferred; when it ships it should
+  use the same template/breadcrumb contract.
 - A7. Settings gate: hardcoded enabled, escape hatch via legacy inline
   config documented in README.
 
@@ -555,9 +559,10 @@ switches). Making it the canonical source of truth removes the
 hardcoded-config tech debt at the same time as fixing the immediate
 defect.
 
-Phases A and B are small enough to ship together as a single PR; that
-already closes the wrong-chat injection vulnerability (the safety net is
-sufficient even before the breadcrumb is read by the watcher). Phases C
+Breadcrumb-driven pairing is still worth doing even after the title-marker
+rollback because it removes hardcoded thread ids from static watcher config
+and makes the active peer inspectable. Phase B/C are the minimum useful
+implementation slice. Phases D
 through E can land as follow-ups.
 
 [[handoff:codex]]
