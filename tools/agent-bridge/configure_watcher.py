@@ -243,6 +243,7 @@ def configure_watcher(
             "-File", str(wake_script),
             "-IdleThresholdSeconds", str(settings.wake_idle_threshold_seconds),
             "-MaxWaitSeconds", str(settings.wake_max_wait_seconds),
+            "-ExpectedTitleMarker", project_name,
         ]
         codex_thread_id = config.get(PARENT_THREAD_ID_KEY) or os.environ.get("CODEX_THREAD_ID")
         if codex_thread_id:

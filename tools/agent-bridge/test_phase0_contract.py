@@ -407,6 +407,59 @@ class Phase0ContractTests(unittest.TestCase):
         state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["pending_wake_verifications"], [])
 
+    def test_07c_wake_exit_3_marks_seen_without_retry(self) -> None:
+        """Wrong-chat detection is a permanent wake failure, not a retry loop."""
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-wrong-chat",
+            "session_id": "codex-live",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+        wrong_chat = Mock(
+            returncode=3,
+            stdout="[wake_codex] WARNING: foreground window title 'Other Chat' does not contain expected marker 'mlv-app'.",
+            stderr="",
+        )
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run", return_value=wrong_chat) as run:
+            processed = watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake",
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(processed, [])
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("msg-wrong-chat", seen_ids)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["pending_wake_verifications"], [])
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        wrong_chat_events = [row for row in audit_rows if row.get("action") == "wake_skipped_wrong_chat"]
+        self.assertEqual(len(wrong_chat_events), 1)
+        self.assertEqual(wrong_chat_events[0]["message_id"], "msg-wrong-chat")
+
     # ------------------------------------------------------------------
     # Test 8 & 9: configure_watcher race + sub-agent cannot mutate parent_thread_id
     # Invariant: #10. Phase 7.X infrastructure.

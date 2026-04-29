@@ -1126,6 +1126,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(any("-ThreadId 019dcfe4-bd5d-7841-a7c1-2e8969a777c5" in command for command in codex_commands))
         self.assertTrue(any("-IdleThresholdSeconds 9" in command for command in codex_commands))
         self.assertTrue(any("-MaxWaitSeconds 77" in command for command in codex_commands))
+        self.assertTrue(any("-ExpectedTitleMarker mlv-app" in command for command in codex_commands))
 
     def test_codex_bridge_reminder_reports_unbootstrapped_and_recovery_hint(self) -> None:
         script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"

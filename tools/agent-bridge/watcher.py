@@ -41,6 +41,7 @@ except ImportError:
 COMPACT_SIZE_MB = 1.0          # also compact if inbox exceeds this size
 WAKE_ACK_GRACE_PERIOD_S = 30
 WAKE_MAX_RETRIES = 3
+WAKE_PERMANENT_EXIT_CODES = {3}
 
 
 def utc_now() -> str:
@@ -350,17 +351,69 @@ def _notify_windows_balloon(agent: str, session_id: str, messages: List[Dict[str
         notify_terminal(agent, session_id, messages)
 
 
-def run_command_for_session(cmd: str, agent: str, session_id: str, messages: List[Dict[str, Any]], inbox_path: Path) -> bool:
+def _permanent_wake_event(
+    *,
+    agent: str,
+    session_id: str,
+    message_id: str,
+    returncode: int,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    event = {
+        "action": "wake_skipped_wrong_chat" if returncode == 3 else "wake_command_failed_permanently",
+        "agent": agent,
+        "session_id": session_id,
+        "message_id": message_id,
+        "returncode": returncode,
+        "reason": "wrong_chat_detected" if returncode == 3 else "permanent_wake_failure",
+    }
+    stdout = str(result.get("stdout") or "").strip()
+    stderr = str(result.get("stderr") or "").strip()
+    if stdout:
+        event["stdout"] = stdout[-500:]
+    if stderr:
+        event["stderr"] = stderr[-500:]
+    return event
+
+
+def _mark_permanent_wake_failure(
+    *,
+    agent: str,
+    session_id: str,
+    inbox_path: Path,
+    message_id: str,
+    seen_ids: set,
+    result: Dict[str, Any],
+) -> None:
+    returncode = int(result.get("returncode") or 0)
+    seen_ids.add(message_id)
+    _append_wake_audit(
+        inbox_path,
+        _permanent_wake_event(
+            agent=agent,
+            session_id=session_id,
+            message_id=message_id,
+            returncode=returncode,
+            result=result,
+        ),
+    )
+    print(
+        f"[agent-bridge] permanent wake failure for {agent} id={message_id} session=...{session_id[-8:]} rc={returncode}; suppressing retries",
+        flush=True,
+    )
+
+
+def run_command_for_session(cmd: str, agent: str, session_id: str, messages: List[Dict[str, Any]], inbox_path: Path) -> Dict[str, Any]:
     import subprocess
 
     if not messages:
-        return False
+        return {"ok": False, "returncode": None, "retryable": False, "stdout": "", "stderr": ""}
     if "consume_inbox.py" in cmd:
         print(
             f"[agent-bridge] refusing destructive on_message_command for {agent} session=...{(session_id or '')[-8:]}",
             flush=True,
         )
-        return True
+        return {"ok": True, "returncode": 0, "retryable": False, "stdout": "", "stderr": ""}
     first = messages[0]
     env = {**__import__("os").environ}
     env["BRIDGE_AGENT"] = agent
@@ -388,18 +441,26 @@ def run_command_for_session(cmd: str, agent: str, session_id: str, messages: Lis
         if proc.stderr:
             print(proc.stderr.rstrip(), flush=True)
         if proc.returncode != 0:
+            retryable = proc.returncode not in WAKE_PERMANENT_EXIT_CODES
             print(
-                f"[agent-bridge] on_message_command exited {proc.returncode}; message remains retryable",
+                f"[agent-bridge] on_message_command exited {proc.returncode}; "
+                f"{'message remains retryable' if retryable else 'suppressing retries for this message'}",
                 flush=True,
             )
-            return False
-        return True
+            return {
+                "ok": False,
+                "returncode": proc.returncode,
+                "retryable": retryable,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            }
+        return {"ok": True, "returncode": 0, "retryable": False, "stdout": proc.stdout, "stderr": proc.stderr}
     except subprocess.TimeoutExpired:
         print("[agent-bridge] on_message_command timed out; message remains retryable", flush=True)
-        return False
+        return {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": "timeout"}
     except Exception as exc:
         print(f"[agent-bridge] on_message_command failed: {exc}", flush=True)
-        return False
+        return {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": str(exc)}
 
 
 def _process_pending_wake_verifications(
@@ -472,13 +533,24 @@ def _process_pending_wake_verifications(
             continue
 
         if on_message_command:
-            command_ok = run_command_for_session(on_message_command, agent, session_id, [row], inbox_path)
+            command_result = run_command_for_session(on_message_command, agent, session_id, [row], inbox_path)
         else:
-            command_ok = False
+            command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
+        if not command_result.get("ok") and not command_result.get("retryable", True):
+            _mark_permanent_wake_failure(
+                agent=agent,
+                session_id=session_id,
+                inbox_path=inbox_path,
+                message_id=message_id,
+                seen_ids=seen_ids,
+                result=command_result,
+            )
+            changed = True
+            continue
         retry_count += 1
         entry["retry_count"] = retry_count
         entry["sent_at"] = utc_now()
-        entry["last_retry_ok"] = command_ok
+        entry["last_retry_ok"] = bool(command_result.get("ok"))
         kept.append(entry)
         changed = True
         print(
@@ -600,11 +672,27 @@ def process_session_once(
     else:
         notify_terminal(agent, session_id, new_msgs)
 
-    command_ok = False
+    command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
     if on_message_command:
-        command_ok = run_command_for_session(on_message_command, agent, session_id, new_msgs, inbox_path)
+        command_result = run_command_for_session(on_message_command, agent, session_id, new_msgs, inbox_path)
 
-    if on_message_command and command_ok:
+    if on_message_command and not command_result.get("ok") and not command_result.get("retryable", True):
+        for message in new_msgs:
+            message_id = str(message.get("id", ""))
+            if not message_id:
+                continue
+            _mark_permanent_wake_failure(
+                agent=agent,
+                session_id=session_id,
+                inbox_path=inbox_path,
+                message_id=message_id,
+                seen_ids=seen_ids,
+                result=command_result,
+            )
+        _save_watcher_state(state_path, seen_ids, pending)
+        return []
+
+    if on_message_command and command_result.get("ok"):
         _queue_pending_wake_verifications(
             pending=pending,
             agent=agent,
