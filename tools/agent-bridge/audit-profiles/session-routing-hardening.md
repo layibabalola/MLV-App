@@ -93,6 +93,34 @@
 - [ ] Tests:
   - `test_bootstrap_rotation_rekeys_old_bucket_unread`
 
+### SR9 - User-action breaker bypass (one-shot recovery)
+
+- [ ] New MCP tool `nudge_peer(agent, session_id=None)` registered in agent_bridge.py + server.py
+- [ ] Bypasses open breaker on call (one-shot per call)
+- [ ] Rate-limited per `(agent, session_id)` per `BREAKER_BYPASS_COOLDOWN_S` (default 60s)
+- [ ] On bypass success: breaker fully closes (failure window cleared)
+- [ ] On bypass failure: breaker stays open; failure recorded normally; bypass NOT re-granted
+- [ ] `resume_bridge` grants one bypass per open breaker
+- [ ] `mark_read` of a message older than `BREAKER_BYPASS_STALE_MIN` (default 30 min) when breaker is open grants one bypass
+- [ ] `wake-failure-windows.json` schema gets `bypass_grant` field (count of pending bypasses)
+- [ ] Audit events: `nudge_peer_user_initiated`, `resume_bridge_breaker_bypass_grant`, `mark_read_stale_breaker_bypass_grant`
+- [ ] Tests:
+  - `test_sr9_nudge_peer_fires_when_breaker_closed`
+  - `test_sr9_nudge_peer_bypasses_open_breaker_one_shot`
+  - `test_sr9_nudge_peer_bypass_failure_keeps_breaker_open`
+  - `test_sr9_nudge_peer_rate_limit_blocks_rapid_calls`
+  - `test_sr9_resume_bridge_grants_bypass_per_open_breaker`
+  - `test_sr9_resume_bridge_no_grant_when_no_open_breaker`
+  - `test_sr9_mark_read_stale_message_grants_bypass`
+  - `test_sr9_mark_read_fresh_message_does_not_grant_bypass`
+  - `test_sr9_bypass_success_closes_breaker_fully`
+  - `test_sr9_bypass_failure_does_not_extend_breaker_window`
+
+**Critical pushback if seen during audit:**
+- Bypass cascade abuse: if any code path or MCP call lets bypasses accumulate / chain, STATUS=fail. One user action → one bypass.
+- Agent-driven bypass: if a non-user-surface caller (e.g. internal poller, automation) is allowed to call `nudge_peer`, STATUS=fail. Rate limit alone is not sufficient.
+- Bypass without rate limit: STATUS=fail.
+
 ### SR8 - Backpressure rejection auto-nudges receiver
 
 - [ ] `send_to_peer` rejection with `error_kind="backpressure_unread_work"` ALSO attempts a wake nudge before returning
