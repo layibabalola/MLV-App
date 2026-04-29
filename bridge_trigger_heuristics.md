@@ -301,6 +301,14 @@ Waypoint rule:
   - treat the returned item as the machine-selected active candidate rather than relying on memory or the most recent discussion topic,
   - if actionable in-scope items remain and there is no real blocker, continue by doing that top pending item instead of stopping,
   - if the item should not be worked now, explicitly say why it remains `parked`, `displaced`, or `blocked`.
+- Stronger universal rule:
+  - this ledger check is not limited to checkpoint-shaped turns,
+  - before every final response in a bridge-focused conversation, Codex must run the same `next_pending_bridge_action(owner_agent="codex")` check,
+  - if the returned top item is actionable and in scope, Codex must keep going instead of ending the turn,
+  - only after that item is worked, or explicitly classified as `blocked`, `parked`, or `displaced`, may Codex actually stop.
+- Implementation note:
+  - `I finished what the user just asked for` is not by itself permission to stop if the ledger still contains actionable Codex-owned work,
+  - the ledger check happens after the requested turn-local work is complete and before the final response is sent.
 - During an active implementation stretch, the highest-priority actionable ledger item is the default active task.
 - Aggressive drain rule:
   - if the inbox is clear and the top Codex-owned ledger item is actionable, Codex should keep executing it by default without waiting for a user nudge,
