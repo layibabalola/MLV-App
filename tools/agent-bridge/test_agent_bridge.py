@@ -1354,6 +1354,82 @@ class AgentBridgeTests(unittest.TestCase):
         audit_rows = read_jsonl(self.state_dir / "messages.jsonl")
         self.assertTrue(any(row.get("action") == "bootstrap_subagent_retargeted_to_parent" for row in audit_rows))
 
+    def test_bootstrap_refuses_codex_parent_thread_drift_without_override(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session(
+            "codex",
+            "codex-parent",
+            project="mlv-app",
+            bootstrap_origin="parent",
+            trusted_parent_eligible=True,
+        )
+        bridge.record_session_runtime_metadata(
+            agent="codex",
+            session_id="codex-parent",
+            project="mlv-app",
+            desktop_thread_id="parent-thread",
+            bootstrap_thread_id="parent-thread",
+        )
+
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "child-thread"}, clear=True):
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-child",
+                project="mlv-app",
+                handshake_retries=1,
+                start_watcher=False,
+            )
+
+        self.assertTrue(result["refused"])
+        self.assertEqual(result["trusted_parent_drift"]["trusted_thread_id"], "parent-thread")
+        self.assertEqual(result["trusted_parent_drift"]["incoming_thread_id"], "child-thread")
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-parent")
+        self.assertEqual(status.data["trusted_parent"]["codex"]["session_id"], "codex-parent")
+        self.assertNotIn("codex-child", status.data["sessions"])
+        audit_rows = read_jsonl(self.state_dir / "messages.jsonl")
+        self.assertTrue(any(row.get("action") == "bootstrap_trusted_parent_drift_refused" for row in audit_rows))
+
+    def test_bootstrap_allows_codex_parent_thread_drift_with_override(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session(
+            "codex",
+            "codex-parent",
+            project="mlv-app",
+            bootstrap_origin="parent",
+            trusted_parent_eligible=True,
+        )
+        bridge.record_session_runtime_metadata(
+            agent="codex",
+            session_id="codex-parent",
+            project="mlv-app",
+            desktop_thread_id="parent-thread",
+            bootstrap_thread_id="parent-thread",
+        )
+
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "new-parent-thread"}, clear=True):
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-new-parent",
+                project="mlv-app",
+                handshake_retries=1,
+                start_watcher=False,
+                replace_trusted_parent=True,
+            )
+
+        self.assertFalse(result.get("refused", False))
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-new-parent")
+        self.assertEqual(status.data["trusted_parent"]["codex"]["session_id"], "codex-new-parent")
+        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["desktop_thread_id"], "new-parent-thread")
+
     def test_restart_watcher_for_code_change_clears_missing_signature_lease(self) -> None:
         config_path = self.tempdir / "watcher-config.json"
         self.state_dir.mkdir(parents=True, exist_ok=True)

@@ -286,6 +286,39 @@ def _desktop_thread_id_for_bootstrap(agent: str, watcher_config: Optional[Path])
     return _desktop_thread_id_from_env(agent)
 
 
+def _trusted_parent_thread_drift(
+    bridge: AgentBridge,
+    *,
+    agent: str,
+    project: str,
+    incoming_session_id: str,
+    incoming_thread_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if agent != "codex" or not incoming_thread_id:
+        return None
+    status = bridge.session_status(project)
+    if not status.ok:
+        return None
+    trusted = (status.data.get("trusted_parent") or {}).get(agent) or {}
+    trusted_session_id = trusted.get("session_id")
+    if not trusted_session_id or trusted_session_id == incoming_session_id:
+        return None
+    trusted_record = (status.data.get("sessions") or {}).get(trusted_session_id) or {}
+    trusted_thread_id = (
+        trusted_record.get("desktop_thread_id")
+        or trusted_record.get("bootstrap_parent_thread_id")
+        or trusted_record.get("bootstrap_thread_id")
+    )
+    if not trusted_thread_id or str(trusted_thread_id) == incoming_thread_id:
+        return None
+    return {
+        "trusted_session_id": trusted_session_id,
+        "trusted_thread_id": str(trusted_thread_id),
+        "incoming_session_id": incoming_session_id,
+        "incoming_thread_id": incoming_thread_id,
+    }
+
+
 def bootstrap(
     *,
     state_dir: Path,
@@ -298,6 +331,7 @@ def bootstrap(
     watcher_config: Optional[Path] = None,
     start_watcher: bool = True,
     restart_watcher_if_code_changed: bool = True,
+    replace_trusted_parent: bool = False,
 ) -> Dict[str, Any]:
     bridge = AgentBridge(state_dir)
     identity = derive_project_identity(cwd)
@@ -367,6 +401,49 @@ def bootstrap(
             "exit_code": 3,
         }
 
+    desktop_thread_id = _desktop_thread_id_for_bootstrap(agent, watcher_config)
+    if retargeted_to_parent and bootstrap_parent_thread_id:
+        desktop_thread_id = bootstrap_parent_thread_id
+    if bootstrap_origin == "parent" and not replace_trusted_parent:
+        drift = _trusted_parent_thread_drift(
+            bridge,
+            agent=agent,
+            project=project_name,
+            incoming_session_id=new_session,
+            incoming_thread_id=desktop_thread_id,
+        )
+        if drift is not None:
+            bridge._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                    "action": "bootstrap_trusted_parent_drift_refused",
+                    "agent": agent,
+                    "session_id": new_session,
+                    "project": project_name,
+                    "accepted": False,
+                    **drift,
+                }
+            )
+            return {
+                "identity": identity,
+                "project": project_name,
+                "agent": agent,
+                "session_id": new_session,
+                "peer_agent": peer_agent,
+                "bootstrap_origin": bootstrap_origin,
+                "detected_bootstrap_origin": detected_bootstrap_origin,
+                "subagent_signals": subagent_signals,
+                "refused": True,
+                "refusal_reason": (
+                    "codex bootstrap refused because it would replace trusted parent thread "
+                    f"{drift['trusted_thread_id']} with {drift['incoming_thread_id']}; "
+                    "run from the trusted parent or use --replace-trusted-parent for an intentional repair"
+                ),
+                "trusted_parent_drift": drift,
+                "exit_code": 3,
+            }
+
     # activate_session auto-detects the previous same-agent session from the
     # registry, drains its unread messages BEFORE stamping superseded_at, and
     # returns them in data["drained_messages"].  This is atomic under the bridge
@@ -390,9 +467,6 @@ def bootstrap(
         if msg_id:
             bridge.mark_read(agent=agent, message_id=msg_id, session_id=None)
 
-    desktop_thread_id = _desktop_thread_id_for_bootstrap(agent, watcher_config)
-    if retargeted_to_parent and bootstrap_parent_thread_id:
-        desktop_thread_id = bootstrap_parent_thread_id
     peer_breadcrumb = build_peer_runtime_breadcrumb(
         state_dir=state_dir,
         agent=agent,
@@ -521,6 +595,11 @@ def main() -> None:
         action="store_true",
         help="Update watcher config without spawning the watcher daemon",
     )
+    parser.add_argument(
+        "--replace-trusted-parent",
+        action="store_true",
+        help="Manual repair only: allow this Codex bootstrap to replace a different trusted parent thread",
+    )
     restart_group = parser.add_mutually_exclusive_group()
     restart_group.add_argument(
         "--restart-watcher-if-code-changed",
@@ -554,6 +633,7 @@ def main() -> None:
         watcher_config=Path(args.watcher_config) if args.watcher_config else (paths.watcher_config if args.bridge_root else None),
         start_watcher=not args.no_start_watcher,
         restart_watcher_if_code_changed=args.restart_watcher_if_code_changed,
+        replace_trusted_parent=args.replace_trusted_parent,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     if result.get("refused"):
