@@ -1522,6 +1522,19 @@ class AgentBridge:
                 return reject("bridge is paused")
 
             registry = self._load_session_registry()
+            requested_bucket_info = self._bucket_info(registry, session)
+            requested_record = requested_bucket_info.get("record")
+            if (
+                requested_bucket_info.get("inbox_level") == INBOX_LEVEL_SESSION
+                and isinstance(requested_record, dict)
+                and requested_record.get("agent") != target
+            ):
+                owner = str(requested_record.get("agent") or "unknown")
+                status = str(requested_record.get("status") or "unknown")
+                return reject(
+                    "session_id %s belongs to %s session (%s); send_to_peer session_id selects the receiver bucket for %s"
+                    % (session, owner, status, target)
+                )
             delivery = self._resolve_delivery_bucket(registry, target, session)
             if not delivery["ok"]:
                 return reject(delivery["reason"])
@@ -1534,7 +1547,6 @@ class AgentBridge:
             event["inbox_level"] = delivery_level
             event["escalated_from"] = delivery.get("escalated_from")
             event["escalation_reason"] = delivery.get("escalation_reason")
-            requested_bucket_info = self._bucket_info(registry, session)
             if (
                 delivery_level == INBOX_LEVEL_SESSION
                 and requested_bucket_info.get("record")

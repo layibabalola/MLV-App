@@ -425,6 +425,23 @@ class AgentBridgeTests(unittest.TestCase):
         )
         self.assertFalse(result.ok)
         self.assertIn("superseded", result.message)
+        self.assertIn("receiver bucket", result.message)
+
+    def test_sender_session_id_is_rejected_as_receiver_bucket(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+
+        result = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] do not route to sender bucket",
+            session_id="claude-live",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("belongs to claude session", result.message)
+        self.assertIn("receiver bucket for codex", result.message)
 
     def test_superseded_target_session_escalates_to_project_bucket(self) -> None:
         bridge = AgentBridge(self.state_dir)
