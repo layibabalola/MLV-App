@@ -88,6 +88,7 @@ event actions:
 | `wake_skipped_bad_provenance` | watcher | Peer breadcrumb resolved to bad provenance | breadcrumb_origin, message_id |
 | `wake_skipped_no_peer` | watcher | Peer breadcrumb missing | breadcrumb_path |
 | `bootstrap_origin_resolved` | bootstrap_session | Bootstrap origin was evaluated | origin, signals |
+| `bootstrap_subagent_retargeted_to_parent` | bootstrap_session | Confident sub-agent bootstrap reused explicit parent thread id and proceeded against the parent target | bootstrap_thread_id, bootstrap_parent_thread_id, signals |
 | `bootstrap_subagent_refused` | bootstrap_session | Confident sub-agent bootstrap was refused | signals, session_id |
 | `unknown_origin_warning` | watcher | Wake proceeded against unknown-origin breadcrumb with warning | session_id |
 | `wake_skipped_breaker_open` | watcher | Circuit breaker open | session_id, consecutive_failures, opened_at |

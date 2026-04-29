@@ -193,7 +193,11 @@ def bootstrap(
     project_name = project or identity["rendezvous"]
     new_session = session_id or str(uuid.uuid4())
     peer_agent = "claude" if agent == "codex" else "codex"
-    bootstrap_origin, subagent_signals = detect_bootstrap_origin(agent=agent)
+    detected_bootstrap_origin, subagent_signals = detect_bootstrap_origin(agent=agent)
+    bootstrap_origin = detected_bootstrap_origin
+    bootstrap_thread_id = _thread_id_from_env(agent)
+    bootstrap_parent_thread_id = _parent_thread_id_from_env(agent)
+    retargeted_to_parent = False
 
     bridge._audit(
         {
@@ -203,12 +207,29 @@ def bootstrap(
             "agent": agent,
             "session_id": new_session,
             "project": project_name,
-            "origin": bootstrap_origin,
+            "origin": detected_bootstrap_origin,
             "signals": subagent_signals,
             "accepted": True,
         }
     )
-    if bootstrap_origin == "subagent":
+    if detected_bootstrap_origin == "subagent" and bootstrap_parent_thread_id:
+        retargeted_to_parent = True
+        bootstrap_origin = "parent"
+        bridge._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                "action": "bootstrap_subagent_retargeted_to_parent",
+                "agent": agent,
+                "session_id": new_session,
+                "project": project_name,
+                "bootstrap_thread_id": bootstrap_thread_id,
+                "bootstrap_parent_thread_id": bootstrap_parent_thread_id,
+                "signals": subagent_signals,
+                "accepted": True,
+            }
+        )
+    elif detected_bootstrap_origin == "subagent":
         bridge._audit(
             {
                 "id": str(uuid.uuid4()),
@@ -228,6 +249,7 @@ def bootstrap(
             "session_id": new_session,
             "peer_agent": peer_agent,
             "bootstrap_origin": bootstrap_origin,
+            "detected_bootstrap_origin": detected_bootstrap_origin,
             "subagent_signals": subagent_signals,
             "refused": True,
             "refusal_reason": "subagent bootstrap refused; only the parent thread should run bootstrap_session.py",
@@ -258,6 +280,8 @@ def bootstrap(
             bridge.mark_read(agent=agent, message_id=msg_id, session_id=None)
 
     desktop_thread_id = _desktop_thread_id_for_bootstrap(agent, watcher_config)
+    if retargeted_to_parent and bootstrap_parent_thread_id:
+        desktop_thread_id = bootstrap_parent_thread_id
     peer_breadcrumb = build_peer_runtime_breadcrumb(
         state_dir=state_dir,
         agent=agent,
@@ -266,8 +290,8 @@ def bootstrap(
         desktop_thread_id=desktop_thread_id,
         bootstrap_command=[sys.executable, *sys.argv],
         bootstrap_origin=bootstrap_origin,
-        bootstrap_thread_id=_thread_id_from_env(agent),
-        bootstrap_parent_thread_id=_parent_thread_id_from_env(agent),
+        bootstrap_thread_id=bootstrap_thread_id,
+        bootstrap_parent_thread_id=bootstrap_parent_thread_id,
         trusted_parent_session_id=activation.data.get("trusted_parent_session") if activation.ok else None,
         subagent_signals=subagent_signals,
     )
@@ -276,8 +300,8 @@ def bootstrap(
         session_id=new_session,
         project=project_name,
         desktop_thread_id=desktop_thread_id,
-        bootstrap_thread_id=_thread_id_from_env(agent),
-        bootstrap_parent_thread_id=_parent_thread_id_from_env(agent),
+        bootstrap_thread_id=bootstrap_thread_id,
+        bootstrap_parent_thread_id=bootstrap_parent_thread_id,
     )
     write_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent), peer_breadcrumb)
 
@@ -353,7 +377,9 @@ def bootstrap(
         "watcher_process": watcher_process,
         "peer_runtime": peer_breadcrumb,
         "bootstrap_origin": bootstrap_origin,
+        "detected_bootstrap_origin": detected_bootstrap_origin,
         "subagent_signals": subagent_signals,
+        "retargeted_to_parent": retargeted_to_parent,
     }
 
 

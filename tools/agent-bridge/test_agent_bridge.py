@@ -1299,6 +1299,44 @@ class AgentBridgeTests(unittest.TestCase):
         status = AgentBridge(self.state_dir).session_status("mlv-app")
         self.assertEqual(status.data["active"].get("codex"), None)
 
+    def test_bootstrap_subagent_retargets_to_explicit_parent_thread(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        with patch.dict(
+            "os.environ",
+            {
+                "CODEX_SUBAGENT": "1",
+                "CODEX_THREAD_ID": "child-thread",
+                "CODEX_PARENT_THREAD_ID": "parent-thread",
+            },
+            clear=True,
+        ):
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-retarget",
+                project=None,
+                handshake_retries=1,
+                watcher_config=config_path,
+                start_watcher=False,
+            )
+
+        self.assertFalse(result.get("refused", False))
+        self.assertEqual(result["detected_bootstrap_origin"], "subagent")
+        self.assertEqual(result["bootstrap_origin"], "parent")
+        self.assertTrue(result["retargeted_to_parent"])
+        status = AgentBridge(self.state_dir).session_status(result["project"])
+        self.assertEqual(status.data["active"]["codex"], "codex-retarget")
+        self.assertEqual(status.data["trusted_parent"]["codex"]["session_id"], "codex-retarget")
+        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["bootstrap_origin"], "parent")
+        self.assertEqual(breadcrumb["desktop_thread_id"], "parent-thread")
+        self.assertEqual(breadcrumb["bootstrap_thread_id"], "child-thread")
+        self.assertEqual(breadcrumb["bootstrap_parent_thread_id"], "parent-thread")
+        audit_rows = read_jsonl(self.state_dir / "messages.jsonl")
+        self.assertTrue(any(row.get("action") == "bootstrap_subagent_retargeted_to_parent" for row in audit_rows))
+
     def test_unknown_origin_session_does_not_supersede_parent(self) -> None:
         bridge = AgentBridge(self.state_dir)
         first = bridge.activate_session(
