@@ -265,8 +265,11 @@ class AgentBridgeTests(unittest.TestCase):
         text = script.read_text(encoding="utf-8")
 
         self.assertIn("public static extern bool BringWindowToTop", text)
-        self.assertIn('[System.Windows.Forms.SendKeys]::SendWait("%")', text)
-        self.assertIn("ALT-tap fallback", text)
+        self.assertIn("public static extern uint SendInput", text)
+        self.assertIn("public static extern void SwitchToThisWindow", text)
+        self.assertIn("function Send-AltTap", text)
+        self.assertIn("SendInput ALT-tap fallback", text)
+        self.assertIn("SwitchToThisWindow fallback", text)
         self.assertIn("exit 12", text)
 
         helper = text.split("function Invoke-CodexForegroundAttempt", 1)[1].split("if ($PrintInnerCommand", 1)[0]

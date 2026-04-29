@@ -48,14 +48,32 @@ public class Win32Wake {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
     [DllImport("kernel32.dll")] public static extern uint GetTickCount();
+    public const uint INPUT_KEYBOARD = 1;
+    public const ushort VK_MENU = 0x12;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT {
+        public uint type;
+        public KEYBDINPUT ki;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
     [StructLayout(LayoutKind.Sequential)]
     public struct LASTINPUTINFO {
         public uint cbSize;
@@ -163,6 +181,20 @@ function Invoke-CodexForegroundAttempt {
         [Win32Wake]::SetForegroundWindow($Hwnd) | Out-Null
     } finally {
         [Win32Wake]::AttachThreadInput($myThread, $TargetThreadId, $false) | Out-Null
+    }
+}
+
+function Send-AltTap {
+    $inputs = New-Object 'Win32Wake+INPUT[]' 2
+    $inputs[0].type = [Win32Wake]::INPUT_KEYBOARD
+    $inputs[0].ki.wVk = [Win32Wake]::VK_MENU
+    $inputs[1].type = [Win32Wake]::INPUT_KEYBOARD
+    $inputs[1].ki.wVk = [Win32Wake]::VK_MENU
+    $inputs[1].ki.dwFlags = [Win32Wake]::KEYEVENTF_KEYUP
+    $inputSize = [System.Runtime.InteropServices.Marshal]::SizeOf([Win32Wake+INPUT])
+    $sent = [Win32Wake]::SendInput(2, $inputs, $inputSize)
+    if ($sent -ne 2) {
+        Write-Host ("[wake_codex] WARNING: SendInput ALT-tap sent " + $sent + "/2 input events.")
     }
 }
 
@@ -284,8 +316,8 @@ try {
 
     $nowFg = [Win32Wake]::GetForegroundWindow()
     if ($nowFg -ne $codexHwnd) {
-        Write-Host "[wake_codex] First foreground attempt failed. Trying ALT-tap fallback."
-        [System.Windows.Forms.SendKeys]::SendWait("%")
+        Write-Host "[wake_codex] First foreground attempt failed. Trying SendInput ALT-tap fallback."
+        Send-AltTap
         Start-Sleep -Milliseconds 50
 
         Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
@@ -293,10 +325,18 @@ try {
 
         $nowFg = [Win32Wake]::GetForegroundWindow()
         if ($nowFg -ne $codexHwnd) {
-            Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground after ALT-tap retry; likely blocked by Windows focus-steal protection. Aborting."
-            exit 12
+            Write-Host "[wake_codex] ALT-tap retry failed. Trying SwitchToThisWindow fallback."
+            [Win32Wake]::SwitchToThisWindow($codexHwnd, $true)
+            Start-Sleep -Milliseconds 200
+            $nowFg = [Win32Wake]::GetForegroundWindow()
+            if ($nowFg -ne $codexHwnd) {
+                Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground after all focus fallbacks; likely blocked by Windows focus-steal protection. Aborting."
+                exit 12
+            }
+            Write-Host "[wake_codex] SwitchToThisWindow fallback succeeded."
+        } else {
+            Write-Host "[wake_codex] SendInput ALT-tap fallback succeeded."
         }
-        Write-Host "[wake_codex] ALT-tap fallback succeeded."
     }
 
     if ($DryRun) {
