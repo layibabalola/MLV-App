@@ -243,6 +243,28 @@ Interrupt-discipline rule:
 - Sender-side quiet mode is part of the same discipline:
   - if Codex knows Claude is in a protected execution window, avoid sending non-urgent traffic unless it changes priority, is the one allowed watchdog reminder, or the user explicitly asked for live relay.
 
+Status-digest reciprocity rule:
+
+- The user must not be the manual relay for cross-peer status.
+- If Codex writes user-facing text that names Claude-owned work, Claude-awaited replies, or a joint open-items summary, Codex must bridge the same status content to Claude in the same work stretch.
+- Trigger examples:
+  - `active waits remaining`
+  - `still in flight`
+  - `waiting on Claude`
+  - `Claude is working on X`
+  - `I will review/audit when Claude ships Y`
+  - end-of-turn lists that include open items Claude owns or is expected to answer
+- Preferred bridge format is a neutral `STATUS_DIGEST`:
+  - frame it as `open joint items between Claude and Codex`
+  - list one item per open thread
+  - include `no items awaiting Claude action` when that is true
+  - avoid `you owe me` phrasing
+- Use `WAIT_SUMMARY` only when the digest is specifically about blocking waits rather than general joint status.
+- This rule is about peer visibility, not urgency:
+  - the digest should still respect the traffic classes above
+  - if Claude is in a protected execution window, send the digest only when it materially prevents user-relay or confusion, otherwise park it until the next checkpoint
+- Reciprocal expectation applies to Claude as well: if Claude tells the user about Codex-owned work, Codex should receive the same digest without waiting for the user to paste it across.
+
 Workflow-strategy sync rule:
 
 - If Codex creates or changes a bridge workflow strategy, operating rule, or durable coordination mechanism that Claude should know about, Codex must:
