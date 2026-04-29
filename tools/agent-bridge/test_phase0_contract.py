@@ -483,11 +483,12 @@ class Phase0ContractTests(unittest.TestCase):
         write_runtime_breadcrumb(
             peer_runtime_path_for_state_dir(self.state_dir, "codex"),
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "agent": "codex",
                 "session_id": "codex-live",
                 "project": "mlv-app",
                 "desktop_thread_id": "019dcfe4-bd5d-7841-a7c1-2e8969a777c5",
+                "bootstrap_origin": "parent",
                 "deeplink_template": "codex://threads/{thread_id}",
             },
         )
@@ -707,7 +708,7 @@ class Phase0ContractTests(unittest.TestCase):
         ]
         self.assertTrue(any(row.get("action") == "bootstrap_subagent_auto_rollback_succeeded" for row in audit_rows))
 
-    def test_07eb_unknown_peer_breadcrumb_warns_once_and_proceeds(self) -> None:
+    def test_07eb_unknown_codex_peer_breadcrumb_marks_seen_without_retry(self) -> None:
         inbox_path = self.state_dir / "inbox-codex.jsonl"
         inbox_path.parent.mkdir(parents=True, exist_ok=True)
         message = {
@@ -736,10 +737,9 @@ class Phase0ContractTests(unittest.TestCase):
 
         seen_ids: set[str] = set()
         state_path = self.tempdir / "watcher-state.json"
-        succeeded = Mock(returncode=0, stdout="", stderr="")
 
-        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run", return_value=succeeded) as run:
-            watcher.process_session_once(
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run") as run:
+            processed = watcher.process_session_once(
                 {
                     "agent": "codex",
                     "session_id": "codex-live",
@@ -753,14 +753,18 @@ class Phase0ContractTests(unittest.TestCase):
                 toasts_enabled=True,
             )
 
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(processed, [])
+        self.assertFalse(run.called)
+        self.assertIn("msg-unknown-peer", seen_ids)
         audit_rows = [
             json.loads(line)
             for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        warning_events = [row for row in audit_rows if row.get("action") == "unknown_origin_warning"]
-        self.assertEqual(len(warning_events), 1)
+        provenance_events = [row for row in audit_rows if row.get("action") == "wake_skipped_bad_provenance"]
+        self.assertEqual(len(provenance_events), 1)
+        self.assertEqual(provenance_events[0]["message_id"], "msg-unknown-peer")
+        self.assertEqual(provenance_events[0]["reason"], "bad_provenance_unknown")
 
     def test_07f_watcher_skips_wake_command_when_bridge_paused(self) -> None:
         inbox_path = self.state_dir / "inbox-codex.jsonl"

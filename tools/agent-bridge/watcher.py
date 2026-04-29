@@ -836,6 +836,20 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
                 "reason": "bad_provenance_subagent",
             },
         }
+    if agent == "codex" and bootstrap_origin != "parent":
+        return {
+            "ok": False,
+            "command": None,
+            "peer": peer,
+            "result": {
+                "ok": False,
+                "returncode": 11,
+                "retryable": False,
+                "stdout": "",
+                "stderr": f"peer runtime breadcrumb lacks trusted parent provenance: {peer_path}",
+                "reason": "bad_provenance_unknown",
+            },
+        }
 
     desktop_thread_id = str(peer.get("desktop_thread_id") or "").strip()
     if not desktop_thread_id:
@@ -1434,7 +1448,7 @@ def process_session_once(
     if command_configured:
         resolved = _resolve_command_template(session_config, inbox_path)
         peer = resolved.get("peer") or {}
-        if str(peer.get("bootstrap_origin") or "").lower() == "unknown":
+        if agent != "codex" and str(peer.get("bootstrap_origin") or "").lower() == "unknown":
             session_key = "%s:%s" % (agent, session_id)
             _warn_unknown_origin_once(
                 state_path=state_path,

@@ -35,7 +35,7 @@ these codes; the watcher routes wake decisions accordingly.
 | 8 | Tenant mismatch (tenant_scope layer down; cloud only) | Mark seen; audit `wake_skipped_auth_block` | Yes | No |
 | 9 | Active pairing expired or revoked | Mark seen; audit `wake_skipped_pairing_invalid` with sub-reason | Yes | No (require re-pair) |
 | 10 | Peer busy (receptive layer down) | Defer; drain on next inbox-check | No (defer) | On natural inbox-check |
-| 11 | Peer breadcrumb has bad provenance (`bootstrap_origin = subagent`) | Mark seen; audit `wake_skipped_bad_provenance` | Yes | No |
+| 11 | Peer breadcrumb lacks trusted parent provenance (`bootstrap_origin != parent` for Codex; `subagent` elsewhere) | Mark seen; audit `wake_skipped_bad_provenance` | Yes | No |
 
 `watcher.WAKE_PERMANENT_EXIT_CODES` includes the codes that mark the
 message seen and suppress retries: {2, 3, 7, 8, 9}. Codes 4, 5, 10 defer
@@ -56,7 +56,7 @@ layer failures and watcher exit codes. Cross-referenced by
 | `wake_skipped_wrong_project` | exit 7 | project_scope layer mismatch |
 | `wake_skipped_auth_block` | exit 8 | tenant_scope layer mismatch (cloud only) |
 | `wake_skipped_pairing_invalid` | exit 9 | active_pairing expired/revoked; sub-reason in payload |
-| `wake_skipped_bad_provenance` | exit 11 | peer runtime breadcrumb came from a sub-agent bootstrap and must not be used as a wake target |
+| `wake_skipped_bad_provenance` | exit 11 | peer runtime breadcrumb lacks trusted parent provenance and must not be used as a wake target |
 | `wake_skipped_breaker_open` | per-session circuit breaker | Per `WAKE_HARDENING_SPEC.md` D2; suppressed after 5 failures in 5 min |
 | `wake_dropped_peer_absent_overflow` | pending queue full | `pending_peer_absent` exceeded 100-entry cap; FIFO eviction |
 | `wake_dropped_*_ttl` | pending queue TTL expiry | Entry older than 24h evicted |
