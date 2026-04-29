@@ -27,10 +27,12 @@ param(
     [string]$ThreadId             = "",
     [int]   $IdleThresholdSeconds = 5,
     [int]   $MaxWaitSeconds       = 60,
+    [int]   $TotalRuntimeTimeoutSeconds = 90,
     [string]$LockFile             = "$env:USERPROFILE\.agent-bridge\wake_codex.lock",
     [switch]$DryRun,
     [switch]$FindOnly,
-    [string]$ProcessName          = "Codex"
+    [string]$ProcessName          = "Codex",
+    [switch]$RunInnerWake
 )
 
 $ErrorActionPreference = "Stop"
@@ -132,26 +134,67 @@ if ($FindOnly) {
     exit 0
 }
 
-# --- Stage 2: lock - only one wake instance polls/injects at a time ---
-$lockDir = Split-Path -Parent $LockFile
-if (-not (Test-Path $lockDir)) {
-    New-Item -ItemType Directory -Path $lockDir | Out-Null
-}
+if (-not $RunInnerWake) {
+    # --- Stage 2: lock - only one wake instance polls/injects at a time ---
+    $lockDir = Split-Path -Parent $LockFile
+    if (-not (Test-Path $lockDir)) {
+        New-Item -ItemType Directory -Path $lockDir | Out-Null
+    }
 
-if (Test-Path $LockFile) {
-    $lockAge = (Get-Date) - (Get-Item $LockFile).LastWriteTime
-    if ($lockAge.TotalSeconds -lt ($MaxWaitSeconds + 60)) {
-        Write-Host ("[wake_codex] Another wake instance is active (lock age=" + [int]$lockAge.TotalSeconds + "s). Skipping; it will pick up our message via 'check bridge inbox'.")
-        exit 0
-    } else {
-        Write-Host "[wake_codex] Stale lock detected (older than max wait). Taking over."
+    if (Test-Path $LockFile) {
+        $lockAge = (Get-Date) - (Get-Item $LockFile).LastWriteTime
+        if ($lockAge.TotalSeconds -lt ($MaxWaitSeconds + 60)) {
+            Write-Host ("[wake_codex] Another wake instance is active (lock age=" + [int]$lockAge.TotalSeconds + "s). Skipping; it will pick up our message via 'check bridge inbox'.")
+            exit 0
+        } else {
+            Write-Host "[wake_codex] Stale lock detected (older than max wait). Taking over."
+            Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Take lock - store PID so stale-detection can verify
+    $PID | Set-Content -Path $LockFile -NoNewline
+
+    try {
+        $argumentList = @(
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            $PSCommandPath,
+            "-RunInnerWake",
+            "-Message",
+            $Message,
+            "-ThreadId",
+            $ThreadId,
+            "-IdleThresholdSeconds",
+            [string]$IdleThresholdSeconds,
+            "-MaxWaitSeconds",
+            [string]$MaxWaitSeconds,
+            "-TotalRuntimeTimeoutSeconds",
+            [string]$TotalRuntimeTimeoutSeconds,
+            "-LockFile",
+            $LockFile,
+            "-ProcessName",
+            $ProcessName
+        )
+        if ($DryRun) {
+            $argumentList += "-DryRun"
+        }
+
+        $child = Start-Process -FilePath "powershell.exe" -ArgumentList $argumentList -WindowStyle Hidden -PassThru
+        if (-not $child.WaitForExit($TotalRuntimeTimeoutSeconds * 1000)) {
+            Write-Host ("[wake_codex] Total runtime exceeded " + $TotalRuntimeTimeoutSeconds + "s. Killing stuck wake helper.")
+            Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+        }
+        exit $child.ExitCode
+    } finally {
         Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
     }
 }
 
-# Take lock - store PID so stale-detection can verify
-$PID | Set-Content -Path $LockFile -NoNewline
-
+# --- Inner wake process: stages 3-6 only ---
 try {
     # --- Stage 3: wait for system-wide idle ---
     Write-Host ("[wake_codex] Waiting for >= " + $IdleThresholdSeconds + "s idle (max " + $MaxWaitSeconds + "s)...")
@@ -250,9 +293,9 @@ try {
     [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
     Write-Host ("[wake_codex] Restored focus to: " + $prevFgTitle)
 
-} finally {
-    # Always release the lock, even on exception
-    Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
+} catch {
+    Write-Host ("[wake_codex] ERROR: " + $_.Exception.Message)
+    exit 1
 }
 
 exit 0

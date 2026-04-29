@@ -328,6 +328,11 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         return as_dict(bridge.bridge_process_status())
 
     @mcp.tool(annotations=READ_ONLY)
+    def wake_breaker_status(session_id: Optional[str] = None) -> dict:
+        """Return persisted wake breaker state for one session or all sessions."""
+        return as_dict(bridge.wake_breaker_status(session_id=session_id))
+
+    @mcp.tool(annotations=READ_ONLY)
     def project_identity(cwd: Optional[str] = None) -> dict:
         """Derive the canonical project root and rendezvous name from a repo/worktree path."""
         return as_dict(bridge.project_identity(cwd=cwd))
@@ -361,6 +366,11 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
     def resume_bridge() -> dict:
         """Resume delivery of new bridge handoffs."""
         return as_dict(bridge.resume_bridge())
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def resume_wake_for_session(session_id: str) -> dict:
+        """Clear the wake circuit breaker for one session."""
+        return as_dict(bridge.resume_wake_for_session(session_id=session_id))
 
     @mcp.tool(annotations=DESTRUCTIVE_WRITE)
     def clear_inbox(agent: Optional[str] = None, session_id: Optional[str] = None) -> dict:

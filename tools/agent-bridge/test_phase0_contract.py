@@ -334,7 +334,10 @@ class Phase0ContractTests(unittest.TestCase):
 
         self.assertEqual(processed, [])
         self.assertNotIn("msg-failed-wake", seen_ids)
-        self.assertFalse(state_path.exists(), "failed wake must not persist seen_ids")
+        self.assertTrue(state_path.exists(), "failed wake should persist watcher state for rate limiting/breaker tracking")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["seen_ids"], [])
+        self.assertEqual(state["pending_wake_verifications"], [])
 
     def test_07b_wake_exit_zero_requires_seen_receipt_before_seen_ids(self) -> None:
         """A successful wake command is not delivery until check_inbox sets seen_at.
@@ -955,6 +958,150 @@ class Phase0ContractTests(unittest.TestCase):
         config_events = [row for row in audit_rows if row.get("action") == "wake_skipped_config_error"]
         self.assertEqual(len(config_events), 1)
         self.assertEqual(config_events[0]["message_id"], "msg-legacy-bad")
+
+    def test_07j_wake_breaker_opens_after_repeated_failures_and_suppresses_new_wake(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path = self.tempdir / "watcher-state.json"
+        seen_ids: set[str] = set()
+        session_config = {
+            "agent": "codex",
+            "session_id": "codex-live",
+            "inbox": str(inbox_path),
+            "on_message": "notify",
+            "on_message_command": "fake-wake",
+        }
+
+        with patch("watcher.notify_terminal"):
+            for code in ("1", "3", "1", "1", "3"):
+                watcher._record_wake_failure(
+                    state_path=state_path,
+                    agent="codex",
+                    session_id="codex-live",
+                    code=code,
+                    inbox_path=inbox_path,
+                )
+
+        breaker_state = json.loads((self.state_dir / "wake-failure-windows.json").read_text(encoding="utf-8"))
+        self.assertEqual(breaker_state["sessions"]["codex-live"]["breaker_state"], "open")
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run") as run:
+            inbox_path.write_text(
+                json.dumps(
+                    {
+                        "id": "msg-breaker-suppressed",
+                        "session_id": "codex-live",
+                        "from": "claude",
+                        "to": "codex",
+                        "body": "wake me",
+                        "delivered_message": "wake me",
+                        "seen_at": None,
+                        "read_at": None,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            watcher.process_session_once(
+                session_config,
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertFalse(run.called, "open breaker must suppress new wake attempts")
+        self.assertIn("msg-breaker-suppressed", seen_ids)
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertTrue(any(row.get("action") == "wake_breaker_open" for row in audit_rows))
+        self.assertTrue(any(row.get("action") == "wake_skipped_breaker_open" and row.get("message_id") == "msg-breaker-suppressed" for row in audit_rows))
+
+    def test_07k_resume_wake_for_session_clears_breaker(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path = self.tempdir / "watcher-state.json"
+
+        for code in ("1", "3", "1", "3", "1"):
+            watcher._record_wake_failure(
+                state_path=state_path,
+                agent="codex",
+                session_id="codex-live",
+                code=code,
+                inbox_path=inbox_path,
+            )
+
+        self.assertEqual(bridge.wake_breaker_status("codex-live").data["session"]["breaker_state"], "open")
+        resumed = bridge.resume_wake_for_session("codex-live")
+        self.assertTrue(resumed.ok)
+        self.assertIsNone(bridge.wake_breaker_status("codex-live").data["session"])
+
+    def test_07l_watcher_rate_limits_rapid_wake_fires(self) -> None:
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        inbox_path.write_text(
+            json.dumps(
+                {
+                    "id": "msg-rate-limited",
+                    "session_id": "codex-live",
+                    "from": "claude",
+                    "to": "codex",
+                    "body": "wake me",
+                    "delivered_message": "wake me",
+                    "seen_at": None,
+                    "read_at": None,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state_path = self.tempdir / "watcher-state.json"
+        now = watcher.utc_now()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "seen_ids": [],
+                    "pending_wake_verifications": [],
+                    "paused_wake_messages": [],
+                    "unknown_origin_warnings": [],
+                    "wake_fire_history": [
+                        {"session_id": "codex-live", "at": now},
+                        {"session_id": "codex-live", "at": now},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run") as run:
+            processed = watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command": "fake-wake",
+                },
+                seen_ids=set(),
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(processed, [])
+        self.assertFalse(run.called)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["pending_wake_verifications"][0]["message_id"], "msg-rate-limited")
+        self.assertIsNotNone(state["pending_wake_verifications"][0]["deferred_until"])
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertTrue(any(row.get("action") == "wake_rate_limited" and row.get("message_id") == "msg-rate-limited" for row in audit_rows))
 
     # ------------------------------------------------------------------
     # Test 8 & 9: configure_watcher race + sub-agent cannot mutate parent_thread_id

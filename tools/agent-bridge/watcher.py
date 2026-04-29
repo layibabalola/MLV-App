@@ -51,6 +51,13 @@ COMPACT_SIZE_MB = 1.0          # also compact if inbox exceeds this size
 WAKE_ACK_GRACE_PERIOD_S = 30
 WAKE_MAX_RETRIES = 3
 WAKE_PERMANENT_EXIT_CODES = {3, 11}
+WAKE_PREFIRE_LIMIT = 2
+WAKE_PREFIRE_WINDOW_S = 10
+WAKE_PREFIRE_DEFER_S = 10
+WAKE_BREAKER_THRESHOLD = 5
+WAKE_BREAKER_WINDOW_S = 5 * 60
+WAKE_BREAKER_IDLE_CLOSE_S = 15 * 60
+WAKE_BREAKER_SCHEMA_VERSION = 1
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
 
 
@@ -94,6 +101,7 @@ def load_seen(state_path: Path) -> Dict[str, Any]:
             "pending_wake_verifications": [],
             "paused_wake_messages": [],
             "unknown_origin_warnings": [],
+            "wake_fire_history": [],
         }
     with state_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -101,6 +109,7 @@ def load_seen(state_path: Path) -> Dict[str, Any]:
     data.setdefault("pending_wake_verifications", [])
     data.setdefault("paused_wake_messages", [])
     data.setdefault("unknown_origin_warnings", [])
+    data.setdefault("wake_fire_history", [])
     return data
 
 
@@ -151,12 +160,256 @@ def _append_wake_audit(inbox_path: Path, event: Dict[str, Any]) -> None:
         print(f"[agent-bridge] failed to write wake audit event: {exc}", flush=True)
 
 
+def _watcher_state_dir(state_path: Path) -> Path:
+    return state_path.parent / "state"
+
+
+def _wake_breaker_path(state_path: Path) -> Path:
+    return _watcher_state_dir(state_path) / "wake-failure-windows.json"
+
+
+def _load_wake_breakers(state_path: Path) -> Dict[str, Any]:
+    path = _wake_breaker_path(state_path)
+    if not path.exists():
+        return {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}, "updated_at": utc_now()}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}, "updated_at": utc_now()}
+    data.setdefault("schema_version", WAKE_BREAKER_SCHEMA_VERSION)
+    data.setdefault("sessions", {})
+    data.setdefault("updated_at", utc_now())
+    return data
+
+
+def _save_wake_breakers(state_path: Path, payload: Dict[str, Any]) -> None:
+    path = _wake_breaker_path(state_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
+    payload["updated_at"] = utc_now()
+    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    tmp.replace(path)
+
+
+def _normalize_breaker_session(record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = dict(record or {})
+    data.setdefault("failures", [])
+    data.setdefault("breaker_state", "closed")
+    data.setdefault("opened_at", None)
+    data.setdefault("last_failure_at", None)
+    data.setdefault("last_success_at", None)
+    data.setdefault("exit_code_distribution", {})
+    data.setdefault("notified_open_at", None)
+    return data
+
+
+def _breaker_prune_failures(record: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+    failures = []
+    for item in list(record.get("failures", [])):
+        failure_at = _parse_dt(item.get("at"))
+        if failure_at is None:
+            continue
+        if (now - failure_at).total_seconds() <= WAKE_BREAKER_WINDOW_S:
+            failures.append({"at": failure_at.isoformat(timespec="seconds"), "code": str(item.get("code") or "unknown")})
+    record["failures"] = failures
+    distribution: Dict[str, int] = {}
+    for item in failures:
+        code = str(item.get("code") or "unknown")
+        distribution[code] = distribution.get(code, 0) + 1
+    record["exit_code_distribution"] = distribution
+    return record
+
+
+def _close_breaker(
+    *,
+    state_path: Path,
+    session_id: str,
+    reason: str,
+    inbox_path: Optional[Path] = None,
+) -> None:
+    payload = _load_wake_breakers(state_path)
+    sessions = payload.setdefault("sessions", {})
+    record = sessions.get(session_id)
+    if not record:
+        return
+    normalized = _normalize_breaker_session(record)
+    if normalized.get("breaker_state") == "open":
+        if inbox_path is not None:
+            _append_wake_audit(
+                inbox_path,
+                {
+                    "action": "wake_breaker_closed",
+                    "session_id": session_id,
+                    "reason": reason,
+                },
+            )
+    sessions.pop(session_id, None)
+    _save_wake_breakers(state_path, payload)
+
+
+def _breaker_is_open(
+    *,
+    state_path: Path,
+    session_id: str,
+    inbox_path: Optional[Path] = None,
+) -> bool:
+    payload = _load_wake_breakers(state_path)
+    record = payload.get("sessions", {}).get(session_id)
+    if not record:
+        return False
+    normalized = _normalize_breaker_session(record)
+    last_failure = _parse_dt(normalized.get("last_failure_at"))
+    now = datetime.now(timezone.utc)
+    if (
+        normalized.get("breaker_state") == "open"
+        and last_failure is not None
+        and (now - last_failure).total_seconds() >= WAKE_BREAKER_IDLE_CLOSE_S
+    ):
+        _close_breaker(state_path=state_path, session_id=session_id, reason="idle", inbox_path=inbox_path)
+        return False
+    return normalized.get("breaker_state") == "open"
+
+
+def _record_wake_failure(
+    *,
+    state_path: Path,
+    agent: str,
+    session_id: str,
+    code: str,
+    inbox_path: Path,
+) -> bool:
+    payload = _load_wake_breakers(state_path)
+    sessions = payload.setdefault("sessions", {})
+    record = _normalize_breaker_session(sessions.get(session_id))
+    now = datetime.now(timezone.utc)
+    record = _breaker_prune_failures(record, now)
+    record["failures"].append({"at": now.isoformat(timespec="seconds"), "code": code})
+    record["last_failure_at"] = now.isoformat(timespec="seconds")
+    record = _breaker_prune_failures(record, now)
+    was_open = record.get("breaker_state") == "open"
+    opened = False
+    if len(record["failures"]) >= WAKE_BREAKER_THRESHOLD:
+        record["breaker_state"] = "open"
+        if not was_open:
+            record["opened_at"] = now.isoformat(timespec="seconds")
+            record["notified_open_at"] = now.isoformat(timespec="seconds")
+            _append_wake_audit(
+                inbox_path,
+                {
+                    "action": "wake_breaker_open",
+                    "session_id": session_id,
+                    "threshold": WAKE_BREAKER_THRESHOLD,
+                    "consecutive_failures": len(record["failures"]),
+                    "exit_code_distribution": dict(record.get("exit_code_distribution", {})),
+                    "opened_at": record["opened_at"],
+                },
+            )
+            notify_terminal(
+                agent,
+                session_id,
+                [{"id": "wake-breaker-open", "body": "Wake suppressed after repeated failures; investigate or resume_wake_for_session."}],
+            )
+            opened = True
+    sessions[session_id] = record
+    _save_wake_breakers(state_path, payload)
+    return opened or was_open
+
+
+def _record_wake_success(*, state_path: Path, session_id: str, inbox_path: Optional[Path] = None) -> None:
+    _close_breaker(state_path=state_path, session_id=session_id, reason="success", inbox_path=inbox_path)
+
+
+def _rate_limit_fire_history(
+    *,
+    seen_ids: set,
+    pending: List[Dict[str, Any]],
+    paused_messages: List[Dict[str, Any]],
+    unknown_origin_warnings: List[str],
+    wake_fire_history: List[Dict[str, Any]],
+    state_path: Path,
+) -> List[Dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    kept = []
+    for item in wake_fire_history:
+        fired_at = _parse_dt(item.get("at"))
+        if fired_at is None:
+            continue
+        if (now - fired_at).total_seconds() <= WAKE_PREFIRE_WINDOW_S:
+            kept.append({"session_id": str(item.get("session_id") or ""), "at": fired_at.isoformat(timespec="seconds")})
+    if len(kept) != len(wake_fire_history):
+        _save_watcher_state(
+            state_path,
+            seen_ids,
+            pending,
+            paused_messages,
+            unknown_origin_warnings,
+            kept,
+        )
+    return kept
+
+
+def _wake_rate_limited(
+    *,
+    session_id: str,
+    wake_fire_history: List[Dict[str, Any]],
+    seen_ids: set,
+    pending: List[Dict[str, Any]],
+    paused_messages: List[Dict[str, Any]],
+    unknown_origin_warnings: List[str],
+    state_path: Path,
+) -> bool:
+    kept = _rate_limit_fire_history(
+        seen_ids=seen_ids,
+        pending=pending,
+        paused_messages=paused_messages,
+        unknown_origin_warnings=unknown_origin_warnings,
+        wake_fire_history=wake_fire_history,
+        state_path=state_path,
+    )
+    return sum(1 for item in kept if item.get("session_id") == session_id) >= WAKE_PREFIRE_LIMIT
+
+
+def _record_wake_fire(
+    *,
+    session_id: str,
+    seen_ids: set,
+    pending: List[Dict[str, Any]],
+    paused_messages: List[Dict[str, Any]],
+    unknown_origin_warnings: List[str],
+    wake_fire_history: List[Dict[str, Any]],
+    state_path: Path,
+) -> List[Dict[str, Any]]:
+    kept = _rate_limit_fire_history(
+        seen_ids=seen_ids,
+        pending=pending,
+        paused_messages=paused_messages,
+        unknown_origin_warnings=unknown_origin_warnings,
+        wake_fire_history=wake_fire_history,
+        state_path=state_path,
+    )
+    kept.append({"session_id": session_id, "at": utc_now()})
+    _save_watcher_state(
+        state_path,
+        seen_ids,
+        pending,
+        paused_messages,
+        unknown_origin_warnings,
+        kept,
+    )
+    return kept
+
+
 def _save_watcher_state(
     state_path: Path,
     seen_ids: set,
     pending: List[Dict[str, Any]],
     paused_messages: Optional[List[Dict[str, Any]]] = None,
     unknown_origin_warnings: Optional[List[str]] = None,
+    wake_fire_history: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     save_seen(
         state_path,
@@ -165,6 +418,7 @@ def _save_watcher_state(
             "pending_wake_verifications": pending[-200:],
             "paused_wake_messages": (paused_messages or [])[-200:],
             "unknown_origin_warnings": (unknown_origin_warnings or [])[-200:],
+            "wake_fire_history": (wake_fire_history or [])[-200:],
         },
     )
 
@@ -440,9 +694,18 @@ def _mark_permanent_wake_failure(
     message_id: str,
     seen_ids: set,
     result: Dict[str, Any],
+    state_path: Optional[Path] = None,
 ) -> None:
     returncode = int(result.get("returncode") or 0)
     seen_ids.add(message_id)
+    if state_path is not None:
+        _record_wake_failure(
+            state_path=state_path,
+            agent=agent,
+            session_id=session_id,
+            code=str(returncode or result.get("reason") or "unknown"),
+            inbox_path=inbox_path,
+        )
     _append_wake_audit(
         inbox_path,
         _permanent_wake_event(
@@ -623,6 +886,8 @@ def _warn_unknown_origin_once(
     seen_ids: set,
     pending: List[Dict[str, Any]],
     paused_messages: List[Dict[str, Any]],
+    unknown_origin_warnings: List[str],
+    wake_fire_history: List[Dict[str, Any]],
     session_key: str,
     inbox_path: Path,
     agent: str,
@@ -648,6 +913,7 @@ def _warn_unknown_origin_once(
         pending,
         paused_messages,
         sorted(warned),
+        wake_fire_history,
     )
 
 
@@ -753,6 +1019,8 @@ def _process_pending_wake_verifications(
     max_retries: int,
     bridge_paused: bool,
     paused_messages: Optional[List[Dict[str, Any]]] = None,
+    unknown_origin_warnings: Optional[List[str]] = None,
+    wake_fire_history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Promote pending wake attempts to seen only after a receipt appears."""
     agent = session_config["agent"]
@@ -762,6 +1030,8 @@ def _process_pending_wake_verifications(
     now = datetime.now(timezone.utc)
     kept: List[Dict[str, Any]] = []
     changed = False
+    unknown_origin_warnings = unknown_origin_warnings or []
+    wake_fire_history = wake_fire_history or []
 
     for entry in pending:
         if entry.get("agent") != agent or entry.get("session_id") != session_id:
@@ -783,6 +1053,10 @@ def _process_pending_wake_verifications(
             continue
 
         sent_at = _parse_dt(entry.get("sent_at"))
+        deferred_until = _parse_dt(entry.get("deferred_until"))
+        if deferred_until and now < deferred_until:
+            kept.append(entry)
+            continue
         if sent_at and (now - sent_at).total_seconds() < grace_period_seconds:
             kept.append(entry)
             continue
@@ -817,10 +1091,58 @@ def _process_pending_wake_verifications(
             changed = True
             continue
 
+        if _breaker_is_open(state_path=state_path, session_id=session_id, inbox_path=inbox_path):
+            seen_ids.add(message_id)
+            changed = True
+            _append_wake_audit(
+                inbox_path,
+                {
+                    "action": "wake_skipped_breaker_open",
+                    "agent": agent,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "reason": "wake_breaker_open",
+                },
+            )
+            continue
+
+        if _wake_rate_limited(
+            session_id=session_id,
+            wake_fire_history=wake_fire_history,
+            seen_ids=seen_ids,
+            pending=kept + [item for item in pending if item not in kept],
+            paused_messages=paused_messages or [],
+            unknown_origin_warnings=unknown_origin_warnings,
+            state_path=state_path,
+        ):
+            entry["deferred_until"] = (now + timedelta(seconds=WAKE_PREFIRE_DEFER_S)).isoformat(timespec="seconds")
+            kept.append(entry)
+            changed = True
+            _append_wake_audit(
+                inbox_path,
+                {
+                    "action": "wake_rate_limited",
+                    "agent": agent,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "deferred_seconds": WAKE_PREFIRE_DEFER_S,
+                },
+            )
+            continue
+
         resolved = _resolve_command_template(session_config, inbox_path)
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
+            wake_fire_history = _record_wake_fire(
+                session_id=session_id,
+                seen_ids=seen_ids,
+                pending=kept,
+                paused_messages=paused_messages or [],
+                unknown_origin_warnings=unknown_origin_warnings,
+                wake_fire_history=wake_fire_history,
+                state_path=state_path,
+            )
             command_result = run_command_for_session(resolved["command"], agent, session_id, [row], inbox_path)
         else:
             command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
@@ -839,12 +1161,24 @@ def _process_pending_wake_verifications(
                 message_id=message_id,
                 seen_ids=seen_ids,
                 result=command_result,
+                state_path=state_path,
             )
             changed = True
             continue
+        if command_result.get("ok"):
+            _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
+        else:
+            _record_wake_failure(
+                state_path=state_path,
+                agent=agent,
+                session_id=session_id,
+                code=str(command_result.get("returncode") if command_result.get("returncode") is not None else "timeout"),
+                inbox_path=inbox_path,
+            )
         retry_count += 1
         entry["retry_count"] = retry_count
         entry["sent_at"] = utc_now()
+        entry.pop("deferred_until", None)
         entry["last_retry_ok"] = bool(command_result.get("ok"))
         kept.append(entry)
         changed = True
@@ -854,7 +1188,7 @@ def _process_pending_wake_verifications(
         )
 
     if changed:
-        _save_watcher_state(state_path, seen_ids, kept, paused_messages)
+        _save_watcher_state(state_path, seen_ids, kept, paused_messages, unknown_origin_warnings, wake_fire_history)
     return kept
 
 
@@ -868,6 +1202,9 @@ def _queue_pending_wake_verifications(
     seen_ids: set,
     state_path: Path,
     paused_messages: Optional[List[Dict[str, Any]]] = None,
+    unknown_origin_warnings: Optional[List[str]] = None,
+    wake_fire_history: Optional[List[Dict[str, Any]]] = None,
+    deferred_seconds: int = 0,
 ) -> List[Dict[str, Any]]:
     existing_ids = {entry.get("message_id") for entry in pending}
     now = utc_now()
@@ -888,12 +1225,23 @@ def _queue_pending_wake_verifications(
                 "inbox": str(inbox_path),
                 "sent_at": now,
                 "retry_count": 0,
+                "deferred_until": (
+                    datetime.now(timezone.utc) + timedelta(seconds=deferred_seconds)
+                ).isoformat(timespec="seconds")
+                if deferred_seconds > 0 else None,
             }
         )
         existing_ids.add(message_id)
         changed = True
     if changed:
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
+        _save_watcher_state(
+            state_path,
+            seen_ids,
+            pending,
+            paused_messages,
+            unknown_origin_warnings,
+            wake_fire_history,
+        )
     return pending
 
 
@@ -907,6 +1255,8 @@ def _queue_paused_wake_messages(
     pending: List[Dict[str, Any]],
     seen_ids: set,
     state_path: Path,
+    unknown_origin_warnings: Optional[List[str]] = None,
+    wake_fire_history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     existing_ids = {entry.get("message_id") for entry in paused_messages}
     changed = False
@@ -936,7 +1286,14 @@ def _queue_paused_wake_messages(
         )
         changed = True
     if changed:
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages)
+        _save_watcher_state(
+            state_path,
+            seen_ids,
+            pending,
+            paused_messages,
+            unknown_origin_warnings,
+            wake_fire_history,
+        )
     return paused_messages
 
 
@@ -972,6 +1329,7 @@ def process_session_once(
     pending: List[Dict[str, Any]] = list(state.get("pending_wake_verifications", []))
     paused_messages: List[Dict[str, Any]] = list(state.get("paused_wake_messages", []))
     unknown_origin_warnings: List[str] = list(state.get("unknown_origin_warnings", []))
+    wake_fire_history: List[Dict[str, Any]] = list(state.get("wake_fire_history", []))
     bridge_paused = _bridge_is_paused(inbox_path.parent)
     if not bridge_paused:
         filtered_paused_messages = [
@@ -981,7 +1339,7 @@ def process_session_once(
         ]
         if len(filtered_paused_messages) != len(paused_messages):
             paused_messages = filtered_paused_messages
-            _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
+            _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
     pending = _process_pending_wake_verifications(
         session_config,
         pending=pending,
@@ -992,7 +1350,10 @@ def process_session_once(
         max_retries=max_retries,
         bridge_paused=bridge_paused,
         paused_messages=paused_messages,
+        unknown_origin_warnings=unknown_origin_warnings,
+        wake_fire_history=wake_fire_history,
     )
+    wake_fire_history = list(load_seen(state_path).get("wake_fire_history", []))
     pending_ids = {
         entry.get("message_id")
         for entry in pending
@@ -1024,6 +1385,8 @@ def process_session_once(
                 pending=pending,
                 seen_ids=seen_ids,
                 state_path=state_path,
+                unknown_origin_warnings=unknown_origin_warnings,
+                wake_fire_history=wake_fire_history,
             )
             for m in new_msgs:
                 print(
@@ -1038,7 +1401,7 @@ def process_session_once(
             )
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
         return [m["id"] for m in new_msgs]
 
     if effective_on_message == "toast":
@@ -1062,6 +1425,8 @@ def process_session_once(
             pending=pending,
             seen_ids=seen_ids,
             state_path=state_path,
+            unknown_origin_warnings=unknown_origin_warnings,
+            wake_fire_history=wake_fire_history,
         )
         return []
 
@@ -1076,6 +1441,8 @@ def process_session_once(
                 seen_ids=seen_ids,
                 pending=pending,
                 paused_messages=paused_messages,
+                unknown_origin_warnings=unknown_origin_warnings,
+                wake_fire_history=wake_fire_history,
                 session_key=session_key,
                 inbox_path=inbox_path,
                 agent=agent,
@@ -1084,6 +1451,67 @@ def process_session_once(
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
+            if _breaker_is_open(state_path=state_path, session_id=session_id, inbox_path=inbox_path):
+                for message in new_msgs:
+                    message_id = str(message.get("id", ""))
+                    if not message_id:
+                        continue
+                    seen_ids.add(message_id)
+                    _append_wake_audit(
+                        inbox_path,
+                        {
+                            "action": "wake_skipped_breaker_open",
+                            "agent": agent,
+                            "session_id": session_id,
+                            "message_id": message_id,
+                            "reason": "wake_breaker_open",
+                        },
+                    )
+                _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
+                return []
+            if _wake_rate_limited(
+                session_id=session_id,
+                wake_fire_history=wake_fire_history,
+                seen_ids=seen_ids,
+                pending=pending,
+                paused_messages=paused_messages,
+                unknown_origin_warnings=unknown_origin_warnings,
+                state_path=state_path,
+            ):
+                _queue_pending_wake_verifications(
+                    pending=pending,
+                    agent=agent,
+                    session_id=session_id,
+                    inbox_path=inbox_path,
+                    messages=new_msgs,
+                    seen_ids=seen_ids,
+                    state_path=state_path,
+                    paused_messages=paused_messages,
+                    unknown_origin_warnings=unknown_origin_warnings,
+                    wake_fire_history=wake_fire_history,
+                    deferred_seconds=WAKE_PREFIRE_DEFER_S,
+                )
+                for message in new_msgs:
+                    _append_wake_audit(
+                        inbox_path,
+                        {
+                            "action": "wake_rate_limited",
+                            "agent": agent,
+                            "session_id": session_id,
+                            "message_id": str(message.get("id", "")),
+                            "deferred_seconds": WAKE_PREFIRE_DEFER_S,
+                        },
+                    )
+                return []
+            wake_fire_history = _record_wake_fire(
+                session_id=session_id,
+                seen_ids=seen_ids,
+                pending=pending,
+                paused_messages=paused_messages,
+                unknown_origin_warnings=unknown_origin_warnings,
+                wake_fire_history=wake_fire_history,
+                state_path=state_path,
+            )
             command_result = run_command_for_session(resolved["command"], agent, session_id, new_msgs, inbox_path)
 
     if command_configured and not command_result.get("ok") and not command_result.get("retryable", True):
@@ -1105,11 +1533,13 @@ def process_session_once(
                 message_id=message_id,
                 seen_ids=seen_ids,
                 result=command_result,
+                state_path=state_path,
             )
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
         return []
 
     if command_configured and command_result.get("ok"):
+        _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
         _queue_pending_wake_verifications(
             pending=pending,
             agent=agent,
@@ -1119,13 +1549,24 @@ def process_session_once(
             seen_ids=seen_ids,
             state_path=state_path,
             paused_messages=paused_messages,
+            unknown_origin_warnings=unknown_origin_warnings,
+            wake_fire_history=wake_fire_history,
         )
         return []
+
+    if command_configured and not command_result.get("ok"):
+        _record_wake_failure(
+            state_path=state_path,
+            agent=agent,
+            session_id=session_id,
+            code=str(command_result.get("returncode") if command_result.get("returncode") is not None else "timeout"),
+            inbox_path=inbox_path,
+        )
 
     if not command_configured:
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings)
+        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
         return [m["id"] for m in new_msgs]
 
     return []

@@ -35,6 +35,7 @@ DEFAULT_MAX_HOPS = 8  # retained as audit-only metadata; no longer enforced
 MAX_MESSAGE_BYTES = 64 * 1024
 SESSION_RETENTION_DAYS = 30
 PENDING_BRIDGE_ACTIONS_SCHEMA_VERSION = 1
+WAKE_BREAKER_SCHEMA_VERSION = 1
 INBOX_LEVEL_SESSION = "session"
 INBOX_LEVEL_PROJECT = "project"
 INBOX_LEVEL_AGENT = "agent"
@@ -226,6 +227,10 @@ class AgentBridge:
     @property
     def session_registry_path(self) -> Path:
         return session_registry_path_for_state_dir(self.state_dir)
+
+    @property
+    def wake_breaker_path(self) -> Path:
+        return self.state_dir / "wake-failure-windows.json"
 
     @property
     def lock_path(self) -> Path:
@@ -1910,6 +1915,11 @@ class AgentBridge:
                     if not row.get("read_at"):
                         row["read_at"] = now
                         changed = True
+                    if not row.get("seen_at"):
+                        row["seen_at"] = now
+                        row["seen_by_session"] = row.get("session_id")
+                        row["seen_via"] = "implicit_via_mark_read"
+                        changed = True
                     break
 
             if not matched:
@@ -1937,6 +1947,65 @@ class AgentBridge:
                 "marked_read" if changed else "already_read",
                 "Message %s is marked read." % target_id,
                 {"message_id": target_id, "changed": changed},
+            )
+
+    def wake_breaker_status(self, session_id: Optional[str] = None) -> BridgeResult:
+        with self._locked():
+            target_session = normalize_session(session_id) if session_id is not None else None
+            payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+            sessions = payload.get("sessions", {})
+            if target_session is not None:
+                return BridgeResult(
+                    True,
+                    "status",
+                    "Wake breaker status for %s." % target_session,
+                    {
+                        "schema_version": payload.get("schema_version", WAKE_BREAKER_SCHEMA_VERSION),
+                        "session_id": target_session,
+                        "session": copy.deepcopy(sessions.get(target_session)),
+                        "path": str(self.wake_breaker_path),
+                    },
+                )
+            return BridgeResult(
+                True,
+                "status",
+                "Wake breaker status for %d session(s)." % len(sessions),
+                {
+                    "schema_version": payload.get("schema_version", WAKE_BREAKER_SCHEMA_VERSION),
+                    "sessions": copy.deepcopy(sessions),
+                    "path": str(self.wake_breaker_path),
+                },
+            )
+
+    def resume_wake_for_session(self, session_id: str) -> BridgeResult:
+        with self._locked():
+            try:
+                session = normalize_session(session_id)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+            sessions = payload.setdefault("sessions", {})
+            changed = bool(sessions.pop(session, None) is not None)
+            payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
+            payload["updated_at"] = utc_now()
+            if changed:
+                write_json(self.wake_breaker_path, payload)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "wake_breaker_closed",
+                    "accepted": True,
+                    "session_id": session,
+                    "reason": "resume_call",
+                    "changed": changed,
+                }
+            )
+            return BridgeResult(
+                True,
+                "cleared" if changed else "already_clear",
+                "Wake breaker cleared for %s." % session,
+                {"session_id": session, "changed": changed},
             )
 
     def _message_lifecycle_status(self, row: Dict[str, Any]) -> str:
@@ -2472,6 +2541,16 @@ class AgentBridge:
                 )
 
         stale_servers = [entry for entry in server_markers if entry.get("stale")]
+        wake_breakers = read_json(
+            self.wake_breaker_path,
+            {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}},
+        )
+        breaker_sessions = wake_breakers.get("sessions", {})
+        open_breakers = {
+            session_id: data
+            for session_id, data in breaker_sessions.items()
+            if (data or {}).get("breaker_state") == "open"
+        }
         tool_refresh = {
             "path": str(tool_refresh_status_path),
             "status": "missing",
@@ -2486,7 +2565,14 @@ class AgentBridge:
             except Exception:
                 tool_refresh["status"] = "unreadable"
         status = "healthy"
-        if watcher.get("stale") or stale_servers or lock_entries or tool_refresh["refresh_required"] or tool_refresh["status"] == "unreadable":
+        if (
+            watcher.get("stale")
+            or stale_servers
+            or lock_entries
+            or tool_refresh["refresh_required"]
+            or tool_refresh["status"] == "unreadable"
+            or open_breakers
+        ):
             status = "attention"
         return BridgeResult(
             True,
@@ -2498,6 +2584,12 @@ class AgentBridge:
                 "mcp_server_markers": server_markers,
                 "mcp_server_marker_count": len(server_markers),
                 "stale_server_marker_count": len(stale_servers),
+                "wake_breakers": {
+                    "path": str(self.wake_breaker_path),
+                    "session_count": len(breaker_sessions),
+                    "open_session_count": len(open_breakers),
+                    "sessions": open_breakers,
+                },
                 "tool_refresh": tool_refresh,
                 "locks": lock_entries,
                 "lock_count": len(lock_entries),

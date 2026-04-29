@@ -22,7 +22,7 @@ from core.processes import acquire_singleton_lease, heartbeat_lease, release_lea
 from core.runtime import peer_runtime_path_for_state_dir, read_runtime_breadcrumb
 from core.routing import RoutingStatus, resolve_route
 from core.settings import load_settings, settings_path_for_state_dir
-from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json
+from core.storage import append_jsonl, read_jsonl, with_schema_version, write_json, write_jsonl
 from migrate_root import migrate_root
 from project_identity import derive_project_identity, normalize_rendezvous
 from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session
@@ -506,6 +506,31 @@ class AgentBridgeTests(unittest.TestCase):
         after = bridge.peek_inbox("claude", session_id="mlv-app")
         self.assertEqual(after.status, "empty")
 
+    def test_mark_read_backfills_seen_at_when_missing(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] receipt hello", session_id="mlv-app")
+        self.assertTrue(result.ok)
+        message_id = result.data["id"]
+
+        inbox_path = bridge.inbox_path("claude")
+        rows = read_jsonl(inbox_path)
+        self.assertEqual(len(rows), 1)
+        rows[0]["read_at"] = "2026-04-29T01:02:03+00:00"
+        rows[0]["seen_at"] = None
+        rows[0]["seen_by_session"] = None
+        rows[0]["seen_via"] = None
+        write_jsonl(inbox_path, rows)
+
+        marked = bridge.mark_read("claude", message_id)
+        self.assertTrue(marked.ok)
+        self.assertEqual(marked.status, "marked_read")
+
+        updated = read_jsonl(inbox_path)[0]
+        self.assertEqual(updated["read_at"], "2026-04-29T01:02:03+00:00")
+        self.assertIsNotNone(updated["seen_at"])
+        self.assertEqual(updated["seen_by_session"], "mlv-app")
+        self.assertEqual(updated["seen_via"], "implicit_via_mark_read")
+
     def test_message_receipts_track_seen_read_and_handled(self) -> None:
         bridge = AgentBridge(self.state_dir)
         result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] receipt hello", session_id="mlv-app")
@@ -694,6 +719,43 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(status.status, "attention")
         self.assertTrue(status.data["tool_refresh"]["refresh_required"])
         self.assertEqual(status.data["tool_refresh"]["status"], "refresh_required")
+
+    def test_resume_wake_for_session_clears_breaker_and_status(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        bridge.wake_breaker_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "updated_at": "2026-04-29T00:00:00+00:00",
+                    "sessions": {
+                        "codex-live": {
+                            "breaker_state": "open",
+                            "opened_at": "2026-04-29T00:00:00+00:00",
+                            "last_failure_at": "2026-04-29T00:01:00+00:00",
+                            "failures": [{"at": "2026-04-29T00:01:00+00:00", "code": "1"}],
+                            "exit_code_distribution": {"1": 1},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status = bridge.bridge_process_status()
+        self.assertEqual(status.status, "attention")
+        self.assertEqual(status.data["wake_breakers"]["open_session_count"], 1)
+
+        breaker_status = bridge.wake_breaker_status("codex-live")
+        self.assertEqual(breaker_status.data["session"]["breaker_state"], "open")
+
+        resumed = bridge.resume_wake_for_session("codex-live")
+        self.assertTrue(resumed.ok)
+        self.assertEqual(resumed.status, "cleared")
+
+        after = bridge.bridge_process_status()
+        self.assertEqual(after.data["wake_breakers"]["open_session_count"], 0)
+        self.assertEqual(bridge.wake_breaker_status("codex-live").data["session"], None)
 
     def test_process_lease_heartbeat_and_release(self) -> None:
         lock_path = self.state_dir / "locks" / "watcher.lock"
