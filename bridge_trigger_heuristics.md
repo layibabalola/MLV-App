@@ -96,7 +96,15 @@ For bridge coordination, distinguish `follow-on work exists` from `I am blocked 
 Inbox hygiene for bridge-related work:
 
 - If the active conversation is itself about bridge behavior, routing, wake paths, hooks, or inbox hygiene, treat every user turn in that conversation as bridge-related.
-- At the start of any bridge-related coding, design, audit, or protocol turn, check Codex's private GUID bucket and the project bucket non-destructively.
+- At the start of any bridge-related coding, design, audit, or protocol turn, do a lightweight non-destructive inbox awareness pass only as needed for safety/backpressure, but do not let routine inbox status consume the answer slot for a normal user prompt.
+- Default flow for normal user prompts in bridge-focused conversations:
+  - answer or execute the user-requested work first,
+  - then do the end-of-turn inbox check before stopping.
+- Exceptions that justify early inbox checking:
+  - the user explicitly asked `check bridge inbox`,
+  - Codex is about to send bridge traffic and needs to avoid known backpressure,
+  - Claude or the user reported a routing/backpressure/session issue that may block the next step,
+  - Codex is resuming a bridge task whose correctness depends on fresh inbox state.
 - At the end of that turn, check the same buckets again before the final response.
 - In bridge-focused conversations, do that end-of-turn inbox check before every final response, even if the user message was only a question about process or UX.
 - Surface and handle any relevant messages, then mark each handled message read by id.
