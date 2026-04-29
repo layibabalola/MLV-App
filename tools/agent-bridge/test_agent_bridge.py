@@ -639,6 +639,49 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(page.data["total_count"], 2)
         self.assertTrue(page.data["has_more"])
 
+    def test_next_pending_bridge_action_uses_priority_due_date_and_age(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        low = bridge.record_pending_bridge_action(
+            "codex",
+            "Low item",
+            priority="low",
+        )
+        self.assertTrue(low.ok)
+        urgent = bridge.record_pending_bridge_action(
+            "codex",
+            "Urgent item",
+            priority="urgent",
+        )
+        self.assertTrue(urgent.ok)
+        due_soon = bridge.record_pending_bridge_action(
+            "codex",
+            "High due soon",
+            priority="high",
+            due_at="2026-04-29T10:00:00+00:00",
+        )
+        self.assertTrue(due_soon.ok)
+
+        next_action = bridge.next_pending_bridge_action("codex")
+        self.assertTrue(next_action.ok)
+        self.assertEqual(next_action.data["count"], 3)
+        self.assertEqual(next_action.data["action"]["summary"], "Urgent item")
+
+        bridge.resolve_pending_bridge_action(urgent.data["action"]["id"], resolved_by="codex")
+        next_after_urgent = bridge.next_pending_bridge_action("codex")
+        self.assertEqual(next_after_urgent.data["action"]["summary"], "High due soon")
+
+        bridge.resolve_pending_bridge_action(due_soon.data["action"]["id"], resolved_by="codex")
+        next_after_due = bridge.next_pending_bridge_action("codex")
+        self.assertEqual(next_after_due.data["action"]["summary"], "Low item")
+
+    def test_next_pending_bridge_action_empty_when_no_pending(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        result = bridge.next_pending_bridge_action("codex")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "empty")
+        self.assertIsNone(result.data["action"])
+        self.assertEqual(result.data["count"], 0)
+
     def test_check_inbox_records_seen_but_peek_stays_pure(self) -> None:
         bridge = AgentBridge(self.state_dir)
         result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] visible hello", session_id="mlv-app")

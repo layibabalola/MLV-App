@@ -318,6 +318,11 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         )
 
     @mcp.tool(annotations=READ_ONLY)
+    def next_pending_bridge_action(owner_agent: str) -> dict:
+        """Return the highest-priority actionable ledger item for one agent."""
+        return as_dict(bridge.next_pending_bridge_action(owner_agent=owner_agent))
+
+    @mcp.tool(annotations=READ_ONLY)
     def bridge_status(session_id: Optional[str] = None) -> dict:
         """Return bridge pause state, hop count, state directory, and unread counts."""
         return as_dict(bridge.bridge_status(session_id=session_id))

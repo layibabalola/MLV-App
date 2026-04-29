@@ -297,10 +297,21 @@ Waypoint rule:
   - the user redirected the task,
   - the next step has hidden consequences that require explicit confirmation.
 - Before ending a turn after a checkpoint, Codex must also check the pending-action ledger for its own open bridge obligations:
-  - call `list_pending_bridge_actions(owner_agent="codex")` or otherwise inspect the durable pending ledger,
-  - if actionable in-scope items remain and there is no real blocker, continue by doing the highest-priority pending item instead of stopping,
+  - call `next_pending_bridge_action(owner_agent="codex")` when available, or otherwise inspect the durable pending ledger,
+  - treat the returned item as the machine-selected active candidate rather than relying on memory or the most recent discussion topic,
+  - if actionable in-scope items remain and there is no real blocker, continue by doing that top pending item instead of stopping,
   - if the item should not be worked now, explicitly say why it remains `parked`, `displaced`, or `blocked`.
 - During an active implementation stretch, the highest-priority actionable ledger item is the default active task.
+- Aggressive drain rule:
+  - if the inbox is clear and the top Codex-owned ledger item is actionable, Codex should keep executing it by default without waiting for a user nudge,
+  - stopping is allowed only when:
+    - the ledger has no actionable Codex-owned items,
+    - the top item is explicitly `blocked`, `parked`, or `displaced`,
+    - the user explicitly redirected or paused the work,
+    - or the next step has hidden consequences that require confirmation.
+- Post-commit / post-test continuation rule:
+  - after a commit, green test run, or other successful checkpoint, immediately re-run `next_pending_bridge_action(owner_agent="codex")`,
+  - if it returns an actionable item, that item becomes the next default work block.
 - User process/debugging questions do not automatically replace that active task:
   - answer them briefly,
   - then immediately resume the highest-priority actionable ledger item,
@@ -315,6 +326,9 @@ Waypoint rule:
   - resolve ledger entries that are already completed,
   - correct priorities or details if the external list is more accurate than Codex's local ledger.
 - Do not let the ledger stay empty or stale when Codex already knows about open Codex-side obligations.
+- Workflow implication:
+  - the ledger is not just a memory aid; it is the default source of truth for `what Codex should do next`,
+  - if the current conversation turns meta while actionable ledger items remain, the turn should snap back to the top item after the meta answer unless the user clearly changed priority.
 
 Closed-on-send exclusion:
 

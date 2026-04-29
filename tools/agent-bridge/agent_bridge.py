@@ -2177,6 +2177,62 @@ class AgentBridge:
                 },
             )
 
+    def next_pending_bridge_action(self, owner_agent: str) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            priority_order = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+
+            def _parse_iso(value: Any) -> Optional[str]:
+                raw = str(value or "").strip()
+                if not raw:
+                    return None
+                try:
+                    parsed = datetime.fromisoformat(raw)
+                except ValueError:
+                    return None
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.isoformat(timespec="seconds")
+
+            def _sort_key(action: Dict[str, Any]) -> tuple:
+                due_at = _parse_iso(action.get("due_at"))
+                created_at = _parse_iso(action.get("created_at"))
+                due_bucket = 0 if due_at else 1
+                due_value = due_at or "9999-12-31T23:59:59+00:00"
+                created_value = created_at or "9999-12-31T23:59:59+00:00"
+                return (
+                    priority_order.get(str(action.get("priority") or "normal").strip().lower(), 2),
+                    due_bucket,
+                    due_value,
+                    created_value,
+                    str(action.get("id") or ""),
+                )
+
+            pending = self._load_pending_actions()
+            candidates = [
+                copy.deepcopy(action)
+                for action in pending.get("actions", [])
+                if action.get("owner_agent") == owner and action.get("status") == "pending"
+            ]
+            candidates.sort(key=_sort_key)
+            next_action = candidates[0] if candidates else None
+            return BridgeResult(
+                True,
+                "next_pending_bridge_action" if next_action else "empty",
+                "Next pending bridge action selected for %s." % owner
+                if next_action
+                else "No pending bridge actions for %s." % owner,
+                {
+                    "owner_agent": owner,
+                    "action": next_action,
+                    "count": len(candidates),
+                },
+            )
+
     def resolve_pending_bridge_action(
         self,
         action_id: str,
