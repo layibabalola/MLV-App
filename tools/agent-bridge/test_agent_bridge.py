@@ -260,6 +260,18 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn(f"-LockFile '{lock_file}'", result.stdout)
         self.assertIn("-Message 'check bridge inbox from test'", result.stdout)
 
+    def test_wake_codex_foreground_path_has_focus_retry_hardening(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        text = script.read_text(encoding="utf-8")
+
+        self.assertIn("public static extern bool BringWindowToTop", text)
+        self.assertIn('[System.Windows.Forms.SendKeys]::SendWait("%")', text)
+        self.assertIn("ALT-tap fallback", text)
+        self.assertIn("exit 12", text)
+
+        helper = text.split("function Invoke-CodexForegroundAttempt", 1)[1].split("if ($PrintInnerCommand", 1)[0]
+        self.assertLess(helper.index("BringWindowToTop"), helper.index("SetForegroundWindow"))
+
     def test_migrate_root_dry_run_does_not_create_target(self) -> None:
         source = self.tempdir / "source-root"
         target = self.tempdir / "target-root"

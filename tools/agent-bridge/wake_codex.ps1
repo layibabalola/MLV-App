@@ -47,6 +47,7 @@ using System.Text;
 public class Win32Wake {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -144,6 +145,25 @@ function Open-CodexThread {
     Write-Host ("[wake_codex] Opening Codex thread deeplink: " + $uri)
     Start-Process $uri
     Start-Sleep -Milliseconds 1200
+}
+
+function Invoke-CodexForegroundAttempt {
+    param(
+        [IntPtr]$Hwnd,
+        [uint32]$TargetThreadId
+    )
+
+    $myThread = [Win32Wake]::GetCurrentThreadId()
+    [Win32Wake]::AttachThreadInput($myThread, $TargetThreadId, $true) | Out-Null
+    try {
+        if ([Win32Wake]::IsIconic($Hwnd)) {
+            [Win32Wake]::ShowWindow($Hwnd, 9) | Out-Null
+        }
+        [Win32Wake]::BringWindowToTop($Hwnd) | Out-Null
+        [Win32Wake]::SetForegroundWindow($Hwnd) | Out-Null
+    } finally {
+        [Win32Wake]::AttachThreadInput($myThread, $TargetThreadId, $false) | Out-Null
+    }
 }
 
 if ($PrintInnerCommand -and -not $RunInnerWake) {
@@ -255,26 +275,28 @@ try {
     $codexTitle = Get-WindowTitle -hWnd $codexHwnd
     Write-Host ("[wake_codex] Target Codex after deeplink: PID=" + $codex.Id + " hwnd=" + $codexHwnd + " title=" + $codexTitle)
 
-    $myThread    = [Win32Wake]::GetCurrentThreadId()
     $codexProcId = 0
     $codexThread = [Win32Wake]::GetWindowThreadProcessId($codexHwnd, [ref]$codexProcId)
 
-    [Win32Wake]::AttachThreadInput($myThread, $codexThread, $true) | Out-Null
-    try {
-        if ([Win32Wake]::IsIconic($codexHwnd)) {
-            [Win32Wake]::ShowWindow($codexHwnd, 9) | Out-Null
-        }
-        [Win32Wake]::SetForegroundWindow($codexHwnd) | Out-Null
-    } finally {
-        [Win32Wake]::AttachThreadInput($myThread, $codexThread, $false) | Out-Null
-    }
+    Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
 
     Start-Sleep -Milliseconds 250
 
     $nowFg = [Win32Wake]::GetForegroundWindow()
     if ($nowFg -ne $codexHwnd) {
-        Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground; likely blocked by Windows focus-steal protection. Aborting."
-        exit 12
+        Write-Host "[wake_codex] First foreground attempt failed. Trying ALT-tap fallback."
+        [System.Windows.Forms.SendKeys]::SendWait("%")
+        Start-Sleep -Milliseconds 50
+
+        Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
+        Start-Sleep -Milliseconds 200
+
+        $nowFg = [Win32Wake]::GetForegroundWindow()
+        if ($nowFg -ne $codexHwnd) {
+            Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground after ALT-tap retry; likely blocked by Windows focus-steal protection. Aborting."
+            exit 12
+        }
+        Write-Host "[wake_codex] ALT-tap fallback succeeded."
     }
 
     if ($DryRun) {
