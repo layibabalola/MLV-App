@@ -1,5 +1,9 @@
 # Bridge Watch Lifecycle
 
+**Status:** Implemented for Codex side (`wait_inbox` keepalive). Claude
+side is asymmetric — uses Monitor instead of `wait_inbox`. Symmetric
+`wake_claude.ps1` (cold-start case) deferred to AUTO_PAIR_SPEC Phase D.
+
 This note defines the lifecycle for Codex-side bridge watch: how the
 `wait_inbox` keepalive loop starts, stays alive, breaks, and resumes.
 

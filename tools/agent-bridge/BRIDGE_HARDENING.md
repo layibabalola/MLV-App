@@ -1,5 +1,9 @@
 # Agent-Bridge Hardening Plan
 
+**Status:** Implemented baseline; tail-end Phase 14 security review and
+Final 10/10 Validation Loop deferred per 2026-04-28 roadmap shift (per-feature
+contract tests stay inline).
+
 Merged from Claude + Codex edge-case analyses (2026-04-26/27).
 Target: "boring and dependable" — not theoretically perfect.
 

@@ -1,5 +1,12 @@
 # Agent-Bridge Communication Protocol
 
+**Status:** Implemented v1.5; new types added 2026-04-28 (`WAIT_DECLARED`,
+`HEURISTIC_SYNC_ACK`, `PROTOCOL_SYNC_ACK`, `ACTION_REQUEST_RESPONSE`,
+`SPEC_REVIEW_ACK`, `SPEC_REVIEW_REQUEST`, `SPEC_REVIEW_RESULT`,
+`SPEC_REVIEW_RESULT_ACK`, `IMPLEMENTATION_UPDATE`,
+`CROSS_PROJECT_PAIR_REQUEST/ACCEPT/REJECT/EXPIRE/REVOKE/PROMOTE` per
+cross-project pairing spec in flight). EXCHANGE_CLOSED close-marker
+convention added per 2026-04-28 heuristic.
 Version: 1.5
 Transport: agent-bridge MCP server
 Applies to: any two agents sharing an agent-bridge instance
