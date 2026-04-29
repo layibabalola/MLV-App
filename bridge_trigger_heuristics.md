@@ -267,6 +267,11 @@ Waypoint rule:
   - if the item should not be worked now, explicitly say why it remains `parked`, `displaced`, or `blocked`.
 - Do not rely on memory alone for “what’s next” once a turn is about to end.
 - The pending-action ledger is the final anti-drop backstop for work Codex has already committed to actioning.
+- If the user or Claude enumerates Codex-side pending work, reconcile the durable pending-action ledger in that same work stretch:
+  - add newly surfaced Codex obligations that are missing,
+  - resolve ledger entries that are already completed,
+  - correct priorities or details if the external list is more accurate than Codex's local ledger.
+- Do not let the ledger stay empty or stale when Codex already knows about open Codex-side obligations.
 
 Closed-on-send exclusion:
 
