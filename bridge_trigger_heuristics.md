@@ -81,6 +81,17 @@ For bridge hygiene, distinguish `read` from `actioned`:
   - send the bridge reply,
   - say explicitly that the item is `read but parked` and why,
   - or say explicitly that another higher-priority item displaced it.
+- `ACTION_REQUEST` is a stronger subclass:
+  - after surfacing an `ACTION_REQUEST`, Codex must not end the turn with only an inbox summary,
+  - Codex must immediately choose and state exactly one disposition:
+    - `acting now` and then make the next substantive action the implementation/reply,
+    - `recorded and parked` with a durable `record_pending_bridge_action(...)` entry, priority, and reason,
+    - `blocked` with the concrete blocker and any question needed to unblock,
+    - `displaced` with the higher-priority task that is taking precedence,
+    - or `rejected` with a clear reason if the request is unsafe or out of scope,
+  - for bridge defects or user-visible workflow failures marked `urgent`, `high`, or `medium`, default to `acting now` unless there is a real blocker or a higher-priority active execution lock,
+  - if only a narrow safe slice can be done immediately, implement that slice now and record the remaining slice as a pending action before stopping,
+  - marking the message read only satisfies the receipt contract; it does not satisfy the `ACTION_REQUEST` contract.
 - If the message did not actually change priority, resume the interrupted implementation or investigation immediately after the inbox report instead of stopping at status.
 - A bridge inbox check is complete only when both states are true:
   - surfaced messages were marked read,
