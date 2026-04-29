@@ -112,7 +112,12 @@ Inbox hygiene for bridge-related work:
   - check both buckets non-destructively,
   - surface and mark read any messages that were surfaced,
   - answer the inbox status,
-  - then resume the previously active implementation or investigation unless the user explicitly says to pause, stop, wait, or only report status.
+  - then resume the previously active implementation, investigation, or unanswered user question unless the user explicitly says to pause, stop, wait, or only report status.
+- If Codex was already answering a user question when an explicit `check bridge inbox` request arrived:
+  - treat the earlier unanswered question as active return debt,
+  - answer the inbox check,
+  - then come back and answer the earlier question before closing the turn unless the user clearly superseded or withdrew it.
+- Do not let an explicit inbox-check interrupt erase an already-open answer obligation.
 - After any interrupt that surfaces a message but does not truly displace the current task:
   - explicitly classify the result as `resume`, `displaced`, or `parked`,
   - if the surfaced message creates follow-up work that will not be actioned immediately, record it in the pending-action ledger with `record_pending_bridge_action(...)`,
