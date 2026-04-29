@@ -261,6 +261,12 @@ Waypoint rule:
   - a real blocker exists,
   - the user redirected the task,
   - the next step has hidden consequences that require explicit confirmation.
+- Before ending a turn after a checkpoint, Codex must also check the pending-action ledger for its own open bridge obligations:
+  - call `list_pending_bridge_actions(owner_agent="codex")` or otherwise inspect the durable pending ledger,
+  - if actionable in-scope items remain and there is no real blocker, continue by doing the highest-priority pending item instead of stopping,
+  - if the item should not be worked now, explicitly say why it remains `parked`, `displaced`, or `blocked`.
+- Do not rely on memory alone for “what’s next” once a turn is about to end.
+- The pending-action ledger is the final anti-drop backstop for work Codex has already committed to actioning.
 
 Closed-on-send exclusion:
 
