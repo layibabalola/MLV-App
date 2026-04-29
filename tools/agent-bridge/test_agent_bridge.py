@@ -268,9 +268,13 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("public static extern uint SendInput", text)
         self.assertIn("public static extern void SwitchToThisWindow", text)
         self.assertIn("function Send-AltTap", text)
+        self.assertIn("function Invoke-CodexComposerUiaFallback", text)
+        self.assertIn("Add-Type -AssemblyName UIAutomationClient", text)
+        self.assertIn("*ProseMirror*", text)
+        self.assertIn("Send-BridgeMessageKeys -Value $Message", text)
         self.assertIn("SendInput ALT-tap fallback", text)
         self.assertIn("SwitchToThisWindow fallback", text)
-        self.assertIn("exit 12", text)
+        self.assertIn("exit 13", text)
 
         helper = text.split("function Invoke-CodexForegroundAttempt", 1)[1].split("if ($PrintInnerCommand", 1)[0]
         self.assertLess(helper.index("BringWindowToTop"), helper.index("SetForegroundWindow"))

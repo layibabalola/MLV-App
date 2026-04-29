@@ -21,6 +21,9 @@
 #                    [-IdleThresholdSeconds 10]
 #                    [-MaxWaitSeconds 600]
 #                    [-DryRun] [-FindOnly]
+#
+# Exit codes:
+#   13 = all foreground paths failed and UIA composer fallback failed
 
 param(
     [string]$Message              = "check bridge inbox",
@@ -198,6 +201,84 @@ function Send-AltTap {
     }
 }
 
+function Get-CodexComposerElement {
+    param([IntPtr]$RootHwnd)
+
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($RootHwnd)
+        if ($null -eq $root) {
+            return $null
+        }
+
+        $all = $root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        $fallback = $null
+        for ($i = 0; $i -lt $all.Count; $i++) {
+            $element = $all.Item($i)
+            $className = [string]$element.Current.ClassName
+            if ($className -notlike "*ProseMirror*") {
+                continue
+            }
+            if ($null -eq $fallback -and $element.Current.IsEnabled) {
+                $fallback = $element
+            }
+            if ($element.Current.IsEnabled -and $element.Current.IsKeyboardFocusable) {
+                return $element
+            }
+        }
+        return $fallback
+    } catch {
+        Write-Host ("[wake_codex] UIA composer search failed: " + $_.Exception.Message)
+        return $null
+    }
+}
+
+function Send-BridgeMessageKeys {
+    param([string]$Value)
+
+    [System.Windows.Forms.SendKeys]::SendWait("^a")
+    Start-Sleep -Milliseconds 60
+    [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")
+    Start-Sleep -Milliseconds 60
+
+    [System.Windows.Forms.SendKeys]::SendWait($Value)
+    Start-Sleep -Milliseconds 100
+    [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
+}
+
+function Invoke-CodexComposerUiaFallback {
+    param(
+        [IntPtr]$RootHwnd,
+        [string]$Value,
+        [switch]$DryRun
+    )
+
+    $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+    if ($null -eq $composer) {
+        Write-Host "[wake_codex] UIA fallback could not find ProseMirror composer."
+        return $false
+    }
+
+    try {
+        $composer.SetFocus()
+        Start-Sleep -Milliseconds 150
+        if ($DryRun) {
+            Write-Host ("[wake_codex] DryRun. UIA fallback would send: " + $Value + " + Ctrl+Enter (steer).")
+            return $true
+        }
+        Send-BridgeMessageKeys -Value $Value
+        Write-Host ("[wake_codex] UIA fallback sent: " + $Value + " + Ctrl+Enter (steer; composer cleared first)")
+        return $true
+    } catch {
+        Write-Host ("[wake_codex] UIA fallback failed: " + $_.Exception.Message)
+        return $false
+    }
+}
+
 if ($PrintInnerCommand -and -not $RunInnerWake) {
     Write-Host (New-InnerWakeCommand)
     exit 0
@@ -330,8 +411,16 @@ try {
             Start-Sleep -Milliseconds 200
             $nowFg = [Win32Wake]::GetForegroundWindow()
             if ($nowFg -ne $codexHwnd) {
-                Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground after all focus fallbacks; likely blocked by Windows focus-steal protection. Aborting."
-                exit 12
+                Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground after all focus fallbacks; trying UIA composer fallback."
+                $uiaDelivered = Invoke-CodexComposerUiaFallback -RootHwnd $codexHwnd -Value $Message -DryRun:$DryRun
+                if (-not $uiaDelivered) {
+                    Write-Host "[wake_codex] WARNING: UIA composer fallback failed. Aborting."
+                    exit 13
+                }
+                Start-Sleep -Milliseconds 200
+                [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
+                Write-Host ("[wake_codex] Restored focus to: " + $prevFgTitle)
+                exit 0
             }
             Write-Host "[wake_codex] SwitchToThisWindow fallback succeeded."
         } else {
@@ -356,14 +445,7 @@ try {
     # behind the current turn. We always want bridge wakes to steer, so the
     # "check bridge inbox" trigger is actioned now, not after Codex finishes
     # whatever it was thinking about.
-    [System.Windows.Forms.SendKeys]::SendWait("^a")
-    Start-Sleep -Milliseconds 60
-    [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")
-    Start-Sleep -Milliseconds 60
-
-    [System.Windows.Forms.SendKeys]::SendWait($Message)
-    Start-Sleep -Milliseconds 100
-    [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
+    Send-BridgeMessageKeys -Value $Message
     Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; composer cleared first)")
 
     # --- Stage 6: restore previous foreground ---
