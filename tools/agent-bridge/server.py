@@ -219,6 +219,61 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
             )
         )
 
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def record_pending_bridge_action(
+        owner_agent: str,
+        summary: str,
+        message_id: Optional[str] = None,
+        related_session_id: Optional[str] = None,
+        priority: str = "normal",
+        due_at: Optional[str] = None,
+        details: Optional[str] = None,
+    ) -> dict:
+        """Record a durable bridge follow-up item after surfacing a message but before resuming other work."""
+        return as_dict(
+            bridge.record_pending_bridge_action(
+                owner_agent=owner_agent,
+                summary=summary,
+                message_id=message_id,
+                related_session_id=related_session_id,
+                priority=priority,
+                due_at=due_at,
+                details=details,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def list_pending_bridge_actions(
+        owner_agent: Optional[str] = None,
+        status: str = "pending",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """List pending or resolved bridge follow-up items from the durable action ledger."""
+        return as_dict(
+            bridge.list_pending_bridge_actions(
+                owner_agent=owner_agent,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        )
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def resolve_pending_bridge_action(
+        action_id: str,
+        resolved_by: Optional[str] = None,
+        resolution: Optional[str] = None,
+    ) -> dict:
+        """Resolve one pending bridge follow-up item by id."""
+        return as_dict(
+            bridge.resolve_pending_bridge_action(
+                action_id=action_id,
+                resolved_by=resolved_by,
+                resolution=resolution,
+            )
+        )
+
     @mcp.tool(annotations=READ_ONLY)
     def bridge_status(session_id: Optional[str] = None) -> dict:
         """Return bridge pause state, hop count, state directory, and unread counts."""

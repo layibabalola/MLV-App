@@ -29,6 +29,7 @@ DEFAULT_PROJECT = "default"
 DEFAULT_MAX_HOPS = 8  # retained as audit-only metadata; no longer enforced
 MAX_MESSAGE_BYTES = 64 * 1024
 SESSION_RETENTION_DAYS = 30
+PENDING_BRIDGE_ACTIONS_SCHEMA_VERSION = 1
 INBOX_LEVEL_SESSION = "session"
 INBOX_LEVEL_PROJECT = "project"
 INBOX_LEVEL_AGENT = "agent"
@@ -214,6 +215,10 @@ class AgentBridge:
         return self.state_dir / "messages.jsonl"
 
     @property
+    def pending_actions_path(self) -> Path:
+        return self.state_dir / "pending-actions.json"
+
+    @property
     def session_registry_path(self) -> Path:
         return session_registry_path_for_state_dir(self.state_dir)
 
@@ -299,6 +304,51 @@ class AgentBridge:
             "projects": {},
             "updated_at": utc_now(),
         }
+
+    def _default_pending_actions(self) -> Dict[str, Any]:
+        return {
+            "schema_version": PENDING_BRIDGE_ACTIONS_SCHEMA_VERSION,
+            "actions": [],
+            "updated_at": utc_now(),
+        }
+
+    def _load_pending_actions(self) -> Dict[str, Any]:
+        try:
+            pending = read_json(self.pending_actions_path, self._default_pending_actions())
+        except (JSONDecodeError, OSError):
+            corrupt_path = self.pending_actions_path.with_name(
+                "pending-actions.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            )
+            if self.pending_actions_path.exists():
+                self.pending_actions_path.replace(corrupt_path)
+            pending = self._default_pending_actions()
+        pending["schema_version"] = max(
+            int(pending.get("schema_version") or 1),
+            PENDING_BRIDGE_ACTIONS_SCHEMA_VERSION,
+        )
+        actions = pending.get("actions")
+        if not isinstance(actions, list):
+            pending["actions"] = []
+        else:
+            normalized: List[Dict[str, Any]] = []
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                action.setdefault("status", "pending")
+                action.setdefault("details", None)
+                action.setdefault("due_at", None)
+                action.setdefault("message_id", None)
+                action.setdefault("related_session_id", None)
+                action.setdefault("resolved_at", None)
+                action.setdefault("resolved_by", None)
+                action.setdefault("resolution", None)
+                normalized.append(action)
+            pending["actions"] = normalized
+        return pending
+
+    def _save_pending_actions(self, pending: Dict[str, Any]) -> None:
+        pending["updated_at"] = utc_now()
+        write_json(self.pending_actions_path, pending)
 
     def _load_session_registry(self) -> Dict[str, Any]:
         try:
@@ -1729,6 +1779,174 @@ class AgentBridge:
         if value < minimum or value > maximum:
             raise ValueError("%s must be between %d and %d" % (name, minimum, maximum))
         return value
+
+    def record_pending_bridge_action(
+        self,
+        owner_agent: str,
+        summary: str,
+        *,
+        message_id: Optional[str] = None,
+        related_session_id: Optional[str] = None,
+        priority: str = "normal",
+        due_at: Optional[str] = None,
+        details: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent)
+                related_session = normalize_session(related_session_id) if related_session_id is not None else None
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            text = (summary or "").strip()
+            if not text:
+                return BridgeResult(False, "rejected", "summary is required")
+            if len(text) > 240:
+                return BridgeResult(False, "rejected", "summary must be 240 characters or fewer")
+
+            resolved_priority = (priority or "normal").strip().lower()
+            if resolved_priority not in {"low", "normal", "high", "urgent"}:
+                return BridgeResult(False, "rejected", "priority must be low, normal, high, or urgent")
+
+            pending = self._load_pending_actions()
+            now = utc_now()
+            action_id = str(uuid.uuid4())
+            action = {
+                "id": action_id,
+                "owner_agent": owner,
+                "summary": text,
+                "details": (details or "").strip() or None,
+                "message_id": (message_id or "").strip() or None,
+                "related_session_id": related_session,
+                "priority": resolved_priority,
+                "due_at": (due_at or "").strip() or None,
+                "status": "pending",
+                "created_at": now,
+                "updated_at": now,
+                "resolved_at": None,
+                "resolved_by": None,
+                "resolution": None,
+            }
+            pending.setdefault("actions", []).append(action)
+            self._save_pending_actions(pending)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "action": "record_pending_bridge_action",
+                    "owner_agent": owner,
+                    "pending_action_id": action_id,
+                    "message_id": action["message_id"],
+                    "related_session_id": related_session,
+                    "priority": resolved_priority,
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(
+                True,
+                "recorded",
+                "Recorded pending bridge action %s for %s." % (action_id, owner),
+                {"action": action},
+            )
+
+    def list_pending_bridge_actions(
+        self,
+        owner_agent: Optional[str] = None,
+        *,
+        status: str = "pending",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent) if owner_agent else None
+                page_limit = self._bounded_int("limit", limit, 1, 200)
+                page_offset = self._bounded_int("offset", offset, 0, 1_000_000)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            status_filter = (status or "pending").strip().lower()
+            if status_filter not in {"pending", "resolved", "all"}:
+                return BridgeResult(False, "rejected", "status must be pending, resolved, or all")
+
+            pending = self._load_pending_actions()
+            filtered: List[Dict[str, Any]] = []
+            for action in pending.get("actions", []):
+                if owner and action.get("owner_agent") != owner:
+                    continue
+                if status_filter != "all" and action.get("status") != status_filter:
+                    continue
+                filtered.append(copy.deepcopy(action))
+            total_count = len(filtered)
+            page = filtered[page_offset:page_offset + page_limit]
+            return BridgeResult(
+                True,
+                "pending_bridge_actions",
+                "%d pending bridge action(s); returning %d starting at offset %d."
+                % (total_count, len(page), page_offset),
+                {
+                    "count": len(page),
+                    "total_count": total_count,
+                    "limit": page_limit,
+                    "offset": page_offset,
+                    "has_more": page_offset + len(page) < total_count,
+                    "actions": page,
+                },
+            )
+
+    def resolve_pending_bridge_action(
+        self,
+        action_id: str,
+        *,
+        resolved_by: Optional[str] = None,
+        resolution: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                resolver = normalize_agent(resolved_by) if resolved_by else None
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            target_id = (action_id or "").strip()
+            if not target_id:
+                return BridgeResult(False, "rejected", "action_id is required")
+
+            pending = self._load_pending_actions()
+            now = utc_now()
+            matched: Optional[Dict[str, Any]] = None
+            for action in pending.get("actions", []):
+                if action.get("id") != target_id:
+                    continue
+                matched = action
+                if action.get("status") != "resolved":
+                    action["status"] = "resolved"
+                    action["resolved_at"] = now
+                if resolver:
+                    action["resolved_by"] = resolver
+                if resolution is not None:
+                    action["resolution"] = (resolution or "").strip() or None
+                action["updated_at"] = now
+                break
+            if not matched:
+                return BridgeResult(False, "not_found", "No pending bridge action %s." % target_id)
+
+            self._save_pending_actions(pending)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "action": "resolve_pending_bridge_action",
+                    "pending_action_id": target_id,
+                    "resolved_by": resolver,
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(
+                True,
+                "resolved",
+                "Pending bridge action %s resolved." % target_id,
+                {"action": copy.deepcopy(matched)},
+            )
 
     def message_status(self, message_id: str) -> BridgeResult:
         with self._locked():

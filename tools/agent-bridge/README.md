@@ -88,6 +88,11 @@ For scheduled polling, use `peek_inbox` instead of `check_inbox`. `peek_inbox` i
 Use `list_pending_receipts(limit=50, offset=0)` for bounded stuck-message
 diagnostics; it returns receipt summaries with truncated previews. Use
 `message_status(id)` to inspect a single message in full.
+Use `record_pending_bridge_action(...)` when you need to mark a surfaced bridge
+message read but defer the actual follow-up until after the current work
+checkpoint. `list_pending_bridge_actions(...)` shows the durable follow-up
+ledger, and `resolve_pending_bridge_action(id)` closes an item after the reply,
+review, or implementation follow-up is complete.
 
 Runtime state and audit logs live under `%USERPROFILE%\.agent-bridge\state`.
 The active cross-chat session registry lives at `%USERPROFILE%\.agent-bridge\session.json`.

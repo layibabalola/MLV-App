@@ -558,6 +558,62 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertFalse(rejected.ok)
         self.assertIn("limit", rejected.message)
 
+    def test_pending_bridge_actions_record_list_and_resolve(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+
+        recorded = bridge.record_pending_bridge_action(
+            "codex",
+            "Reply to Claude about follow-up scope",
+            message_id="msg-123",
+            related_session_id="mlv-app",
+            priority="high",
+            details="Need to send SPEC_REVIEW_RESULT after current patch.",
+        )
+        self.assertTrue(recorded.ok)
+        action_id = recorded.data["action"]["id"]
+
+        pending = bridge.list_pending_bridge_actions(owner_agent="codex")
+        self.assertTrue(pending.ok)
+        self.assertEqual(pending.data["count"], 1)
+        self.assertEqual(pending.data["actions"][0]["id"], action_id)
+        self.assertEqual(pending.data["actions"][0]["status"], "pending")
+        self.assertEqual(pending.data["actions"][0]["priority"], "high")
+
+        resolved = bridge.resolve_pending_bridge_action(
+            action_id,
+            resolved_by="codex",
+            resolution="Sent the reply after finishing the patch.",
+        )
+        self.assertTrue(resolved.ok)
+        self.assertEqual(resolved.data["action"]["status"], "resolved")
+        self.assertEqual(resolved.data["action"]["resolved_by"], "codex")
+
+        still_pending = bridge.list_pending_bridge_actions(owner_agent="codex")
+        self.assertEqual(still_pending.data["count"], 0)
+        all_actions = bridge.list_pending_bridge_actions(owner_agent="codex", status="all")
+        self.assertEqual(all_actions.data["count"], 1)
+        self.assertEqual(all_actions.data["actions"][0]["status"], "resolved")
+
+    def test_pending_bridge_actions_are_bounded_and_filterable(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        for index in range(3):
+            recorded = bridge.record_pending_bridge_action(
+                "codex" if index < 2 else "claude",
+                "Action %d" % index,
+                priority="normal",
+            )
+            self.assertTrue(recorded.ok)
+
+        rejected = bridge.list_pending_bridge_actions(status="later")
+        self.assertFalse(rejected.ok)
+        self.assertIn("status", rejected.message)
+
+        page = bridge.list_pending_bridge_actions(owner_agent="codex", limit=1, offset=0)
+        self.assertTrue(page.ok)
+        self.assertEqual(page.data["count"], 1)
+        self.assertEqual(page.data["total_count"], 2)
+        self.assertTrue(page.data["has_more"])
+
     def test_check_inbox_records_seen_but_peek_stays_pure(self) -> None:
         bridge = AgentBridge(self.state_dir)
         result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] visible hello", session_id="mlv-app")
