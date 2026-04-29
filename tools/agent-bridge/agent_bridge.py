@@ -36,6 +36,8 @@ MAX_MESSAGE_BYTES = 64 * 1024
 SESSION_RETENTION_DAYS = 30
 PENDING_BRIDGE_ACTIONS_SCHEMA_VERSION = 1
 WAKE_BREAKER_SCHEMA_VERSION = 1
+EXECUTION_STATE_SCHEMA_VERSION = 1
+EXECUTION_PROOF_TIMEOUT_S = 120
 INBOX_LEVEL_SESSION = "session"
 INBOX_LEVEL_PROJECT = "project"
 INBOX_LEVEL_AGENT = "agent"
@@ -225,6 +227,10 @@ class AgentBridge:
         return self.state_dir / "pending-actions.json"
 
     @property
+    def execution_state_path(self) -> Path:
+        return self.state_dir / "execution-state.json"
+
+    @property
     def session_registry_path(self) -> Path:
         return session_registry_path_for_state_dir(self.state_dir)
 
@@ -322,6 +328,13 @@ class AgentBridge:
             "updated_at": utc_now(),
         }
 
+    def _default_execution_state(self) -> Dict[str, Any]:
+        return {
+            "schema_version": EXECUTION_STATE_SCHEMA_VERSION,
+            "owners": {},
+            "updated_at": utc_now(),
+        }
+
     def _load_pending_actions(self) -> Dict[str, Any]:
         try:
             pending = read_json(self.pending_actions_path, self._default_pending_actions())
@@ -352,6 +365,9 @@ class AgentBridge:
                 action.setdefault("resolved_at", None)
                 action.setdefault("resolved_by", None)
                 action.setdefault("resolution", None)
+                action.setdefault("active_execution_task_id", None)
+                action.setdefault("execution_state", None)
+                action.setdefault("execution_updated_at", None)
                 normalized.append(action)
             pending["actions"] = normalized
         return pending
@@ -359,6 +375,60 @@ class AgentBridge:
     def _save_pending_actions(self, pending: Dict[str, Any]) -> None:
         pending["updated_at"] = utc_now()
         write_json(self.pending_actions_path, pending)
+
+    def _load_execution_state(self) -> Dict[str, Any]:
+        try:
+            payload = read_json(self.execution_state_path, self._default_execution_state())
+        except (JSONDecodeError, OSError):
+            corrupt_path = self.execution_state_path.with_name(
+                "execution-state.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            )
+            if self.execution_state_path.exists():
+                self.execution_state_path.replace(corrupt_path)
+            payload = self._default_execution_state()
+        payload["schema_version"] = max(
+            int(payload.get("schema_version") or 1),
+            EXECUTION_STATE_SCHEMA_VERSION,
+        )
+        owners = payload.get("owners")
+        if not isinstance(owners, dict):
+            owners = {}
+            payload["owners"] = owners
+        normalized: Dict[str, Any] = {}
+        for owner, record in owners.items():
+            if not isinstance(record, dict):
+                continue
+            entry = dict(record)
+            entry["active_task"] = dict(entry.get("active_task") or {}) or None
+            recent = entry.get("recent_tasks")
+            if not isinstance(recent, list):
+                recent = []
+            entry["recent_tasks"] = [dict(task) for task in recent if isinstance(task, dict)][-20:]
+            entry.setdefault("updated_at", utc_now())
+            normalized[str(owner)] = entry
+        payload["owners"] = normalized
+        return payload
+
+    def _save_execution_state(self, payload: Dict[str, Any]) -> None:
+        payload["updated_at"] = utc_now()
+        write_json(self.execution_state_path, payload)
+
+    def _owner_execution_record(self, payload: Dict[str, Any], owner: str) -> Dict[str, Any]:
+        owners = payload.setdefault("owners", {})
+        record = owners.setdefault(
+            owner,
+            {
+                "active_task": None,
+                "recent_tasks": [],
+                "updated_at": utc_now(),
+            },
+        )
+        record.setdefault("active_task", None)
+        recent = record.setdefault("recent_tasks", [])
+        if not isinstance(recent, list):
+            record["recent_tasks"] = []
+        record.setdefault("updated_at", utc_now())
+        return record
 
     def _load_session_registry(self) -> Dict[str, Any]:
         try:
@@ -2230,6 +2300,303 @@ class AgentBridge:
                     "owner_agent": owner,
                     "action": next_action,
                     "count": len(candidates),
+                },
+            )
+
+    def _set_pending_action_execution_state(
+        self,
+        pending: Dict[str, Any],
+        *,
+        action_id: Optional[str],
+        execution_state: Optional[str],
+        task_id: Optional[str],
+    ) -> None:
+        if not action_id:
+            return
+        for action in pending.get("actions", []):
+            if action.get("id") != action_id:
+                continue
+            action["active_execution_task_id"] = task_id
+            action["execution_state"] = execution_state
+            action["execution_updated_at"] = utc_now()
+            break
+
+    def _derive_execution_task(self, task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not task:
+            return None
+        derived = copy.deepcopy(task)
+        now = datetime.now(timezone.utc)
+        status = str(derived.get("status") or "starting").strip().lower()
+        proof_signals = derived.get("proof_signals") or []
+        proof_deadline = str(derived.get("proof_deadline_at") or "").strip()
+        eta_at = str(derived.get("eta_at") or "").strip()
+        derived_status = status
+        if status in {"starting", "active"} and not proof_signals and proof_deadline:
+            try:
+                if datetime.fromisoformat(proof_deadline) < now:
+                    derived_status = "not_started"
+            except ValueError:
+                pass
+        if status in {"starting", "active"} and eta_at:
+            try:
+                eta = datetime.fromisoformat(eta_at)
+                if eta.tzinfo is None:
+                    eta = eta.replace(tzinfo=timezone.utc)
+                if eta < now:
+                    derived_status = "timed_out"
+            except ValueError:
+                pass
+        derived["derived_status"] = derived_status
+        derived["resume_hint"] = "resume active task: %s %s" % (
+            derived.get("id"),
+            derived.get("summary"),
+        )
+        return derived
+
+    def start_execution_task(
+        self,
+        owner_agent: str,
+        summary: str,
+        *,
+        source: str,
+        related_action_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+        eta_at: Optional[str] = None,
+        allowed_interrupts: Optional[List[str]] = None,
+        interrupt_mode: str = "task_switch",
+        priority: Optional[str] = None,
+        displaced_by: Optional[str] = None,
+        displacement_reason: Optional[str] = None,
+        prior_action_id: Optional[str] = None,
+        prior_disposition: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            text = (summary or "").strip()
+            if not text:
+                return BridgeResult(False, "rejected", "summary is required")
+            source_value = (source or "").strip().lower()
+            if not source_value:
+                return BridgeResult(False, "rejected", "source is required")
+            interrupt_value = (interrupt_mode or "task_switch").strip().lower()
+            if interrupt_value not in {"task_switch", "answer_only_interrupt"}:
+                return BridgeResult(False, "rejected", "interrupt_mode must be task_switch or answer_only_interrupt")
+
+            pending = self._load_pending_actions()
+            payload = self._load_execution_state()
+            record = self._owner_execution_record(payload, owner)
+            active = record.get("active_task")
+            now = utc_now()
+            task_id = str(uuid.uuid4())
+
+            if active:
+                active_id = str(active.get("id") or "")
+                if not displaced_by or not displacement_reason:
+                    return BridgeResult(
+                        False,
+                        "active_task_exists",
+                        "Active execution task %s exists for %s; displacement must be explicit." % (active_id, owner),
+                        {"active_task": self._derive_execution_task(active)},
+                    )
+                displaced = copy.deepcopy(active)
+                displaced["status"] = "displaced"
+                displaced["displaced_at"] = now
+                displaced["displaced_by"] = (displaced_by or "").strip() or None
+                displaced["displacement_reason"] = (displacement_reason or "").strip() or None
+                displaced["new_active_task_id"] = task_id
+                record.setdefault("recent_tasks", []).append(displaced)
+                self._set_pending_action_execution_state(
+                    pending,
+                    action_id=displaced.get("related_action_id"),
+                    execution_state="displaced",
+                    task_id=None,
+                )
+
+            task = {
+                "id": task_id,
+                "owner_agent": owner,
+                "summary": text,
+                "source": source_value,
+                "related_action_id": (related_action_id or "").strip() or None,
+                "message_id": (message_id or "").strip() or None,
+                "priority": (priority or "").strip().lower() or None,
+                "checkpoint": (checkpoint or "").strip() or None,
+                "eta_at": (eta_at or "").strip() or None,
+                "allowed_interrupts": list(allowed_interrupts or []),
+                "interrupt_mode": interrupt_value,
+                "status": "starting",
+                "started_at": now,
+                "updated_at": now,
+                "proof_status": "awaiting",
+                "proof_deadline_at": (datetime.now(timezone.utc) + timedelta(seconds=EXECUTION_PROOF_TIMEOUT_S)).isoformat(timespec="seconds"),
+                "proof_signals": [],
+                "prior_action_id": (prior_action_id or "").strip() or None,
+                "prior_disposition": (prior_disposition or "").strip() or None,
+            }
+            record["active_task"] = task
+            record["updated_at"] = now
+            self._set_pending_action_execution_state(
+                pending,
+                action_id=task.get("related_action_id"),
+                execution_state="active",
+                task_id=task_id,
+            )
+            self._save_execution_state(payload)
+            self._save_pending_actions(pending)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "action": "start_execution_task",
+                    "owner_agent": owner,
+                    "task_id": task_id,
+                    "source": source_value,
+                    "related_action_id": task.get("related_action_id"),
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(True, "started", "Execution task %s started for %s." % (task_id, owner), {"task": self._derive_execution_task(task)})
+
+    def record_execution_progress(
+        self,
+        owner_agent: str,
+        task_id: str,
+        signal_type: str,
+        *,
+        details: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            signal = (signal_type or "").strip().lower()
+            if not signal:
+                return BridgeResult(False, "rejected", "signal_type is required")
+            payload = self._load_execution_state()
+            record = self._owner_execution_record(payload, owner)
+            active = record.get("active_task")
+            if not active or str(active.get("id") or "") != (task_id or "").strip():
+                return BridgeResult(False, "not_found", "Active execution task %s not found for %s." % (task_id, owner))
+            active.setdefault("proof_signals", []).append(
+                {
+                    "type": signal,
+                    "details": (details or "").strip() or None,
+                    "at": utc_now(),
+                }
+            )
+            active["proof_status"] = "proved"
+            active["status"] = "active"
+            if checkpoint is not None:
+                active["checkpoint"] = (checkpoint or "").strip() or None
+            active["updated_at"] = utc_now()
+            record["updated_at"] = utc_now()
+            self._save_execution_state(payload)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "record_execution_progress",
+                    "owner_agent": owner,
+                    "task_id": task_id,
+                    "signal_type": signal,
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(True, "progress_recorded", "Execution progress recorded for %s." % task_id, {"task": self._derive_execution_task(active)})
+
+    def complete_execution_task(
+        self,
+        owner_agent: str,
+        task_id: str,
+        *,
+        outcome: str,
+        resolution: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            outcome_value = (outcome or "").strip().lower()
+            if outcome_value not in {"completed", "blocked", "parked", "timed_out", "displaced"}:
+                return BridgeResult(False, "rejected", "outcome must be completed, blocked, parked, timed_out, or displaced")
+            pending = self._load_pending_actions()
+            payload = self._load_execution_state()
+            record = self._owner_execution_record(payload, owner)
+            active = record.get("active_task")
+            if not active or str(active.get("id") or "") != (task_id or "").strip():
+                return BridgeResult(False, "not_found", "Active execution task %s not found for %s." % (task_id, owner))
+            closed = copy.deepcopy(active)
+            closed["status"] = outcome_value
+            closed["completed_at"] = utc_now()
+            closed["resolution"] = (resolution or "").strip() or None
+            record.setdefault("recent_tasks", []).append(closed)
+            record["recent_tasks"] = record["recent_tasks"][-20:]
+            record["active_task"] = None
+            record["updated_at"] = utc_now()
+            if outcome_value == "completed":
+                self._set_pending_action_execution_state(
+                    pending,
+                    action_id=closed.get("related_action_id"),
+                    execution_state="completed",
+                    task_id=None,
+                )
+                if closed.get("related_action_id"):
+                    for action in pending.get("actions", []):
+                        if action.get("id") == closed.get("related_action_id") and action.get("status") != "resolved":
+                            action["status"] = "resolved"
+                            action["resolved_at"] = utc_now()
+                            action["resolved_by"] = owner
+                            action["resolution"] = closed.get("resolution")
+                            action["updated_at"] = utc_now()
+                            break
+            else:
+                self._set_pending_action_execution_state(
+                    pending,
+                    action_id=closed.get("related_action_id"),
+                    execution_state=outcome_value,
+                    task_id=None,
+                )
+            self._save_execution_state(payload)
+            self._save_pending_actions(pending)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "complete_execution_task",
+                    "owner_agent": owner,
+                    "task_id": task_id,
+                    "outcome": outcome_value,
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(True, outcome_value, "Execution task %s closed as %s." % (task_id, outcome_value), {"task": self._derive_execution_task(closed)})
+
+    def execution_status(self, owner_agent: str) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            payload = self._load_execution_state()
+            record = self._owner_execution_record(payload, owner)
+            active = self._derive_execution_task(record.get("active_task"))
+            recent = [self._derive_execution_task(task) for task in record.get("recent_tasks", [])]
+            return BridgeResult(
+                True,
+                "execution_status",
+                "Execution status for %s." % owner,
+                {
+                    "owner_agent": owner,
+                    "active_task": active,
+                    "recent_tasks": recent,
+                    "resume_hint": active.get("resume_hint") if active else None,
                 },
             )
 

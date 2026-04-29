@@ -682,6 +682,125 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIsNone(result.data["action"])
         self.assertEqual(result.data["count"], 0)
 
+    def test_execution_task_requires_explicit_displacement_and_records_progress(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        action = bridge.record_pending_bridge_action(
+            "codex",
+            "Fix routing footgun",
+            priority="high",
+        )
+        self.assertTrue(action.ok)
+        action_id = action.data["action"]["id"]
+
+        started = bridge.start_execution_task(
+            "codex",
+            "Fix routing footgun",
+            source="ledger",
+            related_action_id=action_id,
+            checkpoint="open file",
+            allowed_interrupts=["urgent", "confirm_before"],
+            prior_action_id=action_id,
+            prior_disposition="continue",
+        )
+        self.assertTrue(started.ok)
+        task_id = started.data["task"]["id"]
+        self.assertEqual(started.data["task"]["status"], "starting")
+        self.assertEqual(started.data["task"]["proof_status"], "awaiting")
+
+        active = bridge.execution_status("codex")
+        self.assertEqual(active.data["active_task"]["id"], task_id)
+        self.assertEqual(active.data["active_task"]["related_action_id"], action_id)
+
+        rejected = bridge.start_execution_task(
+            "codex",
+            "Something else",
+            source="user",
+        )
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.status, "active_task_exists")
+
+        progress = bridge.record_execution_progress(
+            "codex",
+            task_id,
+            "patch_applied",
+            details="Edited routing validation.",
+            checkpoint="tests next",
+        )
+        self.assertTrue(progress.ok)
+        self.assertEqual(progress.data["task"]["status"], "active")
+        self.assertEqual(progress.data["task"]["proof_status"], "proved")
+        self.assertEqual(progress.data["task"]["checkpoint"], "tests next")
+
+    def test_execution_task_displacement_and_completion_reconcile_with_ledger(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        first = bridge.record_pending_bridge_action("codex", "First task", priority="normal")
+        second = bridge.record_pending_bridge_action("codex", "Urgent task", priority="urgent")
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        first_id = first.data["action"]["id"]
+        second_id = second.data["action"]["id"]
+
+        started = bridge.start_execution_task(
+            "codex",
+            "First task",
+            source="ledger",
+            related_action_id=first_id,
+            checkpoint="open file",
+            prior_action_id=first_id,
+            prior_disposition="continue",
+        )
+        self.assertTrue(started.ok)
+        first_task_id = started.data["task"]["id"]
+
+        displaced = bridge.start_execution_task(
+            "codex",
+            "Urgent task",
+            source="interrupt",
+            related_action_id=second_id,
+            displaced_by="claude_action_request",
+            displacement_reason="Higher-priority wake breakage",
+            prior_action_id=first_id,
+            prior_disposition="displaced",
+        )
+        self.assertTrue(displaced.ok)
+        second_task_id = displaced.data["task"]["id"]
+        status = bridge.execution_status("codex")
+        self.assertEqual(status.data["active_task"]["id"], second_task_id)
+        self.assertEqual(status.data["recent_tasks"][-1]["id"], first_task_id)
+        self.assertEqual(status.data["recent_tasks"][-1]["status"], "displaced")
+
+        completed = bridge.complete_execution_task(
+            "codex",
+            second_task_id,
+            outcome="completed",
+            resolution="Shipped urgent task.",
+        )
+        self.assertTrue(completed.ok)
+        after = bridge.execution_status("codex")
+        self.assertIsNone(after.data["active_task"])
+
+        pending = bridge.list_pending_bridge_actions(owner_agent="codex", status="all")
+        actions = {item["id"]: item for item in pending.data["actions"]}
+        self.assertEqual(actions[second_id]["status"], "resolved")
+        self.assertEqual(actions[first_id]["execution_state"], "displaced")
+
+    def test_execution_status_derives_not_started_when_no_proof_arrives(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        started = bridge.start_execution_task(
+            "codex",
+            "Needs proof",
+            source="manual",
+        )
+        self.assertTrue(started.ok)
+        payload = json.loads(bridge.execution_state_path.read_text(encoding="utf-8"))
+        payload["owners"]["codex"]["active_task"]["proof_deadline_at"] = "2026-04-29T00:00:00+00:00"
+        payload["owners"]["codex"]["active_task"]["status"] = "starting"
+        write_json(bridge.execution_state_path, payload)
+
+        status = bridge.execution_status("codex")
+        self.assertEqual(status.data["active_task"]["derived_status"], "not_started")
+        self.assertIn("resume active task", status.data["resume_hint"])
+
     def test_check_inbox_records_seen_but_peek_stays_pure(self) -> None:
         bridge = AgentBridge(self.state_dir)
         result = bridge.send_to_peer("codex", "claude", "[[handoff:claude]] visible hello", session_id="mlv-app")

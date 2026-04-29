@@ -317,6 +317,84 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
             )
         )
 
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def start_execution_task(
+        owner_agent: str,
+        summary: str,
+        source: str,
+        related_action_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+        eta_at: Optional[str] = None,
+        allowed_interrupts: Optional[list[str]] = None,
+        interrupt_mode: str = "task_switch",
+        priority: Optional[str] = None,
+        displaced_by: Optional[str] = None,
+        displacement_reason: Optional[str] = None,
+        prior_action_id: Optional[str] = None,
+        prior_disposition: Optional[str] = None,
+    ) -> dict:
+        """Start an explicit execution-lane task; replacing an active task requires explicit displacement metadata."""
+        return as_dict(
+            bridge.start_execution_task(
+                owner_agent=owner_agent,
+                summary=summary,
+                source=source,
+                related_action_id=related_action_id,
+                message_id=message_id,
+                checkpoint=checkpoint,
+                eta_at=eta_at,
+                allowed_interrupts=allowed_interrupts,
+                interrupt_mode=interrupt_mode,
+                priority=priority,
+                displaced_by=displaced_by,
+                displacement_reason=displacement_reason,
+                prior_action_id=prior_action_id,
+                prior_disposition=prior_disposition,
+            )
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def record_execution_progress(
+        owner_agent: str,
+        task_id: str,
+        signal_type: str,
+        details: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+    ) -> dict:
+        """Record near-immediate proof that execution actually started for the active task."""
+        return as_dict(
+            bridge.record_execution_progress(
+                owner_agent=owner_agent,
+                task_id=task_id,
+                signal_type=signal_type,
+                details=details,
+                checkpoint=checkpoint,
+            )
+        )
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def complete_execution_task(
+        owner_agent: str,
+        task_id: str,
+        outcome: str,
+        resolution: Optional[str] = None,
+    ) -> dict:
+        """Close the active execution task with an explicit terminal state."""
+        return as_dict(
+            bridge.complete_execution_task(
+                owner_agent=owner_agent,
+                task_id=task_id,
+                outcome=outcome,
+                resolution=resolution,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def execution_status(owner_agent: str) -> dict:
+        """Return the active execution-lane task, derived status, and recent closed tasks."""
+        return as_dict(bridge.execution_status(owner_agent=owner_agent))
+
     @mcp.tool(annotations=READ_ONLY)
     def next_pending_bridge_action(owner_agent: str) -> dict:
         """Return the highest-priority actionable ledger item for one agent."""

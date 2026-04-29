@@ -268,6 +268,60 @@ function Get-NextPendingBridgeActionDigest {
     return "ledger_top=$priority $actionId $summary"
 }
 
+function Get-ActiveExecutionDigest {
+    param(
+        [string]$StateDir,
+        [string]$OwnerAgent = "codex"
+    )
+
+    $path = Join-Path $StateDir "execution-state.json"
+    if (-not (Test-Path $path)) {
+        return @{
+            banner = "execution=idle"
+            resume = $null
+        }
+    }
+
+    try {
+        $payload = Get-Content -Raw $path | ConvertFrom-Json
+    } catch {
+        return @{
+            banner = "execution=unreadable"
+            resume = $null
+        }
+    }
+
+    $ownerRecord = $payload.owners.$OwnerAgent
+    if ($null -eq $ownerRecord -or $null -eq $ownerRecord.active_task) {
+        return @{
+            banner = "execution=idle"
+            resume = $null
+        }
+    }
+
+    $task = $ownerRecord.active_task
+    $summary = [string]$task.summary
+    if ($summary.Length -gt 72) {
+        $summary = $summary.Substring(0, 69) + "..."
+    }
+
+    $status = [string]$task.status
+    $proofStatus = [string]$task.proof_status
+    $source = [string]$task.source
+    $priorDisposition = [string]$task.prior_disposition
+    $priorActionId = [string]$task.prior_action_id
+    $interruptMode = [string]$task.interrupt_mode
+    $taskId = [string]$task.id
+    $banner = "active_task=$status/$proofStatus $taskId $summary source=$source interrupt=$interruptMode"
+    if (-not [string]::IsNullOrWhiteSpace($priorDisposition) -or -not [string]::IsNullOrWhiteSpace($priorActionId)) {
+        $banner += " prior=${priorDisposition}:$priorActionId"
+    }
+    return @{
+        banner = $banner
+        resume = "resume active task: $taskId $summary"
+    }
+}
+
 function Get-BridgeRuntimeState {
     param(
         [string]$RegistryPath,
@@ -325,14 +379,18 @@ $bridgeState = Get-BridgeRuntimeState -RegistryPath $SessionRegistryPath -Watche
 $resolvedBridgeRoot = Resolve-BridgeRoot -CandidatePaths @($SessionRegistryPath, $WatcherConfigPath, $WatcherPidPath, $SettingsPath, $BridgeWatchFlagPath, $LogPath) -Fallback $bridgeRoot
 $resolvedStateDir = Join-Path $resolvedBridgeRoot "state"
 $heuristicsDigest = Get-HeuristicsDigest -WorkspaceRoot $WorkspaceRoot
+$executionDigest = Get-ActiveExecutionDigest -StateDir $resolvedStateDir -OwnerAgent "codex"
 $ledgerDigest = Get-NextPendingBridgeActionDigest -StateDir $resolvedStateDir -OwnerAgent "codex"
 
 $stateLine = "Bridge state: $bridgeState"
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
-$digestLine = "Bridge digest: $heuristicsDigest ; $ledgerDigest"
+$digestLine = "Bridge digest: $heuristicsDigest ; $($executionDigest.banner) ; $ledgerDigest"
 Write-Output $stateLine
 Write-Output $message
 Write-Output $digestLine
+if ($executionDigest.resume) {
+    Write-Output $executionDigest.resume
+}
 
 if ($bridgeState -eq "UNBOOTSTRAPPED") {
     Write-Output "Recovery: run py -3 tools\agent-bridge\recover_bridge_session.py --state-dir `"$resolvedStateDir`" --agent codex --cwd . --watcher-config `"$WatcherConfigPath`""
@@ -347,7 +405,7 @@ if ($watchModeActive) {
     Write-Output "Do not use a persistent wait_inbox loop in the main working chat unless the user explicitly asked for that short test."
 }
 
-"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' ledger='$ledgerDigest'" | Add-Content -Path $LogPath -Encoding UTF8
+"$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest'" | Add-Content -Path $LogPath -Encoding UTF8
 
 if ($NoToast -or -not $toastEnabled) {
     exit 0
