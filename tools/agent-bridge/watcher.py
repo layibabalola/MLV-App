@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+from agent_bridge import AgentBridge
 from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
 from core.runtime import (
     build_runtime_breadcrumb,
@@ -562,6 +563,7 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
         return {
             "ok": False,
             "command": None,
+            "peer": peer,
             "result": {
                 "ok": False,
                 "returncode": 11,
@@ -647,6 +649,25 @@ def _warn_unknown_origin_once(
         paused_messages,
         sorted(warned),
     )
+
+
+def _attempt_bad_provenance_repair(*, inbox_path: Path, agent: str, peer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if str(peer.get("bootstrap_origin") or "").strip().lower() != "subagent":
+        return None
+    project = str(peer.get("project") or "").strip()
+    bad_session = str(peer.get("session_id") or "").strip()
+    if not project or not bad_session:
+        return None
+    bridge = AgentBridge(inbox_path.parent)
+    result = bridge.repair_bootstrap_provenance(
+        agent=agent,
+        project=project,
+        bad_session_id=bad_session,
+        trusted_parent_session_id=str(peer.get("trusted_parent_session_id") or "").strip() or None,
+        fallback_thread_id=str(peer.get("desktop_thread_id") or "").strip() or None,
+        fallback_parent_thread_id=str(peer.get("bootstrap_parent_thread_id") or "").strip() or None,
+    )
+    return {"ok": result.ok, "status": result.status, "message": result.message, "data": result.data}
 
 
 def run_command_for_session(
@@ -804,6 +825,13 @@ def _process_pending_wake_verifications(
         else:
             command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
         if not command_result.get("ok") and not command_result.get("retryable", True):
+            repair = _attempt_bad_provenance_repair(
+                inbox_path=inbox_path,
+                agent=agent,
+                peer=resolved.get("peer") or command_result.get("peer") or {},
+            )
+            if repair:
+                command_result["repair"] = repair
             _mark_permanent_wake_failure(
                 agent=agent,
                 session_id=session_id,
@@ -1059,6 +1087,13 @@ def process_session_once(
             command_result = run_command_for_session(resolved["command"], agent, session_id, new_msgs, inbox_path)
 
     if command_configured and not command_result.get("ok") and not command_result.get("retryable", True):
+        repair = _attempt_bad_provenance_repair(
+            inbox_path=inbox_path,
+            agent=agent,
+            peer=resolved.get("peer") or command_result.get("peer") or {},
+        )
+        if repair:
+            command_result["repair"] = repair
         for message in new_msgs:
             message_id = str(message.get("id", ""))
             if not message_id:

@@ -17,7 +17,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from core.addressing import AgentInbox, MessageKind, ProjectInbox, SenderContext, SessionInbox
 from core.paths import routing_rules_path_for_state_dir, session_registry_path_for_state_dir, watcher_pid_path_for_state_dir
-from core.runtime import read_runtime_breadcrumb
+from core.runtime import (
+    build_peer_runtime_breadcrumb,
+    peer_runtime_path_for_state_dir,
+    read_runtime_breadcrumb,
+    write_runtime_breadcrumb,
+)
 from core.routing import resolve_route
 from core.settings import load_settings
 from project_identity import derive_project_identity
@@ -376,6 +381,9 @@ class AgentBridge:
                 record.setdefault("session_id", session_id)
                 record.setdefault("bootstrap_origin", "unknown")
                 record.setdefault("bootstrap_promoted_to_trusted", False)
+                record.setdefault("desktop_thread_id", None)
+                record.setdefault("bootstrap_thread_id", None)
+                record.setdefault("bootstrap_parent_thread_id", None)
         return registry
 
     def session_registry_view(self) -> Dict[str, Any]:
@@ -447,6 +455,9 @@ class AgentBridge:
                 "status": "active",
                 "bootstrap_origin": "unknown",
                 "bootstrap_promoted_to_trusted": False,
+                "desktop_thread_id": None,
+                "bootstrap_thread_id": None,
+                "bootstrap_parent_thread_id": None,
             },
         )
         record.setdefault("agent", agent)
@@ -455,7 +466,42 @@ class AgentBridge:
         record.setdefault("activated_at", utc_now())
         record.setdefault("bootstrap_origin", "unknown")
         record.setdefault("bootstrap_promoted_to_trusted", False)
+        record.setdefault("desktop_thread_id", None)
+        record.setdefault("bootstrap_thread_id", None)
+        record.setdefault("bootstrap_parent_thread_id", None)
         return record
+
+    def record_session_runtime_metadata(
+        self,
+        *,
+        agent: str,
+        session_id: str,
+        project: str,
+        desktop_thread_id: Optional[str] = None,
+        bootstrap_thread_id: Optional[str] = None,
+        bootstrap_parent_thread_id: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(agent)
+                session = normalize_session(session_id)
+                project_name = normalize_project(project)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            registry = self._load_session_registry()
+            project_entry = self._project_registry(registry, project_name)
+            record = self._session_record(project_entry, session, owner)
+            record["last_seen_at"] = utc_now()
+            record["desktop_thread_id"] = (desktop_thread_id or "").strip() or None
+            record["bootstrap_thread_id"] = (bootstrap_thread_id or "").strip() or None
+            record["bootstrap_parent_thread_id"] = (bootstrap_parent_thread_id or "").strip() or None
+            self._save_session_registry(registry)
+            return BridgeResult(
+                True,
+                "recorded",
+                "Recorded runtime metadata for %s session %s." % (owner, session),
+                {"project": project_name, "session_id": session},
+            )
 
     def _trusted_parent_info(self, project_entry: Dict[str, Any], agent: str) -> Dict[str, Any]:
         trusted = project_entry.setdefault("trusted_parent", {})
@@ -934,6 +980,174 @@ class AgentBridge:
                     "sessions": dict(project_entry.get("sessions", {})),
                     "trusted_parent": dict(project_entry.get("trusted_parent", {})),
                     "registry_path": str(self.session_registry_path),
+                },
+            )
+
+    def repair_bootstrap_provenance(
+        self,
+        *,
+        agent: str,
+        project: str,
+        bad_session_id: str,
+        trusted_parent_session_id: Optional[str] = None,
+        fallback_thread_id: Optional[str] = None,
+        fallback_parent_thread_id: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(agent)
+                project_name = normalize_project(project)
+                bad_session = normalize_session(bad_session_id)
+                trusted_hint = normalize_session(trusted_parent_session_id) if trusted_parent_session_id else None
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+
+            now = utc_now()
+            registry = self._load_session_registry()
+            project_entry = self._project_registry(registry, project_name)
+            active = project_entry.setdefault("active", {})
+            sessions = project_entry.setdefault("sessions", {})
+            bad_record = self._session_record(project_entry, bad_session, owner)
+            peer_agent = "claude" if owner == "codex" else "codex"
+            peer_session = active.get(peer_agent)
+            trusted_info = self._trusted_parent_info(project_entry, owner)
+            trusted_session = trusted_hint or trusted_info.get("session_id")
+            trusted_record = sessions.get(trusted_session) if trusted_session else None
+            trusted_thread_id = None if not trusted_record else (
+                trusted_record.get("desktop_thread_id") or fallback_parent_thread_id or fallback_thread_id
+            )
+            trusted_valid = bool(
+                trusted_session
+                and trusted_record
+                and trusted_record.get("bootstrap_origin") == "parent"
+                and trusted_record.get("status") != "ended"
+                and (
+                    trusted_record.get("status") != "superseded"
+                    or trusted_record.get("superseded_by") == bad_session
+                )
+                and trusted_thread_id
+                and trusted_session != bad_session
+            )
+
+            if trusted_valid:
+                promoted = self._promote_superseded_inbox(owner, bad_session, project_name)
+                bad_record["status"] = "superseded"
+                bad_record["superseded_by"] = trusted_session
+                bad_record["superseded_at"] = now
+                bad_record["last_seen_at"] = now
+                trusted_record["status"] = "active"
+                trusted_record["activated_at"] = now
+                trusted_record["last_seen_at"] = now
+                active[owner] = trusted_session
+                self._save_session_registry(registry)
+
+                breadcrumb = build_peer_runtime_breadcrumb(
+                    state_dir=self.state_dir,
+                    agent=owner,
+                    session_id=trusted_session,
+                    project=project_name,
+                    desktop_thread_id=trusted_thread_id,
+                    bootstrap_origin="parent",
+                    bootstrap_thread_id=trusted_record.get("bootstrap_thread_id"),
+                    bootstrap_parent_thread_id=trusted_record.get("bootstrap_parent_thread_id"),
+                    trusted_parent_session_id=trusted_session,
+                    subagent_signals={},
+                )
+                write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, owner), breadcrumb)
+                self._append_control_message(
+                    target_agent=peer_agent,
+                    session_id=peer_session or project_name,
+                    sender="bridge",
+                    control_type="ROUTE_REPAIR",
+                    summary="Recovered %s session routing for project %s" % (owner, project_name),
+                    body=(
+                        "Recovered from bad bootstrap provenance for %s.\n\n"
+                        "Previous session id: %s\n"
+                        "Restored trusted parent session id: %s\n"
+                        "Reason: subagent bootstrap provenance detected at wake time."
+                    )
+                    % (owner, bad_session, trusted_session),
+                    replace_existing_control=True,
+                )
+                self._audit(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "timestamp": now,
+                        "action": "bootstrap_subagent_auto_rollback_succeeded",
+                        "accepted": True,
+                        "agent": owner,
+                        "project": project_name,
+                        "original_subagent_session": bad_session,
+                        "rolled_back_to_session": trusted_session,
+                        "peer_session": peer_session,
+                        "promoted_messages": len(promoted),
+                    }
+                )
+                return BridgeResult(
+                    True,
+                    "rolled_back",
+                    "Rolled back %s from %s to trusted parent %s." % (owner, bad_session, trusted_session),
+                    {
+                        "agent": owner,
+                        "project": project_name,
+                        "bad_session_id": bad_session,
+                        "restored_session_id": trusted_session,
+                        "peer_session": peer_session,
+                    },
+                )
+
+            state = self._load_state()
+            state["paused"] = True
+            freeze = state.setdefault("freeze", {})
+            freeze.update(
+                {
+                    "scope": "frozen_after_subagent_bootstrap",
+                    "frozen_at": now,
+                    "frozen_agent": owner,
+                    "project": project_name,
+                    "bad_session_id": bad_session,
+                    "trusted_parent_session_id": trusted_session,
+                    "reason": "no_valid_trusted_parent",
+                }
+            )
+            self._save_state(state)
+            self._save_session_registry(registry)
+            self._append_control_message(
+                target_agent=peer_agent,
+                session_id=peer_session or project_name,
+                sender="bridge",
+                control_type="BRIDGE_FROZEN",
+                summary="Bridge frozen for %s in project %s" % (owner, project_name),
+                body=(
+                    "Bridge traffic for %s is frozen after bad bootstrap provenance was detected and no valid trusted parent session could be restored.\n\n"
+                    "Bad session id: %s\n"
+                    "Manual recovery action: re-bootstrap the parent thread explicitly."
+                )
+                % (owner, bad_session),
+                replace_existing_control=True,
+            )
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "action": "bootstrap_subagent_auto_rollback_failed",
+                    "accepted": False,
+                    "agent": owner,
+                    "project": project_name,
+                    "original_subagent_session": bad_session,
+                    "frozen": True,
+                    "peer_session": peer_session,
+                }
+            )
+            return BridgeResult(
+                True,
+                "frozen",
+                "Bridge frozen for %s after bad bootstrap provenance with no valid trusted parent." % owner,
+                {
+                    "agent": owner,
+                    "project": project_name,
+                    "bad_session_id": bad_session,
+                    "peer_session": peer_session,
                 },
             )
 

@@ -616,6 +616,94 @@ class Phase0ContractTests(unittest.TestCase):
         self.assertEqual(len(provenance_events), 1)
         self.assertEqual(provenance_events[0]["message_id"], "msg-subagent-peer")
 
+    def test_07eaa_subagent_peer_breadcrumb_triggers_route_repair_when_parent_known(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session(
+            "codex",
+            "codex-parent",
+            project="mlv-app",
+            bootstrap_origin="parent",
+            trusted_parent_eligible=True,
+        )
+        bridge.record_session_runtime_metadata(
+            agent="codex",
+            session_id="codex-parent",
+            project="mlv-app",
+            desktop_thread_id="parent-thread",
+            bootstrap_thread_id="parent-thread",
+        )
+        bridge.activate_session(
+            "codex",
+            "codex-child",
+            project="mlv-app",
+            bootstrap_origin="subagent",
+            allow_supersede=True,
+            trusted_parent_eligible=False,
+        )
+
+        inbox_path = self.state_dir / "inbox-codex.jsonl"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        message = {
+            "id": "msg-subagent-rollback",
+            "session_id": "codex-child",
+            "from": "claude",
+            "to": "codex",
+            "body": "wake me",
+            "delivered_message": "wake me",
+            "seen_at": None,
+            "read_at": None,
+        }
+        with inbox_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(message) + "\n")
+
+        write_runtime_breadcrumb(
+            peer_runtime_path_for_state_dir(self.state_dir, "codex"),
+            {
+                "schema_version": 2,
+                "agent": "codex",
+                "session_id": "codex-child",
+                "project": "mlv-app",
+                "desktop_thread_id": "child-thread",
+                "bootstrap_origin": "subagent",
+                "bootstrap_parent_thread_id": "parent-thread",
+                "trusted_parent_session_id": "codex-parent",
+                "subagent_signals": {"env_marker": "CODEX_SUBAGENT=1"},
+            },
+        )
+
+        seen_ids: set[str] = set()
+        state_path = self.tempdir / "watcher-state.json"
+
+        with patch("watcher.notify_terminal"), patch("watcher.subprocess.run") as run:
+            processed = watcher.process_session_once(
+                {
+                    "agent": "codex",
+                    "session_id": "codex-child",
+                    "project": "mlv-app",
+                    "inbox": str(inbox_path),
+                    "on_message": "notify",
+                    "on_message_command_template": ["fake-wake", "-ThreadId", "{desktop_thread_id}"],
+                },
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+            )
+
+        self.assertEqual(processed, [])
+        self.assertFalse(run.called)
+        self.assertIn("msg-subagent-rollback", seen_ids)
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-parent")
+        peer_inbox = bridge.peek_inbox("claude", "claude-live")
+        self.assertIn("ROUTE_REPAIR", peer_inbox.message)
+        audit_rows = [
+            json.loads(line)
+            for line in (self.state_dir / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertTrue(any(row.get("action") == "bootstrap_subagent_auto_rollback_succeeded" for row in audit_rows))
+
     def test_07eb_unknown_peer_breadcrumb_warns_once_and_proceeds(self) -> None:
         inbox_path = self.state_dir / "inbox-codex.jsonl"
         inbox_path.parent.mkdir(parents=True, exist_ok=True)

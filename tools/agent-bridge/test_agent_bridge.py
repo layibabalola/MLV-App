@@ -1039,6 +1039,81 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(status.data["sessions"]["codex-unknown"]["status"], "secondary")
         self.assertEqual(status.data["trusted_parent"]["codex"]["session_id"], "codex-parent")
 
+    def test_repair_bootstrap_provenance_rolls_back_to_trusted_parent(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        parent = bridge.activate_session(
+            "codex",
+            "codex-parent",
+            project="mlv-app",
+            bootstrap_origin="parent",
+            trusted_parent_eligible=True,
+        )
+        self.assertEqual(parent.status, "active")
+        bridge.record_session_runtime_metadata(
+            agent="codex",
+            session_id="codex-parent",
+            project="mlv-app",
+            desktop_thread_id="parent-thread",
+            bootstrap_thread_id="parent-thread",
+        )
+        child = bridge.activate_session(
+            "codex",
+            "codex-child",
+            project="mlv-app",
+            bootstrap_origin="subagent",
+            allow_supersede=True,
+            trusted_parent_eligible=False,
+        )
+        self.assertEqual(child.status, "active")
+
+        result = bridge.repair_bootstrap_provenance(
+            agent="codex",
+            project="mlv-app",
+            bad_session_id="codex-child",
+            trusted_parent_session_id="codex-parent",
+            fallback_parent_thread_id="parent-thread",
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "rolled_back")
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-parent")
+        self.assertEqual(status.data["sessions"]["codex-child"]["status"], "superseded")
+        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["session_id"], "codex-parent")
+        self.assertEqual(breadcrumb["desktop_thread_id"], "parent-thread")
+        peer_inbox = bridge.peek_inbox("claude", "claude-live")
+        self.assertIn("ROUTE_REPAIR", peer_inbox.message)
+        audit_rows = read_jsonl(self.state_dir / "messages.jsonl")
+        self.assertTrue(any(row.get("action") == "bootstrap_subagent_auto_rollback_succeeded" for row in audit_rows))
+
+    def test_repair_bootstrap_provenance_freezes_without_trusted_parent(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session(
+            "codex",
+            "codex-child",
+            project="mlv-app",
+            bootstrap_origin="subagent",
+            allow_supersede=True,
+            trusted_parent_eligible=False,
+        )
+
+        result = bridge.repair_bootstrap_provenance(
+            agent="codex",
+            project="mlv-app",
+            bad_session_id="codex-child",
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "frozen")
+        self.assertEqual(bridge.bridge_status("mlv-app").message.split(".")[0], "Bridge is paused")
+        peer_inbox = bridge.peek_inbox("claude", "claude-live")
+        self.assertIn("BRIDGE_FROZEN", peer_inbox.message)
+        audit_rows = read_jsonl(self.state_dir / "messages.jsonl")
+        self.assertTrue(any(row.get("action") == "bootstrap_subagent_auto_rollback_failed" for row in audit_rows))
+
     def test_recover_bridge_session_bootstraps_when_unbootstrapped(self) -> None:
         config_path = self.tempdir / "watcher-config.json"
         result = recover_bridge_session(

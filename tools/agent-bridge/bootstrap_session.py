@@ -271,6 +271,14 @@ def bootstrap(
         trusted_parent_session_id=activation.data.get("trusted_parent_session") if activation.ok else None,
         subagent_signals=subagent_signals,
     )
+    bridge.record_session_runtime_metadata(
+        agent=agent,
+        session_id=new_session,
+        project=project_name,
+        desktop_thread_id=desktop_thread_id,
+        bootstrap_thread_id=_thread_id_from_env(agent),
+        bootstrap_parent_thread_id=_parent_thread_id_from_env(agent),
+    )
     write_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent), peer_breadcrumb)
 
     handshake = None
