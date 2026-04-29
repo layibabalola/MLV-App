@@ -2398,6 +2398,7 @@ class AgentBridge:
         bridge_root = self.state_dir.parent
         watcher_lease_path = self.state_dir / "locks" / "watcher.lock"
         watcher_runtime_path = watcher_pid_path.parent / "watcher.runtime.json"
+        tool_refresh_status_path = self.state_dir / "tool-refresh-status.json"
         watcher: Dict[str, Any] = {
             "expected": watcher_pid_path.exists(),
             "pid_path": str(watcher_pid_path),
@@ -2471,8 +2472,21 @@ class AgentBridge:
                 )
 
         stale_servers = [entry for entry in server_markers if entry.get("stale")]
+        tool_refresh = {
+            "path": str(tool_refresh_status_path),
+            "status": "missing",
+            "refresh_required": False,
+            "data": None,
+        }
+        if tool_refresh_status_path.exists():
+            try:
+                tool_refresh["data"] = read_json(tool_refresh_status_path, {})
+                tool_refresh["refresh_required"] = bool((tool_refresh["data"] or {}).get("refresh_required"))
+                tool_refresh["status"] = "refresh_required" if tool_refresh["refresh_required"] else "current"
+            except Exception:
+                tool_refresh["status"] = "unreadable"
         status = "healthy"
-        if watcher.get("stale") or stale_servers or lock_entries:
+        if watcher.get("stale") or stale_servers or lock_entries or tool_refresh["refresh_required"] or tool_refresh["status"] == "unreadable":
             status = "attention"
         return BridgeResult(
             True,
@@ -2484,6 +2498,7 @@ class AgentBridge:
                 "mcp_server_markers": server_markers,
                 "mcp_server_marker_count": len(server_markers),
                 "stale_server_marker_count": len(stale_servers),
+                "tool_refresh": tool_refresh,
                 "locks": lock_entries,
                 "lock_count": len(lock_entries),
             },

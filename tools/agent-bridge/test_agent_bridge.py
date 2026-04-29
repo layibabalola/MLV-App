@@ -673,6 +673,28 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(status.status, "attention")
         self.assertTrue(status.data["watcher"]["root_mismatch"])
 
+    def test_bridge_process_status_surfaces_tool_refresh_required(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        (self.state_dir / "tool-refresh-status.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "refresh_required": True,
+                    "reason": "tool_manifest_changed_during_wrapper_session",
+                    "previous_signature": "old",
+                    "current_signature": "new",
+                    "changed_files": ["server.py"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status = AgentBridge(self.state_dir).bridge_process_status()
+
+        self.assertEqual(status.status, "attention")
+        self.assertTrue(status.data["tool_refresh"]["refresh_required"])
+        self.assertEqual(status.data["tool_refresh"]["status"], "refresh_required")
+
     def test_process_lease_heartbeat_and_release(self) -> None:
         lock_path = self.state_dir / "locks" / "watcher.lock"
         acquired = acquire_singleton_lease(

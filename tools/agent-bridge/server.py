@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import atexit
 import dataclasses
+import hashlib
+import json
 import os
 import signal
 import sys
@@ -51,6 +53,8 @@ DESTRUCTIVE_WRITE = {
     "openWorldHint": False,
 }
 
+TOOL_MANIFEST_SCHEMA_VERSION = 1
+
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MCP bridge for Claude Desktop and Codex Desktop handoffs.")
@@ -86,6 +90,45 @@ def register_server_pid(state_dir: Path):
             pass
 
     return cleanup
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    tmp.replace(path)
+
+
+def write_tool_manifest(*, state_dir: Path, mcp: FastMCP) -> dict:
+    tools = []
+    for info in mcp._tool_manager.list_tools():
+        tool_payload = {
+            "name": info.name,
+            "title": info.title,
+            "description": info.description,
+            "inputSchema": info.parameters,
+            "outputSchema": info.output_schema,
+            "annotations": info.annotations,
+            "icons": info.icons,
+            "meta": info.meta,
+        }
+        tools.append(tool_payload)
+    tool_names = [tool["name"] for tool in tools]
+    signature_payload = {"tool_names": tool_names, "tools": tools}
+    signature = hashlib.sha256(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()
+    manifest = {
+        "schema_version": TOOL_MANIFEST_SCHEMA_VERSION,
+        "generated_at": build_runtime_breadcrumb(state_dir=state_dir, role="mcp_server", pid=os.getpid())["timestamp"],
+        "server_pid": os.getpid(),
+        "tool_count": len(tools),
+        "tool_names": tool_names,
+        "signature": signature,
+        "tools": tools,
+    }
+    _write_json(Path(state_dir) / "tool-manifest.json", manifest)
+    return manifest
 
 
 def create_mcp(bridge: AgentBridge) -> FastMCP:
@@ -345,6 +388,8 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
 def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
     bridge = create_bridge(args)
+    mcp = create_mcp(bridge)
+    write_tool_manifest(state_dir=Path(args.state_dir), mcp=mcp)
     cleanup_pid = register_server_pid(Path(args.state_dir))
     atexit.register(cleanup_pid)
 
@@ -353,7 +398,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, handle_sigterm)
-    create_mcp(bridge).run()
+    mcp.run()
 
 
 if __name__ == "__main__":

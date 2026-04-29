@@ -158,6 +158,21 @@ protected thread id recorded in the current peer breadcrumb. See
 `BRIDGE_WATCH_LIFECYCLE.md` for explicit parked-watch guidance and
 `AUTO_PAIR_SPEC.md` for the pairing/wake hardening roadmap.
 
+### Mid-session MCP tool additions
+
+`server.py` now writes `state/tool-manifest.json` on startup, and
+`server_wrapper.py` compares manifests across child self-restarts caused by
+bridge code changes. If the tool signature changes during one live Desktop MCP
+session, the wrapper writes `state/tool-refresh-status.json`, audits
+`mcp_tools_refresh_required`, and `bridge_process_status()` returns
+`tool_refresh.status = refresh_required`.
+
+This is a fallback warning, not a live refresh guarantee. The current FastMCP
+stdio surface used here exposes the `notifications/tools/list_changed` type at
+the SDK level, but not an ergonomic active-session hook from this bridge
+server. In practice, if `tool_refresh.refresh_required` is set, restart the
+Desktop MCP client/session before expecting newly added bridge tools to appear.
+
 Halt-condition detection (e.g. `SESSION_UPDATE: superseded`) is performed by
 each agent inside its normal `check_inbox` flow — there is no longer a
 separate watcher/consumer step for it. The previous `consume_inbox.py` helper

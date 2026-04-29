@@ -79,6 +79,7 @@ event actions:
 | `send_control` | bridge | Control message routed | control_type |
 | `mcp_server_wrapper_launch` | server_wrapper | Wrapper started a `server.py` | command, parent_pid |
 | `mcp_server_self_restarted` | wrapper Phase 2 | Auto-restart on bridge code change | old_child_pid, new_child_pid, changed_files, elapsed_ms |
+| `mcp_tools_refresh_required` | server_wrapper | Tool manifest changed during one live MCP client session | previous_signature, current_signature, changed_files, previous_tool_names, current_tool_names |
 | `wake_skipped_paused` | watcher | Pause was active when wake would have fired | message_id |
 | `wake_skipped_wrong_chat` | watcher | Phase B UUID-mismatch (reserved) | window_title?, expected_thread_id |
 | `wake_skipped_wrong_project` | watcher | project_scope mismatch | active_project, expected_project |

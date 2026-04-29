@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -16,6 +17,7 @@ from server_wrapper import SupervisorConfig, run_supervisor
 
 SERVER_SCRIPT = """\
 import argparse
+import json
 import os
 import sys
 
@@ -24,11 +26,33 @@ parser.add_argument("--state-dir")
 parser.add_argument("--max-hops")
 parser.add_argument("--mode", default="echo")
 parser.add_argument("--launch-log", required=True)
+parser.add_argument("--tool-signature-file")
 args, _ = parser.parse_known_args()
 
 with open(args.launch_log, "a", encoding="utf-8", newline="\\n") as handle:
     handle.write(str(os.getpid()) + "\\n")
     handle.flush()
+
+if args.tool_signature_file:
+    tool_signature_path = args.tool_signature_file
+    with open(tool_signature_path, "r", encoding="utf-8") as handle:
+        signature = handle.read().strip()
+    manifest_path = os.path.join(args.state_dir, "tool-manifest.json")
+    with open(manifest_path, "w", encoding="utf-8", newline="\\n") as handle:
+        json.dump(
+            {
+                "schema_version": 1,
+                "generated_at": "2026-04-29T00:00:00+00:00",
+                "server_pid": os.getpid(),
+                "tool_count": 1,
+                "tool_names": ["demo_" + signature],
+                "signature": signature,
+                "tools": [{"name": "demo_" + signature}],
+            },
+            handle,
+            sort_keys=True,
+        )
+        handle.write("\\n")
 
 sys.stdout.buffer.write(("READY %s\\n" % os.getpid()).encode("ascii"))
 sys.stdout.buffer.flush()
@@ -102,13 +126,17 @@ class BufferOutputStream:
 
 
 class SupervisorHarness:
-    def __init__(self, tempdir: Path, *, mode: str = "echo", watch_count: int = 1) -> None:
+    def __init__(self, tempdir: Path, *, mode: str = "echo", watch_count: int = 1, tool_signature: Optional[str] = None) -> None:
         self.root = tempdir
         self.state_dir = self.root / "bridge-root" / "state"
         self.state_dir.mkdir(parents=True)
         self.server_script = self.root / "fake_server.py"
         self.server_script.write_text(SERVER_SCRIPT, encoding="utf-8")
         self.launch_log = self.root / "launches.log"
+        self.tool_signature_file: Optional[Path] = None
+        if tool_signature is not None:
+            self.tool_signature_file = self.root / "tool-signature.txt"
+            self.tool_signature_file.write_text(tool_signature, encoding="utf-8")
         self.watch_files = [self.root / ("watch_%s.py" % index) for index in range(watch_count)]
         for index, path in enumerate(self.watch_files):
             path.write_text("# %s\\n" % index, encoding="utf-8")
@@ -121,19 +149,22 @@ class SupervisorHarness:
 
     def _run(self, mode: str) -> None:
         try:
+            command = [
+                sys.executable,
+                str(self.server_script),
+                "--state-dir",
+                str(self.state_dir),
+                "--max-hops",
+                "8",
+                "--mode",
+                mode,
+                "--launch-log",
+                str(self.launch_log),
+            ]
+            if self.tool_signature_file is not None:
+                command.extend(["--tool-signature-file", str(self.tool_signature_file)])
             self.result["exit_code"] = run_supervisor(
-                command=[
-                    sys.executable,
-                    str(self.server_script),
-                    "--state-dir",
-                    str(self.state_dir),
-                    "--max-hops",
-                    "8",
-                    "--mode",
-                    mode,
-                    "--launch-log",
-                    str(self.launch_log),
-                ],
+                command=command,
                 state_dir=self.state_dir,
                 watch_paths=self.watch_files,
                 config=SupervisorConfig(
@@ -191,6 +222,11 @@ class SupervisorHarness:
     def audit_events(self) -> List[dict]:
         return read_jsonl(self.state_dir / "messages.jsonl")
 
+    def set_tool_signature(self, signature: str) -> None:
+        if self.tool_signature_file is None:
+            raise AssertionError("tool signature file not configured")
+        self.tool_signature_file.write_text(signature, encoding="utf-8")
+
 
 class ServerWrapperPhase2Tests(unittest.TestCase):
     def setUp(self) -> None:
@@ -202,8 +238,19 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             harness.cleanup()
         shutil.rmtree(self.tempdir, ignore_errors=True)
 
-    def _start_harness(self, *, mode: str = "echo", watch_count: int = 1) -> SupervisorHarness:
-        harness = SupervisorHarness(self.tempdir / ("case-%s" % len(self._harnesses)), mode=mode, watch_count=watch_count)
+    def _start_harness(
+        self,
+        *,
+        mode: str = "echo",
+        watch_count: int = 1,
+        tool_signature: Optional[str] = None,
+    ) -> SupervisorHarness:
+        harness = SupervisorHarness(
+            self.tempdir / ("case-%s" % len(self._harnesses)),
+            mode=mode,
+            watch_count=watch_count,
+            tool_signature=tool_signature,
+        )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
         harness.stdout_stream.wait_for(b"READY ")
@@ -308,6 +355,27 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             [event for event in harness.audit_events() if event.get("action") == "mcp_server_self_restarted"],
             [],
         )
+
+    def test_wrapper_phase2_marks_tool_refresh_required_when_manifest_changes(self) -> None:
+        harness = self._start_harness(tool_signature="sig-a")
+
+        harness.set_tool_signature("sig-b")
+        harness.touch_watch_files([0])
+        harness.wait_for_launch_count(2)
+        time.sleep(0.1)
+
+        refresh_events = [event for event in harness.audit_events() if event.get("action") == "mcp_tools_refresh_required"]
+        self.assertEqual(len(refresh_events), 1)
+        self.assertEqual(refresh_events[0]["previous_signature"], "sig-a")
+        self.assertEqual(refresh_events[0]["current_signature"], "sig-b")
+
+        status = json.loads((harness.state_dir / "tool-refresh-status.json").read_text(encoding="utf-8"))
+        self.assertTrue(status["refresh_required"])
+        self.assertEqual(status["previous_signature"], "sig-a")
+        self.assertEqual(status["current_signature"], "sig-b")
+
+        harness.stdin_stream.close()
+        self.assertEqual(harness.wait_for_exit(), 0)
 
 
 if __name__ == "__main__":

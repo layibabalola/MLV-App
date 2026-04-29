@@ -1,9 +1,12 @@
 import argparse
+import json
+import os
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Dict, List, Optional, Sequence, Set
 
@@ -20,6 +23,9 @@ DEFAULT_RESTART_WINDOW_SECONDS = 30.0
 DEFAULT_MAX_RESTARTS_PER_WINDOW = 4
 DEFAULT_CHUNK_SIZE = 65536
 DEFAULT_LOOP_SLEEP_SECONDS = 0.05
+TOOL_MANIFEST_FILENAME = "tool-manifest.json"
+TOOL_REFRESH_STATUS_FILENAME = "tool-refresh-status.json"
+TOOL_REFRESH_STATUS_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,9 @@ class ServerSupervisor:
         self._restart_history: List[float] = []
         self._stdin_eof = False
         self._thread_error: Optional[BaseException] = None
+        self._tool_manifest_path = self.state_dir / TOOL_MANIFEST_FILENAME
+        self._tool_refresh_status_path = self.state_dir / TOOL_REFRESH_STATUS_FILENAME
+        self._clear_tool_refresh_status()
 
     def run(self) -> int:
         try:
@@ -195,6 +204,89 @@ class ServerSupervisor:
             _close_pipe(child.stdin)
         stdout_thread.start()
         return child
+
+    def _read_json_file(self, path: Path) -> Optional[dict]:
+        try:
+            if not path.exists():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _write_json_file(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(path)
+
+    def _read_tool_manifest_snapshot(self) -> Optional[dict]:
+        manifest = self._read_json_file(self._tool_manifest_path)
+        if manifest is None:
+            return None
+        try:
+            stat = self._tool_manifest_path.stat()
+        except OSError:
+            return None
+        return {
+            "path": str(self._tool_manifest_path),
+            "mtime_ns": stat.st_mtime_ns,
+            "signature": manifest.get("signature"),
+            "tool_count": manifest.get("tool_count"),
+            "tool_names": manifest.get("tool_names") or [],
+            "generated_at": manifest.get("generated_at"),
+        }
+
+    def _wait_for_tool_manifest_snapshot(self, *, previous_mtime_ns: Optional[int], timeout_seconds: float = 1.0) -> Optional[dict]:
+        deadline = time.monotonic() + timeout_seconds
+        latest = self._read_tool_manifest_snapshot()
+        while time.monotonic() < deadline:
+            current = self._read_tool_manifest_snapshot()
+            if current is not None:
+                latest = current
+                if previous_mtime_ns is None or current.get("mtime_ns") != previous_mtime_ns:
+                    return current
+            time.sleep(self.config.loop_sleep_seconds)
+        return latest
+
+    def _clear_tool_refresh_status(self) -> None:
+        self._write_json_file(
+            self._tool_refresh_status_path,
+            {
+                "schema_version": TOOL_REFRESH_STATUS_SCHEMA_VERSION,
+                "refresh_required": False,
+                "reason": None,
+                "changed_at": None,
+                "wrapper_pid": os.getpid(),
+                "previous_signature": None,
+                "current_signature": None,
+                "changed_files": [],
+                "previous_tool_names": [],
+                "current_tool_names": [],
+            },
+        )
+
+    def _mark_tool_refresh_required(self, *, previous_snapshot: dict, current_snapshot: dict, changed_files: List[str]) -> None:
+        payload = {
+            "schema_version": TOOL_REFRESH_STATUS_SCHEMA_VERSION,
+            "refresh_required": True,
+            "reason": "tool_manifest_changed_during_wrapper_session",
+            "changed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "wrapper_pid": os.getpid(),
+            "previous_signature": previous_snapshot.get("signature"),
+            "current_signature": current_snapshot.get("signature"),
+            "changed_files": changed_files,
+            "previous_tool_names": previous_snapshot.get("tool_names") or [],
+            "current_tool_names": current_snapshot.get("tool_names") or [],
+        }
+        self._write_json_file(self._tool_refresh_status_path, payload)
+        self._append_audit_event(
+            action="mcp_tools_refresh_required",
+            previous_signature=payload["previous_signature"],
+            current_signature=payload["current_signature"],
+            changed_files=changed_files,
+            previous_tool_names=payload["previous_tool_names"],
+            current_tool_names=payload["current_tool_names"],
+        )
 
     def _pump_parent_stdin(self) -> None:
         try:
@@ -278,6 +370,7 @@ class ServerSupervisor:
             self._last_change_time = None
             self._restart_in_progress = True
             child = self._child
+        previous_manifest = self._read_tool_manifest_snapshot()
 
         if child is None:
             with self._state_lock:
@@ -304,6 +397,23 @@ class ServerSupervisor:
             self._report_error("agent-bridge server wrapper restart failed: %s" % exc)
             self._stop_event.set()
             return False
+        current_manifest = None
+        if previous_manifest is not None:
+            current_manifest = self._wait_for_tool_manifest_snapshot(
+                previous_mtime_ns=previous_manifest.get("mtime_ns")
+            )
+        if (
+            previous_manifest is not None
+            and current_manifest is not None
+            and previous_manifest.get("signature")
+            and current_manifest.get("signature")
+            and previous_manifest.get("signature") != current_manifest.get("signature")
+        ):
+            self._mark_tool_refresh_required(
+                previous_snapshot=previous_manifest,
+                current_snapshot=current_manifest,
+                changed_files=changed_files,
+            )
 
         elapsed_ms = int((self.now_fn() - restart_started) * 1000)
         with self._state_lock:
