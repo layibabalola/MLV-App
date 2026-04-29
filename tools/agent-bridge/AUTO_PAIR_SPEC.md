@@ -1,9 +1,11 @@
 # Agent Bridge - Auto-Pair And Wrong-Chat Defense Spec
 
-**Status:** Title-marker Phase A shipped historically, then was intentionally
-retired on 2026-04-28. Current tree direction is Phase B/C groundwork:
-peer-runtime breadcrumbs plus fire-time watcher command-template resolution.
-Phases D-E remain speculative pending Q1 verification.
+**Status:** Codex-side wrong-chat defense is implemented through
+peer-runtime breadcrumbs, fire-time watcher command-template resolution,
+parent-only provenance, subagent retargeting, and trusted-parent drift refusal.
+Title-marker Phase A shipped historically, then was intentionally retired on
+2026-04-28. Cross-project pairing, symmetric `wake_claude.ps1`, and optional
+register fallback remain separate roadmap work.
 **Authors:** Claude (proposal); Codex review and Phase A implementation
 **Motivation:** eliminate the hardcoded `session_id` and `desktop_thread_id`
 in `watcher-config.json` that go stale when either side rotates threads, and

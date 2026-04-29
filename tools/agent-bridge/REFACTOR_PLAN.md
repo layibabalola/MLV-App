@@ -1,6 +1,6 @@
 # Agent Bridge Refactor — Canonical Plan v1.1
 
-**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening execution is in progress: Phase 0 contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, and docs consolidation have landed. Deeper service extraction, property tests, and full concurrency stress coverage remain follow-up work.
+**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, and WR1-WR3 wake recovery loops. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, session-routing remainder, cross-project pairing, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
 
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
 - Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.

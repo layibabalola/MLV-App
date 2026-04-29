@@ -1,9 +1,22 @@
 # Agent Bridge - Bootstrap Provenance Spec
 
-**Status:** Proposed
+**Status:** Codex-side implementation shipped for BP2-BP10; BP11 symmetric
+Claude implementation remains parked.
 **Authors:** Codex (original framing 2026-04-29 in response to user "configuration by convention" direction); Claude (codification + scope refinements)
 **Convention:** *Bootstrap is parent-only by default; sub-agent bootstrap attempts are rejected, and any accidental success is automatically rolled back to the last trusted parent session.*
 **Motivation:** the Confucius incident (2026-04-29) revealed that bootstrap can capture a sub-agent's CODEX_THREAD_ID and bind the bridge to a sub-agent chat instead of the user's intended bridge chat. Treating sub-agent bootstrap as a first-class fault — with prevention, detection, and self-heal rules — closes this class of failure without requiring user designation of the bridge chat.
+
+---
+
+## Implemented Status
+
+Shipped Codex-side behavior includes bootstrap-origin detection, conservative
+unknown-origin handling, subagent refusal/retargeting, trusted-parent tracking,
+unknown-to-parent reclassification coverage, watcher refusal for bad Codex
+provenance, trusted-parent drift refusal, and rollback/freeze paths. The
+remaining unsatisfied acceptance criterion is BP11: symmetric Claude-side
+provenance handling, which is tracked separately because Claude desktop exposes
+a different runtime surface.
 
 ---
 

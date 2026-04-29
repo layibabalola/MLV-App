@@ -1,11 +1,23 @@
 # Agent Bridge - Component Supervision Spec
 
-**Status:** Proposed
-**Authors:** Claude (proposal); Codex review pending
+**Status:** Implemented for current long-running bridge components; future
+components must register a supervision pattern before shipping.
+**Authors:** Claude (proposal); Codex implementation/review
 **Tier:** Tier 1 - architectural floor; codifies the convention behind today's wake-storm hardening
 **Motivation:** On 2026-04-29 the bridge ate four wake storms. Every storm traced to one root cause: a long-running component (server.py or watcher.py) running stale code while fresher fixes sat in the worktree, untouched by the live process. We patched both in commits `d97eaf9c`, `96ae99d0`, `bfe9a3ec`, `47948817`, `3a380df1`, `d09b4c1a`, `ff5dff0d` - but each component got its own ad-hoc supervision mechanism without a written policy that says "every long-running component MUST self-heal on stale code." This spec codifies that policy so future components inherit the convention rather than reinvent (or skip) it.
 
 The convention is the spec. Configuration is the escape hatch, not the design. This composes with the user-direction memory `convention_over_configuration.md` (2026-04-29).
+
+---
+
+## Implemented Status
+
+Current bridge-owned long-running components comply with this spec: `server.py`
+is protected by the wrapper/tool-manifest refresh path, and `watcher.py` is
+protected by bootstrap-time code-signature restart plus orphan watcher sweep.
+The remaining work is prospective only: any future `bridge-d`, presence agent,
+or monitor component must add a registry entry and choose Pattern A or Pattern B
+before it lands.
 
 ---
 

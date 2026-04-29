@@ -1,12 +1,13 @@
 # Wake Hardening Spec - Pause Gating, Circuit Breaker, Title-Marker Lessons
 
-**Status:** Partially implemented. D1 pause gating is now landed in the
-working tree; D2 circuit-breaker follow-up remains open.
+**Status:** Implemented for D1/D2. D3 title-marker lessons are closed by
+retiring the title heuristic and moving identity proof to breadcrumb/provenance
+work in `AUTO_PAIR_SPEC.md` and `BRIDGE_BOOTSTRAP_PROVENANCE_SPEC.md`.
 **Authors:** Claude
 **Motivation:** capture three wake-loop-suppression concerns that Codex's
 2026-04-28 SPEC_REVIEW_RESULT explicitly kept OUT of `AUTO_PAIR_SPEC`:
-(1) `pause_bridge` does not gate watcher's `on_message_command`,
-(2) circuit breaker for repeatedly-failing wake is not implemented,
+(1) `pause_bridge` did not gate watcher's `on_message_command`,
+(2) circuit breaker for repeatedly-failing wake was not implemented,
 (3) the title-marker layer (Phase A) was a dead-end that taught us
 title heuristics are unreliable on Windows hosts.
 
@@ -94,6 +95,12 @@ open items in D1 are mostly contract clarity questions, not the original
 
 ### Current state
 
+Updated implementation note: `watcher.py` now records per-session wake failure
+windows in `wake-failure-windows.json`. Repeated failures open a breaker for
+that session, which suppresses further wake attempts until explicit reset,
+one-shot bypass, or the idle auto-close path. Permanent-exit handling remains
+per-message, while the breaker covers session-wide failure modes.
+
 `watcher.py` retries failing wake invocations up to `WAKE_MAX_RETRIES = 3`
 per message, with `WAKE_ACK_GRACE_PERIOD_S = 30` between retries. Phase A
 introduced `WAKE_PERMANENT_EXIT_CODES = {3}` for "no retry" exits, but
@@ -104,7 +111,7 @@ OS misconfiguration), each new message triggers its own up-to-3-retries.
 With N queued messages: `N × MAX_RETRIES × GRACE_PERIOD ≈ N × 90s` of
 retry storm.
 
-### Proposed fix
+### Implemented fix
 
 Per-session circuit breaker, keyed by `session_id` (per Codex's resolved
 answer to AUTO_PAIR_SPEC Q5).
@@ -214,9 +221,9 @@ in the 2026-04-28 update).
 - `resume_wake_for_session` MCP tool
 - Tests C1-C7
 
-These phases are independent. W1 is now effectively shipped on this branch and
-addresses the user-perception bug ("the stop button doesn't stop"). W2 remains
-the substantive open wake-loop follow-up.
+These phases are independent and both are shipped. Follow-on recovery behavior
+for breaker-open backlogs is implemented in `BRIDGE_WAKE_RECOVERY_LOOPS_SPEC.md`;
+it layers on top of D2 without changing the storm-prevention threshold.
 
 ---
 
