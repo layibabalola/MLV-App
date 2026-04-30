@@ -1,6 +1,6 @@
 # Agent Bridge Refactor — Canonical Plan v1.1
 
-**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, and cross-project pairing MVP. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, cross-project file read/write tools, knowledge-sharing contracts, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
+**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, and cross-project pairing MVP. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, cross-project file read/write tools, knowledge-sharing contracts, policy-authority/doc-drift controls, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
 
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
 - Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
@@ -340,21 +340,85 @@ security signoff.
   - bounded renewal filters implementation journal history
   - health/diagnostics surface reauth-required contracts
 
-### Phase 15 - Security review and threat model
+### Phase 15 - Policy authority and documentation drift
+
+Implement `POLICY_AUTHORITY_SPEC.md` so markdown can explain or propose policy
+but cannot override runtime enforcement. This closes the remote-doc-edit
+escalation path before the final security review.
+
+- Add runtime policy registry:
+  - policy id, version, owner, severity, default/effective values
+  - immutable vs locally configurable flag
+  - allowed override source
+  - generated markdown fragment hash
+  - linked enforcement tests
+- Classify policy docs:
+  - `generated`
+  - `enforced_reference`
+  - `proposal`
+  - `explanatory`
+- Protect sensitive docs:
+  - `AGENTS.md`
+  - `CLAUDE.md`
+  - `bridge_trigger_heuristics.md`
+  - bridge protocol/security specs
+  - knowledge-sharing and policy-authority specs
+- Add protected-doc workflow:
+  - remote-origin edits become proposals
+  - local user sees diff preview
+  - local confirmation token is required before applying authority-affecting
+    changes
+  - code/tests must change with docs when docs claim enforced behavior changed
+- Add drift detection:
+  - generated sections match runtime policy snapshot hashes
+  - enforced-reference docs cannot claim broader permissions than runtime policy
+  - dashboard/health panel surfaces drift
+  - readiness/signoff blocks while drift remains unresolved
+- Add obedience classifier for remote requests:
+  - informational
+  - proposal
+  - contract action request
+  - local confirmation required
+  - forbidden remote authority
+- Add MCP/CLI/dashboard support:
+  - `list_policy_rules`
+  - `policy_rule_status`
+  - `validate_policy_docs`
+  - `protected_doc_status`
+  - protected-doc edit proposal/approval/rejection flow
+- Add audit actions:
+  - `policy_doc_drift_detected`
+  - `policy_doc_drift_resolved`
+  - `protected_doc_edit_proposed`
+  - `protected_doc_edit_approved`
+  - `protected_doc_edit_rejected`
+  - `remote_authority_request_rejected`
+  - `runtime_policy_changed`
+  - `runtime_policy_snapshot_generated`
+- Add tests for:
+  - markdown contradictions do not change enforcement
+  - generated policy docs fail validation after manual edits
+  - remote protected-doc edits become proposals only
+  - local-confirmed protected-doc edits are audited
+  - remote authority escalation requests are rejected
+  - dashboard reads runtime policy, not markdown
+
+### Phase 16 - Security review and threat model
 
 Treat the bridge as local-only infrastructure, but still hostile-input exposed:
 messages, config files, JSONL rows, environment variables, watcher commands,
 and desktop wake helpers can all be influenced by a compromised peer, stale
-state, stale knowledge contract, or accidental operator input.
+state, stale knowledge contract, contradictory markdown, or accidental operator
+input.
 
 - Write `SECURITY_REVIEW.md` with:
   - trust boundaries: Claude, Codex, MCP clients, watcher, helper scripts,
-    shared state files, settings, knowledge contracts, and desktop UI wake
-    surface
+    shared state files, settings, knowledge contracts, protected docs, policy
+    registry, and desktop UI wake surface
   - threat model: command injection, path traversal, state tampering, message
     spoofing, replay/dedupe bypass, denial of service/backpressure wedging,
     stale-session takeover, stale-contract knowledge leakage, prompt/log
-    exfiltration, and unsafe destructive tools
+    exfiltration, markdown-policy drift escalation, and unsafe destructive tools
   - explicit assumptions: same-user local machine, no network listener, state
     files not secret, bridge messages may contain sensitive prompts and must not
     be silently copied elsewhere
@@ -372,6 +436,7 @@ state, stale knowledge contract, or accidental operator input.
   - `probe_server.py` cannot mutate live state without `--mutate`
   - settings reject unknown keys and invalid types
   - expired/revoked/stale knowledge contracts block body-sharing catch-up
+  - contradictory markdown cannot broaden runtime permissions
 - Review state-file permissions and document the expected local-user security
   posture. If permissions cannot be enforced portably, report it as an accepted
   local-user trust assumption.
@@ -442,9 +507,14 @@ Phase 7 (wake hardening)
 | 33 | Long-dormant peers receive reauthorization metadata, not historical bodies | 14 |
 | 34 | Contract renewal supports no-history, metadata-only, and bounded body-sharing modes | 14 |
 | 35 | Revoked/expired contracts block catch-up and cross-project sends | 14 |
-| 36 | Security threat model and trust boundaries documented | 15 |
-| 37 | Shell/process boundaries audited with injection/path tests where applicable | 15 |
-| 38 | Security signoff records fixed findings, accepted risks, and exclusions | 15 |
+| 36 | Runtime policy registry is authoritative over markdown/spec text | 15 |
+| 37 | Protected policy docs require local authority path before authority-affecting edits apply | 15 |
+| 38 | Remote-origin protected doc edits become proposals, not applied policy changes | 15 |
+| 39 | Documentation drift is detected, audited, and blocks readiness/signoff while unresolved | 15 |
+| 40 | Dashboard/effective policy views read runtime policy, not markdown text | 15 |
+| 41 | Security threat model and trust boundaries documented | 16 |
+| 42 | Shell/process boundaries audited with injection/path tests where applicable | 16 |
+| 43 | Security signoff records fixed findings, accepted risks, and exclusions | 16 |
 
 ## Final 10/10 Validation Loop
 
@@ -490,9 +560,10 @@ This preserves the two-axis distinction agreed during hardening review:
 | Root relocation creates split-brain state | Phase 13 adds a single resolver, root manifest, stale-root redirects, and startup rejection for moved roots |
 | Migration loses or corrupts bridge history | Phase 13 migration is dry-run first, backup-before-mutate, and validates target with recovery/probe tools |
 | Long-dormant peer receives stale sensitive context | Phase 14 gates catch-up on active knowledge contracts and returns reauthorization metadata after dormancy expiry |
-| Local command injection via watcher/helper boundaries | Phase 15 audits all process boundaries and adds injection/path tests |
-| Sensitive prompt leakage through bridge state/logs | Phase 15 documents local-user trust assumptions, retention, and accepted risks |
-| Destructive MCP tool misuse | Phase 15 validates ambiguous/destructive inputs reject by default |
+| Remote or stale markdown claims broader permissions than code allows | Phase 15 makes runtime policy authoritative, detects doc drift, and gates protected-doc edits through local confirmation |
+| Local command injection via watcher/helper boundaries | Phase 16 audits all process boundaries and adds injection/path tests |
+| Sensitive prompt leakage through bridge state/logs | Phase 16 documents local-user trust assumptions, retention, and accepted risks |
+| Destructive MCP tool misuse | Phase 16 validates ambiguous/destructive inputs reject by default |
 
 ---
 

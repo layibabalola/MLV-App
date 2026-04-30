@@ -1,16 +1,17 @@
 # Agent-Bridge Communication Protocol
 
-**Status:** Implemented v1.7 (bumped 2026-04-29). Adds wake-script exit code
+**Status:** Implemented v1.8 (bumped 2026-04-30). Adds wake-script exit code
 table, provenance-aware wake refusal, failure reason taxonomy aligned to multi-layer presence
-(`BRIDGE_PRESENCE_SPEC.md`), audit event registry, and consolidated message
-type registry including types added 2026-04-28 (`WAIT_DECLARED`,
+(`BRIDGE_PRESENCE_SPEC.md`), audit event registry including policy-authority
+and documentation-drift events, and consolidated message type registry including
+types added 2026-04-28 (`WAIT_DECLARED`,
 `HEURISTIC_SYNC_ACK`, `PROTOCOL_SYNC_ACK`, `ACTION_REQUEST_RESPONSE`,
 `SPEC_REVIEW_ACK`, `SPEC_REVIEW_REQUEST`, `SPEC_REVIEW_RESULT`,
 `SPEC_REVIEW_RESULT_ACK`, `IMPLEMENTATION_UPDATE`,
 `CROSS_PROJECT_PAIR_REQUEST/ACCEPT/REJECT/EXPIRE/REVOKE/PROMOTE`).
 EXCHANGE_CLOSED close-marker convention added per 2026-04-28 heuristic.
 
-Version: 1.7
+Version: 1.8
 Transport: agent-bridge MCP server (local FS in v1; LAN sync in v2; cloud
 WebSocket in v3 — see `BRIDGE_TRANSPORT_ABSTRACTION_SPEC.md`)
 Applies to: any two agents sharing an agent-bridge instance
@@ -111,7 +112,15 @@ event actions:
 | `presence_layer_change` | bridge-d | Any presence layer transitioned state | layer, from_state, to_state |
 | `peer_breadcrumb_missing` | watcher | Phase B breadcrumb read failed | breadcrumb_path, expected_pid? |
 | `migrate_root_apply` | migrate_root.py | Phase 13 root relocation | source_root, target_root |
-| `phase14_security_signoff` | tail-end gate | Phase 14 security review complete | reviewer_session, residual_risks |
+| `policy_doc_drift_detected` | policy validator | Runtime policy and protected markdown disagree | policy_id?, path, authority_class, drift_reason |
+| `policy_doc_drift_resolved` | policy validator | Previously reported policy/doc drift is resolved | policy_id?, path, old_hash, new_hash |
+| `protected_doc_edit_proposed` | bridge/dashboard | Remote or local actor proposed an edit to a protected policy document | path, source_agent?, source_message_id?, proposal_id |
+| `protected_doc_edit_approved` | bridge/dashboard | Local authority path approved a protected document edit | path, proposal_id, confirmer, diff_hash |
+| `protected_doc_edit_rejected` | bridge/dashboard | Protected document edit proposal was rejected | path, proposal_id, reason |
+| `remote_authority_request_rejected` | bridge policy gate | Remote peer requested authority it cannot hold | message_id, requested_action, reason |
+| `runtime_policy_changed` | bridge/dashboard | Effective runtime policy changed through a local authority path | policy_id, old_value_hash, new_value_hash |
+| `runtime_policy_snapshot_generated` | policy generator | Generated policy documentation snapshot from runtime registry | snapshot_hash, policy_count |
+| `phase16_security_signoff` | tail-end gate | Phase 16 security review complete | reviewer_session, residual_risks |
 
 New audit event actions get added to this table as they're introduced;
 unknown action values are tolerated (forward compat) but should map to a
