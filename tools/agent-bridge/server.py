@@ -347,6 +347,67 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
             )
         )
 
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def record_implementation_event(
+        owner_agent: str,
+        peer_agent: str,
+        summary: str,
+        message_type: str = "IMPLEMENTATION_UPDATE",
+        commit: Optional[str] = None,
+        tests: Optional[list[str]] = None,
+        details: Optional[str] = None,
+        related_session_id: Optional[str] = None,
+    ) -> dict:
+        """Record durable implementation progress for later peer catch-up digests."""
+        return as_dict(
+            bridge.record_implementation_event(
+                owner_agent=owner_agent,
+                peer_agent=peer_agent,
+                summary=summary,
+                message_type=message_type,
+                commit=commit,
+                tests=tests,
+                details=details,
+                related_session_id=related_session_id,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def list_implementation_journal(
+        owner_agent: Optional[str] = None,
+        peer_agent: Optional[str] = None,
+        since_sequence: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """List durable implementation progress events and peer acknowledgement state."""
+        return as_dict(
+            bridge.list_implementation_journal(
+                owner_agent=owner_agent,
+                peer_agent=peer_agent,
+                since_sequence=since_sequence,
+                limit=limit,
+            )
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def send_catchup_digest(
+        from_agent: str,
+        to_agent: str,
+        target_session_id: str,
+        reason: str = "manual",
+        max_items: int = 20,
+    ) -> dict:
+        """Queue one coalesced implementation catch-up digest for a peer."""
+        return as_dict(
+            bridge.send_catchup_digest(
+                from_agent=from_agent,
+                to_agent=to_agent,
+                target_session_id=target_session_id,
+                reason=reason,
+                max_items=max_items,
+            )
+        )
+
     @mcp.tool(annotations=IDEMPOTENT_WRITE)
     def start_execution_task(
         owner_agent: str,

@@ -1677,6 +1677,78 @@ class AgentBridgeTests(unittest.TestCase):
         ]
         self.assertEqual(notices, [])
 
+    def test_backpressure_clear_queues_implementation_catchup_digest(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        first = bridge.send_to_peer(
+            "codex",
+            "claude",
+            "[[handoff:claude]] TYPE: IMPLEMENTATION_UPDATE\nSUMMARY: shipped first\n\nCommit: abc1234",
+            session_id="claude-live",
+        )
+        self.assertTrue(first.ok)
+        second = bridge.send_to_peer(
+            "codex",
+            "claude",
+            "[[handoff:claude]] TYPE: IMPLEMENTATION_UPDATE\nSUMMARY: shipped second\n\nCommit: def5678",
+            session_id="claude-live",
+        )
+        self.assertFalse(second.ok)
+
+        journal = bridge.list_implementation_journal("codex", "claude")
+        self.assertEqual(journal.data["total_count"], 2)
+        self.assertEqual([event["delivery_status"] for event in journal.data["events"]], ["queued", "rejected"])
+
+        read = bridge.check_inbox("claude", "claude-live", mark_read=True)
+
+        self.assertTrue(read.ok)
+        digest = read.data["backpressure_resolutions"][0]["notified"][0]["catchup_digest"]
+        self.assertTrue(digest["ok"])
+        self.assertEqual(digest["event_count"], 2)
+        inbox = bridge.peek_inbox("claude", "claude-live")
+        digest_rows = [row for row in inbox.data["messages"] if row.get("control_type") == "CATCHUP_DIGEST"]
+        self.assertEqual(len(digest_rows), 1)
+        self.assertIn("shipped first", digest_rows[0]["body"])
+        self.assertIn("shipped second", digest_rows[0]["body"])
+        self.assertEqual(digest_rows[0]["catchup_to_sequence"], 2)
+
+        marked = bridge.mark_read("claude", digest_rows[0]["id"], session_id="claude-live")
+        self.assertTrue(marked.ok)
+        journal_after = bridge.list_implementation_journal("codex", "claude")
+        peer_state = journal_after.data["peer_states"]["codex->claude"]
+        self.assertEqual(peer_state["last_ack_sequence"], 2)
+
+    def test_handshake_read_queues_catchup_digest_for_peer(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        recorded = bridge.record_implementation_event(
+            "codex",
+            "claude",
+            "shipped while Claude was offline",
+            commit="abc1234",
+        )
+        self.assertTrue(recorded.ok)
+        bridge.send_control_message(
+            "claude",
+            "codex",
+            "HANDSHAKE",
+            "claude handshake",
+            json.dumps({"session_id": "claude-live", "project": "mlv-app"}),
+            session_id="codex-live",
+        )
+
+        read = bridge.check_inbox("codex", "codex-live", mark_read=True)
+
+        self.assertTrue(read.ok)
+        digests = [item for item in read.data["catchup_digests"] if item.get("ok")]
+        self.assertEqual(len(digests), 1)
+        inbox = bridge.peek_inbox("claude", "claude-live")
+        digest_rows = [row for row in inbox.data["messages"] if row.get("control_type") == "CATCHUP_DIGEST"]
+        self.assertEqual(len(digest_rows), 1)
+        self.assertIn("shipped while Claude was offline", digest_rows[0]["body"])
+
     def test_process_lease_heartbeat_and_release(self) -> None:
         lock_path = self.state_dir / "locks" / "watcher.lock"
         acquired = acquire_singleton_lease(

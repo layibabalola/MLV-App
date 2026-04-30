@@ -43,6 +43,10 @@ WAKE_PREFIRE_WINDOW_S = 10
 EXECUTION_STATE_SCHEMA_VERSION = 1
 EXECUTION_PROOF_TIMEOUT_S = 120
 NON_ACTIONABLE_PENDING_EXECUTION_STATES = {"blocked", "parked", "displaced", "completed"}
+IMPLEMENTATION_JOURNAL_SCHEMA_VERSION = 1
+IMPLEMENTATION_JOURNAL_MAX_EVENTS = 500
+IMPLEMENTATION_JOURNAL_DIGEST_MAX_ITEMS = 20
+IMPLEMENTATION_JOURNAL_MESSAGE_TYPES = {"IMPLEMENTATION_UPDATE", "IMPLEMENTATION_SUMMARY", "PHASE_DONE"}
 CROSS_PROJECT_PAIR_SCHEMA_VERSION = 1
 CROSS_PROJECT_PENDING_SCHEMA_VERSION = 1
 CROSS_PROJECT_NONCE_WINDOW_S = 60
@@ -256,6 +260,10 @@ class AgentBridge:
     @property
     def execution_state_path(self) -> Path:
         return self.state_dir / "execution-state.json"
+
+    @property
+    def implementation_journal_path(self) -> Path:
+        return self.state_dir / "implementation-journal.json"
 
     @property
     def cross_project_pairs_dir(self) -> Path:
@@ -512,6 +520,12 @@ class AgentBridge:
                         "sender_session_id": reply_session,
                         "control_status": sent.status,
                         "message_id": sent.data.get("id") if sent.ok else None,
+                        "catchup_digest": self._send_catchup_digest_unlocked(
+                            from_agent=sender,
+                            to_agent=receiver_agent,
+                            target_session_id=bucket,
+                            reason="backpressure_resolved",
+                        ),
                     }
                 )
             pending.pop(key, None)
@@ -557,6 +571,15 @@ class AgentBridge:
         return {
             "schema_version": EXECUTION_STATE_SCHEMA_VERSION,
             "owners": {},
+            "updated_at": utc_now(),
+        }
+
+    def _default_implementation_journal(self) -> Dict[str, Any]:
+        return {
+            "schema_version": IMPLEMENTATION_JOURNAL_SCHEMA_VERSION,
+            "next_sequence": 1,
+            "events": [],
+            "peer_states": {},
             "updated_at": utc_now(),
         }
 
@@ -637,6 +660,349 @@ class AgentBridge:
     def _save_execution_state(self, payload: Dict[str, Any]) -> None:
         payload["updated_at"] = utc_now()
         write_json(self.execution_state_path, payload)
+
+    def _load_implementation_journal(self) -> Dict[str, Any]:
+        try:
+            payload = read_json(self.implementation_journal_path, self._default_implementation_journal())
+        except (JSONDecodeError, OSError):
+            corrupt_path = self.implementation_journal_path.with_name(
+                "implementation-journal.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            )
+            if self.implementation_journal_path.exists():
+                self.implementation_journal_path.replace(corrupt_path)
+            payload = self._default_implementation_journal()
+        payload["schema_version"] = max(
+            int(payload.get("schema_version") or 1),
+            IMPLEMENTATION_JOURNAL_SCHEMA_VERSION,
+        )
+        if not isinstance(payload.get("events"), list):
+            payload["events"] = []
+        if not isinstance(payload.get("peer_states"), dict):
+            payload["peer_states"] = {}
+        try:
+            payload["next_sequence"] = max(1, int(payload.get("next_sequence") or 1))
+        except (TypeError, ValueError):
+            payload["next_sequence"] = 1
+        return payload
+
+    def _save_implementation_journal(self, payload: Dict[str, Any]) -> None:
+        payload["updated_at"] = utc_now()
+        payload["events"] = list(payload.get("events") or [])[-IMPLEMENTATION_JOURNAL_MAX_EVENTS:]
+        write_json(self.implementation_journal_path, payload)
+
+    def _journal_pair_key(self, owner_agent: str, peer_agent: str) -> str:
+        return "%s->%s" % (owner_agent, peer_agent)
+
+    def _journal_peer_state(self, journal: Dict[str, Any], owner_agent: str, peer_agent: str) -> Dict[str, Any]:
+        states = journal.setdefault("peer_states", {})
+        return states.setdefault(
+            self._journal_pair_key(owner_agent, peer_agent),
+            {
+                "owner_agent": owner_agent,
+                "peer_agent": peer_agent,
+                "last_ack_sequence": 0,
+                "last_digest_sequence": 0,
+                "last_digest_at": None,
+            },
+        )
+
+    def _extract_bridge_field(self, body: str, field: str) -> Optional[str]:
+        match = re.search(r"(?im)^%s:\s*(.+?)\s*$" % re.escape(field), body or "")
+        return match.group(1).strip() if match else None
+
+    def _implementation_message_type(self, body: str) -> Optional[str]:
+        value = self._extract_bridge_field(body, "TYPE")
+        if not value:
+            return None
+        message_type = value.split()[0].strip().upper()
+        return message_type if message_type in IMPLEMENTATION_JOURNAL_MESSAGE_TYPES else None
+
+    def _implementation_event_summary(self, body: str) -> str:
+        summary = self._extract_bridge_field(body, "SUMMARY")
+        if summary:
+            return summary[:240]
+        for line in (body or "").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.upper().startswith(("TYPE:", "STATUS:", "ACTION_REQUESTED:")):
+                return stripped[:240]
+        return "Implementation progress update"
+
+    def _implementation_event_commit(self, body: str) -> Optional[str]:
+        explicit = self._extract_bridge_field(body, "COMMIT") or self._extract_bridge_field(body, "Commit")
+        if explicit:
+            token = explicit.split()[0].strip()
+            if re.fullmatch(r"[0-9a-fA-F]{7,40}", token):
+                return token
+        match = re.search(r"(?i)\bcommit[:\s]+([0-9a-f]{7,40})\b", body or "")
+        return match.group(1) if match else None
+
+    def _record_implementation_event_unlocked(
+        self,
+        journal: Dict[str, Any],
+        *,
+        owner_agent: str,
+        peer_agent: str,
+        message_type: str,
+        summary: str,
+        commit: Optional[str] = None,
+        tests: Optional[List[str]] = None,
+        details: Optional[str] = None,
+        related_session_id: Optional[str] = None,
+        body: Optional[str] = None,
+        delivery_status: str = "manual",
+        delivery_session_id: Optional[str] = None,
+        delivery_message_id: Optional[str] = None,
+        rejection_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        sequence = int(journal.get("next_sequence") or 1)
+        journal["next_sequence"] = sequence + 1
+        event = {
+            "id": str(uuid.uuid4()),
+            "sequence": sequence,
+            "created_at": utc_now(),
+            "owner_agent": owner_agent,
+            "peer_agent": peer_agent,
+            "message_type": message_type,
+            "summary": summary.strip()[:240] or "Implementation progress update",
+            "commit": (commit or "").strip() or None,
+            "tests": tests or [],
+            "details": (details or "").strip() or None,
+            "related_session_id": related_session_id,
+            "body_hash": sha256_text(body or "") if body is not None else None,
+            "body_preview": (body or "")[:1000] if body is not None else None,
+            "delivery_status": delivery_status,
+            "delivery_session_id": delivery_session_id,
+            "delivery_message_id": delivery_message_id,
+            "rejection_reason": rejection_reason,
+            "updated_at": utc_now(),
+        }
+        journal.setdefault("events", []).append(event)
+        self._journal_peer_state(journal, owner_agent, peer_agent)
+        return event
+
+    def _update_implementation_event_delivery_unlocked(
+        self,
+        journal: Dict[str, Any],
+        sequence: Optional[int],
+        *,
+        delivery_status: str,
+        delivery_session_id: Optional[str] = None,
+        delivery_message_id: Optional[str] = None,
+        rejection_reason: Optional[str] = None,
+    ) -> None:
+        if sequence is None:
+            return
+        for event in journal.get("events", []):
+            if isinstance(event, dict) and event.get("sequence") == sequence:
+                event["delivery_status"] = delivery_status
+                if delivery_session_id is not None:
+                    event["delivery_session_id"] = delivery_session_id
+                if delivery_message_id is not None:
+                    event["delivery_message_id"] = delivery_message_id
+                if rejection_reason is not None:
+                    event["rejection_reason"] = rejection_reason
+                event["updated_at"] = utc_now()
+                return
+
+    def _ack_implementation_sequences_unlocked(
+        self,
+        journal: Dict[str, Any],
+        *,
+        rows: List[Dict[str, Any]],
+        reader_agent: str,
+    ) -> bool:
+        changed = False
+        for row in rows:
+            try:
+                sender = normalize_agent(row.get("from"))
+            except ValueError:
+                continue
+            sequence = row.get("implementation_journal_sequence") or row.get("catchup_to_sequence")
+            try:
+                sequence_int = int(sequence)
+            except (TypeError, ValueError):
+                continue
+            state = self._journal_peer_state(journal, sender, reader_agent)
+            if sequence_int > int(state.get("last_ack_sequence") or 0):
+                state["last_ack_sequence"] = sequence_int
+                state["last_ack_at"] = utc_now()
+                changed = True
+        return changed
+
+    def _ack_implementation_rows_unlocked(
+        self,
+        *,
+        rows: List[Dict[str, Any]],
+        reader_agent: str,
+    ) -> Dict[str, Any]:
+        journal = self._load_implementation_journal()
+        changed = self._ack_implementation_sequences_unlocked(
+            journal,
+            rows=rows,
+            reader_agent=reader_agent,
+        )
+        if changed:
+            self._save_implementation_journal(journal)
+        return {"changed": changed}
+
+    def _render_catchup_digest(
+        self,
+        *,
+        owner_agent: str,
+        peer_agent: str,
+        events: List[Dict[str, Any]],
+        since_sequence: int,
+        omitted_count: int,
+        reason: str,
+    ) -> str:
+        highest = max([int(event.get("sequence") or 0) for event in events] or [since_sequence])
+        lines = [
+            "CATCHUP_FOR: %s" % peer_agent,
+            "FROM_AGENT: %s" % owner_agent,
+            "SINCE_SEQUENCE: %d" % since_sequence,
+            "TO_SEQUENCE: %d" % highest,
+            "EVENT_COUNT: %d" % len(events),
+            "OMITTED_OLDER_COUNT: %d" % omitted_count,
+            "REASON: %s" % reason,
+            "",
+            "Implementation catch-up digest:",
+        ]
+        if omitted_count:
+            lines.append("- %d older undigested event(s) omitted from this bounded digest; inspect implementation_journal for full history." % omitted_count)
+        for event in events:
+            parts = [
+                "- #%s %s" % (event.get("sequence"), event.get("summary")),
+            ]
+            if event.get("commit"):
+                parts.append("commit=%s" % event.get("commit"))
+            if event.get("delivery_status"):
+                parts.append("delivery=%s" % event.get("delivery_status"))
+            lines.append(" ".join(parts))
+        return "\n".join(lines)
+
+    def _send_catchup_digest_unlocked(
+        self,
+        *,
+        from_agent: str,
+        to_agent: str,
+        target_session_id: str,
+        reason: str,
+        max_items: int = IMPLEMENTATION_JOURNAL_DIGEST_MAX_ITEMS,
+    ) -> Dict[str, Any]:
+        journal = self._load_implementation_journal()
+        state = self._journal_peer_state(journal, from_agent, to_agent)
+        since_sequence = int(state.get("last_ack_sequence") or 0)
+        events = [
+            event
+            for event in journal.get("events", [])
+            if isinstance(event, dict)
+            and event.get("owner_agent") == from_agent
+            and event.get("peer_agent") == to_agent
+            and int(event.get("sequence") or 0) > since_sequence
+        ]
+        if not events:
+            return {
+                "status": "skipped",
+                "reason": "no_unacked_implementation_events",
+                "from_agent": from_agent,
+                "to_agent": to_agent,
+                "target_session_id": target_session_id,
+                "since_sequence": since_sequence,
+            }
+        events = sorted(events, key=lambda item: int(item.get("sequence") or 0))
+        omitted = max(0, len(events) - max_items)
+        selected = events[-max_items:]
+        to_sequence = max(int(event.get("sequence") or 0) for event in selected)
+        target_info = self._bucket_info(self._load_session_registry(), target_session_id)
+        sent = self._enqueue_control_message(
+            from_agent=from_agent,
+            to_agent=to_agent,
+            session_id=target_session_id,
+            control_type="CATCHUP_DIGEST",
+            summary="Implementation catch-up digest from %s" % from_agent,
+            body=self._render_catchup_digest(
+                owner_agent=from_agent,
+                peer_agent=to_agent,
+                events=selected,
+                since_sequence=since_sequence,
+                omitted_count=omitted,
+                reason=reason,
+            ),
+            status="info",
+            replace_existing_control=True,
+            inbox_level=target_info.get("inbox_level"),
+            parent_project=target_info.get("parent_project"),
+            extra_fields={
+                "catchup_from_sequence": since_sequence + 1,
+                "catchup_to_sequence": to_sequence,
+                "catchup_event_count": len(selected),
+                "catchup_omitted_count": omitted,
+                "catchup_reason": reason,
+            },
+        )
+        if sent.ok:
+            state["last_digest_sequence"] = to_sequence
+            state["last_digest_at"] = utc_now()
+            self._save_implementation_journal(journal)
+        return {
+            "status": sent.status,
+            "ok": sent.ok,
+            "message_id": sent.data.get("id") if sent.ok else None,
+            "from_agent": from_agent,
+            "to_agent": to_agent,
+            "target_session_id": target_session_id,
+            "since_sequence": since_sequence,
+            "to_sequence": to_sequence,
+            "event_count": len(selected),
+            "omitted_count": omitted,
+            "reason": sent.message,
+        }
+
+    def _session_hint_from_handshake_row(self, row: Dict[str, Any], registry: Dict[str, Any]) -> Optional[str]:
+        body = row.get("body")
+        if isinstance(body, str):
+            try:
+                payload = json.loads(body)
+                if isinstance(payload, dict) and payload.get("session_id"):
+                    return normalize_session(str(payload["session_id"]))
+            except Exception:
+                pass
+        sender = row.get("from")
+        project = row.get("parent_project") or row.get("session_id")
+        if sender in AGENTS and project:
+            project_entry = (registry.get("projects") or {}).get(str(project), {})
+            active = (project_entry.get("active") or {}).get(sender)
+            if active:
+                return normalize_session(str(active))
+        return None
+
+    def _send_catchup_for_handshakes_unlocked(
+        self,
+        *,
+        receiver_agent: str,
+        rows: List[Dict[str, Any]],
+        registry: Dict[str, Any],
+        via: str,
+    ) -> List[Dict[str, Any]]:
+        digests: List[Dict[str, Any]] = []
+        for row in rows:
+            if row.get("marker_variant") != "control" or row.get("control_type") != "HANDSHAKE":
+                continue
+            try:
+                sender = normalize_agent(row.get("from"))
+            except ValueError:
+                continue
+            target_session = self._session_hint_from_handshake_row(row, registry)
+            if not target_session:
+                continue
+            digest = self._send_catchup_digest_unlocked(
+                from_agent=receiver_agent,
+                to_agent=sender,
+                target_session_id=target_session,
+                reason="handshake_%s" % via,
+            )
+            digests.append(digest)
+        return digests
 
     def _default_cross_project_pending(self) -> Dict[str, Any]:
         return {
@@ -1098,6 +1464,7 @@ class AgentBridge:
         parent_project: Optional[str] = None,
         escalated_from: Optional[str] = None,
         escalation_reason: Optional[str] = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         path = self.inbox_path(target_agent)
         rows = read_jsonl(path)
@@ -1135,9 +1502,7 @@ class AgentBridge:
             summary,
             body,
         )
-        append_jsonl(
-            self.inbox_path(target_agent),
-            {
+        row = {
                 "schema_version": 2,
                 "id": message_id,
                 "created_at": now,
@@ -1168,8 +1533,10 @@ class AgentBridge:
                 "handled_by_session": None,
                 "handled_status": None,
                 "failure_reason": None,
-            },
-        )
+            }
+        if extra_fields:
+            row.update(extra_fields)
+        append_jsonl(self.inbox_path(target_agent), row)
         return message_id
 
     def _enqueue_control_message(
@@ -1187,6 +1554,7 @@ class AgentBridge:
         parent_project: Optional[str] = None,
         escalated_from: Optional[str] = None,
         escalation_reason: Optional[str] = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
     ) -> BridgeResult:
         message_id = self._append_control_message(
             target_agent=to_agent,
@@ -1201,6 +1569,7 @@ class AgentBridge:
             parent_project=parent_project,
             escalated_from=escalated_from,
             escalation_reason=escalation_reason,
+            extra_fields=extra_fields,
         )
         if message_id is None:
             return BridgeResult(
@@ -2463,9 +2832,19 @@ class AgentBridge:
                 "reason": None,
                 "deprecated_session_id_param_used": deprecated_session_param_used,
             }
+            journal: Optional[Dict[str, Any]] = None
+            journal_sequence: Optional[int] = None
 
             def reject(reason: str) -> BridgeResult:
                 event["reason"] = reason
+                if journal is not None and journal_sequence is not None:
+                    self._update_implementation_event_delivery_unlocked(
+                        journal,
+                        journal_sequence,
+                        delivery_status="rejected",
+                        rejection_reason=reason,
+                    )
+                    self._save_implementation_journal(journal)
                 self._audit(event)
                 return BridgeResult(False, "rejected", reason, {"audit_id": event["id"]})
 
@@ -2580,6 +2959,25 @@ class AgentBridge:
                 if sender_record_info:
                     sender_origin = sender_record_info["record"].get("bootstrap_origin")
 
+            implementation_message_type = self._implementation_message_type(body)
+            if implementation_message_type:
+                journal = self._load_implementation_journal()
+                journal_event = self._record_implementation_event_unlocked(
+                    journal,
+                    owner_agent=sender,
+                    peer_agent=target,
+                    message_type=implementation_message_type,
+                    summary=self._implementation_event_summary(body),
+                    commit=self._implementation_event_commit(body),
+                    related_session_id=sender_session_id or delivery_bucket,
+                    body=body,
+                    delivery_status="attempted",
+                    delivery_session_id=delivery_bucket,
+                )
+                journal_sequence = int(journal_event["sequence"])
+                event["implementation_journal_sequence"] = journal_sequence
+                self._save_implementation_journal(journal)
+
             session_state = self._session_state(state, delivery_bucket)
             hop_count = int(session_state.get("hop_count", 0))
             event["hop_count_before"] = hop_count
@@ -2677,6 +3075,8 @@ class AgentBridge:
                 "handled_status": None,
                 "failure_reason": None,
             }
+            if journal_sequence is not None:
+                inbox_row["implementation_journal_sequence"] = journal_sequence
             append_jsonl(self.inbox_path(target), inbox_row)
 
             session_state["hop_count"] = hop_count + 1
@@ -2690,6 +3090,15 @@ class AgentBridge:
             event["accepted"] = True
             event["reason"] = "delivered"
             event["hop_count_after"] = hop_count + 1
+            if journal is not None and journal_sequence is not None:
+                self._update_implementation_event_delivery_unlocked(
+                    journal,
+                    journal_sequence,
+                    delivery_status="queued",
+                    delivery_session_id=delivery_bucket,
+                    delivery_message_id=event["id"],
+                )
+                self._save_implementation_journal(journal)
             self._audit(event)
 
             note = "Queued message for %s in session %s." % (target, delivery_bucket)
@@ -2706,6 +3115,7 @@ class AgentBridge:
                     "inbox_level": delivery_level,
                     "escalated_from": delivery.get("escalated_from"),
                     "escalation_reason": delivery.get("escalation_reason"),
+                    "implementation_journal_sequence": journal_sequence,
                 },
             )
 
@@ -2760,6 +3170,137 @@ class AgentBridge:
                 parent_project=delivery.get("parent_project"),
                 escalated_from=delivery.get("escalated_from"),
                 escalation_reason=delivery.get("escalation_reason"),
+            )
+
+    def record_implementation_event(
+        self,
+        owner_agent: str,
+        peer_agent: str,
+        summary: str,
+        *,
+        message_type: str = "IMPLEMENTATION_UPDATE",
+        commit: Optional[str] = None,
+        tests: Optional[List[str]] = None,
+        details: Optional[str] = None,
+        related_session_id: Optional[str] = None,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent)
+                peer = normalize_agent(peer_agent)
+                related_session = normalize_session(related_session_id) if related_session_id else None
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            event_type = (message_type or "").strip().upper()
+            if event_type not in IMPLEMENTATION_JOURNAL_MESSAGE_TYPES:
+                return BridgeResult(
+                    False,
+                    "rejected",
+                    "message_type must be one of: %s" % ", ".join(sorted(IMPLEMENTATION_JOURNAL_MESSAGE_TYPES)),
+                )
+            if not summary.strip():
+                return BridgeResult(False, "rejected", "summary is required")
+            journal = self._load_implementation_journal()
+            event = self._record_implementation_event_unlocked(
+                journal,
+                owner_agent=owner,
+                peer_agent=peer,
+                message_type=event_type,
+                summary=summary,
+                commit=commit,
+                tests=tests or [],
+                details=details,
+                related_session_id=related_session,
+                delivery_status="recorded",
+            )
+            self._save_implementation_journal(journal)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "record_implementation_event",
+                    "accepted": True,
+                    "owner_agent": owner,
+                    "peer_agent": peer,
+                    "sequence": event["sequence"],
+                }
+            )
+            return BridgeResult(
+                True,
+                "recorded",
+                "Recorded implementation event #%s for %s -> %s." % (event["sequence"], owner, peer),
+                {"event": event},
+            )
+
+    def list_implementation_journal(
+        self,
+        owner_agent: Optional[str] = None,
+        peer_agent: Optional[str] = None,
+        since_sequence: int = 0,
+        limit: int = 50,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                owner = normalize_agent(owner_agent) if owner_agent else None
+                peer = normalize_agent(peer_agent) if peer_agent else None
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            page_limit = self._bounded_int("limit", int(limit), 1, 200)
+            try:
+                since = max(0, int(since_sequence or 0))
+            except (TypeError, ValueError):
+                return BridgeResult(False, "rejected", "since_sequence must be an integer")
+            journal = self._load_implementation_journal()
+            events = [
+                event
+                for event in journal.get("events", [])
+                if isinstance(event, dict)
+                and int(event.get("sequence") or 0) > since
+                and (owner is None or event.get("owner_agent") == owner)
+                and (peer is None or event.get("peer_agent") == peer)
+            ]
+            events = sorted(events, key=lambda item: int(item.get("sequence") or 0))
+            return BridgeResult(
+                True,
+                "implementation_journal",
+                "Found %d implementation journal event(s)." % len(events),
+                {
+                    "count": min(len(events), page_limit),
+                    "total_count": len(events),
+                    "events": events[-page_limit:],
+                    "peer_states": copy.deepcopy(journal.get("peer_states") or {}),
+                    "path": str(self.implementation_journal_path),
+                },
+            )
+
+    def send_catchup_digest(
+        self,
+        from_agent: str,
+        to_agent: str,
+        target_session_id: str,
+        reason: str = "manual",
+        max_items: int = IMPLEMENTATION_JOURNAL_DIGEST_MAX_ITEMS,
+    ) -> BridgeResult:
+        with self._locked():
+            try:
+                sender = normalize_agent(from_agent)
+                target = normalize_agent(to_agent)
+                session = normalize_session(target_session_id)
+            except ValueError as exc:
+                return BridgeResult(False, "rejected", str(exc))
+            page_limit = self._bounded_int("max_items", int(max_items), 1, 100)
+            digest = self._send_catchup_digest_unlocked(
+                from_agent=sender,
+                to_agent=target,
+                target_session_id=session,
+                reason=(reason or "manual").strip() or "manual",
+                max_items=page_limit,
+            )
+            return BridgeResult(
+                bool(digest.get("ok", digest.get("status") == "skipped")),
+                str(digest.get("status")),
+                "Catch-up digest %s for %s -> %s." % (digest.get("status"), sender, target),
+                {"digest": digest},
             )
 
     def check_inbox(
@@ -2838,6 +3379,16 @@ class AgentBridge:
                 )
                 if backpressure_resolutions:
                     self._save_state(state)
+                implementation_ack = self._ack_implementation_rows_unlocked(
+                    rows=read_rows,
+                    reader_agent=target,
+                )
+                catchup_digests = self._send_catchup_for_handshakes_unlocked(
+                    receiver_agent=target,
+                    rows=read_rows,
+                    registry=registry,
+                    via="check_inbox",
+                )
                 self._audit(
                     {
                         "id": str(uuid.uuid4()),
@@ -2850,10 +3401,14 @@ class AgentBridge:
                         "reason": "marked_read",
                         "message_count": len(unread),
                         "backpressure_resolutions": backpressure_resolutions,
+                        "implementation_ack": implementation_ack,
+                        "catchup_digests": catchup_digests,
                     }
                 )
             else:
                 backpressure_resolutions = []
+                implementation_ack = {"changed": False}
+                catchup_digests = []
 
             if not unread:
                 if session is None:
@@ -2873,6 +3428,8 @@ class AgentBridge:
                     "messages": unread,
                     "buckets": returned_buckets if buckets is None else buckets,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "implementation_ack": implementation_ack,
+                    "catchup_digests": catchup_digests,
                 },
             )
 
@@ -2991,6 +3548,16 @@ class AgentBridge:
                         )
                         if backpressure_resolutions:
                             self._save_state(state)
+                        implementation_ack = self._ack_implementation_rows_unlocked(
+                            rows=read_rows,
+                            reader_agent=target,
+                        )
+                        catchup_digests = self._send_catchup_for_handshakes_unlocked(
+                            receiver_agent=target,
+                            rows=read_rows,
+                            registry=registry,
+                            via="wait_inbox",
+                        )
                         self._audit(
                             {
                                 "id": str(uuid.uuid4()),
@@ -3002,10 +3569,14 @@ class AgentBridge:
                                 "reason": "delivered_and_marked",
                                 "message_count": len(unread),
                                 "backpressure_resolutions": backpressure_resolutions,
+                                "implementation_ack": implementation_ack,
+                                "catchup_digests": catchup_digests,
                             }
                         )
                     else:
                         backpressure_resolutions = []
+                        implementation_ack = {"changed": False}
+                        catchup_digests = []
                     delivered = "\n\n".join(row["delivered_message"] for row in unread)
                     return BridgeResult(
                         True,
@@ -3017,6 +3588,8 @@ class AgentBridge:
                             "timed_out": False,
                             "marked_read": mark_read,
                             "backpressure_resolutions": backpressure_resolutions,
+                            "implementation_ack": implementation_ack,
+                            "catchup_digests": catchup_digests,
                         },
                     )
 
@@ -3125,6 +3698,19 @@ class AgentBridge:
                 )
                 if backpressure_resolutions:
                     self._save_state(state)
+                implementation_ack = self._ack_implementation_rows_unlocked(
+                    rows=read_rows,
+                    reader_agent=target,
+                )
+                catchup_digests = self._send_catchup_for_handshakes_unlocked(
+                    receiver_agent=target,
+                    rows=read_rows,
+                    registry=registry,
+                    via="mark_read",
+                )
+            else:
+                implementation_ack = {"changed": False}
+                catchup_digests = []
 
             self._audit(
                 {
@@ -3137,6 +3723,8 @@ class AgentBridge:
                     "accepted": True,
                     "changed": changed,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "implementation_ack": implementation_ack,
+                    "catchup_digests": catchup_digests,
                 }
             )
             return BridgeResult(
@@ -3148,6 +3736,8 @@ class AgentBridge:
                     "changed": changed,
                     "stale_bypass": stale_bypass,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "implementation_ack": implementation_ack,
+                    "catchup_digests": catchup_digests,
                 },
             )
 
@@ -4668,6 +5258,7 @@ class AgentBridge:
             "session_registry": self.session_registry_path,
             "pending_actions": self.pending_actions_path,
             "execution_state": self.execution_state_path,
+            "implementation_journal": self.implementation_journal_path,
             "wake_breaker": self.wake_breaker_path,
             "tool_manifest": self.state_dir / "tool-manifest.json",
             "cross_project_pending": self.cross_project_pending_path,

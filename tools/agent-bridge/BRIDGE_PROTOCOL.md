@@ -77,6 +77,7 @@ event actions:
 | `mark_handled` | bridge MCP | Receipt update | message_id, handled_status |
 | `activate_session` | bootstrap_session | Session registered | previous_local_session, drained_messages count |
 | `send_control` | bridge | Control message routed | control_type |
+| `record_implementation_event` | bridge MCP | Durable implementation progress journal entry recorded for peer catch-up | owner_agent, peer_agent, sequence |
 | `mcp_server_wrapper_launch` | server_wrapper | Wrapper started a `server.py` | command, parent_pid |
 | `mcp_server_self_restarted` | wrapper Phase 2 | Auto-restart on bridge code change | old_child_pid, new_child_pid, changed_files, elapsed_ms |
 | `mcp_tools_refresh_required` | server_wrapper | Tool manifest changed during one live MCP client session | previous_signature, current_signature, changed_files, previous_tool_names, current_tool_names |
@@ -621,8 +622,14 @@ Claude -> Codex:
   ARCH_DECISION, UNBLOCK, ACTION_REQUEST, USER_PREFERENCE
 
 Either direction:
-  SESSION_UPDATE, USER_PREFERENCE, AUDIT_REQUEST
+  SESSION_UPDATE, USER_PREFERENCE, AUDIT_REQUEST, CATCHUP_DIGEST
 ```
+
+`CATCHUP_DIGEST` is control-plane traffic. It is generated from
+`implementation-journal.json` when a peer clears backpressure or a fresh
+`HANDSHAKE` is read. It is replaceable/coalesced: one unread digest per sender
+and target bucket summarizes all unacknowledged implementation journal entries
+up to its `TO_SEQUENCE`.
 
 ## Bridge Feedback
 
