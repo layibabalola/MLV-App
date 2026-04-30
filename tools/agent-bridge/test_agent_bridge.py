@@ -555,6 +555,208 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertEqual(inbox.status, "messages")
         self.assertIn("active sender to active target still works", inbox.message)
 
+    def _activate_cross_project_fixture(self, bridge: AgentBridge) -> None:
+        bridge.activate_session("claude", "claude-source", project="source-app")
+        bridge.activate_session("codex", "codex-source", project="source-app")
+        bridge.activate_session("claude", "claude-target", project="target-app")
+        bridge.activate_session("codex", "codex-target", project="target-app")
+
+    def test_cross_pair_init_requires_manual_confirmation(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self._activate_cross_project_fixture(bridge)
+
+        result = bridge.cross_pair_init(
+            agent="claude",
+            project="source-app",
+            peer_project="target-app",
+            role="advisor",
+            nonce="nonce-12345",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "confirmation_required")
+        self.assertIn("different projects", result.message)
+
+    def test_cross_pair_nonce_match_activates_read_and_advise(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self._activate_cross_project_fixture(bridge)
+
+        first = bridge.cross_pair_init(
+            agent="claude",
+            project="source-app",
+            peer_project="target-app",
+            role="advisor",
+            nonce="nonce-activate-1",
+            session_id="claude-source",
+            confirm_different_projects=True,
+            requested_permission_tier="write_with_confirmation",
+        )
+        second = bridge.cross_pair_init(
+            agent="codex",
+            project="target-app",
+            peer_project="source-app",
+            role="executor",
+            nonce="nonce-activate-1",
+            session_id="codex-target",
+            confirm_different_projects=True,
+        )
+
+        self.assertTrue(first.ok)
+        self.assertEqual(first.status, "pending")
+        self.assertTrue(second.ok)
+        self.assertEqual(second.status, "active")
+        link = second.data["link"]
+        self.assertEqual(link["permission_tier"], "read_and_advise")
+        self.assertEqual(link["advisor"]["project"], "source-app")
+        self.assertEqual(link["executor"]["project"], "target-app")
+        self.assertTrue((bridge.cross_project_pairs_dir / ("%s.json" % link["link_id"])).exists())
+
+        replay = bridge.cross_pair_init(
+            agent="claude",
+            project="source-app",
+            peer_project="target-app",
+            role="advisor",
+            nonce="nonce-activate-1",
+            confirm_different_projects=True,
+        )
+        self.assertFalse(replay.ok)
+        self.assertIn("already been used", replay.message)
+
+    def test_cross_pair_nonce_window_expiry_keeps_second_side_pending(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self._activate_cross_project_fixture(bridge)
+
+        first = bridge.cross_pair_init(
+            agent="claude",
+            project="source-app",
+            peer_project="target-app",
+            role="advisor",
+            nonce="nonce-expire-1",
+            confirm_different_projects=True,
+        )
+        self.assertEqual(first.status, "pending")
+        pending = json.loads(bridge.cross_project_pending_path.read_text(encoding="utf-8"))
+        pending["observations"][0]["expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat(timespec="seconds")
+        write_json(bridge.cross_project_pending_path, pending)
+
+        second = bridge.cross_pair_init(
+            agent="codex",
+            project="target-app",
+            peer_project="source-app",
+            role="executor",
+            nonce="nonce-expire-1",
+            confirm_different_projects=True,
+        )
+        self.assertTrue(second.ok)
+        self.assertEqual(second.status, "pending")
+        self.assertEqual(bridge.list_cross_project_links().data["count"], 0)
+
+    def test_cross_pair_promotion_is_executor_only_and_explicit(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self._activate_cross_project_fixture(bridge)
+        bridge.cross_pair_init(
+            agent="claude",
+            project="source-app",
+            peer_project="target-app",
+            role="advisor",
+            nonce="nonce-promote-1",
+            confirm_different_projects=True,
+        )
+        active = bridge.cross_pair_init(
+            agent="codex",
+            project="target-app",
+            peer_project="source-app",
+            role="executor",
+            nonce="nonce-promote-1",
+            confirm_different_projects=True,
+        )
+        link_id = active.data["link"]["link_id"]
+
+        advisor = bridge.cross_pair_promote(
+            link_id=link_id,
+            project="source-app",
+            permission_tier="write_with_confirmation",
+            agent="claude",
+            confirm_write_override=True,
+        )
+        self.assertFalse(advisor.ok)
+        self.assertIn("only the executor", advisor.message)
+
+        missing_confirm = bridge.cross_pair_promote(
+            link_id=link_id,
+            project="target-app",
+            permission_tier="write_with_confirmation",
+            agent="codex",
+        )
+        self.assertFalse(missing_confirm.ok)
+        self.assertEqual(missing_confirm.status, "confirmation_required")
+
+        promoted = bridge.cross_pair_promote(
+            link_id=link_id,
+            project="target-app",
+            permission_tier="write_with_confirmation",
+            agent="codex",
+            session_id="codex-target",
+            confirm_write_override=True,
+        )
+        self.assertTrue(promoted.ok)
+        self.assertEqual(promoted.data["link"]["permission_tier"], "write_with_confirmation")
+
+    def test_cross_project_message_routes_with_policy_and_revoke_blocks(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self._activate_cross_project_fixture(bridge)
+        bridge.cross_pair_init(
+            agent="claude",
+            project="source-app",
+            peer_project="target-app",
+            role="advisor",
+            nonce="nonce-message-1",
+            confirm_different_projects=True,
+        )
+        active = bridge.cross_pair_init(
+            agent="codex",
+            project="target-app",
+            peer_project="source-app",
+            role="executor",
+            nonce="nonce-message-1",
+            confirm_different_projects=True,
+        )
+        link_id = active.data["link"]["link_id"]
+
+        sent = bridge.send_cross_project_message(
+            link_id=link_id,
+            from_project="source-app",
+            from_agent="claude",
+            to_agent="codex",
+            message="Advise on porting this parser; do not write directly.",
+        )
+        self.assertTrue(sent.ok)
+        self.assertEqual(sent.data["to_project"], "target-app")
+        inbox = bridge.peek_inbox("codex", session_id="target-app")
+        cross_rows = [row for row in inbox.data["messages"] if "TYPE: CROSS_PROJECT_MESSAGE" in row["body"]]
+        self.assertEqual(len(cross_rows), 1)
+        self.assertIn("ROLE_POLICY: communication-only", cross_rows[0]["body"])
+        self.assertIn("PERMISSION_TIER: read_and_advise", cross_rows[0]["body"])
+
+        revoked = bridge.cross_pair_revoke(
+            link_id=link_id,
+            project="target-app",
+            agent="codex",
+            reason="test complete",
+        )
+        self.assertTrue(revoked.ok)
+        blocked = bridge.send_cross_project_message(
+            link_id=link_id,
+            from_project="source-app",
+            from_agent="claude",
+            to_agent="codex",
+            message="This should not send.",
+        )
+        self.assertFalse(blocked.ok)
+        self.assertIn("revoked", blocked.message)
+
     def test_activate_session_promotes_unread_messages_to_project(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")

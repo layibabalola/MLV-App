@@ -30,6 +30,7 @@ Default state root:
     pending_busy.jsonl                (presence exit code 10 deferred queue)
     wake-failure-windows.json         (D2 circuit breaker per-session state)
     cross-project-pairs\              (cross-project pairing state, when active)
+      _pending.json                   (manual nonce observations and replay hashes)
       <link_id>.json
     locks\
       watcher.lock
@@ -82,7 +83,8 @@ Full migration tooling is still tracked in `REFACTOR_PLAN.md`.
 | `pending_bootstrap.jsonl` | Deferred queue for presence exit code 5 (peer not bootstrapped). Drained on bridge_bootstrap layer transition to ok. |
 | `pending_busy.jsonl` | Deferred queue for presence exit code 10 (peer busy in long task). Drained on next `check_inbox` audit event by target agent. |
 | `wake-failure-windows.json` | Per-session circuit-breaker state per `WAKE_HARDENING_SPEC.md` D2: rolling failure windows, breaker state, exit-code distribution metadata. |
-| `cross-project-pairs/<link_id>.json` | Cross-project pairing state per the in-flight cross-project spec: tier, expiration, advisor/executor, audit references. |
+| `cross-project-pairs/_pending.json` | Manual nonce observations for cross-project pairing plus hashed used-nonce replay cache. |
+| `cross-project-pairs/<link_id>.json` | Cross-project pairing state per `CROSS_PROJECT_PAIRING_SPEC.md`: tier, expiration, advisor/executor, policy, and audit references. |
 | `*.quarantine.jsonl` | Malformed JSONL rows preserved by storage/recovery tools. |
 
 ## Process State

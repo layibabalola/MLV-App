@@ -43,6 +43,16 @@ WAKE_PREFIRE_WINDOW_S = 10
 EXECUTION_STATE_SCHEMA_VERSION = 1
 EXECUTION_PROOF_TIMEOUT_S = 120
 NON_ACTIONABLE_PENDING_EXECUTION_STATES = {"blocked", "parked", "displaced", "completed"}
+CROSS_PROJECT_PAIR_SCHEMA_VERSION = 1
+CROSS_PROJECT_PENDING_SCHEMA_VERSION = 1
+CROSS_PROJECT_NONCE_WINDOW_S = 60
+CROSS_PROJECT_DEFAULT_TTL_MINUTES = 120
+CROSS_PROJECT_MAX_TTL_MINUTES = 24 * 60
+CROSS_PROJECT_READ_AND_ADVISE = "read_and_advise"
+CROSS_PROJECT_WRITE_WITH_CONFIRMATION = "write_with_confirmation"
+CROSS_PROJECT_PERMISSION_TIERS = {CROSS_PROJECT_READ_AND_ADVISE, CROSS_PROJECT_WRITE_WITH_CONFIRMATION}
+CROSS_PROJECT_ROLES = {"advisor", "executor"}
+CROSS_PROJECT_WARNING = "You are about to pair threads from different projects. Are you sure?"
 INBOX_LEVEL_SESSION = "session"
 INBOX_LEVEL_PROJECT = "project"
 INBOX_LEVEL_AGENT = "agent"
@@ -248,6 +258,14 @@ class AgentBridge:
         return self.state_dir / "execution-state.json"
 
     @property
+    def cross_project_pairs_dir(self) -> Path:
+        return self.state_dir / "cross-project-pairs"
+
+    @property
+    def cross_project_pending_path(self) -> Path:
+        return self.cross_project_pairs_dir / "_pending.json"
+
+    @property
     def session_registry_path(self) -> Path:
         return session_registry_path_for_state_dir(self.state_dir)
 
@@ -433,6 +451,156 @@ class AgentBridge:
     def _save_execution_state(self, payload: Dict[str, Any]) -> None:
         payload["updated_at"] = utc_now()
         write_json(self.execution_state_path, payload)
+
+    def _default_cross_project_pending(self) -> Dict[str, Any]:
+        return {
+            "schema_version": CROSS_PROJECT_PENDING_SCHEMA_VERSION,
+            "observations": [],
+            "used_nonce_hashes": [],
+            "updated_at": utc_now(),
+        }
+
+    def _load_cross_project_pending(self) -> Dict[str, Any]:
+        try:
+            pending = read_json(self.cross_project_pending_path, self._default_cross_project_pending())
+        except (JSONDecodeError, OSError):
+            corrupt_path = self.cross_project_pending_path.with_name(
+                "_pending.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            )
+            if self.cross_project_pending_path.exists():
+                self.cross_project_pending_path.replace(corrupt_path)
+            pending = self._default_cross_project_pending()
+        pending["schema_version"] = max(
+            int(pending.get("schema_version") or 1),
+            CROSS_PROJECT_PENDING_SCHEMA_VERSION,
+        )
+        if not isinstance(pending.get("observations"), list):
+            pending["observations"] = []
+        if not isinstance(pending.get("used_nonce_hashes"), list):
+            pending["used_nonce_hashes"] = []
+        return pending
+
+    def _save_cross_project_pending(self, pending: Dict[str, Any]) -> None:
+        pending["updated_at"] = utc_now()
+        self.cross_project_pairs_dir.mkdir(parents=True, exist_ok=True)
+        write_json(self.cross_project_pending_path, pending)
+
+    def _hash_cross_project_nonce(self, nonce: str) -> str:
+        return sha256_text("cross-project-pair\n%s" % nonce)
+
+    def _normalize_cross_project_role(self, role: str) -> str:
+        value = (role or "").strip().lower()
+        if value not in CROSS_PROJECT_ROLES:
+            raise ValueError("role must be one of: advisor, executor")
+        return value
+
+    def _normalize_cross_project_permission(self, permission_tier: Optional[str]) -> str:
+        value = (permission_tier or CROSS_PROJECT_READ_AND_ADVISE).strip().lower()
+        if value not in CROSS_PROJECT_PERMISSION_TIERS:
+            raise ValueError(
+                "permission_tier must be one of: %s"
+                % ", ".join(sorted(CROSS_PROJECT_PERMISSION_TIERS))
+            )
+        return value
+
+    def _normalize_cross_project_link_id(self, link_id: str) -> str:
+        value = (link_id or "").strip()
+        if not value:
+            raise ValueError("link_id is required")
+        if len(value) > 96:
+            raise ValueError("link_id must be 96 characters or fewer")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+            raise ValueError("link_id may only contain letters, numbers, dot, colon, dash, and underscore")
+        return value
+
+    def _bounded_cross_project_ttl(self, ttl_minutes: int) -> int:
+        if isinstance(ttl_minutes, bool) or not isinstance(ttl_minutes, int):
+            raise ValueError("ttl_minutes must be an integer")
+        if ttl_minutes < 1 or ttl_minutes > CROSS_PROJECT_MAX_TTL_MINUTES:
+            raise ValueError("ttl_minutes must be between 1 and %d" % CROSS_PROJECT_MAX_TTL_MINUTES)
+        return ttl_minutes
+
+    def _cross_project_link_path(self, link_id: str) -> Path:
+        return self.cross_project_pairs_dir / ("%s.json" % self._normalize_cross_project_link_id(link_id))
+
+    def _load_cross_project_link(self, link_id: str) -> Optional[Dict[str, Any]]:
+        path = self._cross_project_link_path(link_id)
+        if not path.exists():
+            return None
+        try:
+            payload = read_json(path, {})
+        except (JSONDecodeError, OSError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    def _save_cross_project_link(self, link: Dict[str, Any]) -> None:
+        link_id = self._normalize_cross_project_link_id(str(link.get("link_id") or ""))
+        link["updated_at"] = utc_now()
+        self.cross_project_pairs_dir.mkdir(parents=True, exist_ok=True)
+        write_json(self._cross_project_link_path(link_id), link)
+
+    def _cross_project_link_status(self, link: Dict[str, Any], now_dt: Optional[datetime] = None) -> str:
+        status = str(link.get("status") or "unknown")
+        if status != "active":
+            return status
+        expires_at = parse_iso_datetime(link.get("expires_at"))
+        if expires_at and expires_at <= (now_dt or datetime.now(timezone.utc)):
+            return "expired"
+        return "active"
+
+    def _cross_project_side_for_project(self, link: Dict[str, Any], project: str) -> Optional[str]:
+        advisor_project = (link.get("advisor") or {}).get("project")
+        executor_project = (link.get("executor") or {}).get("project")
+        if project == advisor_project:
+            return "advisor"
+        if project == executor_project:
+            return "executor"
+        return None
+
+    def _cross_project_link_records(self) -> List[Dict[str, Any]]:
+        if not self.cross_project_pairs_dir.exists():
+            return []
+        records: List[Dict[str, Any]] = []
+        for path in sorted(self.cross_project_pairs_dir.glob("*.json")):
+            if path.name.startswith("_"):
+                continue
+            try:
+                payload = read_json(path, {})
+            except (JSONDecodeError, OSError):
+                continue
+            if isinstance(payload, dict):
+                records.append(payload)
+        return records
+
+    def _active_cross_project_link_between(
+        self,
+        from_project: str,
+        to_project: str,
+        now_dt: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        for link in self._cross_project_link_records():
+            if self._cross_project_link_status(link, now_dt=now_dt) != "active":
+                continue
+            advisor_project = (link.get("advisor") or {}).get("project")
+            executor_project = (link.get("executor") or {}).get("project")
+            projects = {advisor_project, executor_project}
+            if from_project in projects and to_project in projects and from_project != to_project:
+                return link
+        return None
+
+    def _prune_cross_project_pending(self, pending: Dict[str, Any], now_dt: datetime) -> None:
+        kept: List[Dict[str, Any]] = []
+        for observation in pending.get("observations", []):
+            if not isinstance(observation, dict):
+                continue
+            expires_at = parse_iso_datetime(observation.get("expires_at"))
+            if expires_at and expires_at <= now_dt:
+                continue
+            kept.append(observation)
+        pending["observations"] = kept
+        pending["used_nonce_hashes"] = list(dict.fromkeys(str(item) for item in pending.get("used_nonce_hashes", [])))[-200:]
 
     def _owner_execution_record(self, payload: Dict[str, Any], owner: str) -> Dict[str, Any]:
         owners = payload.setdefault("owners", {})
@@ -1636,6 +1804,437 @@ class AgentBridge:
         if delivery_level == INBOX_LEVEL_SESSION and parent_project:
             return SessionInbox(parent_project, target, delivery_bucket)
         return None
+
+    def cross_pair_init(
+        self,
+        agent: str,
+        project: str,
+        peer_project: str,
+        role: str,
+        nonce: str,
+        session_id: Optional[str] = None,
+        confirm_different_projects: bool = False,
+        ttl_minutes: int = CROSS_PROJECT_DEFAULT_TTL_MINUTES,
+        requested_permission_tier: str = CROSS_PROJECT_READ_AND_ADVISE,
+    ) -> BridgeResult:
+        """Manually establish a nonce-matched cross-project advisory link.
+
+        This is intentionally not automatic. Both project chats must call this
+        with the same nonce, inverse projects, and opposite roles within the
+        short nonce window. The active link always starts as read_and_advise.
+        """
+        now = utc_now()
+        now_dt = parse_iso_datetime(now) or datetime.now(timezone.utc)
+        try:
+            owner = normalize_agent(agent)
+            project_name = normalize_project(project)
+            peer_name = normalize_project(peer_project)
+            side = self._normalize_cross_project_role(role)
+            ttl = self._bounded_cross_project_ttl(ttl_minutes)
+            requested_permission = self._normalize_cross_project_permission(requested_permission_tier)
+            session = normalize_session(session_id) if session_id is not None else None
+        except ValueError as exc:
+            return BridgeResult(False, "rejected", str(exc))
+
+        nonce_value = (nonce or "").strip()
+        if len(nonce_value) < 8:
+            return BridgeResult(False, "rejected", "nonce must be at least 8 characters")
+        if project_name == peer_name:
+            return BridgeResult(False, "rejected", "cross-project pairing requires two different projects")
+        if not confirm_different_projects:
+            return BridgeResult(
+                False,
+                "confirmation_required",
+                CROSS_PROJECT_WARNING,
+                {
+                    "warning": CROSS_PROJECT_WARNING,
+                    "required_parameter": "confirm_different_projects=true",
+                    "project": project_name,
+                    "peer_project": peer_name,
+                    "default_permission_tier": CROSS_PROJECT_READ_AND_ADVISE,
+                    "mode": "manual_only",
+                },
+            )
+
+        nonce_hash = self._hash_cross_project_nonce(nonce_value)
+        with self._locked():
+            registry = self._load_session_registry()
+            projects = registry.get("projects") or {}
+            if project_name not in projects or peer_name not in projects:
+                return BridgeResult(
+                    False,
+                    "rejected",
+                    "both projects must be bootstrapped before cross-project pairing",
+                    {"project": project_name, "peer_project": peer_name},
+                )
+
+            pending = self._load_cross_project_pending()
+            self._prune_cross_project_pending(pending, now_dt)
+            if nonce_hash in set(str(item) for item in pending.get("used_nonce_hashes", [])):
+                self._save_cross_project_pending(pending)
+                return BridgeResult(False, "rejected", "nonce has already been used for cross-project pairing")
+
+            observation = {
+                "id": str(uuid.uuid4()),
+                "created_at": now,
+                "expires_at": (now_dt + timedelta(seconds=CROSS_PROJECT_NONCE_WINDOW_S)).isoformat(timespec="seconds"),
+                "nonce_hash": nonce_hash,
+                "agent": owner,
+                "session_id": session,
+                "project": project_name,
+                "peer_project": peer_name,
+                "role": side,
+                "ttl_minutes": ttl,
+                "requested_permission_tier": requested_permission,
+                "requested_permission_ignored": requested_permission != CROSS_PROJECT_READ_AND_ADVISE,
+                "bridge_root": str(self.state_dir.parent),
+            }
+
+            observations = [
+                item for item in pending.get("observations", [])
+                if not (
+                    isinstance(item, dict)
+                    and item.get("nonce_hash") == nonce_hash
+                    and item.get("project") == project_name
+                    and item.get("role") == side
+                )
+            ]
+            opposite = [
+                item for item in observations
+                if isinstance(item, dict)
+                and item.get("nonce_hash") == nonce_hash
+                and item.get("project") == peer_name
+                and item.get("peer_project") == project_name
+            ]
+            same_role = [item for item in opposite if item.get("role") == side]
+            if same_role:
+                pending["observations"] = observations
+                self._save_cross_project_pending(pending)
+                return BridgeResult(False, "rejected", "matching nonce was observed with the same role; use advisor/executor")
+
+            match = next((item for item in opposite if item.get("role") != side), None)
+            if not match:
+                observations.append(observation)
+                pending["observations"] = observations
+                self._save_cross_project_pending(pending)
+                self._audit(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "timestamp": now,
+                        "action": "cross_project_pair_pending",
+                        "agent": owner,
+                        "session_id": session,
+                        "project": project_name,
+                        "peer_project": peer_name,
+                        "role": side,
+                        "nonce_hash": nonce_hash,
+                        "accepted": True,
+                    }
+                )
+                return BridgeResult(
+                    True,
+                    "pending",
+                    "Recorded one side of cross-project pairing; waiting for peer project to confirm with matching nonce.",
+                    {
+                        "project": project_name,
+                        "peer_project": peer_name,
+                        "role": side,
+                        "nonce_window_seconds": CROSS_PROJECT_NONCE_WINDOW_S,
+                        "warning": CROSS_PROJECT_WARNING,
+                    },
+                )
+
+            pair = [match, observation]
+            advisor = next(item for item in pair if item.get("role") == "advisor")
+            executor = next(item for item in pair if item.get("role") == "executor")
+            ttl_final = min(int(advisor.get("ttl_minutes") or ttl), int(executor.get("ttl_minutes") or ttl), ttl)
+            link_id = "xpair-%s" % sha256_text(
+                "%s\n%s\n%s" % (advisor.get("project"), executor.get("project"), nonce_hash)
+            )[:20]
+            link = {
+                "schema_version": CROSS_PROJECT_PAIR_SCHEMA_VERSION,
+                "link_id": link_id,
+                "status": "active",
+                "created_at": now,
+                "updated_at": now,
+                "expires_at": (now_dt + timedelta(minutes=ttl_final)).isoformat(timespec="seconds"),
+                "nonce_hash": nonce_hash,
+                "permission_tier": CROSS_PROJECT_READ_AND_ADVISE,
+                "mode": "manual_cross_project",
+                "warning_confirmed": True,
+                "advisor": {
+                    "project": advisor.get("project"),
+                    "agent": advisor.get("agent"),
+                    "session_id": advisor.get("session_id"),
+                },
+                "executor": {
+                    "project": executor.get("project"),
+                    "agent": executor.get("agent"),
+                    "session_id": executor.get("session_id"),
+                },
+                "policy": {
+                    "communication_only": True,
+                    "advisor_default": "read-only advice; executor owns writes",
+                    "write_override_requires_executor_confirmation": True,
+                },
+            }
+            pending["observations"] = [
+                item for item in observations
+                if not (isinstance(item, dict) and item.get("nonce_hash") == nonce_hash)
+            ]
+            used = list(pending.get("used_nonce_hashes", []))
+            used.append(nonce_hash)
+            pending["used_nonce_hashes"] = used[-200:]
+            self._save_cross_project_pending(pending)
+            self._save_cross_project_link(link)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "action": "cross_project_pair_activated",
+                    "link_id": link_id,
+                    "advisor_project": advisor.get("project"),
+                    "executor_project": executor.get("project"),
+                    "permission_tier": CROSS_PROJECT_READ_AND_ADVISE,
+                    "expires_at": link["expires_at"],
+                    "accepted": True,
+                    "projects": [advisor.get("project"), executor.get("project")],
+                }
+            )
+            return BridgeResult(
+                True,
+                "active",
+                "Activated cross-project pairing %s in read_and_advise mode." % link_id,
+                {"link": link},
+            )
+
+    def list_cross_project_links(
+        self,
+        project: Optional[str] = None,
+        include_inactive: bool = False,
+    ) -> BridgeResult:
+        try:
+            project_name = normalize_project(project) if project else None
+        except ValueError as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        now_dt = datetime.now(timezone.utc)
+        with self._locked():
+            links: List[Dict[str, Any]] = []
+            for link in self._cross_project_link_records():
+                derived_status = self._cross_project_link_status(link, now_dt=now_dt)
+                if project_name and self._cross_project_side_for_project(link, project_name) is None:
+                    continue
+                if not include_inactive and derived_status != "active":
+                    continue
+                item = copy.deepcopy(link)
+                item["derived_status"] = derived_status
+                if project_name:
+                    item["local_role"] = self._cross_project_side_for_project(link, project_name)
+                links.append(item)
+        return BridgeResult(
+            True,
+            "cross_project_links",
+            "Found %d cross-project link(s)." % len(links),
+            {"count": len(links), "links": links},
+        )
+
+    def cross_pair_promote(
+        self,
+        link_id: str,
+        project: str,
+        permission_tier: str,
+        agent: str,
+        session_id: Optional[str] = None,
+        confirm_write_override: bool = False,
+    ) -> BridgeResult:
+        try:
+            link = self._normalize_cross_project_link_id(link_id)
+            project_name = normalize_project(project)
+            owner = normalize_agent(agent)
+            permission = self._normalize_cross_project_permission(permission_tier)
+            session = normalize_session(session_id) if session_id is not None else None
+        except ValueError as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        with self._locked():
+            payload = self._load_cross_project_link(link)
+            if not payload:
+                return BridgeResult(False, "not_found", "cross-project link %s was not found" % link)
+            if self._cross_project_link_status(payload) != "active":
+                return BridgeResult(False, "rejected", "cross-project link %s is not active" % link)
+            side = self._cross_project_side_for_project(payload, project_name)
+            if side != "executor":
+                return BridgeResult(False, "rejected", "only the executor project can promote cross-project permissions")
+            if permission == CROSS_PROJECT_WRITE_WITH_CONFIRMATION and not confirm_write_override:
+                return BridgeResult(
+                    False,
+                    "confirmation_required",
+                    "Write override requires explicit executor confirmation.",
+                    {
+                        "required_parameter": "confirm_write_override=true",
+                        "permission_tier": permission,
+                        "link_id": link,
+                    },
+                )
+            payload["permission_tier"] = permission
+            payload["permission_updated_at"] = utc_now()
+            payload["permission_updated_by_project"] = project_name
+            payload["permission_updated_by_agent"] = owner
+            payload["permission_updated_by_session"] = session
+            self._save_cross_project_link(payload)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": payload["permission_updated_at"],
+                    "action": "cross_project_pair_permission_updated",
+                    "link_id": link,
+                    "project": project_name,
+                    "agent": owner,
+                    "session_id": session,
+                    "permission_tier": permission,
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(
+                True,
+                "updated",
+                "Updated cross-project link %s permission to %s." % (link, permission),
+                {"link": payload},
+            )
+
+    def cross_pair_revoke(
+        self,
+        link_id: str,
+        project: str,
+        agent: str,
+        session_id: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> BridgeResult:
+        try:
+            link = self._normalize_cross_project_link_id(link_id)
+            project_name = normalize_project(project)
+            owner = normalize_agent(agent)
+            session = normalize_session(session_id) if session_id is not None else None
+        except ValueError as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        with self._locked():
+            payload = self._load_cross_project_link(link)
+            if not payload:
+                return BridgeResult(False, "not_found", "cross-project link %s was not found" % link)
+            side = self._cross_project_side_for_project(payload, project_name)
+            if side is None:
+                return BridgeResult(False, "rejected", "project is not part of cross-project link %s" % link)
+            if payload.get("status") == "revoked":
+                return BridgeResult(True, "already_revoked", "cross-project link %s is already revoked" % link, {"link": payload})
+            revoked_at = utc_now()
+            payload["status"] = "revoked"
+            payload["revoked_at"] = revoked_at
+            payload["revoked_by_project"] = project_name
+            payload["revoked_by_agent"] = owner
+            payload["revoked_by_session"] = session
+            payload["revocation_reason"] = (reason or "").strip() or None
+            self._save_cross_project_link(payload)
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": revoked_at,
+                    "action": "cross_project_pair_revoked",
+                    "link_id": link,
+                    "project": project_name,
+                    "agent": owner,
+                    "session_id": session,
+                    "reason": payload["revocation_reason"],
+                    "accepted": True,
+                }
+            )
+            return BridgeResult(True, "revoked", "Revoked cross-project link %s." % link, {"link": payload})
+
+    def send_cross_project_message(
+        self,
+        link_id: str,
+        from_project: str,
+        from_agent: str,
+        to_agent: str,
+        message: str,
+    ) -> BridgeResult:
+        try:
+            link = self._normalize_cross_project_link_id(link_id)
+            source_project = normalize_project(from_project)
+            sender = normalize_agent(from_agent)
+            target = normalize_agent(to_agent)
+        except ValueError as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        clean_body = strip_markers(message).get("body", "").strip()
+        if not clean_body:
+            return BridgeResult(False, "rejected", "message is empty after stripping bridge markers")
+
+        with self._locked():
+            payload = self._load_cross_project_link(link)
+            if not payload:
+                return BridgeResult(False, "not_found", "cross-project link %s was not found" % link)
+            derived_status = self._cross_project_link_status(payload)
+            if derived_status != "active":
+                return BridgeResult(False, "rejected", "cross-project link %s is %s" % (link, derived_status))
+            side = self._cross_project_side_for_project(payload, source_project)
+            if side is None:
+                return BridgeResult(False, "rejected", "from_project is not part of cross-project link %s" % link)
+            target_project = (
+                (payload.get("executor") or {}).get("project")
+                if side == "advisor"
+                else (payload.get("advisor") or {}).get("project")
+            )
+            permission = str(payload.get("permission_tier") or CROSS_PROJECT_READ_AND_ADVISE)
+            policy = copy.deepcopy(payload.get("policy") or {})
+
+        role_policy = (
+            "communication-only; advisor is read-only/read-and-advise by default; "
+            "executor owns writes unless it explicitly grants a write override"
+        )
+        wrapped = (
+            "[[handoff:%s]] TYPE: CROSS_PROJECT_MESSAGE\n"
+            "LINK_ID: %s\n"
+            "FROM_PROJECT: %s\n"
+            "TO_PROJECT: %s\n"
+            "FROM_ROLE: %s\n"
+            "PERMISSION_TIER: %s\n"
+            "ROLE_POLICY: %s\n\n"
+            "%s"
+        ) % (target, link, source_project, target_project, side, permission, role_policy, clean_body)
+        queued = self.send_to_peer(sender, target, wrapped, target_session_id=target_project)
+        with self._locked():
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "cross_project_message_sent",
+                    "link_id": link,
+                    "from_project": source_project,
+                    "to_project": target_project,
+                    "from_agent": sender,
+                    "to_agent": target,
+                    "permission_tier": permission,
+                    "policy": policy,
+                    "accepted": queued.ok,
+                    "reason": queued.status if queued.ok else queued.message,
+                    "queued_message_id": queued.data.get("id") if queued.ok else None,
+                }
+            )
+        if not queued.ok:
+            return queued
+        data = dict(queued.data)
+        data.update(
+            {
+                "link_id": link,
+                "from_project": source_project,
+                "to_project": target_project,
+                "permission_tier": permission,
+            }
+        )
+        return BridgeResult(
+            True,
+            "queued",
+            "Queued cross-project message for %s via link %s." % (target_project, link),
+            data,
+        )
 
     def send_to_peer(
         self,

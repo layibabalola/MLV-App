@@ -1,10 +1,11 @@
 # Cross-Project Pair - Test Matrix and Abuse-Path Catalog
 
-**Status:** Proposed (parallel to Codex's in-flight cross-project pairing
-SPEC.md)
+**Status:** MVP coverage implemented for manual nonce pairing, read-and-advise
+default, executor-only promotion, revoke, list, and message routing. Broader
+tier-1 read/write and race/performance cases remain future gates before
+cross-project file operations ship.
 **Authors:** Claude
-**Parent spec:** TBD (Codex drafting; will be at
-`tools/agent-bridge/CROSS_PROJECT_PAIRING_SPEC.md` or similar)
+**Parent spec:** `tools/agent-bridge/CROSS_PROJECT_PAIRING_SPEC.md`
 **Motivation:** concrete tier-1 contract tests that cross-project pairing
 must pass at every commit, per the 2026-04-28 roadmap-shift caveat C2
 (cross-project pairing is higher-stakes; baseline permission/scope checks
@@ -16,6 +17,18 @@ NOT deferred to Phase 14).
 
 These map to the 8 additions in my SPEC_REVIEW_RESULT `45e556fd`. Each is
 a non-negotiable test that the implementation must pass.
+
+The MVP intentionally ships no cross-project file read/write tools. Implemented
+coverage focuses on the authority boundary that exists now:
+
+- manual confirmation is required before any cross-project link can activate
+- nonce match, nonce expiry, and replay blocking are covered
+- new links default to `read_and_advise`
+- advisor self-promotion is rejected; executor write override requires explicit confirmation
+- active links are listable; revoked links block future messages
+- cross-project messages carry policy metadata in the target project bucket
+
+The remaining rows below are still binding for future read/write surfaces.
 
 ### A - Authentication via shared nonce
 

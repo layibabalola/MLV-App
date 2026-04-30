@@ -470,6 +470,97 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         """Find and optionally rekey/quarantine inbox rows in orphaned session buckets."""
         return as_dict(bridge.truedup_session_routing(agent=agent, dry_run=dry_run, mode=mode))
 
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def cross_pair_init(
+        agent: str,
+        project: str,
+        peer_project: str,
+        role: str,
+        nonce: str,
+        session_id: Optional[str] = None,
+        confirm_different_projects: bool = False,
+        ttl_minutes: int = 120,
+        requested_permission_tier: str = "read_and_advise",
+    ) -> dict:
+        """Manually establish one side of a nonce-matched cross-project advisory link."""
+        return as_dict(
+            bridge.cross_pair_init(
+                agent=agent,
+                project=project,
+                peer_project=peer_project,
+                role=role,
+                nonce=nonce,
+                session_id=session_id,
+                confirm_different_projects=confirm_different_projects,
+                ttl_minutes=ttl_minutes,
+                requested_permission_tier=requested_permission_tier,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def list_cross_project_links(project: Optional[str] = None, include_inactive: bool = False) -> dict:
+        """List active cross-project links, optionally scoped to one project."""
+        return as_dict(bridge.list_cross_project_links(project=project, include_inactive=include_inactive))
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def cross_pair_promote(
+        link_id: str,
+        project: str,
+        permission_tier: str,
+        agent: str,
+        session_id: Optional[str] = None,
+        confirm_write_override: bool = False,
+    ) -> dict:
+        """Promote or downgrade a cross-project link permission; write override requires executor confirmation."""
+        return as_dict(
+            bridge.cross_pair_promote(
+                link_id=link_id,
+                project=project,
+                permission_tier=permission_tier,
+                agent=agent,
+                session_id=session_id,
+                confirm_write_override=confirm_write_override,
+            )
+        )
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def cross_pair_revoke(
+        link_id: str,
+        project: str,
+        agent: str,
+        session_id: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> dict:
+        """Revoke a cross-project link from either participating project."""
+        return as_dict(
+            bridge.cross_pair_revoke(
+                link_id=link_id,
+                project=project,
+                agent=agent,
+                session_id=session_id,
+                reason=reason,
+            )
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def send_cross_project_message(
+        link_id: str,
+        from_project: str,
+        from_agent: str,
+        to_agent: str,
+        message: str,
+    ) -> dict:
+        """Send communication-only advice through an active cross-project link."""
+        return as_dict(
+            bridge.send_cross_project_message(
+                link_id=link_id,
+                from_project=from_project,
+                from_agent=from_agent,
+                to_agent=to_agent,
+                message=message,
+            )
+        )
+
     @mcp.tool(annotations=IDEMPOTENT_WRITE)
     def end_session(agent: str, session_id: str, project: Optional[str] = None) -> dict:
         """Mark a session ended and notify the active peer session to stop sending there."""
