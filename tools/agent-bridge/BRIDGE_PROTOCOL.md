@@ -1,17 +1,17 @@
 # Agent-Bridge Communication Protocol
 
-**Status:** Implemented v1.8 (bumped 2026-04-30). Adds wake-script exit code
+**Status:** Implemented v1.9 (bumped 2026-04-30). Adds wake-script exit code
 table, provenance-aware wake refusal, failure reason taxonomy aligned to multi-layer presence
 (`BRIDGE_PRESENCE_SPEC.md`), audit event registry including policy-authority
-and documentation-drift events, and consolidated message type registry including
-types added 2026-04-28 (`WAIT_DECLARED`,
+and documentation-drift events, guided pairing/dashboard use-case events, and
+consolidated message type registry including types added 2026-04-28 (`WAIT_DECLARED`,
 `HEURISTIC_SYNC_ACK`, `PROTOCOL_SYNC_ACK`, `ACTION_REQUEST_RESPONSE`,
 `SPEC_REVIEW_ACK`, `SPEC_REVIEW_REQUEST`, `SPEC_REVIEW_RESULT`,
 `SPEC_REVIEW_RESULT_ACK`, `IMPLEMENTATION_UPDATE`,
 `CROSS_PROJECT_PAIR_REQUEST/ACCEPT/REJECT/EXPIRE/REVOKE/PROMOTE`).
 EXCHANGE_CLOSED close-marker convention added per 2026-04-28 heuristic.
 
-Version: 1.8
+Version: 1.9
 Transport: agent-bridge MCP server (local FS in v1; LAN sync in v2; cloud
 WebSocket in v3 — see `BRIDGE_TRANSPORT_ABSTRACTION_SPEC.md`)
 Applies to: any two agents sharing an agent-bridge instance
@@ -120,7 +120,21 @@ event actions:
 | `remote_authority_request_rejected` | bridge policy gate | Remote peer requested authority it cannot hold | message_id, requested_action, reason |
 | `runtime_policy_changed` | bridge/dashboard | Effective runtime policy changed through a local authority path | policy_id, old_value_hash, new_value_hash |
 | `runtime_policy_snapshot_generated` | policy generator | Generated policy documentation snapshot from runtime registry | snapshot_hash, policy_count |
-| `phase16_security_signoff` | tail-end gate | Phase 16 security review complete | reviewer_session, residual_risks |
+| `remote_request_classified` | bridge policy gate | Remote peer request classified before action | message_id, classification, resulting_action |
+| `guided_pairing_started` | dashboard/local chat | User started guided pairing flow | source, project, pairing_type? |
+| `guided_pairing_confirmed` | dashboard/local chat | User confirmed guided pairing activation | source, contract_id, relationship, role |
+| `guided_pairing_cancelled` | dashboard/local chat | User cancelled guided pairing flow | source, reason |
+| `pairing_cardinality_rejected` | bridge policy gate | Requested pairing would violate primary/cap policy | project, requested_role, reason |
+| `dashboard_started` | dashboard server | Local admin dashboard started | bind_host, port, auth_mode |
+| `dashboard_action_requested` | dashboard | User requested dashboard action | action, target_id? |
+| `dashboard_action_confirmed` | dashboard | User locally confirmed dashboard action | action, target_id?, confirmation_id |
+| `dashboard_action_rejected` | dashboard | Dashboard action rejected or cancelled | action, target_id?, reason |
+| `contract_revoke_requested` | dashboard/local chat | Local user requested contract revocation | contract_id, source |
+| `contract_revoked` | bridge policy gate | Contract was revoked and pairing severed | contract_id, revoked_by, source |
+| `contract_renew_requested` | dashboard/local chat | Local user requested contract renewal | contract_id, source |
+| `contract_renewed` | bridge policy gate | Contract was renewed through local authority path | contract_id, expires_at, source |
+| `local_alias_updated` | dashboard/local chat | Local friendly label changed | target_id, old_alias_hash, new_alias_hash |
+| `phase17_security_signoff` | tail-end gate | Phase 17 security review complete | reviewer_session, residual_risks |
 
 New audit event actions get added to this table as they're introduced;
 unknown action values are tolerated (forward compat) but should map to a

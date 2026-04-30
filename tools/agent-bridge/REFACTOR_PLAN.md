@@ -1,6 +1,6 @@
 # Agent Bridge Refactor — Canonical Plan v1.1
 
-**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, and cross-project pairing MVP. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, cross-project file read/write tools, knowledge-sharing contracts, policy-authority/doc-drift controls, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
+**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, and cross-project pairing MVP. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, cross-project file read/write tools, knowledge-sharing contracts, policy-authority/doc-drift controls, guided pairing/admin dashboard UX, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
 
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
 - Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
@@ -403,18 +403,77 @@ escalation path before the final security review.
   - remote authority escalation requests are rejected
   - dashboard reads runtime policy, not markdown
 
-### Phase 16 - Security review and threat model
+### Phase 16 - Guided pairing and local admin dashboard UX
+
+Implement the use-case-facing UX layer described by:
+
+- `BRIDGE_PAIRING_USER_FLOWS_SPEC.md`
+- `BRIDGE_ADMIN_DASHBOARD_SPEC.md`
+- `REMOTE_OBEDIENCE_USE_CASES_SPEC.md`
+
+This phase makes the contract/policy model understandable to users before final
+security signoff.
+
+- Add guided pairing flow:
+  - same-project primary
+  - same-project observer/advisor/auditor
+  - simultaneous same-project primaries across different projects
+  - cross-project advisor
+  - cross-project write-with-confirmation
+  - bidirectional advising modeled as two directed contracts
+- Add pairing cardinality enforcement:
+  - one primary per `(project, agent)`
+  - configurable observer/advisor/auditor caps
+  - configurable cross-project active-contract caps
+  - dashboard-visible reasons when a pairing option is disabled
+- Add user-facing naming model:
+  - local friendly alias
+  - project alias/id
+  - peer agents and short session ids
+  - trusted local alias vs untrusted peer-claimed label
+  - bidirectional `<->` vs directed `->` relationship display
+- Add local admin dashboard:
+  - localhost-only authenticated web surface
+  - pairings/contracts overview
+  - contract duration and expiration countdown
+  - revoke, renew, rename, preview catch-up
+  - backpressure/catch-up status
+  - policy/doc drift status
+  - remote-authority rejection/proposal queue
+  - audit timeline
+- Add revocation flows:
+  - dashboard revoke with confirmation
+  - natural-language local revoke using the same backend path
+  - peer-initiated disconnect as access-reducing action
+  - revoked contract severs pairing and blocks future sends/wakes/body catch-up
+- Add remote-obedience UX:
+  - classify remote requests before action
+  - reject forbidden remote authority with user-facing explanation
+  - route protected-doc edits and authority-broadening requests to local
+    proposals/confirmations
+  - honor access-reducing requests safely
+- Add tests for:
+  - dashboard rendering and escaping
+  - guided pairing option availability
+  - duplicate-primary rejection
+  - simultaneous multi-project primary pairings
+  - revoke/renew/rename flows
+  - natural-language revoke path
+  - remote-obedience request classes
+  - dashboard uses runtime policy, not markdown
+
+### Phase 17 - Security review and threat model
 
 Treat the bridge as local-only infrastructure, but still hostile-input exposed:
 messages, config files, JSONL rows, environment variables, watcher commands,
 and desktop wake helpers can all be influenced by a compromised peer, stale
 state, stale knowledge contract, contradictory markdown, or accidental operator
-input.
+input. The local admin dashboard is part of the reviewed surface.
 
 - Write `SECURITY_REVIEW.md` with:
   - trust boundaries: Claude, Codex, MCP clients, watcher, helper scripts,
     shared state files, settings, knowledge contracts, protected docs, policy
-    registry, and desktop UI wake surface
+    registry, local dashboard, and desktop UI wake surface
   - threat model: command injection, path traversal, state tampering, message
     spoofing, replay/dedupe bypass, denial of service/backpressure wedging,
     stale-session takeover, stale-contract knowledge leakage, prompt/log
@@ -437,6 +496,8 @@ input.
   - settings reject unknown keys and invalid types
   - expired/revoked/stale knowledge contracts block body-sharing catch-up
   - contradictory markdown cannot broaden runtime permissions
+  - dashboard auth, CSRF, escaping, and localhost binding are tested
+  - guided pairing cannot activate disabled/forbidden relationship types
 - Review state-file permissions and document the expected local-user security
   posture. If permissions cannot be enforced portably, report it as an accepted
   local-user trust assumption.
@@ -512,9 +573,15 @@ Phase 7 (wake hardening)
 | 38 | Remote-origin protected doc edits become proposals, not applied policy changes | 15 |
 | 39 | Documentation drift is detected, audited, and blocks readiness/signoff while unresolved | 15 |
 | 40 | Dashboard/effective policy views read runtime policy, not markdown text | 15 |
-| 41 | Security threat model and trust boundaries documented | 16 |
-| 42 | Shell/process boundaries audited with injection/path tests where applicable | 16 |
-| 43 | Security signoff records fixed findings, accepted risks, and exclusions | 16 |
+| 41 | Guided pairing explains allowed capabilities from runtime policy before activation | 16 |
+| 42 | Same-project primary cardinality is one per `(project, agent)` while different projects can pair simultaneously | 16 |
+| 43 | Dashboard lists pairings/contracts with friendly names, roles, short session ids, durations, and countdowns | 16 |
+| 44 | Dashboard and natural-language revoke use the same confirmed backend path | 16 |
+| 45 | Remote requests are classified before action and forbidden authority requests are rejected/audited | 16 |
+| 46 | Dashboard surfaces backpressure, catch-up, contract reauth, and policy/doc drift status | 16 |
+| 47 | Security threat model and trust boundaries documented | 17 |
+| 48 | Shell/process/dashboard boundaries audited with injection/path/CSRF tests where applicable | 17 |
+| 49 | Security signoff records fixed findings, accepted risks, and exclusions | 17 |
 
 ## Final 10/10 Validation Loop
 
@@ -561,9 +628,12 @@ This preserves the two-axis distinction agreed during hardening review:
 | Migration loses or corrupts bridge history | Phase 13 migration is dry-run first, backup-before-mutate, and validates target with recovery/probe tools |
 | Long-dormant peer receives stale sensitive context | Phase 14 gates catch-up on active knowledge contracts and returns reauthorization metadata after dormancy expiry |
 | Remote or stale markdown claims broader permissions than code allows | Phase 15 makes runtime policy authoritative, detects doc drift, and gates protected-doc edits through local confirmation |
-| Local command injection via watcher/helper boundaries | Phase 16 audits all process boundaries and adds injection/path tests |
-| Sensitive prompt leakage through bridge state/logs | Phase 16 documents local-user trust assumptions, retention, and accepted risks |
-| Destructive MCP tool misuse | Phase 16 validates ambiguous/destructive inputs reject by default |
+| User accidentally creates ambiguous multiple primaries | Phase 16 guided pairing enforces one primary per `(project, agent)` and makes non-primary roles explicit |
+| Dashboard becomes a remote attack surface | Phase 16 keeps it localhost/auth-token/CSRF-only; Phase 17 audits dashboard boundaries |
+| Remote peer manipulates user-facing labels or markdown | Phase 16 marks peer labels untrusted and escapes remote text; Phase 15 keeps runtime policy authoritative |
+| Local command injection via watcher/helper boundaries | Phase 17 audits all process boundaries and adds injection/path tests |
+| Sensitive prompt leakage through bridge state/logs/dashboard | Phase 17 documents local-user trust assumptions, retention, dashboard redaction, and accepted risks |
+| Destructive MCP tool misuse | Phase 17 validates ambiguous/destructive inputs reject by default |
 
 ---
 
@@ -574,7 +644,8 @@ This preserves the two-axis distinction agreed during hardening review:
 - Multi-agent beyond `claude` / `codex`
 - Replacing MCP transport
 - Cross-platform watcher (Windows-only acceptable)
-- Web UI / wire protocol redesign
+- Remote web UI or externally reachable dashboard
+- Wire protocol redesign
 - Resurrecting heartbeat automations
 - Silent automatic bridge-root migration without explicit user approval
 - Editing Claude/Codex desktop config files during migration unless an explicit
