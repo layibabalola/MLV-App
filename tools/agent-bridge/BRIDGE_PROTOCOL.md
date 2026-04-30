@@ -100,6 +100,7 @@ event actions:
 | `backpressure_rejected_nudge_attempted` | bridge MCP | Backpressure rejection re-armed an existing unread message for watcher retry | session_id, message_id |
 | `backpressure_rejected_no_nudge_breaker_open` | bridge MCP | Backpressure nudge skipped because breaker is open | session_id |
 | `backpressure_rejected_no_nudge_rate_limited` | bridge MCP | Backpressure nudge skipped by wake pre-fire rate limit | session_id |
+| `backpressure_resolved` | bridge MCP | Receiver read enough work messages to clear a bucket that had an actual backpressure rejection | receiver_agent, session_id, unread_work_before, unread_work_after, notified |
 | `session_truedup_rekeyed` | bridge MCP | Orphaned inbox row rekeyed to a valid receiver bucket | message_id, from_session_id, to_session_id |
 | `session_truedup_quarantined` | bridge MCP | Orphaned inbox row moved to an orphan file | message_id, from_session_id, orphan_path |
 | `bootstrap_rotation_routed_messages` | bridge MCP/bootstrap | Unread old-session rows promoted during session rotation | from_session_id, to_session_id, count |

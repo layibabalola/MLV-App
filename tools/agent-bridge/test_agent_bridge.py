@@ -1583,6 +1583,100 @@ class AgentBridgeTests(unittest.TestCase):
         actions = [row.get("action") for row in read_jsonl(bridge.audit_path)]
         self.assertIn("backpressure_rejected_nudge_attempted", actions)
 
+    def test_check_inbox_mark_read_notifies_sender_when_backpressure_resolves(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        first = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] first unread",
+            session_id="codex-live",
+        )
+        self.assertTrue(first.ok)
+        second = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] blocked by pressure",
+            session_id="codex-live",
+        )
+        self.assertFalse(second.ok)
+        state = json.loads(bridge.state_path.read_text(encoding="utf-8"))
+        self.assertIn("codex:codex-live", state.get("backpressure_pending", {}))
+
+        read = bridge.check_inbox("codex", "codex-live", mark_read=True)
+
+        self.assertTrue(read.ok)
+        self.assertEqual(read.data["backpressure_resolutions"][0]["session_id"], "codex-live")
+        state_after = json.loads(bridge.state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("codex:codex-live", state_after.get("backpressure_pending", {}))
+        notice = bridge.peek_inbox("claude", "claude-live")
+        self.assertEqual(notice.status, "messages")
+        notices = [row for row in notice.data["messages"] if row.get("control_type") == "BACKPRESSURE_RESOLVED"]
+        self.assertEqual(len(notices), 1)
+        row = notices[0]
+        self.assertEqual(row["marker_variant"], "control")
+        self.assertEqual(row["control_type"], "BACKPRESSURE_RESOLVED")
+        self.assertIn("UNREAD_WORK_BEFORE: 1", row["body"])
+        self.assertIn("UNREAD_WORK_AFTER: 0", row["body"])
+        actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
+        self.assertIn("backpressure_resolved", actions)
+
+    def test_project_bucket_mark_read_notifies_sender_when_pressure_resolves(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        message_ids = []
+        for index in range(5):
+            sent = bridge.send_to_peer(
+                "claude",
+                "codex",
+                "[[handoff:codex]] project backlog %d" % index,
+                session_id="mlv-app",
+            )
+            self.assertTrue(sent.ok)
+            message_ids.append(sent.data["id"])
+        rejected = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] blocked project message",
+            session_id="mlv-app",
+        )
+        self.assertFalse(rejected.ok)
+
+        marked = bridge.mark_read("codex", message_ids[0], session_id="mlv-app")
+
+        self.assertTrue(marked.ok)
+        self.assertEqual(marked.data["backpressure_resolutions"][0]["session_id"], "mlv-app")
+        notice = bridge.peek_inbox("claude", "claude-live")
+        self.assertEqual(notice.status, "messages")
+        notices = [row for row in notice.data["messages"] if row.get("control_type") == "BACKPRESSURE_RESOLVED"]
+        self.assertEqual(len(notices), 1)
+        self.assertIn("UNREAD_WORK_BEFORE: 5", notices[0]["body"])
+        self.assertIn("UNREAD_WORK_AFTER: 4", notices[0]["body"])
+
+    def test_read_without_prior_backpressure_rejection_does_not_notify_sender(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        sent = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] ordinary project message",
+            session_id="mlv-app",
+        )
+        self.assertTrue(sent.ok)
+
+        read = bridge.check_inbox("codex", "mlv-app", mark_read=True)
+
+        self.assertTrue(read.ok)
+        self.assertEqual(read.data["backpressure_resolutions"], [])
+        notice = bridge.peek_inbox("claude", "claude-live")
+        notices = [] if notice.status == "empty" else [
+            row for row in notice.data["messages"] if row.get("control_type") == "BACKPRESSURE_RESOLVED"
+        ]
+        self.assertEqual(notices, [])
+
     def test_process_lease_heartbeat_and_release(self) -> None:
         lock_path = self.state_dir / "locks" / "watcher.lock"
         acquired = acquire_singleton_lease(

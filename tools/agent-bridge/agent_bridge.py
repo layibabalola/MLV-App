@@ -350,6 +350,192 @@ class AgentBridge:
         session.setdefault("seen_hashes", [])
         return session
 
+    def _backpressure_key(self, agent: str, session_id: str) -> str:
+        return "%s:%s" % (agent, session_id)
+
+    def _backpressure_limit_for_bucket(self, registry: Dict[str, Any], session_id: str) -> Optional[int]:
+        info = self._bucket_info(registry, session_id)
+        if info["inbox_level"] == INBOX_LEVEL_PROJECT:
+            return PROJECT_BACKPRESSURE_LIMIT
+        if info["inbox_level"] == INBOX_LEVEL_SESSION:
+            return SESSION_BACKPRESSURE_LIMIT
+        return None
+
+    def _unread_work_counts_by_bucket(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for row in rows:
+            if row.get("read_at") or row.get("superseded_at") or row.get("marker_variant") == "control":
+                continue
+            bucket = str(row.get("session_id") or DEFAULT_SESSION_ID)
+            counts[bucket] = counts.get(bucket, 0) + 1
+        return counts
+
+    def _record_backpressure_pending(
+        self,
+        state: Dict[str, Any],
+        *,
+        receiver_agent: str,
+        session_id: str,
+        inbox_level: str,
+        sender_agent: str,
+        sender_session_id: Optional[str],
+        reason: str,
+        unread_count: int,
+        limit: int,
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        pending = state.setdefault("backpressure_pending", {})
+        key = self._backpressure_key(receiver_agent, session_id)
+        record = pending.setdefault(
+            key,
+            {
+                "receiver_agent": receiver_agent,
+                "session_id": session_id,
+                "inbox_level": inbox_level,
+                "first_rejected_at": now,
+                "last_rejected_at": now,
+                "unread_count_at_rejection": unread_count,
+                "limit": limit,
+                "senders": [],
+            },
+        )
+        record["receiver_agent"] = receiver_agent
+        record["session_id"] = session_id
+        record["inbox_level"] = inbox_level
+        record["last_rejected_at"] = now
+        record["unread_count_at_rejection"] = unread_count
+        record["limit"] = limit
+        sender_session = (sender_session_id or "").strip() or None
+        sender_entry = {
+            "sender_agent": sender_agent,
+            "sender_session_id": sender_session,
+            "reason": reason,
+            "last_rejected_at": now,
+        }
+        senders = [
+            item
+            for item in record.get("senders", [])
+            if not (
+                isinstance(item, dict)
+                and item.get("sender_agent") == sender_agent
+                and item.get("sender_session_id") == sender_session
+            )
+        ]
+        senders.append(sender_entry)
+        record["senders"] = senders[-20:]
+        return copy.deepcopy(record)
+
+    def _resolve_backpressure_after_read(
+        self,
+        state: Dict[str, Any],
+        registry: Dict[str, Any],
+        *,
+        receiver_agent: str,
+        before_counts: Dict[str, int],
+        after_counts: Dict[str, int],
+        read_rows: List[Dict[str, Any]],
+        via: str,
+    ) -> List[Dict[str, Any]]:
+        pending = state.setdefault("backpressure_pending", {})
+        if not isinstance(pending, dict):
+            state["backpressure_pending"] = {}
+            pending = state["backpressure_pending"]
+        read_buckets = {str(row.get("session_id") or DEFAULT_SESSION_ID) for row in read_rows}
+        resolutions: List[Dict[str, Any]] = []
+        for bucket in sorted(read_buckets):
+            key = self._backpressure_key(receiver_agent, bucket)
+            record = pending.get(key)
+            if not isinstance(record, dict):
+                continue
+            limit = self._backpressure_limit_for_bucket(registry, bucket)
+            if limit is None:
+                continue
+            before = before_counts.get(bucket, 0)
+            after = after_counts.get(bucket, 0)
+            if before < limit or after >= limit:
+                continue
+            notified: List[Dict[str, Any]] = []
+            for sender_record in record.get("senders", []):
+                if not isinstance(sender_record, dict):
+                    continue
+                try:
+                    sender = normalize_agent(sender_record.get("sender_agent"))
+                except ValueError:
+                    continue
+                reply_session = (sender_record.get("sender_session_id") or "").strip()
+                if not reply_session:
+                    reply_session = self._resolve_default_session(sender)
+                try:
+                    reply_session = normalize_session(reply_session)
+                except ValueError:
+                    continue
+                if reply_session == DEFAULT_SESSION_ID:
+                    continue
+                reply_info = self._bucket_info(registry, reply_session)
+                body = (
+                    "Backpressure has cleared for %s bucket %s.\n\n"
+                    "RECEIVER_AGENT: %s\n"
+                    "BUCKET: %s\n"
+                    "READ_VIA: %s\n"
+                    "UNREAD_WORK_BEFORE: %d\n"
+                    "UNREAD_WORK_AFTER: %d\n"
+                    "LIMIT: %d\n"
+                    "FIRST_REJECTED_AT: %s\n"
+                    "LAST_REJECTED_AT: %s\n"
+                ) % (
+                    receiver_agent,
+                    bucket,
+                    receiver_agent,
+                    bucket,
+                    via,
+                    before,
+                    after,
+                    limit,
+                    record.get("first_rejected_at"),
+                    record.get("last_rejected_at"),
+                )
+                sent = self._enqueue_control_message(
+                    from_agent=receiver_agent,
+                    to_agent=sender,
+                    session_id=reply_session,
+                    control_type="BACKPRESSURE_RESOLVED",
+                    summary="Backpressure cleared for %s bucket %s" % (receiver_agent, bucket),
+                    body=body,
+                    status="info",
+                    replace_existing_control=True,
+                    inbox_level=reply_info.get("inbox_level"),
+                    parent_project=reply_info.get("parent_project"),
+                )
+                notified.append(
+                    {
+                        "sender_agent": sender,
+                        "sender_session_id": reply_session,
+                        "control_status": sent.status,
+                        "message_id": sent.data.get("id") if sent.ok else None,
+                    }
+                )
+            pending.pop(key, None)
+            resolution = {
+                "receiver_agent": receiver_agent,
+                "session_id": bucket,
+                "via": via,
+                "unread_work_before": before,
+                "unread_work_after": after,
+                "limit": limit,
+                "notified": notified,
+            }
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "backpressure_resolved",
+                    "accepted": True,
+                    **resolution,
+                }
+            )
+            resolutions.append(resolution)
+        return resolutions
+
     def _audit(self, event: Dict[str, Any]) -> None:
         append_jsonl(self.audit_path, event)
 
@@ -2415,6 +2601,18 @@ class AgentBridge:
             ]
             if delivery_level == INBOX_LEVEL_SESSION and len(unread_work) >= SESSION_BACKPRESSURE_LIMIT:
                 reason = "target %s already has one unread work message for session %s" % (target, delivery_bucket)
+                event["backpressure_pending"] = self._record_backpressure_pending(
+                    state,
+                    receiver_agent=target,
+                    session_id=delivery_bucket,
+                    inbox_level=delivery_level,
+                    sender_agent=sender,
+                    sender_session_id=sender_session_id,
+                    reason="session_backpressure",
+                    unread_count=len(unread_work),
+                    limit=SESSION_BACKPRESSURE_LIMIT,
+                )
+                self._save_state(state)
                 event["backpressure_nudge"] = self._request_backpressure_nudge(
                     agent=target,
                     session=delivery_bucket,
@@ -2426,6 +2624,18 @@ class AgentBridge:
                     "target %s project inbox %s is full (%d unread >= %d)"
                     % (target, delivery_bucket, len(unread_work), PROJECT_BACKPRESSURE_LIMIT)
                 )
+                event["backpressure_pending"] = self._record_backpressure_pending(
+                    state,
+                    receiver_agent=target,
+                    session_id=delivery_bucket,
+                    inbox_level=delivery_level,
+                    sender_agent=sender,
+                    sender_session_id=sender_session_id,
+                    reason="project_backpressure",
+                    unread_count=len(unread_work),
+                    limit=PROJECT_BACKPRESSURE_LIMIT,
+                )
+                self._save_state(state)
                 event["backpressure_nudge"] = self._request_backpressure_nudge(
                     agent=target,
                     session=delivery_bucket,
@@ -2610,10 +2820,24 @@ class AgentBridge:
             if mark_read and unread:
                 now = utc_now()
                 unread_ids = {row["id"] for row in unread}
+                before_counts = self._unread_work_counts_by_bucket(rows)
+                read_rows = [dict(row) for row in rows if row.get("id") in unread_ids]
                 for row in rows:
                     if row.get("id") in unread_ids:
                         row["read_at"] = now
                 write_jsonl(path, rows)
+                state = self._load_state()
+                backpressure_resolutions = self._resolve_backpressure_after_read(
+                    state,
+                    registry,
+                    receiver_agent=target,
+                    before_counts=before_counts,
+                    after_counts=self._unread_work_counts_by_bucket(rows),
+                    read_rows=read_rows,
+                    via="check_inbox",
+                )
+                if backpressure_resolutions:
+                    self._save_state(state)
                 self._audit(
                     {
                         "id": str(uuid.uuid4()),
@@ -2625,8 +2849,11 @@ class AgentBridge:
                         "accepted": True,
                         "reason": "marked_read",
                         "message_count": len(unread),
+                        "backpressure_resolutions": backpressure_resolutions,
                     }
                 )
+            else:
+                backpressure_resolutions = []
 
             if not unread:
                 if session is None:
@@ -2645,6 +2872,7 @@ class AgentBridge:
                     "count": len(unread),
                     "messages": unread,
                     "buckets": returned_buckets if buckets is None else buckets,
+                    "backpressure_resolutions": backpressure_resolutions,
                 },
             )
 
@@ -2744,10 +2972,25 @@ class AgentBridge:
                     if mark_read:
                         now = utc_now()
                         unread_ids = {row["id"] for row in unread}
+                        before_counts = self._unread_work_counts_by_bucket(rows)
+                        read_rows = [dict(row) for row in rows if row.get("id") in unread_ids]
                         for row in rows:
                             if row.get("id") in unread_ids:
                                 row["read_at"] = now
                         write_jsonl(path, rows)
+                        registry = self._load_session_registry()
+                        state = self._load_state()
+                        backpressure_resolutions = self._resolve_backpressure_after_read(
+                            state,
+                            registry,
+                            receiver_agent=target,
+                            before_counts=before_counts,
+                            after_counts=self._unread_work_counts_by_bucket(rows),
+                            read_rows=read_rows,
+                            via="wait_inbox",
+                        )
+                        if backpressure_resolutions:
+                            self._save_state(state)
                         self._audit(
                             {
                                 "id": str(uuid.uuid4()),
@@ -2758,8 +3001,11 @@ class AgentBridge:
                                 "accepted": True,
                                 "reason": "delivered_and_marked",
                                 "message_count": len(unread),
+                                "backpressure_resolutions": backpressure_resolutions,
                             }
                         )
+                    else:
+                        backpressure_resolutions = []
                     delivered = "\n\n".join(row["delivered_message"] for row in unread)
                     return BridgeResult(
                         True,
@@ -2770,6 +3016,7 @@ class AgentBridge:
                             "messages": unread,
                             "timed_out": False,
                             "marked_read": mark_read,
+                            "backpressure_resolutions": backpressure_resolutions,
                         },
                     )
 
@@ -2819,15 +3066,18 @@ class AgentBridge:
 
             path = self.inbox_path(target)
             rows = read_jsonl(path)
+            before_counts = self._unread_work_counts_by_bucket(rows)
             now = utc_now()
             matched = False
             changed = False
             matched_row: Optional[Dict[str, Any]] = None
+            read_rows: List[Dict[str, Any]] = []
             for row in rows:
                 if row.get("id") == target_id and (session is None or row.get("session_id") == session):
                     matched = True
                     matched_row = row
                     if not row.get("read_at"):
+                        read_rows = [dict(row)]
                         row["read_at"] = now
                         changed = True
                     if not row.get("seen_at"):
@@ -2860,6 +3110,22 @@ class AgentBridge:
             if changed:
                 write_jsonl(path, rows)
 
+            backpressure_resolutions: List[Dict[str, Any]] = []
+            if changed and read_rows:
+                registry = self._load_session_registry()
+                state = self._load_state()
+                backpressure_resolutions = self._resolve_backpressure_after_read(
+                    state,
+                    registry,
+                    receiver_agent=target,
+                    before_counts=before_counts,
+                    after_counts=self._unread_work_counts_by_bucket(rows),
+                    read_rows=read_rows,
+                    via="mark_read",
+                )
+                if backpressure_resolutions:
+                    self._save_state(state)
+
             self._audit(
                 {
                     "id": str(uuid.uuid4()),
@@ -2870,13 +3136,19 @@ class AgentBridge:
                     "message_id": target_id,
                     "accepted": True,
                     "changed": changed,
+                    "backpressure_resolutions": backpressure_resolutions,
                 }
             )
             return BridgeResult(
                 True,
                 "marked_read" if changed else "already_read",
                 "Message %s is marked read." % target_id,
-                {"message_id": target_id, "changed": changed, "stale_bypass": stale_bypass},
+                {
+                    "message_id": target_id,
+                    "changed": changed,
+                    "stale_bypass": stale_bypass,
+                    "backpressure_resolutions": backpressure_resolutions,
+                },
             )
 
     def _normalize_wake_breaker_session(self, record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
