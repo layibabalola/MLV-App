@@ -3,6 +3,7 @@ import asyncio
 import atexit
 import dataclasses
 import hashlib
+import io
 import json
 import os
 import signal
@@ -12,6 +13,56 @@ from typing import Optional
 
 from agent_bridge import AgentBridge, add_common_args
 from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
+
+
+_WINDOWS_PIPE_CHUNK_BYTES = 4096
+
+
+def _install_windows_pipe_safety(chunk_size: int = _WINDOWS_PIPE_CHUNK_BYTES) -> None:
+    """Re-wrap sys.stdout so each OS write is at most chunk_size bytes.
+
+    Why: MCP's stdio transport flushes a full JSON-RPC response in one write.
+    On Windows anonymous pipes, large writes intermittently raise
+    OSError [Errno 22] inside anyio's `to_thread.run_sync(self._fp.flush)`,
+    which kills the server before Claude Desktop can finish initialization.
+    With ~41 registered tools the tools/list response is ~25 KB and lands
+    inside the failure envelope.
+
+    The fix replaces sys.stdout's underlying raw writer with a chunked
+    RawIOBase that splits every os-level write into chunk_size-byte slices,
+    keeping each write inside the Windows pipe envelope.
+    """
+    if sys.platform != "win32":
+        return
+
+    raw = sys.stdout.buffer.raw if hasattr(sys.stdout.buffer, "raw") else sys.stdout.buffer
+    fd = raw.fileno()
+
+    class _ChunkedRaw(io.RawIOBase):
+        def writable(self) -> bool:  # noqa: D401
+            return True
+
+        def write(self, data) -> int:
+            view = memoryview(data).cast("B")
+            total = len(view)
+            i = 0
+            while i < total:
+                end = min(i + chunk_size, total)
+                written = os.write(fd, bytes(view[i:end]))
+                if not written:
+                    raise OSError("short write to stdout pipe")
+                i += written
+            return total
+
+        def flush(self) -> None:
+            pass
+
+    sys.stdout = io.TextIOWrapper(
+        io.BufferedWriter(_ChunkedRaw(), buffer_size=chunk_size),
+        encoding="utf-8",
+        line_buffering=False,
+        write_through=False,
+    )
 
 
 if sys.version_info < (3, 10):
@@ -691,6 +742,7 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
 
 def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
+    _install_windows_pipe_safety()
     bridge = create_bridge(args)
     mcp = create_mcp(bridge)
     write_tool_manifest(state_dir=Path(args.state_dir), mcp=mcp)

@@ -63,6 +63,17 @@ Add the server to `claude_desktop_config.json`:
 }
 ```
 
+## Windows MCP startup
+
+On Windows, `server.py` defensively wraps `sys.stdout` so that every os-level
+write to the stdout pipe is at most 4 KB. The MCP stdio transport flushes the
+full JSON-RPC response in one write; once the registered tool list grew past
+~25 KB, those flushes started intermittently failing with
+`OSError: [Errno 22]` inside anyio's `to_thread.run_sync(self._fp.flush)`,
+which crashed the server before Claude Desktop could finish initialization.
+The workaround is unconditional on `win32`, has no settings knob, and is
+implemented in `_install_windows_pipe_safety()` at the top of `server.py`.
+
 ## Protocol
 
 Messages must include a matching handoff marker:
