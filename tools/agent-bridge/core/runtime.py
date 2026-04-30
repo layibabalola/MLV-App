@@ -38,6 +38,7 @@ def build_runtime_breadcrumb(
     bridge_root = bridge_root_for_state_dir(Path(state_dir))
     breadcrumb: Dict[str, Any] = {
         "schema_version": 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "role": role,
         "pid": pid if pid is not None else os.getpid(),
         "parent_pid": os.getppid() if hasattr(os, "getppid") else None,
