@@ -24,6 +24,10 @@
 #
 # Exit codes:
 #   13 = all foreground paths failed and UIA composer fallback failed
+#   14 = no Codex window after deeplink navigation
+#   15 = total runtime timeout exceeded
+#   16 = deferred (system idle never reached within MaxWaitSeconds; user typing).
+#        Watcher should retry; do NOT trip the wake breaker.
 
 param(
     [string]$Message              = "check bridge inbox",
@@ -376,10 +380,9 @@ try {
     }
 
     if (-not $achieved) {
-        Write-Host ("[wake_codex] Max wait of " + $MaxWaitSeconds + "s expired without idle. Forcibly injecting anyway - bridge delivery wins over user typing.")
-        # Fall through: inject regardless. User's in-progress draft (if any) will
-        # be wiped by the Ctrl+A+Delete in stage 5, and any keystrokes they're
-        # mid-typing may interleave with our SendKeys briefly.
+        Write-Host ("[wake_codex] Max wait of " + $MaxWaitSeconds + "s expired without idle. Deferring delivery to avoid keystroke collision with active user typing.")
+        Write-Host "[wake_codex] Bridge message stays unread; watcher will retry, or next bridge event will surface it."
+        exit 16
     }
 
     # --- Stage 4: activate Codex (no foreground-skip - fire regardless) ---
