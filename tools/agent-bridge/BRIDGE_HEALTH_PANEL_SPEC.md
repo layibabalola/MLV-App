@@ -1,9 +1,17 @@
 # Agent Bridge - Health Panel Spec
 
-**Status:** Proposed
+**Status:** MVP implemented (2026-04-30)
 **Authors:** Claude (proposal); Codex review pending
 **Tier:** Tier 0 - in-chat surface; no install required, no new processes
 **Motivation:** Field-deployed users need a single, friction-free way to ask "is the bridge healthy?" and get a structured, actionable answer. The current path is: read multiple state files manually, run `Get-Process`, tail an audit log, decide. That's expert-only. A single MCP tool that returns a structured health snapshot, renderable as a markdown table in chat, makes self-service diagnosis available to any user with bridge access. This is the smallest possible diagnostic UI: the chat *is* the panel.
+
+**Implemented v1:** `bridge_health_panel` is exposed from the MCP server and
+returns JSON or markdown. It is a read-only on-demand aggregator over
+`state.json`, `session.json`, watcher/server breadcrumbs, wake processes when
+`psutil` is available, inbox rows, pending-action ledger, wake breaker state,
+audit-derived failures/wakes, schema versions, provenance, and cross-project
+links. Missing or malformed slices degrade independently; the tool does not
+repair or quarantine state while reading.
 
 ---
 

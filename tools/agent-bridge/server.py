@@ -441,6 +441,25 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         return as_dict(bridge.bridge_process_status())
 
     @mcp.tool(annotations=READ_ONLY)
+    def bridge_health_panel(
+        agent: str,
+        session_id: Optional[str] = None,
+        include_extended: bool = False,
+        format: str = "json",
+        stuck_wake_threshold_seconds: int = 30,
+    ) -> dict:
+        """Return a read-only bridge health snapshot as JSON or rendered markdown."""
+        return as_dict(
+            bridge.bridge_health_panel(
+                agent=agent,
+                session_id=session_id,
+                include_extended=include_extended,
+                format=format,
+                stuck_wake_threshold_seconds=stuck_wake_threshold_seconds,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
     def wake_breaker_status(session_id: Optional[str] = None) -> dict:
         """Return persisted wake breaker state for one session or all sessions."""
         return as_dict(bridge.wake_breaker_status(session_id=session_id))

@@ -4050,6 +4050,624 @@ class AgentBridge:
             },
         )
 
+    def _health_read_json(self, path: Path, default: Dict[str, Any], metric: str) -> Dict[str, Any]:
+        if not path.exists():
+            return {"status": "missing", "path": str(path), "data": copy.deepcopy(default), "error": None}
+        try:
+            return {"status": "ok", "path": str(path), "data": read_json(path, default), "error": None}
+        except Exception as exc:
+            return {"status": "error", "path": str(path), "data": copy.deepcopy(default), "error": "%s" % exc}
+
+    def _health_read_jsonl(self, path: Path, metric: str) -> Dict[str, Any]:
+        if not path.exists():
+            return {"status": "missing", "path": str(path), "rows": [], "error": None, "bad_lines": 0}
+        rows: List[Dict[str, Any]] = []
+        bad_lines = 0
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        row = json.loads(text)
+                    except JSONDecodeError:
+                        bad_lines += 1
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+            status = "partial" if bad_lines else "ok"
+            return {"status": status, "path": str(path), "rows": rows, "error": None, "bad_lines": bad_lines}
+        except Exception as exc:
+            return {"status": "error", "path": str(path), "rows": rows, "error": "%s" % exc, "bad_lines": bad_lines}
+
+    def _health_age_seconds(self, stamp: Any, now_dt: datetime) -> Optional[int]:
+        parsed = parse_iso_datetime(stamp)
+        if not parsed:
+            return None
+        return max(0, int((now_dt - parsed).total_seconds()))
+
+    def _health_active_sessions(self, registry_read: Dict[str, Any], now_dt: datetime) -> Dict[str, Any]:
+        if registry_read["status"] == "error":
+            return {
+                "status": "error",
+                "path": registry_read["path"],
+                "error": registry_read["error"],
+                "projects": {},
+                "active": {},
+                "recent_superseded": [],
+            }
+        registry = registry_read["data"]
+        projects: Dict[str, Any] = {}
+        active_flat: Dict[str, Any] = {}
+        recent_superseded: List[Dict[str, Any]] = []
+        cutoff = now_dt - timedelta(hours=1)
+        for project_name, project_entry in (registry.get("projects") or {}).items():
+            project_active = dict((project_entry or {}).get("active") or {})
+            project_sessions = {}
+            for session_id, record in ((project_entry or {}).get("sessions") or {}).items():
+                if not isinstance(record, dict):
+                    continue
+                session_summary = {
+                    "agent": record.get("agent"),
+                    "status": record.get("status"),
+                    "bootstrap_origin": record.get("bootstrap_origin", "unknown"),
+                    "started_at": record.get("started_at"),
+                    "updated_at": record.get("updated_at"),
+                    "age_seconds": self._health_age_seconds(record.get("started_at"), now_dt),
+                }
+                project_sessions[session_id] = session_summary
+                if project_active.get(record.get("agent")) == session_id:
+                    active_flat["%s:%s" % (project_name, record.get("agent"))] = {
+                        "project": project_name,
+                        "agent": record.get("agent"),
+                        "session_id": session_id,
+                        **session_summary,
+                    }
+                elif record.get("status") == "superseded":
+                    updated_at = parse_iso_datetime(record.get("updated_at"))
+                    if updated_at and updated_at >= cutoff:
+                        recent_superseded.append(
+                            {
+                                "project": project_name,
+                                "session_id": session_id,
+                                **session_summary,
+                            }
+                        )
+            projects[project_name] = {
+                "active": project_active,
+                "sessions": project_sessions,
+                "trusted_parent": dict((project_entry or {}).get("trusted_parent") or {}),
+            }
+        return {
+            "status": "ok" if registry_read["status"] in {"ok", "missing"} else registry_read["status"],
+            "path": registry_read["path"],
+            "project_count": len(projects),
+            "projects": projects,
+            "active": active_flat,
+            "recent_superseded": recent_superseded,
+        }
+
+    def _health_inboxes(self, now_dt: datetime) -> Dict[str, Any]:
+        buckets: List[Dict[str, Any]] = []
+        totals = {
+            "unread_count": 0,
+            "handled_not_seen_count": 0,
+            "bad_lines": 0,
+        }
+        errors: List[Dict[str, Any]] = []
+        for agent in sorted(AGENTS):
+            read = self._health_read_jsonl(self.inbox_path(agent), "inboxes")
+            if read["status"] == "error":
+                errors.append({"metric": "inboxes", "agent": agent, "error": read["error"]})
+            if read.get("bad_lines"):
+                errors.append({"metric": "inboxes", "agent": agent, "error": "bad_jsonl_lines=%d" % read["bad_lines"]})
+            grouped: Dict[str, Dict[str, Any]] = {}
+            for row in read["rows"]:
+                session = str(row.get("session_id") or DEFAULT_SESSION_ID)
+                entry = grouped.setdefault(
+                    session,
+                    {
+                        "agent": agent,
+                        "session_id": session,
+                        "unread_count": 0,
+                        "oldest_unread_age_seconds": None,
+                        "handled_not_seen_count": 0,
+                        "handled_not_seen_oldest_age_seconds": None,
+                        "row_count": 0,
+                    },
+                )
+                entry["row_count"] += 1
+                created_age = self._health_age_seconds(row.get("created_at"), now_dt)
+                if not row.get("read_at"):
+                    entry["unread_count"] += 1
+                    totals["unread_count"] += 1
+                    if created_age is not None and (
+                        entry["oldest_unread_age_seconds"] is None
+                        or created_age > entry["oldest_unread_age_seconds"]
+                    ):
+                        entry["oldest_unread_age_seconds"] = created_age
+                if row.get("read_at") and not row.get("seen_at"):
+                    entry["handled_not_seen_count"] += 1
+                    totals["handled_not_seen_count"] += 1
+                    if created_age is not None and (
+                        entry["handled_not_seen_oldest_age_seconds"] is None
+                        or created_age > entry["handled_not_seen_oldest_age_seconds"]
+                    ):
+                        entry["handled_not_seen_oldest_age_seconds"] = created_age
+            buckets.extend(sorted(grouped.values(), key=lambda item: (item["agent"], item["session_id"])))
+            totals["bad_lines"] += int(read.get("bad_lines") or 0)
+        return {
+            "status": "error" if errors else "ok",
+            "bucket_count": len(buckets),
+            "totals": totals,
+            "buckets": buckets,
+            "errors": errors,
+        }
+
+    def _health_in_flight_wakes(self, now_dt: datetime, threshold_seconds: int) -> Dict[str, Any]:
+        try:
+            import psutil  # type: ignore
+        except Exception as exc:
+            unavailable = {
+                "status": "unavailable",
+                "error": "psutil unavailable: %s" % exc,
+                "count": 0,
+                "processes": [],
+            }
+            return {
+                "in_flight": unavailable,
+                "stuck": {
+                    "status": "unavailable",
+                    "error": unavailable["error"],
+                    "count": 0,
+                    "threshold_seconds": threshold_seconds,
+                    "processes": [],
+                },
+            }
+        processes: List[Dict[str, Any]] = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+            try:
+                info = proc.info
+                cmdline = " ".join(str(part) for part in (info.get("cmdline") or []))
+                name = str(info.get("name") or "")
+                if "wake_codex.ps1" not in cmdline:
+                    continue
+                created = datetime.fromtimestamp(float(info.get("create_time") or 0), timezone.utc)
+                age = max(0, int((now_dt - created).total_seconds()))
+                target_session = None
+                match = re.search(r"-(?:ThreadId|SessionId)\s+['\"]?([A-Za-z0-9_.:-]+)", cmdline)
+                if match:
+                    target_session = match.group(1)
+                processes.append(
+                    {
+                        "pid": info.get("pid"),
+                        "name": name,
+                        "target_agent": "codex",
+                        "target_session": target_session,
+                        "started_at": created.isoformat(timespec="seconds"),
+                        "age_seconds": age,
+                        "cmdline_preview": cmdline[:240],
+                    }
+                )
+            except Exception:
+                continue
+        stuck = [item for item in processes if int(item.get("age_seconds") or 0) > threshold_seconds]
+        return {
+            "in_flight": {"status": "ok", "count": len(processes), "processes": processes},
+            "stuck": {
+                "status": "ok",
+                "count": len(stuck),
+                "threshold_seconds": threshold_seconds,
+                "processes": stuck,
+            },
+        }
+
+    def _health_pending_actions(self, now_dt: datetime) -> Dict[str, Any]:
+        read = self._health_read_json(self.pending_actions_path, self._default_pending_actions(), "pending_actions")
+        if read["status"] == "error":
+            return {"status": "error", "path": read["path"], "error": read["error"]}
+        actions = [item for item in (read["data"].get("actions") or []) if isinstance(item, dict)]
+        counts: Dict[str, int] = {}
+        execution_counts: Dict[str, int] = {}
+        unresolved: List[Dict[str, Any]] = []
+        for action in actions:
+            status = str(action.get("status") or "pending")
+            counts[status] = counts.get(status, 0) + 1
+            execution_state = str(action.get("execution_state") or "unclassified")
+            execution_counts[execution_state] = execution_counts.get(execution_state, 0) + 1
+            if status == "pending" and execution_state not in NON_ACTIONABLE_PENDING_EXECUTION_STATES:
+                unresolved.append(
+                    {
+                        "id": action.get("id"),
+                        "summary": action.get("summary"),
+                        "priority": action.get("priority"),
+                        "created_at": action.get("created_at"),
+                        "age_seconds": self._health_age_seconds(action.get("created_at"), now_dt),
+                        "execution_state": action.get("execution_state"),
+                    }
+                )
+        unresolved.sort(key=lambda item: item.get("created_at") or "")
+        return {
+            "status": "ok" if read["status"] in {"ok", "missing"} else read["status"],
+            "path": read["path"],
+            "counts_by_status": counts,
+            "counts_by_execution_state": execution_counts,
+            "unresolved_actionable_count": len(unresolved),
+            "oldest_unresolved": unresolved[:5],
+        }
+
+    def _health_recent_failures(self, now_dt: datetime) -> Dict[str, Any]:
+        read = self._health_read_jsonl(self.audit_path, "recent_failures")
+        failures: List[Dict[str, Any]] = []
+        cutoff = now_dt - timedelta(minutes=5)
+        for row in read["rows"][-200:]:
+            action = str(row.get("action") or "")
+            accepted = row.get("accepted")
+            timestamp = parse_iso_datetime(row.get("timestamp"))
+            if timestamp and timestamp < cutoff:
+                continue
+            is_failure = (
+                "fail" in action
+                or "rejected" in action
+                or "breaker_open" in action
+                or accepted is False
+                or bool(row.get("error"))
+            )
+            if is_failure:
+                failures.append(
+                    {
+                        "event_type": action,
+                        "event_ts": row.get("timestamp"),
+                        "agent": row.get("agent") or row.get("from") or row.get("to"),
+                        "session_id": row.get("session_id") or row.get("resolved_session_id"),
+                        "summary": str(row.get("reason") or row.get("error") or row.get("status") or "")[:120],
+                    }
+                )
+        return {
+            "status": "error" if read["status"] == "error" else "ok",
+            "path": read["path"],
+            "count": len(failures),
+            "failures": failures[-50:],
+            "error": read["error"],
+        }
+
+    def _health_provenance(self, active_sessions: Dict[str, Any]) -> Dict[str, Any]:
+        counts = {"parent": 0, "subagent": 0, "unknown": 0}
+        active_subagents: List[Dict[str, Any]] = []
+        for active in active_sessions.get("active", {}).values():
+            origin = str(active.get("bootstrap_origin") or "unknown")
+            counts[origin] = counts.get(origin, 0) + 1
+            if origin == "subagent":
+                active_subagents.append(active)
+        return {
+            "status": "ok",
+            "counts": counts,
+            "subagent_owns_active": bool(active_subagents),
+            "active_subagents": active_subagents,
+        }
+
+    def _health_wake_breaker(self) -> Dict[str, Any]:
+        read = self._health_read_json(
+            self.wake_breaker_path,
+            {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}},
+            "wake_breaker",
+        )
+        if read["status"] == "error":
+            return {"status": "error", "path": read["path"], "error": read["error"], "sessions": {}}
+        sessions = read["data"].get("sessions") or {}
+        open_sessions = {
+            session_id: record
+            for session_id, record in sessions.items()
+            if isinstance(record, dict) and record.get("breaker_state") == "open"
+        }
+        return {
+            "status": "ok" if read["status"] in {"ok", "missing"} else read["status"],
+            "path": read["path"],
+            "session_count": len(sessions),
+            "open_session_count": len(open_sessions),
+            "open_sessions": open_sessions,
+            "sessions": sessions,
+        }
+
+    def _health_last_wake_per_peer(self) -> Dict[str, Any]:
+        read = self._health_read_jsonl(self.audit_path, "last_wake_per_peer")
+        last: Dict[str, Any] = {}
+        for row in read["rows"]:
+            action = str(row.get("action") or "")
+            if action not in {"wake_succeeded", "wake_receipt_verified", "wake_delivered"}:
+                continue
+            agent = row.get("agent") or row.get("to")
+            session = row.get("session_id") or row.get("resolved_session_id")
+            if not agent or not session:
+                continue
+            key = "%s:%s" % (agent, session)
+            last[key] = {
+                "agent": agent,
+                "session_id": session,
+                "timestamp": row.get("timestamp"),
+                "event_type": action,
+            }
+        return {"status": "ok" if read["status"] != "error" else "error", "peers": last, "error": read["error"]}
+
+    def _health_schema_versions(self) -> Dict[str, Any]:
+        files = {
+            "state": self.state_path,
+            "session_registry": self.session_registry_path,
+            "pending_actions": self.pending_actions_path,
+            "execution_state": self.execution_state_path,
+            "wake_breaker": self.wake_breaker_path,
+            "tool_manifest": self.state_dir / "tool-manifest.json",
+            "cross_project_pending": self.cross_project_pending_path,
+        }
+        versions: Dict[str, Any] = {}
+        for name, path in files.items():
+            read = self._health_read_json(path, {}, "schema_versions")
+            if read["status"] == "error":
+                versions[name] = {"status": "error", "path": str(path), "error": read["error"]}
+                continue
+            data = read["data"]
+            versions[name] = {
+                "status": read["status"],
+                "path": str(path),
+                "schema_version": data.get("schema_version", "legacy") if isinstance(data, dict) else "legacy",
+            }
+        return {"status": "ok", "files": versions}
+
+    def _health_cross_project(self) -> Dict[str, Any]:
+        now_dt = datetime.now(timezone.utc)
+        links = []
+        for link in self._cross_project_link_records():
+            links.append(
+                {
+                    "link_id": link.get("link_id"),
+                    "status": link.get("status"),
+                    "derived_status": self._cross_project_link_status(link, now_dt=now_dt),
+                    "permission_tier": link.get("permission_tier"),
+                    "advisor_project": (link.get("advisor") or {}).get("project"),
+                    "executor_project": (link.get("executor") or {}).get("project"),
+                    "expires_at": link.get("expires_at"),
+                }
+            )
+        active = [link for link in links if link.get("derived_status") == "active"]
+        return {
+            "status": "ok",
+            "path": str(self.cross_project_pairs_dir),
+            "active_count": len(active),
+            "link_count": len(links),
+            "links": links,
+        }
+
+    def _derive_health_status(self, snapshot: Dict[str, Any]) -> str:
+        core = snapshot.get("core") or {}
+        bridge_state = core.get("bridge_state") or {}
+        watcher = core.get("watcher") or {}
+        server = core.get("server") or {}
+        stuck_wakes = core.get("stuck_wakes") or {}
+        inboxes = core.get("inboxes") or {}
+        extended = snapshot.get("extended") or {}
+        wake_breaker = extended.get("wake_breaker") or {}
+        recent_failures = extended.get("recent_failures") or {}
+        pending_actions = extended.get("pending_actions") or {}
+        provenance = extended.get("provenance") or {}
+
+        if bridge_state.get("status") == "error" or (core.get("active_sessions") or {}).get("status") == "error":
+            return "broken"
+        if int(stuck_wakes.get("count") or 0) > 0:
+            return "broken"
+        if watcher.get("stale") and not bridge_state.get("paused"):
+            return "broken"
+        if server.get("stale_server_marker_count", 0):
+            return "broken"
+        if bridge_state.get("paused"):
+            return "paused"
+        if (wake_breaker.get("open_session_count") or 0) > 0:
+            return "degraded"
+        if (inboxes.get("totals") or {}).get("handled_not_seen_count", 0) > 0:
+            return "degraded"
+        if recent_failures.get("count", 0) > 0:
+            return "degraded"
+        if pending_actions.get("unresolved_actionable_count", 0) > 0:
+            return "degraded"
+        if provenance.get("subagent_owns_active"):
+            return "degraded"
+        return "healthy"
+
+    def _render_health_markdown(self, snapshot: Dict[str, Any]) -> str:
+        core = snapshot.get("core") or {}
+        extended = snapshot.get("extended") or {}
+        lines = [
+            "# Bridge Health",
+            "",
+            "## Overview",
+            "",
+            "| Field | Value |",
+            "|---|---|",
+            "| Overall | %s |" % snapshot.get("overall_status"),
+            "| Snapshot | %s |" % snapshot.get("snapshot_ts"),
+            "| Bridge root | `%s` |" % snapshot.get("bridge_root"),
+            "| Duration | %sms |" % snapshot.get("snapshot_duration_ms"),
+            "",
+            "## Core",
+            "",
+            "| Metric | Status | Detail |",
+            "|---|---|---|",
+        ]
+        bridge_state = core.get("bridge_state") or {}
+        watcher = core.get("watcher") or {}
+        server = core.get("server") or {}
+        in_flight = core.get("in_flight_wakes") or {}
+        stuck = core.get("stuck_wakes") or {}
+        inboxes = core.get("inboxes") or {}
+        lines.extend(
+            [
+                "| Bridge state | %s | paused=%s |" % (bridge_state.get("status"), bridge_state.get("paused")),
+                "| Watcher | %s | pid=%s running=%s stale=%s |"
+                % (watcher.get("status", "ok"), watcher.get("pid"), watcher.get("running"), watcher.get("stale")),
+                "| MCP servers | ok | markers=%s stale=%s |"
+                % (server.get("mcp_server_marker_count", 0), server.get("stale_server_marker_count", 0)),
+                "| In-flight wakes | %s | count=%s |" % (in_flight.get("status"), in_flight.get("count", 0)),
+                "| Stuck wakes | %s | count=%s |" % (stuck.get("status"), stuck.get("count", 0)),
+                "| Inboxes | %s | unread=%s handled-not-seen=%s |"
+                % (
+                    inboxes.get("status"),
+                    (inboxes.get("totals") or {}).get("unread_count", 0),
+                    (inboxes.get("totals") or {}).get("handled_not_seen_count", 0),
+                ),
+            ]
+        )
+        sessions = (core.get("active_sessions") or {}).get("active") or {}
+        lines.extend(["", "## Active Sessions", "", "| Project/Agent | Session | Origin |", "|---|---|---|"])
+        if sessions:
+            for key, session in sorted(sessions.items()):
+                lines.append(
+                    "| %s | `%s` | %s |"
+                    % (key, session.get("session_id"), session.get("bootstrap_origin", "unknown"))
+                )
+        else:
+            lines.append("| none |  |  |")
+        if extended:
+            pending = extended.get("pending_actions") or {}
+            breaker = extended.get("wake_breaker") or {}
+            cross = extended.get("cross_project") or {}
+            lines.extend(
+                [
+                    "",
+                    "## Extended",
+                    "",
+                    "| Metric | Detail |",
+                    "|---|---|",
+                    "| Pending actions | actionable=%s |" % pending.get("unresolved_actionable_count", 0),
+                    "| Wake breakers | open=%s |" % breaker.get("open_session_count", 0),
+                    "| Cross-project links | active=%s total=%s |"
+                    % (cross.get("active_count", 0), cross.get("link_count", 0)),
+                ]
+            )
+        if snapshot.get("errors"):
+            lines.extend(["", "## Errors", "", "| Metric | Error |", "|---|---|"])
+            for error in snapshot["errors"]:
+                lines.append("| %s | %s |" % (error.get("metric"), error.get("error")))
+        return "\n".join(lines)
+
+    def bridge_health_panel(
+        self,
+        agent: str,
+        session_id: Optional[str] = None,
+        include_extended: bool = False,
+        format: str = "json",
+        stuck_wake_threshold_seconds: int = 30,
+    ) -> BridgeResult:
+        start = time.monotonic()
+        now_dt = datetime.now(timezone.utc)
+        try:
+            caller = normalize_agent(agent)
+            session = normalize_session(session_id) if session_id is not None else None
+        except ValueError as exc:
+            return BridgeResult(False, "rejected", str(exc))
+        output_format = (format or "json").strip().lower()
+        if output_format not in {"json", "markdown"}:
+            return BridgeResult(False, "rejected", "format must be json or markdown")
+        if (
+            isinstance(stuck_wake_threshold_seconds, bool)
+            or not isinstance(stuck_wake_threshold_seconds, int)
+            or stuck_wake_threshold_seconds < 1
+            or stuck_wake_threshold_seconds > 3600
+        ):
+            return BridgeResult(False, "rejected", "stuck_wake_threshold_seconds must be between 1 and 3600")
+
+        errors: List[Dict[str, Any]] = []
+        state_read = self._health_read_json(self.state_path, self._default_state(), "bridge_state")
+        registry_read = self._health_read_json(self.session_registry_path, self._default_session_registry(), "active_sessions")
+        state_data = state_read["data"] if isinstance(state_read["data"], dict) else {}
+        bridge_state = {
+            "status": state_read["status"],
+            "path": state_read["path"],
+            "paused": bool(state_data.get("paused")),
+            "paused_reason": state_data.get("paused_reason"),
+            "paused_since": state_data.get("paused_since"),
+            "error": state_read["error"],
+        }
+        if state_read["status"] == "error":
+            errors.append({"metric": "bridge_state", "error": state_read["error"]})
+
+        active_sessions = self._health_active_sessions(registry_read, now_dt)
+        if active_sessions.get("status") == "error":
+            errors.append({"metric": "active_sessions", "error": active_sessions.get("error")})
+
+        try:
+            process_result = self.bridge_process_status()
+            process_data = process_result.data
+        except Exception as exc:
+            process_data = {
+                "watcher": {"status": "error", "error": "%s" % exc, "stale": True, "running": False},
+                "mcp_server_marker_count": 0,
+                "stale_server_marker_count": 0,
+                "mcp_server_markers": [],
+            }
+            errors.append({"metric": "process_status", "error": "%s" % exc})
+        wake_processes = self._health_in_flight_wakes(now_dt, stuck_wake_threshold_seconds)
+        for key in ("in_flight", "stuck"):
+            if wake_processes[key].get("status") == "unavailable":
+                errors.append({"metric": "%s_wakes" % key, "error": wake_processes[key].get("error")})
+        inboxes = self._health_inboxes(now_dt)
+        errors.extend(inboxes.get("errors") or [])
+
+        extended: Dict[str, Any] = {}
+        if include_extended:
+            extended["pending_actions"] = self._health_pending_actions(now_dt)
+            extended["recent_failures"] = self._health_recent_failures(now_dt)
+            extended["provenance"] = self._health_provenance(active_sessions)
+            extended["wake_breaker"] = self._health_wake_breaker()
+            extended["last_wake_per_peer"] = self._health_last_wake_per_peer()
+            extended["schema_versions"] = self._health_schema_versions()
+            extended["cross_project"] = self._health_cross_project()
+            for metric, payload in extended.items():
+                if isinstance(payload, dict) and payload.get("status") == "error":
+                    errors.append({"metric": metric, "error": payload.get("error")})
+
+        snapshot: Dict[str, Any] = {
+            "schema_version": 1,
+            "snapshot_ts": now_dt.isoformat(timespec="seconds"),
+            "snapshot_duration_ms": 0,
+            "bridge_root": str(self.state_dir.parent),
+            "state_dir": str(self.state_dir),
+            "tenant_id": "local-default",
+            "machine_id": "local-machine",
+            "caller": {"agent": caller, "session_id": session},
+            "overall_status": "healthy",
+            "core": {
+                "bridge_state": bridge_state,
+                "active_sessions": active_sessions,
+                "watcher": process_data.get("watcher", {}),
+                "server": {
+                    "mcp_server_marker_count": process_data.get("mcp_server_marker_count", 0),
+                    "stale_server_marker_count": process_data.get("stale_server_marker_count", 0),
+                    "markers": process_data.get("mcp_server_markers", []),
+                },
+                "in_flight_wakes": wake_processes["in_flight"],
+                "stuck_wakes": wake_processes["stuck"],
+                "inboxes": inboxes,
+            },
+            "extended": extended if include_extended else {},
+            "errors": errors,
+        }
+        snapshot["overall_status"] = self._derive_health_status(snapshot)
+        snapshot["snapshot_duration_ms"] = int((time.monotonic() - start) * 1000)
+        if output_format == "markdown":
+            markdown = self._render_health_markdown(snapshot)
+            return BridgeResult(
+                True,
+                snapshot["overall_status"],
+                markdown,
+                {"snapshot": snapshot, "markdown": markdown},
+            )
+        return BridgeResult(
+            True,
+            snapshot["overall_status"],
+            "Bridge health is %s." % snapshot["overall_status"],
+            {"snapshot": snapshot},
+        )
+
     def pause_bridge(self) -> BridgeResult:
         with self._locked():
             state = self._load_state()

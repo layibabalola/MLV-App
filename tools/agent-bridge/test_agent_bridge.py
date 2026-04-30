@@ -757,6 +757,89 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertFalse(blocked.ok)
         self.assertIn("revoked", blocked.message)
 
+    def test_bridge_health_panel_reports_paused_markdown(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.pause_bridge()
+
+        result = bridge.bridge_health_panel("codex", include_extended=True, format="markdown")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "paused")
+        self.assertIn("# Bridge Health", result.data["markdown"])
+        self.assertIn("| Overall | paused |", result.data["markdown"])
+        self.assertTrue(result.data["snapshot"]["core"]["bridge_state"]["paused"])
+
+    def test_bridge_health_panel_inbox_handled_not_seen_degrades(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        append_jsonl(
+            bridge.inbox_path("codex"),
+            {
+                "id": "read-without-seen",
+                "created_at": "2026-04-29T00:00:00+00:00",
+                "session_id": "mlv-app",
+                "from": "claude",
+                "to": "codex",
+                "body": "already read but never seen",
+                "read_at": "2026-04-29T00:00:01+00:00",
+                "seen_at": None,
+            },
+        )
+
+        result = bridge.bridge_health_panel("codex")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "degraded")
+        totals = result.data["snapshot"]["core"]["inboxes"]["totals"]
+        self.assertEqual(totals["handled_not_seen_count"], 1)
+
+    def test_bridge_health_panel_is_read_only_for_state_files(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        bridge.record_pending_bridge_action("codex", "read-only health check fixture")
+        paths = [
+            bridge.state_path,
+            bridge.session_registry_path,
+            bridge.pending_actions_path,
+            bridge.inbox_path("claude"),
+            bridge.inbox_path("codex"),
+        ]
+        before = {path: path.stat().st_mtime_ns for path in paths if path.exists()}
+
+        for _ in range(3):
+            result = bridge.bridge_health_panel("codex", include_extended=True)
+            self.assertTrue(result.ok)
+
+        after = {path: path.stat().st_mtime_ns for path in paths if path.exists()}
+        self.assertEqual(before, after)
+
+    def test_bridge_health_panel_extended_lists_cross_project_links(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        self._activate_cross_project_fixture(bridge)
+        bridge.cross_pair_init(
+            agent="claude",
+            project="source-app",
+            peer_project="target-app",
+            role="advisor",
+            nonce="nonce-health-1",
+            confirm_different_projects=True,
+        )
+        active = bridge.cross_pair_init(
+            agent="codex",
+            project="target-app",
+            peer_project="source-app",
+            role="executor",
+            nonce="nonce-health-1",
+            confirm_different_projects=True,
+        )
+
+        result = bridge.bridge_health_panel("codex", include_extended=True)
+
+        self.assertTrue(result.ok)
+        cross = result.data["snapshot"]["extended"]["cross_project"]
+        self.assertEqual(cross["active_count"], 1)
+        self.assertEqual(cross["links"][0]["link_id"], active.data["link"]["link_id"])
+
     def test_activate_session_promotes_unread_messages_to_project(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
