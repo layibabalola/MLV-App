@@ -1,6 +1,6 @@
 # Agent Bridge Refactor — Canonical Plan v1.1
 
-**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, and cross-project pairing MVP. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, cross-project file read/write tools, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
+**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, and cross-project pairing MVP. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, cross-project file read/write tools, knowledge-sharing contracts, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
 
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
 - Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
@@ -290,19 +290,71 @@ tool resolves the same way.
   - backward compatibility for `--state-dir`
   - routing-rules/settings/session registry all resolving from the same root
 
-### Phase 14 - Security review and threat model
+### Phase 14 - Knowledge sharing contracts
+
+Implement `KNOWLEDGE_SHARING_CONTRACT_SPEC.md` so pairing consent is explicit,
+scoped, expiring, and enforced before catch-up or future cross-project knowledge
+sharing. This is a privacy/security feature that must land before the final
+security signoff.
+
+- Add contract state:
+  - `state/knowledge-contracts/<contract_id>.json`
+  - `state/knowledge-contracts/_index.json`
+  - active lookup by scope, project(s), and agent pair
+  - statuses: `active`, `expired`, `revoked`, `superseded`
+- Add default policies:
+  - same-project short offline catch-up allowed within the contract dormancy
+    window
+  - cross-project catch-up allowed only while the manual pair is active and
+    unexpired
+  - long dormancy returns metadata-only reauthorization prompts, never bodies
+- Gate catch-up and knowledge-sharing paths:
+  - `send_catchup_digest`
+  - backpressure-clear digest generation
+  - handshake-triggered digest generation
+  - cross-project pairing and cross-project message flows
+  - future file read/write tools
+- Add reauthorization flow:
+  - preview withheld count, date range, projects, and message types
+  - renew with no history, metadata-only history, or bounded body-sharing window
+  - revoke and block future catch-up
+- Add MCP tools:
+  - `list_knowledge_contracts`
+  - `knowledge_contract_status`
+  - `renew_knowledge_contract`
+  - `revoke_knowledge_contract`
+  - `preview_catchup`
+- Add audit actions:
+  - `knowledge_contract_created`
+  - `knowledge_contract_renewed`
+  - `knowledge_contract_revoked`
+  - `knowledge_contract_expired`
+  - `knowledge_contract_reauth_required`
+  - `catchup_digest_policy_allowed`
+  - `catchup_digest_policy_blocked`
+- Add tests for:
+  - recently offline same-project catch-up still works
+  - dormant-too-long peer receives reauth-required metadata only
+  - expired cross-project pair blocks catch-up bodies
+  - revoked contract blocks catch-up and cross-project sends
+  - bounded renewal filters implementation journal history
+  - health/diagnostics surface reauth-required contracts
+
+### Phase 15 - Security review and threat model
 
 Treat the bridge as local-only infrastructure, but still hostile-input exposed:
 messages, config files, JSONL rows, environment variables, watcher commands,
 and desktop wake helpers can all be influenced by a compromised peer, stale
-state, or accidental operator input.
+state, stale knowledge contract, or accidental operator input.
 
 - Write `SECURITY_REVIEW.md` with:
   - trust boundaries: Claude, Codex, MCP clients, watcher, helper scripts,
-    shared state files, settings, and desktop UI wake surface
+    shared state files, settings, knowledge contracts, and desktop UI wake
+    surface
   - threat model: command injection, path traversal, state tampering, message
     spoofing, replay/dedupe bypass, denial of service/backpressure wedging,
-    stale-session takeover, prompt/log exfiltration, and unsafe destructive tools
+    stale-session takeover, stale-contract knowledge leakage, prompt/log
+    exfiltration, and unsafe destructive tools
   - explicit assumptions: same-user local machine, no network listener, state
     files not secret, bridge messages may contain sensitive prompts and must not
     be silently copied elsewhere
@@ -319,6 +371,7 @@ state, or accidental operator input.
   - destructive tools reject `default`, missing buckets, and ambiguous targets
   - `probe_server.py` cannot mutate live state without `--mutate`
   - settings reject unknown keys and invalid types
+  - expired/revoked/stale knowledge contracts block body-sharing catch-up
 - Review state-file permissions and document the expected local-user security
   posture. If permissions cannot be enforced portably, report it as an accepted
   local-user trust assumption.
@@ -384,9 +437,14 @@ Phase 7 (wake hardening)
 | 28 | Root manifest and stale-root redirects prevent silent split-brain | 13 |
 | 29 | Migration tool dry-runs, backs up, rewrites paths, validates target, and prints new config snippets | 13 |
 | 30 | `--state-dir` compatibility remains tested while docs prefer `--bridge-root` | 13 |
-| 31 | Security threat model and trust boundaries documented | 14 |
-| 32 | Shell/process boundaries audited with injection/path tests where applicable | 14 |
-| 33 | Security signoff records fixed findings, accepted risks, and exclusions | 14 |
+| 31 | Pairings have explicit knowledge-sharing contracts with scope, expiry, and dormancy limits | 14 |
+| 32 | Catch-up digests are gated by active contract policy before body sharing | 14 |
+| 33 | Long-dormant peers receive reauthorization metadata, not historical bodies | 14 |
+| 34 | Contract renewal supports no-history, metadata-only, and bounded body-sharing modes | 14 |
+| 35 | Revoked/expired contracts block catch-up and cross-project sends | 14 |
+| 36 | Security threat model and trust boundaries documented | 15 |
+| 37 | Shell/process boundaries audited with injection/path tests where applicable | 15 |
+| 38 | Security signoff records fixed findings, accepted risks, and exclusions | 15 |
 
 ## Final 10/10 Validation Loop
 
@@ -431,9 +489,10 @@ This preserves the two-axis distinction agreed during hardening review:
 | Hypothesis dependency setup friction | Property tests are dev-only extra; Phase 0 doesn't depend on them |
 | Root relocation creates split-brain state | Phase 13 adds a single resolver, root manifest, stale-root redirects, and startup rejection for moved roots |
 | Migration loses or corrupts bridge history | Phase 13 migration is dry-run first, backup-before-mutate, and validates target with recovery/probe tools |
-| Local command injection via watcher/helper boundaries | Phase 14 audits all process boundaries and adds injection/path tests |
-| Sensitive prompt leakage through bridge state/logs | Phase 14 documents local-user trust assumptions, retention, and accepted risks |
-| Destructive MCP tool misuse | Phase 14 validates ambiguous/destructive inputs reject by default |
+| Long-dormant peer receives stale sensitive context | Phase 14 gates catch-up on active knowledge contracts and returns reauthorization metadata after dormancy expiry |
+| Local command injection via watcher/helper boundaries | Phase 15 audits all process boundaries and adds injection/path tests |
+| Sensitive prompt leakage through bridge state/logs | Phase 15 documents local-user trust assumptions, retention, and accepted risks |
+| Destructive MCP tool misuse | Phase 15 validates ambiguous/destructive inputs reject by default |
 
 ---
 
