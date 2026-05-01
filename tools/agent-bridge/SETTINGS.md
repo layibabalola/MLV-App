@@ -19,7 +19,7 @@ answered yes:
 | `toast_max_in_tray` | `10` | `1..50` | Best-effort Windows Action Center cap per bridge notification group. |
 | `wake_idle_threshold_seconds` | `5` | `0..60` | `wake_codex.ps1 -IdleThresholdSeconds`. |
 | `wake_max_wait_seconds` | `60` | `1..3600` | `wake_codex.ps1 -MaxWaitSeconds`. |
-| `poll_interval_seconds` | `2` | `1..60` | Watcher file-stat loop interval. |
+| `poll_interval_seconds` | `2` | `0.1..60` | Watcher file-stat loop interval. Accepts float (e.g. `0.5`). |
 | `compact_interval_hours` | `6` | `1..168` | Watcher periodic compaction cadence. |
 | `audit_log_retention_days` | `90` | `1..3650` | Rotated audit-log retention. |
 | `inbox_read_retention_days` | `7` | `1..3650` | Read inbox row retention during compaction. |
@@ -36,14 +36,14 @@ answered yes:
   "toast_max_in_tray": 10,
   "wake_idle_threshold_seconds": 5,
   "wake_max_wait_seconds": 60,
-  "poll_interval_seconds": 2,
+  "poll_interval_seconds": 0.5,
   "compact_interval_hours": 6,
   "audit_log_retention_days": 90,
   "inbox_read_retention_days": 7,
   "toasts_enabled": true,
   "codex_bridge_reminder_toasts_enabled": false,
   "routing_rules_enabled": true,
-  "wake_provider": "disabled"
+  "wake_provider": "targeted_sendkeys"
 }
 ```
 
