@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.paths import default_bridge_root
+
 
 DEFAULT_RULES = {
     "learned_triggers": [],
@@ -89,7 +91,7 @@ def utc_date() -> str:
 
 
 def default_rules_path() -> Path:
-    return Path(os.path.expanduser("~")) / ".agent-bridge" / "routing-rules.json"
+    return default_bridge_root() / "routing-rules.json"
 
 
 def load_rules(path: Path) -> Dict[str, Any]:

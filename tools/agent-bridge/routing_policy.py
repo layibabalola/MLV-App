@@ -5,9 +5,11 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.paths import default_bridge_root
+
 
 def default_rules_path() -> Path:
-    return Path(os.path.expanduser("~")) / ".agent-bridge" / "routing-rules.json"
+    return default_bridge_root() / "routing-rules.json"
 
 
 def load_rules(path: Optional[str] = None) -> Dict[str, Any]:
