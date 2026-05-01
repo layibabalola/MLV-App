@@ -230,9 +230,19 @@ function Test-CodexThreadId {
     return $Value -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 }
 
+# Approved wake messages. All must contain "check bridge inbox" as the Codex
+# trigger phrase. The prefix identifies who initiated the wake for debugging.
+$script:ApprovedWakeMessages = @(
+    "check bridge inbox",
+    "Watcher says check bridge inbox",
+    "Codex says check bridge inbox",
+    "Claude says check bridge inbox",
+    "User says check bridge inbox"
+)
+
 function Assert-TargetedWakePolicy {
-    if ($RequireConstantMessage -and $Message -ne "check bridge inbox") {
-        Write-Host ("[wake_codex] Unsafe targeted wake: refusing non-constant message payload: " + $Message)
+    if ($RequireConstantMessage -and ($script:ApprovedWakeMessages -notcontains $Message)) {
+        Write-Host ("[wake_codex] Unsafe targeted wake: message not in approved list: " + $Message)
         Write-PreflightAudit -Action "targeted_wake_refused" -Fields @{
             abort_reason = "non_constant_message"
             message_hash = (Get-TextHash -Value $Message)
