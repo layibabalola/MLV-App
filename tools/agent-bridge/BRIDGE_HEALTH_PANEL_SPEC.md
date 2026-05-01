@@ -150,11 +150,29 @@ returns: SnapshotV1 (json) | str (pre-rendered markdown table)
 - [ ] Distinguishes "watcher dead" from "watcher gracefully paused" via `bridge_state.paused`.
 - [ ] Tests: alive+heartbeat fresh; alive+heartbeat stale; PID not running; lock missing; paused state.
 
-#### HP4 - Server status
+#### HP4 - Server status (wrapper + inner server, separately)
+
+MCP server health is two-layer: the **wrapper process** (parent; holds the stdio pipe the MCP host connected to) and the **inner server process** (child; the actual FastMCP server). These must be reported separately because their failure modes differ.
+
+| Event | Audit action | User impact |
+|---|---|---|
+| Inner server hot-reload | `mcp_server_self_restarted` | None — stdio pipe stays connected to wrapper; MCP host never sees a disconnect |
+| Wrapper exit + relaunch | `mcp_server_wrapper_launch` | MCP host must reconnect; agent loses bridge tool access for that turn |
 
 - [ ] Globs `<bridge-root>/state/server-pids/server-*.json`; for each: `pid`, `agent`, `started_at`, breadcrumb `mtime_age_seconds`.
 - [ ] Verifies each PID alive; entries with dead PIDs flagged `stale_breadcrumb`.
-- [ ] Tests: live server only; live + stale; no servers; corrupted breadcrumb.
+- [ ] Reads audit log for most recent `mcp_server_wrapper_launch` per parent PID: `pid`, `timestamp`, `changed_files`, `elapsed_ms` (if self-restart).
+- [ ] Reads audit log for most recent `mcp_server_self_restarted` per wrapper PID: `new_child_pid`, `old_child_pid`, `timestamp`, `changed_files`, `elapsed_ms`.
+- [ ] Surfaces:
+  - `wrapper_pid` — current live wrapper PID (null if none alive)
+  - `wrapper_started_at` — timestamp of last `mcp_server_wrapper_launch`
+  - `inner_pid` — current inner child PID (from most recent self-restart or initial launch)
+  - `inner_last_restart_at` — timestamp of last `mcp_server_self_restarted` (null if never)
+  - `inner_restart_count_today` — count of self-restart events since midnight UTC
+  - `mcp_host_likely_reconnected` — bool: `True` if any `check_inbox` or `mark_seen` audit event for any agent has `timestamp > wrapper_started_at`. Heuristic: if the agent used bridge tools after the wrapper launched, the MCP host reconnected successfully.
+  - `impact_class` — `"benign_hot_reload"` if only `mcp_server_self_restarted` events since last `mcp_server_wrapper_launch`; `"tool_access_risk"` if a `mcp_server_wrapper_launch` occurred within the last 5 minutes AND `mcp_host_likely_reconnected == False`.
+- [ ] If `impact_class == "tool_access_risk"`: contributes to `overall_status = degraded`.
+- [ ] Tests: live server only; live + stale; no servers; corrupted breadcrumb; wrapper recently relaunched with no post-launch audit activity (tool_access_risk); wrapper relaunched with post-launch audit activity (benign); multiple self-restarts in burst (inner_restart_count_today correct).
 
 #### HP5 - In-flight wakes
 
@@ -221,6 +239,49 @@ returns: SnapshotV1 (json) | str (pre-rendered markdown table)
 - [ ] Depends on cross-project pairing impl.
 - [ ] Reads `<bridge-root>/state/cross-project-pairs/*.json`; lists active links: `link_id`, `tier`, `expires_at`, `peer_project`.
 - [ ] Tests: no links; active link; expired link.
+
+---
+
+## Recovery Actions (companion to health panel; NOT part of the read-only panel)
+
+The health panel is read-only. When HP4 surfaces `impact_class == "tool_access_risk"`, the panel also returns a `recovery_hint` field pointing the user to the appropriate recovery action. The actions themselves are separate MCP tools (or CLI commands) so the read-only invariant on the panel is never broken.
+
+### HP-R1 - MCP wrapper reconnect/reload
+
+**Purpose:** gives field users a safe, one-step recovery path when the MCP host lost the wrapper connection, without requiring PID spelunking or manual process management.
+
+**Mechanism:** `bridge_reconnect_mcp` MCP tool (or `python -m agent_bridge reconnect-mcp` CLI equivalent):
+
+1. Locates the wrapper command from the most recent `mcp_server_wrapper_launch` audit entry.
+2. Verifies the wrapper PID is no longer alive (guards against reconnecting a healthy wrapper).
+3. Re-execs `server_wrapper.py` with the same `--state-dir` and `--max-hops` arguments.
+4. Writes a `mcp_server_reconnect_requested` audit event with `requested_by` (agent or user).
+5. Returns `{ "ok": true, "new_wrapper_pid": <pid>, "command": [...] }` or a structured error if the wrapper is still alive (in which case: reconnect is not needed, surface wrapper PID to user instead).
+
+**Guard:** if the wrapper PID is alive, refuse and return `{ "ok": false, "reason": "wrapper_alive", "pid": <pid> }`. The user should call `bridge_health_panel` first to confirm the wrapper is actually dead before calling reconnect.
+
+**Field-user docs note:** JSONL inbox messages are durable through any number of MCP restarts — messages queued while the MCP server is down are not lost. Only bridge tool *calls* fail during the outage. Once the MCP host reconnects, the agent's next `check_inbox` call will surface any messages that arrived during the gap.
+
+**Acceptance criteria:**
+
+- [ ] `bridge_reconnect_mcp` refuses if wrapper PID is alive.
+- [ ] `bridge_reconnect_mcp` relaunches with identical args from audit log entry.
+- [ ] `mcp_server_reconnect_requested` audit event written before exec.
+- [ ] HP4 `mcp_host_likely_reconnected` heuristic picks up the new wrapper within one poll cycle.
+- [ ] Tests: wrapper dead → reconnect succeeds; wrapper alive → refused; no audit history → error (can't determine args safely).
+
+---
+
+## Field Deployment Notes
+
+These are invariants that production documentation must state explicitly:
+
+1. **Message durability:** JSONL inbox messages survive any MCP server restart, wrapper crash, or machine reboot. The only way to lose a queued message is explicit `clear_bucket` or manual JSONL deletion. Field users should not fear data loss during MCP instability.
+2. **Tool access during outage:** Bridge MCP tool calls (`check_inbox`, `send_to_peer`, etc.) will fail while the wrapper is down. This is a *tool access* failure, not a bridge protocol failure. The watcher continues to fire toasts and wake helpers independently of the MCP server.
+3. **Recovery path:** HP4 `impact_class == "tool_access_risk"` + `recovery_hint` → `bridge_reconnect_mcp`. That is the complete self-service recovery flow.
+4. **Hot-reload is not an outage:** `mcp_server_self_restarted` events (file-watch triggered inner server restart) are invisible to the MCP host and do not interrupt tool access. Field users do not need to take any action for these.
+
+---
 
 ### Tool-level behavior
 
@@ -297,7 +358,9 @@ returns: SnapshotV1 (json) | str (pre-rendered markdown table)
 
 ## Phased Rollout
 
-**HP-Phase 1 (v1, ships first):** HP1, HP2, HP3, HP4, HP5, HP6, HP7 + HP-T1..T5. Markdown rendering. Read-only contract. This is the deliverable.
+**HP-Phase 1 (v1, ships first):** HP1, HP2, HP3, HP4 (extended wrapper metrics included), HP5, HP6, HP7 + HP-T1..T5. Markdown rendering. Read-only contract. This is the deliverable.
+
+**HP-Phase 1b:** HP-R1 (`bridge_reconnect_mcp` companion tool). Ships alongside or immediately after HP-Phase 1; depends on HP4 audit-log reading being in place. Considered part of the same user story as HP4 — surfacing `impact_class == "tool_access_risk"` without a recovery action is incomplete for field users.
 
 **HP-Phase 2:** HP9 (recent failures), HP10 (provenance summary), HP12 (last wake) - depend only on existing audit log; ship as soon as HP-Phase 1 is in.
 
