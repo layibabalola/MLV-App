@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from agent_bridge import AgentBridge
+from core.paths import session_registry_path_for_state_dir
 from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
 from core.runtime import (
     build_runtime_breadcrumb,
@@ -63,6 +64,12 @@ WAKE_BREAKER_WINDOW_S = 5 * 60
 WAKE_BREAKER_IDLE_CLOSE_S = 15 * 60
 WAKE_BREAKER_SCHEMA_VERSION = 1
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
+# Wake commands that use {desktop_thread_id} inject into a specific Codex chat thread.
+# If the breadcrumb is stale the thread ID may point to yesterday's chat, causing silent
+# wrong-thread injection. Fail loudly past this age so the caller falls back to toast.
+_BREADCRUMB_MAX_AGE_HOURS = 4
+ACTIVE_SESSION_ID_SOURCE = "active_session"
+_SESSION_REGISTRY_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def utc_now() -> str:
@@ -96,6 +103,88 @@ def unread_for_session(inbox_path: Path, session_id: str) -> List[Dict[str, Any]
         r for r in rows
         if r.get("session_id") == session_id and not r.get("read_at")
     ]
+
+
+def _load_session_registry_cached(registry_path: Path) -> Dict[str, Any]:
+    """Read session.json with a cheap mtime/size cache for watcher poll loops."""
+    key = str(registry_path)
+    try:
+        stat = registry_path.stat()
+    except OSError:
+        _SESSION_REGISTRY_CACHE.pop(key, None)
+        return {}
+
+    signature = (stat.st_mtime_ns, stat.st_size)
+    cached = _SESSION_REGISTRY_CACHE.get(key)
+    if cached and cached.get("signature") == signature:
+        payload = cached.get("payload")
+        return payload if isinstance(payload, dict) else {}
+
+    try:
+        with registry_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    _SESSION_REGISTRY_CACHE[key] = {"signature": signature, "payload": payload}
+    return payload
+
+
+def _active_session_from_registry(registry: Dict[str, Any], *, project: str, agent: str) -> Optional[str]:
+    projects = registry.get("projects", {})
+    if not isinstance(projects, dict):
+        return None
+    project_entry = projects.get(project)
+    if not isinstance(project_entry, dict):
+        return None
+    active = project_entry.get("active", {})
+    if not isinstance(active, dict):
+        return None
+    session_id = str(active.get(agent) or "").strip()
+    if not session_id:
+        return None
+    sessions = project_entry.get("sessions", {})
+    if isinstance(sessions, dict):
+        record = sessions.get(session_id)
+        if isinstance(record, dict) and record.get("agent") not in {None, agent}:
+            return None
+    return session_id
+
+
+def _resolve_session_config(session_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy with private entries rebound to the active session registry row.
+
+    watcher-config.json may contain a stale private session_id snapshot.  For
+    entries that opt into active-session resolution, session.json is the source
+    of truth and the snapshot is only a fallback for bootstrap/recovery gaps.
+    """
+    resolved = dict(session_config)
+    fallback_session_id = str(resolved.get("session_id") or "").strip()
+    source = str(resolved.get("session_id_source") or "").strip().lower()
+    if resolved.get("kind") != "private" or source != ACTIVE_SESSION_ID_SOURCE:
+        resolved["session_id"] = fallback_session_id
+        return resolved
+
+    agent = str(resolved.get("agent") or "").strip()
+    project = str(resolved.get("project") or "").strip()
+    inbox_value = str(resolved.get("inbox") or "").strip()
+    if not agent or not project or not inbox_value:
+        resolved["session_id"] = fallback_session_id
+        return resolved
+
+    registry_value = str(resolved.get("session_registry") or resolved.get("session_registry_path") or "").strip()
+    registry_path = Path(registry_value) if registry_value else session_registry_path_for_state_dir(Path(inbox_value).parent)
+    active_session_id = _active_session_from_registry(
+        _load_session_registry_cached(registry_path),
+        project=project,
+        agent=agent,
+    )
+    resolved["configured_session_id"] = fallback_session_id
+    resolved["resolved_session_id"] = active_session_id or fallback_session_id
+    resolved["session_registry_path"] = str(registry_path)
+    resolved["session_id"] = active_session_id or fallback_session_id
+    return resolved
 
 
 def load_seen(state_path: Path) -> Dict[str, Any]:
@@ -408,7 +497,27 @@ def _record_wake_failure(
 
 
 def _record_wake_success(*, state_path: Path, session_id: str, inbox_path: Optional[Path] = None) -> None:
-    _close_breaker(state_path=state_path, session_id=session_id, reason="success", inbox_path=inbox_path)
+    payload = _load_wake_breakers(state_path)
+    sessions = payload.setdefault("sessions", {})
+    record = _normalize_breaker_session(sessions.get(session_id))
+    was_open = record.get("breaker_state") == "open"
+    now = utc_now()
+    if was_open and inbox_path is not None:
+        _append_wake_audit(
+            inbox_path,
+            {
+                "action": "wake_breaker_closed",
+                "session_id": session_id,
+                "reason": "success",
+            },
+        )
+    record["breaker_state"] = "closed"
+    record["opened_at"] = None
+    record["last_success_at"] = now
+    record["failures"] = []
+    record["exit_code_distribution"] = {}
+    sessions[session_id] = record
+    _save_wake_breakers(state_path, payload)
 
 
 def _rate_limit_fire_history(
@@ -750,6 +859,8 @@ def _permanent_wake_event(
     event_reason = reason or "permanent_wake_failure"
     if reason == "no_peer_breadcrumb":
         action = "wake_skipped_no_peer"
+    elif reason == "stale_breadcrumb":
+        action = "wake_skipped_stale_breadcrumb"
     elif reason == "config_error":
         action = "wake_skipped_config_error"
     elif returncode == 3:
@@ -958,6 +1069,36 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
             },
         }
 
+    # Staleness gate: if the breadcrumb is too old AND the wake command uses
+    # {desktop_thread_id}, the thread ID may point to a stale chat, causing
+    # silent wrong-thread injection. Fail loudly so caller falls back to toast.
+    template_str = "\n".join(str(t) for t in template) if isinstance(template, list) else str(template)
+    if "{desktop_thread_id}" in template_str:
+        written_at_str = str(peer.get("written_at") or "").strip()
+        if written_at_str:
+            try:
+                written_at = datetime.fromisoformat(written_at_str.replace("Z", "+00:00"))
+                age_hours = (datetime.now(timezone.utc) - written_at).total_seconds() / 3600
+                if age_hours > _BREADCRUMB_MAX_AGE_HOURS:
+                    return {
+                        "ok": False,
+                        "command": None,
+                        "result": {
+                            "ok": False,
+                            "returncode": 2,
+                            "retryable": False,
+                            "stdout": "",
+                            "stderr": (
+                                f"peer runtime breadcrumb is {age_hours:.1f}h old "
+                                f"(max {_BREADCRUMB_MAX_AGE_HOURS}h); skipping targeted wake "
+                                f"to avoid wrong-thread injection: {peer_path}"
+                            ),
+                            "reason": "stale_breadcrumb",
+                        },
+                    }
+            except (ValueError, TypeError):
+                pass
+
     deeplink_template = str(peer.get("deeplink_template") or "")
     deeplink_uri = deeplink_template.format(thread_id=desktop_thread_id) if deeplink_template else ""
     mapping = {
@@ -1129,8 +1270,11 @@ def _process_pending_wake_verifications(
     wake_fire_history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Promote pending wake attempts to seen only after a receipt appears."""
+    session_config = _resolve_session_config(session_config)
     agent = session_config["agent"]
-    session_id = session_config["session_id"]
+    session_id = str(session_config.get("session_id") or "")
+    if not session_id:
+        return pending
     inbox_path = Path(session_config["inbox"])
     on_message_command: Optional[str] = session_config.get("on_message_command")
     now = datetime.now(timezone.utc)
@@ -1429,8 +1573,11 @@ def process_session_once(
     notification succeeds and any wake command exits cleanly. Failed wake
     commands leave messages retryable for the next poll.
     """
+    session_config = _resolve_session_config(session_config)
     agent = session_config["agent"]
-    session_id = session_config["session_id"]
+    session_id = str(session_config.get("session_id") or "")
+    if not session_id:
+        return []
     inbox_path = Path(session_config["inbox"])
     on_message = session_config.get("on_message", "notify")
     on_message_command: Optional[str] = session_config.get("on_message_command")
@@ -1787,7 +1934,13 @@ def watch(
         flush=True,
     )
     for s in sessions:
-        print(f"  agent={s['agent']}  session=...{s['session_id'][-8:]}  inbox={s['inbox']}", flush=True)
+        resolved = _resolve_session_config(s)
+        session_id = str(resolved.get("session_id") or "")
+        source = str(s.get("session_id_source") or "static")
+        print(
+            f"  agent={s['agent']}  session=...{session_id[-8:]}  source={source}  inbox={s['inbox']}",
+            flush=True,
+        )
 
     # Compact on startup
     if state_dir:

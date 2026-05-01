@@ -44,6 +44,7 @@ param(
     [int]   $PreflightPollSeconds = 5,
     [int]   $PreflightIdleStabilitySeconds = 0,
     [int]   $PreflightCapSeconds  = 0,
+    [int]   $DeeplinkSleepMilliseconds = 500,
     [switch]$RequireThreadId,
     [switch]$RequireConstantMessage,
     [switch]$VerifyTargetTwice,
@@ -60,6 +61,17 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$script:WakeStart = [System.Diagnostics.Stopwatch]::StartNew()
+
+function Write-StageEvent {
+    param([string]$Stage, [string]$Detail = "")
+    $elapsed = [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3)
+    $ts = (Get-Date).ToUniversalTime().ToString("HH:mm:ss.fff") + "Z"
+    $msg = "[wake_codex][$ts][+${elapsed}s][$Stage]"
+    if ($Detail) { $msg += " " + $Detail }
+    Write-Host $msg
+}
 
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -165,6 +177,7 @@ function New-InnerWakeCommand {
         "-PreflightPollSeconds " + [string]$PreflightPollSeconds,
         "-PreflightIdleStabilitySeconds " + [string]$PreflightIdleStabilitySeconds,
         "-PreflightCapSeconds " + [string]$PreflightCapSeconds,
+        "-DeeplinkSleepMilliseconds " + [string]$DeeplinkSleepMilliseconds,
         "-VerifyTargetGapMilliseconds " + [string]$VerifyTargetGapMilliseconds,
         "-MaxPreSendRaceMilliseconds " + [string]$MaxPreSendRaceMilliseconds,
         "-ProcessName " + (ConvertTo-PowerShellSingleQuotedLiteral $ProcessName)
@@ -235,7 +248,9 @@ function Open-CodexThread {
     $uri = "codex://threads/$Value"
     Write-Host ("[wake_codex] Opening Codex thread deeplink: " + $uri)
     Start-Process $uri
-    Start-Sleep -Milliseconds 1200
+    if ($DeeplinkSleepMilliseconds -gt 0) {
+        Start-Sleep -Milliseconds $DeeplinkSleepMilliseconds
+    }
 }
 
 function Invoke-CodexForegroundAttempt {
@@ -796,14 +811,19 @@ if ($PrintInnerCommand -and -not $RunInnerWake) {
 
 Assert-TargetedWakePolicy
 
+Write-StageEvent "START" ("message_id=" + $MessageId + " priority=" + $Priority + " idle_threshold=" + $IdleThresholdSeconds + "s")
+
 # --- Stage 1: locate ---
+Write-StageEvent "STAGE1_FIND" "locating Codex window"
 $codex = Get-CodexWindow
 if (-not $codex) {
+    Write-StageEvent "STAGE1_ABORT" "no Codex window found"
     Write-Host "[wake_codex] No Codex window found. Skipping."
     exit 0
 }
 $codexHwnd  = $codex.MainWindowHandle
 $codexTitle = Get-WindowTitle -hWnd $codexHwnd
+Write-StageEvent "STAGE1_OK" ("PID=" + $codex.Id + " hwnd=" + $codexHwnd)
 Write-Host ("[wake_codex] Found Codex: PID=" + $codex.Id + " hwnd=" + $codexHwnd + " title=" + $codexTitle)
 
 if ($FindOnly) {
@@ -858,6 +878,7 @@ if (-not $RunInnerWake) {
 # --- Inner wake process: stages 3-6 only ---
 try {
     # --- Stage 3: wait for system-wide idle ---
+    Write-StageEvent "STAGE3_IDLE_START" ("threshold=" + $IdleThresholdSeconds + "s max=" + $MaxWaitSeconds + "s")
     Write-Host ("[wake_codex] Waiting for >= " + $IdleThresholdSeconds + "s idle (max " + $MaxWaitSeconds + "s)...")
     $startTime = Get-Date
     $achieved  = $false
@@ -866,6 +887,7 @@ try {
         $idle = Get-IdleSeconds
         if ($idle -ge $IdleThresholdSeconds) {
             $achieved = $true
+            Write-StageEvent "STAGE3_IDLE_OK" ("idle=" + $idle + "s")
             Write-Host ("[wake_codex] Idle threshold reached (idle=" + $idle + "s). Proceeding.")
             break
         }
@@ -873,6 +895,7 @@ try {
     }
 
     if (-not $achieved) {
+        Write-StageEvent "STAGE3_IDLE_TIMEOUT" ("max=" + $MaxWaitSeconds + "s")
         Write-Host ("[wake_codex] Max wait of " + $MaxWaitSeconds + "s expired without idle. Deferring delivery to avoid keystroke collision with active user typing.")
         Write-Host "[wake_codex] Bridge message stays unread; watcher will retry, or next bridge event will surface it."
         exit 16
@@ -883,7 +906,9 @@ try {
     $prevFgTitle = Get-WindowTitle -hWnd $prevFg
     Write-Host ("[wake_codex] Foreground before: hwnd=" + $prevFg + " title=" + $prevFgTitle)
 
+    Write-StageEvent "STAGE4_DEEPLINK_START" ("thread=" + $ThreadId)
     Open-CodexThread -Value $ThreadId
+    Write-StageEvent "STAGE4_DEEPLINK_DONE"
 
     # The deeplink can create or retarget a Codex window. Prefer the foreground
     # Codex window after navigation, then fall back to the first visible one.
@@ -902,7 +927,9 @@ try {
     # Pre-flight is read-only: inspect the ProseMirror composer before any
     # focus/SendKeys path. UIA-unavailable defaults to exit 16 so the watcher
     # retries without counting this as a wake failure.
+    Write-StageEvent "STAGE4_PREFLIGHT_START" ("priority=" + $Priority)
     $preflight = Invoke-ComposerPreflight -RootHwnd $codexHwnd
+    Write-StageEvent "STAGE4_PREFLIGHT_DONE" ("state=" + $preflight.State)
     Write-Host ("[wake_codex] Preflight composer state: " + $preflight.State)
 
     $codexProcId = 0
@@ -998,7 +1025,9 @@ try {
             exit 16
         }
     }
+    Write-StageEvent "STAGE5_SENDKEYS_START" ("preserve_draft=" + [string]([bool]$preflight.PreserveDraft))
     Send-BridgeMessageKeys -Value $Message -DraftText $preflight.DraftText -PreserveDraft:([bool]$preflight.PreserveDraft)
+    Write-StageEvent "STAGE5_SENDKEYS_DONE"
     Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; preflight=" + $preflight.State + ")")
 
     if ($PostTypingVerify) {
@@ -1017,11 +1046,14 @@ try {
     }
 
     # --- Stage 6: restore previous foreground ---
+    Write-StageEvent "STAGE6_RESTORE_START"
     Start-Sleep -Milliseconds 200
     [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
+    Write-StageEvent "STAGE6_DONE" ("total=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s restored_to=" + $prevFgTitle)
     Write-Host ("[wake_codex] Restored focus to: " + $prevFgTitle)
 
 } catch {
+    Write-StageEvent "ERROR" $_.Exception.Message
     Write-Host ("[wake_codex] ERROR: " + $_.Exception.Message)
     exit 1
 }
