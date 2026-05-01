@@ -11,7 +11,7 @@ class BridgeSettings:
     toast_max_in_tray: int = 10
     wake_idle_threshold_seconds: int = 5
     wake_max_wait_seconds: int = 60
-    poll_interval_seconds: int = 2
+    poll_interval_seconds: float = 2
     compact_interval_hours: int = 6
     audit_log_retention_days: int = 90
     inbox_read_retention_days: int = 7
@@ -33,7 +33,7 @@ _BOUNDS = {
     "toast_max_in_tray": (1, 50),
     "wake_idle_threshold_seconds": (0, 60),
     "wake_max_wait_seconds": (1, 3600),
-    "poll_interval_seconds": (1, 60),
+    "poll_interval_seconds": (0.1, 60),
     "compact_interval_hours": (1, 168),
     "audit_log_retention_days": (1, 3650),
     "inbox_read_retention_days": (1, 3650),
@@ -53,6 +53,9 @@ def settings_path_for_state_dir(state_dir: Path) -> Path:
     return Path(state_dir).parent / "settings.json"
 
 
+_FLOAT_FIELDS = {"poll_interval_seconds"}
+
+
 def _validate_int(name: str, value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("%s must be an integer" % name)
@@ -60,6 +63,16 @@ def _validate_int(name: str, value: Any) -> int:
     if value < low or value > high:
         raise ValueError("%s must be between %d and %d" % (name, low, high))
     return value
+
+
+def _validate_float(name: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("%s must be a number" % name)
+    result = float(value)
+    low, high = _BOUNDS[name]
+    if result < low or result > high:
+        raise ValueError("%s must be between %s and %s" % (name, low, high))
+    return result
 
 
 def _validate_bool(name: str, value: Any) -> bool:
@@ -94,7 +107,10 @@ def load_settings(state_dir: Path, settings_path: Optional[Path] = None) -> Brid
     values.pop("schema_version", None)
 
     for name in _BOUNDS:
-        values[name] = _validate_int(name, values[name])
+        if name in _FLOAT_FIELDS:
+            values[name] = _validate_float(name, values[name])
+        else:
+            values[name] = _validate_int(name, values[name])
     for name in _BOOL_FIELDS:
         values[name] = _validate_bool(name, values[name])
     for name in _ENUM_FIELDS:
