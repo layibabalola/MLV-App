@@ -9,6 +9,26 @@ Agent Bridge is a local, file-backed message bus used by Claude and Codex to
 handoff work through MCP tools. Its main invariant is simple: durable delivery to
 an inbox is not the same thing as wake, read, or handled completion.
 
+## Product Invariant — Visible Bidirectional Wake
+
+The intended interactive UX for a paired session is:
+
+> If Claude sends Codex a message, Codex should visibly wake in the paired Desktop
+> thread, run `check bridge inbox`, respond naturally, and mark/reply/handle the
+> message. The user should see this happen in the Codex Desktop chat.
+
+This drives the default wake provider choice:
+
+| Provider | Mode | When to use |
+|---|---|---|
+| `targeted_sendkeys` | **Default** — wakes Codex Desktop, types in composer, visible chat feedback | Normal interactive pairing |
+| `disabled` | Toast-only — no focus steal, no compositor typing | User opts out of auto-nudge (`{ "wake_provider": "disabled" }` in `settings.json`) |
+| `app_server` | Background/headless — drives Codex via loopback JSON-RPC, Desktop UI does not update | Automation, recovery tests, or when Desktop visibility is impossible |
+
+`targeted_sendkeys` is on by default because a bridge that works silently in the
+background is perceived as broken. The user must be able to see Codex receive and
+respond.
+
 This document is the canonical reference for how the bridge works on a single
 machine. Cross-machine (LAN) and multi-tenant cloud deployments share the same
 protocol, message types, and presence model; the transport layer differs and
@@ -32,7 +52,7 @@ is described in `BRIDGE_LAN_TRANSPORT_SPEC.md` (Tier 3) and
 | **session** | A unique GUID identifying one agent's running instance. Sessions are tracked in `session.json`; the most recent for an agent is the "active" peer. |
 | **supersession** | When a newer session for the same agent registers, the older session is marked superseded; bridge auto-redirects sends to the new session. |
 | **tenant** | (Multi-tenant cloud only — forward-compat in v1.) An identity scope; users in different tenants cannot see each other's traffic. Single-machine v1 uses `tenant_id="local-default"`. |
-| **wake** | The mechanism by which a sender's message reaches the receiver's attention. On Claude side: Monitor (always-on inbox poll). On Codex side: `wake_codex.ps1` SendKeys nudge. Wake spawn is not equivalent to delivery. |
+| **wake** | The mechanism by which a sender's message reaches the receiver's attention. On Claude side today: Monitor (always-on inbox poll) plus a bootstrap reminder until `wake_claude.ps1` exists. On Codex side: `wake_codex.ps1` SendKeys nudge. Wake spawn is not equivalent to delivery. |
 
 ## Components
 
@@ -47,7 +67,7 @@ is described in `BRIDGE_LAN_TRANSPORT_SPEC.md` (Tier 3) and
 | `core/processes.py` | Process liveness, command hashing, role leases, heartbeats, and safe release. |
 | `core/settings.py` | Constrained `%USERPROFILE%\.agent-bridge\settings.json` loader and validation. |
 | `bootstrap_session.py` | Session activation, previous-session drain, handshake, watcher config refresh, and watcher start. |
-| `watcher.py` | Singleton file watcher and wake dispatcher. It notifies only; it must not consume inbox messages. Helper-backed wake paths are receipt-verified before being recorded as seen. |
+| `watcher.py` | Singleton file watcher and wake dispatcher. It notifies only; it must not consume inbox messages. Private entries can resolve the current active session from `session.json`; helper-backed wake paths are receipt-verified before being recorded as seen. |
 | `configure_watcher.py` | Transactional watcher config writer with parent-thread guardrails. |
 | `wake_codex.ps1` | Codex Desktop wake helper. It is a wake trigger, not proof of delivery. |
 | `compact.py` | Inbox retention, audit rotation, and stale MCP server marker reaping. |

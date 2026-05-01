@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .storage import STATE_SCHEMA_VERSION
 
 @dataclasses.dataclass(frozen=True)
 class BridgeSettings:
@@ -17,6 +18,9 @@ class BridgeSettings:
     toasts_enabled: bool = True
     codex_bridge_reminder_toasts_enabled: bool = False
     routing_rules_enabled: bool = True
+    default_pairing_intent: str = "ask_first"
+    pending_pair_timeout_seconds: int = 120
+    wake_provider: str = "targeted_sendkeys"
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -33,10 +37,16 @@ _BOUNDS = {
     "compact_interval_hours": (1, 168),
     "audit_log_retention_days": (1, 3650),
     "inbox_read_retention_days": (1, 3650),
+    "pending_pair_timeout_seconds": (10, 3600),
 }
 
 _BOOL_FIELDS = {"toasts_enabled", "codex_bridge_reminder_toasts_enabled", "routing_rules_enabled"}
+_ENUM_FIELDS = {
+    "default_pairing_intent": {"ask_first", "active_primary", "background"},
+    "wake_provider": {"disabled", "sendkeys", "targeted_sendkeys", "app_server", "app_server_then_redraw"},
+}
 _KNOWN_FIELDS = set(DEFAULT_SETTINGS.to_dict())
+_KNOWN_META_FIELDS = {"schema_version"}
 
 
 def settings_path_for_state_dir(state_dir: Path) -> Path:
@@ -58,21 +68,35 @@ def _validate_bool(name: str, value: Any) -> bool:
     return value
 
 
+def _validate_enum(name: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("%s must be a string" % name)
+    normalized = value.strip().lower()
+    allowed = _ENUM_FIELDS[name]
+    if normalized not in allowed:
+        raise ValueError("%s must be one of: %s" % (name, ", ".join(sorted(allowed))))
+    return normalized
+
+
 def load_settings(state_dir: Path, settings_path: Optional[Path] = None) -> BridgeSettings:
     path = Path(settings_path) if settings_path else settings_path_for_state_dir(Path(state_dir))
     values = DEFAULT_SETTINGS.to_dict()
     if path.exists():
-        with path.open("r", encoding="utf-8") as handle:
+        with path.open("r", encoding="utf-8-sig") as handle:
             loaded = json.load(handle)
         if not isinstance(loaded, dict):
             raise ValueError("%s must contain a JSON object" % path)
-        unknown = sorted(set(loaded) - _KNOWN_FIELDS)
+        unknown = sorted(set(loaded) - _KNOWN_FIELDS - _KNOWN_META_FIELDS)
         if unknown:
             raise ValueError("unsupported bridge setting(s): %s" % ", ".join(unknown))
+        loaded.setdefault("schema_version", STATE_SCHEMA_VERSION)
         values.update(loaded)
+    values.pop("schema_version", None)
 
     for name in _BOUNDS:
         values[name] = _validate_int(name, values[name])
     for name in _BOOL_FIELDS:
         values[name] = _validate_bool(name, values[name])
+    for name in _ENUM_FIELDS:
+        values[name] = _validate_enum(name, values[name])
     return BridgeSettings(**values)

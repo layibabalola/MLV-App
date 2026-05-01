@@ -26,6 +26,7 @@ answered yes:
 | `toasts_enabled` | `true` | boolean | Watcher toast/log mode. |
 | `codex_bridge_reminder_toasts_enabled` | `false` | boolean | Windows balloon toast for Codex workflow hygiene reminders; stdout reminder still prints either way. |
 | `routing_rules_enabled` | `true` | boolean | Learned/suppressed routing-rule evaluation. |
+| `wake_provider` | `targeted_sendkeys` | `targeted_sendkeys`, `disabled`, `app_server`, `sendkeys` (legacy), `app_server_then_redraw` | Codex wake backend. **`targeted_sendkeys` is the default**: wakes the paired Codex Desktop thread, types `check bridge inbox` in the composer, and produces visible chat feedback — the expected interactive UX. Set to `disabled` to opt out of focus-stealing and compositor typing (toast-only). Use `app_server` for background/headless automation where Desktop visibility is not needed. |
 
 ## Example
 
@@ -41,7 +42,8 @@ answered yes:
   "inbox_read_retention_days": 7,
   "toasts_enabled": true,
   "codex_bridge_reminder_toasts_enabled": false,
-  "routing_rules_enabled": true
+  "routing_rules_enabled": true,
+  "wake_provider": "disabled"
 }
 ```
 

@@ -1,5 +1,6 @@
 {
   "_comment": "agent-bridge watcher config. The watcher is notification-only: use toast/log to alert, never consume messages from here. Prefer settings.json for runtime tuning.",
+  "_auto_nudge_help": "Auto-nudge (targeted_sendkeys) is ON by default. To opt out of focus-stealing and compositor typing, add {\"wake_provider\": \"disabled\"} to settings.json. Valid values: targeted_sendkeys (default), disabled, app_server.",
   "toasts_enabled": true,
   "sessions": [
     {
@@ -7,6 +8,7 @@
       "agent": "claude",
       "kind": "private",
       "project": "mlv-app",
+      "session_id_source": "active_session",
       "session_id": "YOUR-CLAUDE-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-claude.jsonl",
       "on_message": "toast"
@@ -16,6 +18,7 @@
       "agent": "codex",
       "kind": "private",
       "project": "mlv-app",
+      "session_id_source": "active_session",
       "session_id": "YOUR-CODEX-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-codex.jsonl",
       "on_message": "toast",

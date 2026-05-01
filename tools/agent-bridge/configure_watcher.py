@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from core.settings import load_settings
-from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths, session_registry_path_for_state_dir
+from core.paths import ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths, session_registry_path_for_state_dir
+from core.storage import STATE_SCHEMA_VERSION
 from project_identity import derive_project_identity
 
 
@@ -38,6 +39,7 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
             value[PARENT_THREAD_ID_KEY] = current.get(PARENT_THREAD_ID_KEY)
             value[PARENT_THREAD_PROVENANCE_KEY] = current.get(PARENT_THREAD_PROVENANCE_KEY, "parent")
     path.parent.mkdir(parents=True, exist_ok=True)
+    value.setdefault("schema_version", STATE_SCHEMA_VERSION)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
@@ -117,6 +119,7 @@ def build_private_entry(
         "agent": agent,
         "kind": "private",
         "project": project,
+        "session_id_source": "active_session",
         "session_id": session_id,
         "inbox": str(inbox),
         "on_message": existing.get("on_message", "toast") if isinstance(existing, dict) else "toast",
@@ -130,6 +133,8 @@ def build_private_entry(
         merged.pop("on_message_command", None)
     if command_template is None:
         merged.pop("on_message_command_template", None)
+    if command is not None or command_template is not None:
+        merged.pop("wake_disabled_reason", None)
     return merged
 
 
@@ -161,6 +166,8 @@ def build_rendezvous_entry(
         merged.pop("on_message_command", None)
     if command_template is None:
         merged.pop("on_message_command_template", None)
+    if command is not None or command_template is not None:
+        merged.pop("wake_disabled_reason", None)
     return merged
 
 
@@ -190,10 +197,12 @@ def configure_watcher(
     config = read_json(
         config_path,
         {
+            "schema_version": STATE_SCHEMA_VERSION,
             "_comment": "agent-bridge watcher config",
             "sessions": [],
         },
     )
+    config.setdefault("schema_version", STATE_SCHEMA_VERSION)
     if agent == "codex" and parent_thread_id:
         if parent_thread_provenance not in PARENT_THREAD_ALLOWED_PROVENANCE:
             raise ValueError("parent_thread_id may only be written by an approved parent provenance")
@@ -232,19 +241,21 @@ def configure_watcher(
         if existing_private is None:
             existing_private = raw_entry
 
-    # The watcher's job is notification only (toast) plus, for Codex, a best-effort
-    # wake into Codex Desktop via deeplink + SendKeys.
+    # The watcher's default job is notification only (toast).  App Server wake
+    # is the non-composer path; Codex SendKeys wake remains opt-in because it
+    # can type into whichever Codex chat is active if target verification is
+    # missing, deeplink navigation fails, or focus races with the user.
     # Consumption is each agent's own responsibility:
     #   Claude: persistent Monitor -> check_inbox -> mark_read by id
-    #   Codex:  wake_codex.ps1 opens the protected parent thread deeplink when a
-    #           trusted thread id is configured, then synthesizes "check bridge
-    #           inbox". Without that target it is active-window scoped, so docs
-    #           must not describe it as equivalent to Claude Monitor.
+    #   Codex:  codex_app_server_wake.py starts a bridge-owned app-server,
+    #           resumes the protected parent thread id, and starts a fixed
+    #           bridge-inbox-check turn. The visible Desktop nudge is explicit
+    #           only through targeted_sendkeys.
     # NEVER use consume_inbox.py from the watcher — it races with both agent
     # read paths and silently eats messages.
     wake_command: Optional[str] = None
     wake_command_template: Optional[List[str]] = None
-    if agent == "codex":
+    if agent == "codex" and settings.wake_provider in {"sendkeys", "targeted_sendkeys"}:
         wake_script = Path(__file__).with_name("wake_codex.ps1")
         wake_command_template = [
             "powershell",
@@ -255,6 +266,33 @@ def configure_watcher(
             "-MaxWaitSeconds", str(settings.wake_max_wait_seconds),
             "-ThreadId", "{desktop_thread_id}",
         ]
+        if settings.wake_provider == "targeted_sendkeys":
+            wake_command_template.extend(
+                [
+                    # Run inner wake directly — avoids spawning a hidden child process
+                    # which has no Win32 input queue and blocks AttachThreadInput.
+                    "-RunInnerWake",
+                    "-RequireThreadId",
+                    "-RequireConstantMessage",
+                    "-VerifyTargetTwice",
+                    "-VerifyTargetGapMilliseconds", "50",
+                    "-MaxPreSendRaceMilliseconds", "500",
+                    "-PostTypingVerify",
+                ]
+            )
+    elif agent == "codex" and settings.wake_provider in {"app_server", "app_server_then_redraw"}:
+        wake_script = Path(__file__).with_name("codex_app_server_wake.py")
+        wake_command_template = [
+            python_executable,
+            str(wake_script),
+            "--thread-id", "{desktop_thread_id}",
+            "--session-id", "{session_id}",
+            "--project", "{project}",
+            "--repo-root", str(identity["canonical_root"]),
+            "--timeout-seconds", str(max(30, min(settings.wake_max_wait_seconds, 85))),
+        ]
+        if settings.wake_provider == "app_server_then_redraw":
+            wake_command_template.append("--redraw-deeplink")
 
     if active_session_id:
         managed_entries.append(
@@ -302,14 +340,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     paths = resolve_bridge_paths(
-        bridge_root=Path(args.bridge_root) if args.bridge_root else None,
-        state_dir=Path(args.state_dir) if args.state_dir else None,
+        bridge_root=expand_path_arg(args.bridge_root) if args.bridge_root else None,
+        state_dir=expand_path_arg(args.state_dir) if args.state_dir else None,
     )
     if args.bridge_root:
         ensure_bridge_root_manifest(paths, reason="configure_watcher")
 
     config = configure_watcher(
-        config_path=Path(args.config) if args.config else paths.watcher_config,
+        config_path=expand_path_arg(args.config) if args.config else paths.watcher_config,
         state_dir=paths.state_dir,
         agent=args.agent,
         project=args.project,
