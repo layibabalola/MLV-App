@@ -52,6 +52,11 @@ param(
     # Draft protection: if composer has content, require this many seconds of
     # stability before firing (prevents clobbering an in-progress Codex response).
     [int]   $DraftStabilitySeconds = 5,
+    # Active-typing patience: if user has keyboard focus in the composer (actively typing),
+    # extend the preflight cap to this many seconds before hijacking. Within this window
+    # the 5s inactivity check (DraftStabilitySeconds) still applies — we fire as soon as
+    # they stop typing for 5s, or after this max wait elapses.
+    [int]   $ActiveTypingMaxWaitSeconds = 90,
     [switch]$RequireThreadId,
     [switch]$RequireConstantMessage,
     [switch]$VerifyTargetTwice,
@@ -188,6 +193,7 @@ function New-InnerWakeCommand {
         "-DeeplinkSleepMilliseconds " + [string]$DeeplinkSleepMilliseconds,
         "-FastPathIdleSeconds " + [string]$FastPathIdleSeconds,
         "-DraftStabilitySeconds " + [string]$DraftStabilitySeconds,
+        "-ActiveTypingMaxWaitSeconds " + [string]$ActiveTypingMaxWaitSeconds,
         "-VerifyTargetGapMilliseconds " + [string]$VerifyTargetGapMilliseconds,
         "-MaxPreSendRaceMilliseconds " + [string]$MaxPreSendRaceMilliseconds,
         "-ProcessName " + (ConvertTo-PowerShellSingleQuotedLiteral $ProcessName)
@@ -550,7 +556,22 @@ function Invoke-ComposerPreflight {
 
         $trimmed = ([string]$text).Trim()
         $isPlaceholder = Test-IsCodexPlaceholderText -Text $trimmed
-        $state = if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) { "idle-empty" } else { "idle-with-draft" }
+        $composerFocused = $false
+        try { $composerFocused = [bool]$composer.Current.HasKeyboardFocus } catch {}
+        $state = if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) {
+            "idle-empty"
+        } elseif ($composerFocused) {
+            "actively-typing"  # user has focus in the composer right now
+        } else {
+            "idle-with-draft"  # draft present but user is not focused here
+        }
+
+        # User is actively composing — extend the cap so we wait patiently while they type.
+        # The 5s inactivity check (DraftStabilitySeconds) still fires as soon as they pause.
+        if ($state -eq "actively-typing" -and $capSeconds -lt $ActiveTypingMaxWaitSeconds) {
+            $capSeconds = $ActiveTypingMaxWaitSeconds
+            Write-StageEvent "PREFLIGHT_ACTIVE_TYPING_DETECTED" ("cap_extended_to=" + $capSeconds + "s")
+        }
 
         if ($null -ne $lastText -and $text -eq $lastText) {
             if ($null -eq $stableSince) { $stableSince = Get-Date }
@@ -579,8 +600,8 @@ function Invoke-ComposerPreflight {
             }
             return @{
                 State = $state
-                DraftText = if ($state -eq "idle-with-draft") { [string]$text } else { "" }
-                PreserveDraft = ($state -eq "idle-with-draft")
+                DraftText = if ($state -ne "idle-empty") { [string]$text } else { "" }
+                PreserveDraft = ($state -ne "idle-empty")
                 Composer = $cachedComposer
             }
         }

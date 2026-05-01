@@ -36,9 +36,24 @@ These parameters were empirically tuned to achieve ~2.5s end-to-end wake latency
 | `-IdleThresholdSeconds` | `0` | `5` | Fire even while user is typing elsewhere. Bridge messages are urgent. |
 | `-FastPathIdleSeconds` | `0` | `1` | Fire immediately if composer is empty. Was 1; dropped to 0 for latency. |
 | `-DraftStabilitySeconds` | `5` | `5` | If composer has draft, wait 5s stable before firing. Protects in-progress Codex response. Do not lower. |
+| `-ActiveTypingMaxWaitSeconds` | `90` | `90` | If user has keyboard focus in the composer (actively typing), extend the preflight cap to this many seconds. Within the cap, the 5s inactivity check still applies — fires as soon as they pause for 5s or cap elapses. |
 | `-DeeplinkSleepMilliseconds` | `150` | `500` | Sleep after deeplink nav before UIA lookup. UIA retry (3x at 200ms) absorbs remaining warmup. |
 | `-Priority` | `urgent` | `normal` | Bridge wake is always urgent. |
 | `-MaxWaitSeconds` | `60` | `60` | Total wait ceiling before deferred exit. |
+
+## Composer preflight states
+
+The preflight loop classifies the composer into one of three states before firing:
+
+| State | Condition | Behavior |
+|---|---|---|
+| `idle-empty` | Composer is empty or shows placeholder text | Fire after `FastPathIdleSeconds` (0s — immediately) |
+| `actively-typing` | Composer has text AND user has keyboard focus here | Wait up to `ActiveTypingMaxWaitSeconds` (90s); fire as soon as `DraftStabilitySeconds` (5s) of no typing change. Draft is restored after injection. |
+| `idle-with-draft` | Composer has text AND user is NOT focused here | Fire after `DraftStabilitySeconds` (5s) of stability |
+
+The distinction between `actively-typing` and `idle-with-draft` uses `HasKeyboardFocus` on the UIA composer element. This means the wake is patient while the user is composing, but still fires if they abandon the draft.
+
+---
 
 ## Hardening parameters (added 2026-05-01 by Codex)
 
