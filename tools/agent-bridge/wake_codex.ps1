@@ -24,7 +24,7 @@
 #
 # Exit codes:
 #   3  = unsafe target proof / wrong-chat risk detected before typing.
-#   13 = all foreground paths failed and UIA composer fallback failed
+#   13 = UIA SetFocus primary path + all Win32 fallbacks failed to acquire foreground
 #   14 = no Codex window after deeplink navigation
 #   15 = total runtime timeout exceeded
 #   16 = deferred (system idle never reached within MaxWaitSeconds; user typing).
@@ -969,56 +969,86 @@ try {
     $codexProcId = 0
     $codexThread = [Win32Wake]::GetWindowThreadProcessId($codexHwnd, [ref]$codexProcId)
 
-    Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
+    # --- Stage 4b: focus acquisition ---
+    # UIA SetFocus is the primary strategy: it acts directly on the cached
+    # composer element (no new tree scan needed) and empirically acquires
+    # foreground on Windows 10 even when the calling process doesn't own it.
+    # Win32 chain (SetForegroundWindow, ALT-tap, SPI nuke, SwitchToThisWindow)
+    # runs only when UIA SetFocus fails to move foreground to the Codex window.
+    Write-StageEvent "STAGE4B_FOCUS_START"
 
-    Start-Sleep -Milliseconds 80
+    $composerForFocus = $preflight.Composer
+    if ($null -eq $composerForFocus) {
+        $composerForFocus = Get-CodexComposerElement -RootHwnd $codexHwnd
+    }
 
-    $nowFg = [Win32Wake]::GetForegroundWindow()
-    if ($nowFg -ne $codexHwnd) {
-        Write-Host "[wake_codex] First foreground attempt failed. Trying SendInput ALT-tap fallback."
-        Send-AltTap
-        Start-Sleep -Milliseconds 30
+    $focusAcquired = $false
+    if ($null -ne $composerForFocus) {
+        try {
+            if ([Win32Wake]::IsIconic($codexHwnd)) {
+                [Win32Wake]::ShowWindow($codexHwnd, 9) | Out-Null
+                Start-Sleep -Milliseconds 30
+            }
+            $composerForFocus.SetFocus()
+            Start-Sleep -Milliseconds 50
+            $nowFg = [Win32Wake]::GetForegroundWindow()
+            if ($nowFg -eq $codexHwnd) {
+                $focusAcquired = $true
+                Write-StageEvent "STAGE4B_FOCUS_UIA_OK" ("elapsed=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s")
+                Write-Host "[wake_codex] UIA SetFocus acquired foreground directly."
+            } else {
+                Write-Host "[wake_codex] UIA SetFocus did not move foreground; falling through to Win32 chain."
+            }
+        } catch {
+            Write-Host ("[wake_codex] UIA SetFocus threw: " + $_.Exception.Message + "; falling through to Win32 chain.")
+        }
+    } else {
+        Write-Host "[wake_codex] No cached composer element; falling through to Win32 chain."
+    }
 
+    if (-not $focusAcquired) {
         Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
         Start-Sleep -Milliseconds 80
-
         $nowFg = [Win32Wake]::GetForegroundWindow()
+
         if ($nowFg -ne $codexHwnd) {
-            Write-Host "[wake_codex] ALT-tap retry failed. Trying SPI ForegroundLockTimeout=0 nuke."
-            Invoke-CodexForegroundWithSpiNuke -Hwnd $codexHwnd -TargetThreadId $codexThread
+            Write-Host "[wake_codex] Win32 first attempt failed. Trying SendInput ALT-tap fallback."
+            Send-AltTap
+            Start-Sleep -Milliseconds 30
+            Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
             Start-Sleep -Milliseconds 80
             $nowFg = [Win32Wake]::GetForegroundWindow()
+
             if ($nowFg -ne $codexHwnd) {
-                Write-Host "[wake_codex] SPI nuke failed. Trying SwitchToThisWindow fallback."
-                [Win32Wake]::SwitchToThisWindow($codexHwnd, $true)
+                Write-Host "[wake_codex] ALT-tap retry failed. Trying SPI ForegroundLockTimeout=0 nuke."
+                Invoke-CodexForegroundWithSpiNuke -Hwnd $codexHwnd -TargetThreadId $codexThread
                 Start-Sleep -Milliseconds 80
                 $nowFg = [Win32Wake]::GetForegroundWindow()
-            }
-            if ($nowFg -ne $codexHwnd) {
-                if ($RequireThreadId) {
-                    Write-PreflightAudit -Action "targeted_wake_presend_verification_failed" -Fields @{
-                        abort_reason = "foreground_unavailable"
-                        foreground_hwnd = [string]$nowFg
-                        target_hwnd = [string]$codexHwnd
-                    }
-                    Write-Host "[wake_codex] Targeted wake refused: Codex target window could not be made foreground before typing."
-                    exit 16
+                if ($nowFg -ne $codexHwnd) {
+                    Write-Host "[wake_codex] SPI nuke failed. Trying SwitchToThisWindow fallback."
+                    [Win32Wake]::SwitchToThisWindow($codexHwnd, $true)
+                    Start-Sleep -Milliseconds 80
+                    $nowFg = [Win32Wake]::GetForegroundWindow()
                 }
-                Write-Host "[wake_codex] WARNING: failed to bring Codex to foreground after all focus fallbacks; trying UIA composer fallback."
-                $uiaDelivered = Invoke-CodexComposerUiaFallback -RootHwnd $codexHwnd -Value $Message -DraftText $preflight.DraftText -PreserveDraft ([bool]$preflight.PreserveDraft) -DryRun:$DryRun
-                if (-not $uiaDelivered) {
-                    Write-Host "[wake_codex] WARNING: UIA composer fallback failed. Aborting."
+                if ($nowFg -ne $codexHwnd) {
+                    if ($RequireThreadId) {
+                        Write-PreflightAudit -Action "targeted_wake_presend_verification_failed" -Fields @{
+                            abort_reason = "foreground_unavailable"
+                            foreground_hwnd = [string]$nowFg
+                            target_hwnd = [string]$codexHwnd
+                        }
+                        Write-Host "[wake_codex] Targeted wake refused: Codex target window could not be made foreground before typing."
+                        exit 16
+                    }
+                    Write-Host "[wake_codex] WARNING: all Win32 focus paths failed. Aborting."
                     exit 13
                 }
-                Start-Sleep -Milliseconds 80
-                [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
-                Write-Host ("[wake_codex] Restored focus to: " + $prevFgTitle)
-                exit 0
+                Write-Host "[wake_codex] SwitchToThisWindow fallback succeeded."
+            } else {
+                Write-Host "[wake_codex] SendInput ALT-tap fallback succeeded."
             }
-            Write-Host "[wake_codex] SwitchToThisWindow fallback succeeded."
-        } else {
-            Write-Host "[wake_codex] SendInput ALT-tap fallback succeeded."
         }
+        Write-StageEvent "STAGE4B_FOCUS_WIN32_OK" ("elapsed=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s")
     }
 
     $targetVerification = $null
