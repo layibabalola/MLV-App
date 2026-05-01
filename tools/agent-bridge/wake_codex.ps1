@@ -500,7 +500,13 @@ function Invoke-ComposerPreflight {
         # Reuse cached composer element; only re-scan if null (first call or element went stale).
         $composer = $cachedComposer
         if ($null -eq $composer) {
-            $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+            # Retry up to 3x at 200ms — deeplink navigation briefly makes the UIA tree
+            # unavailable. Retrying here avoids the 5s+ watcher retry cycle on exit 16.
+            for ($uiaRetry = 0; $uiaRetry -lt 3; $uiaRetry++) {
+                $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+                if ($null -ne $composer) { break }
+                if ($uiaRetry -lt 2) { Start-Sleep -Milliseconds 200 }
+            }
         }
         if ($null -eq $composer) {
             Write-PreflightAudit -Action "preflight_aborted_policy_state" -Fields @{
