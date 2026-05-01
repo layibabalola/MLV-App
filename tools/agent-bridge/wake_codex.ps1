@@ -52,6 +52,7 @@ param(
     [int]   $MaxPreSendRaceMilliseconds = 0,
     [switch]$PostTypingVerify,
     [switch]$AllowLegacyNoPreflight,
+    [switch]$SkipPreflight,
     [switch]$DryRun,
     [switch]$FindOnly,
     [switch]$PrintInnerCommand,
@@ -187,6 +188,9 @@ function New-InnerWakeCommand {
     }
     if ($RequireConstantMessage) {
         $innerCommandParts += "-RequireConstantMessage"
+    }
+    if ($SkipPreflight) {
+        $innerCommandParts += "-SkipPreflight"
     }
     if ($VerifyTargetTwice) {
         $innerCommandParts += "-VerifyTargetTwice"
@@ -927,8 +931,13 @@ try {
     # Pre-flight is read-only: inspect the ProseMirror composer before any
     # focus/SendKeys path. UIA-unavailable defaults to exit 16 so the watcher
     # retries without counting this as a wake failure.
-    Write-StageEvent "STAGE4_PREFLIGHT_START" ("priority=" + $Priority)
-    $preflight = Invoke-ComposerPreflight -RootHwnd $codexHwnd
+    Write-StageEvent "STAGE4_PREFLIGHT_START" ("priority=" + $Priority + " skip=" + [string]$SkipPreflight)
+    if ($SkipPreflight) {
+        $preflight = @{ State = "skip-preflight"; DraftText = ""; PreserveDraft = $false; Composer = $null }
+        Write-Host "[wake_codex] Preflight skipped (-SkipPreflight). Proceeding directly to foreground."
+    } else {
+        $preflight = Invoke-ComposerPreflight -RootHwnd $codexHwnd
+    }
     Write-StageEvent "STAGE4_PREFLIGHT_DONE" ("state=" + $preflight.State)
     Write-Host ("[wake_codex] Preflight composer state: " + $preflight.State)
 
@@ -988,7 +997,7 @@ try {
     }
 
     $targetVerification = $null
-    if ($RequireThreadId -or $VerifyTargetTwice -or $MaxPreSendRaceMilliseconds -gt 0) {
+    if (-not $SkipPreflight -and ($RequireThreadId -or $VerifyTargetTwice -or $MaxPreSendRaceMilliseconds -gt 0)) {
         $targetVerification = Invoke-TargetPreSendVerification -RootHwnd $codexHwnd
         $rawText = [string]$targetVerification.Text
         $isPlaceholder = Test-IsCodexPlaceholderText -Text $rawText
