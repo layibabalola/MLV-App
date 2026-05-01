@@ -1,6 +1,6 @@
 # Pre-flight Composer Detection Spec
 
-**Status:** Proposed
+**Status:** Implemented (shipped in `wake_codex.ps1`; see `WAKE_CODEX_TUNING.md` for canonical param reference)
 **Owner:** Claude implements (wake_codex.ps1 path), Codex reviews
 **Scope:** Wake-time gate that reads target composer state non-intrusively
 before any intrusive write path, defers when user is actively typing, and
@@ -90,19 +90,37 @@ Detected when composer text matches one of:
 - Empty string or whitespace only.
 - Captured placeholder fingerprint (auto-detected on first run; see below).
 
-**`idle-with-draft`** - composer has stable non-empty content for at least
-the priority-specific idle-stability window. Fire intrusive write path
-**with full clipboard save/restore** around the SendKeys sequence.
+**`idle-with-draft`** - composer has stable non-empty content AND the user
+does not have keyboard focus in the composer. Fire intrusive write path after
+`DraftStabilitySeconds` (default 5s) of no content change, **with full
+clipboard save/restore** around the SendKeys sequence.
 
-**`actively-typing`** - composer content changed within the polling window.
-Defer; re-poll after the polling cadence interval.
+**`actively-typing`** - composer has content AND the user has keyboard focus
+in the composer right now (detected via `[AutomationElement].Current.HasKeyboardFocus`).
+The wake is patient while the user is composing:
+- Extends the preflight cap to `ActiveTypingMaxWaitSeconds` (default 90s).
+- Still fires as soon as `DraftStabilitySeconds` (5s) of inactivity passes
+  (user paused or abandoned the draft).
+- If the composer empties (user submitted), falls through to `idle-empty`
+  and fires immediately.
+- Full clipboard save/restore applies (`PreserveDraft = true`) so the
+  in-progress draft is restored after injection.
+
+> **Implementation note:** The spec originally defined `actively-typing` as
+> "content changed within the polling window." The shipped implementation uses
+> `HasKeyboardFocus` as the primary signal. This is more precise: a draft
+> left in the composer with no focus is `idle-with-draft`, not `actively-typing`,
+> even if it changed recently.
 
 ### Error/abort states
 
 **`uia-unavailable`** - UIA read fails (UIAutomationClient assembly load
 fails, AutomationElement.FromHandle returns null, or the ProseMirror element
-is missing). Audit and proceed to the legacy MaxWait/idle path as
-fall-through, since pre-flight cannot make a determination.
+is missing). Audit and defer/abort cleanly; do not fall through to legacy
+intrusive typing by default because pre-flight cannot prove the composer is
+safe. A temporary `-AllowLegacyNoPreflight` debug override may permit the old
+MaxWait/idle path for local troubleshooting, but production watcher templates
+must not enable it.
 
 **`window-not-ready`** - Codex window minimized, off-screen, or no
 MainWindowHandle. Audit and defer; this is a watcher / window-presence
@@ -117,24 +135,24 @@ superseded, or `pause_bridge` toggled during pre-flight wait. Defer cleanly.
 
 ## Polling Mechanics
 
-- **Read primitive:** `[AutomationElement]::FromHandle` + `FindAll` for
-  ProseMirror, then `TextPattern.DocumentRange.GetText(-1)`. Read-only.
-  No `SetFocus`, no `Select`. UIA read is non-intrusive (`uia_setfocus_intrusive`
-  memory empirically confirms read works in background; only write paths
-  require activation).
-- **Cadence:** poll every 5 seconds.
-- **Stability requirement:** content must be byte-for-byte equal across at
-  least 2 consecutive polls before transitioning out of `actively-typing`.
-- **Idle-stability windows (defaults, not invariants):**
-
-  | Priority | Window | Notes |
-  |---|---|---|
-  | urgent | 3 sec | Only valid when paired with 2 consecutive stable reads. Otherwise fall back to `normal`. |
-  | normal | 8 sec | Default for typical bridge messages. |
-  | low | 15 sec | Audit/digest/non-blocking traffic. |
-
-- **Per-session override:** `preflight_idle_stability_seconds` may be set
-  in the session config to override the priority default.
+- **Read primitive:** `[AutomationElement]::FromHandle` + `FindFirst` for
+  ProseMirror, then `TextPattern.DocumentRange.GetText(-1)` or `ValuePattern`.
+  Also reads `Current.HasKeyboardFocus` to classify `actively-typing`.
+  Read-only — no `SetFocus`, no `Select`. UIA read is non-intrusive
+  (`uia_setfocus_intrusive` memory empirically confirms read works in
+  background; only write paths require activation).
+- **UIA retry on first lookup:** after deeplink navigation, the UIA tree
+  is briefly unavailable (~200-400ms warmup). The preflight retries up to
+  3× at 200ms before giving up with exit 16. This absorbs post-deeplink
+  warmup without triggering the 5s+ watcher retry cycle.
+- **Cadence:** poll every 500ms (tighter than the original 5s spec;
+  provides ~250ms average reaction to typing pause).
+- **Stability requirement:** content byte-for-byte equal for `DraftStabilitySeconds`
+  (default 5s) regardless of priority. Original per-priority windows
+  (urgent 3s / normal 8s / low 15s) were superseded by the flat 5s
+  default; per-priority override is still available via `-DraftStabilitySeconds`.
+- **Active-typing cap:** `ActiveTypingMaxWaitSeconds` (default 90s) extends
+  the preflight cap when `HasKeyboardFocus` is true. See state machine above.
 
 ## Hard Cap
 
@@ -143,7 +161,7 @@ Time-boxed safety net: pre-flight cannot wait forever. Cap is
 
 | Priority | Cap | After cap |
 |---|---|---|
-| urgent | 30-60 sec | Force-fire with full clipboard save/restore + audit `preflight_forced_after_cap`. |
+| urgent | 45 sec | Force-fire with full clipboard save/restore + audit `preflight_forced_after_cap`. |
 | normal | 2 min | Same. |
 | low | 5 min | Same. |
 
@@ -158,6 +176,10 @@ After the cap fires:
 
 Mandatory whenever the composer state is `idle-with-draft` or the cap
 forces progress through `actively-typing`:
+
+Codex review decision: preserve every non-empty draft. Do not add a minimum
+draft length threshold; losing a short command fragment is still user-visible,
+and a threshold creates a surprising branch in the safety contract.
 
 1. **Save:** `[System.Windows.Forms.Clipboard]::GetDataObject()` returns
    full `IDataObject` (preserves text, RTF, HTML, image, file-list - not
@@ -184,6 +206,9 @@ forced), re-verify:
 - Window title still matches the expected project / thread marker.
 - Owning bridge session still active (not superseded).
 - Bridge not paused.
+- Runtime breadcrumb still names the expected `desktop_thread_id`.
+- Composer element identity is still stable enough to prove the paste target
+  is the element that was inspected during pre-flight.
 
 If any check fails, abort the paste and audit `preflight_aborted_policy_state`.
 The inbox message remains unread; the next wake cycle will re-evaluate.
@@ -217,7 +242,7 @@ infrastructure):
 
 | Event | Fields |
 |---|---|
-| `preflight_state_detected` | message_id, state, composer_text_hash, priority, idle_seconds_observed |
+| `preflight_state_detected` | message_id, state, composer_text_hash, composer_length_bucket, composer_line_count, priority, idle_seconds_observed |
 | `preflight_deferred_active_typing` | message_id, deferred_for_seconds, current_state, retry_count |
 | `preflight_forced_after_cap` | message_id, priority, cap_seconds, draft_preserved (bool) |
 | `preflight_draft_preserved` | message_id, save_format_count, restore_succeeded |
@@ -226,6 +251,9 @@ infrastructure):
 
 `composer_text_hash` is SHA-256 of the read text; the raw text is **not**
 audited (privacy: composer content is user data, not bridge protocol).
+Length bucket and line count are allowed because they help forensics without
+recording user content. Suggested buckets: `0`, `1-32`, `33-256`,
+`257-2048`, and `over-2048`.
 
 ## Receipt Semantics (re-iterated)
 
@@ -259,8 +287,10 @@ Required tests (PowerShell + python-side):
   audit + console warning, paste still completed.
 - **placeholder auto-detect:** first run with empty fingerprint → capture
   after first delivery, persist; subsequent runs use captured value.
-- **UIA unavailable:** simulate UIAutomationClient assembly load failure →
-  fall through to legacy MaxWait/idle path, audit `uia_unavailable`.
+- **UIA unavailable:** simulate UIAutomationClient assembly load failure;
+  default behavior defers/aborts without intrusive typing and audits
+  `uia_unavailable`. A separate debug-only test covers explicit
+  `-AllowLegacyNoPreflight` fallback.
 - **deferral does not increment breaker:** N consecutive deferrals → wake
   breaker count unchanged.
 - **deferral does not consume rate limit:** N consecutive deferrals →
@@ -312,6 +342,8 @@ Implementation plan (post-spec):
 4. Migrate `MaxWaitSeconds` semantics: the legacy single-window cap
    becomes one of three priority-tiered caps in the new state machine.
 5. Update tests to cover all 11 scenarios listed in Test Requirements.
+6. Slot PREFLIGHT before final Phase 17 signoff: this is a wake-safety
+   prerequisite for the security review, not a post-signoff enhancement.
 
 ## Security Notes
 
@@ -334,13 +366,8 @@ Implementation plan (post-spec):
 
 ## Open Questions for Reviewer
 
-1. Should the `urgent` priority cap default to 30 sec or 60 sec? Codex's
-   pass_with_changes suggested "30-60" without committing; I default to
-   45 sec in this spec but call it tunable.
-2. Should `idle-with-draft` always preserve clipboard, or only when the
-   draft exceeds N characters (cheap drafts may not be worth round-trip
-   risk)? Current spec says "always preserve when non-empty"; revisit if
-   restore-failure rate proves nontrivial.
-3. Should the spec mandate a config knob to disable pre-flight entirely
-   (legacy mode) for debugging? Current spec assumes always-on; happy to
-   add a `preflight_enabled` config field if useful.
+1. Resolved by Codex review: urgent cap default is 45 sec, still tunable.
+2. Resolved by Codex review: preserve every non-empty draft.
+3. Resolved by Codex review: no production disable knob. A debug-only
+   `-AllowLegacyNoPreflight` escape hatch is acceptable for local
+   troubleshooting and must be absent from managed watcher templates.

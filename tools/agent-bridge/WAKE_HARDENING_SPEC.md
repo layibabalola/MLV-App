@@ -1,6 +1,6 @@
 # Wake Hardening Spec - Pause Gating, Circuit Breaker, Title-Marker Lessons
 
-**Status:** Implemented for D1/D2. D3 title-marker lessons are closed by
+**Status:** Implemented for D1/D2/D4/D5. D3 title-marker lessons are closed by
 retiring the title heuristic and moving identity proof to breadcrumb/provenance
 work in `AUTO_PAIR_SPEC.md` and `BRIDGE_BOOTSTRAP_PROVENANCE_SPEC.md`.
 **Authors:** Claude
@@ -204,6 +204,74 @@ own counter. Per-session-only key prevents this.
 
 These lessons go into `AUTO_PAIR_SPEC.md` Layer 2 section (already done
 in the 2026-04-28 update).
+
+---
+
+---
+
+## D4 - Wake re-fire on successful delivery (seen_ids guard)
+
+**Status:** Implemented in `watcher.py` (commit `076bd500`, 2026-05-01).
+
+### Problem
+
+`_queue_pending_wake_verifications` checked `existing_ids` (messages currently
+in the pending-wake list) to avoid duplicate enqueues, but did NOT check
+`seen_ids` (messages already delivered). After successful delivery:
+
+1. Message is removed from the pending list (`existing_ids`).
+2. Message is added to `seen_ids`.
+3. On the next poll, the message was absent from `existing_ids` and no wake
+   receipt existed yet → re-enqueued → second wake fired for the same message.
+
+Same gap existed in `_queue_paused_wake_messages`.
+
+### Fix
+
+Added `or message_id in seen_ids` guard to both enqueue functions:
+
+```python
+if not message_id or message_id in existing_ids or message_id in seen_ids:
+    continue
+```
+
+### Acceptance criteria
+
+- D4.1. A successfully delivered message does not re-enqueue after delivery.
+- D4.2. A paused-then-resumed message fires exactly once after resume.
+- D4.3. A genuinely undelivered message (no receipt) still retries normally.
+
+---
+
+## D5 - UIA SetFocus as primary foreground acquisition strategy
+
+**Status:** Implemented in `wake_codex.ps1` Stage 4b (commit `91c479ef`, 2026-05-01).
+
+### Problem
+
+Win32 `SetForegroundWindow` nearly always fails from a background process due to
+`ForegroundLockTimeout`. The API returns success but the window does not come to
+the foreground; the taskbar button flashes orange instead. This was causing
+reliable focus failures on every wake.
+
+### Fix
+
+Promoted UIA `[AutomationElement].SetFocus()` on the cached ProseMirror composer
+element to the primary focus acquisition path (Stage 4b). Empirically:
+- UIA `SetFocus()` acquires foreground, confirmed against a Notepad force-foregrounded
+  baseline (see `uia_setfocus_intrusive` memory).
+- Win32 chain (`SetForegroundWindow`, ALT-tap, SPI nuke, `SwitchToThisWindow`)
+  retained as fallback if UIA path fails.
+
+Stage 4b logic:
+1. Try UIA `SetFocus()` on cached composer element.
+2. Wait 50ms; check `GetForegroundWindow()`.
+3. If foreground confirmed → proceed.
+4. If not → fall through to Win32 fallback chain.
+
+Orange taskbar flash eliminated after this change. Note: UIA `SetFocus()` IS
+intrusive — it does change foreground. There is no non-intrusive write path;
+all wake delivery requires window activation.
 
 ---
 
