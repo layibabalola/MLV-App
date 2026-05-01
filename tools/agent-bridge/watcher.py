@@ -1426,6 +1426,15 @@ def _process_pending_wake_verifications(
             continue
         if command_result.get("ok"):
             _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
+            # Wake delivered — stop here. Retrying after a successful wake fires
+            # duplicate "check bridge inbox" injections with no benefit and bad UX.
+            # Only refire on actual failure (non-zero exit code).
+            seen_ids.add(message_id)
+            changed = True
+            print(
+                f"[agent-bridge] wake delivered for {agent} id={message_id}; no refire",
+                flush=True,
+            )
         else:
             _record_wake_failure(
                 state_path=state_path,
@@ -1434,17 +1443,17 @@ def _process_pending_wake_verifications(
                 code=str(command_result.get("returncode") if command_result.get("returncode") is not None else "timeout"),
                 inbox_path=inbox_path,
             )
-        retry_count += 1
-        entry["retry_count"] = retry_count
-        entry["sent_at"] = utc_now()
-        entry.pop("deferred_until", None)
-        entry["last_retry_ok"] = bool(command_result.get("ok"))
-        kept.append(entry)
-        changed = True
-        print(
-            f"[agent-bridge] wake receipt pending for {agent} id={message_id}; retry {retry_count}/{max_retries}",
-            flush=True,
-        )
+            retry_count += 1
+            entry["retry_count"] = retry_count
+            entry["sent_at"] = utc_now()
+            entry.pop("deferred_until", None)
+            entry["last_retry_ok"] = False
+            kept.append(entry)
+            changed = True
+            print(
+                f"[agent-bridge] wake failed for {agent} id={message_id}; retry {retry_count}/{max_retries}",
+                flush=True,
+            )
 
     if changed:
         _save_watcher_state(state_path, seen_ids, kept, paused_messages, unknown_origin_warnings, wake_fire_history)

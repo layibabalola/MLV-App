@@ -45,6 +45,12 @@ param(
     [int]   $PreflightIdleStabilitySeconds = 0,
     [int]   $PreflightCapSeconds  = 0,
     [int]   $DeeplinkSleepMilliseconds = 500,
+    # Smart debounce: fire immediately if composer has been idle-empty for this long.
+    # Bypasses the full priority-based stability wait when Codex is clearly idle.
+    [int]   $FastPathIdleSeconds  = 1,
+    # Draft protection: if composer has content, require this many seconds of
+    # stability before firing (prevents clobbering an in-progress Codex response).
+    [int]   $DraftStabilitySeconds = 5,
     [switch]$RequireThreadId,
     [switch]$RequireConstantMessage,
     [switch]$VerifyTargetTwice,
@@ -179,6 +185,8 @@ function New-InnerWakeCommand {
         "-PreflightIdleStabilitySeconds " + [string]$PreflightIdleStabilitySeconds,
         "-PreflightCapSeconds " + [string]$PreflightCapSeconds,
         "-DeeplinkSleepMilliseconds " + [string]$DeeplinkSleepMilliseconds,
+        "-FastPathIdleSeconds " + [string]$FastPathIdleSeconds,
+        "-DraftStabilitySeconds " + [string]$DraftStabilitySeconds,
         "-VerifyTargetGapMilliseconds " + [string]$VerifyTargetGapMilliseconds,
         "-MaxPreSendRaceMilliseconds " + [string]$MaxPreSendRaceMilliseconds,
         "-ProcessName " + (ConvertTo-PowerShellSingleQuotedLiteral $ProcessName)
@@ -266,7 +274,7 @@ function Invoke-CodexForegroundAttempt {
     # Un-minimize first — SetForegroundWindow on iconic HWND only un-flashes
     if ([Win32Wake]::IsIconic($Hwnd)) {
         [Win32Wake]::ShowWindow($Hwnd, 9) | Out-Null
-        Start-Sleep -Milliseconds 80
+        Start-Sleep -Milliseconds 30
     }
 
     # Step 1: phantom Alt-tap via keybd_event BEFORE AttachThreadInput.
@@ -358,6 +366,22 @@ function Get-CodexComposerElement {
             return $null
         }
 
+        # Fast path: FindFirst with exact class name — avoids full-tree scan.
+        # Falls back to FindAll only if exact match misses (e.g. class is a compound
+        # like "ProseMirror-editor" or changes between Codex Desktop versions).
+        foreach ($exactName in @("ProseMirror", "ProseMirror-editor")) {
+            try {
+                $cond = New-Object System.Windows.Automation.PropertyCondition(
+                    [System.Windows.Automation.AutomationElement]::ClassNameProperty, $exactName
+                )
+                $found = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+                if ($null -ne $found -and $found.Current.IsEnabled) {
+                    return $found
+                }
+            } catch {}
+        }
+
+        # Fallback: full-tree scan filtered in PowerShell.
         $all = $root.FindAll(
             [System.Windows.Automation.TreeScope]::Descendants,
             [System.Windows.Automation.Condition]::TrueCondition
@@ -456,31 +480,31 @@ function Get-CodexComposerTextReadOnly {
 function Invoke-ComposerPreflight {
     param([IntPtr]$RootHwnd)
 
-    $priorityCaps = @{
-        urgent = 45
-        normal = 120
-        low = 300
-    }
-    $priorityStability = @{
-        urgent = 3
-        normal = 8
-        low = 15
-    }
+    $priorityCaps = @{ urgent = 45; normal = 120; low = 300 }
     $capSeconds = if ($PreflightCapSeconds -gt 0) { $PreflightCapSeconds } else { [int]$priorityCaps[$Priority] }
-    $stableSecondsRequired = if ($PreflightIdleStabilitySeconds -gt 0) { $PreflightIdleStabilitySeconds } else { [int]$priorityStability[$Priority] }
-    $pollSeconds = [Math]::Max(1, $PreflightPollSeconds)
-    $started = Get-Date
-    $lastText = $null
-    $stableReads = 0
+
+    # Smart debounce thresholds:
+    #   idle-empty  → FastPathIdleSeconds (default 1s): composer is clearly idle, fire quickly
+    #   idle-with-draft → DraftStabilitySeconds (default 5s): protect in-progress content
+    # These replace the flat priority-based stability wait from the old design.
+    $fastPathSeconds   = [Math]::Max(0, $FastPathIdleSeconds)
+    $draftStableSeconds = [Math]::Max(0, $DraftStabilitySeconds)
+
+    $started    = Get-Date
+    $lastText   = $null
+    $lastState  = $null
     $stableSince = $null
-    $lastComposer = $null
+    $cachedComposer = $null   # reuse UIA element ref across polls — avoids re-scanning
 
     while ((New-TimeSpan -Start $started -End (Get-Date)).TotalSeconds -lt $capSeconds) {
-        $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+        # Reuse cached composer element; only re-scan if null (first call or element went stale).
+        $composer = $cachedComposer
+        if ($null -eq $composer) {
+            $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+        }
         if ($null -eq $composer) {
             Write-PreflightAudit -Action "preflight_aborted_policy_state" -Fields @{
-                abort_reason = "uia_unavailable"
-                priority = $Priority
+                abort_reason = "uia_unavailable"; priority = $Priority
             }
             if ($AllowLegacyNoPreflight) {
                 Write-Host "[wake_codex] WARNING: UIA unavailable; AllowLegacyNoPreflight enabled, continuing with legacy wake path."
@@ -489,14 +513,15 @@ function Invoke-ComposerPreflight {
             Write-Host "[wake_codex] UIA composer unavailable. Deferring wake without intrusive typing."
             exit 16
         }
-        $lastComposer = $composer
+        $cachedComposer = $composer
+
         try {
             $text = Get-CodexComposerTextReadOnly -Composer $composer
         } catch {
+            # Element may have gone stale — clear cache so next iteration re-scans.
+            $cachedComposer = $null
             Write-PreflightAudit -Action "preflight_aborted_policy_state" -Fields @{
-                abort_reason = "uia_unavailable"
-                priority = $Priority
-                exception_text = $_.Exception.Message
+                abort_reason = "uia_unavailable"; priority = $Priority; exception_text = $_.Exception.Message
             }
             if ($AllowLegacyNoPreflight) {
                 Write-Host "[wake_codex] WARNING: UIA read failed; AllowLegacyNoPreflight enabled, continuing with legacy wake path."
@@ -506,28 +531,26 @@ function Invoke-ComposerPreflight {
             exit 16
         }
 
+        $trimmed = ([string]$text).Trim()
+        $isPlaceholder = Test-IsCodexPlaceholderText -Text $trimmed
+        $state = if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) { "idle-empty" } else { "idle-with-draft" }
+
         if ($null -ne $lastText -and $text -eq $lastText) {
-            $stableReads += 1
-            if ($null -eq $stableSince) {
-                $stableSince = Get-Date
-            }
+            if ($null -eq $stableSince) { $stableSince = Get-Date }
         } else {
-            $stableReads = 1
             $stableSince = Get-Date
             if ($null -ne $lastText) {
                 Write-PreflightAudit -Action "preflight_deferred_active_typing" -Fields @{
-                    current_state = "actively-typing"
-                    retry_count = $stableReads
-                    priority = $Priority
+                    current_state = "actively-typing"; priority = $Priority
                 }
             }
         }
-        $lastText = $text
+        $lastText  = $text
+        $lastState = $state
         $stableFor = (New-TimeSpan -Start $stableSince -End (Get-Date)).TotalSeconds
-        if ($stableReads -ge 2 -and $stableFor -ge $stableSecondsRequired) {
-            $trimmed = ([string]$text).Trim()
-            $isPlaceholder = Test-IsCodexPlaceholderText -Text $trimmed
-            $state = if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) { "idle-empty" } else { "idle-with-draft" }
+
+        $threshold = if ($state -eq "idle-empty") { $fastPathSeconds } else { $draftStableSeconds }
+        if ($stableFor -ge $threshold) {
             Write-PreflightAudit -Action "preflight_state_detected" -Fields @{
                 state = $state
                 composer_text_hash = (Get-TextHash -Value ([string]$text))
@@ -535,27 +558,29 @@ function Invoke-ComposerPreflight {
                 composer_line_count = (([string]$text -split "`n").Count)
                 priority = $Priority
                 idle_seconds_observed = [Math]::Round($stableFor, 1)
+                fast_path = ($state -eq "idle-empty")
             }
             return @{
                 State = $state
                 DraftText = if ($state -eq "idle-with-draft") { [string]$text } else { "" }
                 PreserveDraft = ($state -eq "idle-with-draft")
-                Composer = $lastComposer
+                Composer = $cachedComposer
             }
         }
-        Start-Sleep -Seconds $pollSeconds
+
+        # Poll at 500ms when actively waiting — tighter debounce than the old 1-5s.
+        Start-Sleep -Milliseconds 500
     }
 
     Write-PreflightAudit -Action "preflight_forced_after_cap" -Fields @{
-        priority = $Priority
-        cap_seconds = $capSeconds
+        priority = $Priority; cap_seconds = $capSeconds
         draft_preserved = -not [string]::IsNullOrWhiteSpace($lastText)
     }
     return @{
         State = "forced-after-cap"
         DraftText = [string]$lastText
         PreserveDraft = -not [string]::IsNullOrWhiteSpace($lastText)
-        Composer = $lastComposer
+        Composer = $cachedComposer
     }
 }
 
@@ -946,27 +971,27 @@ try {
 
     Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
 
-    Start-Sleep -Milliseconds 250
+    Start-Sleep -Milliseconds 80
 
     $nowFg = [Win32Wake]::GetForegroundWindow()
     if ($nowFg -ne $codexHwnd) {
         Write-Host "[wake_codex] First foreground attempt failed. Trying SendInput ALT-tap fallback."
         Send-AltTap
-        Start-Sleep -Milliseconds 50
+        Start-Sleep -Milliseconds 30
 
         Invoke-CodexForegroundAttempt -Hwnd $codexHwnd -TargetThreadId $codexThread
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 80
 
         $nowFg = [Win32Wake]::GetForegroundWindow()
         if ($nowFg -ne $codexHwnd) {
             Write-Host "[wake_codex] ALT-tap retry failed. Trying SPI ForegroundLockTimeout=0 nuke."
             Invoke-CodexForegroundWithSpiNuke -Hwnd $codexHwnd -TargetThreadId $codexThread
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 80
             $nowFg = [Win32Wake]::GetForegroundWindow()
             if ($nowFg -ne $codexHwnd) {
                 Write-Host "[wake_codex] SPI nuke failed. Trying SwitchToThisWindow fallback."
                 [Win32Wake]::SwitchToThisWindow($codexHwnd, $true)
-                Start-Sleep -Milliseconds 200
+                Start-Sleep -Milliseconds 80
                 $nowFg = [Win32Wake]::GetForegroundWindow()
             }
             if ($nowFg -ne $codexHwnd) {
@@ -985,7 +1010,7 @@ try {
                     Write-Host "[wake_codex] WARNING: UIA composer fallback failed. Aborting."
                     exit 13
                 }
-                Start-Sleep -Milliseconds 200
+                Start-Sleep -Milliseconds 80
                 [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
                 Write-Host ("[wake_codex] Restored focus to: " + $prevFgTitle)
                 exit 0
@@ -1007,7 +1032,7 @@ try {
 
     if ($DryRun) {
         Write-Host ("[wake_codex] DryRun. Would send: " + $Message + " + Ctrl+Enter (steer); preserve draft=" + [string]$preflight.PreserveDraft + ". Restoring focus.")
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 80
         [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
         exit 0
     }
