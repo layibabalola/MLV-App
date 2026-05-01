@@ -1479,7 +1479,7 @@ def _queue_pending_wake_verifications(
     changed = False
     for message in messages:
         message_id = str(message.get("id", ""))
-        if not message_id or message_id in existing_ids:
+        if not message_id or message_id in existing_ids or message_id in seen_ids:
             continue
         if _message_has_wake_receipt(inbox_path, message_id):
             seen_ids.add(message_id)
@@ -1530,7 +1530,7 @@ def _queue_paused_wake_messages(
     changed = False
     for message in messages:
         message_id = str(message.get("id", ""))
-        if not message_id or message_id in existing_ids:
+        if not message_id or message_id in existing_ids or message_id in seen_ids:
             continue
         paused_messages.append(
             {
