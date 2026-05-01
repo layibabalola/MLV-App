@@ -1,0 +1,126 @@
+# Wake Codex Tuning Reference
+
+**Status:** Active  
+**Owned by:** Both agents (read before editing `wake_codex.ps1` or watcher-config.json)
+
+This document is the authoritative reference for `wake_codex.ps1` parameters and
+their tuned values. **When you add a param or change a default, update this doc
+in the same commit.** The watcher-config.json and wake_codex.ps1 both point here.
+
+---
+
+## How the wake pipeline works
+
+```
+watcher.py polls inbox-codex.jsonl every 0.5s
+  → new unread message detected
+  → fires on_message_command_template (PowerShell wake_codex.ps1)
+  → ps1 opens deeplink (codex://threads/<ThreadId>)
+  → waits for UIA composer to be available (preflight)
+  → checks composer state (empty = fast path; has draft = stability wait)
+  → acquires foreground (UIA SetFocus primary, Win32 fallback)
+  → injects message text via SendKeys
+  → Codex reads "Watcher says check bridge inbox" → calls check_inbox MCP
+```
+
+---
+
+## Tuned parameters (current production values)
+
+These parameters were empirically tuned to achieve ~2.5s end-to-end wake latency
+(down from 15s baseline). **Do not drop these from watcher-config.json templates.**
+
+| Parameter | Production value | Default in script | Notes |
+|---|---|---|---|
+| `-Message` | `"Watcher says check bridge inbox"` | `"check bridge inbox"` | **Must be set.** Identifies sender in Codex chat. Approved list in `$script:ApprovedWakeMessages`. |
+| `-IdleThresholdSeconds` | `0` | `5` | Fire even while user is typing elsewhere. Bridge messages are urgent. |
+| `-FastPathIdleSeconds` | `0` | `1` | Fire immediately if composer is empty. Was 1; dropped to 0 for latency. |
+| `-DraftStabilitySeconds` | `5` | `5` | If composer has draft, wait 5s stable before firing. Protects in-progress Codex response. Do not lower. |
+| `-DeeplinkSleepMilliseconds` | `150` | `500` | Sleep after deeplink nav before UIA lookup. UIA retry (3x at 200ms) absorbs remaining warmup. |
+| `-Priority` | `urgent` | `normal` | Bridge wake is always urgent. |
+| `-MaxWaitSeconds` | `60` | `60` | Total wait ceiling before deferred exit. |
+
+## Hardening parameters (added 2026-05-01 by Codex)
+
+These were added for injection safety. Keep them — they prevent wrong-chat injection.
+
+| Parameter | Value | Purpose |
+|---|---|---|
+| `-RequireThreadId` | (switch) | Abort if no ThreadId — prevents wrong-chat fallback |
+| `-RequireConstantMessage` | (switch) | Message must be in approved list |
+| `-VerifyTargetTwice` | (switch) | Double-check target before SendKeys |
+| `-VerifyTargetGapMilliseconds` | `50` | Gap between the two target verifications |
+| `-MaxPreSendRaceMilliseconds` | `500` | Abort if > 500ms between verify and send (race guard) |
+| `-PostTypingVerify` | (switch) | Verify window is still Codex after typing |
+
+---
+
+## Approved message list (`$script:ApprovedWakeMessages`)
+
+The `-RequireConstantMessage` flag requires the injected text to match one of these:
+
+```
+"check bridge inbox"
+"Watcher says check bridge inbox"
+"Codex says check bridge inbox"
+"Claude says check bridge inbox"
+"User says check bridge inbox"
+```
+
+Use `"Watcher says check bridge inbox"` (the production value) so the Codex chat
+shows who triggered the wake. Other values are available for debug/testing.
+
+---
+
+## Latency breakdown (at tuned settings, ~2.5s total)
+
+- ~250ms average poll wait (0.5s interval)
+- ~150ms deeplink sleep
+- ~200-400ms UIA warmup retries (post-deeplink)
+- ~100ms focus (UIA SetFocus primary, Win32 fallback)
+- ~220ms SendKeys (Ctrl+A + Del + type + Ctrl+Enter)
+
+Safe fallback values (revert if issues): `FastPathIdleSeconds=1`, `DeeplinkSleepMilliseconds=300`, `IdleThresholdSeconds=5`, `poll_interval_seconds=1`.
+
+---
+
+## watcher-config.json template structure
+
+The Codex session entries in `~/.agent-bridge/watcher-config.json` must include
+**all tuned params + all hardening params**. Missing any silently reverts to the
+slower/unsafe default.
+
+Canonical template (both `kind: private` and `kind: rendezvous` Codex sessions):
+
+```json
+"on_message_command_template": [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+  "-File", "<path>/wake_codex.ps1",
+  "-RunInnerWake",
+  "-IdleThresholdSeconds", "0",
+  "-MaxWaitSeconds", "60",
+  "-Priority", "urgent",
+  "-FastPathIdleSeconds", "0",
+  "-DraftStabilitySeconds", "5",
+  "-DeeplinkSleepMilliseconds", "150",
+  "-ThreadId", "{desktop_thread_id}",
+  "-Message", "Watcher says check bridge inbox",
+  "-RequireThreadId",
+  "-RequireConstantMessage",
+  "-VerifyTargetTwice",
+  "-VerifyTargetGapMilliseconds", "50",
+  "-MaxPreSendRaceMilliseconds", "500",
+  "-PostTypingVerify"
+]
+```
+
+---
+
+## Workflow rule
+
+> **Before editing `wake_codex.ps1` or `watcher-config.json`: read this file.**  
+> **After adding a parameter or changing a default: update the table above in the same commit.**
+
+This prevents regressions like the 2026-05-01 incident where Codex rewrote the
+command template to add hardening flags but silently dropped `-Message` and all
+tuning params, reverting wake latency from 2.5s to ~15s and removing sender labels.

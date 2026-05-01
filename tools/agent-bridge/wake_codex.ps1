@@ -1,4 +1,5 @@
 # wake_codex.ps1
+# Doc: tools/agent-bridge/WAKE_CODEX_TUNING.md — read before editing params or defaults.
 # Inject a synthetic user message into the running Codex Desktop window.
 # Invoked from watcher's on_message_command when a Codex bridge message arrives.
 #
