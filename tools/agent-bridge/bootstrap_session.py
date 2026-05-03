@@ -860,7 +860,7 @@ def bootstrap(
         session_id=new_session,
         project=project_name,
         bootstrap_origin=bootstrap_origin,
-        allow_supersede=bootstrap_origin != "unknown",
+        allow_supersede=bootstrap_origin != "unknown" or resolved_pairing["intent"] == "active_primary",
         trusted_parent_eligible=bootstrap_origin == "parent",
         pairing_intent=resolved_pairing["intent"],
     )
