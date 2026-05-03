@@ -8,7 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from agent_bridge import AgentBridge, utc_now
+from agent_bridge import AgentBridge, BridgeResult, utc_now
+from compact import reap_stale_server_pids
 
 
 LOCAL_DASHBOARD_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -324,6 +325,12 @@ def _dashboard_html(
       display:grid;
       gap:14px;
     }
+    .stable-strip{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      margin-top:18px;
+    }
     .section-stack,.summary-list{
       display:grid;
       gap:14px;
@@ -417,6 +424,29 @@ def _dashboard_html(
       border:1px solid rgba(173, 190, 215, .12);
       background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(6,12,21,.28));
       min-height:100%;
+    }
+    .spotlight-card{
+      margin-top:20px;
+      padding:18px 18px 16px;
+      border-radius:22px;
+      border:1px solid rgba(111, 211, 255, .18);
+      background:
+        radial-gradient(circle at top right, rgba(111, 211, 255, .12), transparent 38%),
+        rgba(8, 16, 28, .72);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .spotlight-title{
+      margin:8px 0 6px;
+      font-size:1.05rem;
+      letter-spacing:-.02em;
+    }
+    .spotlight-copy{
+      margin:0;
+      color:var(--muted-strong);
+      line-height:1.58;
+    }
+    .spotlight-card .code-block{
+      margin-top:12px;
     }
     .surface-title,.action-title,.pair-title,.pending-title,.contract-title,.rejection-title{
       margin:0;
@@ -622,6 +652,60 @@ def _dashboard_html(
       color:var(--muted);
       font-size:.88rem;
     }
+    .modal-root:empty{
+      display:none;
+    }
+    .modal-root{
+      position:fixed;
+      inset:0;
+      display:grid;
+      place-items:center;
+      padding:20px;
+      background:rgba(4, 10, 18, .72);
+      backdrop-filter:blur(12px);
+      z-index:50;
+    }
+    .modal-card{
+      width:min(480px, 100%);
+      padding:22px;
+      border-radius:24px;
+      border:1px solid rgba(173, 190, 215, .16);
+      background:linear-gradient(180deg, rgba(16, 26, 44, .96), rgba(8, 16, 28, .96));
+      box-shadow:0 28px 70px rgba(2, 6, 14, .42);
+    }
+    .modal-title{
+      margin:8px 0 8px;
+      font-size:1.4rem;
+      letter-spacing:-.03em;
+    }
+    .modal-copy{
+      margin:0;
+      color:var(--muted-strong);
+      line-height:1.65;
+    }
+    .modal-field{
+      display:grid;
+      gap:8px;
+      margin-top:16px;
+      color:var(--muted-strong);
+      font-size:.92rem;
+    }
+    .modal-field input{
+      width:100%;
+      min-height:48px;
+      border-radius:14px;
+      border:1px solid rgba(173, 190, 215, .16);
+      background:rgba(6, 12, 22, .84);
+      color:var(--text);
+      padding:0 14px;
+    }
+    .modal-actions{
+      display:flex;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+      gap:10px;
+      margin-top:18px;
+    }
     .toast{
       position:fixed;
       right:20px;
@@ -670,9 +754,6 @@ def _dashboard_html(
       .hero,.meta-grid{
         grid-template-columns:1fr;
       }
-      .hero-visual{
-        order:-1;
-      }
     }
     @media (max-width:820px){
       .topbar{
@@ -711,14 +792,15 @@ def _dashboard_html(
   <div class="shell">
     <header class="topbar">
       <div class="brand">
-        <span class="eyebrow">Authenticated local mission control</span>
+        <span class="eyebrow">Local bridge operations</span>
         <h1>Agent Bridge Dashboard</h1>
-        <p class="lead">Mission control for sessions, pairing health, wake safety, and next actions. Auto-refreshes every 5s.</p>
+        <p class="lead">Operational view for sessions, pairing health, wake safety, and next actions. Refreshes every 5s while live mode is on.</p>
       </div>
       <div class="header-actions">
-        <button type="button" class="button button-primary" id="refresh-button" data-action="refresh">Refresh now</button>
-        <button type="button" class="button button-secondary" id="copy-recovery-button" data-action="copy-recovery">Copy recovery hint</button>
-        <button type="button" class="button button-danger" id="shutdown-button" data-action="shutdown">Stop dashboard server</button>
+        <button type="button" class="button button-secondary" id="refresh-toggle-button" data-action="toggle-refresh" data-focus-key="toggle-refresh">Pause live refresh</button>
+        <button type="button" class="button button-primary" id="refresh-button" data-action="refresh" data-focus-key="manual-refresh">Refresh now</button>
+        <button type="button" class="button button-secondary" id="copy-recovery-button" data-action="copy-recovery" data-focus-key="copy-recovery">Copy recovery hint</button>
+        <button type="button" class="button button-danger" id="shutdown-button" data-action="shutdown" data-focus-key="shutdown-dashboard">Stop dashboard server</button>
       </div>
     </header>
     <div class="status-banner" id="status-banner">Loading live bridge snapshot…</div>
@@ -735,6 +817,7 @@ def _dashboard_html(
       </section>
     </main>
   </div>
+  <div class="modal-root" id="modal-root"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <noscript>This dashboard needs JavaScript enabled to render the live bridge surface.</noscript>
   <script>
@@ -744,7 +827,16 @@ def _dashboard_html(
     const INITIAL_PAYLOAD=__DASHBOARD_INITIAL_JSON__;
     const REFRESH_MS=5000;
     let latestPayload=INITIAL_PAYLOAD;
+    let lastRenderSignature=null;
     let toastTimer=null;
+    let modalResolver=null;
+    let autoRefreshEnabled=true;
+    let refreshTimer=null;
+    let modalReturnFocus=null;
+    const DIRECT_ACTION_LABELS={
+      compact_stale_server_markers:"Run cleanup now",
+      backfill_read_receipts:"Backfill now"
+    };
 
     function escapeHtml(value){
       return String(value == null ? "" : value)
@@ -932,6 +1024,162 @@ def _dashboard_html(
       }
     }
 
+    function updateRefreshToggle(){
+      const button=byId("refresh-toggle-button");
+      if(!button){
+        return;
+      }
+      button.textContent=autoRefreshEnabled ? "Pause live refresh" : "Resume live refresh";
+      button.className="button "+(autoRefreshEnabled ? "button-secondary" : "button-primary");
+    }
+
+    function captureOpenDetails(){
+      return Array.from(document.querySelectorAll("details[data-detail-key][open]")).map(function(node){
+        return node.getAttribute("data-detail-key");
+      }).filter(Boolean);
+    }
+
+    function captureViewportState(){
+      const active=document.activeElement;
+      return {
+        scrollY:window.scrollY || window.pageYOffset || 0,
+        focusKey:active && active.getAttribute ? active.getAttribute("data-focus-key") : null
+      };
+    }
+
+    function restoreViewportState(state){
+      if(state && state.focusKey){
+        const focusTarget=Array.from(document.querySelectorAll("[data-focus-key]")).find(function(node){
+          return node.getAttribute("data-focus-key") === state.focusKey;
+        });
+        if(focusTarget && focusTarget.focus){
+          focusTarget.focus();
+        }
+      }
+      if(state && typeof state.scrollY === "number"){
+        window.scrollTo(0, state.scrollY);
+      }
+    }
+
+    function payloadSignature(payload){
+      const overview=((payload || {}).data || {}).overview;
+      function stripVolatile(value){
+        if(Array.isArray(value)){
+          return value.map(stripVolatile);
+        }
+        if(value && typeof value === "object"){
+          const result={};
+          Object.keys(value).forEach(function(key){
+            if(
+              key === "generated_at"
+              || key === "snapshot_ts"
+              || key === "snapshot_duration_ms"
+              || key === "age_seconds"
+              || key.endsWith("_at")
+            ){
+              return;
+            }
+            result[key]=stripVolatile(value[key]);
+          });
+          return result;
+        }
+        return value;
+      }
+      return JSON.stringify(stripVolatile(overview || payload || {}));
+    }
+
+    function restoreOpenDetails(keys){
+      if(!Array.isArray(keys) || !keys.length){
+        return;
+      }
+      const nodes=Array.from(document.querySelectorAll("details[data-detail-key]"));
+      keys.forEach(function(key){
+        const match=nodes.find(function(node){ return node.getAttribute("data-detail-key") === key; });
+        if(match){
+          match.open=true;
+        }
+      });
+    }
+
+    function pairingTitle(pairing){
+      const status=String((pairing || {}).status || "unknown");
+      return ((pairing && pairing.project) ? pairing.project : "project")
+        +" / "
+        +titleCase(status === "active" ? ((pairing || {}).role || "active") : status)
+        +" / "
+        +titleCase((pairing || {}).agent || "agent")
+        +" "
+        +shortId((pairing || {}).session_id || "");
+    }
+
+    function openModal(options){
+      return new Promise(function(resolve){
+        modalResolver=resolve;
+        modalReturnFocus=document.activeElement && document.activeElement.focus ? document.activeElement : null;
+        const needsInput=Boolean(options && options.inputLabel);
+        byId("modal-root").innerHTML=
+          '<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">'
+          + '<div class="section-kicker">'+escapeHtml((options && options.kicker) || "Confirm action")+'</div>'
+          + '<h3 class="modal-title" id="modal-title">'+escapeHtml((options && options.title) || "Confirm")+'</h3>'
+          + '<p class="modal-copy">'+escapeHtml((options && options.body) || "")+'</p>'
+          + (needsInput ? '<label class="modal-field"><span>'+escapeHtml(options.inputLabel)+'</span><input id="modal-input" type="'+escapeHtml((options.inputType) || "text")+'" value="'+escapeHtml((options.inputValue) || "")+'" /></label>' : '')
+          + '<div class="modal-actions">'
+          + '<button type="button" class="button button-secondary" data-modal-action="cancel">'+escapeHtml((options && options.cancelLabel) || "Cancel")+'</button>'
+          + '<button type="button" class="button '+(((options && options.confirmTone) === "danger") ? "button-danger" : "button-primary")+'" data-modal-action="confirm">'+escapeHtml((options && options.confirmLabel) || "Confirm")+'</button>'
+          + '</div>'
+          + '</div>';
+        const input=byId("modal-input");
+        if(input){
+          input.focus();
+          input.select();
+        }else{
+          const confirmButton=Array.from(document.querySelectorAll("#modal-root button[data-modal-action='confirm']")).shift();
+          if(confirmButton && confirmButton.focus){
+            confirmButton.focus();
+          }
+        }
+      });
+    }
+
+    function closeModal(result){
+      byId("modal-root").innerHTML="";
+      const resolver=modalResolver;
+      modalResolver=null;
+      if(resolver){
+        resolver(result || { confirmed:false, value:null });
+      }
+      if(modalReturnFocus && document.contains(modalReturnFocus) && modalReturnFocus.focus){
+        modalReturnFocus.focus();
+      }
+      modalReturnFocus=null;
+    }
+
+    async function confirmModal(title, body, confirmLabel, confirmTone){
+      const result=await openModal({
+        title:title,
+        body:body,
+        confirmLabel:confirmLabel || "Confirm",
+        confirmTone:confirmTone || "primary"
+      });
+      return Boolean(result && result.confirmed);
+    }
+
+    async function promptModal(title, body, inputLabel, inputValue, confirmLabel, inputType){
+      const result=await openModal({
+        kicker:"Provide value",
+        title:title,
+        body:body,
+        inputLabel:inputLabel,
+        inputValue:inputValue || "",
+        confirmLabel:confirmLabel || "Save",
+        inputType:inputType || "text"
+      });
+      if(!result || !result.confirmed){
+        return null;
+      }
+      return result.value;
+    }
+
     async function apiPost(path, payload){
       const response=await fetch(path+"?token="+encodeURIComponent(TOKEN), {
         method:"POST",
@@ -949,7 +1197,13 @@ def _dashboard_html(
     }
 
     async function shutdownDashboard(){
-      if(!confirm("Stop the Agent Bridge dashboard server?")){
+      const confirmed=await confirmModal(
+        "Stop dashboard server?",
+        "This closes the local admin surface until it is launched again.",
+        "Stop server",
+        "danger"
+      );
+      if(!confirmed){
         return;
       }
       const button=byId("shutdown-button");
@@ -1108,9 +1362,57 @@ def _dashboard_html(
         + '</article>';
     }
 
+    function surfaceNeedsAttention(key, surface){
+      const status=String((surface || {}).status || "unknown").toLowerCase();
+      if(!["ok","active","current","clean"].includes(status)){
+        return true;
+      }
+      if(key === "dashboard_reads"){
+        return Number(surface.degraded_component_count || 0) > 0;
+      }
+      if(key === "backpressure"){
+        return Number(surface.unread_work_count || 0) > 0 || Number(surface.blocked_bucket_count || 0) > 0 || Number(surface.warning_bucket_count || 0) > 0;
+      }
+      if(key === "claude_monitor"){
+        return Number(surface.problem_count || 0) > 0;
+      }
+      if(key === "stale_unread_watchdog"){
+        return Number(surface.rearm_count || 0) > 0;
+      }
+      if(key === "catchup"){
+        return Number(surface.pending_event_count || 0) > 0 || Number(surface.pending_pair_count || 0) > 0;
+      }
+      if(key === "contracts"){
+        return Number(surface.reauthorization_required_count || 0) > 0 || Number(surface.expiring_soon_count || 0) > 0 || Number(surface.revoked_count || 0) > 0;
+      }
+      if(key === "policy_drift"){
+        return Number(surface.doc_drift_count || 0) > 0 || Number(surface.missing_doc_count || 0) > 0;
+      }
+      if(key === "guardrail_debt"){
+        return Number(surface.active_debt_count || 0) > 0;
+      }
+      return false;
+    }
+
+    function renderStableSurfaceChip(key, surface){
+      const titles={
+        dashboard_reads:"Reads",
+        backpressure:"Inbox",
+        claude_monitor:"Monitor",
+        stale_unread_watchdog:"Watchdog",
+        catchup:"Catch-up",
+        contracts:"Contracts",
+        policy_drift:"Policy",
+        guardrail_debt:"Guardrails"
+      };
+      const label=titles[key] || titleCase(key);
+      return '<span class="pill '+toneClass("success")+'">'+escapeHtml(label)+" stable"+'</span>';
+    }
+
     function renderActionCard(action, index){
       const severity=String((action || {}).severity || "normal");
       const tone=toneForSeverity(severity);
+      const directActionLabel=DIRECT_ACTION_LABELS[(action || {}).id || ""];
       return '<article class="action-card">'
         + '<div class="action-header"><div><div class="section-kicker">Recommended action</div><h3 class="action-title">'+escapeHtml(titleCase((action || {}).id || ("action "+(index + 1))))+'</h3></div>'
         + '<span class="pill '+toneClass(tone)+'">'+escapeHtml(titleCase(severity))+'</span></div>'
@@ -1120,7 +1422,10 @@ def _dashboard_html(
         + '<span class="pill '+toneClass((action || {}).safe_to_run ? "success" : "neutral")+'">'+escapeHtml((action || {}).safe_to_run ? "Safe to run" : "Manual follow-up")+'</span>'
         + '<span class="pill '+toneClass((action || {}).mutates_state ? "warning" : "info")+'">'+escapeHtml((action || {}).mutates_state ? "Mutates state" : "Read-only")+'</span>'
         + '</div>'
-        + '<div class="button-row"><button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((action || {}).command || "")+'" data-copy-label="Recommended command">Copy command</button></div>'
+        + '<div class="button-row">'
+        + (directActionLabel ? '<button type="button" class="button button-primary" data-action="apply-recommended-action" data-action-id="'+escapeHtml((action || {}).id || "")+'" data-focus-key="action-run-'+escapeHtml((action || {}).id || "")+'">'+escapeHtml(directActionLabel)+'</button>' : '')
+        + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((action || {}).command || "")+'" data-copy-label="Recommended command" data-focus-key="action-copy-'+escapeHtml((action || {}).id || "")+'">Copy command</button>'
+        + '</div>'
         + '</article>';
     }
 
@@ -1144,18 +1449,11 @@ def _dashboard_html(
       }).map(function(item){
         return '<span class="pill '+toneClass("success")+'">'+escapeHtml(item && item.label ? item.label : "Action")+'</span>';
       }).join("");
-      const title=(pairing && pairing.project ? pairing.project : "project")
-        +" / "
-        +titleCase(status === "active" ? ((pairing || {}).role || "active") : status)
-        +" / "
-        +titleCase((pairing || {}).agent || "agent")
-        +" "
-        +shortId((pairing || {}).session_id || "");
       return '<article class="pair-card">'
         + '<div class="pair-identity">'
         + '<div class="avatar '+avatarClass+'">'+escapeHtml(shortId((pairing || {}).agent || "?").toUpperCase())+'</div>'
         + '<div>'
-        + '<div class="pair-header"><div><div class="section-kicker">Pairing</div><h3 class="pair-title">'+escapeHtml(title)+'</h3></div>'
+        + '<div class="pair-header"><div><div class="section-kicker">Pairing</div><h3 class="pair-title">'+escapeHtml(pairingTitle(pairing))+'</h3></div>'
         + '<span class="pill '+toneClass(toneForStatus(status))+'">'+escapeHtml(titleCase(status))+'</span></div>'
         + '<p class="pair-copy">'+escapeHtml("Connected to "+(((pairing || {}).peer_agent) || "peer")+" "+shortId((pairing || {}).peer_session_id || "")+" in a "+(((pairing || {}).relationship) || "paired")+" relationship.")+'</p>'
         + '</div></div>'
@@ -1165,15 +1463,18 @@ def _dashboard_html(
         + '<span class="pill '+toneClass((pairing || {}).last_wake_postflight_action ? "success" : "neutral")+'">'+escapeHtml(wakeReason)+'</span>'
         + '</div>'
         + '<dl class="detail-list">'
-        + detailRow("Session", (pairing || {}).session_id || "—")
-        + detailRow("Peer session", (pairing || {}).peer_session_id || "—")
-        + detailRow("Desktop thread", (pairing || {}).desktop_thread_id || "—")
+        + detailRow("Session", shortId((pairing || {}).session_id || ""))
+        + detailRow("Peer session", shortId((pairing || {}).peer_session_id || ""))
+        + detailRow("Desktop thread", (pairing || {}).desktop_thread_id ? shortId((pairing || {}).desktop_thread_id || "") : "—")
         + detailRow("Bootstrap origin", (pairing || {}).bootstrap_origin || "—")
         + '</dl>'
+        + '<details data-detail-key="pair-ids-'+escapeHtml((pairing || {}).session_id || "")+'"><summary>Identifiers</summary><div class="code-block">'
+        + escapeHtml("session_id: "+(((pairing || {}).session_id) || "—")+"\\npeer_session_id: "+(((pairing || {}).peer_session_id) || "—")+"\\ndesktop_thread_id: "+(((pairing || {}).desktop_thread_id) || "—"))
+        + '</div></details>'
         + (actionPills ? '<div class="pair-meta">'+actionPills+'</div>' : "")
         + '<div class="button-row">'
-        + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((pairing || {}).session_id || "")+'" data-copy-label="Session ID">Copy session ID</button>'
-        + ((pairing || {}).desktop_thread_id ? '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((pairing || {}).desktop_thread_id || "")+'" data-copy-label="Desktop thread ID">Copy thread ID</button>' : "")
+        + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((pairing || {}).session_id || "")+'" data-copy-label="Session ID" data-focus-key="pair-session-'+escapeHtml((pairing || {}).session_id || "")+'">Copy session ID</button>'
+        + ((pairing || {}).desktop_thread_id ? '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((pairing || {}).desktop_thread_id || "")+'" data-copy-label="Desktop thread ID" data-focus-key="pair-thread-'+escapeHtml((pairing || {}).session_id || "")+'">Copy thread ID</button>' : "")
         + '</div>'
         + '</article>';
     }
@@ -1181,18 +1482,11 @@ def _dashboard_html(
     function renderPairQueueCard(items){
       const rows=items.slice(0, 6).map(function(pairing){
         const status=String((pairing || {}).status || "unknown");
-        const title=(pairing && pairing.project ? pairing.project : "project")
-          +" / "
-          +titleCase(status)
-          +" / "
-          +titleCase((pairing || {}).agent || "agent")
-          +" "
-          +shortId((pairing || {}).session_id || "");
         return '<div class="summary-item">'
-          + '<div><div class="summary-item-title">'+escapeHtml(title)+'</div><div class="summary-item-copy">'+escapeHtml("Peer "+(((pairing || {}).peer_agent) || "peer")+" "+shortId((pairing || {}).peer_session_id || "")+" · "+titleCase((pairing || {}).relationship || "paired"))+'</div></div>'
+          + '<div><div class="summary-item-title">'+escapeHtml(pairingTitle(pairing))+'</div><div class="summary-item-copy">'+escapeHtml("Peer "+(((pairing || {}).peer_agent) || "peer")+" "+shortId((pairing || {}).peer_session_id || "")+" · "+titleCase((pairing || {}).relationship || "paired"))+'</div></div>'
           + '<div class="summary-item-actions">'
           + '<span class="pill '+toneClass(toneForStatus(status))+'">'+escapeHtml(titleCase(status))+'</span>'
-          + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((pairing || {}).session_id || "")+'" data-copy-label="Pending pair session ID">Copy session</button>'
+          + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((pairing || {}).session_id || "")+'" data-copy-label="Pending pair session ID" data-focus-key="queue-session-'+escapeHtml((pairing || {}).session_id || "")+'">Copy session</button>'
           + '</div>'
           + '</div>';
       }).join("");
@@ -1220,13 +1514,13 @@ def _dashboard_html(
         + '<dl class="detail-list">'
         + detailRow("Created", formatDate((action || {}).created_at || ""))
         + detailRow("Updated", formatDate((action || {}).updated_at || ""))
-        + detailRow("Related session", (action || {}).related_session_id || "—")
-        + detailRow("Message ID", (action || {}).message_id || "—")
+        + detailRow("Related session", (action || {}).related_session_id ? shortId((action || {}).related_session_id || "") : "—")
+        + detailRow("Message ID", (action || {}).message_id ? shortId((action || {}).message_id || "") : "—")
         + '</dl>'
-        + '<details><summary>Full details</summary><div class="code-block">'+escapeHtml((action || {}).details || "No details recorded.")+'</div></details>'
+        + '<details data-detail-key="pending-'+escapeHtml(String((action || {}).id || (action || {}).message_id || (action || {}).summary || ""))+'"><summary>Full details</summary><div class="code-block">'+escapeHtml("related_session_id: "+(((action || {}).related_session_id) || "—")+"\\nmessage_id: "+(((action || {}).message_id) || "—")+"\\n\\n"+(((action || {}).details) || "No details recorded."))+'</div></details>'
         + '<div class="button-row">'
-        + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((action || {}).details || "")+'" data-copy-label="Pending action details">Copy details</button>'
-        + ((action || {}).message_id ? '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((action || {}).message_id || "")+'" data-copy-label="Pending action message ID">Copy message ID</button>' : "")
+        + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((action || {}).details || "")+'" data-copy-label="Pending action details" data-focus-key="pending-details-'+escapeHtml(String((action || {}).id || (action || {}).message_id || ""))+'">Copy details</button>'
+        + ((action || {}).message_id ? '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((action || {}).message_id || "")+'" data-copy-label="Pending action message ID" data-focus-key="pending-message-'+escapeHtml(String((action || {}).message_id || ""))+'">Copy message ID</button>' : "")
         + '</div>'
         + '</article>';
     }
@@ -1247,9 +1541,9 @@ def _dashboard_html(
         + ((contract || {}).local_alias ? '<span class="pill '+toneClass("neutral")+'">'+escapeHtml((contract || {}).local_alias || "")+'</span>' : "")
         + '</div>'
         + '<div class="button-row">'
-        + '<button type="button" class="button button-secondary" data-action="alias-contract" data-link-id="'+escapeHtml((contract || {}).link_id || "")+'" data-alias="'+escapeHtml((contract || {}).local_alias || "")+'">Rename alias</button>'
-        + '<button type="button" class="button button-secondary" data-action="renew-contract" data-link-id="'+escapeHtml((contract || {}).link_id || "")+'">Renew</button>'
-        + '<button type="button" class="button button-danger" data-action="revoke-contract" data-link-id="'+escapeHtml((contract || {}).link_id || "")+'">Revoke</button>'
+        + '<button type="button" class="button button-secondary" data-action="alias-contract" data-link-id="'+escapeHtml((contract || {}).link_id || "")+'" data-alias="'+escapeHtml((contract || {}).local_alias || "")+'" data-focus-key="contract-alias-'+escapeHtml((contract || {}).link_id || "")+'">Rename alias</button>'
+        + '<button type="button" class="button button-secondary" data-action="renew-contract" data-link-id="'+escapeHtml((contract || {}).link_id || "")+'" data-focus-key="contract-renew-'+escapeHtml((contract || {}).link_id || "")+'">Renew</button>'
+        + '<button type="button" class="button button-danger" data-action="revoke-contract" data-link-id="'+escapeHtml((contract || {}).link_id || "")+'" data-focus-key="contract-revoke-'+escapeHtml((contract || {}).link_id || "")+'">Revoke</button>'
         + '</div>'
         + '</article>';
     }
@@ -1293,6 +1587,8 @@ def _dashboard_html(
       const unread=(surfaces.backpressure || {}).unread_work_count || 0;
       const healthTone=toneForStatus(health.overall_status || latestPayload.status || "unknown");
       const generatedAt=overview.generated_at || (health.snapshot_ts) || "";
+      const spotlightCommand=(health.recovery_hint) || ((recommended[0] || {}).command) || "";
+      const spotlightReason=(recommended[0] && recommended[0].reason) ? recommended[0].reason : "Start with the health-published recovery path before scanning the lower sections.";
       const heroCopy=(latestPayload.ok === false)
         ? escapeHtml(latestPayload.message || "The dashboard could not load a complete overview.")
         : escapeHtml("The bridge is scoped to "+(overview.caller && overview.caller.project ? overview.caller.project : "the active context")+". Use the cards below to see what is healthy, what is drifting, and which commands are safe to run next.");
@@ -1302,9 +1598,21 @@ def _dashboard_html(
         metricCard("Unread work", formatCount(unread), unread ? "Some unread work still needs attention." : "No inbox backlog is blocking the bridge."),
         metricCard("Pending actions", formatCount(pending.length), pending.length ? "There is still parked or pending work to resolve." : "The pending action queue is clear.")
       ].join("");
+      const spotlightActionId=(recommended[0] || {}).id || "";
+      const spotlightDirectLabel=DIRECT_ACTION_LABELS[spotlightActionId] || "";
+      const recommendedForGrid=(spotlightActionId && recommended.length > 1) ? recommended.slice(1, 8) : recommended.slice(0, 8);
       const surfaceOrder=["dashboard_reads","backpressure","claude_monitor","stale_unread_watchdog","catchup","contracts","policy_drift","guardrail_debt"];
-      const surfaceCards=surfaceOrder.filter(function(key){ return surfaces[key]; }).map(function(key){ return renderSurfaceCard(key, surfaces[key]); }).join("");
-      const actionCards=recommended.length ? recommended.slice(0, 8).map(renderActionCard).join("") : emptyState("No recommended actions", "The bridge does not currently need a manual remediation command.");
+      const attentionSurfaces=surfaceOrder.filter(function(key){ return surfaces[key] && surfaceNeedsAttention(key, surfaces[key]); });
+      const stableSurfaces=surfaceOrder.filter(function(key){ return surfaces[key] && !surfaceNeedsAttention(key, surfaces[key]); });
+      const surfaceCards=attentionSurfaces.length ? attentionSurfaces.map(function(key){ return renderSurfaceCard(key, surfaces[key]); }).join("") : (
+        healthTone === "danger"
+          ? '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Health alert</div><h3 class="surface-title">Top-level health is still broken</h3></div><span class="pill '+toneClass("danger")+'">Broken</span></div><div class="surface-stat">'+escapeHtml(String(recommended.length || 1))+'</div><p class="surface-copy">'+escapeHtml("The primary recovery path above addresses the current broken-health signal. Use the follow-up sections for secondary work only.")+'</p></article>'
+          : ((recommendedForGrid.length || pending.length)
+            ? '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Status surface</div><h3 class="surface-title">Core surfaces are stable, but follow-up work remains</h3></div><span class="pill '+toneClass("warning")+'">Follow-up</span></div><div class="surface-stat">'+escapeHtml(String(recommendedForGrid.length + pending.length))+'</div><p class="surface-copy">The bridge is calm at the surface level, but there are still queued actions below that need operator attention.</p></article>'
+            : '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Status surface</div><h3 class="surface-title">All monitored surfaces stable</h3></div><span class="pill '+toneClass("success")+'">Stable</span></div><div class="surface-stat">0</div><p class="surface-copy">Nothing across reads, inbox pressure, policy drift, contracts, or guardrail debt currently needs escalation.</p></article>')
+      );
+      const stableSurfaceStrip=stableSurfaces.length ? '<div class="stable-strip">'+stableSurfaces.map(function(key){ return renderStableSurfaceChip(key, surfaces[key]); }).join("")+'</div>' : "";
+      const actionCards=recommendedForGrid.length ? recommendedForGrid.map(renderActionCard).join("") : emptyState("Primary recovery already pinned above", "No secondary follow-up actions remain beyond the spotlighted recovery step.");
       const pairCards=activePairingsList.length ? '<div class="cards-grid">'+activePairingsList.map(renderPairCard).join("")+'</div>' : emptyState("No active primary pairings", "There are no active same-project routes in this scope, so nothing is expanded as a live primary.");
       const pairQueue=queuedPairings.length ? '<div class="cards-grid">'+renderPairQueueCard(queuedPairings)+'</div>' : "";
       const pendingCards=pending.length ? pending.map(renderPendingCard).join("") : emptyState("No pending actions", "There is no parked or unresolved action debt in the current scope.");
@@ -1323,7 +1631,23 @@ def _dashboard_html(
       const overallMessage=latestPayload.ok === false
         ? (latestPayload.message || "Dashboard refresh failed.")
         : titleCase(health.overall_status || latestPayload.status || "unknown")+" health · "+(debtSummary.length ? debtSummary.join(" • ") : "No immediate operator debt")+" · refreshed "+formatRelative(generatedAt)+".";
+      const heroTitle=latestPayload.ok === false
+        ? "Dashboard refresh needs attention."
+        : (healthTone === "danger"
+          ? titleCase(health.overall_status || "broken")+" health needs decisive recovery."
+          : (debtSummary.length ? "Bridge health is stable, but queued work still needs decisions." : "Bridge health is steady and ready."));
+      const recommendedSectionCopy=spotlightActionId
+        ? "The primary recovery path stays pinned in the hero. The actions here are the remaining follow-up moves."
+        : "Commands are promoted into action cards with severity, safety hints, and one-click copy affordances.";
       setStatus(overallMessage, healthTone);
+      const signature=payloadSignature(latestPayload);
+      if(signature === lastRenderSignature){
+        updateRefreshToggle();
+        return;
+      }
+      lastRenderSignature=signature;
+      const openDetailKeys=captureOpenDetails();
+      const viewportState=captureViewportState();
       byId("dashboard-root").innerHTML=
         '<section class="panel hero">'
         + '<div class="hero-copy">'
@@ -1333,15 +1657,16 @@ def _dashboard_html(
         + '<span class="pill '+toneClass("info")+'">'+escapeHtml((overview.caller || {}).project || "global scope")+'</span>'
         + '<span class="pill '+toneClass("neutral")+'">'+escapeHtml(formatDate(generatedAt))+'</span>'
         + '</div>'
-        + '<h2 class="hero-title">Operational clarity instead of a markdown dump.</h2>'
+        + '<h2 class="hero-title">'+escapeHtml(heroTitle)+'</h2>'
         + '<p class="hero-subtitle">'+heroCopy+'</p>'
+        + (spotlightCommand ? '<div class="spotlight-card"><div class="section-kicker">Primary recovery path</div><h3 class="spotlight-title">'+escapeHtml(titleCase(health.overall_status || "needs attention"))+' needs one decisive next move.</h3><p class="spotlight-copy">'+escapeHtml(spotlightReason)+'</p><div class="code-block">'+escapeHtml(spotlightCommand)+'</div><div class="button-row">'+(spotlightDirectLabel ? '<button type="button" class="button button-primary" data-action="apply-recommended-action" data-action-id="'+escapeHtml(spotlightActionId)+'" data-focus-key="spotlight-run-primary">'+escapeHtml(spotlightDirectLabel)+'</button>' : '')+'<button type="button" class="button '+(spotlightDirectLabel ? 'button-secondary' : 'button-primary')+'" data-action="copy-text" data-copy="'+escapeHtml(spotlightCommand)+'" data-copy-label="Primary recovery command" data-focus-key="spotlight-copy-primary">Copy primary action</button></div></div>' : '')
         + '<div class="metric-grid">'+metrics+'</div>'
         + '<p class="footer-note">'+escapeHtml((health.recovery_hint) ? "The current health snapshot includes a recovery hint, and the top-bar copy button always mirrors it." : "No recovery hint is published for the current state.")+'</p>'
         + '</div>'
         + '<div class="hero-visual">'+heroVisual(overview)+'</div>'
         + '</section>'
-        + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">At a glance</span><h2 class="section-title">Operational signals</h2><p class="section-copy">Every important bridge surface is turned into a readable signal card with enough detail to act fast without spelunking raw JSON.</p></div></div><div class="status-grid">'+surfaceCards+'</div></section>'
-        + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Do next</span><h2 class="section-title">Recommended actions</h2><p class="section-copy">Commands are promoted into action cards with severity, safety hints, and one-click copy affordances.</p></div></div><div class="action-grid">'+actionCards+'</div></section>'
+        + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">At a glance</span><h2 class="section-title">Operational signals</h2><p class="section-copy">Only the surfaces that need attention stay expanded. Stable systems collapse into a lightweight readiness strip so the first scan stays sharp.</p></div></div><div class="status-grid">'+surfaceCards+'</div>'+stableSurfaceStrip+'</section>'
+        + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Do next</span><h2 class="section-title">Recommended actions</h2><p class="section-copy">'+escapeHtml(recommendedSectionCopy)+'</p></div></div><div class="action-grid">'+actionCards+'</div></section>'
         + '<section class="meta-grid">'
         + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Live routes</span><h2 class="section-title">Pairings</h2><p class="section-copy">Active primaries stay expanded. Secondary and pending routes are summarized separately so the operator can scan what matters now first.</p></div></div><div class="section-stack">'+pairCards+pairQueue+'</div></section>'
         + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Work queue</span><h2 class="section-title">Pending actions</h2><p class="section-copy">Parked work is visible, prioritized, and copyable so nothing important disappears into the ledger.</p></div></div><div class="cards-grid">'+pendingCards+'</div></section>'
@@ -1350,9 +1675,15 @@ def _dashboard_html(
         + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Trust boundaries</span><h2 class="section-title">Contracts</h2><p class="section-copy">Cross-project contracts get first-class controls with renew, revoke, and alias actions whenever links are present.</p></div></div><div class="cards-grid">'+contractCards+'</div></section>'
         + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Audit trail</span><h2 class="section-title">Remote rejections</h2><p class="section-copy">Remote authority failures stay visible so policy disagreements are obvious instead of buried in logs.</p></div></div><div class="cards-grid">'+rejectionCards+'</div></section>'
         + '</section>';
+      restoreOpenDetails(openDetailKeys);
+      restoreViewportState(viewportState);
+      updateRefreshToggle();
     }
 
-    async function refresh(){
+    async function refresh(force){
+      if((!force && !autoRefreshEnabled) || modalResolver){
+        return;
+      }
       setBusy(true);
       try{
         const response=await fetch(overviewUrl());
@@ -1374,7 +1705,24 @@ def _dashboard_html(
       try{
         const data=await apiPost(path, payload);
         showToast(data.message || "Contract updated.", successTone || "success");
-        await refresh();
+        await refresh(true);
+      }catch(error){
+        showToast(String(error), "danger");
+        setStatus(String(error), "danger");
+      }finally{
+        button.disabled=false;
+      }
+    }
+
+    async function runRecommendedAction(button){
+      button.disabled=true;
+      try{
+        const data=await apiPost("/api/recommended-action", {
+          action_id:button.getAttribute("data-action-id") || "",
+          project:PROJECT
+        });
+        showToast(data.message || "Recommended action applied.", "success");
+        await refresh(true);
       }catch(error){
         showToast(String(error), "danger");
         setStatus(String(error), "danger");
@@ -1384,13 +1732,32 @@ def _dashboard_html(
     }
 
     document.addEventListener("click", async function(event){
+      const modalButton=event.target.closest("button[data-modal-action]");
+      if(modalButton){
+        if(modalButton.getAttribute("data-modal-action") === "cancel"){
+          closeModal({ confirmed:false, value:null });
+          return;
+        }
+        const input=byId("modal-input");
+        closeModal({ confirmed:true, value:input ? input.value : null });
+        return;
+      }
       const button=event.target.closest("button[data-action]");
       if(!button){
         return;
       }
       const action=button.getAttribute("data-action");
       if(action === "refresh"){
-        await refresh();
+        await refresh(true);
+        return;
+      }
+      if(action === "toggle-refresh"){
+        autoRefreshEnabled=!autoRefreshEnabled;
+        updateRefreshToggle();
+        showToast(autoRefreshEnabled ? "Live refresh resumed." : "Live refresh paused.", autoRefreshEnabled ? "info" : "warning");
+        if(autoRefreshEnabled){
+          await refresh(true);
+        }
         return;
       }
       if(action === "copy-recovery"){
@@ -1407,8 +1774,19 @@ def _dashboard_html(
         await copyText(button.getAttribute("data-copy") || "", button.getAttribute("data-copy-label") || "Text");
         return;
       }
+      if(action === "apply-recommended-action"){
+        await runRecommendedAction(button);
+        return;
+      }
       if(action === "renew-contract"){
-        const ttl=window.prompt("Renew contract TTL in minutes", "120");
+        const ttl=await promptModal(
+          "Renew contract",
+          "Choose how long this cross-project contract should stay active.",
+          "TTL in minutes",
+          "120",
+          "Renew",
+          "number"
+        );
         if(ttl == null){
           return;
         }
@@ -1426,7 +1804,13 @@ def _dashboard_html(
         return;
       }
       if(action === "revoke-contract"){
-        if(!confirm("Revoke this cross-project contract?")){
+        const confirmed=await confirmModal(
+          "Revoke contract?",
+          "This will revoke the selected cross-project contract and record the action in bridge state.",
+          "Revoke",
+          "danger"
+        );
+        if(!confirmed){
           return;
         }
         await mutateContract(button, "/api/revoke", {
@@ -1438,7 +1822,14 @@ def _dashboard_html(
         return;
       }
       if(action === "alias-contract"){
-        const alias=window.prompt("Rename local alias", button.getAttribute("data-alias") || "");
+        const alias=await promptModal(
+          "Rename contract alias",
+          "Set a clearer local alias for this contract so it reads well in the dashboard.",
+          "Alias",
+          button.getAttribute("data-alias") || "",
+          "Save alias",
+          "text"
+        );
         if(alias == null){
           return;
         }
@@ -1450,9 +1841,35 @@ def _dashboard_html(
       }
     });
 
+    document.addEventListener("keydown", function(event){
+      if(event.key === "Escape" && modalResolver){
+        closeModal({ confirmed:false, value:null });
+      }
+      if(event.key === "Tab" && modalResolver){
+        const focusables=Array.from(document.querySelectorAll("#modal-root button, #modal-root input")).filter(function(node){
+          return node instanceof HTMLElement && !node.disabled;
+        });
+        if(focusables.length){
+          const first=focusables[0];
+          const last=focusables[focusables.length - 1];
+          if(event.shiftKey && document.activeElement === first){
+            event.preventDefault();
+            last.focus();
+          }else if(!event.shiftKey && document.activeElement === last){
+            event.preventDefault();
+            first.focus();
+          }
+        }
+      }
+      if(event.key === "Enter" && modalResolver && event.target && event.target.id === "modal-input"){
+        closeModal({ confirmed:true, value:event.target.value });
+      }
+    });
+
     render(INITIAL_PAYLOAD);
     refresh();
-    setInterval(refresh, 5000);
+    updateRefreshToggle();
+    refreshTimer=setInterval(refresh, 5000);
   </script>
 </body>
 </html>
@@ -1493,6 +1910,28 @@ class BridgeDashboardHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
+
+    def _run_safe_recommended_action(self, payload: Dict[str, Any]) -> BridgeResult:
+        action_id = str(payload.get("action_id") or "").strip()
+        agent = str(payload.get("agent") or self.server.default_agent)
+        if action_id == "compact_stale_server_markers":
+            result = reap_stale_server_pids(self.server.bridge.state_dir, max_age_hours=0, dry_run=False)
+            return BridgeResult(
+                True,
+                "action_applied",
+                "Reaped %d stale server marker(s) after checking %d marker(s)."
+                % (int(result.get("removed") or 0), int(result.get("checked") or 0)),
+                {"action_id": action_id, "result": result},
+            )
+        if action_id == "backfill_read_receipts":
+            result = self.server.bridge.receipt_debt_cleanup(agent=agent, apply=True)
+            return BridgeResult(
+                result.ok,
+                result.status,
+                result.message,
+                {"action_id": action_id, **(result.data or {})},
+            )
+        return BridgeResult(False, "rejected", "recommended action %s cannot be executed directly" % action_id)
 
     def _reject_if_not_local(self) -> bool:
         host = str(self.client_address[0])
@@ -1619,6 +2058,8 @@ class BridgeDashboardHandler(BaseHTTPRequestHandler):
                 alias=str(payload.get("alias") or ""),
                 source="dashboard",
             )
+        elif parsed.path == "/api/recommended-action":
+            result = self._run_safe_recommended_action(payload)
         elif parsed.path == "/api/shutdown":
             self.server.shutdown_requested.set()
             _json_response(

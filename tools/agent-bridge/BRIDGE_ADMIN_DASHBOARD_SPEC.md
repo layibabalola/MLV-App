@@ -242,11 +242,17 @@ bounded cadence and restarts the HTTP server if the server thread dies or
 `/api/overview` stops responding.
 
 The dashboard root page auto-refreshes every 5 seconds by fetching
-`/api/overview?format=markdown` with the session token. Updates replace the
-dashboard `<pre>` via `textContent`, never `innerHTML`, so bridge-supplied text
-is not interpreted as HTML. The page also includes a local Stop button that
-POSTs to `/api/shutdown` with the CSRF token; this exits the background
-supervisor cleanly. Task Manager remains an emergency stop fallback.
+`/api/overview?format=json` with the session token. Operators can pause live
+refresh without disabling the manual "Refresh now" button. The page includes a
+local Stop button that POSTs to `/api/shutdown` with the CSRF token; this exits
+the background supervisor cleanly. Task Manager remains an emergency stop
+fallback.
+
+The UI may expose direct buttons only for allowlisted low-risk remediation
+actions whose implementation is local and bounded, currently stale MCP server
+marker cleanup and read-receipt backfill. All other recommended actions remain
+copy-only instructions. Direct buttons POST to `/api/recommended-action` with the
+dashboard token and CSRF header.
 
 Local chat can also call the `open_dashboard` MCP tool. The tool starts or
 reuses the in-process dashboard server, opens the tokenized URL in the default
@@ -258,6 +264,7 @@ Proposed local dashboard backend endpoints or equivalent MCP/CLI handlers:
 
 - `dashboard_overview`
 - `open_dashboard`
+- `recommended_action`
 - `list_pairings`
 - `pairing_details`
 - `start_guided_pairing`

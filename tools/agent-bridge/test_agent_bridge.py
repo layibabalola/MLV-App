@@ -2789,9 +2789,87 @@ for index in range(count):
             self.assertIn("shutdownDashboard", html)
             self.assertIn("format=json", html)
             self.assertIn("setInterval(refresh, 5000)", html)
+            self.assertIn("Pause live refresh", html)
+            self.assertIn("async function refresh(force)", html)
+            self.assertIn("if((!force && !autoRefreshEnabled) || modalResolver)", html)
+            self.assertIn("await refresh(true)", html)
+            self.assertIn("data-action=\"apply-recommended-action\"", html)
+            self.assertIn("/api/recommended-action", html)
+            self.assertIn("id=\"modal-root\"", html)
+            self.assertNotIn("window.prompt(", html)
+            self.assertNotIn("confirm(", html)
             self.assertIn("id=\"dashboard-root\"", html)
             self.assertIn("Operational signals", html)
             self.assertIn("Copy recovery hint", html)
+        finally:
+            handle.stop()
+
+    def test_dashboard_server_recommended_action_backfills_read_receipts(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        read_at = "2026-04-29T00:00:01+00:00"
+        append_jsonl(
+            bridge.inbox_path("codex"),
+            {
+                "id": "read-without-seen",
+                "created_at": "2026-04-29T00:00:00+00:00",
+                "session_id": "mlv-app",
+                "from": "claude",
+                "to": "codex",
+                "body": "read but missing seen",
+                "read_at": read_at,
+                "seen_at": None,
+            },
+        )
+        handle = start_dashboard_server(
+            bridge,
+            token="test-token",
+            csrf_token="csrf-token",
+            default_agent="codex",
+            default_project="mlv-app",
+        )
+        try:
+            req = urllib.request.Request(
+                handle.url + "/api/recommended-action?token=test-token",
+                data=json.dumps({"action_id": "backfill_read_receipts", "agent": "codex"}).encode("utf-8"),
+                headers={"X-CSRF-Token": "csrf-token", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual("backfill_read_receipts", payload["data"]["action_id"])
+            self.assertEqual(1, payload["data"]["totals"]["seen_backfilled"])
+            rows = {row["id"]: row for row in read_jsonl(bridge.inbox_path("codex"))}
+            self.assertEqual(read_at, rows["read-without-seen"]["seen_at"])
+            self.assertEqual("receipt_debt_cleanup:read_backfill", rows["read-without-seen"]["seen_via"])
+        finally:
+            handle.stop()
+
+    def test_dashboard_server_recommended_action_rejects_unknown_direct_action(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        handle = start_dashboard_server(
+            bridge,
+            token="test-token",
+            csrf_token="csrf-token",
+            default_agent="codex",
+            default_project="mlv-app",
+        )
+        try:
+            req = urllib.request.Request(
+                handle.url + "/api/recommended-action?token=test-token",
+                data=json.dumps({"action_id": "restart_watcher"}).encode("utf-8"),
+                headers={"X-CSRF-Token": "csrf-token", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(400, rejected.exception.code)
+            payload = json.loads(rejected.exception.read().decode("utf-8"))
+            self.assertFalse(payload["ok"])
+            self.assertEqual("rejected", payload["status"])
+            rejected.exception.close()
         finally:
             handle.stop()
 
@@ -2863,7 +2941,7 @@ for index in range(count):
                 self.assertEqual(200, response.status)
                 html = response.read().decode("utf-8")
             self.assertIn("Agent Bridge Dashboard", html)
-            self.assertIn("Auto-refreshes every 5s", html)
+            self.assertIn("Refreshes every 5s while live mode is on.", html)
         finally:
             proc.terminate()
             try:
