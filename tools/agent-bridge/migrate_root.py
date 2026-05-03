@@ -8,6 +8,7 @@ from core.paths import (
     ROOT_MANIFEST_SCHEMA_VERSION,
     bridge_paths_for_root,
     ensure_bridge_root_manifest,
+    expand_path_arg,
     utc_now,
 )
 from core.processes import acquire_singleton_lease, is_process_alive, release_lease
@@ -310,8 +311,8 @@ def main() -> None:
     args = parser.parse_args()
 
     result = migrate_root(
-        source_root=Path(args.source_root),
-        target_root=Path(args.target_root),
+        source_root=expand_path_arg(args.source_root),
+        target_root=expand_path_arg(args.target_root),
         apply=args.apply,
         force_while_running=args.force_while_running,
         allow_reparse_target=args.allow_reparse_target,

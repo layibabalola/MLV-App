@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap, ensure_watcher
 from configure_watcher import configure_watcher
-from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths, watcher_config_path_for_state_dir
+from core.paths import ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths, watcher_config_path_for_state_dir
 from project_identity import derive_project_identity
 
 
@@ -230,8 +230,8 @@ def main() -> None:
     )
     args = parser.parse_args()
     paths = resolve_bridge_paths(
-        bridge_root=Path(args.bridge_root) if args.bridge_root else None,
-        state_dir=Path(args.state_dir) if args.state_dir else None,
+        bridge_root=expand_path_arg(args.bridge_root) if args.bridge_root else None,
+        state_dir=expand_path_arg(args.state_dir) if args.state_dir else None,
     )
     if args.bridge_root:
         ensure_bridge_root_manifest(paths, reason="recover_bridge_session")
@@ -241,7 +241,7 @@ def main() -> None:
         agent=args.agent,
         cwd=args.cwd,
         project=args.project,
-        watcher_config=Path(args.watcher_config) if args.watcher_config else paths.watcher_config,
+        watcher_config=expand_path_arg(args.watcher_config) if args.watcher_config else paths.watcher_config,
         start_watcher=not args.no_start_watcher,
         force_takeover=args.force_takeover,
     )

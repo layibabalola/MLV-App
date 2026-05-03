@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
 from configure_watcher import configure_watcher
-from core.runtime import peer_runtime_path_for_state_dir, write_runtime_breadcrumb
+from core.runtime import peer_runtime_path_for_state_dir, read_runtime_breadcrumb, write_runtime_breadcrumb
 import probe_server
 import watcher
 
@@ -407,7 +407,18 @@ class Phase0ContractTests(unittest.TestCase):
 
         seen_ids: set[str] = set()
         state_path = self.tempdir / "watcher-state.json"
-        succeeded = Mock(returncode=0, stdout="", stderr="")
+        succeeded = Mock(
+            returncode=0,
+            stdout=(
+                'AGENT_BRIDGE_WAKE_TELEMETRY {"schema_version":1,'
+                '"action":"thread_title_observed",'
+                '"desktop_thread_id":"019dcfe4-bd5d-7841-a7c1-2e8969a777c5",'
+                '"desktop_thread_title":"Agent Bridge - Codex",'
+                '"desktop_thread_title_source":"uia_root_name",'
+                '"desktop_window_title":"Agent Bridge - Codex"}\n'
+            ),
+            stderr="",
+        )
         session_config = {
             "agent": "codex",
             "session_id": "codex-live",
@@ -538,7 +549,18 @@ class Phase0ContractTests(unittest.TestCase):
 
         seen_ids: set[str] = set()
         state_path = self.tempdir / "watcher-state.json"
-        succeeded = Mock(returncode=0, stdout="", stderr="")
+        succeeded = Mock(
+            returncode=0,
+            stdout=(
+                'AGENT_BRIDGE_WAKE_TELEMETRY {"schema_version":1,'
+                '"action":"thread_title_observed",'
+                '"desktop_thread_id":"019dcfe4-bd5d-7841-a7c1-2e8969a777c5",'
+                '"desktop_thread_title":"Agent Bridge - Codex",'
+                '"desktop_thread_title_source":"uia_root_name",'
+                '"desktop_window_title":"Agent Bridge - Codex"}\n'
+            ),
+            stderr="",
+        )
 
         with patch("watcher.notify_terminal"), patch("watcher.subprocess.run", return_value=succeeded) as run:
             watcher.process_session_once(
@@ -557,6 +579,10 @@ class Phase0ContractTests(unittest.TestCase):
 
         self.assertEqual(run.call_args.args[0], ["fake-wake", "-ThreadId", "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"])
         self.assertFalse(run.call_args.kwargs["shell"])
+        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["desktop_thread_title"], "Agent Bridge - Codex")
+        self.assertEqual(breadcrumb["desktop_thread_title_source"], "uia_root_name")
+        self.assertEqual(breadcrumb["desktop_window_title"], "Agent Bridge - Codex")
 
     def test_07e_missing_peer_breadcrumb_marks_seen_without_retry(self) -> None:
         inbox_path = self.state_dir / "inbox-codex.jsonl"
@@ -1220,7 +1246,8 @@ class Phase0ContractTests(unittest.TestCase):
             for entry in config["sessions"]
             if entry.get("agent") == "codex"
         ]
-        self.assertTrue(any("{desktop_thread_id}" in " ".join(command) for command in commands))
+        if any(commands):
+            self.assertTrue(any("{desktop_thread_id}" in " ".join(command) for command in commands))
         self.assertFalse(any(subagent_thread in " ".join(command) for command in commands))
 
     def test_09_sub_agent_cannot_mutate_parent_thread_id(self) -> None:

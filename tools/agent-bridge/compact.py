@@ -18,6 +18,8 @@ Options:
     --audit-max-mb N        Rotate audit log when it exceeds N MB (default: 5)
     --audit-retention-days N
                             Drop rotated messages.YYYY-MM.jsonl files older than N days (default: 90)
+    --server-pid-max-age-hours N
+                            Reap dead MCP server PID/runtime markers older than N hours (default: 24)
     --dry-run               Print what would be done without writing
 
 Safe to run at any time. Uses the same .lock directory as the MCP server,
@@ -76,6 +78,12 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
             for bad in quarantine:
                 f.write(bad + "\n")
     return rows
+
+
+def read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
@@ -307,6 +315,80 @@ def is_process_alive(pid: int) -> bool:
         return False
 
 
+PROCESS_MARKER_START_TOLERANCE_SECONDS = 300
+
+
+def process_start_time_utc(pid: int) -> Optional[datetime]:
+    if pid <= 0 or sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        ok = ctypes.windll.kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        )
+        ctypes.windll.kernel32.CloseHandle(handle)
+        if not ok:
+            return None
+        ticks = (creation.dwHighDateTime << 32) + creation.dwLowDateTime
+        unix_seconds = ticks / 10_000_000 - 11_644_473_600
+        return datetime.fromtimestamp(unix_seconds, timezone.utc)
+    except Exception:
+        return None
+
+
+def process_runtime_identity_status(
+    pid: int,
+    runtime: Optional[Dict[str, Any]],
+    *,
+    expected_role: Optional[str] = None,
+    max_start_delta_seconds: int = PROCESS_MARKER_START_TOLERANCE_SECONDS,
+) -> Dict[str, Any]:
+    running = is_process_alive(pid)
+    status: Dict[str, Any] = {
+        "running": running,
+        "identity_verified": False,
+        "identity_mismatch": False,
+        "identity_mismatch_reason": None,
+        "process_started_at": None,
+        "runtime_timestamp_delta_seconds": None,
+    }
+    if not running:
+        return status
+    runtime_data = runtime if isinstance(runtime, dict) else {}
+    role = runtime_data.get("role")
+    if expected_role and role and role != expected_role:
+        status["identity_mismatch"] = True
+        status["identity_mismatch_reason"] = "role_mismatch"
+        return status
+    runtime_started_at = parse_dt(runtime_data.get("timestamp"))
+    process_started_at = process_start_time_utc(pid)
+    if process_started_at is not None:
+        status["process_started_at"] = process_started_at.isoformat(timespec="seconds")
+    if runtime_started_at is None or process_started_at is None:
+        return status
+    delta = abs((process_started_at - runtime_started_at).total_seconds())
+    status["identity_verified"] = True
+    status["runtime_timestamp_delta_seconds"] = round(delta, 3)
+    if delta > max_start_delta_seconds:
+        status["identity_mismatch"] = True
+        status["identity_mismatch_reason"] = "pid_reuse_start_time_mismatch"
+    return status
+
+
 def reap_stale_server_pids(
     state_dir: Path,
     max_age_hours: int = 24,
@@ -316,7 +398,11 @@ def reap_stale_server_pids(
     server_dir = state_dir / "server-pids"
     cutoff_seconds = max_age_hours * 60 * 60
     checked = 0
+    checked_runtime_orphans = 0
     removed: List[str] = []
+    removed_runtime_paths: List[str] = []
+    removed_runtime_orphans: List[str] = []
+    removed_identity_mismatch = 0
     kept_running = 0
     kept_fresh = 0
     errors: List[Dict[str, str]] = []
@@ -324,34 +410,74 @@ def reap_stale_server_pids(
     if server_dir.exists():
         for marker in sorted(server_dir.glob("server-*.pid")):
             checked += 1
+            runtime_marker = marker.with_suffix(".json")
             try:
                 raw = marker.read_text(encoding="utf-8").strip()
                 pid = int(raw)
             except (OSError, ValueError) as exc:
                 pid = 0
                 errors.append({"path": str(marker), "error": str(exc)})
-            running = is_process_alive(pid)
+            runtime: Optional[Dict[str, Any]] = None
+            if runtime_marker.exists():
+                try:
+                    runtime = read_json(runtime_marker, {})
+                except Exception as exc:
+                    errors.append({"path": str(runtime_marker), "error": str(exc)})
+            identity = process_runtime_identity_status(pid, runtime, expected_role="mcp_server")
+            running = bool(identity["running"])
+            identity_mismatch = bool(identity["identity_mismatch"])
             age_seconds = time.time() - marker.stat().st_mtime
-            if running:
+            if running and not identity_mismatch:
                 kept_running += 1
                 continue
-            if age_seconds < cutoff_seconds:
+            if running and identity_mismatch:
+                removed_identity_mismatch += 1
+            elif age_seconds < cutoff_seconds:
                 kept_fresh += 1
                 continue
             removed.append(str(marker))
+            if runtime_marker.exists():
+                removed_runtime_paths.append(str(runtime_marker))
             if not dry_run:
                 try:
                     marker.unlink()
                 except OSError as exc:
                     errors.append({"path": str(marker), "error": str(exc)})
+                try:
+                    runtime_marker.unlink(missing_ok=True)
+                except OSError as exc:
+                    errors.append({"path": str(runtime_marker), "error": str(exc)})
+
+        for runtime_marker in sorted(server_dir.glob("server-*.json")):
+            if runtime_marker.with_suffix(".pid").exists():
+                continue
+            checked_runtime_orphans += 1
+            try:
+                age_seconds = time.time() - runtime_marker.stat().st_mtime
+            except OSError as exc:
+                errors.append({"path": str(runtime_marker), "error": str(exc)})
+                continue
+            if age_seconds < cutoff_seconds:
+                kept_fresh += 1
+                continue
+            removed_runtime_orphans.append(str(runtime_marker))
+            if not dry_run:
+                try:
+                    runtime_marker.unlink()
+                except OSError as exc:
+                    errors.append({"path": str(runtime_marker), "error": str(exc)})
 
     event = {
         "id": str(uuid.uuid4()),
         "timestamp": utc_now(),
         "action": "reap_stale_server_pids",
         "checked": checked,
+        "checked_runtime_orphans": checked_runtime_orphans,
         "removed": len(removed),
         "removed_paths": removed,
+        "removed_runtime_paths": removed_runtime_paths,
+        "removed_runtime_orphans": removed_runtime_orphans,
+        "removed_identity_mismatch": removed_identity_mismatch,
         "kept_running": kept_running,
         "kept_fresh": kept_fresh,
         "max_age_hours": max_age_hours,

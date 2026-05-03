@@ -37,32 +37,59 @@ def _install_windows_pipe_safety(chunk_size: int = _WINDOWS_PIPE_CHUNK_BYTES) ->
 
     raw = sys.stdout.buffer.raw if hasattr(sys.stdout.buffer, "raw") else sys.stdout.buffer
     fd = raw.fileno()
+    encoding = getattr(sys.stdout, "encoding", "utf-8") or "utf-8"
+    errors = getattr(sys.stdout, "errors", "strict") or "strict"
 
-    class _ChunkedRaw(io.RawIOBase):
+    class _ChunkedStdout(io.TextIOBase):
+        """Direct-write stdout proxy that avoids secondary buffering layers."""
+
+        def __init__(self, fileno: int, *, text_encoding: str, text_errors: str, max_chunk_size: int) -> None:
+            self._fileno = fileno
+            self._encoding = text_encoding
+            self._errors = text_errors
+            self._chunk_size = max_chunk_size
+            self.buffer = self
+
+        @property
+        def encoding(self) -> str:
+            return self._encoding
+
+        @property
+        def errors(self) -> str:
+            return self._errors
+
         def writable(self) -> bool:  # noqa: D401
             return True
 
+        def fileno(self) -> int:
+            return self._fileno
+
+        def isatty(self) -> bool:
+            return False
+
         def write(self, data) -> int:
-            view = memoryview(data).cast("B")
+            if isinstance(data, str):
+                payload = data.encode(self._encoding, errors=self._errors)
+                text_length = len(data)
+            else:
+                payload = bytes(data)
+                text_length = len(payload)
+
+            view = memoryview(payload).cast("B")
             total = len(view)
-            i = 0
-            while i < total:
-                end = min(i + chunk_size, total)
-                written = os.write(fd, bytes(view[i:end]))
+            offset = 0
+            while offset < total:
+                end = min(offset + self._chunk_size, total)
+                written = os.write(self._fileno, bytes(view[offset:end]))
                 if not written:
                     raise OSError("short write to stdout pipe")
-                i += written
-            return total
+                offset += written
+            return text_length
 
         def flush(self) -> None:
-            pass
+            return
 
-    sys.stdout = io.TextIOWrapper(
-        io.BufferedWriter(_ChunkedRaw(), buffer_size=chunk_size),
-        encoding="utf-8",
-        line_buffering=False,
-        write_through=False,
-    )
+    sys.stdout = _ChunkedStdout(fd, text_encoding=encoding, text_errors=errors, max_chunk_size=chunk_size)
 
 
 if sys.version_info < (3, 10):
@@ -208,11 +235,17 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         message: str,
         session_id: Optional[str] = None,
         target_session_id: Optional[str] = None,
+        relay_mode: Optional[str] = None,
+        sender_session_id: Optional[str] = None,
+        reply_to_session_id: Optional[str] = None,
+        ephemeral_relay_id: Optional[str] = None,
+        pair_id: Optional[str] = None,
     ) -> dict:
         """Queue a handoff message for the peer agent.
 
         The message must contain [[handoff:claude]] or [[handoff:codex]] matching
-        to_agent. The marker is stripped before delivery.
+        to_agent. The marker is stripped before delivery. relay_mode=ephemeral
+        enables a scoped project-bucket relay for background chats.
         """
         return as_dict(
             bridge.send_to_peer(
@@ -221,6 +254,11 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
                 message,
                 session_id=session_id,
                 target_session_id=target_session_id,
+                relay_mode=relay_mode,
+                sender_session_id=sender_session_id,
+                reply_to_session_id=reply_to_session_id,
+                ephemeral_relay_id=ephemeral_relay_id,
+                pair_id=pair_id,
             )
         )
 
@@ -339,6 +377,29 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
                 agent=agent,
                 limit=limit,
                 offset=offset,
+                body_preview_chars=body_preview_chars,
+            )
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def receipt_debt_cleanup(
+        agent: Optional[str] = None,
+        old_after_seconds: Optional[int] = None,
+        stale_after_seconds: int = 300,
+        apply: bool = False,
+        rearm_stale_unread: bool = False,
+        limit: int = 50,
+        body_preview_chars: int = 240,
+    ) -> dict:
+        """Report receipt debt and optionally apply safe cleanup migrations."""
+        return as_dict(
+            bridge.receipt_debt_cleanup(
+                agent=agent,
+                old_after_seconds=old_after_seconds,
+                stale_after_seconds=stale_after_seconds,
+                apply=apply,
+                rearm_stale_unread=rearm_stale_unread,
+                limit=limit,
                 body_preview_chars=body_preview_chars,
             )
         )
@@ -516,6 +577,27 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         )
 
     @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def classify_execution_interrupt(
+        owner_agent: str,
+        task_id: str,
+        disposition: str,
+        reason: Optional[str] = None,
+        interrupt_kind: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> dict:
+        """Record the WGI-10 disposition for an interrupt while an execution task is active."""
+        return as_dict(
+            bridge.classify_execution_interrupt(
+                owner_agent=owner_agent,
+                task_id=task_id,
+                disposition=disposition,
+                reason=reason,
+                interrupt_kind=interrupt_kind,
+                message_id=message_id,
+            )
+        )
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
     def complete_execution_task(
         owner_agent: str,
         task_id: str,
@@ -541,6 +623,57 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
     def next_pending_bridge_action(owner_agent: str) -> dict:
         """Return the highest-priority actionable ledger item for one agent."""
         return as_dict(bridge.next_pending_bridge_action(owner_agent=owner_agent))
+
+    @mcp.tool()
+    def record_reviewer_wait(
+        owner_agent: str,
+        reviewer_id: str,
+        request_id: Optional[str] = None,
+        owner_session_id: Optional[str] = None,
+        subject: Optional[str] = None,
+        eta_minutes: Optional[int] = None,
+        note: Optional[str] = None,
+    ) -> dict:
+        """Record that a background reviewer is pending and optionally schedule an ETA/checkback."""
+        return as_dict(
+            bridge.record_reviewer_wait(
+                owner_agent=owner_agent,
+                reviewer_id=reviewer_id,
+                request_id=request_id,
+                owner_session_id=owner_session_id,
+                subject=subject,
+                eta_minutes=eta_minutes,
+                note=note,
+            )
+        )
+
+    @mcp.tool()
+    def update_reviewer_wait(
+        wait_id: str,
+        event_type: str,
+        owner_agent: str = "codex",
+        reviewer_id: Optional[str] = None,
+        eta_minutes: Optional[int] = None,
+        result: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> dict:
+        """Update reviewer wait state with ETA/checkback/verdict/parked/blocked status."""
+        return as_dict(
+            bridge.update_reviewer_wait(
+                wait_id=wait_id,
+                event_type=event_type,
+                owner_agent=owner_agent,
+                reviewer_id=reviewer_id,
+                eta_minutes=eta_minutes,
+                result=result,
+                note=note,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def reviewer_wait_status(owner_agent: str = "codex", include_all: bool = False) -> dict:
+        """Return reviewer wait debt and scheduled checkbacks for one owner."""
+        return as_dict(bridge.reviewer_wait_status(owner_agent=owner_agent, include_all=include_all))
 
     @mcp.tool(annotations=READ_ONLY)
     def bridge_status(session_id: Optional[str] = None) -> dict:
@@ -572,9 +705,206 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         )
 
     @mcp.tool(annotations=READ_ONLY)
+    def dashboard_overview(agent: str, project: Optional[str] = None, format: str = "json") -> dict:
+        """Return the local admin dashboard overview as JSON or escaped markdown."""
+        return as_dict(bridge.dashboard_overview(agent=agent, project=project, format=format))
+
+    @mcp.tool(annotations=READ_ONLY)
+    def list_pairings(agent: str, project: Optional[str] = None) -> dict:
+        """List dashboard-visible primary pairings."""
+        return as_dict(bridge.list_pairings(agent=agent, project=project))
+
+    @mcp.tool(annotations=READ_ONLY)
+    def pairing_details(agent: str, project: Optional[str] = None, session_id: Optional[str] = None) -> dict:
+        """Return guided pairing details and available actions for one session."""
+        return as_dict(bridge.pairing_details(agent=agent, project=project, session_id=session_id))
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def start_guided_pairing(
+        agent: str,
+        project: Optional[str] = None,
+        session_id: Optional[str] = None,
+        desired_role: str = "active_primary",
+        source: str = "dashboard",
+    ) -> dict:
+        """Start a guided pairing flow without mutating active sessions."""
+        return as_dict(
+            bridge.start_guided_pairing(
+                agent=agent,
+                project=project,
+                session_id=session_id,
+                desired_role=desired_role,
+                source=source,
+            )
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def confirm_guided_pairing(
+        agent: str,
+        project: Optional[str] = None,
+        session_id: Optional[str] = None,
+        decision: str = "active_primary",
+        source: str = "dashboard",
+        confirm: bool = False,
+    ) -> dict:
+        """Confirm a guided pairing decision after user-visible review."""
+        return as_dict(
+            bridge.confirm_guided_pairing(
+                agent=agent,
+                project=project,
+                session_id=session_id,
+                decision=decision,
+                source=source,
+                confirm=confirm,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def list_contracts(agent: str, project: Optional[str] = None, include_inactive: bool = True) -> dict:
+        """List dashboard-visible knowledge/cross-project contracts."""
+        return as_dict(bridge.list_contracts(agent=agent, project=project, include_inactive=include_inactive))
+
+    @mcp.tool(annotations=READ_ONLY)
+    def list_policy_dashboard(agent: str, project: Optional[str] = None) -> dict:
+        """Return runtime policy facts used by the dashboard."""
+        return as_dict(bridge.list_policy_dashboard(agent=agent, project=project))
+
+    @mcp.tool(annotations=READ_ONLY)
+    def validate_policy_dashboard(agent: str, project: Optional[str] = None) -> dict:
+        """Validate that the runtime policy dashboard can resolve protected docs."""
+        return as_dict(bridge.validate_policy_dashboard(agent=agent, project=project))
+
+    @mcp.tool(annotations=READ_ONLY)
+    def list_remote_authority_requests(
+        agent: str,
+        project: Optional[str] = None,
+        max_count: int = 100,
+    ) -> dict:
+        """List rejected remote-authority requests for local dashboard review."""
+        return as_dict(
+            bridge.list_remote_authority_requests(agent=agent, project=project, max_count=max_count)
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def audit_timeline(
+        agent: str,
+        action: Optional[str] = None,
+        project: Optional[str] = None,
+        max_count: int = 100,
+    ) -> dict:
+        """Return a tenant-filtered local audit timeline for dashboard display."""
+        return as_dict(
+            bridge.audit_timeline(agent=agent, action=action, project=project, max_count=max_count)
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def revoke_contract(
+        link_id: str,
+        project: str,
+        agent: str,
+        session_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        source: str = "dashboard",
+        confirm_revoke: bool = False,
+    ) -> dict:
+        """Revoke a contract through the shared dashboard/local-chat confirmation path."""
+        return as_dict(
+            bridge.revoke_contract(
+                link_id=link_id,
+                project=project,
+                agent=agent,
+                session_id=session_id,
+                reason=reason,
+                source=source,
+                confirm_revoke=confirm_revoke,
+            )
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def renew_contract(
+        link_id: str,
+        project: str,
+        agent: str,
+        ttl_minutes: int = 120,
+        session_id: Optional[str] = None,
+        source: str = "dashboard",
+        confirm_renew: bool = False,
+    ) -> dict:
+        """Renew a contract through the shared dashboard/local-chat confirmation path."""
+        return as_dict(
+            bridge.renew_contract(
+                link_id=link_id,
+                project=project,
+                agent=agent,
+                ttl_minutes=ttl_minutes,
+                session_id=session_id,
+                source=source,
+                confirm_renew=confirm_renew,
+            )
+        )
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def rename_local_alias(
+        link_id: str,
+        project: str,
+        agent: str,
+        alias: str,
+        source: str = "dashboard",
+    ) -> dict:
+        """Update a trusted local display alias for a contract."""
+        return as_dict(
+            bridge.rename_local_alias(
+                link_id=link_id,
+                project=project,
+                agent=agent,
+                alias=alias,
+                source=source,
+            )
+        )
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def classify_remote_authority_request(
+        from_agent: str,
+        text: str,
+        project: Optional[str] = None,
+        audit: bool = True,
+    ) -> dict:
+        """Classify a remote peer request before any privileged local action is considered."""
+        return as_dict(
+            bridge.classify_remote_authority_request(
+                from_agent=from_agent,
+                text=text,
+                project=project,
+                audit=audit,
+            )
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
     def wake_breaker_status(session_id: Optional[str] = None) -> dict:
         """Return persisted wake breaker state for one session or all sessions."""
         return as_dict(bridge.wake_breaker_status(session_id=session_id))
+
+    @mcp.tool(annotations=READ_ONLY)
+    def wake_fire_history(session_id: Optional[str] = None, limit: int = 20) -> dict:
+        """Return recent watcher wake-fire events, optionally filtered by session."""
+        return as_dict(bridge.wake_fire_history(session_id=session_id, limit=limit))
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def stale_unread_watchdog(
+        agent: Optional[str] = None,
+        stale_after_seconds: int = 300,
+        rearm: bool = False,
+        limit: int = 50,
+    ) -> dict:
+        """Find wake-delivered unread rows and optionally rearm their watcher ids."""
+        return as_dict(
+            bridge.stale_unread_watchdog(
+                agent=agent,
+                stale_after_seconds=stale_after_seconds,
+                rearm=rearm,
+                limit=limit,
+            )
+        )
 
     @mcp.tool(annotations=READ_ONLY)
     def project_identity(cwd: Optional[str] = None) -> dict:
@@ -595,6 +925,11 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
     def session_status(project: Optional[str] = None) -> dict:
         """Return active and historical session registry data for a project."""
         return as_dict(bridge.session_status(project=project))
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    def reap_expired_pending_pairs(project: Optional[str] = None, now: Optional[str] = None) -> dict:
+        """Fallback stale pending_pair sessions to background mode."""
+        return as_dict(bridge.reap_expired_pending_pairs(project=project, now=now))
 
     @mcp.tool(annotations=IDEMPOTENT_WRITE)
     def truedup_session_routing(agent: str, dry_run: bool = True, mode: str = "rekey") -> dict:

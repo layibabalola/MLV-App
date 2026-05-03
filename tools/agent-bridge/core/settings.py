@@ -17,7 +17,9 @@ class BridgeSettings:
     inbox_read_retention_days: int = 7
     toasts_enabled: bool = True
     codex_bridge_reminder_toasts_enabled: bool = False
+    toast_retention_mode: str = "latest_sticky"
     routing_rules_enabled: bool = True
+    heuristic_auto_mirror_enabled: bool = True
     default_pairing_intent: str = "ask_first"
     pending_pair_timeout_seconds: int = 120
     wake_provider: str = "targeted_sendkeys"
@@ -40,9 +42,10 @@ _BOUNDS = {
     "pending_pair_timeout_seconds": (10, 3600),
 }
 
-_BOOL_FIELDS = {"toasts_enabled", "codex_bridge_reminder_toasts_enabled", "routing_rules_enabled"}
+_BOOL_FIELDS = {"toasts_enabled", "codex_bridge_reminder_toasts_enabled", "routing_rules_enabled", "heuristic_auto_mirror_enabled"}
 _ENUM_FIELDS = {
     "default_pairing_intent": {"ask_first", "active_primary", "background"},
+    "toast_retention_mode": {"latest_sticky", "all_sticky", "all_expiring"},
     "wake_provider": {"disabled", "sendkeys", "targeted_sendkeys", "app_server", "app_server_then_redraw"},
 }
 _KNOWN_FIELDS = set(DEFAULT_SETTINGS.to_dict())

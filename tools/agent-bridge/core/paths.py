@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,34 @@ class BridgePaths:
     server_pids_dir: Path
     manifest: Path
     moved_to: Path
+
+
+def expand_path_arg(value: Optional[object], env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+    if value is None:
+        return None
+    text = str(value)
+    values = dict(os.environ) if env is None else dict(env)
+    expanded = text
+    if values:
+        expanded = re.sub(
+            r"%([^%]+)%",
+            lambda match: str(values.get(match.group(1), match.group(0))),
+            expanded,
+        )
+        expanded = re.sub(
+            r"\$\{([^}]+)\}",
+            lambda match: str(values.get(match.group(1), match.group(0))),
+            expanded,
+        )
+        expanded = re.sub(
+            r"\$([A-Za-z_][A-Za-z0-9_]*)",
+            lambda match: str(values.get(match.group(1), match.group(0))),
+            expanded,
+        )
+    else:
+        expanded = os.path.expandvars(expanded)
+    expanded = os.path.expanduser(expanded)
+    return Path(expanded)
 
 
 def default_bridge_root(env: Optional[Mapping[str, str]] = None) -> Path:
@@ -195,17 +224,17 @@ def resolve_bridge_paths(
 ) -> BridgePaths:
     values = env if env is not None else os.environ
     if bridge_root is not None:
-        root = Path(bridge_root)
+        root = expand_path_arg(bridge_root, values)
     elif values.get("AGENT_BRIDGE_ROOT"):
-        root = Path(str(values["AGENT_BRIDGE_ROOT"]))
+        root = expand_path_arg(values["AGENT_BRIDGE_ROOT"], values)
     elif state_dir is not None:
-        root = bridge_root_for_state_dir(Path(state_dir))
+        root = bridge_root_for_state_dir(expand_path_arg(state_dir, values))
     else:
         root = default_bridge_root(values)
 
     if state_dir is not None and bridge_root is not None:
         expected_state = state_dir_for_bridge_root(root)
-        if Path(state_dir) != expected_state:
+        if expand_path_arg(state_dir, values) != expected_state:
             raise ValueError("--state-dir must equal <bridge-root>\\state when --bridge-root is provided")
 
     moved = resolve_moved_root_chain(root)

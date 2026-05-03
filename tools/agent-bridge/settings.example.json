@@ -9,5 +9,10 @@
   "inbox_read_retention_days": 7,
   "toasts_enabled": true,
   "codex_bridge_reminder_toasts_enabled": false,
-  "routing_rules_enabled": true
+  "toast_retention_mode": "latest_sticky",
+  "routing_rules_enabled": true,
+  "heuristic_auto_mirror_enabled": true,
+  "default_pairing_intent": "ask_first",
+  "pending_pair_timeout_seconds": 120,
+  "wake_provider": "targeted_sendkeys"
 }

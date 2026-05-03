@@ -135,6 +135,11 @@ def build_private_entry(
         merged.pop("on_message_command_template", None)
     if command is not None or command_template is not None:
         merged.pop("wake_disabled_reason", None)
+    elif agent == "claude":
+        merged["wake_disabled_reason"] = (
+            "Claude wake remains Monitor-owned: no verified thread-addressable "
+            "Claude Desktop deeplink exists for safe SendKeys."
+        )
     return merged
 
 
@@ -168,6 +173,11 @@ def build_rendezvous_entry(
         merged.pop("on_message_command_template", None)
     if command is not None or command_template is not None:
         merged.pop("wake_disabled_reason", None)
+    elif agent == "claude":
+        merged["wake_disabled_reason"] = (
+            "Claude wake remains Monitor-owned: no verified thread-addressable "
+            "Claude Desktop deeplink exists for safe SendKeys."
+        )
     return merged
 
 
@@ -264,7 +274,10 @@ def configure_watcher(
             "-File", str(wake_script),
             "-IdleThresholdSeconds", str(settings.wake_idle_threshold_seconds),
             "-MaxWaitSeconds", str(settings.wake_max_wait_seconds),
+            "-StateDir", str(state_dir),
+            "-LockFile", str(state_dir.parent / "wake_codex.lock"),
             "-ThreadId", "{desktop_thread_id}",
+            "-ExpectedProjectToken", "{project}",
         ]
         if settings.wake_provider == "targeted_sendkeys":
             wake_command_template.extend(
@@ -278,6 +291,8 @@ def configure_watcher(
                     "-VerifyTargetGapMilliseconds", "50",
                     "-MaxPreSendRaceMilliseconds", "500",
                     "-PostTypingVerify",
+                    "-WarnOnTitleMismatch",
+                    "-ProtectForegroundCodexThread",
                 ]
             )
     elif agent == "codex" and settings.wake_provider in {"app_server", "app_server_then_redraw"}:

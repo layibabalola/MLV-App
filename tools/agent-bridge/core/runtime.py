@@ -1,5 +1,6 @@
 import os
 import sys
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,8 @@ from .paths import ROOT_MANIFEST_FILENAME, bridge_root_for_state_dir
 from .storage import read_json, write_json
 
 PEER_RUNTIME_SCHEMA_VERSION = 2
+MONITOR_RUNTIME_SCHEMA_VERSION = 1
+MONITOR_RUNTIME_MIN_TTL_S = 30
 
 
 def _manifest_identity(bridge_root: Path) -> Dict[str, Any]:
@@ -23,7 +26,7 @@ def _manifest_identity(bridge_root: Path) -> Dict[str, Any]:
         "manifest_exists": True,
         "root_id": manifest.get("root_id"),
         "active_root": manifest.get("active_root"),
-        "schema_version": manifest.get("schema_version"),
+        "manifest_schema_version": manifest.get("schema_version"),
     }
 
 
@@ -65,6 +68,66 @@ def read_runtime_breadcrumb(path: Path) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         return {"path": str(path), "error": str(exc), "unreadable": True}
     return data if isinstance(data, dict) else {"path": str(path), "error": "not a JSON object", "unreadable": True}
+
+
+def _file_hash(path: Path) -> Optional[str]:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def monitor_runtime_path_for_state_dir(state_dir: Path, agent: str, session_id: str) -> Path:
+    safe_session = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
+    return bridge_root_for_state_dir(Path(state_dir)) / f"monitor-{agent}-{safe_session}.runtime.json"
+
+
+def build_monitor_runtime_breadcrumb(
+    *,
+    state_dir: Path,
+    agent: str,
+    session_id: str,
+    project: str,
+    script_path: Path,
+    argv: Optional[List[str]] = None,
+    watched_buckets: Optional[List[str]] = None,
+    poll_interval_seconds: Optional[float] = None,
+    preexisting_target_unread: Optional[int] = None,
+    last_emit_at: Optional[str] = None,
+    context_generation: Optional[str] = None,
+    compacted_after_start: bool = False,
+    started_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    script = Path(script_path)
+    bridge_root = bridge_root_for_state_dir(Path(state_dir))
+    payload: Dict[str, Any] = {
+        "schema_version": MONITOR_RUNTIME_SCHEMA_VERSION,
+        "agent": agent,
+        "session_id": session_id,
+        "project": project,
+        "monitor_pid": os.getpid(),
+        "started_at": started_at or now,
+        "heartbeat_at": now,
+        "context_generation": context_generation,
+        "compacted_after_start": bool(compacted_after_start),
+        "script_path": str(script),
+        "script_name": script.name,
+        "argv": argv or sys.argv,
+        "watched_buckets": list(watched_buckets or []),
+        "helper_hash": _file_hash(script),
+        "poll_interval_seconds": poll_interval_seconds,
+        "preexisting_target_unread": preexisting_target_unread,
+        "last_emit_at": last_emit_at,
+        "bridge_root": str(bridge_root),
+        "state_dir": str(state_dir),
+    }
+    payload.update(_manifest_identity(bridge_root))
+    return payload
 
 
 def peer_runtime_path_for_state_dir(state_dir: Path, agent: str) -> Path:

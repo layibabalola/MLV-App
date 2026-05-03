@@ -267,19 +267,18 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
 
-    def test_wrapper_phase2_restarts_on_mtime_change(self) -> None:
+    def test_wrapper_phase2_marks_refresh_required_on_mtime_change(self) -> None:
         harness = self._start_harness()
 
         first_pid = harness.launch_pids()[0]
         harness.touch_watch_files([0])
-        launches = harness.wait_for_launch_count(2)
+        time.sleep(0.25)
 
-        self.assertNotEqual(first_pid, launches[-1])
-        restart_events = [event for event in harness.audit_events() if event.get("action") == "mcp_server_self_restarted"]
-        self.assertEqual(len(restart_events), 1)
-        self.assertEqual(restart_events[0]["old_child_pid"], first_pid)
-        self.assertEqual(restart_events[0]["new_child_pid"], launches[-1])
-        self.assertEqual(restart_events[0]["changed_files"], [str(harness.watch_files[0])])
+        self.assertEqual(harness.launch_pids(), [first_pid])
+        refresh_events = [event for event in harness.audit_events() if event.get("action") == "mcp_server_refresh_required"]
+        self.assertEqual(len(refresh_events), 1)
+        self.assertEqual(refresh_events[0]["child_pid"], first_pid)
+        self.assertEqual(refresh_events[0]["changed_files"], [str(harness.watch_files[0])])
 
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
@@ -287,19 +286,13 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
     def test_wrapper_phase2_debounces_burst(self) -> None:
         harness = self._start_harness(watch_count=3)
 
-        harness.touch_watch_files([0])
-        time.sleep(0.01)
-        harness.touch_watch_files([1])
-        time.sleep(0.01)
-        harness.touch_watch_files([2])
-        launches = harness.wait_for_launch_count(2)
+        harness.touch_watch_files([0, 1, 2])
         time.sleep(0.2)
 
-        self.assertEqual(len(harness.launch_pids()), 2)
-        restart_events = [event for event in harness.audit_events() if event.get("action") == "mcp_server_self_restarted"]
-        self.assertEqual(len(restart_events), 1)
-        self.assertEqual(sorted(restart_events[0]["changed_files"]), sorted(str(path) for path in harness.watch_files))
-        self.assertNotEqual(launches[0], launches[1])
+        self.assertEqual(len(harness.launch_pids()), 1)
+        refresh_events = [event for event in harness.audit_events() if event.get("action") == "mcp_server_refresh_required"]
+        self.assertEqual(len(refresh_events), 1)
+        self.assertEqual(sorted(refresh_events[0]["changed_files"]), sorted(str(path) for path in harness.watch_files))
 
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
@@ -320,31 +313,42 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness.touch_watch_files([0])
         time.sleep(0.25)
         self.assertEqual(len(harness.launch_pids()), 1)
+        self.assertEqual(
+            [event for event in harness.audit_events() if event.get("action") == "mcp_server_refresh_required"],
+            [],
+        )
 
         stop_writes.set()
         writer.join(timeout=1.0)
-        launches = harness.wait_for_launch_count(2)
-        self.assertEqual(len(launches), 2)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            refresh_events = [event for event in harness.audit_events() if event.get("action") == "mcp_server_refresh_required"]
+            if refresh_events:
+                break
+            time.sleep(0.02)
+        self.assertEqual(len(harness.launch_pids()), 1)
+        self.assertEqual(len(refresh_events), 1)
 
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
 
-    def test_wrapper_phase2_loop_protection_aborts_at_4th(self) -> None:
+    def test_wrapper_phase2_repeated_changes_do_not_abort_wrapper(self) -> None:
         harness = self._start_harness()
 
-        for expected_launches in (2, 3, 4):
+        for _ in range(4):
             harness.touch_watch_files([0])
-            harness.wait_for_launch_count(expected_launches)
+            time.sleep(0.15)
 
-        harness.touch_watch_files([0])
-        self.assertNotEqual(harness.wait_for_exit(), 0)
-        self.assertEqual(len(harness.launch_pids()), 4)
+        self.assertEqual(len(harness.launch_pids()), 1)
+        self.assertIsNone(harness.result.get("exit_code"))
 
-        restart_events = [event for event in harness.audit_events() if event.get("action") == "mcp_server_self_restarted"]
+        refresh_events = [event for event in harness.audit_events() if event.get("action") == "mcp_server_refresh_required"]
         aborted = [event for event in harness.audit_events() if event.get("action") == "mcp_server_self_restart_aborted_loop"]
-        self.assertEqual(len(restart_events), 3)
-        self.assertEqual(len(aborted), 1)
-        self.assertEqual(aborted[0]["attempted_restart_count"], 4)
+        self.assertGreaterEqual(len(refresh_events), 1)
+        self.assertEqual(len(aborted), 0)
+
+        harness.stdin_stream.close()
+        self.assertEqual(harness.wait_for_exit(), 0)
 
     def test_wrapper_phase2_does_not_restart_on_crash_without_code_change(self) -> None:
         harness = self._start_harness(mode="crash")
@@ -359,20 +363,24 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
     def test_wrapper_phase2_marks_tool_refresh_required_when_manifest_changes(self) -> None:
         harness = self._start_harness(tool_signature="sig-a")
 
-        harness.set_tool_signature("sig-b")
         harness.touch_watch_files([0])
-        harness.wait_for_launch_count(2)
-        time.sleep(0.1)
+        deadline = time.time() + 3.0
+        refresh_events = []
+        while time.time() < deadline:
+            refresh_events = [event for event in harness.audit_events() if event.get("action") == "mcp_tools_refresh_required"]
+            if refresh_events:
+                break
+            time.sleep(0.02)
 
-        refresh_events = [event for event in harness.audit_events() if event.get("action") == "mcp_tools_refresh_required"]
         self.assertEqual(len(refresh_events), 1)
         self.assertEqual(refresh_events[0]["previous_signature"], "sig-a")
-        self.assertEqual(refresh_events[0]["current_signature"], "sig-b")
+        self.assertEqual(refresh_events[0]["current_signature"], "sig-a")
+        self.assertEqual(refresh_events[0]["reason"], "bridge_code_changed_during_wrapper_session")
 
         status = json.loads((harness.state_dir / "tool-refresh-status.json").read_text(encoding="utf-8"))
         self.assertTrue(status["refresh_required"])
         self.assertEqual(status["previous_signature"], "sig-a")
-        self.assertEqual(status["current_signature"], "sig-b")
+        self.assertEqual(status["current_signature"], "sig-a")
 
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)

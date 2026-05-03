@@ -1,14 +1,22 @@
 param(
     [ValidateSet("on", "off", "status")]
     [string]$Action = "status",
+    [string]$BridgeRoot = "",
     [string]$FlagPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 if (-not $FlagPath) {
-    $userProfile = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath("UserProfile") }
-    $FlagPath = Join-Path $userProfile ".agent-bridge\bridge_watch_mode.flag"
+    if (-not $BridgeRoot) {
+        if ($env:AGENT_BRIDGE_ROOT) {
+            $BridgeRoot = [System.Environment]::ExpandEnvironmentVariables($env:AGENT_BRIDGE_ROOT)
+        } else {
+            $userProfile = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath("UserProfile") }
+            $BridgeRoot = Join-Path $userProfile ".agent-bridge"
+        }
+    }
+    $FlagPath = Join-Path $BridgeRoot "bridge_watch_mode.flag"
 }
 
 $flag = [System.IO.Path]::GetFullPath($FlagPath)

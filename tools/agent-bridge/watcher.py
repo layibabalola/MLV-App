@@ -30,15 +30,22 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from agent_bridge import AgentBridge
 from core.paths import session_registry_path_for_state_dir
-from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, release_lease
+from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, is_process_alive, release_lease
 from core.runtime import (
+    MONITOR_RUNTIME_MIN_TTL_S,
     build_runtime_breadcrumb,
+    monitor_runtime_path_for_state_dir,
     normalize_peer_runtime_breadcrumb,
     peer_runtime_path_for_state_dir,
     read_runtime_breadcrumb,
     write_runtime_breadcrumb,
 )
 from core.settings import BridgeSettings, load_settings, settings_path_for_state_dir
+from core.storage import append_jsonl as storage_append_jsonl
+from core.storage import read_json as storage_read_json
+from core.storage import read_jsonl as storage_read_jsonl
+from core.storage import update_json as storage_update_json
+from core.storage import write_json as storage_write_json
 
 # Compaction support (same directory -- import directly)
 try:
@@ -63,11 +70,9 @@ WAKE_BREAKER_THRESHOLD = 5
 WAKE_BREAKER_WINDOW_S = 5 * 60
 WAKE_BREAKER_IDLE_CLOSE_S = 15 * 60
 WAKE_BREAKER_SCHEMA_VERSION = 1
+CLAUDE_MONITOR_UNREAD_ESCALATION_S = 60
+WAKE_TELEMETRY_PREFIX = "AGENT_BRIDGE_WAKE_TELEMETRY "
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
-# Wake commands that use {desktop_thread_id} inject into a specific Codex chat thread.
-# If the breadcrumb is stale the thread ID may point to yesterday's chat, causing silent
-# wrong-thread injection. Fail loudly past this age so the caller falls back to toast.
-_BREADCRUMB_MAX_AGE_HOURS = 4
 ACTIVE_SESSION_ID_SOURCE = "active_session"
 _SESSION_REGISTRY_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -77,24 +82,7 @@ def utc_now() -> str:
 
 
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    quarantine: List[str] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    quarantine.append(line)
-    if quarantine:
-        qpath = path.with_suffix(".quarantine.jsonl")
-        with qpath.open("a", encoding="utf-8", newline="\n") as f:
-            for bad in quarantine:
-                f.write(bad + "\n")
-    return rows
+    return storage_read_jsonl(path)
 
 
 def unread_for_session(inbox_path: Path, session_id: str) -> List[Dict[str, Any]]:
@@ -188,33 +176,30 @@ def _resolve_session_config(session_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_seen(state_path: Path) -> Dict[str, Any]:
-    if not state_path.exists():
-        return {
+    data = storage_read_json(
+        state_path,
+        {
             "seen_ids": [],
             "toasted_ids": [],
             "pending_wake_verifications": [],
             "paused_wake_messages": [],
             "unknown_origin_warnings": [],
             "wake_fire_history": [],
-        }
-    with state_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+            "claude_monitor_escalations": [],
+        },
+    )
     data.setdefault("seen_ids", [])
     data.setdefault("toasted_ids", [])
     data.setdefault("pending_wake_verifications", [])
     data.setdefault("paused_wake_messages", [])
     data.setdefault("unknown_origin_warnings", [])
     data.setdefault("wake_fire_history", [])
+    data.setdefault("claude_monitor_escalations", [])
     return data
 
 
 def save_seen(state_path: Path, seen: Dict[str, Any]) -> None:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = state_path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as f:
-        json.dump(seen, f, indent=2, sort_keys=True)
-        f.write("\n")
-    tmp.replace(state_path)
+    storage_write_json(state_path, seen)
 
 
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
@@ -243,14 +228,168 @@ def _message_has_wake_receipt(inbox_path: Path, message_id: str) -> bool:
     return bool(row.get("seen_at") or row.get("read_at"))
 
 
+def _claude_monitor_runtime_status(state_dir: Path, session_id: str, project: str) -> Dict[str, Any]:
+    runtime_path = monitor_runtime_path_for_state_dir(state_dir, "claude", session_id)
+    data = read_runtime_breadcrumb(runtime_path)
+    result: Dict[str, Any] = {"status": "missing", "path": str(runtime_path), "fresh": False}
+    if not data:
+        return result
+    if data.get("unreadable"):
+        result.update({"status": "unreadable", "reason": data.get("error") or "runtime_unreadable"})
+        return result
+    mismatches: List[str] = []
+    if data.get("agent") != "claude":
+        mismatches.append("agent")
+    if data.get("session_id") != session_id:
+        mismatches.append("session_id")
+    if data.get("project") != project:
+        mismatches.append("project")
+    watched = {str(item) for item in data.get("watched_buckets") or [] if str(item)}
+    if session_id not in watched or project not in watched:
+        mismatches.append("watched_buckets")
+    pid = int(data.get("monitor_pid") or 0)
+    if pid and not is_process_alive(pid):
+        mismatches.append("monitor_pid")
+    heartbeat = _parse_dt(data.get("heartbeat_at"))
+    try:
+        ttl_seconds = max(MONITOR_RUNTIME_MIN_TTL_S, int(float(data.get("poll_interval_seconds") or 0) * 3))
+    except (TypeError, ValueError):
+        ttl_seconds = MONITOR_RUNTIME_MIN_TTL_S
+    age_seconds = None
+    if heartbeat:
+        age_seconds = max(0, int((datetime.now(timezone.utc) - heartbeat).total_seconds()))
+    else:
+        mismatches.append("heartbeat_at")
+    result.update({"age_seconds": age_seconds, "freshness_ttl_seconds": ttl_seconds})
+    if mismatches:
+        result.update({"status": "misbound", "reason": ",".join(mismatches), "mismatches": mismatches})
+        return result
+    if age_seconds is None or age_seconds > ttl_seconds:
+        result.update({"status": "stale", "reason": "heartbeat_expired"})
+        return result
+    result.update({"status": "current", "fresh": True})
+    return result
+
+
+def _escalate_claude_unread_without_monitor(
+    *,
+    state_path: Path,
+    inbox_path: Path,
+    session_id: str,
+    project: str,
+    toasts_enabled: bool,
+    toast_expiry_minutes: int,
+    toast_max_in_tray: int,
+    emit_user_visible: bool = True,
+) -> List[str]:
+    runtime = _claude_monitor_runtime_status(inbox_path.parent, session_id, project)
+    if runtime.get("fresh"):
+        return []
+    now_dt = datetime.now(timezone.utc)
+    unread = unread_for_session(inbox_path, session_id)
+    candidates: List[Dict[str, Any]] = []
+    for row in unread:
+        created = _parse_dt(str(row.get("created_at") or ""))
+        if not created:
+            continue
+        age_seconds = max(0, int((now_dt - created).total_seconds()))
+        if age_seconds >= CLAUDE_MONITOR_UNREAD_ESCALATION_S:
+            candidate = dict(row)
+            candidate["age_seconds"] = age_seconds
+            candidates.append(candidate)
+    if not candidates:
+        return []
+
+    def _merge(existing: Dict[str, Any]) -> Dict[str, Any]:
+        escalations = list(existing.get("claude_monitor_escalations") or [])
+        escalated_ids = {str(item.get("message_id") or "") for item in escalations if isinstance(item, dict)}
+        new_events: List[Dict[str, Any]] = []
+        for row in candidates:
+            message_id = str(row.get("id") or "")
+            if not message_id or message_id in escalated_ids:
+                continue
+            event = {
+                "message_id": message_id,
+                "agent": "claude",
+                "session_id": session_id,
+                "project": project,
+                "status": "CLAUDE_UNREAD_WITHOUT_MONITOR",
+                "runtime_status": runtime.get("status"),
+                "age_seconds": row.get("age_seconds"),
+                "escalated_at": utc_now(),
+            }
+            escalations.append(event)
+            new_events.append(event)
+        if not new_events:
+            return existing
+        updated = dict(existing)
+        updated["claude_monitor_escalations"] = escalations[-200:]
+        updated["_new_claude_monitor_escalations"] = new_events
+        return updated
+
+    updated = storage_update_json(
+        state_path,
+        {
+            "seen_ids": [],
+            "toasted_ids": [],
+            "pending_wake_verifications": [],
+            "paused_wake_messages": [],
+            "unknown_origin_warnings": [],
+            "wake_fire_history": [],
+            "claude_monitor_escalations": [],
+        },
+        _merge,
+    )
+    events = list(updated.get("_new_claude_monitor_escalations") or [])
+    if "_new_claude_monitor_escalations" in updated:
+        updated.pop("_new_claude_monitor_escalations", None)
+        storage_write_json(state_path, updated)
+    for event in events:
+        _append_wake_audit(
+            inbox_path,
+            {
+                "action": "claude_unread_without_monitor",
+                "agent": "claude",
+                "session_id": session_id,
+                "project": project,
+                "message_id": event.get("message_id"),
+                "status": event.get("status"),
+                "runtime_status": event.get("runtime_status"),
+                "age_seconds": event.get("age_seconds"),
+            },
+        )
+        if emit_user_visible:
+            print(
+                "[agent-bridge] %s -- Claude unread work id=%s has no fresh Monitor heartbeat for session=...%s"
+                % (utc_now(), event.get("message_id"), session_id[-8:]),
+                flush=True,
+            )
+    if events and toasts_enabled and emit_user_visible:
+        notify_windows_toast(
+            "claude",
+            session_id,
+            [
+                {
+                    "id": "claude-monitor-%s" % events[-1].get("message_id"),
+                    "body": "Claude has unread bridge work but no fresh Monitor heartbeat. Start bridge_monitor_poll.py.",
+                    "from": "agent-bridge",
+                }
+            ],
+            toast_expiry_minutes=toast_expiry_minutes,
+            toast_max_in_tray=toast_max_in_tray,
+            display_label="Claude Monitor stale",
+        )
+    if not emit_user_visible:
+        return []
+    return [str(event.get("message_id") or "") for event in events if event.get("message_id")]
+
+
 def _append_wake_audit(inbox_path: Path, event: Dict[str, Any]) -> None:
     audit_path = inbox_path.parent / "messages.jsonl"
     event.setdefault("id", str(uuid.uuid4()))
     event.setdefault("timestamp", utc_now())
     try:
-        with audit_path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event, sort_keys=True))
-            handle.write("\n")
+        storage_append_jsonl(audit_path, event)
     except OSError as exc:
         print(f"[agent-bridge] failed to write wake audit event: {exc}", flush=True)
 
@@ -265,13 +404,10 @@ def _wake_breaker_path(state_path: Path) -> Path:
 
 def _load_wake_breakers(state_path: Path) -> Dict[str, Any]:
     path = _wake_breaker_path(state_path)
-    if not path.exists():
-        return {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}, "updated_at": utc_now()}
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}, "updated_at": utc_now()}
+    data = storage_read_json(
+        path,
+        {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}, "updated_at": utc_now()},
+    )
     data.setdefault("schema_version", WAKE_BREAKER_SCHEMA_VERSION)
     data.setdefault("sessions", {})
     data.setdefault("updated_at", utc_now())
@@ -280,14 +416,9 @@ def _load_wake_breakers(state_path: Path) -> Dict[str, Any]:
 
 def _save_wake_breakers(state_path: Path, payload: Dict[str, Any]) -> None:
     path = _wake_breaker_path(state_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
     payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
     payload["updated_at"] = utc_now()
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    tmp.replace(path)
+    storage_write_json(path, payload)
 
 
 def _normalize_breaker_session(record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -520,6 +651,134 @@ def _record_wake_success(*, state_path: Path, session_id: str, inbox_path: Optio
     _save_wake_breakers(state_path, payload)
 
 
+def _truncate_ui_label(value: Any, limit: int = 240) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _runtime_session_display_label(
+    state_dir: Path,
+    agent: str,
+    session_id: str,
+    project: Optional[str] = None,
+) -> str:
+    tail = ("..." + session_id[-8:]) if session_id else ""
+    peer = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent))
+    if not isinstance(peer, dict) or peer.get("unreadable"):
+        return tail
+    if str(peer.get("agent") or "").strip().lower() not in {"", str(agent or "").strip().lower()}:
+        return tail
+    if str(peer.get("session_id") or "").strip() != str(session_id or "").strip():
+        return tail
+    project_text = str(project or "").strip()
+    if project_text and str(peer.get("project") or "").strip() != project_text:
+        return tail
+    if peer.get("desktop_thread_title_project_match") is False:
+        return tail
+    title = _truncate_ui_label(peer.get("desktop_thread_title"), 80)
+    if title and tail:
+        return f"{title} ({tail})"
+    return title or tail
+
+
+def _extract_wake_telemetry(stdout: Any) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for raw_line in str(stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith(WAKE_TELEMETRY_PREFIX):
+            continue
+        payload = line[len(WAKE_TELEMETRY_PREFIX):].strip()
+        if not payload:
+            continue
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            events.append(decoded)
+    return events
+
+
+def _cache_wake_telemetry(
+    *,
+    inbox_path: Path,
+    agent: str,
+    session_id: str,
+    message_id: str,
+    command_result: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    events = _extract_wake_telemetry(command_result.get("stdout"))
+    if not events:
+        return []
+
+    peer_path = peer_runtime_path_for_state_dir(inbox_path.parent, agent)
+    peer = read_runtime_breadcrumb(peer_path)
+    if not isinstance(peer, dict) or peer.get("unreadable"):
+        return events
+
+    peer_agent = str(peer.get("agent") or "").strip().lower()
+    if peer_agent and peer_agent != str(agent or "").strip().lower():
+        return events
+    if str(peer.get("session_id") or "").strip() != str(session_id or "").strip():
+        return events
+
+    changed = False
+    for event in events:
+        title = _truncate_ui_label(event.get("desktop_thread_title"))
+        title_project_match = event.get("title_project_match")
+        if title_project_match is False:
+            if title:
+                peer["last_mismatched_desktop_thread_title"] = title
+                peer["last_mismatched_desktop_thread_title_source"] = _truncate_ui_label(event.get("desktop_thread_title_source"), 80)
+                peer["last_mismatched_desktop_thread_title_observed_at"] = str(event.get("timestamp") or utc_now())
+            peer.pop("desktop_thread_title", None)
+            peer.pop("desktop_thread_title_source", None)
+            peer.pop("desktop_thread_title_observed_at", None)
+            peer.pop("desktop_window_title", None)
+            changed = True
+        elif title:
+            peer["desktop_thread_title"] = title
+            peer["desktop_thread_title_source"] = _truncate_ui_label(event.get("desktop_thread_title_source"), 80)
+            peer["desktop_thread_title_observed_at"] = str(event.get("timestamp") or utc_now())
+            window_title = _truncate_ui_label(event.get("desktop_window_title"))
+            if window_title:
+                peer["desktop_window_title"] = window_title
+            changed = True
+        if "title_project_match" in event:
+            peer["desktop_thread_title_project_match"] = title_project_match
+            changed = True
+        if "expected_project_token" in event:
+            peer["desktop_thread_title_expected_project_token"] = _truncate_ui_label(
+                event.get("expected_project_token"),
+                80,
+            )
+            changed = True
+        if str(event.get("action") or "").startswith("wake_postflight"):
+            peer["last_wake_postflight_action"] = str(event.get("action") or "")
+            peer["last_wake_postflight_reason"] = _truncate_ui_label(event.get("reason"), 120)
+            peer["last_wake_postflight_at"] = str(event.get("timestamp") or utc_now())
+            changed = True
+
+    if changed:
+        write_runtime_breadcrumb(peer_path, peer)
+        _append_wake_audit(
+            inbox_path,
+            {
+                "action": "wake_telemetry_cached",
+                "agent": agent,
+                "session_id": session_id,
+                "message_id": message_id,
+                "desktop_thread_title": None
+                if peer.get("desktop_thread_title_project_match") is False
+                else peer.get("desktop_thread_title"),
+                "postflight_action": peer.get("last_wake_postflight_action"),
+            },
+        )
+    return events
+
+
 def _rate_limit_fire_history(
     *,
     seen_ids: set,
@@ -611,17 +870,39 @@ def _save_watcher_state(
 ) -> None:
     if toasted_ids is None:
         toasted_ids = set(str(item) for item in load_seen(state_path).get("toasted_ids", []))
-    save_seen(
-        state_path,
-        {
-            "seen_ids": list(seen_ids)[-500:],
-            "toasted_ids": list(toasted_ids)[-500:],
+
+    def _merge(existing: Dict[str, Any]) -> Dict[str, Any]:
+        existing_seen = {str(item) for item in existing.get("seen_ids", []) if str(item)}
+        existing_toasted = {str(item) for item in existing.get("toasted_ids", []) if str(item)}
+        merged_seen = list(existing_seen.union(str(item) for item in seen_ids if str(item)))[-500:]
+        merged_toasted = list(existing_toasted.union(str(item) for item in toasted_ids if str(item)))[-500:]
+        merged = dict(existing)
+        merged.update({
+            "seen_ids": merged_seen,
+            "toasted_ids": merged_toasted,
             "pending_wake_verifications": pending[-200:],
             "paused_wake_messages": (paused_messages or [])[-200:],
             "unknown_origin_warnings": (unknown_origin_warnings or [])[-200:],
             "wake_fire_history": (wake_fire_history or [])[-200:],
+            "claude_monitor_escalations": (existing.get("claude_monitor_escalations") or [])[-200:],
+        })
+        return merged
+
+    saved = storage_update_json(
+        state_path,
+        {
+            "seen_ids": [],
+            "toasted_ids": [],
+            "pending_wake_verifications": [],
+            "paused_wake_messages": [],
+            "unknown_origin_warnings": [],
+            "wake_fire_history": [],
+            "claude_monitor_escalations": [],
         },
+        _merge,
     )
+    seen_ids.clear()
+    seen_ids.update(str(item) for item in saved.get("seen_ids", []) if str(item))
 
 
 def _bridge_is_paused(state_dir: Path) -> bool:
@@ -660,12 +941,13 @@ def run_compaction(state_dir: Path, settings: BridgeSettings) -> None:
         print(f"[agent-bridge] compaction error: {exc}", flush=True)
 
 
-def notify_terminal(agent: str, session_id: str, messages: List[Dict[str, Any]]) -> None:
+def notify_terminal(agent: str, session_id: str, messages: List[Dict[str, Any]], display_label: Optional[str] = None) -> None:
     count = len(messages)
     summary = messages[0].get("body", "")[:80].replace("\n", " ")
+    label = display_label or (("..." + session_id[-8:]) if session_id else "")
     print(
         f"[agent-bridge] {utc_now()} -- {count} unread for {agent} "
-        f"(session ...{session_id[-8:]}): {summary!r}",
+        f"(session {label}): {summary!r}",
         flush=True,
     )
 
@@ -700,6 +982,7 @@ def notify_windows_toast(
     *,
     toast_expiry_minutes: int = 5,
     toast_max_in_tray: int = 10,
+    display_label: Optional[str] = None,
 ) -> None:
     """Surface a modern Windows 10/11 toast notification via WinRT.
 
@@ -712,7 +995,7 @@ def notify_windows_toast(
     notification policy, PowerShell unavailable).
     """
     if sys.platform != "win32":
-        notify_terminal(agent, session_id, messages)
+        notify_terminal(agent, session_id, messages, display_label=display_label)
         return
 
     import base64
@@ -755,6 +1038,8 @@ def notify_windows_toast(
 
     # Footer: action hint + session fingerprint
     session_tail = ("…" + session_id[-8:]) if session_id else ""
+    if display_label:
+        session_tail = display_label
     if action and action not in {"none", ""}:
         line2 = f"⚡ {action}  ·  agent-bridge {session_tail}"
     else:
@@ -815,13 +1100,16 @@ def notify_windows_toast(
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except OSError:
-        _notify_windows_balloon(agent, session_id, messages)
+        _notify_windows_balloon(agent, session_id, messages, display_label=display_label)
 
 
-def _notify_windows_balloon(agent: str, session_id: str, messages: List[Dict[str, Any]]) -> None:
+def _notify_windows_balloon(agent: str, session_id: str, messages: List[Dict[str, Any]], display_label: Optional[str] = None) -> None:
     """Legacy NotifyIcon balloon fallback (Windows 7+ compatible)."""
+    import base64
+
     body = messages[0].get("body", "")[:120].replace("\n", " ").replace("\r", " ")
-    title = f"agent-bridge: new message for {agent}"
+    label = display_label or (("..." + session_id[-8:]) if session_id else "")
+    title = f"agent-bridge: new message for {agent} {label}".strip()
     safe_title = title.replace("'", "''")
     safe_body = body.replace("'", "''")
     ps_script = (
@@ -836,14 +1124,15 @@ def _notify_windows_balloon(agent: str, session_id: str, messages: List[Dict[str
         "$b.Dispose()"
     )
     try:
+        ps_b64 = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
         subprocess.Popen(
-            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", ps_b64],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except OSError:
-        notify_terminal(agent, session_id, messages)
+        notify_terminal(agent, session_id, messages, display_label=display_label)
 
 
 def _permanent_wake_event(
@@ -859,8 +1148,6 @@ def _permanent_wake_event(
     event_reason = reason or "permanent_wake_failure"
     if reason == "no_peer_breadcrumb":
         action = "wake_skipped_no_peer"
-    elif reason == "stale_breadcrumb":
-        action = "wake_skipped_stale_breadcrumb"
     elif reason == "config_error":
         action = "wake_skipped_config_error"
     elif returncode == 3:
@@ -1069,36 +1356,6 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
             },
         }
 
-    # Staleness gate: if the breadcrumb is too old AND the wake command uses
-    # {desktop_thread_id}, the thread ID may point to a stale chat, causing
-    # silent wrong-thread injection. Fail loudly so caller falls back to toast.
-    template_str = "\n".join(str(t) for t in template) if isinstance(template, list) else str(template)
-    if "{desktop_thread_id}" in template_str:
-        written_at_str = str(peer.get("written_at") or "").strip()
-        if written_at_str:
-            try:
-                written_at = datetime.fromisoformat(written_at_str.replace("Z", "+00:00"))
-                age_hours = (datetime.now(timezone.utc) - written_at).total_seconds() / 3600
-                if age_hours > _BREADCRUMB_MAX_AGE_HOURS:
-                    return {
-                        "ok": False,
-                        "command": None,
-                        "result": {
-                            "ok": False,
-                            "returncode": 2,
-                            "retryable": False,
-                            "stdout": "",
-                            "stderr": (
-                                f"peer runtime breadcrumb is {age_hours:.1f}h old "
-                                f"(max {_BREADCRUMB_MAX_AGE_HOURS}h); skipping targeted wake "
-                                f"to avoid wrong-thread injection: {peer_path}"
-                            ),
-                            "reason": "stale_breadcrumb",
-                        },
-                    }
-            except (ValueError, TypeError):
-                pass
-
     deeplink_template = str(peer.get("deeplink_template") or "")
     deeplink_uri = deeplink_template.format(thread_id=desktop_thread_id) if deeplink_template else ""
     mapping = {
@@ -1273,6 +1530,7 @@ def _process_pending_wake_verifications(
     session_config = _resolve_session_config(session_config)
     agent = session_config["agent"]
     session_id = str(session_config.get("session_id") or "")
+    project = str(session_config.get("project") or "")
     if not session_id:
         return pending
     inbox_path = Path(session_config["inbox"])
@@ -1328,7 +1586,12 @@ def _process_pending_wake_verifications(
                 "reason": "seen_at_not_observed_after_wake_retries",
             }
             _append_wake_audit(inbox_path, event)
-            notify_terminal(agent, session_id, [_message_by_id(inbox_path, message_id) or {"id": message_id, "body": "wake delivery failed"}])
+            notify_terminal(
+                agent,
+                session_id,
+                [_message_by_id(inbox_path, message_id) or {"id": message_id, "body": "wake delivery failed"}],
+                display_label=_runtime_session_display_label(inbox_path.parent, agent, session_id, project),
+            )
             print(
                 f"[agent-bridge] wake delivery failed for {agent} id={message_id} after {retry_count} retries",
                 flush=True,
@@ -1405,6 +1668,13 @@ def _process_pending_wake_verifications(
             command_result = run_command_for_session(resolved["command"], agent, session_id, [row], inbox_path)
         else:
             command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
+        _cache_wake_telemetry(
+            inbox_path=inbox_path,
+            agent=agent,
+            session_id=session_id,
+            message_id=message_id,
+            command_result=command_result,
+        )
         if not command_result.get("ok") and not command_result.get("retryable", True):
             repair = _attempt_bad_provenance_repair(
                 inbox_path=inbox_path,
@@ -1426,13 +1696,17 @@ def _process_pending_wake_verifications(
             continue
         if command_result.get("ok"):
             _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
-            # Wake delivered — stop here. Retrying after a successful wake fires
-            # duplicate "check bridge inbox" injections with no benefit and bad UX.
-            # Only refire on actual failure (non-zero exit code).
-            seen_ids.add(message_id)
+            # Wake spawn is not delivery; keep the row pending until
+            # check_inbox/writeback stamps seen_at/read_at or retries exhaust.
+            retry_count += 1
+            entry["retry_count"] = retry_count
+            entry["sent_at"] = utc_now()
+            entry.pop("deferred_until", None)
+            entry["last_retry_ok"] = True
+            kept.append(entry)
             changed = True
             print(
-                f"[agent-bridge] wake delivered for {agent} id={message_id}; no refire",
+                f"[agent-bridge] wake delivered for {agent} id={message_id}; awaiting receipt",
                 flush=True,
             )
         else:
@@ -1585,6 +1859,7 @@ def process_session_once(
     session_config = _resolve_session_config(session_config)
     agent = session_config["agent"]
     session_id = str(session_config.get("session_id") or "")
+    project = str(session_config.get("project") or "")
     if not session_id:
         return []
     inbox_path = Path(session_config["inbox"])
@@ -1597,6 +1872,8 @@ def process_session_once(
         effective_on_message = "log"
 
     state = load_seen(state_path)
+    seen_ids.clear()
+    seen_ids.update(str(item) for item in state.get("seen_ids", []) if str(item))
     pending: List[Dict[str, Any]] = list(state.get("pending_wake_verifications", []))
     paused_messages: List[Dict[str, Any]] = list(state.get("paused_wake_messages", []))
     unknown_origin_warnings: List[str] = list(state.get("unknown_origin_warnings", []))
@@ -1639,6 +1916,31 @@ def process_session_once(
 
     command_configured = bool(on_message_command or on_message_command_template)
     unread = unread_for_session(inbox_path, session_id)
+    escalated_ids: set = set()
+    if agent == "claude":
+        escalated_ids = set(
+            _escalate_claude_unread_without_monitor(
+                state_path=state_path,
+                inbox_path=inbox_path,
+                session_id=session_id,
+                project=project,
+                toasts_enabled=toasts_enabled,
+                toast_expiry_minutes=toast_expiry_minutes,
+                toast_max_in_tray=toast_max_in_tray,
+                emit_user_visible=effective_on_message == "toast",
+            )
+        )
+        if escalated_ids:
+            seen_ids.update(escalated_ids)
+            _save_watcher_state(
+                state_path,
+                seen_ids,
+                pending,
+                paused_messages,
+                unknown_origin_warnings,
+                wake_fire_history,
+                toasted_ids,
+            )
     new_msgs = [
         m for m in unread
         if m.get("id") not in seen_ids and m.get("id") not in pending_ids and m.get("id") not in paused_ids
@@ -1677,6 +1979,7 @@ def process_session_once(
                 new_msgs = [recovery_message]
     if not new_msgs:
         return []
+    display_label = _runtime_session_display_label(inbox_path.parent, agent, session_id, project)
 
     if effective_on_message == "log":
         if bridge_paused and command_configured:
@@ -1694,13 +1997,13 @@ def process_session_once(
             )
             for m in new_msgs:
                 print(
-                    f"[agent-bridge] {utc_now()} -- wake suppressed while paused for {agent} id={m.get('id')} session=...{(session_id or '')[-8:]}",
+                    f"[agent-bridge] {utc_now()} -- wake suppressed while paused for {agent} id={m.get('id')} session={display_label}",
                     flush=True,
                 )
             return []
         for m in new_msgs:
             print(
-                f"[agent-bridge] {utc_now()} -- new {agent} message id={m.get('id')} session=...{(session_id or '')[-8:]}",
+                f"[agent-bridge] {utc_now()} -- new {agent} message id={m.get('id')} session={display_label}",
                 flush=True,
             )
         for m in new_msgs:
@@ -1717,6 +2020,7 @@ def process_session_once(
                 toast_msgs,
                 toast_expiry_minutes=toast_expiry_minutes,
                 toast_max_in_tray=toast_max_in_tray,
+                display_label=display_label,
             )
             for message in toast_msgs:
                 message_id = str(message.get("id", ""))
@@ -1732,7 +2036,7 @@ def process_session_once(
                 toasted_ids,
             )
     else:
-        notify_terminal(agent, session_id, new_msgs)
+        notify_terminal(agent, session_id, new_msgs, display_label=display_label)
 
     if bridge_paused and command_configured:
         _queue_paused_wake_messages(
@@ -1842,6 +2146,15 @@ def process_session_once(
             )
             command_result = run_command_for_session(resolved["command"], agent, session_id, new_msgs, inbox_path)
 
+    if command_configured:
+        _cache_wake_telemetry(
+            inbox_path=inbox_path,
+            agent=agent,
+            session_id=session_id,
+            message_id=str(new_msgs[0].get("id", "")) if new_msgs else "",
+            command_result=command_result,
+        )
+
     if command_configured and not command_result.get("ok") and not command_result.get("retryable", True):
         repair = _attempt_bad_provenance_repair(
             inbox_path=inbox_path,
@@ -1945,9 +2258,16 @@ def watch(
     for s in sessions:
         resolved = _resolve_session_config(s)
         session_id = str(resolved.get("session_id") or "")
+        project = str(resolved.get("project") or "")
         source = str(s.get("session_id_source") or "static")
+        display_label = _runtime_session_display_label(
+            state_dir or Path(s["inbox"]).parent,
+            str(s["agent"]),
+            session_id,
+            project,
+        )
         print(
-            f"  agent={s['agent']}  session=...{session_id[-8:]}  source={source}  inbox={s['inbox']}",
+            f"  agent={s['agent']}  session={display_label}  source={source}  inbox={s['inbox']}",
             flush=True,
         )
 

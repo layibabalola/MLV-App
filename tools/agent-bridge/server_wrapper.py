@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Dict, List, Optional, Sequence, Set
 
-from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, resolve_bridge_paths
+from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
 from core.storage import append_jsonl
 
@@ -81,6 +81,16 @@ def _binary_reader(stream: object) -> BinaryIO:
 
 def _binary_writer(stream: object) -> BinaryIO:
     return getattr(stream, "buffer", stream)
+
+
+def _read_available(stream: object, size: int) -> bytes:
+    fileno = getattr(stream, "fileno", None)
+    if callable(fileno):
+        try:
+            return os.read(fileno(), size)
+        except (OSError, ValueError):
+            pass
+    return stream.read(size)
 
 
 def _watch_bridge_code_files(base_dir: Path) -> List[Path]:
@@ -265,11 +275,18 @@ class ServerSupervisor:
             },
         )
 
-    def _mark_tool_refresh_required(self, *, previous_snapshot: dict, current_snapshot: dict, changed_files: List[str]) -> None:
+    def _mark_tool_refresh_required(
+        self,
+        *,
+        previous_snapshot: dict,
+        current_snapshot: dict,
+        changed_files: List[str],
+        reason: str = "tool_manifest_changed_during_wrapper_session",
+    ) -> None:
         payload = {
             "schema_version": TOOL_REFRESH_STATUS_SCHEMA_VERSION,
             "refresh_required": True,
-            "reason": "tool_manifest_changed_during_wrapper_session",
+            "reason": reason,
             "changed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "wrapper_pid": os.getpid(),
             "previous_signature": previous_snapshot.get("signature"),
@@ -281,6 +298,7 @@ class ServerSupervisor:
         self._write_json_file(self._tool_refresh_status_path, payload)
         self._append_audit_event(
             action="mcp_tools_refresh_required",
+            reason=payload["reason"],
             previous_signature=payload["previous_signature"],
             current_signature=payload["current_signature"],
             changed_files=changed_files,
@@ -291,7 +309,7 @@ class ServerSupervisor:
     def _pump_parent_stdin(self) -> None:
         try:
             while not self._stop_event.is_set():
-                chunk = self.stdin_stream.read(self.config.chunk_size)
+                chunk = _read_available(self.stdin_stream, self.config.chunk_size)
                 if not chunk:
                     with self._state_lock:
                         self._stdin_eof = True
@@ -322,7 +340,7 @@ class ServerSupervisor:
             if child.stdout is None:
                 return
             while not self._stop_event.is_set():
-                chunk = child.stdout.read(self.config.chunk_size)
+                chunk = _read_available(child.stdout, self.config.chunk_size)
                 if not chunk:
                     return
                 self._note_io()
@@ -370,7 +388,6 @@ class ServerSupervisor:
             self._last_change_time = None
             self._restart_in_progress = True
             child = self._child
-        previous_manifest = self._read_tool_manifest_snapshot()
 
         if child is None:
             with self._state_lock:
@@ -378,44 +395,15 @@ class ServerSupervisor:
             return False
 
         restart_at = self.now_fn()
-        if self._restart_limit_reached(restart_at, changed_files):
-            with self._state_lock:
-                self._restart_in_progress = False
-            self._shutdown_child()
-            self._stop_event.set()
-            return False
-
-        old_child_pid = child.pid
-        restart_started = self.now_fn()
-        self._terminate_child(child)
-        self._join_stdout_thread(old_child_pid)
-        try:
-            new_child = self._spawn_child()
-        except Exception as exc:
-            with self._state_lock:
-                self._restart_in_progress = False
-            self._report_error("agent-bridge server wrapper restart failed: %s" % exc)
-            self._stop_event.set()
-            return False
-        current_manifest = None
-        if previous_manifest is not None:
-            current_manifest = self._wait_for_tool_manifest_snapshot(
-                previous_mtime_ns=previous_manifest.get("mtime_ns")
-            )
-        if (
-            previous_manifest is not None
-            and current_manifest is not None
-            and previous_manifest.get("signature")
-            and current_manifest.get("signature")
-            and previous_manifest.get("signature") != current_manifest.get("signature")
-        ):
+        snapshot = self._read_tool_manifest_snapshot() or {}
+        if snapshot:
             self._mark_tool_refresh_required(
-                previous_snapshot=previous_manifest,
-                current_snapshot=current_manifest,
+                previous_snapshot=snapshot,
+                current_snapshot=snapshot,
                 changed_files=changed_files,
+                reason="bridge_code_changed_during_wrapper_session",
             )
 
-        elapsed_ms = int((self.now_fn() - restart_started) * 1000)
         with self._state_lock:
             cutoff = restart_at - self.config.restart_window_seconds
             self._restart_history = [stamp for stamp in self._restart_history if stamp >= cutoff]
@@ -423,11 +411,10 @@ class ServerSupervisor:
             self._restart_in_progress = False
 
         self._append_audit_event(
-            action="mcp_server_self_restarted",
-            old_child_pid=old_child_pid,
-            new_child_pid=new_child.pid,
+            action="mcp_server_refresh_required",
+            child_pid=child.pid,
             changed_files=changed_files,
-            elapsed_ms=elapsed_ms,
+            reason="bridge_code_changed_during_wrapper_session",
         )
         return True
 
@@ -535,8 +522,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
     try:
         paths = resolve_bridge_paths(
-            bridge_root=Path(args.bridge_root) if args.bridge_root else None,
-            state_dir=Path(args.state_dir) if args.state_dir else None,
+            bridge_root=expand_path_arg(args.bridge_root) if args.bridge_root else None,
+            state_dir=expand_path_arg(args.state_dir) if args.state_dir else None,
         )
         if args.bridge_root:
             ensure_bridge_root_manifest(paths, reason="mcp_server_wrapper")

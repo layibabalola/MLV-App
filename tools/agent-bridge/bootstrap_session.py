@@ -6,14 +6,23 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_bridge import AgentBridge
 from configure_watcher import PARENT_THREAD_ID_KEY, configure_watcher
-from core.paths import ensure_bridge_root_manifest, resolve_bridge_paths
+from core.paths import ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.processes import acquire_singleton_lease, build_lease, command_line_hash, is_process_alive, lease_status, read_lease, write_lease
-from core.runtime import build_peer_runtime_breadcrumb, peer_runtime_path_for_state_dir, write_runtime_breadcrumb
+from core.runtime import (
+    MONITOR_RUNTIME_MIN_TTL_S,
+    build_peer_runtime_breadcrumb,
+    monitor_runtime_path_for_state_dir,
+    peer_runtime_path_for_state_dir,
+    read_runtime_breadcrumb,
+    write_runtime_breadcrumb,
+)
+from core.settings import load_settings
 from project_identity import derive_project_identity
 
 SUBAGENT_ENV_MARKERS = {
@@ -33,6 +42,7 @@ WATCHER_RESTART_CODE_FILES = (
     "agent_bridge.py",
     "core/runtime.py",
 )
+PAIRING_INTENT_CHOICES = {"ask_first", "active_primary", "background"}
 
 
 def detect_bootstrap_origin(
@@ -429,6 +439,157 @@ def _desktop_thread_id_for_bootstrap(agent: str, watcher_config: Optional[Path])
     return _desktop_thread_id_from_env(agent)
 
 
+def _normalize_pairing_intent(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip().lower().replace("-", "_")
+    if not normalized:
+        return None
+    if normalized not in PAIRING_INTENT_CHOICES:
+        raise ValueError("pairing intent must be one of: %s" % ", ".join(sorted(PAIRING_INTENT_CHOICES)))
+    return normalized
+
+
+def _resolve_pairing_intent(state_dir: Path, explicit_intent: Optional[str]) -> Dict[str, Any]:
+    normalized_explicit = _normalize_pairing_intent(explicit_intent)
+    if normalized_explicit:
+        return {"intent": normalized_explicit, "source": "cli"}
+    settings = load_settings(state_dir)
+    return {
+        "intent": settings.default_pairing_intent,
+        "source": "settings.json" if (Path(state_dir).parent / "settings.json").exists() else "hardcoded_default",
+        "pending_pair_timeout_seconds": settings.pending_pair_timeout_seconds,
+    }
+
+
+def _active_same_agent_session(bridge: AgentBridge, *, agent: str, project: str) -> Optional[str]:
+    status = bridge.session_status(project)
+    if not status.ok:
+        return None
+    active = status.data.get("active") or {}
+    value = active.get(agent)
+    return str(value) if value else None
+
+
+def _pairing_prompt(*, agent: str, session_id: str, project: str, active_session: str, timeout_seconds: int) -> Dict[str, Any]:
+    return {
+        "status": "pending_pair",
+        "prompt": (
+            "Would you like this session to pair with the remote peer for project %s? "
+            "It will supersede the existing %s pairing %s. Reply Yes / Pair this thread to continue, "
+            "or No to keep this chat in background mode."
+        )
+        % (project, agent, active_session),
+        "yes_examples": ["yes", "pair this thread", "pair this chat", "pair with peer"],
+        "no_examples": ["no", "do not pair", "background chat", "incognito"],
+        "fallback_after_seconds": timeout_seconds,
+        "fallback_intent": "background",
+        "session_id": session_id,
+        "active_session_to_supersede": active_session,
+    }
+
+
+def _parse_runtime_dt(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _claude_monitor_runtime_status(*, state_dir: Path, session_id: str, project: str) -> Dict[str, Any]:
+    runtime_path = monitor_runtime_path_for_state_dir(state_dir, "claude", session_id)
+    data = read_runtime_breadcrumb(runtime_path)
+    base: Dict[str, Any] = {
+        "path": str(runtime_path),
+        "status": "missing",
+        "fresh": False,
+        "expected_buckets": [session_id, project],
+        "repair_required": True,
+    }
+    if not data:
+        return base
+    base["data"] = data
+    if data.get("unreadable"):
+        base.update({"status": "unreadable", "reason": data.get("error") or "runtime_unreadable"})
+        return base
+    mismatches: List[str] = []
+    if data.get("agent") != "claude":
+        mismatches.append("agent")
+    if data.get("session_id") != session_id:
+        mismatches.append("session_id")
+    if data.get("project") != project:
+        mismatches.append("project")
+    watched = {str(item) for item in data.get("watched_buckets") or [] if str(item)}
+    if session_id not in watched or project not in watched:
+        mismatches.append("watched_buckets")
+    if str(data.get("script_name") or Path(str(data.get("script_path") or "")).name) != "bridge_monitor_poll.py":
+        mismatches.append("script_path")
+    pid = int(data.get("monitor_pid") or 0)
+    if pid and not is_process_alive(pid):
+        mismatches.append("monitor_pid")
+    heartbeat = _parse_runtime_dt(data.get("heartbeat_at"))
+    poll_interval = data.get("poll_interval_seconds")
+    try:
+        ttl_seconds = max(MONITOR_RUNTIME_MIN_TTL_S, int(float(poll_interval or 0) * 3))
+    except (TypeError, ValueError):
+        ttl_seconds = MONITOR_RUNTIME_MIN_TTL_S
+    age_seconds = None
+    if heartbeat:
+        age_seconds = max(0, int((datetime.now(timezone.utc) - heartbeat).total_seconds()))
+    else:
+        mismatches.append("heartbeat_at")
+    base["age_seconds"] = age_seconds
+    base["freshness_ttl_seconds"] = ttl_seconds
+    if mismatches:
+        base.update({"status": "misbound", "reason": ",".join(mismatches), "mismatches": mismatches})
+        return base
+    if age_seconds is None or age_seconds > ttl_seconds:
+        base.update({"status": "stale", "reason": "heartbeat_expired"})
+        return base
+    base.update({"status": "current", "fresh": True, "repair_required": False})
+    return base
+
+
+def _claude_monitor_reminder(*, state_dir: Path, session_id: str, project: str) -> Dict[str, Any]:
+    inbox_path = state_dir / "inbox-claude.jsonl"
+    monitor_script = Path(__file__).resolve().parent / "bridge_monitor_poll.py"
+    command_hint = (
+        "Monitor(persistent=True, command=\"%s -u \\\"%s\\\" --state-dir \\\"%s\\\" "
+        "--agent claude --session-id %s --project %s --poll-interval-seconds 2\")"
+        % (sys.executable, monitor_script, state_dir, session_id, project)
+    )
+    runtime_status = _claude_monitor_runtime_status(state_dir=state_dir, session_id=session_id, project=project)
+    monitor_armed = runtime_status.get("status") == "current"
+    return {
+        "status": "required_until_thread_addressable_wake_exists",
+        "banner": (
+            "MONITOR ARMED - Claude bridge Monitor heartbeat is fresh."
+            if monitor_armed
+            else "MONITOR NOT YET ARMED - execute the Claude bridge Monitor now."
+        ),
+        "command_hint": command_hint,
+        "monitor_script": str(monitor_script),
+        "monitor_script_name": "bridge_monitor_poll.py",
+        "monitor_armed": monitor_armed,
+        "monitor_runtime": runtime_status,
+        "not_probe_server": True,
+        "wake_claude_status": "unsupported_fail_closed",
+        "wake_claude_reason": (
+            "Claude Desktop has no verified thread-addressable deeplink/target "
+            "contract in Agent Bridge; wake_claude.ps1 is diagnostic-only and "
+            "refuses SendKeys."
+        ),
+        "private_session_id": session_id,
+        "project_bucket": project,
+        "inbox": str(inbox_path),
+    }
+
+
 def _trusted_parent_thread_drift(
     bridge: AgentBridge,
     *,
@@ -475,6 +636,7 @@ def bootstrap(
     start_watcher: bool = True,
     restart_watcher_if_code_changed: bool = True,
     replace_trusted_parent: bool = False,
+    pairing_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     bridge = AgentBridge(state_dir)
     identity = derive_project_identity(cwd)
@@ -486,6 +648,8 @@ def bootstrap(
     bootstrap_thread_id = _thread_id_from_env(agent)
     bootstrap_parent_thread_id = _parent_thread_id_from_env(agent)
     retargeted_to_parent = False
+    resolved_pairing = _resolve_pairing_intent(state_dir, pairing_intent)
+    resolved_pairing.setdefault("pending_pair_timeout_seconds", load_settings(state_dir).pending_pair_timeout_seconds)
 
     bridge._audit(
         {
@@ -497,6 +661,20 @@ def bootstrap(
             "project": project_name,
             "origin": detected_bootstrap_origin,
             "signals": subagent_signals,
+            "accepted": True,
+        }
+    )
+    bridge._audit(
+        {
+            "id": str(uuid.uuid4()),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+            "action": "pairing_intent_resolved",
+            "agent": agent,
+            "session_id": new_session,
+            "project": project_name,
+            "pairing_intent": resolved_pairing["intent"],
+            "source": resolved_pairing["source"],
+            "pending_pair_timeout_seconds": resolved_pairing.get("pending_pair_timeout_seconds"),
             "accepted": True,
         }
     )
@@ -565,6 +743,7 @@ def bootstrap(
                     "session_id": new_session,
                     "project": project_name,
                     "accepted": False,
+                    "reason": "trusted_parent_thread_drift_requires_explicit_repair",
                     **drift,
                 }
             )
@@ -581,11 +760,96 @@ def bootstrap(
                 "refusal_reason": (
                     "codex bootstrap refused because it would replace trusted parent thread "
                     f"{drift['trusted_thread_id']} with {drift['incoming_thread_id']}; "
-                    "run from the trusted parent or use --replace-trusted-parent for an intentional repair"
+                    "run from the trusted parent, say 'pair this chat', or use --replace-trusted-parent "
+                    "for an intentional repair"
                 ),
                 "trusted_parent_drift": drift,
                 "exit_code": 3,
             }
+
+    active_same_agent = _active_same_agent_session(bridge, agent=agent, project=project_name)
+    resolved_intent = resolved_pairing["intent"]
+    should_gate_pairing = not previous_session_id and not replace_trusted_parent
+    if should_gate_pairing and active_same_agent and active_same_agent != new_session and resolved_intent in {"ask_first", "background"}:
+        consent_timeout = int(resolved_pairing.get("pending_pair_timeout_seconds") or 120)
+        registration = bridge.register_non_primary_session(
+            agent=agent,
+            session_id=new_session,
+            project=project_name,
+            pairing_intent=resolved_intent,
+            bootstrap_origin=bootstrap_origin,
+            consent_timeout_seconds=consent_timeout if resolved_intent == "ask_first" else None,
+            desktop_thread_id=desktop_thread_id,
+            bootstrap_thread_id=bootstrap_thread_id,
+            bootstrap_parent_thread_id=bootstrap_parent_thread_id,
+        )
+        prompt = (
+            _pairing_prompt(
+                agent=agent,
+                session_id=new_session,
+                project=project_name,
+                active_session=active_same_agent,
+                timeout_seconds=consent_timeout,
+            )
+            if resolved_intent == "ask_first"
+            else None
+        )
+        bridge._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+                "action": "pairing_intent_prompted" if prompt else "pairing_intent_backgrounded",
+                "agent": agent,
+                "session_id": new_session,
+                "project": project_name,
+                "pairing_intent": resolved_intent,
+                "active_session_preserved": active_same_agent,
+                "accepted": registration.ok,
+            }
+        )
+        return {
+            "identity": identity,
+            "project": project_name,
+            "agent": agent,
+            "session_id": new_session,
+            "peer_agent": peer_agent,
+            "previous_session_id": previous_session_id,
+            "drained_previous_messages": [],
+            "activation": {
+                "ok": registration.ok,
+                "status": registration.status,
+                "message": registration.message,
+                "data": registration.data,
+            },
+            "handshake": {
+                "ok": True,
+                "status": "skipped_non_primary",
+                "message": "HANDSHAKE skipped because this session did not become active_primary.",
+                "data": {},
+                "attempts": 0,
+            },
+            "watcher": None,
+            "watcher_process": {
+                "status": "not_started",
+                "reason": "non_primary_pairing_intent",
+            },
+            "watcher_restart_check": None,
+            "watcher_orphan_sweep": None,
+            "peer_runtime": None,
+            "bootstrap_origin": bootstrap_origin,
+            "detected_bootstrap_origin": detected_bootstrap_origin,
+            "subagent_signals": subagent_signals,
+            "retargeted_to_parent": retargeted_to_parent,
+            "pairing_intent": resolved_pairing,
+            "pairing_prompt": prompt,
+            "pairing_hint": None
+            if prompt
+            else {
+                "status": "background",
+                "message": "This chat is running in background mode. Type 'Pair this thread' later to promote it.",
+            },
+            "claude_monitor_reminder": None,
+        }
 
     # activate_session auto-detects the previous same-agent session from the
     # registry, drains its unread messages BEFORE stamping superseded_at, and
@@ -598,6 +862,7 @@ def bootstrap(
         bootstrap_origin=bootstrap_origin,
         allow_supersede=bootstrap_origin != "unknown",
         trusted_parent_eligible=bootstrap_origin == "parent",
+        pairing_intent=resolved_pairing["intent"],
     )
     drained: List[Dict[str, Any]] = activation.data.get("drained_messages", []) if activation.ok else []
     peer_session = activation.data.get("active_peer_session") if activation.ok else None
@@ -609,6 +874,23 @@ def bootstrap(
         msg_id = msg.get("id")
         if msg_id:
             bridge.mark_read(agent=agent, message_id=msg_id, session_id=None)
+
+    active_session_unread_result = bridge.check_inbox(
+        agent=agent,
+        session_id=new_session,
+        include_parents=False,
+        mark_read=False,
+        record_seen=True,
+    )
+    active_session_unread = {
+        "ok": active_session_unread_result.ok,
+        "status": active_session_unread_result.status,
+        "message": active_session_unread_result.message,
+        "count": int((active_session_unread_result.data or {}).get("count") or 0),
+        "messages": (active_session_unread_result.data or {}).get("messages", []),
+        "buckets": (active_session_unread_result.data or {}).get("buckets", []),
+        "mark_read_required": active_session_unread_result.status == "messages",
+    }
 
     peer_breadcrumb = build_peer_runtime_breadcrumb(
         state_dir=state_dir,
@@ -690,6 +972,11 @@ def bootstrap(
                 "reason": "start_watcher_false",
             }
 
+    claude_monitor_reminder = (
+        _claude_monitor_reminder(state_dir=state_dir, session_id=new_session, project=project_name)
+        if agent == "claude"
+        else None
+    )
     return {
         "identity": identity,
         "project": project_name,
@@ -699,6 +986,7 @@ def bootstrap(
         "peer_session_hint": peer_session,
         "previous_session_id": previous_session_id,
         "drained_previous_messages": drained,
+        "active_session_unread": active_session_unread,
         "activation": {
             "ok": activation.ok,
             "status": activation.status,
@@ -723,6 +1011,8 @@ def bootstrap(
         "detected_bootstrap_origin": detected_bootstrap_origin,
         "subagent_signals": subagent_signals,
         "retargeted_to_parent": retargeted_to_parent,
+        "pairing_intent": resolved_pairing,
+        "claude_monitor_reminder": claude_monitor_reminder,
     }
 
 
@@ -735,6 +1025,10 @@ def main() -> None:
     parser.add_argument("--previous-session-id", help="Old same-agent session GUID to drain before takeover")
     parser.add_argument("--session-id", help="Optional new session GUID; default generates one")
     parser.add_argument("--project", help="Optional explicit rendezvous/project name")
+    parser.add_argument(
+        "--pairing-intent",
+        help="How this parent chat should enter the bridge: ask_first, active_primary, or background",
+    )
     parser.add_argument("--handshake-retries", type=int, default=3)
     parser.add_argument("--watcher-config", help="Optional watcher-config.json to update for this active session")
     parser.add_argument(
@@ -763,8 +1057,8 @@ def main() -> None:
     parser.set_defaults(restart_watcher_if_code_changed=True)
     args = parser.parse_args()
     paths = resolve_bridge_paths(
-        bridge_root=Path(args.bridge_root) if args.bridge_root else None,
-        state_dir=Path(args.state_dir) if args.state_dir else None,
+        bridge_root=expand_path_arg(args.bridge_root) if args.bridge_root else None,
+        state_dir=expand_path_arg(args.state_dir) if args.state_dir else None,
     )
     if args.bridge_root:
         ensure_bridge_root_manifest(paths, reason="bootstrap")
@@ -777,11 +1071,16 @@ def main() -> None:
         session_id=args.session_id,
         project=args.project,
         handshake_retries=args.handshake_retries,
-        watcher_config=Path(args.watcher_config) if args.watcher_config else (paths.watcher_config if args.bridge_root else None),
+        watcher_config=expand_path_arg(args.watcher_config) if args.watcher_config else (paths.watcher_config if args.bridge_root else None),
         start_watcher=not args.no_start_watcher,
         restart_watcher_if_code_changed=args.restart_watcher_if_code_changed,
         replace_trusted_parent=args.replace_trusted_parent,
+        pairing_intent=args.pairing_intent,
     )
+    reminder = result.get("claude_monitor_reminder") if result.get("agent") == "claude" and not result.get("refused") else None
+    if isinstance(reminder, dict):
+        print(reminder.get("banner", "MONITOR NOT YET ARMED"), file=sys.stderr)
+        print(reminder.get("command_hint", ""), file=sys.stderr)
     print(json.dumps(result, indent=2, sort_keys=True))
     if result.get("refused"):
         sys.exit(int(result.get("exit_code") or 3))

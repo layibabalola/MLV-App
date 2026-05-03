@@ -13,6 +13,9 @@
 #     "check bridge inbox" will surface every unread message anyway).
 #   - Activates Codex regardless of current foreground (user reading Codex
 #     counts as idle from the OS's POV; the message still needs to be delivered).
+#   - If Codex itself is the foreground app on a different/unprovable thread,
+#     defers instead of switching the user's visible Codex thread without an
+#     exact restore path.
 #   - Clears the composer (Ctrl+A + Delete) before injection - any draft text
 #     the user left in the box will be wiped. This is a deliberate trade-off.
 #
@@ -34,11 +37,12 @@
 param(
     [string]$Message              = "check bridge inbox",
     [string]$ThreadId             = "",
+    [string]$ExpectedProjectToken = "",
     [int]   $IdleThresholdSeconds = 5,
     [int]   $MaxWaitSeconds       = 60,
     [int]   $TotalRuntimeTimeoutSeconds = 90,
-    [string]$LockFile             = "$env:USERPROFILE\.agent-bridge\wake_codex.lock",
-    [string]$StateDir             = "$env:USERPROFILE\.agent-bridge\state",
+    [string]$LockFile             = "",
+    [string]$StateDir             = "",
     [string]$MessageId            = "",
     [ValidateSet("urgent", "normal", "low")]
     [string]$Priority             = "normal",
@@ -63,6 +67,11 @@ param(
     [int]   $VerifyTargetGapMilliseconds = 50,
     [int]   $MaxPreSendRaceMilliseconds = 0,
     [switch]$PostTypingVerify,
+    [switch]$WarnOnTitleMismatch,
+    [switch]$RequireTitleMatch,
+    [string]$ExpectedThreadTitle = "",
+    [string]$RestoreThreadId = "",
+    [switch]$ProtectForegroundCodexThread,
     [switch]$AllowLegacyNoPreflight,
     [switch]$SkipPreflight,
     [switch]$DryRun,
@@ -70,10 +79,26 @@ param(
     [switch]$PrintInnerCommand,
     [switch]$TestInputSize,
     [string]$ProcessName          = "Codex",
-    [switch]$RunInnerWake
+    [switch]$RunInnerWake,
+    # Developer flag: include raw composer text in preflight audit records.
+    # Off by default — enables diagnosis of false-positive draft-preserve classifications.
+    [switch]$AuditDraftText
 )
 
 $ErrorActionPreference = "Stop"
+
+$defaultUserProfile = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath("UserProfile") }
+$defaultBridgeRoot = if ($env:AGENT_BRIDGE_ROOT) {
+    [System.Environment]::ExpandEnvironmentVariables($env:AGENT_BRIDGE_ROOT)
+} else {
+    Join-Path $defaultUserProfile ".agent-bridge"
+}
+if (-not $StateDir) {
+    $StateDir = Join-Path $defaultBridgeRoot "state"
+}
+if (-not $LockFile) {
+    $LockFile = Join-Path ([System.IO.Path]::GetFullPath((Split-Path -Parent $StateDir))) "wake_codex.lock"
+}
 
 $script:WakeStart = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -102,6 +127,7 @@ public class Win32Wake {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
@@ -118,6 +144,12 @@ public class Win32Wake {
     public const uint INPUT_KEYBOARD = 1;
     public const ushort VK_MENU = 0x12;
     public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const uint WM_PASTE     = 0x0302;
+    public const uint WM_KEYDOWN   = 0x0100;
+    public const uint WM_KEYUP_MSG = 0x0101;
+    public const ushort VK_CONTROL = 0x11;
+    public const ushort VK_RETURN  = 0x0D;
+    public const ushort VK_DELETE  = 0x2E;
     [StructLayout(LayoutKind.Sequential)]
     public struct INPUT {
         public uint type;
@@ -180,6 +212,7 @@ function New-InnerWakeCommand {
         "-RunInnerWake",
         "-Message " + (ConvertTo-PowerShellSingleQuotedLiteral $Message),
         "-ThreadId " + (ConvertTo-PowerShellSingleQuotedLiteral $ThreadId),
+        "-ExpectedProjectToken " + (ConvertTo-PowerShellSingleQuotedLiteral $ExpectedProjectToken),
         "-IdleThresholdSeconds " + [string]$IdleThresholdSeconds,
         "-MaxWaitSeconds " + [string]$MaxWaitSeconds,
         "-TotalRuntimeTimeoutSeconds " + [string]$TotalRuntimeTimeoutSeconds,
@@ -201,6 +234,15 @@ function New-InnerWakeCommand {
     if ($RequireThreadId) {
         $innerCommandParts += "-RequireThreadId"
     }
+    if ($ExpectedThreadTitle) {
+        $innerCommandParts += "-ExpectedThreadTitle " + (ConvertTo-PowerShellSingleQuotedLiteral $ExpectedThreadTitle)
+    }
+    if ($RestoreThreadId) {
+        $innerCommandParts += "-RestoreThreadId " + (ConvertTo-PowerShellSingleQuotedLiteral $RestoreThreadId)
+    }
+    if ($ProtectForegroundCodexThread) {
+        $innerCommandParts += "-ProtectForegroundCodexThread"
+    }
     if ($RequireConstantMessage) {
         $innerCommandParts += "-RequireConstantMessage"
     }
@@ -213,8 +255,17 @@ function New-InnerWakeCommand {
     if ($PostTypingVerify) {
         $innerCommandParts += "-PostTypingVerify"
     }
+    if ($WarnOnTitleMismatch) {
+        $innerCommandParts += "-WarnOnTitleMismatch"
+    }
+    if ($RequireTitleMatch) {
+        $innerCommandParts += "-RequireTitleMatch"
+    }
     if ($DryRun) {
         $innerCommandParts += "-DryRun"
+    }
+    if ($AuditDraftText) {
+        $innerCommandParts += "-AuditDraftText"
     }
     if ($AllowLegacyNoPreflight) {
         $innerCommandParts += "-AllowLegacyNoPreflight"
@@ -355,10 +406,73 @@ function Send-AltTap {
     }
 }
 
+function New-KeyLParam {
+    # Build the lParam value for WM_KEYDOWN / WM_KEYUP_MSG PostMessage calls.
+    # Bits: [0-15] repeat=1, [16-23] scan code, [30] prevState, [31] transition.
+    param([byte]$ScanCode, [switch]$KeyUp)
+    $v = [long]1
+    $v = $v -bor ([long]$ScanCode -shl 16)
+    if ($KeyUp) {
+        $v = $v -bor [long]0x40000000  # previous state = down
+        $v = $v -bor [long]0x80000000  # transition = release
+    }
+    return [IntPtr]$v
+}
+
+function Send-BridgeMessageViaPostMessage {
+    # Delivers $Value + Ctrl+Enter directly into the Chromium render widget via
+    # PostMessage, bypassing the Windows foreground-window requirement entirely.
+    # Called when UIA SetFocus gives element-level keyboard focus but Claude Desktop
+    # holds the foreground lock and all Win32 SetForegroundWindow paths are blocked.
+    param($ComposerElement, [string]$Value)
+
+    $nativeHwnd = [IntPtr]::Zero
+    try { $nativeHwnd = [IntPtr]([uint32]$ComposerElement.Current.NativeWindowHandle) } catch {}
+    if ($nativeHwnd -eq [IntPtr]::Zero) {
+        Write-Host "[wake_codex] PostMessage path: NativeWindowHandle is zero; cannot deliver."
+        return $false
+    }
+    Write-Host ("[wake_codex] PostMessage path: targeting hwnd=" + $nativeHwnd)
+
+    try {
+        # Ctrl+A to select all existing composer text
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr]65, (New-KeyLParam -ScanCode 0x1E)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr]65, (New-KeyLParam -ScanCode 0x1E -KeyUp)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D -KeyUp)) | Out-Null
+        Start-Sleep -Milliseconds 30
+
+        # Delete selection
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53 -KeyUp)) | Out-Null
+        Start-Sleep -Milliseconds 30
+
+        # WM_PASTE: high-level semantic message that Chromium processes regardless of
+        # foreground window status; equivalent to Edit > Paste in the app menu.
+        [System.Windows.Forms.Clipboard]::SetText($Value)
+        Start-Sleep -Milliseconds 30
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_PASTE, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+        Start-Sleep -Milliseconds 100
+
+        # Ctrl+Enter to steer/submit
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_RETURN,  (New-KeyLParam -ScanCode 0x1C)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_RETURN,  (New-KeyLParam -ScanCode 0x1C -KeyUp)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D -KeyUp)) | Out-Null
+
+        Write-Host "[wake_codex] PostMessage path: sent clear+paste+Ctrl+Enter."
+        return $true
+    } catch {
+        Write-Host ("[wake_codex] PostMessage path exception: " + $_.Exception.Message)
+        return $false
+    }
+}
+
 # Codex Desktop placeholder strings that ProseMirror renders via CSS ::before
 # but UIA TextPattern.GetText() returns as real text. Treat these as empty.
 $script:CodexComposerPlaceholders = @(
     "Ask for follow-up changes",
+    "Ask for follow up changes or @ to tag an agent",
     "Message Codex...",
     "Ask Codex..."
 )
@@ -369,6 +483,23 @@ function Test-IsCodexPlaceholderText {
     foreach ($p in $script:CodexComposerPlaceholders) {
         if ($trimmed -eq $p) { return $true }
     }
+    return $false
+}
+
+# Primary placeholder detector: checks UIA child element class name rather than
+# matching text content. ProseMirror marks the empty-composer paragraph with
+# class="placeholder" (ClassName exposed by Chromium UIA). This is stable across
+# Codex Desktop releases regardless of what text the placeholder displays.
+# Falls back to $false on any UIA error so the string-list check still runs.
+function Test-IsPlaceholderByStructure {
+    param($Composer)
+    try {
+        $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+        $child = $walker.GetFirstChild($Composer)
+        if ($null -eq $child) { return $false }
+        $cn = try { [string]$child.Current.ClassName } catch { return $false }
+        if ($cn -eq 'placeholder') { return $true }
+    } catch {}
     return $false
 }
 
@@ -444,6 +575,210 @@ function Get-TextHash {
     }
 }
 
+function Write-WakeTelemetry {
+    param([hashtable]$Fields = @{})
+    try {
+        $event = [ordered]@{
+            schema_version = 1
+            source = "wake_codex.ps1"
+            timestamp = (Get-Date).ToUniversalTime().ToString("s") + "+00:00"
+            desktop_thread_id = $ThreadId
+        }
+        foreach ($key in $Fields.Keys) {
+            $event[$key] = $Fields[$key]
+        }
+        $json = $event | ConvertTo-Json -Compress -Depth 8
+        Write-Host ("AGENT_BRIDGE_WAKE_TELEMETRY " + $json)
+    } catch {
+        Write-Host ("[wake_codex] WARNING: telemetry write failed: " + $_.Exception.Message)
+    }
+}
+
+function Get-CodexThreadTitleSnapshot {
+    param(
+        [IntPtr]$RootHwnd,
+        [string]$WindowTitle = ""
+    )
+    $uiaName = ""
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($RootHwnd)
+        if ($null -ne $root) {
+            $uiaName = [string]$root.Current.Name
+        }
+    } catch {
+        Write-Host ("[wake_codex] WARNING: UIA thread title read failed: " + $_.Exception.Message)
+    }
+    $title = if (-not [string]::IsNullOrWhiteSpace($uiaName)) { $uiaName } else { [string]$WindowTitle }
+    $source = if (-not [string]::IsNullOrWhiteSpace($uiaName)) { "uia_root_name" } else { "win32_window_text" }
+    return @{
+        Title = $title
+        Source = $source
+        UiaName = $uiaName
+        WindowTitle = [string]$WindowTitle
+    }
+}
+
+function Get-ProcessNameForHwnd {
+    param([IntPtr]$Hwnd)
+    if ($Hwnd -eq [IntPtr]::Zero) {
+        return ""
+    }
+    $processId = 0
+    [Win32Wake]::GetWindowThreadProcessId($Hwnd, [ref]$processId) | Out-Null
+    if ($processId -le 0) {
+        return ""
+    }
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return ""
+    }
+    return [string]$process.ProcessName
+}
+
+function Test-ThreadTitleEquals {
+    param(
+        [string]$Actual,
+        [string]$Expected
+    )
+    if ([string]::IsNullOrWhiteSpace($Actual) -or [string]::IsNullOrWhiteSpace($Expected)) {
+        return $false
+    }
+    return $Actual.Trim().Equals($Expected.Trim(), [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-ExpectedThreadTitleFromRuntime {
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedThreadTitle)) {
+        return $ExpectedThreadTitle
+    }
+    if ([string]::IsNullOrWhiteSpace($StateDir) -or [string]::IsNullOrWhiteSpace($ThreadId)) {
+        return ""
+    }
+    try {
+        $bridgeRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $StateDir))
+        $runtimePath = Join-Path $bridgeRoot "peer-codex.runtime.json"
+        if (-not (Test-Path -LiteralPath $runtimePath)) {
+            return ""
+        }
+        $runtime = Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$runtime.desktop_thread_id -ne $ThreadId) {
+            return ""
+        }
+        if ($runtime.PSObject.Properties.Name -contains "desktop_thread_title_project_match" -and $runtime.desktop_thread_title_project_match -eq $false) {
+            return ""
+        }
+        return [string]$runtime.desktop_thread_title
+    } catch {
+        Write-Host ("[wake_codex] WARNING: expected thread title runtime read failed: " + $_.Exception.Message)
+        return ""
+    }
+}
+
+function Test-ForegroundCodexNavigationSafety {
+    param(
+        [IntPtr]$ForegroundHwnd,
+        [string]$ForegroundTitle
+    )
+    $result = @{
+        Ok = $true
+        SkipNavigation = $false
+        Reason = "not_foreground_codex"
+        PreviousThreadTitle = ""
+        ExpectedThreadTitle = ""
+    }
+    if (-not $ProtectForegroundCodexThread) {
+        return $result
+    }
+    if ([string]::IsNullOrWhiteSpace($ThreadId)) {
+        return $result
+    }
+    $foregroundProcessName = Get-ProcessNameForHwnd -Hwnd $ForegroundHwnd
+    if ($foregroundProcessName -ne $ProcessName) {
+        return $result
+    }
+
+    $snapshot = Get-CodexThreadTitleSnapshot -RootHwnd $ForegroundHwnd -WindowTitle $ForegroundTitle
+    $expectedTitle = Get-ExpectedThreadTitleFromRuntime
+    $result.PreviousThreadTitle = [string]$snapshot.Title
+    $result.ExpectedThreadTitle = [string]$expectedTitle
+
+    if (Test-ThreadTitleEquals -Actual ([string]$snapshot.Title) -Expected $expectedTitle) {
+        $result.Ok = $true
+        $result.SkipNavigation = $true
+        $result.Reason = "foreground_codex_already_target"
+        return $result
+    }
+
+    if (Test-CodexThreadId -Value $RestoreThreadId) {
+        $result.Ok = $true
+        $result.SkipNavigation = $false
+        $result.Reason = "restore_thread_id_available"
+        return $result
+    }
+
+    $result.Ok = $false
+    $result.SkipNavigation = $false
+    $result.Reason = if ([string]::IsNullOrWhiteSpace($expectedTitle)) {
+        "foreground_codex_restore_unproven_no_expected_title"
+    } else {
+        "foreground_codex_restore_unproven_title_mismatch"
+    }
+    return $result
+}
+
+function Test-TitleContainsProjectToken {
+    param(
+        [string]$Title,
+        [string]$Token
+    )
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($Title)) {
+        return $false
+    }
+    return $Title.IndexOf($Token, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+function Invoke-ThreadTitleProjectCertification {
+    param([hashtable]$Snapshot)
+    if ([string]::IsNullOrWhiteSpace($ExpectedProjectToken)) {
+        return
+    }
+    $title = [string]$Snapshot.Title
+    $matches = Test-TitleContainsProjectToken -Title $title -Token $ExpectedProjectToken
+    Write-WakeTelemetry -Fields @{
+        action = "thread_title_certified"
+        desktop_thread_title = $title
+        desktop_thread_title_source = [string]$Snapshot.Source
+        desktop_window_title = [string]$Snapshot.WindowTitle
+        expected_project_token = $ExpectedProjectToken
+        title_project_match = $matches
+    }
+    if ($matches) {
+        Write-PreflightAudit -Action "targeted_wake_title_verified" -Fields @{
+            desktop_thread_title = $title
+            expected_project_token = $ExpectedProjectToken
+        }
+        return
+    }
+    $fields = @{
+        desktop_thread_title = $title
+        expected_project_token = $ExpectedProjectToken
+        hard_fail = [bool]$RequireTitleMatch
+    }
+    Write-PreflightAudit -Action "targeted_wake_title_mismatch" -Fields $fields
+    $detail = "expected project token '" + $ExpectedProjectToken + "' not found in title '" + $title + "'"
+    if ($RequireTitleMatch) {
+        Write-Host ("[wake_codex] Targeted wake refused: " + $detail)
+        exit 3
+    }
+    if ($WarnOnTitleMismatch) {
+        Write-Host ("[wake_codex] WARNING: title/project mismatch; continuing because title match is warn-only: " + $detail)
+    }
+}
+
 function Write-PreflightAudit {
     param(
         [string]$Action,
@@ -492,6 +827,51 @@ function Get-CodexComposerTextReadOnly {
         return [string]$valuePattern.Current.Value
     }
     return [string]$Composer.Current.Name
+}
+
+# Reads UIA color and child-element structure from the composer for calibration.
+# Used only when -AuditDraftText is set. Never throws — all paths are try/catch.
+function Get-CodexComposerColorHint {
+    param($Composer)
+    $hint = @{
+        fg_color_raw = 'unsupported'
+        fg_color_rgb = $null
+        children     = @()
+    }
+    # ForegroundColorAttribute on the full document range
+    try {
+        $tp = $null
+        if ($Composer.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tp)) {
+            $attr = $tp.DocumentRange.GetAttributeValue(
+                [System.Windows.Automation.TextPatternIdentifiers]::ForegroundColorAttribute)
+            if ($attr -ne [System.Windows.Automation.AutomationElement]::NotSupported) {
+                $c = [int]$attr
+                $hint.fg_color_raw = $c
+                $hint.fg_color_rgb = @{
+                    r = $c -band 0xFF
+                    g = ($c -shr 8) -band 0xFF
+                    b = ($c -shr 16) -band 0xFF
+                }
+            }
+        }
+    } catch {}
+    # Immediate children: ControlType, ClassName, IsContentElement, truncated Name
+    try {
+        $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+        $child = $walker.GetFirstChild($Composer)
+        $childList = [System.Collections.Generic.List[object]]::new()
+        $limit = 10
+        while ($null -ne $child -and $childList.Count -lt $limit) {
+            $ct  = try { $child.Current.ControlType.ProgrammaticName } catch { 'unknown' }
+            $cn  = try { [string]$child.Current.ClassName } catch { '' }
+            $ice = try { [bool]$child.Current.IsContentElement } catch { $null }
+            $nm  = try { $raw = [string]$child.Current.Name; ($raw -replace "`n", '\n').Substring(0, [Math]::Min(80, $raw.Length)) } catch { '' }
+            $childList.Add(@{ control_type = $ct; class_name = $cn; is_content_element = $ice; name_preview = $nm })
+            $child = $walker.GetNextSibling($child)
+        }
+        $hint.children = $childList.ToArray()
+    } catch {}
+    return $hint
 }
 
 function Invoke-ComposerPreflight {
@@ -555,7 +935,7 @@ function Invoke-ComposerPreflight {
         }
 
         $trimmed = ([string]$text).Trim()
-        $isPlaceholder = Test-IsCodexPlaceholderText -Text $trimmed
+        $isPlaceholder = (Test-IsPlaceholderByStructure -Composer $composer) -or (Test-IsCodexPlaceholderText -Text $trimmed)
         $composerFocused = $false
         try { $composerFocused = [bool]$composer.Current.HasKeyboardFocus } catch {}
         $state = if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) {
@@ -589,7 +969,7 @@ function Invoke-ComposerPreflight {
 
         $threshold = if ($state -eq "idle-empty") { $fastPathSeconds } else { $draftStableSeconds }
         if ($stableFor -ge $threshold) {
-            Write-PreflightAudit -Action "preflight_state_detected" -Fields @{
+            $preflightAuditFields = @{
                 state = $state
                 composer_text_hash = (Get-TextHash -Value ([string]$text))
                 composer_length_bucket = (ConvertTo-ComposerLengthBucket -Length ([string]$text).Length)
@@ -598,6 +978,16 @@ function Invoke-ComposerPreflight {
                 idle_seconds_observed = [Math]::Round($stableFor, 1)
                 fast_path = ($state -eq "idle-empty")
             }
+            if ($AuditDraftText) {
+                $preflightAuditFields["composer_text"] = [string]$text
+                $colorHint = Get-CodexComposerColorHint -Composer $composer
+                $preflightAuditFields["composer_fg_color_raw"] = $colorHint.fg_color_raw
+                if ($null -ne $colorHint.fg_color_rgb) {
+                    $preflightAuditFields["composer_fg_rgb"] = $colorHint.fg_color_rgb
+                }
+                $preflightAuditFields["composer_children"] = $colorHint.children
+            }
+            Write-PreflightAudit -Action "preflight_state_detected" -Fields $preflightAuditFields
             return @{
                 State = $state
                 DraftText = if ($state -ne "idle-empty") { [string]$text } else { "" }
@@ -765,6 +1155,36 @@ function Test-CodexWindowContainsText {
     return $false
 }
 
+function Test-CodexWakePostflight {
+    param(
+        [IntPtr]$RootHwnd,
+        [string]$Value,
+        [int]$TimeoutMilliseconds = 2500
+    )
+
+    $deadline = (Get-Date).AddMilliseconds([Math]::Max(250, $TimeoutMilliseconds))
+    while ((Get-Date) -lt $deadline) {
+        if (Test-CodexWindowContainsText -RootHwnd $RootHwnd -Value $Value -TimeoutMilliseconds 250) {
+            return @{ Ok = $true; Reason = "wake_command_rendered" }
+        }
+        try {
+            $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+            if ($null -ne $composer) {
+                $text = Get-CodexComposerTextReadOnly -Composer $composer
+                $trimmed = ([string]$text).Trim()
+                $isPlaceholder = (Test-IsPlaceholderByStructure -Composer $composer) -or (Test-IsCodexPlaceholderText -Text $trimmed)
+                if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) {
+                    return @{ Ok = $true; Reason = "composer_empty_after_submit" }
+                }
+            }
+        } catch {
+            return @{ Ok = $false; Reason = "postflight_read_failed"; ExceptionText = $_.Exception.Message }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return @{ Ok = $false; Reason = "postflight_timeout" }
+}
+
 function Send-BridgeMessageKeys {
     param(
         [string]$Value,
@@ -793,12 +1213,12 @@ function Send-BridgeMessageKeys {
         [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")
         Start-Sleep -Milliseconds 60
 
-        if ($PreserveDraft) {
-            [System.Windows.Forms.Clipboard]::SetText($Value)
-            [System.Windows.Forms.SendKeys]::SendWait("^v")
-        } else {
-            [System.Windows.Forms.SendKeys]::SendWait($Value)
-        }
+        # Always paste via clipboard (single atomic Ctrl+V) rather than
+        # character-by-character SendKeys. This collapses the interleave race
+        # window from ~18 keystrokes to one compound event, and avoids AV
+        # heuristics that flag character-sequence injection into foreign windows.
+        [System.Windows.Forms.Clipboard]::SetText($Value)
+        [System.Windows.Forms.SendKeys]::SendWait("^v")
         Start-Sleep -Milliseconds 100
         [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
 
@@ -806,10 +1226,9 @@ function Send-BridgeMessageKeys {
             Start-Sleep -Milliseconds 250
             [System.Windows.Forms.Clipboard]::SetText($DraftText)
             [System.Windows.Forms.SendKeys]::SendWait("^v")
-            Write-PreflightAudit -Action "preflight_draft_preserved" -Fields @{
-                save_format_count = $savedFormatCount
-                restore_succeeded = $true
-            }
+            $draftAuditFields = @{ save_format_count = $savedFormatCount; restore_succeeded = $true }
+            if ($AuditDraftText) { $draftAuditFields["draft_text"] = $DraftText }
+            Write-PreflightAudit -Action "preflight_draft_preserved" -Fields $draftAuditFields
         }
     } finally {
         if ($PreserveDraft -and $clipboardSaved) {
@@ -973,9 +1392,32 @@ try {
     $prevFgTitle = Get-WindowTitle -hWnd $prevFg
     Write-Host ("[wake_codex] Foreground before: hwnd=" + $prevFg + " title=" + $prevFgTitle)
 
-    Write-StageEvent "STAGE4_DEEPLINK_START" ("thread=" + $ThreadId)
-    Open-CodexThread -Value $ThreadId
-    Write-StageEvent "STAGE4_DEEPLINK_DONE"
+    $navigationSafety = Test-ForegroundCodexNavigationSafety -ForegroundHwnd $prevFg -ForegroundTitle $prevFgTitle
+    if (-not $navigationSafety.Ok) {
+        Write-PreflightAudit -Action "targeted_wake_refused" -Fields @{
+            abort_reason = [string]$navigationSafety.Reason
+            previous_desktop_thread_title = [string]$navigationSafety.PreviousThreadTitle
+            expected_desktop_thread_title = [string]$navigationSafety.ExpectedThreadTitle
+            restore_thread_id_present = [bool](Test-CodexThreadId -Value $RestoreThreadId)
+        }
+        Write-WakeTelemetry -Fields @{
+            action = "foreground_codex_navigation_refused"
+            reason = [string]$navigationSafety.Reason
+            previous_desktop_thread_title = [string]$navigationSafety.PreviousThreadTitle
+            expected_desktop_thread_title = [string]$navigationSafety.ExpectedThreadTitle
+        }
+        Write-Host ("[wake_codex] Targeted wake deferred: foreground is Codex on a thread we cannot restore. reason=" + [string]$navigationSafety.Reason)
+        exit 16
+    }
+
+    if ($navigationSafety.SkipNavigation) {
+        Write-StageEvent "STAGE4_DEEPLINK_SKIPPED" ("reason=" + [string]$navigationSafety.Reason)
+        Write-Host "[wake_codex] Foreground Codex appears to already be the target thread; skipping deeplink navigation."
+    } else {
+        Write-StageEvent "STAGE4_DEEPLINK_START" ("thread=" + $ThreadId)
+        Open-CodexThread -Value $ThreadId
+        Write-StageEvent "STAGE4_DEEPLINK_DONE"
+    }
 
     # The deeplink can create or retarget a Codex window. Prefer the foreground
     # Codex window after navigation, then fall back to the first visible one.
@@ -990,6 +1432,15 @@ try {
     $codexHwnd  = $codex.MainWindowHandle
     $codexTitle = Get-WindowTitle -hWnd $codexHwnd
     Write-Host ("[wake_codex] Target Codex after deeplink: PID=" + $codex.Id + " hwnd=" + $codexHwnd + " title=" + $codexTitle)
+    $threadTitleSnapshot = Get-CodexThreadTitleSnapshot -RootHwnd $codexHwnd -WindowTitle $codexTitle
+    Write-Host ("[wake_codex] Visible Codex thread title: " + [string]$threadTitleSnapshot.Title)
+    Write-WakeTelemetry -Fields @{
+        action = "thread_title_observed"
+        desktop_thread_title = [string]$threadTitleSnapshot.Title
+        desktop_thread_title_source = [string]$threadTitleSnapshot.Source
+        desktop_window_title = [string]$threadTitleSnapshot.WindowTitle
+    }
+    Invoke-ThreadTitleProjectCertification -Snapshot $threadTitleSnapshot
 
     # Pre-flight is read-only: inspect the ProseMirror composer before any
     # focus/SendKeys path. UIA-unavailable defaults to exit 16 so the watcher
@@ -1021,6 +1472,7 @@ try {
     }
 
     $focusAcquired = $false
+    $deliveryMode  = "sendkeys"
     if ($null -ne $composerForFocus) {
         try {
             if ([Win32Wake]::IsIconic($codexHwnd)) {
@@ -1028,14 +1480,26 @@ try {
                 Start-Sleep -Milliseconds 30
             }
             $composerForFocus.SetFocus()
-            Start-Sleep -Milliseconds 50
+            Start-Sleep -Milliseconds 80
             $nowFg = [Win32Wake]::GetForegroundWindow()
+            $composerHasKbFocus = $false
+            try { $composerHasKbFocus = [bool]$composerForFocus.Current.HasKeyboardFocus } catch {}
             if ($nowFg -eq $codexHwnd) {
                 $focusAcquired = $true
-                Write-StageEvent "STAGE4B_FOCUS_UIA_OK" ("elapsed=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s")
+                $deliveryMode  = "sendkeys"
+                Write-StageEvent "STAGE4B_FOCUS_UIA_OK" ("elapsed=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s focus_mode=foreground")
                 Write-Host "[wake_codex] UIA SetFocus acquired foreground directly."
+            } elseif ($composerHasKbFocus) {
+                # Composer has element-level keyboard focus but Claude Desktop holds the
+                # foreground lock, so SetForegroundWindow is blocked at the OS level.
+                # Use PostMessage WM_PASTE which targets the message queue directly and
+                # bypasses the foreground-window requirement entirely.
+                $focusAcquired = $true
+                $deliveryMode  = "postmessage"
+                Write-StageEvent "STAGE4B_FOCUS_UIA_ELEMENT_ONLY" ("elapsed=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s")
+                Write-Host "[wake_codex] UIA SetFocus: element-level keyboard focus acquired (foreground locked by Claude). Switching to PostMessage delivery."
             } else {
-                Write-Host "[wake_codex] UIA SetFocus did not move foreground; falling through to Win32 chain."
+                Write-Host "[wake_codex] UIA SetFocus did not acquire foreground or element focus; falling through to Win32 chain."
             }
         } catch {
             Write-Host ("[wake_codex] UIA SetFocus threw: " + $_.Exception.Message + "; falling through to Win32 chain.")
@@ -1127,29 +1591,59 @@ try {
             exit 16
         }
     }
-    Write-StageEvent "STAGE5_SENDKEYS_START" ("preserve_draft=" + [string]([bool]$preflight.PreserveDraft))
-    Send-BridgeMessageKeys -Value $Message -DraftText $preflight.DraftText -PreserveDraft:([bool]$preflight.PreserveDraft)
-    Write-StageEvent "STAGE5_SENDKEYS_DONE"
-    Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; preflight=" + $preflight.State + ")")
+    if ($deliveryMode -eq "postmessage") {
+        Write-StageEvent "STAGE5_POSTMESSAGE_START"
+        $pmOk = Send-BridgeMessageViaPostMessage -ComposerElement $composerForFocus -Value $Message
+        Write-StageEvent "STAGE5_POSTMESSAGE_DONE" ("ok=" + [string]$pmOk)
+        if (-not $pmOk) {
+            # Do NOT fall back to SendKeys here: foreground is Claude Desktop, so
+            # SendKeys would inject "check bridge inbox" into the Claude composer.
+            Write-Host "[wake_codex] PostMessage delivery failed with no safe fallback while foreground is locked. Deferring."
+            exit 16
+        }
+        Write-Host ("[wake_codex] Sent via PostMessage: " + $Message + " (steer; preflight=" + $preflight.State + ")")
+    } else {
+        Write-StageEvent "STAGE5_SENDKEYS_START" ("preserve_draft=" + [string]([bool]$preflight.PreserveDraft))
+        Send-BridgeMessageKeys -Value $Message -DraftText $preflight.DraftText -PreserveDraft:([bool]$preflight.PreserveDraft)
+        Write-StageEvent "STAGE5_SENDKEYS_DONE"
+        Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; preflight=" + $preflight.State + ")")
+    }
 
     if ($PostTypingVerify) {
-        $verified = Test-CodexWindowContainsText -RootHwnd $codexHwnd -Value $Message -TimeoutMilliseconds 2000
-        if ($verified) {
-            Write-PreflightAudit -Action "targeted_wake_post_typing_verified" -Fields @{
+        $postflight = Test-CodexWakePostflight -RootHwnd $codexHwnd -Value $Message -TimeoutMilliseconds 2500
+        if ($postflight.Ok) {
+            Write-PreflightAudit -Action "targeted_wake_postflight_verified" -Fields @{
+                message_hash = (Get-TextHash -Value $Message)
+                reason = [string]$postflight.Reason
+            }
+            Write-WakeTelemetry -Fields @{
+                action = "wake_postflight_verified"
+                reason = [string]$postflight.Reason
                 message_hash = (Get-TextHash -Value $Message)
             }
-            Write-Host "[wake_codex] Post-typing verification observed the wake command in the target Codex window."
+            Write-Host ("[wake_codex] Wake postflight verified: " + [string]$postflight.Reason)
         } else {
-            Write-PreflightAudit -Action "targeted_wake_post_typing_verification_failed" -Fields @{
+            Write-PreflightAudit -Action "targeted_wake_postflight_verification_failed" -Fields @{
+                message_hash = (Get-TextHash -Value $Message)
+                reason = [string]$postflight.Reason
+            }
+            Write-WakeTelemetry -Fields @{
+                action = "wake_postflight_verification_failed"
+                reason = [string]$postflight.Reason
                 message_hash = (Get-TextHash -Value $Message)
             }
-            Write-Host "[wake_codex] WARNING: Post-typing verification did not observe the wake command in the target Codex window."
+            Write-Host ("[wake_codex] WARNING: wake postflight did not confirm visible delivery: " + [string]$postflight.Reason)
         }
     }
 
     # --- Stage 6: restore previous foreground ---
     Write-StageEvent "STAGE6_RESTORE_START"
     Start-Sleep -Milliseconds 200
+    if ($ProtectForegroundCodexThread -and (Test-CodexThreadId -Value $RestoreThreadId) -and $RestoreThreadId -ne $ThreadId) {
+        Write-StageEvent "STAGE6_RESTORE_THREAD_START" ("thread=" + $RestoreThreadId)
+        Open-CodexThread -Value $RestoreThreadId
+        Write-StageEvent "STAGE6_RESTORE_THREAD_DONE"
+    }
     [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
     Write-StageEvent "STAGE6_DONE" ("total=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s restored_to=" + $prevFgTitle)
     Write-Host ("[wake_codex] Restored focus to: " + $prevFgTitle)
