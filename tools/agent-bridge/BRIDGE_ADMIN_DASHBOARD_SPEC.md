@@ -1,6 +1,6 @@
 # Bridge Admin Dashboard Spec
 
-**Status:** Proposed
+**Status:** Partially implemented - backend health/pairing/contract surfaces and guided same-project pairing APIs exist; richer dashboard UI remains follow-up.
 **Owner:** Codex implements, Claude reviews
 **Scope:** Local web dashboard for pairings, contracts, policy status,
 backpressure, revocation, and audit visibility

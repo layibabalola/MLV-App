@@ -4,6 +4,14 @@ Bridge MCP servers are normal Python processes. They import `agent_bridge.py`,
 `server.py`, and `core/*` once at process start. Python does not hot-reload those
 modules after a Git checkout, patch, or commit.
 
+The Desktop MCP wrapper must also keep the already-initialized `server.py` child
+alive after code changes. MCP stdio initialization is stateful; replacing the
+child process under a connected host can close the transport or leave the host
+and child in different protocol states. Code changes therefore set
+`tool-refresh-status.json` to `refresh_required` and emit
+`mcp_server_refresh_required` / `mcp_tools_refresh_required` audit rows instead
+of hot-restarting the child.
+
 ## Rule
 
 After changing bridge Python code, restart each MCP client session before using
@@ -24,6 +32,9 @@ Stale MCP server processes can make a fixed bug look unfixed. Examples:
   output after the pagination fix.
 - Settings or watcher changes work through a fresh probe but not through an
   already-running desktop client.
+- The client reports `Transport closed` after bridge Python files changed during
+  the session. Treat this as an MCP host reconnect/reload requirement, not as
+  durable message loss.
 
 ## What To Do
 

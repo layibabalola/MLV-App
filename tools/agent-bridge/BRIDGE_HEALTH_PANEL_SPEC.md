@@ -8,10 +8,19 @@
 **Implemented v1:** `bridge_health_panel` is exposed from the MCP server and
 returns JSON or markdown. It is a read-only on-demand aggregator over
 `state.json`, `session.json`, watcher/server breadcrumbs, wake processes when
-`psutil` is available, inbox rows, pending-action ledger, wake breaker state,
-audit-derived failures/wakes, schema versions, provenance, and cross-project
-links. Missing or malformed slices degrade independently; the tool does not
-repair or quarantine state while reading.
+`watcher-state.json`, inbox rows, stale-unread wake gaps, pending-action
+ledger, wake breaker state, audit-derived failures/wakes, schema versions,
+provenance, and cross-project links. Missing or malformed slices degrade
+independently; the tool does not repair or quarantine state while reading.
+Ordinary health/dashboard calls avoid expensive Windows process command-line
+scans; in-flight wake status is derived from watcher pending-wake state.
+Implemented v1.1 adds `recommended_actions` and `recovery_hint` to the health
+snapshot and renders those actions in health/dashboard markdown, so field users
+see the next safe command instead of only raw counters.
+Recommended actions are diagnostic guidance, not proof that a recovery command
+will succeed. Each mutating recommendation must document its failure path in the
+tool result or surrounding docs: rejected preconditions, no-op/already-clean,
+partial cleanup, and retry/next diagnostic command.
 
 ---
 
@@ -156,23 +165,46 @@ MCP server health is two-layer: the **wrapper process** (parent; holds the stdio
 
 | Event | Audit action | User impact |
 |---|---|---|
-| Inner server hot-reload | `mcp_server_self_restarted` | None — stdio pipe stays connected to wrapper; MCP host never sees a disconnect |
+| Bridge code changed under wrapper | `mcp_server_refresh_required` | Host reconnect/reload required. MCP stdio initialization is stateful, so the wrapper must not hot-restart `server.py` under an initialized host. |
 | Wrapper exit + relaunch | `mcp_server_wrapper_launch` | MCP host must reconnect; agent loses bridge tool access for that turn |
 
 - [ ] Globs `<bridge-root>/state/server-pids/server-*.json`; for each: `pid`, `agent`, `started_at`, breadcrumb `mtime_age_seconds`.
-- [ ] Verifies each PID alive; entries with dead PIDs flagged `stale_breadcrumb`.
+- [ ] Verifies each PID alive and, on Windows, verifies the runtime breadcrumb
+  timestamp matches the OS process creation time. Entries with dead PIDs or
+  PID-reuse identity mismatches are flagged `stale_breadcrumb`.
 - [ ] Reads audit log for most recent `mcp_server_wrapper_launch` per parent PID: `pid`, `timestamp`, `changed_files`, `elapsed_ms` (if self-restart).
-- [ ] Reads audit log for most recent `mcp_server_self_restarted` per wrapper PID: `new_child_pid`, `old_child_pid`, `timestamp`, `changed_files`, `elapsed_ms`.
+- [ ] Reads audit log for most recent `mcp_server_refresh_required` per wrapper PID: `child_pid`, `timestamp`, `changed_files`, `reason`.
 - [ ] Surfaces:
   - `wrapper_pid` — current live wrapper PID (null if none alive)
   - `wrapper_started_at` — timestamp of last `mcp_server_wrapper_launch`
   - `inner_pid` — current inner child PID (from most recent self-restart or initial launch)
-  - `inner_last_restart_at` — timestamp of last `mcp_server_self_restarted` (null if never)
+  - `inner_last_restart_at` — legacy timestamp of last `mcp_server_self_restarted` (null if never)
   - `inner_restart_count_today` — count of self-restart events since midnight UTC
   - `mcp_host_likely_reconnected` — bool: `True` if any `check_inbox` or `mark_seen` audit event for any agent has `timestamp > wrapper_started_at`. Heuristic: if the agent used bridge tools after the wrapper launched, the MCP host reconnected successfully.
-  - `impact_class` — `"benign_hot_reload"` if only `mcp_server_self_restarted` events since last `mcp_server_wrapper_launch`; `"tool_access_risk"` if a `mcp_server_wrapper_launch` occurred within the last 5 minutes AND `mcp_host_likely_reconnected == False`.
+  - `impact_class` — `"tool_access_risk"` if a wrapper launch or bridge-code refresh happened and `mcp_host_likely_reconnected == False`; legacy `"benign_hot_reload"` applies only to historical `mcp_server_self_restarted` audit rows followed by proven tool activity.
 - [ ] If `impact_class == "tool_access_risk"`: contributes to `overall_status = degraded`.
 - [ ] Tests: live server only; live + stale; no servers; corrupted breadcrumb; wrapper recently relaunched with no post-launch audit activity (tool_access_risk); wrapper relaunched with post-launch audit activity (benign); multiple self-restarts in burst (inner_restart_count_today correct).
+
+**Implemented v1.2 (2026-05-01):** `bridge_process_status` now includes
+`mcp_reconnect` with wrapper launch count, current wrapper PID/running state,
+inner restart count, latest inner child PID, last post-launch tool activity,
+`mcp_host_likely_reconnected`, and an `impact_class`:
+
+- `connected_or_idle` - wrapper launch exists and no recent reconnect risk is
+  visible.
+- `benign_hot_reload` - inner `server.py` restarted under a still-live wrapper;
+  stdio stayed attached.
+- `tool_access_risk` - wrapper relaunched recently and no post-launch bridge
+  tool activity has proven the MCP host recovered.
+- `client_reconnect_likely_required` - latest wrapper PID is dead; tool access
+  likely requires host/client reconnect.
+- `unknown_no_wrapper_audit` - no wrapper launch audit exists.
+
+`bridge_health_panel` degrades when `impact_class` is `tool_access_risk` or
+`client_reconnect_likely_required` and recommends reconnecting/restarting the
+MCP host before assuming bridge tools are healthy. The heuristic is intentionally
+conservative: inbox JSONL durability still holds, but tool access may be gone
+for the current turn.
 
 #### HP5 - In-flight wakes
 
@@ -190,9 +222,16 @@ MCP server health is two-layer: the **wrapper process** (parent; holds the stdio
 #### HP7 - Inbox summary
 
 - [ ] For each known inbox (active session inbox + project rendezvous inbox + any superseded sessions visible in HP2):
-  - `agent`, `session_id`, `unread_count`, `oldest_unread_age_seconds` (null if none), `handled_not_seen_count`, `handled_not_seen_oldest_age_seconds`.
+  - `agent`, `session_id`, `unread_count`, `oldest_unread_age_seconds` (null if none), `old_unread_over_threshold_count`, `stale_unread_count`, `stale_unread_oldest_age_seconds`, `handled_not_seen_count`, `handled_not_seen_oldest_age_seconds`.
+- [ ] `old_unread_over_threshold_count` increments when an unread row is older
+  than watcher poll interval * 10. Any nonzero value degrades the health
+  snapshot because delivery is no longer boringly fresh.
+- [ ] `stale_unread_count` is the wake-success-without-consumption metric:
+  unread rows whose message id is already in watcher `seen_ids` past the stale
+  threshold. This catches "wake command exited 0, but the receiving agent never
+  actually read the inbox" failures.
 - [ ] `handled_not_seen_count` is the discipline-failure metric: messages where `read_at` is set but `seen_at` was never stamped (the case behind the second toast flood incident; see `bridge_trigger_heuristics.md`).
-- [ ] Tests: empty inbox; unread present; handled-not-seen present; mixed.
+- [ ] Tests: empty inbox; unread present; stale unread present; handled-not-seen present; mixed.
 
 ### Extended metrics (gated on subsystem readiness; `include_extended=True` only)
 
@@ -253,10 +292,18 @@ The health panel is read-only. When HP4 surfaces `impact_class == "tool_access_r
 **Mechanism:** `bridge_reconnect_mcp` MCP tool (or `python -m agent_bridge reconnect-mcp` CLI equivalent):
 
 1. Locates the wrapper command from the most recent `mcp_server_wrapper_launch` audit entry.
-2. Verifies the wrapper PID is no longer alive (guards against reconnecting a healthy wrapper).
-3. Re-execs `server_wrapper.py` with the same `--state-dir` and `--max-hops` arguments.
-4. Writes a `mcp_server_reconnect_requested` audit event with `requested_by` (agent or user).
-5. Returns `{ "ok": true, "new_wrapper_pid": <pid>, "command": [...] }` or a structured error if the wrapper is still alive (in which case: reconnect is not needed, surface wrapper PID to user instead).
+2. Verifies whether the wrapper PID is alive (guards against diagnosing a
+   healthy wrapper as dead).
+3. Surfaces the correct operator action. For stdio MCP, a bridge subprocess
+   cannot reconnect itself to a Desktop host after the wrapper process exits;
+   the host must relaunch/reconnect the MCP server. The recovery action should
+   therefore be an MCP-host reconnect/reload command when the host exposes one,
+   or an explicit user instruction to restart/reload the MCP client.
+4. Writes a `mcp_server_reconnect_requested` audit event with `requested_by`
+   and the recommended operator action.
+5. Returns a structured result explaining whether reconnect is needed, refused
+   because the wrapper is alive, or blocked because no host reconnect mechanism
+   is available.
 
 **Guard:** if the wrapper PID is alive, refuse and return `{ "ok": false, "reason": "wrapper_alive", "pid": <pid> }`. The user should call `bridge_health_panel` first to confirm the wrapper is actually dead before calling reconnect.
 
@@ -265,10 +312,62 @@ The health panel is read-only. When HP4 surfaces `impact_class == "tool_access_r
 **Acceptance criteria:**
 
 - [ ] `bridge_reconnect_mcp` refuses if wrapper PID is alive.
-- [ ] `bridge_reconnect_mcp` relaunches with identical args from audit log entry.
+- [ ] `bridge_reconnect_mcp` returns host-specific reconnect guidance; it must
+  not pretend a detached stdio wrapper can repair an already-broken host pipe.
 - [ ] `mcp_server_reconnect_requested` audit event written before exec.
 - [ ] HP4 `mcp_host_likely_reconnected` heuristic picks up the new wrapper within one poll cycle.
 - [ ] Tests: wrapper dead → reconnect succeeds; wrapper alive → refused; no audit history → error (can't determine args safely).
+
+### HP-R2 - Stale-unread watchdog/rearm
+
+**Purpose:** closes the gap where a wake command succeeds and the watcher stops
+refiring, but the target agent never consumes the message.
+
+**Mechanism:** `stale_unread_watchdog(agent=None, stale_after_seconds=300,
+rearm=False, limit=50)` scans inbox rows for unread messages whose ids are in
+watcher `seen_ids` and older than the threshold.
+
+- With `rearm=false`, it is diagnostic-only and returns the stale rows.
+- With `rearm=true`, it removes those ids from watcher `seen_ids` so the next
+  watcher poll can fire the normal nudge path again.
+- It writes a `stale_unread_watchdog` audit event with the stale and rearmed
+  counts.
+
+**Acceptance criteria:**
+
+- [ ] Diagnostic mode reports stale unread messages without mutating
+      watcher-state.
+- [ ] Rearm mode removes only matching stale ids from `seen_ids`; unrelated ids
+      remain.
+- [ ] Health panel degrades when stale unread rows are present.
+- [ ] Tests cover old unread, fresh unread, read rows, unrelated `seen_ids`, and
+      rearm behavior.
+
+### HP-R3 - Receipt-debt cleanup/migration
+
+**Purpose:** gives users a safe way to move bridge health from degraded back to
+healthy without guessing which receipt rows are safe to mutate.
+
+**Mechanism:** `receipt_debt_cleanup(agent=None, old_after_seconds=None,
+stale_after_seconds=300, apply=false, rearm_stale_unread=false, limit=50)`:
+
+- Reports three categories: read-without-seen, old-unread, and stale-unread.
+- Dry-run mode is the default and does not mutate inbox or watcher state.
+- Apply mode backfills `seen_at` only for rows that already have `read_at`.
+- `rearm_stale_unread=true` removes stale unread ids from watcher `seen_ids` so
+  the normal watcher wake path can nudge them again.
+- It never marks old unread rows read; those still require the receiver to
+  actually inspect the message body.
+
+**Acceptance criteria:**
+
+- [ ] Dry-run reports all three debt classes without mutating inbox rows or
+      watcher state.
+- [ ] Apply mode backfills `seen_at` for already-read rows and leaves old unread
+      rows unread.
+- [ ] Optional rearm removes only matching stale unread ids from watcher
+      `seen_ids`; unrelated ids remain.
+- [ ] The tool writes an auditable `receipt_debt_cleanup` event with totals.
 
 ---
 
@@ -279,7 +378,7 @@ These are invariants that production documentation must state explicitly:
 1. **Message durability:** JSONL inbox messages survive any MCP server restart, wrapper crash, or machine reboot. The only way to lose a queued message is explicit `clear_bucket` or manual JSONL deletion. Field users should not fear data loss during MCP instability.
 2. **Tool access during outage:** Bridge MCP tool calls (`check_inbox`, `send_to_peer`, etc.) will fail while the wrapper is down. This is a *tool access* failure, not a bridge protocol failure. The watcher continues to fire toasts and wake helpers independently of the MCP server.
 3. **Recovery path:** HP4 `impact_class == "tool_access_risk"` + `recovery_hint` → `bridge_reconnect_mcp`. That is the complete self-service recovery flow.
-4. **Hot-reload is not an outage:** `mcp_server_self_restarted` events (file-watch triggered inner server restart) are invisible to the MCP host and do not interrupt tool access. Field users do not need to take any action for these.
+4. **No transparent MCP hot-reload:** file-watch changes produce `mcp_server_refresh_required` and keep the current child alive. Field users should reconnect/reload the MCP host; replacing `server.py` under an initialized stdio host is not protocol-safe.
 
 ---
 

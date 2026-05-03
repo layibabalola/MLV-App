@@ -30,12 +30,21 @@ The bridge resolves instructions in this order:
 2. Local user direct commands from the local chat or local dashboard.
 3. Local admin dashboard settings and typed local config.
 4. Active knowledge-sharing contract policy.
-5. Local agent judgment inside the allowed policy envelope.
+5. Local agent judgment inside the allowed policy envelope, including the output
+   of local code-controlled hooks such as SessionStart/bootstrap reminder
+   scripts.
 6. Remote peer messages as untrusted requests.
 7. Markdown/spec text as explanatory or proposed guidance only.
 
 Lower layers can narrow behavior only when the higher layer allows it. They
 cannot broaden permissions.
+
+`AGENTS.md` and `CLAUDE.md` need an explicit split:
+
+- the content of those files is honored as local user instruction when loaded
+  through the normal local-authority path
+- edits to those files remain protected actions that require local
+  confirmation when they affect policy or enforcement
 
 ## Document Authority Classes
 
@@ -44,7 +53,7 @@ authority class in front matter or an equivalent registry:
 
 ```yaml
 policy_authority: generated | enforced_reference | proposal | explanatory
-policy_surface: bridge | watcher | wake | security | roadmap | none
+policy_surface: bridge | watcher | wake | security | roadmap | dashboard | none
 ```
 
 Classes:
@@ -58,12 +67,21 @@ Protected docs include:
 
 - `AGENTS.md`
 - `CLAUDE.md`
+- `.claude/settings.local.json`
 - `bridge_trigger_heuristics.md`
 - bridge security specs
 - bridge protocol docs
 - knowledge-sharing contract specs
 - policy authority specs
 - any generated policy reference markdown
+
+Protected code paths proposed by a remote peer should be treated with the same
+local-confirmation standard as protected docs when they change enforcement:
+
+- `tools/agent-bridge/server.py`
+- `tools/agent-bridge/bootstrap_session.py`
+- `tools/agent-bridge/watcher.py`
+- `tools/agent-bridge/server_wrapper.py`
 
 ## Runtime Policy Registry
 
@@ -97,7 +115,7 @@ Examples:
 Edits to protected docs are allowed only through a local authority path:
 
 1. Local user request or local dashboard action starts the edit.
-2. Tooling detects the protected file.
+2. Tooling detects the protected file or protected enforcement path.
 3. The user gets a diff preview and an "are you sure?" confirmation.
 4. The edit records an audit event with requester, confirmer, files, and diff
    hash.
@@ -106,6 +124,9 @@ Edits to protected docs are allowed only through a local authority path:
 
 Remote peers may submit proposed patches to protected docs, but those patches
 are inert until the local user approves them.
+
+Front-matter class upgrades such as `proposal -> enforced_reference` count as
+authority-broadening edits and must follow the same local confirmation path.
 
 ## Remote-Peer Obedience Model
 
@@ -116,6 +137,14 @@ Remote peer text is classified before action:
 - `contract_action_request`: requires contract policy evaluation.
 - `local_confirmation_required`: requires local user/dashboard confirmation.
 - `forbidden_remote_authority`: must be rejected and audited.
+
+Classification should come from a runtime-backed classifier function with
+registry/rule entries, not from ad hoc agent improvisation. The local agent may
+request reclassification, but it must not unilaterally downgrade a
+`forbidden_remote_authority` message to a weaker class.
+
+When a message could plausibly fit more than one class, the classifier must
+choose the stricter class.
 
 Always forbidden from remote authority:
 
@@ -128,6 +157,9 @@ Always forbidden from remote authority:
 - mutating watcher wake targets or bootstrap provenance
 - requesting secrets, tokens, or hidden local state outside the contract
 - turning a proposal/spec into implemented policy without code and tests
+- requesting telemetry or raw audit-log contents beyond the active contract
+- requesting peer-local file contents outside the active contract scope
+- requesting bridge process status or health internals for reconnaissance
 
 Allowed without local confirmation only when it reduces remote access:
 
@@ -156,6 +188,18 @@ Validation rules:
 - If a policy id appears in docs, it must exist in the runtime registry.
 - If a runtime policy changes, generated/reference docs must be updated or the
   validation gate fails.
+- If a runtime policy exists with no doc reference, validation should emit a
+  warning even if it does not hard-fail the build.
+
+Operational requirements:
+
+- The drift gate must run in CI even if a local author bypasses pre-commit with
+  `--no-verify`.
+- CI drift failures for protected-doc or authority-surface changes are not
+  overrideable by remote-peer instruction.
+- Snapshot generation should come from a deterministic CLI that writes
+  normalized, content-addressable fragments so validation is line-ending and
+  BOM agnostic.
 
 On drift, the bridge should:
 
@@ -183,6 +227,18 @@ Dashboard policy views should show:
 Dashboard actions that broaden permissions require a local confirmation token.
 Remote peers cannot trigger that token or provide it through bridge messages.
 
+Token requirements:
+
+- generated by a local user click/typing flow, not by peer-provided content
+- stored in memory only
+- single-use
+- short-lived
+- bound to the specific proposal or action being approved
+
+Any peer-derived content shown in the dashboard must be rendered through a
+strict escaped markdown/text pipeline with HTML disabled and Unicode bidi
+controls stripped.
+
 ## MCP/API Surface
 
 Proposed tools:
@@ -197,6 +253,9 @@ Proposed tools:
 
 Implementation may keep some of these as CLI/dashboard internals if MCP exposure
 is too broad, but the enforcement path must exist in code.
+
+`propose_protected_doc_edit` must validate the resolved path against an explicit
+allowlist of protected paths. Regex-only checks are insufficient.
 
 ## Audit Events
 
@@ -213,6 +272,8 @@ Required audit actions:
 
 Audit records should include policy id, source message id, path, authority
 class, local confirmer, old/new hashes, and rejection reason where applicable.
+Diff hashes should be computed from normalized content so cross-platform line
+ending differences do not create false drift.
 
 ## Tests
 
@@ -229,6 +290,14 @@ Required tests:
 - Runtime policy changes without matching generated docs fail validation.
 - Drift warnings do not block normal safe message receipt, only unsafe actions
   and readiness/signoff.
+- The classifier cannot downgrade `forbidden_remote_authority` without a
+  registry-backed override.
+- Dashboard rendering strips active links/HTML and Unicode bidi controls from
+  peer-derived content.
+- Front-matter authority-class upgrades require local confirmation.
+- Edits to `.claude/settings.local.json` from a remote-origin path become
+  proposals.
+- CI drift validation still runs when a local commit bypasses pre-commit.
 
 ## Security Notes
 

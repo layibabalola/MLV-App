@@ -20,7 +20,7 @@ Applies to: any two agents sharing an agent-bridge instance
 
 Authoritative table; cross-referenced by `watcher.py`,
 `BRIDGE_PRESENCE_SPEC.md`, `WAKE_HARDENING_SPEC.md`, and audit event
-schemas. Wake scripts (`wake_codex.ps1`, future `wake_claude.ps1`) emit
+schemas. Wake scripts (`wake_codex.ps1`, diagnostic `wake_claude.ps1`) emit
 these codes; the watcher routes wake decisions accordingly.
 
 | Code | Meaning | Watcher behavior | Mark seen | Retry |
@@ -33,6 +33,7 @@ these codes; the watcher routes wake decisions accordingly.
 | 5 | Peer present but not bootstrapped (bridge_bootstrap layer down) | Defer; `pending_bootstrap` queue | No (defer) | On bootstrap event |
 | 6 | Active peer superseded (active_peer layer down) | Auto-redirect via registry to current peer | No (redirected) | Implicit redirect |
 | 7 | Wrong project (project_scope layer down) | Mark seen; audit `wake_skipped_wrong_project` | Yes | No |
+| 20 | Unsupported thread-addressable wake target (Claude diagnostic boundary) | Mark seen for diagnostic/manual recovery only; do not configure as automatic wake | Yes | No |
 | 8 | Tenant mismatch (tenant_scope layer down; cloud only) | Mark seen; audit `wake_skipped_auth_block` | Yes | No |
 | 9 | Active pairing expired or revoked | Mark seen; audit `wake_skipped_pairing_invalid` with sub-reason | Yes | No (require re-pair) |
 | 10 | Peer busy (receptive layer down) | Defer; drain on next inbox-check | No (defer) | On natural inbox-check |
@@ -80,8 +81,9 @@ event actions:
 | `send_control` | bridge | Control message routed | control_type |
 | `record_implementation_event` | bridge MCP | Durable implementation progress journal entry recorded for peer catch-up | owner_agent, peer_agent, sequence |
 | `mcp_server_wrapper_launch` | server_wrapper | Wrapper started a `server.py` | command, parent_pid |
-| `mcp_server_self_restarted` | wrapper Phase 2 | Auto-restart on bridge code change | old_child_pid, new_child_pid, changed_files, elapsed_ms |
-| `mcp_tools_refresh_required` | server_wrapper | Tool manifest changed during one live MCP client session | previous_signature, current_signature, changed_files, previous_tool_names, current_tool_names |
+| `mcp_server_refresh_required` | server_wrapper | Bridge Python code changed during one live MCP client session; existing child was kept alive because MCP stdio initialization is stateful | child_pid, changed_files, reason |
+| `mcp_server_self_restarted` | wrapper Phase 2 legacy | Historical auto-restart on bridge code change; do not emit for new code paths | old_child_pid, new_child_pid, changed_files, elapsed_ms |
+| `mcp_tools_refresh_required` | server_wrapper | Tool/code refresh requires MCP host reconnect/reload | reason, previous_signature, current_signature, changed_files, previous_tool_names, current_tool_names |
 | `wake_skipped_paused` | watcher | Pause was active when wake would have fired | message_id |
 | `wake_skipped_wrong_chat` | watcher | Phase B UUID-mismatch (reserved) | window_title?, expected_thread_id |
 | `wake_skipped_wrong_project` | watcher | project_scope mismatch | active_project, expected_project |
@@ -211,13 +213,13 @@ normalize rules (apply in order):
 
 This anchors to the real project regardless of where the agent is running. A session
 in a worktree (`.../.claude/worktrees/festive-boyd-integration`) and a session in the
-main checkout (`C:\!Layi Wkspc\MLV-App`) both produce the same rendezvous:
+main checkout (`C:\Repos\MLV-App`) both produce the same rendezvous:
 
 | Working directory | git root | Rendezvous |
 |---|---|---|
-| `C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration` | `C:\!Layi Wkspc\MLV-App` | `mlv-app` |
-| `C:\!Layi Wkspc\MLV-App` | `C:\!Layi Wkspc\MLV-App` | `mlv-app` |
-| `C:\!Layi Wkspc\AdversarialLLM-ClaudeCode` | `C:\!Layi Wkspc\AdversarialLLM-ClaudeCode` | `adversarialllm-claudecode` |
+| `C:\Repos\MLV-App\.claude\worktrees\festive-boyd-integration` | `C:\Repos\MLV-App` | `mlv-app` |
+| `C:\Repos\MLV-App` | `C:\Repos\MLV-App` | `mlv-app` |
+| `C:\Repos\AdversarialLLM-ClaudeCode` | `C:\Repos\AdversarialLLM-ClaudeCode` | `adversarialllm-claudecode` |
 
 Both agents work in the same repo → same git root → same rendezvous. Zero
 coordination required even across worktrees.
@@ -553,6 +555,8 @@ not only in the natural-language body:
 
 - `from_session_id`: sender's active session at queue time when known.
 - `to_session_id`: intended receiver bucket after routing resolution.
+- `pair_id`: active pair identity when the sender and receiver resolve to a
+  known pair.
 - `from_session_id_kind`: sender bootstrap provenance, usually `parent`,
   `subagent`, or `unknown`.
 
@@ -562,7 +566,9 @@ only; row fields are the source of truth for automated routing and recovery.
 
 `send_to_peer(..., target_session_id=...)` is the preferred name for the
 receiver bucket. The older `session_id` parameter remains a compatibility alias
-and is audited when used.
+and is audited when used. Work messages must name `target_session_id` /
+`session_id`, `pair_id`, or `sender_session_id` that resolves to exactly one
+active pair; implicit project-bucket fallback is disabled for work traffic.
 
 ## Message Envelope
 
@@ -632,6 +638,23 @@ Do not bridge:
    the peer consumes the message; do not loop.
 4. After pairing, do not send non-handshake messages to the rendezvous channel.
 5. One unread message per target session is the transport constraint; respect it.
+
+### Backpressure Update Exemption (Spec-Only)
+
+The bridge may later allow a scoped update exemption for a follow-up that would
+otherwise hit `SESSION_BACKPRESSURE_LIMIT`. This is intentionally **not** active
+until it has a protocol review and tests.
+
+Required constraints before implementation:
+
+- The new message must include `IN_REPLY_TO: <existing-unread-message-id>`.
+- The existing unread message must be in the same receiver bucket.
+- The sender agent, sender session, receiver agent, receiver session, and
+  `pair_id` must match the unread message.
+- At most one exempt update may be attached to any unread work message.
+- The update must be labeled as an update/revision, not independent new work.
+- The health panel must still show the bucket as backpressure-blocked until the
+  receiver reads or handles the original unread work item.
 
 ## Valid Types
 

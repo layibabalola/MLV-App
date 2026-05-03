@@ -140,8 +140,9 @@ Rules:
 - Write a per-process marker such as `server-pids/server-12345.pid`.
 - Marker cleanup is opportunistic.
 - A new server must not kill any other server just because a marker exists.
-- Stale markers can be removed if the PID is dead or the command line clearly is not
-  an agent-bridge MCP server.
+- Stale markers can be removed if the PID is dead or, on Windows, the PID has
+  been reused by a process whose creation time no longer matches the runtime
+  breadcrumb timestamp.
 
 ---
 
@@ -209,10 +210,12 @@ PowerShell process spelunking, or raw JSONL inspection.
 3. `bootstrap_session.ensure_watcher` uses the watcher lease before spawning.
 4. `server.py` writes per-process markers under `server-pids/` and never claims a
    singleton lease.
-5. `bridge_process_status` reports watcher lease status, lock files, and MCP server
-   marker counts.
-6. `compact.py` reaps stale `server-pids/` markers opportunistically.
-7. Tests cover lease acquire/heartbeat/release and stale server marker reaping.
+5. `bridge_process_status` reports watcher lease status, lock files, MCP server
+   marker counts, and PID-reuse identity mismatches.
+6. `compact.py` reaps stale `server-pids/` markers opportunistically, including
+   Windows PID-reuse mismatches.
+7. Tests cover lease acquire/heartbeat/release, stale server marker reaping, and
+   PID-reuse marker reaping.
 
 Future extension: add monitor-scoped leases if Monitor startup becomes automated by
 the bridge itself. Today Monitor remains harness-owned on Claude's side.

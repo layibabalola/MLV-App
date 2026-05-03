@@ -68,14 +68,17 @@ For bridge hygiene, distinguish `read` from `actioned`:
 
 - `read` means Codex has already surfaced the message body in this chat turn by `check_inbox`, `wait_inbox`, `peek_inbox`, or equivalent tooling.
 - `actioned` means Codex has completed the requested follow-up work.
+- `handled` means Codex has sent the bridge reply, completed the work, or explicitly parked/blocked/displaced/rejected the item and recorded that disposition with `mark_handled`.
 - These are not the same state. Do not leave a surfaced message unread in the bridge just because the follow-up work is still pending.
 
 - Use `wait_inbox(..., mark_read=false)` or `peek_inbox` for discovery, demos, and wake loops.
 - Do not call `check_inbox(..., mark_read=true)` unless you are ready to surface and act on every returned message immediately.
 - If a test explicitly asks for `wait_inbox`, do not substitute `check_inbox`.
 - After handling a message seen with `mark_read=false`, mark it read explicitly by id.
+- After replying to, acting on, parking, blocking, displacing, or rejecting a substantive surfaced message, call `mark_handled` for that message id with the matching disposition.
 - If a non-destructive read already surfaced the message body to Codex, mark it read in the bridge immediately, even if the requested action will be deferred to a later turn.
 - When deferring the actual work, say so explicitly as `read but not actioned yet` rather than implying the message remains unread.
+- A surfaced message with `read_at` but no `handled_at` remains response debt if it contains an action request, user request, smoke/test prompt, or explicit reply/confirmation ask.
 - If a surfaced bridge message contains substantive review, a proposal, a requested answer, or a priority-changing signal, do not treat inbox hygiene as the completed task.
 - After surfacing such a message, Codex must do one of these in the same work stretch:
   - send the bridge reply,
@@ -95,7 +98,8 @@ For bridge hygiene, distinguish `read` from `actioned`:
 - If the message did not actually change priority, resume the interrupted implementation or investigation immediately after the inbox report instead of stopping at status.
 - A bridge inbox check is complete only when both states are true:
   - surfaced messages were marked read,
-  - any substantive surfaced message was either actioned, explicitly parked, or explicitly displaced.
+  - any substantive surfaced message was either actioned, explicitly parked, blocked, rejected, or displaced and then marked handled.
+- The pre-final reminder treats current-turn `read_at` + missing `handled_at` on request/test messages as a final-response guard. Do not bypass it by summarizing only to the user; send the peer reply or record the disposition first.
 
 For bridge coordination, distinguish `follow-on work exists` from `I am blocked waiting`:
 
@@ -148,6 +152,38 @@ Inbox hygiene for bridge-related work:
 - If unread messages are present, surface them, handle them, and mark them read by id before doing more bridge work.
 - If unread messages are present and the work cannot be completed in the same turn, mark them read anyway once surfaced, then track the remaining task separately in the conversation.
 - If both buckets are already empty, send a `BACKPRESSURE_STATUS` or `ROUTE_REPAIR` update to Claude with the checked buckets and ask them to retry from fresh state.
+- Inbox hygiene commands must produce an explicit machine-readable result. A
+  silent zero-output command is a hygiene failure, not an empty inbox.
+- `py -3 tools\agent-bridge\agent_bridge.py check-inbox ... --format json` is
+  now the supported local CLI shape. If it emits no JSON, stop and inspect the
+  CLI/tool path before claiming the inbox is empty.
+- The pre-response and pre-final hooks are canaries for that contract: they must
+  probe `agent_bridge.py check-inbox --help` and fail loudly if the command does
+  not expose the expected `--agent` and `--format` JSON-hygiene interface.
+- When a peer names a specific unread/blocking message id, search the whole
+  `inbox-<agent>.jsonl` for that id and all unread rows before trusting the
+  active-bucket summary. Backpressure can be caused by stale/private buckets
+  that ordinary active-session hygiene missed.
+
+No-silent-success process rule:
+
+- For bridge-owned CLIs, hooks, watchers, wake helpers, probes, migrations, and
+  dashboard/admin helpers, exit code 0 is not enough. A successful process must
+  also emit or write a verifiable success artifact: JSON result, audit row,
+  receipt transition, health-panel field, test assertion, or explicit
+  diagnostic line.
+- Early-detection canaries should validate the interface shape before relying
+  on a process:
+  - `--help` exposes required subcommands/options,
+  - JSON output parses and contains `ok` plus `status`,
+  - state-mutating commands produce audit/receipt rows,
+  - background helpers update health/heartbeat/fire-history fields,
+  - watcher wake success is tied to `seen_at` / `read_at`, not process spawn.
+- Any command that returns 0 with empty stdout/stderr and no expected state
+  artifact must be treated as `silent_failure_suspected` until proven otherwise.
+- If a silent failure is found or remediated in bridge communication, send the
+  paired peer a `ROOT_CAUSE`, `RISK_DELTA`, or `IMPLEMENTATION_UPDATE` with the
+  detection gap and the new canary.
 
 Committed-task rule:
 
@@ -276,6 +312,93 @@ Status-digest reciprocity rule:
   - if Claude is in a protected execution window, send the digest only when it materially prevents user-relay or confusion, otherwise park it until the next checkpoint
 - Reciprocal expectation applies to Claude as well: if Claude tells the user about Codex-owned work, Codex should receive the same digest without waiting for the user to paste it across.
 
+Outbound peer-review verification rule:
+
+- When Codex closes a shared Agent Bridge roadmap/security/review task and sends Claude a `REVIEW_REQUEST`, `PHASE_DONE`, `READINESS_ASSESSMENT`, `STATUS_DIGEST`, or other reply-expected peer packet, Codex must verify the outbound row before telling the user the handoff is complete.
+- Minimum verification before final response:
+  - capture and report the bridge message id,
+  - confirm `send_to_peer` returned `accepted: true` / `status: queued`,
+  - confirm the row exists in the peer inbox or audit log with the intended target session/pair,
+  - distinguish `sent`, `seen`, `read`, `handled`, and `replied` explicitly.
+- If the message is sent but not yet replied to, say `sent; awaiting peer reply` rather than implying Claude reviewed it.
+- If a reply is expected but not yet received, create or preserve response debt through the ledger/response-debt guard instead of relying on memory.
+- If outbound verification fails, do not claim the peer was notified; retry once through the normal bridge path, then surface the failure and record a pending action.
+- This rule exists because a correct `send_to_peer` is only delivery into durable bridge state. It is not proof that Claude has reviewed, answered, or marked the item handled.
+
+Peer-cognition verification rule:
+
+- Do not say or imply `Claude knows`, `Claude was told`, `Claude is reviewing`,
+  or `peer is aware` from `send_to_peer` success alone.
+- Treat bridge lifecycle states as distinct:
+  - `queued`: durable row exists, but the peer may have no live awareness,
+  - `toasted` / watcher `seen_ids`: the watcher noticed or notified, but the
+    peer agent may still not have read the body,
+  - `seen_at`: a tool or wake path observed the row,
+  - `read_at`: the peer surfaced or consumed the body,
+  - `handled_at`: the peer acted, parked, blocked, displaced, rejected, or
+    replied.
+- If a relayed Agent Bridge decision remains `queued` with no `read_at` after a
+  short sanity window, report `sent but not read yet`, inspect the peer wake path
+  before assuming cognition, and preserve the relay as response debt.
+- If the peer-side wake path is Monitor-owned, verify the Monitor is bound to
+  the current private session bucket before trusting it. A watcher toast or
+  stale Monitor process is not proof of peer cognition.
+- When this distinction causes a miss or near-miss, bridge a `HEURISTIC_SYNC` or
+  `ROOT_CAUSE` once the peer can receive it, and include the stuck message id,
+  lifecycle state, and wake-path evidence.
+
+What's-next / status-report rule:
+
+- Treat user prompts like `what now?`, `what's next?`, `show roadmap`, `where are we?`, `status?`, `status report`, `what remains?`, `next steps?`, or `what should we do now?` as bridge-coordination prompts when the active work is Agent Bridge, shared wake/routing behavior, or a Claude/Codex paired task.
+- Before answering one of those prompts, reconcile fresh state:
+  - run normal bridge inbox hygiene for the active Codex private bucket and project bucket,
+  - fold any newly surfaced peer status into the answer,
+  - check the active execution task or pending-action ledger if the prompt is asking what Codex should do next.
+- For Agent Bridge work, next-step/status answers are always relayed. After
+  answering the user, send Claude the same decision as `STATUS_DIGEST`,
+  `READINESS_ASSESSMENT`, or `ACTION_REQUEST` whenever the prompt asks what to
+  do next, what remains, what the roadmap is, or what the recommended next step
+  should be.
+- This relay is mandatory even when the recommendation looks local-only,
+  obvious, or already implied by the ledger. The goal is to prevent Claude and
+  Codex from diverging on roadmap priority after the user receives guidance.
+- Concrete Agent Bridge design advice is also mandatory relay traffic. If Codex
+  recommends or revises a setting name, schema shape, enum value, migration
+  rule, default behavior, implementation order, fallback path, or defect
+  remediation plan for Agent Bridge, Codex must send Claude the same
+  recommendation in the same work stretch unless the user explicitly says not
+  to relay it. Do not wait for the user to paste the idea across.
+- This includes brief advisory answers that do not edit files. If the answer
+  would help Claude keep implementation, docs, tests, or roadmap decisions in
+  sync, bridge it as `STATUS_DIGEST`, `SPEC_PROPOSAL`, `READINESS_ASSESSMENT`,
+  or `HEURISTIC_SYNC` as appropriate.
+- The relay must include:
+  - the user-facing recommendation,
+  - the inbox/ledger state used to derive it,
+  - any blocked send/backpressure state,
+  - and whether Claude is expected to act, review, or only stay informed.
+- If backpressure blocks the relay, record the full outbound body in the
+  pending-action ledger before ending the turn and retry when the peer drains.
+- Outside Agent Bridge / paired-thread coordination, only relay next-step
+  answers when they mention:
+  - work Claude completed or is expected to do,
+  - work Codex completed that Claude should account for,
+  - joint roadmap priority,
+  - a next-step recommendation for shared bridge behavior,
+  - a concrete bridge setting/schema/migration/default recommendation,
+  - or any change to which path is considered primary versus fallback.
+- Do not auto-relay purely local status answers that do not mention Agent Bridge, Claude-owned work, shared bridge behavior, or paired-thread coordination.
+- Receipt disposition:
+  - inbound `IMPLEMENTATION_SUMMARY`, `IMPLEMENTATION_UPDATE`, `PHASE_DONE`, `STATUS_DIGEST`, `READINESS_ASSESSMENT`, `ROADMAP_ALIGNMENT`, and `TEST_RESULT` messages are substantive status traffic,
+  - after surfacing them, mark them `handled` once their contents are folded into the current answer, roadmap, or active-task context,
+  - never mark them `ignored` merely because `ACTION_REQUESTED: none` or because they contain words like `status`, `ack`, or `summary`.
+- Only pure wake/timing pings such as `WAKE_TEST`, `Watcher says check bridge inbox`, or empty-inbox keepalive probes may be marked `ignored`.
+- Classify by the top-level message type, subject, and sender intent. Do not
+  mark a substantive message `ignored` merely because its body quotes
+  `WAKE_TEST`, `Watcher says check bridge inbox`, or another ignored-only token
+  as an example.
+- If a status-report answer changes what Codex thinks is next, the next substantive action after the answer must follow that classification: `continue`, `park`, `block`, or `displace`.
+
 Workflow-strategy sync rule:
 
 - If Codex creates or changes a bridge workflow strategy, operating rule, or durable coordination mechanism that Claude should know about, Codex must:
@@ -371,6 +494,40 @@ Waypoint rule:
     - whether inbox was clear,
     - and the currently active bridge-rule digest or equivalent reminder.
 
+Unexpected behavior / log-first rule:
+
+- When a strange bridge issue appears, inspect durable logs before settling on a root cause.
+- Triggers include:
+  - wrong-thread wake or wrong-project routing,
+  - unexpected pairing/supersession,
+  - messages marked delivered/read/handled contrary to what the UI shows,
+  - watcher wake success/failure that contradicts user observation,
+  - any "this should be impossible" behavior.
+- Minimum investigation:
+  - inspect `~/.agent-bridge/session.json` for active sessions, pairs, trusted parent, thread ids, and supersession history,
+  - inspect `~/.agent-bridge/state/messages.jsonl` around the relevant timestamps/session ids/thread ids,
+  - inspect the relevant `inbox-*.jsonl`, `watcher-state.json`, and `implementation-journal.json` when delivery, read/handled state, wake, or implementation sync is involved,
+  - reconstruct a short timeline with concrete timestamps and event names before claiming root cause.
+- Do not rely only on current memory, current UI appearance, or one live process/env sample when historical activity could explain the failure.
+- If logs are unavailable or inconclusive, say so explicitly and label the conclusion as a hypothesis.
+
+Persistent-issue breakthrough rule:
+
+- When Codex, Claude, or the user uncovers a breakthrough on a persistent or recurring bridge issue, share it with the paired peer automatically.
+- A breakthrough includes:
+  - a root-cause invariant that explains repeated failures,
+  - log evidence that overturns the prior theory,
+  - discovery that a safety rule or guard predicate is invalid,
+  - a durable diagnostic technique that would have shortened the investigation,
+  - or a newly proven constraint that changes the roadmap or implementation priority.
+- Send it even if there is no immediate implementation request. Use `ROOT_CAUSE`, `RISK_DELTA`, `HEURISTIC_SYNC`, or `BREAKTHROUGH_FINDING` as appropriate.
+- Include enough evidence for the peer to update its own model:
+  - concrete timestamps or event names when available,
+  - the old assumption,
+  - the corrected invariant,
+  - and the practical consequence for future behavior.
+- This rule is symmetric: if Claude finds such a breakthrough, Codex should receive it; if Codex finds one, Claude should receive it.
+
 Closed-on-send exclusion:
 
 - When summarizing `still in flight`, `open threads`, or `waiting on Claude`, do not include messages whose `ACTION_REQUESTED` is `none`.
@@ -404,10 +561,25 @@ High-value auto-send categories:
   - a score, acceptance judgement, hardening/readiness rating, or 10/10 feasibility analysis that changes what work is considered blocking versus polish
 - `RISK_DELTA`
   - a newly identified live defect, production-risk cap, or test-coverage gap that materially changes the hardening score or next-step priority
+- `BREAKTHROUGH_FINDING`
+  - evidence or a corrected invariant that resolves a persistent/recurrent issue, invalidates a previous theory, or changes how future debugging should proceed
 - `ACTION_REQUEST`
   - a concrete next step the other agent needs to do now
 - `PHASE_DONE`
   - a meaningful milestone ready for peer review
+
+Directory classifier:
+
+- Any commit or substantive implementation checkpoint touching
+  `tools/agent-bridge/` is shared bridge behavior by definition.
+- Do not require a separate semantic classification pass before notifying the
+  peer; the path is the trigger.
+- Before ending the turn after such a checkpoint, send the matching bridge
+  `IMPLEMENTATION_UPDATE`, `SPEC_PROPOSAL`, `READINESS_ASSESSMENT`, or
+  `STATUS_DIGEST`, or record a pending bridge action explaining why the sync is
+  parked.
+- This is a structural backstop against missing cross-agent updates after
+  bridge-internal commits.
 
 Bridge spec discipline:
 
@@ -418,11 +590,65 @@ Bridge spec discipline:
 - When giving or revising a bridge hardening score, smoke-test confidence score, roadmap-readiness judgement, or "can this reach 10/10 yet?" answer, send `READINESS_ASSESSMENT` to Claude automatically.
 - If the assessment names a live defect or a test gap that caps the score, also include `RISK_DELTA` details and whether the item is required for resilience or merely roadmap/config polish.
 - Distinguish current operational confidence from full roadmap completeness; do not collapse "smoke coverage can improve" into "all roadmap phases must be complete" without stating which missing items actually block hardening.
+- When the user asks Codex to evaluate, merge, prioritize, or give "thoughts on"
+  Claude's Agent Bridge roadmap/proposal/review, treat Codex's answer as shared
+  bridge coordination. After answering the user, send Claude the same decision as
+  `READINESS_ASSESSMENT`, `STATUS_DIGEST`, or `SPEC_PROPOSAL` in the same work
+  stretch unless the user explicitly says not to relay it.
 - `PROTOCOL_SYNC` or `PROTOCOL_SYNC_ACK` with `ACTION_REQUESTED` containing both `confirm` and `before` is a synchronous coordination gate.
 - Treat that subclass as reply-required within the normal ack window, not optional background traffic, because the sender is holding its next action behind your confirmation.
 - Do not leave a `confirm ... before ...` gate unanswered while discussing adjacent bridge work.
 - When changing this heuristics file, send `HEURISTIC_SYNC` to Claude and ask whether the same rule is useful on Claude's side.
 - If Codex realizes after the fact that a message should have been bridged, send the missed bridge message immediately, then update this heuristics file in the same turn so the miss becomes an explicit future trigger.
+
+Canonical completion / tandem review rule:
+
+- For Agent Bridge roadmap, security, wake/routing, pairing, dashboard, or
+  hardening work, "done" means the canonical completion standard in
+  `tools/agent-bridge/REFACTOR_PLAN.md`, not just local confidence.
+- Codex must echo and use that standard when the user asks to finalize,
+  certify, score, iterate to 10/10, or complete the Agent Bridge roadmap.
+- Codex must work in tandem with Claude by default:
+  - send `IMPLEMENTATION_START` before material edits,
+  - send `IMPLEMENTATION_UPDATE`, `REVIEW_REQUEST`, or
+    `READINESS_ASSESSMENT` at meaningful checkpoints,
+  - include changed files, tests/run results, failure-path coverage, risks,
+    and open blockers,
+  - verify the outbound row landed before telling the user Claude was notified.
+- Background agents should assist where they materially improve speed, coverage,
+  decomposition, or independent validation. Use them especially for cold review,
+  failure-path review, and stranger scoring of shared bridge changes.
+- Two or more background agents acting as strangers must rate the implementation
+  10/10, or name concrete blockers, before Codex calls the implementation final.
+- Waiting on background agents is an active execution state. If an agent does
+  not return by the first checkpoint, ask that agent for an ETA, record the ETA
+  or missing response in the turn notes/ledger, check back at that ETA, and ask
+  for a renewed ETA if the result is still not ready. Do not yield a final
+  response that merely says "waiting on agents" unless the wait is explicitly
+  classified as blocked/parked and the recoverable state is durable.
+- Claude review is not optional for finalization. If Claude cannot review
+  immediately because of backpressure or context loss, record the full outbound
+  body in the pending-action ledger and classify the item as blocked/parked
+  rather than silently treating the phase as complete.
+- This standard applies to all Agent Bridge implementations, not just final
+  roadmap certification. Small patches can use proportionate tests/review, but
+  still need peer notification, ledger state, and independent stranger review
+  before final closeout.
+- Always iterate roadmap and todo/pending-ledger state so as much safe work as
+  possible is completed without pausing for more user input. After one item is
+  completed, parked, or blocked, immediately continue to the next safe
+  highest-impact item unless the next step requires a non-obvious
+  product/security decision, external credentials, destructive action, or
+  explicit user choice.
+- When implementation is complete, notify Claude for review and iterate change
+  requests until Claude would rate it 10/10. Do the same with two or more
+  background stranger reviewers. If any reviewer names blockers, continue
+  implementation or record the blocker explicitly in the ledger.
+- Final 10/10 status is canonical only when Codex, Claude, two or more
+  background stranger agents, and the user agree.
+- If Codex, Claude, or background stranger reviewers disagree, send or expect
+  `RISK_DELTA`; resolve by code, tests, docs, or explicit user-approved scope
+  change before signoff.
 
 Optional thread-close convention:
 

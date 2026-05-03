@@ -14,12 +14,18 @@ The misroute is one symptom of a broader weakness: **session identity at the row
 ## Implemented Status
 
 Shipped behavior rejects `send_to_peer` calls where `session_id` names the
-sender's session instead of the receiver bucket, preserves the active project
-default-resolution path for omitted sessions, writes v2 row-level routing
+sender's session instead of the receiver bucket, writes v2 row-level routing
 metadata, exposes `target_session_id` as the preferred receiver-bucket name,
 provides `truedup_session_routing` for orphan recovery, and audits bootstrap
 rotation promotion of unread old-session rows. Body-level `FROM_SESSION:` /
 `TO_SESSION:` lines are now advisory; row fields are the routing source of truth.
+
+Follow-up hardening after the 2026-04-30 wrong-thread wake incident disables
+implicit project-bucket fallback for work traffic. `send_to_peer` must now name
+`target_session_id` / `session_id`, `pair_id`, or `sender_session_id` that
+resolves to exactly one active pair. `session.json` schema v3 records active
+pair identities under `projects.<project>.pairs`, and delivered work rows carry
+`pair_id` when resolvable.
 
 ---
 
@@ -82,6 +88,7 @@ Add to all message rows (in `inbox-claude.jsonl`, `inbox-codex.jsonl`):
 |---|---|---|---|
 | `from_session_id` | string (GUID) | yes (v2+) | Sender's active session at queue time |
 | `to_session_id` | string (GUID) or "mlv-app" or null | yes (v2+) | Intended recipient session bucket; null = "any active session for to_agent" |
+| `pair_id` | string or null | yes (v3+) | Active pair identity when resolvable |
 | `from_session_id_kind` | enum | yes (v2+) | `parent` / `subagent` / `unknown` (mirrors bootstrap_origin) |
 
 The existing `session_id` field stays as the **bucket key** for backward compat. The new fields are the **routing intent**.
@@ -157,6 +164,14 @@ A new read-write tool for self-healing orphaned buckets.
 - [ ] Either re-keys them to the new active session (default), OR leaves them with a `superseded_bucket_at` marker; configurable
 - [ ] Sends an internal audit event `bootstrap_rotation_routed_messages` with count
 - [ ] Tests: synthetic inbox with unread rows in old bucket; after rotation, rows are reachable from new active session
+
+### SR8 - Pair-scoped work routing
+
+- [x] `session.json` schema v3 records active pair rows under `projects.<project>.pairs`
+- [x] `send_to_peer(..., pair_id=...)` routes to the exact peer session in that pair
+- [x] `send_to_peer(..., sender_session_id=...)` routes only when that sender maps to exactly one active pair
+- [x] Sessionless work sends are rejected instead of falling back to the project bucket
+- [x] Inbox rows and result data include `pair_id` when the route resolves through a pair
 
 **Note:** Wake-recovery loops (formerly drafted as SR8/SR9 here) have been split into a dedicated spec: see `BRIDGE_WAKE_RECOVERY_LOOPS_SPEC.md` (WR1 backpressure auto-nudge, WR2 user-action breaker bypass, WR3 breaker auto-close drains backlog). Recovery loops are a wake-mechanism concern, not a routing concern; separating keeps each spec audit-able as one cohesive piece.
 

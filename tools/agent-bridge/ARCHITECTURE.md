@@ -9,6 +9,13 @@ Agent Bridge is a local, file-backed message bus used by Claude and Codex to
 handoff work through MCP tools. Its main invariant is simple: durable delivery to
 an inbox is not the same thing as wake, read, or handled completion.
 
+The local `agent_bridge.py check-inbox` CLI is a diagnostic convenience over
+the same on-disk JSONL state. It is local-filesystem scoped: it can only inspect
+the bridge root mounted on the current machine and should be used by an agent
+for its own local inbox hygiene. In future LAN/cloud deployments, the CLI cannot
+reach remote-machine inboxes; cross-machine access belongs to the MCP/transport
+layer, not direct filesystem reads.
+
 ## Product Invariant — Visible Bidirectional Wake
 
 The intended interactive UX for a paired session is:
@@ -52,7 +59,7 @@ is described in `BRIDGE_LAN_TRANSPORT_SPEC.md` (Tier 3) and
 | **session** | A unique GUID identifying one agent's running instance. Sessions are tracked in `session.json`; the most recent for an agent is the "active" peer. |
 | **supersession** | When a newer session for the same agent registers, the older session is marked superseded; bridge auto-redirects sends to the new session. |
 | **tenant** | (Multi-tenant cloud only — forward-compat in v1.) An identity scope; users in different tenants cannot see each other's traffic. Single-machine v1 uses `tenant_id="local-default"`. |
-| **wake** | The mechanism by which a sender's message reaches the receiver's attention. On Claude side today: Monitor (always-on inbox poll) plus a bootstrap reminder until `wake_claude.ps1` exists. On Codex side: `wake_codex.ps1` SendKeys nudge. Wake spawn is not equivalent to delivery. |
+| **wake** | The mechanism by which a sender's message reaches the receiver's attention. On Claude side today: Monitor (always-on inbox poll) plus a bootstrap reminder; `wake_claude.ps1` is diagnostic-only and refuses SendKeys until Claude Desktop exposes a verified thread-addressable target. On Codex side: `wake_codex.ps1` SendKeys nudge. Wake spawn is not equivalent to delivery. |
 
 ## Components
 
@@ -65,13 +72,38 @@ is described in `BRIDGE_LAN_TRANSPORT_SPEC.md` (Tier 3) and
 | `core/addressing.py` | Typed address/message/sender models used by contract tests and routing seams. |
 | `core/routing.py` | Pure routing resolver for active/superseded/project/agent-level decisions. |
 | `core/processes.py` | Process liveness, command hashing, role leases, heartbeats, and safe release. |
-| `core/settings.py` | Constrained `%USERPROFILE%\.agent-bridge\settings.json` loader and validation. |
+| `core/settings.py` | Constrained `<bridge-root>\settings.json` loader and validation. |
 | `bootstrap_session.py` | Session activation, previous-session drain, handshake, watcher config refresh, and watcher start. |
 | `watcher.py` | Singleton file watcher and wake dispatcher. It notifies only; it must not consume inbox messages. Private entries can resolve the current active session from `session.json`; helper-backed wake paths are receipt-verified before being recorded as seen. |
 | `configure_watcher.py` | Transactional watcher config writer with parent-thread guardrails. |
 | `wake_codex.ps1` | Codex Desktop wake helper. It is a wake trigger, not proof of delivery. |
 | `compact.py` | Inbox retention, audit rotation, and stale MCP server marker reaping. |
 | `recover_state.py` | Dry-run-first state validator and backup-before-repair tool. |
+
+## Claude Monitor Lifecycle
+
+Claude's current wake path is the in-process Monitor running inside a single
+Claude context window. It polls the Claude inbox, surfaces new bridge messages
+to that conversation, and relies on the agent to call `check_inbox` /
+`mark_read` / `mark_handled` in the same visible chat.
+
+The Monitor is not a daemon and does **not** survive context compaction. After
+a compaction, rollover, or fresh Claude session start, the session bootstrap
+must restart or confirm the Monitor before Codex-to-Claude delivery should be
+treated as visible. If the Monitor is not running, messages remain durable in
+the inbox, but the user may see no Claude-side notification until a new turn
+checks the inbox or the Monitor is restarted.
+
+This asymmetry is intentional in v1: the Codex side has watcher-owned wake
+dispatch, while Claude still depends on the per-context Monitor. A
+diagnostic-only `wake_claude.ps1` exists to make the boundary explicit, but it
+refuses SendKeys because Agent Bridge does not yet have a verified mapping from
+bridge session to Claude Desktop conversation id plus post-deeplink DOM
+certification. `claude://` routes exist, but empirical probing showed
+`claude://claude.ai/new` navigates the user's current Claude Desktop window
+rather than opening an isolated wake target. Treat Claude deeplinks as
+potentially disruptive until a safe conversation-id mapping and visible-target
+verification contract ships.
 
 ## Protocol Planes
 
@@ -88,9 +120,42 @@ callers still need them.
 ## Settings
 
 Runtime settings are optional and live at
-`%USERPROFILE%\.agent-bridge\settings.json`. If the file is absent, defaults from
+`<bridge-root>\settings.json`. If the file is absent, defaults from
 `core/settings.py` apply. Unsupported keys are rejected so the settings surface
 stays intentionally small; see `SETTINGS.md` for the canonical list.
+
+## Workflow Guardrails
+
+Agent workflow behavior is split into mandatory invariants and configurable
+preferences. `WORKFLOW_GUARDRAILS_SPEC.md` is the canonical source.
+
+Mandatory guardrails protect delivery truth, receipt state, wrong-thread wake,
+privacy, and shared-agent coordination. They must not have normal user-facing
+disable switches. Examples include explicit read/handled separation,
+`ACTION_REQUEST` disposition, no silent inbox failure, no silent consumption by
+watcher/bootstrap/hooks/compaction, constant wake payloads, log-first
+investigation, peer relay for shared bridge decisions, review-loop closeout
+handoffs, and the 10/10 review routine.
+
+For Desktop wrong-thread prevention, read-only UIA sidebar/active-chat-title
+enumeration is treated as an identity check, not a wake/write primitive. It can
+verify the visible project/chat before `targeted_sendkeys` without activating
+the window; SetFocus remains a write-side operation and may steal foreground.
+
+Configurable preferences tune cadence, noise, UX, and autonomy where failure is
+visible and reversible: wake provider, reminder timing, toast retention,
+pairing defaults, mirror aggressiveness, status format, bounded backpressure,
+and catch-up digest verbosity.
+
+Enforcement is tiered:
+
+| Tier | Meaning |
+|---|---|
+| Tier 1 | Structural code/schema/process enforcement makes skipping hard. |
+| Tier 2 | Tools and hooks exist, but agents must call or heed them. |
+| Tier 3 | Documented norms that still need stronger enforcement. |
+
+Tier 2 and Tier 3 mandatory items are roadmap gaps, not optional behavior.
 
 ## Receipt Lifecycle
 
@@ -127,7 +192,7 @@ Three process roles, one machine:
 |---|---|---|---|
 | **bridge-d** | `watcher.py` (today; will gain responsibilities) | Yes (per state-dir) | Inbox polling, wake dispatch, presence layer computation, peer breadcrumb consumption, audit log writes (compaction, supersession events), pending-queue management |
 | **MCP server** | `server.py` subprocesses, one per MCP client | No (multiple OK) | Hosts the FastMCP tool surface (`check_inbox`, `send_to_peer`, etc.) for one specific MCP client. Each connection is stdio-only. |
-| **Wake helper** | `wake_codex.ps1` (Codex direction); future `wake_claude.ps1` (Claude Desktop direction) | No (short-lived) | OS-side keystroke injection into the desktop app's chat; fire-and-forget per message |
+| **Wake helper** | `wake_codex.ps1` (Codex direction); `wake_claude.ps1` diagnostic boundary (Claude direction) | No (short-lived) | Codex: OS-side keystroke injection into the verified Desktop thread. Claude: fail-closed diagnostic until a thread-addressable target exists. |
 
 In v2 (LAN), `bridge-d` adds a peer-sync responsibility: bidirectional
 WebSocket / HTTP to peer-d on other machines, replicating inbox rows + receipt
@@ -144,8 +209,11 @@ The transport plug-in surface is described in
 
 ## Presence Model
 
-"Is the peer there?" is not a single boolean. The bridge tracks ten
-independent presence layers per agent (see `BRIDGE_PRESENCE_SPEC.md`):
+"Is the peer there?" is not a single boolean. The full multi-layer presence
+runtime is still design work in `BRIDGE_PRESENCE_SPEC.md`. Current v1 behavior
+computes and surfaces only a subset through session registry state, watcher
+leases, peer breadcrumbs, receipts, health-panel diagnostics, and process
+markers. The target model tracks ten independent presence layers per agent:
 
 1. **os_process** — agent executable running, owned by current user
 2. **bridge_bootstrap** — agent has an active session in registry
@@ -158,11 +226,11 @@ independent presence layers per agent (see `BRIDGE_PRESENCE_SPEC.md`):
 9. **active_pairing** — handshake ack'd; cross-project link not expired
 10. **receptive** — recent inbox-check activity; not stuck in long task
 
-Presence is computed by bridge-d before each wake fire and cached in
-`presence-<agent>.runtime.json` with a 30s TTL. The watcher reads the cache,
-computes a watcher exit code (0-10), and routes the wake decision based on
-which layer is failing. See `BRIDGE_PRESENCE_SPEC.md` for the full
-detection table, decision matrix, and exit code semantics.
+Future bridge-d work will compute these layers before each wake fire and cache
+them in `presence-<agent>.runtime.json` with a 30s TTL. Until that runtime
+exists, do not treat `presence-<agent>.runtime.json` or the full exit-code
+matrix as implemented evidence; use current health-panel, watcher, receipt,
+session, and breadcrumb diagnostics instead.
 
 ## Wake Flow (end-to-end sequence)
 
@@ -173,8 +241,8 @@ sender                    bridge-d                      receiver
   ├─────────────────────────►│                              │
   │  (MCP server route)      │                              │
   │                          │                              │
-  │                          │  read presence-<peer>.runtime.json
-  │                          │  (compute if cache stale)
+  │                          │  read session/breadcrumb/receipt state
+  │                          │  (future: presence runtime cache)
   │                          │
   │  (returns route id)      │  if overall=critical:
   │◄─────────────────────────┤    refuse, return reason
@@ -209,11 +277,13 @@ therefore keeps helper-backed wake attempts in `watcher-state.json` as
 pending until the target inbox row gains `seen_at` or `read_at`.
 
 Codex wake is not equivalent to Claude Monitor. Claude Monitor is scoped to
-the active Claude conversation. Codex wake is only thread-scoped when the
-protected parent thread id is configured and the `codex://threads/<id>`
-navigation succeeds; otherwise it is an active-window SendKeys helper and
-can target the wrong Codex chat (the failure mode `BRIDGE_PRESENCE_SPEC.md`
-exit code 6 is meant to catch).
+the active Claude conversation and must be restarted after compaction or a new
+Claude session start. Codex wake is only thread-scoped when the protected parent
+thread id is configured and the `codex://threads/<id>` navigation succeeds;
+the default `targeted_sendkeys` path requires that thread identity and fails
+closed when it cannot verify it. The old active-window broad SendKeys behavior
+is retained only as the unsafe `wake_provider="sendkeys"` debug/legacy mode and
+must not be used for normal pairing.
 
 If no receipt appears after the grace period, the watcher retries per
 `WAKE_MAX_RETRIES`. After the retry limit, it writes a
@@ -237,7 +307,7 @@ Cross-references the `BRIDGE_PRESENCE_SPEC.md` exit codes. Each row maps
 | active_pairing expired/revoked | 9 | Mark seen; surface immediately | "Link expired/revoked; re-pair to send" |
 | receptive busy | 10 | Defer; drain on next inbox-check | "Peer busy; deliver when free" |
 | bridge_d missing | (n/a — local-only failure) | Operator dashboard surfaces | "Receiver's bridge daemon offline" |
-| mcp_server missing | (n/a — local-only) | Wrapper Phase 2 supervisor restarts | "MCP connection lost; auto-reconnecting" |
+| mcp_server missing | (n/a - local-only) | Health/process diagnostics report tool-access risk; Desktop host may need reconnect/restart | "MCP connection lost; reconnect may be required" |
 | peer_breadcrumb stale | 1 (degraded) | Best-effort wake; trigger handshake refresh | "Pairing data outdated; reconciling" |
 
 ## Recovery Model

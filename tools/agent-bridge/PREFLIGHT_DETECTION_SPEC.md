@@ -75,7 +75,11 @@ wake_codex.ps1 stages 4-5 (foreground activation + SendKeys). It is a
 - The owning session is superseded during the pre-flight wait.
 
 Receipt semantics: pre-flight does not mutate `seen_at` or `read_at`. Only
-the normal wake / receipt path proves delivery.
+the normal wake / receipt path proves delivery. Watcher-level policy
+decisions that skip pre-flight entirely (for example, breaker-open
+suppression or wrong-project refusal) may mark a message seen only as an
+audited policy outcome; that is outside the pre-flight boundary and must not
+be described as pre-flight proof of delivery.
 
 ## State Machine
 
@@ -203,7 +207,9 @@ save/restore dance (nothing to lose).
 Immediately before paste (after pre-flight stability achieved or cap
 forced), re-verify:
 - Target Codex window handle still exists.
-- Window title still matches the expected project / thread marker.
+- Runtime breadcrumb / active session / configured `desktop_thread_id` still
+  match the expected project and thread. Window title text is non-authoritative
+  and may be logged as diagnostic context only.
 - Owning bridge session still active (not superseded).
 - Bridge not paused.
 - Runtime breadcrumb still names the expected `desktop_thread_id`.
@@ -263,6 +269,14 @@ watcher poller) proves delivery. A pre-flight that defers all the way to
 hard-cap-then-paste still relies on the existing receipt loop to mark the
 message handled.
 
+The watcher is allowed to record `seen_at` for explicit non-delivery policy
+outcomes that happen before pre-flight starts, such as breaker-open
+suppression, wrong-project refusal, expired pairing, or authorization refusal.
+Those events must carry their own audit action (for example
+`wake_skipped_breaker_open` or `wake_skipped_wrong_project`) and do not weaken
+the pre-flight rule: the pre-flight script/helper itself never mutates receipt
+fields.
+
 ## Test Requirements
 
 Required tests (PowerShell + python-side):
@@ -278,7 +292,9 @@ Required tests (PowerShell + python-side):
 - **2-consecutive-stable for urgent:** urgent priority + single-poll
   stability does NOT transition; 2-poll stability does.
 - **stale-context abort:** between pre-flight start and paste, change the
-  Codex window title → abort, audit, message stays unread.
+  runtime breadcrumb/session/thread identity → abort, audit, message stays
+  unread. A title mismatch by itself is diagnostic only and must not be the
+  authority for aborting or proceeding.
 - **breaker-opens defer:** breaker opens during pre-flight wait → defer
   cleanly, no force-paste.
 - **clipboard-unavailable:** mock `GetDataObject` to throw → fall through

@@ -4,9 +4,14 @@ Local MCP bridge for opt-in handoffs between Claude Desktop and Codex Desktop.
 
 Canonical docs:
 
+- `USER_GUIDE.md` - user-facing setup, daily workflow, wake modes, and troubleshooting.
 - `ARCHITECTURE.md` - current component model, protocol planes, receipts, process ownership, and recovery flow.
-- `STATE_LAYOUT.md` - durable files under `%USERPROFILE%\.agent-bridge`.
-- `SETTINGS.md` - supported `%USERPROFILE%\.agent-bridge\settings.json` runtime tuning surface.
+- `STATE_LAYOUT.md` - durable files under the configured bridge root
+  (default `%USERPROFILE%\.agent-bridge`).
+- `SETTINGS.md` - supported `<bridge-root>\settings.json` runtime tuning surface.
+- `WORKFLOW_GUARDRAILS_SPEC.md` - mandatory vs configurable agent workflow/reminder behavior.
+- `DOM_TELEMETRY_USE_CASE_CATALOG.md` - read-only UI/DOM telemetry use cases,
+  overhead hypotheses, privacy rules, and investigation plan.
 - `RUNTIME_RELOAD.md` - when MCP clients must be restarted to pick up bridge code changes.
 - `DEAD_CODE_DECISIONS.md` - explicit keep/wire/archive calls for ambiguous bridge helpers.
 - `REFACTOR_PLAN.md` - approved v1.1 roadmap and acceptance criteria.
@@ -99,15 +104,32 @@ For scheduled polling, use `peek_inbox` instead of `check_inbox`. `peek_inbox` i
 Use `list_pending_receipts(limit=50, offset=0)` for bounded stuck-message
 diagnostics; it returns receipt summaries with truncated previews. Use
 `message_status(id)` to inspect a single message in full.
+Use `bridge_health_panel(agent="codex", include_extended=true, format="markdown")`
+for the single-glance bridge health snapshot. The snapshot includes
+`recommended_actions` and a `recovery_hint`; the markdown view renders the next
+safe command directly. If it reports stale unread wake gaps, run
+`stale_unread_watchdog(agent="codex")` to inspect wake-delivered messages that
+were never read; pass `rearm=true` only when you want the watcher to nudge
+those message ids again.
+Use `dashboard_overview(agent="codex", format="markdown")` for the local admin
+view that combines health recommendations, pairings, contracts, pending
+actions, and remote-authority rejection counts.
+Use `receipt_debt_cleanup(agent="codex")` for a conservative receipt-debt
+report that groups read-without-seen, old-unread, and stale-unread rows. It is
+dry-run by default. With `apply=true`, it only backfills `seen_at` for rows that
+were already read; add `rearm_stale_unread=true` to let normal watcher retry
+re-nudge stale unread ids. It never marks old unread messages read.
 Use `record_pending_bridge_action(...)` when you need to mark a surfaced bridge
 message read but defer the actual follow-up until after the current work
 checkpoint. `list_pending_bridge_actions(...)` shows the durable follow-up
 ledger, and `resolve_pending_bridge_action(id)` closes an item after the reply,
 review, or implementation follow-up is complete.
 
-Runtime state and audit logs live under `%USERPROFILE%\.agent-bridge\state`.
-The active cross-chat session registry lives at `%USERPROFILE%\.agent-bridge\session.json`.
-Runtime settings, when present, live at `%USERPROFILE%\.agent-bridge\settings.json`.
+Runtime state and audit logs live under `<bridge-root>\state`.
+The active cross-chat session registry lives at `<bridge-root>\session.json`.
+Runtime settings, when present, live at `<bridge-root>\settings.json`.
+The default bridge root is `%USERPROFILE%\.agent-bridge`, but new setup and
+Desktop MCP configs should pass an explicit absolute `--bridge-root`.
 Copy `tools\agent-bridge\settings.example.json` as a starting point; unsupported
 keys are rejected so the settings surface stays intentionally small.
 
@@ -125,14 +147,14 @@ Use `bootstrap_session.py` to perform the startup handoff sequence:
   active private GUID plus the rendezvous/control-plane session.
 
 ```powershell
-py -3 tools\agent-bridge\bootstrap_session.py --state-dir %USERPROFILE%\.agent-bridge\state --agent claude --cwd <project-root> --previous-session-id <previous-guid>
+py -3 tools\agent-bridge\bootstrap_session.py --bridge-root <bridge-root> --agent claude --cwd <project-root> --previous-session-id <previous-guid>
 ```
 
 To refresh a static watcher config independently of bootstrap, use
 `configure_watcher.py`:
 
 ```powershell
-py -3 tools\agent-bridge\configure_watcher.py --config %USERPROFILE%\.agent-bridge\watcher-config.json --state-dir %USERPROFILE%\.agent-bridge\state --agent codex --cwd <project-root>
+py -3 tools\agent-bridge\configure_watcher.py --bridge-root <bridge-root> --agent codex --cwd <project-root>
 ```
 
 Use `send_control_message` for control-plane traffic such as `HANDSHAKE`,
@@ -142,9 +164,12 @@ being blocked by the normal one-unread work-message rule.
 
 Wake paths for inbox notification:
 
-- **Claude**: persistent in-process `Monitor` (started at session bootstrap; reads
-  `inbox-claude.jsonl` and surfaces unread messages into the next turn). No
-  external wake script needed.
+- **Claude**: per-context in-process `Monitor` (confirmed after session
+  bootstrap; reads `inbox-claude.jsonl` and surfaces unread messages into the
+  current Claude conversation). It does not survive compaction or a fresh
+  Claude session. Bootstrap emits the reminder; the Monitor itself must be
+  started or confirmed in the active Claude context. No broad external SendKeys
+  wake script is safe today.
 - **Codex**: managed watcher entries now prefer
   `on_message_command_template` over a fully inlined wake command. At fire
   time the watcher resolves placeholders from the active peer runtime
@@ -159,9 +184,7 @@ Wake paths for inbox notification:
   Codex then runs a turn, calls `check_inbox`, surfaces and handles the
   message. The title-marker verification experiment was removed after it
   failed closed on this Windows host; authoritative pairing now comes from
-  direct thread navigation plus the peer breadcrumb. Legacy inline
-  `on_message_command` entries remain supported temporarily as a migration
-  buffer.
+  direct thread navigation plus the peer breadcrumb.
 
 Both wake paths are event-driven and zero-cost while idle, but they are not
 equally strong: Claude Monitor is chat-scoped, while Codex wake depends on the
@@ -189,10 +212,16 @@ each agent inside its normal `check_inbox` flow — there is no longer a
 separate watcher/consumer step for it. The previous `consume_inbox.py` helper
 is retained only as a CLI diagnostic; do not wire it into the watcher path.
 
-## Active Session Supersede
+## Legacy Active Session Supersede
 
-When a new Claude or Codex chat starts while an older same-agent chat is still
-open, call `activate_session` for the new chat's GUID:
+Normal users should prefer guided pairing (`start_guided_pairing` /
+`confirm_guided_pairing`) so a new same-project chat starts as pending or
+background unless the user explicitly promotes it. Direct `activate_session`
+is a low-level/legacy path for bootstrap, tests, and intentional active-primary
+takeover.
+
+When a new Claude or Codex chat must intentionally become active while an older
+same-agent chat is still open, call `activate_session` for the new chat's GUID:
 
 ```text
 activate_session(agent="claude", session_id="<new-guid>", project="mlv-app")

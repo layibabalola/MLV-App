@@ -19,17 +19,18 @@ provenance, trusted-parent drift refusal, and rollback/freeze paths.
 BP11 is resolved for v1 by explicit scope boundary, not by code symmetry:
 Claude-side wake/provenance enforcement requires a verified Claude Desktop
 thread deeplink and a reliable way to distinguish parent Claude chats from
-Claude subagents. This tree does not contain a shipped `wake_claude.ps1`, and
-the existing specs still mark `claude://threads/<id>` as unverified. Until that
-surface exists, Claude remains protected by MCP/session routing, receipts,
-backpressure, process supervision, and human/manual foreground use rather than
-automatic desktop wake injection.
+Claude subagents. The shipped `wake_claude.ps1` is diagnostic-only and refuses
+SendKeys by default; the existing specs still mark `claude://threads/<id>` as
+unverified. Until that surface exists, Claude remains protected by MCP/session
+routing, receipts, backpressure, process supervision, and human/manual
+foreground use rather than automatic desktop wake injection.
 
 Accepted v1 risk: Codex cannot automatically wake and provenance-verify Claude
 Desktop cold-start chats with the same strength now used for Codex Desktop.
-Mitigation: keep `wake_claude.ps1` and Claude parent-only wake targeting as a
-future feature request/Phase D item; do not invent an unverified SendKeys path
-that could recreate the wrong-chat class on Claude.
+Mitigation: keep real Claude parent-only wake targeting as a future feature
+request/Phase D item; retain `wake_claude.ps1` as a fail-closed diagnostic
+boundary and do not invent an unverified SendKeys path that could recreate the
+wrong-chat class on Claude.
 
 ---
 
@@ -109,6 +110,34 @@ If both env vars are set AND differ, `bootstrap_origin = "subagent"` (high confi
 ### Signal D (MCP context tag)
 
 **MCP server connection metadata.** Future: if the bootstrap call originated from an MCP server subprocess that was tagged with sub-agent context, refuse. Requires Codex Desktop to expose a "connection tag" field in MCP setup. Not implementable today.
+
+### Signal E (defensive UI-title/content heuristic)
+
+**Chat title/content markers.** A spawned Codex agent thread may expose UI text
+such as `spawned agent thread` and the generated agent nickname in the chat
+title. Treat this as a defensive deny signal only:
+
+- If visible title/content contains `spawned agent thread`, refuse
+  `active_primary` promotion.
+- If visible title/content contains a known spawned-agent nickname or id that
+  the parent recorded at spawn time, refuse `active_primary` promotion.
+- If the title does not match, do **not** infer parent safety. Users can rename
+  chats, title generation may change, and normal user-created threads can
+  coincidentally contain similar words.
+
+### Incident note: 2026-05-01 subagent pairing aggression
+
+Historical Agent Bridge logs showed the dangerous failure mode directly. Two
+Codex side/spawned threads were classified as `parent`, then promoted via
+`bootstrap_trusted_parent_drift_auto_superseded` because the existing trusted
+parent's bootstrap PID was no longer alive.
+
+That predicate is invalid in the current architecture: `bootstrap_session.py` is
+a short-lived helper, so a dead bootstrap PID is normal and must not be treated
+as evidence that the parent thread is gone. Trusted-parent thread drift must be
+refused unless there is an explicit repair/pair command, a valid rollover flow,
+or a stronger parent-proof signal. PID liveness may still be diagnostic context,
+but it must not authorize auto-supersession by itself.
 
 ### Combined detection logic
 
@@ -407,10 +436,10 @@ v1.6 → v1.7 with exit code 11, new audit events, new message types (`ROUTE_REP
 ### Phase BP.6 — Symmetric Claude implementation
 
 Scoped out of v1 until Claude Desktop exposes a verified thread-addressable
-wake surface and parent/subagent provenance signal. Do not implement a
-best-guess SendKeys-only `wake_claude.ps1`; it would be weaker than the Codex
-parent-thread path and risks reintroducing wrong-chat injection on the Claude
-side.
+wake surface and parent/subagent provenance signal. `wake_claude.ps1` is
+diagnostic-only and exits fail-closed; do not implement a best-guess
+SendKeys-only Claude wake because it would be weaker than the Codex parent-thread
+path and risks reintroducing wrong-chat injection on the Claude side.
 
 ### Phase BP.7 — Codex Desktop / Claude Code feature requests
 

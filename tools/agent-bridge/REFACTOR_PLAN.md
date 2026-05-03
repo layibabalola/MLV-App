@@ -1,6 +1,41 @@
 # Agent Bridge Refactor — Canonical Plan v1.1
 
-**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, and cross-project pairing MVP. Deeper service extraction, property tests, full concurrency stress coverage, health-panel UI, cross-project file read/write tools, knowledge-sharing contracts, policy-authority/doc-drift controls, guided pairing/admin dashboard UX, Tier-2 transport/tenant/schema/auth work, and final security validation remain follow-up work.
+**Status:** Approved by Claude and Codex (2026-04-28). Baseline hardening has shipped across contracts, receipts/status, import-safe MCP, watcher leases, receipt-verified wake retry, explicit bucket tools, recovery diagnostics, Codex wake-storm prevention, provenance/wrong-chat defense, component supervision, WR1-WR3 wake recovery loops, session-routing remainder, cross-project pairing MVP, knowledge-sharing/policy-authority spec closures, initial Tier-2 local auth/transport/schema seams, remote-obedience classification, dynamic watcher active-session binding, Claude bootstrap Monitor guardrails, pairing-intent gating, explicit ephemeral relays, non-primary session caps, PREFLIGHT wake safety in `wake_codex.ps1`, local dashboard backend surfaces, `bridge_health_panel` MVP, health-panel recommended remediation actions, stale-unread watchdog/rearm, receipt-debt cleanup/migration, CR Wave 1 cross-process storage locks / unique temp files / JSONDecodeError guards, a localhost token/CSRF dashboard server, same-project guided-pairing backend v1, dashboard status surfaces for catch-up / contract reauth / policy-doc drift, a fail-closed diagnostic `wake_claude.ps1` boundary, Phase 13 configurable-root closure, bounded Hypothesis/property routing coverage, a concurrent project-send harness, a Phase 17 local-v1 security review snapshot, and a workflow guardrails spec that separates mandatory invariants from configurable workflow preferences. Deeper service extraction, cross-project file read/write tools, richer guided pairing/dashboard UI, catch-up preview/policy drift proposal UI, optional live Desktop targeted-wake dogfood, stronger stop-time enforcement for mandatory workflow guardrails, and a real thread-addressable Claude wake primitive remain follow-up work.
+
+**Status checkpoint (2026-05-01 14:05 America/Chicago):**
+- User explicitly confirmed the current Codex Desktop thread as the active pair
+  target. The exact session ids, pair id, and Desktop thread id are runtime
+  state and belong in bridge state/audit artifacts, not the durable roadmap.
+- The health panel and stale-unread watchdog are now explicit roadmap items and shipped as code: `bridge_health_panel` reports old/stale unread debt, `stale_unread_watchdog` can detect and optionally rearm delivered-but-unread wake gaps, and both are exposed through the MCP server.
+- Verification: focused health/watchdog tests passed, and the full Agent Bridge unit suite passed locally (`167 tests OK`). `psutil` is now in `requirements.txt` and installed in the local Python runtime used for live diagnostics.
+- Live state after cleanup: stale server PID markers were compacted, the watcher was restarted for `signature_changed`, and bridge health improved from `broken` to `degraded`. Remaining degradation is real receipt/inbox debt, not stale process-marker noise.
+- Subagent pairing-aggression finding: chat/audit logs showed side/spawned Codex threads were classified as `parent` and then promoted by `bootstrap_trusted_parent_drift_auto_superseded` because the previous trusted parent's bootstrap PID was dead. That predicate is invalid because `bootstrap_session.py` is intentionally short-lived; a dead bootstrap PID is normal and must not prove the parent thread is gone. Future fixes must refuse trusted-parent thread drift unless an explicit repair/pair command, valid rollover flow, or stronger parent proof exists. UI title text such as `spawned agent thread` can be an extra defensive heuristic, not an authority.
+- Receipt-debt cleanup/migration shipped on 2026-05-01 15:06 America/Chicago: `receipt_debt_cleanup(...)` reports read-without-seen, old-unread, and stale-unread debt; dry-run is default; apply mode only backfills `seen_at` for already-read rows and optionally rearms stale wake ids. Verification: focused receipt/health tests passed, one full suite run hit a transient localhost dashboard connection abort, rerun passed (`169 tests OK`).
+- Health panel productization shipped on 2026-05-01 15:14 America/Chicago: `bridge_health_panel` now returns `recommended_actions` and `recovery_hint`; health/dashboard markdown renders the next safe command; docs state mutating recovery recommendations are hints with rejected/no-op/partial failure paths. Verification: focused health/dashboard tests passed; full suite passed (`171 tests OK`).
+- Claude Monitor self-healing slice AC79-82 shipped on 2026-05-02: `bridge_monitor_poll.py` writes `monitor-claude-<session>.runtime.json`, bootstrap classifies missing/stale/misbound Monitor evidence and emits the exact repair command, health/dashboard surfaces `CLAUDE_MONITOR_STALE` / `CLAUDE_UNREAD_WITHOUT_MONITOR` with stuck ids, and the watcher escalates old unread Claude work without marking it read. Verification: full Agent Bridge suite passed (`235 tests OK`).
+- CR Wave 1 shipped on 2026-05-01 15:25 America/Chicago: shared storage helpers now use per-file cross-process directory locks, per-process/thread/uuid temp files, and corrupt-JSON-safe reads where appropriate; watcher hot paths use the locked storage helpers for inbox reads, watcher-state writes, wake audit, and wake breaker state; watcher refreshes/merges `seen_ids` from disk to preserve rearm/concurrent state changes. Verification: focused process-writer/watcher tests passed; one full suite run hit the known transient localhost dashboard abort, rerun passed (`175 tests OK`).
+- DR Wave 1 shipped on 2026-05-01 15:34 America/Chicago: documentation contradictions DR-A1, DR-A2, and DR-A11 were resolved. `PREFLIGHT_DETECTION_SPEC.md` now treats window title text as diagnostic-only, separates watcher-layer seen/policy outcomes from pre-flight receipt rules, and tests stale-context via breadcrumb/session/thread identity. `ARCHITECTURE.md` and `USER_GUIDE.md` now state Claude Monitor is per-context, does not survive compaction, and must be restarted/confirmed after session rollover.
+- MCP reconnect validation shipped on 2026-05-01 15:43 America/Chicago: process health now classifies MCP wrapper relaunches separately from inner `server.py` hot-reloads, reports whether post-launch tool activity suggests the host recovered, degrades health on `tool_access_risk` / `client_reconnect_likely_required`, and documents the stdio limitation that a detached wrapper cannot repair an already-broken host pipe. The full discovery suite exposed and fixed an adjacent wake-receipt invariant bug: successful wake retries remain pending until `seen_at` / `read_at` appears instead of being added to watcher `seen_ids`. Verification: wrapper validation tests passed; full Agent Bridge discovery passed (`214 tests OK`).
+- App-native heartbeat wake smoke ran on 2026-05-01 21:30 UTC: Codex Desktop
+  injected a visible `Sent via automation` turn into the paired thread, checked
+  the old Codex private session plus `mlv-app`,
+  found both empty, and the one-shot automation was deleted. This proves
+  same-thread app-native heartbeat wake viability. The visible transcript is a
+  product affordance for interactive pairing because the user can see wake,
+  inbox check, and disposition in chat; remaining productization questions are
+  cadence limits, cost, lifecycle cleanup, and how it coexists with
+  targeted-sendkeys/app-server wake providers.
+- Silent CLI failure remediation shipped on 2026-05-01 17:12 America/Chicago:
+  the local `agent_bridge.py check-inbox` command now has a real argparse
+  entrypoint, JSON output, and nonzero rejection path. `codex_pre_response.ps1`
+  and `codex_pre_final.ps1` now act as canaries by probing
+  `agent_bridge.py check-inbox --help` before printing reminder state, so a
+  future no-op CLI regression fails loudly instead of being mistaken for an
+  empty inbox. The same hardening pass replaced direct reminder-log
+  `Add-Content` calls with bounded retry plus visible diagnostics, after the
+  canary uncovered transient log-file contention. This incident also added the
+  no-silent-success process rule to `bridge_trigger_heuristics.md`.
+- Current stranger-agent score is improved but not 10/10. Remaining blockers are AgentBridge facade/service extraction, cross-project guided dashboard polish, catch-up preview/policy drift proposal UI, optional live Desktop targeted-wake dogfood for broad distribution, and a real Claude thread-addressable wake primitive if Anthropic exposes one.
 
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
 - Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
@@ -39,6 +74,61 @@ A 10/10 implementation is:
 - honest about what is delivered, seen, read, and handled
 - safe around sub-agents and multiple Codex/Claude sessions
 - documented only where behavior is actually shipped
+
+---
+
+## Canonical Completion Standard
+
+This is the user-defined standard for calling any Agent Bridge implementation,
+roadmap item, or hardening phase finished. It is stronger than "tests passed"
+and stronger than one agent's confidence score.
+
+1. Every roadmap acceptance item is either implemented or explicitly removed
+   from scope by user + Codex + Claude agreement.
+2. Codex iterates locally until its own `READINESS_ASSESSMENT` is 10/10 or it
+   names concrete blockers.
+3. Codex sends Claude the test matrix, failure-path coverage, score, changed
+   files, remaining risks, and any explicit scope exclusions.
+4. Claude independently reviews the same implementation, using its own
+   stranger/cold-review or failure-path pass, until Claude also rates the work
+   10/10 or names concrete blockers.
+5. Two or more background agents acting as strangers independently review the
+   implementation and must rate it 10/10, or name concrete blockers, before the
+   work can be called final.
+6. Any Codex/Claude/background-agent disagreement becomes `RISK_DELTA` and is
+   resolved by code, tests, docs, or explicit user-approved scope change before
+   final signoff.
+7. The final hardening/readiness status is canonical only when Codex, Claude,
+   two or more background stranger agents, and the user all agree.
+
+This standard applies to every Agent Bridge implementation checkpoint, not just
+the final roadmap closeout. Small changes may use a proportionate test matrix,
+but they still require explicit peer notification, ledger state, and independent
+review before being called complete.
+
+Roadmap and todo/ledger iteration are part of the standard. After completing or
+parking one item, Codex should immediately choose the next safe highest-impact
+roadmap, todo, or pending-ledger item and continue working without waiting for
+another user prompt, unless the next step requires a non-obvious product/security
+decision, external credentials, destructive action, or explicit user choice.
+
+When an implementation reaches a checkpoint, Codex notifies Claude for review
+and iterates on Claude change requests until Claude would rate the work 10/10.
+Codex also uses two or more background stranger reviewers and iterates on their
+change requests until they would rate the work 10/10, or records the named
+blockers in the ledger.
+
+When Codex is waiting on background agents, "waiting" is an active state, not a
+place to stop. Codex must either keep doing non-overlapping work or block on the
+agent result. If a reviewer does not return at the first checkpoint, Codex asks
+that agent for an ETA, records the ETA or lack of response, checks back at the
+ETA, and requests a renewed ETA before yielding again.
+
+Implementation must be tandem by default. For shared Agent Bridge work, Codex
+sends Claude `IMPLEMENTATION_START` before material edits, then sends
+`IMPLEMENTATION_UPDATE`, `REVIEW_REQUEST`, or `READINESS_ASSESSMENT` at each
+meaningful checkpoint. Claude should be able to review while implementation is
+still fresh, not only after a final closeout.
 
 ---
 
@@ -236,6 +326,70 @@ Test pyramid around the new seams.
 - `message_status` and `bridge_process_status` are first-line diagnostics
 - Structured logs for routing, wake attempts, leases, migrations, recovery
 
+### Release hardening follow-up — startup, reconnect, and field resilience
+
+This is a release hardening track for the current wrapper-plus-child architecture.
+It does not change the architectural direction; it validates and hardens the
+startup/reconnect path so routine bridge use should not require Claude Desktop
+restarts in the field.
+
+- Hammer cold-start and reconnect paths repeatedly until `initialize`,
+  `tools/list`, and first real tool call are consistently prompt across many
+  consecutive runs.
+- Add a repeatable validation matrix for:
+  - cold Claude start with healthy bridge
+  - reconnect after prior MCP timeout/failure
+  - wrapper alive while child `server.py` restarts
+  - child crash during active session followed by wrapper-managed recovery
+- Simulate child crash/restart during active sessions and verify:
+  - wrapper stays stable
+  - Claude-side tool surface remains usable after recovery
+  - no unread/read/handled state corruption occurs during restart windows
+- Validate on multiple cleaner Windows environments, not just the primary dev
+  box, to catch PATH, Python, permissions, antivirus, and pipe/runtime quirks.
+- Extend health signaling so diagnostics clearly distinguish:
+  - `healthy`
+  - `degraded_but_recoverable`
+  - `client_reconnect_likely_required`
+  - `broken`
+- Ensure these states surface through `bridge_process_status`,
+  `bridge_health_panel`, audit logs, and operator-facing runbooks.
+- Productize HP-Phase 1 as the first user-facing status surface:
+  - `bridge_health_panel(format="markdown", include_extended=True)` should be
+    the default answer to "show bridge health" and "what is happening?"
+  - stale-unread counts must be visible without JSON spelunking
+  - users should see watcher status, active sessions, paired thread, wake
+    history, breaker state, and receipt gaps in one snapshot
+- Keep `stale_unread_watchdog` as the active companion to HP7:
+  - diagnostic mode lists wake-delivered unread rows
+  - rearm mode removes matching ids from watcher `seen_ids`
+  - health status degrades when stale unread rows exceed the threshold
+- Treat any issue that can force a Claude restart during normal steady-state use
+  as release-blocking until either fixed or explicitly documented as a client
+  limitation outside bridge control.
+- **Trusted code-signing certificate for bridge PowerShell scripts** (field
+  deployment prerequisite):
+  - `wake_codex.ps1`, `codex_bridge_reminder.ps1`, `codex_pre_response.ps1`,
+    `codex_pre_final.ps1`, and `wake_claude.ps1` each use APIs (UIA
+    `SetFocus`, `AttachThreadInput`, `SetForegroundWindow`, clipboard
+    set/restore, `SendKeys`) that trigger AV behavioral heuristics when
+    unsigned. Signing with a trusted Authenticode certificate drops these flags
+    to near-zero for all major AV/EDR vendors.
+  - Procurement path: OV (Organization Validation) code-signing certificate
+    from a CA trusted by Windows (DigiCert, Sectigo, GlobalSign). EV
+    (Extended Validation) provides higher immediate SmartScreen reputation
+    but requires a hardware token; OV is sufficient for AV suppression.
+  - Signing must be applied to every release; add a `Sign-BridgeScripts.ps1`
+    helper that wraps `signtool.exe /fd sha256 /tr <RFC3161-TSA>` for
+    reproducible timestamped signing.
+  - Until a cert is procured: field users with aggressive EDR (CrowdStrike
+    Falcon strict, MDE Attack Surface Reduction) should add the bridge
+    scripts directory to AV exclusions as a documented workaround. Log this
+    gap in the field-deployment runbook.
+  - Signing does NOT help for `BlockInput` — that API is removed from the
+    bridge codebase (2026-05-01) in favor of clipboard-paste injection, which
+    has no equivalent AV signature.
+
 ### Phase 12 — Dead-code decisions
 
 **No zombies in tree.** Each ambiguous component gets explicit keep/wire/archive:
@@ -407,6 +561,7 @@ escalation path before the final security review.
 
 Implement the use-case-facing UX layer described by:
 
+- `BRIDGE_PAIRING_INTENT_SPEC.md`
 - `BRIDGE_PAIRING_USER_FLOWS_SPEC.md`
 - `BRIDGE_ADMIN_DASHBOARD_SPEC.md`
 - `REMOTE_OBEDIENCE_USE_CASES_SPEC.md`
@@ -415,6 +570,10 @@ This phase makes the contract/policy model understandable to users before final
 security signoff.
 
 - Add guided pairing flow:
+  - startup pairing-intent prompt before supersession
+  - background/incognito/question-only chat mode
+  - explicit "pair this chat" promotion and rollback for accidental pairing
+  - scoped one-off peer relay from an unpaired same-project chat
   - same-project primary
   - same-project observer/advisor/auditor
   - simultaneous same-project primaries across different projects
@@ -459,8 +618,112 @@ security signoff.
   - simultaneous multi-project primary pairings
   - revoke/renew/rename flows
   - natural-language revoke path
+  - natural-language pair/do-not-pair/background/one-off relay paths
+  - `default_pairing_intent` settings validation and bootstrap behavior
+  - pending-pair timeout/default-background fallback
+  - ephemeral relay orphaning, cap enforcement, and reply-only routing
+  - duplicate-primary refusal UX and fourth observer cap rejection
   - remote-obedience request classes
   - dashboard uses runtime policy, not markdown
+
+Progress note (2026-04-30 Codex pass): the shared backend now exposes
+`dashboard_overview`, `list_pairings`, `list_contracts`,
+`list_policy_dashboard`, `validate_policy_dashboard`,
+`list_remote_authority_requests`, `audit_timeline`, confirmed
+`revoke_contract`, confirmed `renew_contract`, `rename_local_alias`, and
+`classify_remote_authority_request` as MCP/local API surfaces. These cover the
+runtime-derived read model, tenant-filtered audit display, escaped markdown
+rendering, remote-obedience classes, and the local-chat/dashboard shared
+confirmation path for revoke/renew. A stdlib localhost dashboard server now
+binds only local hosts, requires a bearer/X-Bridge token, exposes the dashboard
+overview, and requires CSRF for revoke/renew/alias mutation routes. Remaining
+Phase 16 work is richer guided-pairing activation UI, preview catch-up, and
+full policy/doc drift proposal workflow.
+
+Progress note (2026-05-01 Codex pass): same-project guided pairing backend v1
+now exposes `pairing_details`, `start_guided_pairing`, and
+`confirm_guided_pairing` through the shared bridge API and MCP server. Pending
+or background same-project sessions can be promoted to active primary only after
+an explicit confirmation step, or parked as background/observer/advisor/auditor
+without superseding the active pair. Subagent-origin sessions expose the disabled
+primary action with a reason, and active-promotion cleanup removes stale
+pending/non-primary fields so dashboard state remains truthful. Remaining Phase
+16 work is dashboard/UI integration, cross-project guided flows, catch-up
+preview, and policy/doc drift proposal workflow.
+
+Progress note (2026-05-01 Codex pass 2): AC-46's read-only dashboard status
+surface is implemented in `dashboard_overview`. The JSON overview now includes
+`status_surfaces.dashboard_reads`, `status_surfaces.backpressure`,
+`status_surfaces.catchup`, `status_surfaces.contracts`, and
+`status_surfaces.policy_drift`; markdown rendering includes a "Status Surfaces"
+table for dashboard read degradation, blocked buckets,
+project-scoped implementation-journal catch-up debt, contract
+reauthorization/expiry/revocation, and protected-doc drift. The surface is
+diagnostic-only: dashboard reads use non-mutating health-style readers for
+session registry, pending actions, implementation journal, watcher state, and
+audit JSONL, and regression tests assert corrupt dashboard inputs are not
+renamed/quarantined by overview reads. Protected-doc drift validation now
+detects missing protected docs and explicit contradictory policy claims such as
+`remote_labels_trusted: true`; project-scoped catch-up reports `unknown` when a
+degraded session registry prevents safe scoping. Verification: focused
+dashboard tests and the full Agent Bridge suite passed (`240 tests OK`).
+Remaining Phase 16 work is
+richer dashboard/UI integration, cross-project guided flows, actual catch-up
+preview actions, and policy/doc drift proposal workflow.
+
+Progress note (2026-04-30 Codex wake/session remediation): private watcher
+entries now opt into `session_id_source: "active_session"`, so `watcher.py`
+resolves the current active GUID from `session.json` with an mtime/size cache
+instead of trusting a stale static config GUID. `bootstrap_session.py` also
+emits a Claude Monitor startup reminder for Claude sessions. This closes the
+stale-pinning failure mode while Claude wake remains Monitor-owned.
+
+Progress note (2026-05-01 Codex pass): `wake_claude.ps1` now exists as a
+fail-closed diagnostic boundary, not as a production SendKeys helper. `-FindOnly`
+reports candidate Claude Desktop windows, while normal invocation exits 20 with
+`unsupported_thread_addressable_wake` because Agent Bridge has no verified
+Claude Desktop thread id/deeplink contract. Watcher config records the disabled
+reason for Claude entries and continues to rely on the in-context Claude Monitor.
+
+Progress note (2026-05-01 Codex pass): Phase 13 configurable-root closure
+patched the remaining helper seams. `configure_watcher.py` now writes explicit
+root-derived `-StateDir` and `-LockFile` arguments into Codex SendKeys wake
+templates; `wake_codex.ps1` and `wake_claude.ps1` honor `AGENT_BRIDGE_ROOT` when
+defaults are needed; `codex_bridge_watch_mode.ps1` and
+`codex_bridge_reminder.ps1` accept/use an explicit bridge root instead of
+hardcoding `%USERPROFILE%\.agent-bridge`. User-facing docs now prefer
+`--bridge-root` for bootstrap/configure examples.
+
+Progress note (2026-05-01 Codex pass): concurrency/property hardening first
+slice shipped with `hypothesis` added to `requirements.txt`, bounded property
+tests for pure routing invariants, and a thread-level concurrent project-send
+harness. The properties cover work-routing active-sender requirements,
+session-target delivery/escalation, and agent-level work rejection; the
+concurrency harness asserts five simultaneous project-bucket sends preserve
+five unique rows.
+
+Progress note (2026-05-01 Codex pass 2): AC-17 and AC-22 test-depth gaps were
+closed for the current local harness. The concurrency harness now exercises
+4 threads x 50 `send_to_peer` calls against one project bucket and asserts 200
+successful send results, gap-free hop counts 1..200, and 200 unique rows/message
+ids. Hypothesis now covers JSONL write/read round-trip for JSON objects plus
+normalizer stability for rendezvous, session, and project identifiers. Focused
+verification passed before the full-suite run.
+
+Roadmap addition (2026-04-30 Codex): add `BRIDGE_PAIRING_INTENT_SPEC.md`.
+Phase 16 must stop treating every new parent chat as an automatic active-pair
+takeover. New sessions should start as `pending_pair`/`background` unless the
+local user explicitly confirms pairing, while still supporting a scoped
+one-off peer relay whose reply returns only to the requesting background chat.
+Claude review changes incorporated: default `pending_pair` timeout is 120s,
+ephemeral relay is explicit opt-in, project bucket is the default relay target,
+outstanding relay cap defaults to 5 per background session, orphaned relay
+replies stay in the project bucket with audit metadata, and all relay bodies
+remain subject to knowledge-sharing contract body-sharing policy.
+Follow-up user/Claude refinement: expose global `default_pairing_intent` in
+`settings.json` with `ask_first` as safe default, `active_primary` as the
+legacy auto-supersede fast path, and `background` for sidecar-heavy workflows.
+CLI `--pairing-intent` remains the highest-precedence override.
 
 ### Phase 17 - Security review and threat model
 
@@ -469,6 +732,21 @@ messages, config files, JSONL rows, environment variables, watcher commands,
 and desktop wake helpers can all be influenced by a compromised peer, stale
 state, stale knowledge contract, contradictory markdown, or accidental operator
 input. The local admin dashboard is part of the reviewed surface.
+
+`PREFLIGHT_DETECTION_SPEC.md` is now represented in `wake_codex.ps1`: composer
+state is read non-intrusively, active typing defers without marking messages
+seen/read, non-empty drafts are restored after the bridge wake, UIA-unavailable
+fails closed unless a local debug override is explicitly supplied, and audit
+records include hash plus safe length/line-count metadata rather than raw
+composer text. Live Desktop dogfood remains part of final security validation.
+
+Progress note (2026-05-01 Codex pass): Phase 17 local-v1 security review
+snapshot is complete in `SECURITY_REVIEW.md`. The pass records no open P0s,
+keeps legacy inline watcher commands and intrusive live targeted-wake dogfood
+as explicit P1 residuals, records real Claude wake as a fail-closed P2
+availability gap, and adds a regression hardening patch so the legacy Windows
+balloon fallback also uses PowerShell `-EncodedCommand` instead of raw
+`-Command`.
 
 - Write `SECURITY_REVIEW.md` with:
   - trust boundaries: Claude, Codex, MCP clients, watcher, helper scripts,
@@ -506,6 +784,217 @@ input. The local admin dashboard is part of the reviewed surface.
   - fixed findings and regression tests
   - accepted risks and why they are acceptable for a local bridge
   - explicit "not reviewed" exclusions, if any
+
+### Phase 18 - Workflow guardrail enforcement
+
+`WORKFLOW_GUARDRAILS_SPEC.md` classifies current agent workflow/reminder
+behaviors as mandatory invariants versus configurable preferences. Phase 18
+promotes the most dangerous Tier 2/Tier 3 mandatory items from reminders and
+agent discipline into fail-visible stop/pre-final checks.
+
+Status boundary: this section is an implementation plan, not a shipped guard
+runtime. The WGI schemas and artifacts below are planned contracts for Phase 18.
+Until Phase 18 lands, current enforcement remains the existing hooks, reminders,
+ledger, receipt tools, health panel, and agent discipline described in the
+enforcement tiers.
+
+- Add a guardrail registry that records each mandatory behavior, enforcement
+  tier, owner, failure mode, tests, and user-facing diagnostic.
+  - Proposed code location: `core/guardrails.py`.
+  - Proposed state artifact: `<bridge-root>\state\guardrail-debt.jsonl` for
+    current debt events that must survive compaction.
+  - Required registry fields: `id`, `name`, `category`, `mandatory`,
+    `enforcement_tier`, `owner_agent`, `data_sources`, `hook_entry_points`,
+    `diagnostic`, `blocking_default`, `tests`, and `roadmap_criterion`.
+- Add stop/pre-final checks for surfaced substantive bridge messages with
+  `read_at` but no `handled_at`.
+  - Initial hook entry points: `codex_pre_final.ps1`,
+    `codex_bridge_reminder.ps1 -HookPhase final`, and the future Claude
+    Stop/Monitor guard.
+  - Initial data sources: inbox rows for the active private/project buckets,
+    `response-debt-state.json`, pending-action ledger, and `messages.jsonl`
+    current-turn tool activity.
+- Add stop/pre-final checks for surfaced `ACTION_REQUEST` messages lacking an
+  explicit acting/parked/blocked/displaced/rejected disposition.
+- Add outbound reply-debt checks that require a queued message id or a full
+  pending-ledger body before closeout when peer send is blocked.
+  - Data sources: failed/backpressured `send_to_peer` audit rows,
+    `record_pending_bridge_action` rows, and original outbound body hash/body
+    stored in the pending ledger.
+- Add a Claude Monitor freshness guard before "waiting for Claude" or
+  Codex-to-Claude notification reliability claims.
+  - Data sources: Claude bootstrap output, Monitor heartbeat/state artifact,
+    peer runtime breadcrumb, and latest Claude-side inbox activity.
+  - A running process is not enough. The heartbeat must name the current Claude
+    private session bucket and project bucket, the canonical
+    `bridge_monitor_poll.py` helper path, and a recent heartbeat timestamp.
+  - Stale generated scripts under `.claude-state\scripts\` are diagnostic
+    evidence of a failed Monitor re-arm, not valid wake evidence.
+- Add a log-first root-cause template or health-panel affordance that requires
+  relevant audit/log references before a bridge defect is marked diagnosed.
+- Add a reusable safe settings writer for UTF-8-no-BOM, atomic write, validate,
+  backup-on-failure, and reload guidance; require settings mutations to use it.
+- Add a both-scoped settings parity checker that reports every `both` key,
+  consuming code paths per agent, focused tests, and any behavioral keys that
+  are only documented/validated but not actually honored.
+- Add docs/path hygiene checks for `.claude-state/` scratch placement and
+  personal-path leakage in Agent Bridge docs.
+- Add relay-debt checks for known shared bridge decisions, breakthroughs,
+  remediations, roadmap/status/next-step changes, and completion reports that
+  have not been sent to the peer.
+  The relay content categories are defined in `bridge_trigger_heuristics.md`;
+  the relay-debt check verifies no open row in
+  `state\relay-candidates.jsonl` matches those mandatory categories without a
+  `sent_message_id` or `pending_action_id`.
+- Add dashboard visibility for guardrail debt so users can see whether an item
+  is structurally enforced, reminder-backed, or norm-backed.
+
+Phase 18 guard ids and deterministic test contracts:
+
+| Guard id | Debt definition | Data sources | Initial default | Pass/fail tests |
+|---|---|---|---|---|
+| WGI-01 read-without-handled | A surfaced substantive bridge row has `read_at` or current-turn `seen_at` but lacks `handled_at`. | Active private/project inbox rows, `response-debt-state.json`, `messages.jsonl` tool activity. | Warn in general; block Agent Bridge implementation closeout. | Seed current-turn read row without handled -> debt; add `mark_handled` -> clean. |
+| WGI-02 action-request-disposition | A surfaced row with `ACTION_REQUEST` / `ACTION_REQUESTED` lacks acted/parked/blocked/displaced/rejected/completed disposition. | Inbox body headers, `handled_status`, pending-action ledger. | Warn in general; block Agent Bridge implementation closeout. | Seed ACTION_REQUEST read row -> debt; record disposition -> clean. |
+| WGI-03 outbound-reply-debt | A peer reply/send was attempted or required, but no queued id and no full pending body are durable. | `send_to_peer` audit rows, bridge response-debt state, pending-action ledger. | Warn; block when the unsent body is not recoverable after compaction. | Simulate backpressure with body absent -> debt; store full pending body -> clean. |
+| WGI-04 claude-monitor-freshness | A registered waiting-on-Claude-visible-delivery claim has no fresh Claude Monitor heartbeat after latest compaction/session rollover. | `state\peer-wait-claims.jsonl`, future `monitor-claude-<session>.runtime.json` heartbeat from STATE_LAYOUT, Claude bootstrap output, peer runtime breadcrumb, Claude inbox activity. | Warn-only; cannot become blocking until the Monitor heartbeat writer/reader ships. | Register wait claim + missing/stale heartbeat -> warning; fresh heartbeat -> clean. |
+| WGI-05 pending-ledger-drain | Top Codex-owned ledger item is actionable while execution is idle. | `state\pending-actions.json`, `state\execution-state.json`. | Existing final guard warning; block Agent Bridge implementation closeout. | Seed actionable ledger item + idle execution-state -> final guard; park/block/resolve or active task -> clean. |
+| WGI-06 relay-debt | Shared bridge decision, defect, remediation, breakthrough, roadmap/status/next-step change, or completion report is known but not sent or stored pending. | `state\relay-candidates.jsonl`, `bridge_trigger_heuristics.md` mandatory relay categories, `send_to_peer` audit rows, pending-action ledger. | Warn; block 10/10 closeout. | Record relay candidate with no send/pending row -> debt; attach sent id or pending ledger id -> clean. |
+| WGI-07 settings-parity-debt | A `both`-scoped setting lacks consuming code path, focused test, or peer ACK for either agent. | `state\settings-parity.jsonl`, `core/settings.py`, `SETTINGS.md`, focused tests. | Warn; block setting-complete status. | Add synthetic both key with one-sided parity row -> debt; add both consumers/tests/ACK ids -> clean. |
+| WGI-08 log-first-debt | A registered bridge root-cause claim lacks a cited audit/log/message/health artifact. | `state\diagnostic-claims.jsonl`, pending ledger notes, health/report templates. | Warn; block defect-closed status for registered bridge defects. | Register diagnosis without artifact id/path -> debt; artifact citation -> clean. |
+| WGI-09 review-closeout-debt | A peer review result was handled locally, but no amended closeout handoff was sent or durably parked. | `state\review-loop-state.jsonl`, `send_to_peer` audit rows, inbox review-result rows, pending-action ledger. | Codex final-hook warning now; block 10/10 closeout once dashboard debt visibility ships. | Send REVIEW_REQUEST -> peer AUDIT_RESULT -> mark_handled -> warning; send READINESS_ASSESSMENT/ACK with `IN_REPLY_TO` peer result -> clean; add WGI-09 parked pending action with exact peer result id and full closeout body -> clean. |
+| WGI-10 active-task-interrupt-debt | A turn is about to close while an active execution task remains open and the latest user/peer interrupt has not been classified as resumed, completed, blocked, parked, or displaced. | `state\execution-state.json`, `state\pending-actions.json`, current-turn hook phase, `classify_execution_interrupt` artifacts. | Codex final-hook warning now; block Agent Bridge implementation closeout once shared guardrail debt visibility ships. | Seed active task -> final guard; `classify_execution_interrupt(disposition=resume)` -> classified resume artifact; `complete`/`blocked`/`parked`/`displaced` -> terminal classification + task closure; status/inbox interrupt without classification -> debt. |
+
+For Phase 18, "surfaced" means the row was returned to the active agent by
+`check_inbox`, `wait_inbox`, `peek_inbox(record_seen=true)`, or equivalent
+tooling in the current turn, or has `seen_by_session` / `read_by_session`
+matching the active session after `current_turn_started_at`. "Substantive" means
+the message is not a pure closed ACK/control row and contains an action request,
+review, design decision, implementation status, smoke/test prompt, user request,
+or explicit reply/confirmation ask.
+
+False-positive handling: every guard emits machine-readable debt first. A guard
+can become blocking only after focused tests cover the clean path, debt path,
+and explicit park/block/displace path, and after dashboard/health output names
+the remediation.
+
+Phase 18 day-1 state schemas:
+
+- `relay-candidates.jsonl`: machine-readable candidates for mandatory peer
+  relay. Required fields: `schema_version`, `candidate_id`, `owner_agent`,
+  `category`, `summary`, `source_turn_id`, `source_message_id`, `body_hash`,
+  `created_at`, `status`; completion fields: `sent_message_id` or
+  `pending_action_id`.
+- `diagnostic-claims.jsonl`: machine-readable bridge root-cause or defect-close
+  claims. Required fields: `schema_version`, `claim_id`, `owner_agent`,
+  `defect_id`, `summary`, `artifact_refs`, `created_at`, `status`.
+- `peer-wait-claims.jsonl`: machine-readable claims that Codex or Claude is
+  waiting on visible peer delivery. Required fields: `schema_version`,
+  `claim_id`, `owner_agent`, `peer_agent`, `session_id`, `project`, `reason`,
+  `monitor_required`, `monitor_evidence_id`, `created_at`, `status`.
+- `settings-parity.jsonl`: machine-readable parity rows for every `both` scoped
+  setting. Required fields: `schema_version`, `setting_key`, `scope`, `agent`,
+  `consumer_path`, `focused_test`, `peer_ack_message_id`, `status`,
+  `updated_at`.
+- `review-loop-state.jsonl`: append-only review-loop state for WGI-09. Required
+  fields: `schema_version`, `event_id`, `event_type`, `review_loop_id`,
+  `request_message_id`, `owner_agent`, `peer_agent`, `created_at`, and
+  `status`; scoping field: `owner_session_id`; transition fields:
+  `peer_result_message_id` and
+  `closeout_message_id`. Current event types are `review_requested`,
+  `peer_replied`, `peer_result_handled`, and `closeout_sent`.
+- `guardrail-debt.jsonl`: canonical debt rows emitted by WGI-01 through WGI-09.
+  Required fields: `schema_version`, `debt_id`, `guard_id`, `severity`,
+  `owner_agent`, `session_id`, `source_message_id`, `debt_status`,
+  `detected_at`, `data_sources`, and `remediation`.
+- `monitor-claude-<session>.runtime.json`: per-context Claude Monitor heartbeat
+  with `schema_version`, `agent`, `session_id`, `project`, `monitor_pid`,
+  `started_at`, `heartbeat_at`, `context_generation`, `compacted_after_start`,
+  `script_path`, `argv`, `watched_buckets`, `helper_hash`,
+  `preexisting_target_unread`, and `last_emit_at`.
+
+Claude Monitor self-healing boundary:
+
+- Truly self-healable:
+  - canonical helper behavior, including emitting pre-existing targeted unread
+    rows on startup instead of silently priming them away,
+  - heartbeat/runtime breadcrumbs,
+  - stale/misbound Monitor detection,
+  - health/dashboard/watchdog escalation,
+  - bootstrap surfacing of current active-session unread rows.
+- Not truly self-healable without a future thread-addressable Claude wake
+  primitive:
+  - making an already-compacted or detached Claude chat read a message body,
+  - proving Claude cognition from watcher toasts or process existence alone,
+  - marking Claude-bound rows read/handled on Claude's behalf.
+- Field behavior must therefore be fail-loud rather than silent:
+  - preserve queued messages durably,
+  - show `CLAUDE_MONITOR_STALE` / `CLAUDE_UNREAD_WITHOUT_MONITOR`,
+  - include the exact repair command and stuck ids,
+  - keep backpressure/relay debt visible until `read_at` or `handled_at`
+    proves the peer consumed the work.
+
+### Phase 19 - DOM/UI telemetry feasibility and reconciliation
+
+`DOM_TELEMETRY_USE_CASE_CATALOG.md` captures the candidate use cases and
+privacy/overhead assumptions for read-only Desktop UI telemetry. Phase 19 is a
+feasibility phase, not a commitment to make DOM traversal mandatory.
+
+**Concrete first deliverable (AC-67 — ships independently of the feasibility gate):**
+`wake_codex.ps1` reads the Codex Desktop thread title via UIA `AutomationElement.Name`
+after a successful deeplink navigation and emits an `AGENT_BRIDGE_WAKE_TELEMETRY`
+JSON line. The watcher parses this from wake command output and writes
+`desktop_thread_title` into `peer-codex.runtime.json`. The same wake pass records
+warn-only title/project certification and wake postflight telemetry. This is
+on-demand (no background polling), zero overhead outside wake events, and does
+not require the full feasibility investigation before shipping.
+
+Goal: determine whether read-only UIA/DOM/CDP telemetry can safely become a core
+observer/reconciler for Agent Bridge orchestration without introducing visible
+UI jank, privacy leakage, or brittle selector dependence.
+
+Investigation deliverables:
+
+- Build a read-only UIA snapshot probe for Codex Desktop and Claude Desktop.
+  - Preferred scratch location: `.claude-state/bridge-ui/`.
+  - The probe must support one-shot snapshots and bounded cadence runs.
+  - Raw snapshots/screenshots remain scratch artifacts and are not checked in.
+- Measure overhead at representative cadences:
+  - event burst: 250-750ms for 3-5s after wake/send/read/handle,
+  - active pairing: 2-5s,
+  - idle paired session: 10-30s,
+  - on-demand guard: single snapshot before write-side wake or closeout.
+- Record p50/p95/p99 snapshot latency, CPU, memory, handle count, and visible
+  UI jank.
+- Validate parser stability across known UI states:
+  - correct thread, wrong thread, wrong project,
+  - idle, streaming, approval modal, error/rate-limit banner,
+  - non-empty composer/draft, attachment present,
+  - compaction/new-thread/session rollover,
+  - minimized/hidden/multiple windows.
+- Define compact fact schemas before promoting anything into bridge-root state:
+  - `dom-telemetry/current-state.json`,
+  - `dom-telemetry/ui-events.jsonl`,
+  - `dom-telemetry/operation-results.jsonl`.
+- Implement at least one table-driven truth-reconciliation prototype that
+  combines bridge JSONL, receipts, and UI facts into confidence-scored state.
+- Decide which uses are safe as core observers, which remain optional/debug, and
+  which should be rejected as too invasive or brittle.
+
+Initial promotion candidates:
+
+1. Wrong-thread/wrong-project certification before UI write paths.
+2. User draft/composer safety gate before `targeted_sendkeys`.
+3. Wake actually rendered confirmation for helper-backed wake.
+4. Agent busy/idle/blocked classifier to avoid wake storms.
+5. No-silent-success operation contract for wake/send/read/handle.
+
+Non-goals for Phase 19:
+
+- Do not store raw transcript bodies in bridge-root state by default.
+- Do not use UI telemetry as sole authorization for cross-project sharing.
+- Do not make screenshot/OCR a primary dependency.
+- Do not enable CDP probing unless the target app exposes it explicitly and the
+  local security review accepts the mode.
 
 ---
 
@@ -582,6 +1071,41 @@ Phase 7 (wake hardening)
 | 47 | Security threat model and trust boundaries documented | 17 |
 | 48 | Shell/process/dashboard boundaries audited with injection/path/CSRF tests where applicable | 17 |
 | 49 | Security signoff records fixed findings, accepted risks, and exclusions | 17 |
+| 50 | Mandatory vs configurable workflow behavior is documented with enforcement tiers | 18 |
+| 51 | Stop/pre-final guards surface unread/read/handled and ACTION_REQUEST disposition debt | 18 |
+| 52 | Outbound reply-debt is durable across backpressure and compaction | 18 |
+| 53 | Claude Monitor freshness is visible before waiting-on-peer claims | 18 |
+| 54 | Root-cause claims for bridge defects cite durable logs/audit evidence | 18 |
+| 55 | Settings mutations use one safe UTF-8-no-BOM atomic writer and validate after write | 18 |
+| 56 | Scratch/doc path hygiene checks prevent tracked scratch and personal-path leaks | 18 |
+| 57 | Guardrail debt is visible in dashboard/health output by enforcement tier | 18 |
+| 58 | Both-scoped settings parity checker proves every shared key is honored by both agents or reports guardrail debt | 18 |
+| 59 | Pending-ledger drain guard warns or blocks idle closeout with actionable Codex-owned work | 18 |
+| 60 | Review-loop closeout guard tracks review requests/results and warns before final when local handled status lacks a peer closeout handoff | 18 |
+| 68 | Active-task interrupt guard prevents inbox/status/process interrupts from becoming accidental closeout while implementation or review work remains open | 18 |
+| 61 | DOM/UI telemetry use-case catalog is documented with privacy rules, overhead hypothesis, and source preference | 19 |
+| 67 | `wake_codex.ps1` reads thread title via UIA after deeplink nav and emits it to stdout; watcher caches it in `peer-codex.runtime.json` as `desktop_thread_title`; watcher logs, toasts, health panel, and dashboard friendly-name fields display the cached title alongside session GUID tails | 19 |
+| 62 | Read-only UIA snapshot probe measures Codex/Claude Desktop p50/p95/p99 latency, CPU, memory, handle count, and UI jank at candidate cadences | 19 |
+| 63 | DOM telemetry parser fixtures cover wrong thread/project, busy/idle/blocked, draft/composer, error banner, and compaction/rollover states | 19 |
+| 64 | Compact DOM telemetry fact schemas are defined before any bridge-root state promotion and exclude raw transcript bodies by default | 19 |
+| 65 | Hybrid truth reconciler prototype combines bridge JSONL, receipt state, and UI facts into confidence-scored state with contradiction tests | 19 |
+| 66 | Phase 19 closes with an explicit promote/optional/reject decision for each initial DOM telemetry candidate | 19 |
+| 69 | bootstrap_session.py peeks the new active session bucket immediately after activation and surfaces any unread work rows in the bootstrap JSON output (M-1 backpressure mitigation) | 18 |
+| 70 | bridge_health_panel and dashboard_overview surface a BACKPRESSURE_BLOCKED row when SESSION_BACKPRESSURE_LIMIT is saturated, naming the blocked sender agent/session and how long the block has been active (M-2 backpressure visibility) | 18 |
+| 71 | Spec-only gate for a scoped same-pair IN_REPLY_TO update exemption from the backpressure gate; implementation requires separate protocol review before any bypass ships (M-3 backpressure protocol) | 18 |
+| 72 | bootstrap_session.py Monitor reminder emits the exact correct script path (bridge_monitor_poll.py) with no ambiguity; CLAUDE.md startup sequence is updated to name the script explicitly and distinguish it from probe_server.py (M-4 operational clarity) | 18 |
+| 73 | SESSION_BACKPRESSURE_LIMIT raised from 1 to 5 and PROJECT_BACKPRESSURE_LIMIT raised from 5 to 10 as hardcoded constants; soft-warn added at ceil(limit*0.6) unread (3 and 6 at defaults) before hard-reject; not user-configurable (a wrong value fails silently) | 18 |
+| 74 | control/health messages (marker_variant="control") are excluded from SESSION_BACKPRESSURE_LIMIT and PROJECT_BACKPRESSURE_LIMIT counts; regression test verifies a SESSION_UPDATE or HANDSHAKE does not consume a work slot | 18 |
+| 75 | stale-unread watchdog auto-rearms wake IDs without any operator call when peer Monitor heartbeat is absent for >N minutes; safe — rearm-only, never mutates read_at | 18 |
+| 76 | health panel BACKPRESSURE_BLOCKED row exposes a ready-to-run recovery command (e.g. receipt_debt_cleanup call) not just a descriptive string; the command is validated as safe before being surfaced | 18 |
+| 77 | each AC75 auto-rearm event writes a `stale_unread_watchdog_rearmed` audit row containing session_id, count of rearmed message ids, and timestamp; health panel and dashboard_overview surface STALE_UNREAD_WATCHDOG_REARMED rows so the rearm history is visible without log spelunking | 18 |
+| 79 | Claude Monitor writes `monitor-claude-<session>.runtime.json` heartbeat rows with script path, argv, watched buckets, helper version/hash, preexisting unread count, last emit time, and heartbeat time; health/WGI-04 consumes this instead of trusting process existence | 18 |
+| 80 | bootstrap_session.py detects stale/misbound Claude Monitor runtime evidence at startup, refuses to describe the Monitor as armed, and emits an exact repair command plus the current private/project buckets | 18 |
+| 81 | bridge_health_panel/dashboard_overview surface `CLAUDE_MONITOR_STALE` and `CLAUDE_UNREAD_WITHOUT_MONITOR` rows when active Claude unread work exists but no fresh current-bucket Monitor heartbeat is present; include stuck message ids and remediation command | 18 |
+| 82 | Watcher stale-unread watchdog escalates unread Claude work after a bounded threshold by writing a diagnostic/audit row and user-visible notification; it must not mark read or claim Claude cognition without `read_at`/`handled_at` | 18 |
+| 83 | Reviewer wait discipline is ledger/guard enforced: background stranger waits write `reviewer-wait-state.jsonl`; final guard warns when no verdict, no future ETA/checkback, and no parked/blocked/cancelled status exists; CLI/MCP helpers expose start/update/status | 18 |
+| 84 | Watcher sends `TYPE: CONTROL / marker_variant=control / SUBJECT: MONITOR_RESTART_REQUIRED` to Claude's active session inbox on two triggers: (a) Monitor heartbeat absent/stale ≥ the AC80 stale-classification threshold; (b) watcher detects a new commit that modifies any of bridge_monitor_poll.py, server.py, agent_bridge.py, or watcher.py (polled via git log since last watcher tick); CLAUDE.md documents that Claude must stop any stale Monitor task handle and start a fresh Monitor instance immediately on receipt of this control message; control messages are exempt from backpressure per AC74 | 18 |
+| 78 | Targeted SendKeys wake treats user UI state as transactional: if the foreground is Codex on a different or unprovable thread and no exact restore thread id is available, the wake defers instead of navigating away; non-Codex foreground restore remains best-effort | 19 |
 
 ## Final 10/10 Validation Loop
 
@@ -597,12 +1121,14 @@ After roadmap completion:
 2. Codex sends Claude the test matrix, results, score, and remaining risks as an
    `AUDIT_REQUEST` / `READINESS_ASSESSMENT`.
 3. Claude independently runs its own iterative smoke and failure-path suite
-   against the same implementation until Claude also rates the bridge 10/10 or
-   names concrete blockers.
-4. Any divergence becomes a `RISK_DELTA` and must be resolved by code, docs, or
+   against the same implementation, including stranger/cold-review where useful,
+   until Claude also rates the bridge 10/10 or names concrete blockers.
+4. Two or more background agents acting as strangers independently review the
+   same result and must rate it 10/10, or name concrete blockers.
+5. Any divergence becomes a `RISK_DELTA` and must be resolved by code, docs, or
    explicit scope decision before either side calls the bridge 10/10.
-5. The final hardening score is canonical only when both agents agree and the
-   user accepts the result.
+6. The final hardening score is canonical only when Codex, Claude, two or more
+   background stranger agents, and the user agree.
 
 This preserves the two-axis distinction agreed during hardening review:
 

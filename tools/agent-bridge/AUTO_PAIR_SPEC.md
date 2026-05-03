@@ -2,13 +2,14 @@
 
 **Status:** Codex-side wrong-chat defense is implemented through
 peer-runtime breadcrumbs, fire-time watcher command-template resolution,
-parent-only provenance, subagent retargeting, and trusted-parent drift refusal.
+parent-only provenance, subagent retargeting, trusted-parent drift refusal, and
+dynamic active-session binding for private watcher entries.
 Title-marker Phase A shipped historically, then was intentionally retired on
 2026-04-28. Cross-project pairing, symmetric `wake_claude.ps1`, and optional
 register fallback remain separate roadmap work.
 **Authors:** Claude (proposal); Codex review and Phase A implementation
-**Motivation:** eliminate the hardcoded `session_id` and `desktop_thread_id`
-in `watcher-config.json` that go stale when either side rotates threads, and
+**Motivation:** eliminate hardcoded/stale private `session_id` routing and
+`desktop_thread_id` values in `watcher-config.json` when either side rotates threads, and
 provide defense-in-depth against the wrong-chat-injection failure mode that
 caused an observed retry loop on 2026-04-28.
 
@@ -270,11 +271,14 @@ armed, the Monitor sees new bridge messages immediately. SendKeys is
 unnecessary.
 
 **For the cold-start case** (Claude Desktop is open but no Claude Code
-session is running), introduce `wake_claude.ps1`:
+session is running), a diagnostic-only `wake_claude.ps1` now exists, but it
+refuses SendKeys until a verified thread-addressable Claude Desktop target
+exists:
 
 1. Watcher detects new codex -> claude message in `inbox-claude.jsonl`.
-2. Fires `wake_claude.ps1` with payload "check bridge inbox".
-3. Script opens Claude Desktop deeplink (TBD - does Claude Desktop expose
+2. Watcher does not fire `wake_claude.ps1` by default; Claude remains
+   Monitor-owned.
+3. Future script opens Claude Desktop deeplink (TBD - does Claude Desktop expose
    `claude://threads/<id>`? See Open Questions), foregrounds the bridge
    chat, SendKeys "check bridge inbox".
 4. Title-verifies against `peer-claude.runtime.json` `window_title_pattern`.
@@ -397,9 +401,12 @@ Monitor-handles-it case.
 - Add tests: template resolution, missing breadcrumb path, hot-reload.
 
 **Phase D - Symmetric `wake_claude.ps1`:**
-- Deferred until Claude Desktop exposes a verified thread-addressable wake
-  surface. Do not ship a best-guess SendKeys-only implementation; BP11 documents
-  this as an explicit v1 scope boundary.
+- Diagnostic boundary shipped: `wake_claude.ps1 -FindOnly` reports candidate
+  Claude Desktop windows, while normal invocation exits fail-closed with an
+  unsupported-thread-addressable-wake result.
+- Real wake remains deferred until Claude Desktop exposes a verified
+  thread-addressable wake surface. Do not ship a best-guess SendKeys-only
+  implementation; BP11 documents this as an explicit v1 scope boundary.
 - When the surface exists, watcher can fire it on codex -> claude messages with
   tests parallel to `wake_codex.ps1`.
 

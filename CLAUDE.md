@@ -7,48 +7,42 @@ repository root — Claude Code reads it automatically every session.
 
 ---
 
-## Agent Bridge — Session Startup (Run First, Every Session)
+## Agent Bridge — Session Startup (Hook-Driven)
 
-This repo uses an agent-bridge to coordinate with a peer Codex session.
-**At the start of every Claude Code session in this repo**, run the bootstrap
-script before doing anything else:
+This repo uses an agent-bridge to coordinate with a peer Codex session. The
+`SessionStart` hook in `.claude/settings.local.json` runs
+`tools/agent-bridge/bootstrap_session.py` automatically at the start of every
+session — its stdout is injected into your context. The bootstrap registers
+this session as the active Claude bridge owner (superseding any older Claude
+session), drains messages from the previous session, sends a HANDSHAKE to
+Codex, and updates the watcher config.
 
-```powershell
-py -3 tools/agent-bridge/bootstrap_session.py `
-  --state-dir "$env:USERPROFILE\.agent-bridge\state" `
-  --agent claude `
-  --cwd "C:\!Layi Wkspc\MLV-App" `
-  --watcher-config "$env:USERPROFILE\.agent-bridge\watcher-config.json"
-```
-
-What this does (automatically):
-- Derives the project rendezvous from the git root (`mlv-app`)
-- Registers this session as the active Claude bridge owner (supersedes any older Claude session)
-- Drains any messages sent to the previous Claude session before the switch
-- Sends a HANDSHAKE to Codex so the peer learns the new session GUID
-- Updates `watcher-config.json` so the watcher follows this session's inbox
-
-After bootstrap:
-1. **Read `drained_previous_messages`** in the output — surface any unread messages
-   from the previous session to the user before proceeding.
+After the hook fires, do these in order:
+1. **Read `drained_previous_messages`** in the hook output — surface any unread
+   messages from the previous session to the user before proceeding.
 2. **Use the returned `session_id`** as your active Claude bridge GUID for this session.
 3. **If `check_inbox` returns a `SESSION_UPDATE: superseded` control message at any
    point**, stop all bridge sends immediately — a newer Claude session has taken over.
-4. **Do a non-destructive inbox peek** — call `check_inbox(mark_read=False)` for both
-   the active GUID and `mlv-app` to surface any messages that arrived while the Monitor
-   was dead. Mark each read by id after handling.
+4. **Read `active_session_unread`** in the hook output — these are unread rows
+   already sitting in the new active session bucket. Surface them, then mark each
+   read by id after handling.
 5. **Start the bridge Monitor** — the Monitor is Claude's inbox wake mechanism and does
    NOT survive context compaction. Start it every session, no exceptions:
    ```
-   Monitor(persistent=True, command=<poll inbox-claude.jsonl every 2s, emit on new
-   unread for active GUID + mlv-app buckets>)
+   Monitor(persistent=True, command="<python> -u tools/agent-bridge/bridge_monitor_poll.py --state-dir <bridge-state-dir> --agent claude --session-id <active-guid> --project mlv-app --poll-interval-seconds 2")
    ```
-   Before saying "waiting for Codex," verify the Monitor task is active. If no Monitor
-   is running, start one before waiting.
+   Use `bridge_monitor_poll.py` for the Monitor. Do not substitute
+   `probe_server.py`; probes are diagnostics and will not keep Claude's inbox
+   wake path armed. Before saying "waiting for Codex," verify the Monitor task
+   is active. If no Monitor is running, start one before waiting.
 
 When a Monitor notification fires, call `mcp__agent-bridge__check_inbox` with
 `agent=claude`, `session_id=<active-guid-or-mlv-app>`, `mark_read=False`, then mark
 each message read explicitly by id.
+
+If the hook output is missing from your session-start context (broken JSON,
+deleted file, hook failure), fall back to running `bootstrap_session.py`
+manually with the command stored in `.claude/settings.local.json`.
 
 Bridge protocol details: `tools/agent-bridge/BRIDGE_PROTOCOL.md`
 Hardening plan and audit log: `tools/agent-bridge/BRIDGE_HARDENING.md`

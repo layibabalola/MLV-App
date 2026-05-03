@@ -1,6 +1,6 @@
 # Bridge Pairing User Flows Spec
 
-**Status:** Proposed
+**Status:** Partially implemented - pairing-intent gating, non-primary roles, one-off relay, and same-project guided promotion/background APIs are shipped; cross-project guided UI remains follow-up.
 **Owner:** Codex implements, Claude reviews
 **Scope:** User-facing pairing types, naming, cardinality, guided consent, and
 relationship semantics
@@ -27,6 +27,9 @@ rules into the guided user flows a local user sees.
 - The UI explains permissions from runtime policy, not markdown.
 - Local confirmation is required before activation, renewal, write override,
   historical catch-up body sharing, or revocation initiated by the local user.
+- New parent chats start from explicit intent, not automatic supersession. See
+  `BRIDGE_PAIRING_INTENT_SPEC.md` for pending-pair/background/incognito flows
+  and scoped one-off peer relay.
 
 ## Pairing Types
 
@@ -80,6 +83,8 @@ Behavior:
 - Does not mutate bridge policy, contracts, watcher config, or protected docs.
 - May receive summaries/status if the knowledge contract permits it.
 - Default cap: 3 observers/advisors/auditors per project, locally configurable.
+  This is a conservative UX/audit-volume default, not a performance limit;
+  revisit after real usage data shows whether higher caps stay understandable.
 
 ### Disallowed Same-Project Equal Primaries
 
@@ -96,6 +101,37 @@ Behavior:
 - Creates ambiguity for wake target, task ownership, backpressure, and current
   peer identity.
 - The second pair must either supersede the first or choose a non-primary role.
+
+Attempted duplicate-primary UX:
+
+```text
+This project already has an active primary pair:
+MLV App / Primary / Claude c4a91b2f <-> Codex 06205da2.
+
+Choose one:
+1. Supersede the existing primary with this chat.
+2. Keep this chat background/question-only.
+3. Use this chat as observer/advisor/auditor.
+```
+
+### Same-Project Background / Question-Only Chat
+
+Use case:
+
+```text
+The primary pair is active.
+The user opens another same-project chat to ask side questions.
+```
+
+Behavior:
+
+- Allowed as a non-primary local chat.
+- Does not supersede the active pair.
+- Does not own wake targets or watcher config.
+- May send a scoped one-off peer question if the local user asks.
+- One-off replies return to this background chat only for that relay.
+- Future paired conversation remains in the active primary chat unless the user
+  explicitly promotes this chat through the normal supersession flow.
 
 ### Cross-Project Advisor
 
@@ -143,6 +179,8 @@ Behavior:
 - Model as two directed contracts, not one vague all-powerful link.
 - Each direction has its own scope, expiry, catch-up policy, and revocation.
 - Dashboard may group them visually as a reciprocal relationship.
+- Creation UX should use one local consent prompt that explicitly says "this
+  creates two directed contracts" and activates them atomically.
 
 ## Cardinality Defaults
 
@@ -191,6 +229,8 @@ Rules:
 - Friendly aliases are local and trusted.
 - Peer-claimed labels are shown as claimed/untrusted.
 - Full IDs are available through copy/hover/details; rows show short IDs.
+- Short IDs use the shortest unique prefix among visible rows, starting at 8
+  characters, then growing to 12 or full length on collision.
 
 ## Guided Pairing Flow
 
@@ -201,6 +241,7 @@ The bridge detects:
 - current project
 - local agent
 - local session
+- local pairing intent (`pending_pair`, `background`, `active_primary`, etc.)
 - candidate peer agent/session
 - same-project vs cross-project
 - existing primary or contract conflicts
@@ -210,6 +251,7 @@ The bridge detects:
 
 Options:
 
+- keep this chat in background/question-only mode
 - same-project primary
 - same-project observer
 - same-project advisor
@@ -239,7 +281,7 @@ The user chooses:
 - duration
 - dormancy limit
 - catch-up policy
-- body sharing vs metadata-only
+- body sharing policy: `allowed`, `metadata_only`, or `blocked`
 - friendly alias
 - observer/advisor caps if applicable
 
@@ -257,6 +299,7 @@ After activation, the bridge shows:
 - short session IDs
 - relationship direction
 - role and permissions
+- `knowledge_contract_id`
 - original duration
 - expiration countdown
 - revoke and renew actions
@@ -269,6 +312,9 @@ Natural-language commands should route into the same guided flow:
 Pair this project with Claude as advisor for two hours.
 Revoke my contract with the source-project Claude.
 Let this other Codex chat observe the MLV App pair.
+Do not pair this chat; keep it background.
+Ask Claude this one question from here.
+Continue future paired conversation here.
 ```
 
 The bridge must not skip the confirmation step for authority-affecting actions.
@@ -300,7 +346,18 @@ message replay.
 - Full IDs are copyable from details.
 - Natural-language pairing/revocation routes through the same confirmation and
   audit path as dashboard actions.
+- Background/question-only chats do not supersede the current active pair.
+- One-off peer relay from a background chat returns only the linked reply to the
+  sender chat and leaves future traffic in the active primary pair.
+- A user with `default_pairing_intent=active_primary` does not see a startup
+  consent prompt for a new same-project parent chat; supersession happens
+  automatically and is audited with the resolved setting source.
+- A user with `default_pairing_intent=background` gets a background chat without
+  a startup consent prompt and can later promote it with `Pair this chat`.
 - Policy/doc drift warnings appear before activation if relevant.
 - Tests cover same-project primary, simultaneous multi-project primaries,
   observer role, cross-project advisor, cross-project write confirmation,
-  duplicate-primary rejection, and natural-language-to-guided-flow routing.
+  duplicate-primary rejection, fourth observer rejection when the cap is 3,
+  pending-pair context change during supersession, one-off relay then promote,
+  duplicate-primary refusal UX choices, default pairing intent settings, and
+  natural-language-to-guided-flow routing.

@@ -1,8 +1,10 @@
 # Bridge Watch Lifecycle
 
 **Status:** Implemented for Codex side (`wait_inbox` keepalive). Claude
-side is asymmetric — uses Monitor instead of `wait_inbox`. Symmetric
-`wake_claude.ps1` (cold-start case) deferred to AUTO_PAIR_SPEC Phase D.
+side is asymmetric — uses Monitor instead of `wait_inbox`, with a bootstrap
+Monitor reminder and watcher active-session binding to reduce missed rotations.
+Symmetric `wake_claude.ps1` (cold-start case) deferred to AUTO_PAIR_SPEC
+Phase D.
 
 This note defines the lifecycle for Codex-side bridge watch: how the
 `wait_inbox` keepalive loop starts, stays alive, breaks, and resumes.
@@ -134,6 +136,33 @@ Not fully automatic yet:
 - starting the first loop without a user or startup turn
 - restarting the loop after compaction, restart, clear, or other detached state
 - waking a detached idle Codex chat from outside the thread
+
+Claude Monitor self-healing is bounded by the same cognition rule. The bridge
+can repair or detect the supporting machinery, but it cannot honestly claim
+Claude read a row until Claude's tools stamp `read_at` / `handled_at`.
+
+Self-healable pieces:
+
+- the canonical `bridge_monitor_poll.py` helper must emit targeted unread rows
+  that already exist at startup, so a late Monitor restart does not silently
+  skip the exact backlog it was meant to surface
+- the Monitor must write a heartbeat/runtime breadcrumb for the current Claude
+  private session bucket and project bucket
+- health/dashboard/watchdog code can detect stale or misbound Monitor evidence
+  and escalate with stuck message ids plus the exact repair command
+- bootstrap can surface active-session unread rows on the next live Claude turn
+
+Not self-healable without a future thread-addressable Claude wake primitive:
+
+- forcing a compacted/detached Claude chat to run `check_inbox`
+- treating a watcher toast, stale process, or old generated Monitor script as
+  proof that Claude knows about a message
+- marking Claude-bound work read/handled on Claude's behalf
+
+Until that primitive exists, the field strategy is fail-loud: preserve queued
+rows, detect stale Monitor state, show `CLAUDE_MONITOR_STALE` or
+`CLAUDE_UNREAD_WITHOUT_MONITOR`, and keep relay debt visible until the peer
+actually consumes the row.
 
 ## Hooks
 

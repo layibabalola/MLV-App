@@ -275,6 +275,39 @@ all wake delivery requires window activation.
 
 ---
 
+## D6 - User UI State Restoration Boundary
+
+**Status:** Initial guard implemented in `wake_codex.ps1` Stage 4.
+
+### Problem
+
+Restoring the previous foreground HWND is sufficient only when the user was in
+another app. If the previous foreground HWND is already Codex Desktop, opening
+`codex://threads/<target>` can switch the user's visible Codex thread and leave
+them displaced even after foreground restoration.
+
+### Guard
+
+Targeted SendKeys wake treats user UI state as transactional:
+
+- If the previous foreground app is not Codex, targeted wake may navigate to the
+  protected bridge thread and then restore the previous foreground HWND.
+- If the previous foreground app is Codex and the current visible title matches
+  the cached target thread title, wake skips deeplink navigation and types into
+  the already-visible target.
+- If the previous foreground app is Codex but the current visible thread is a
+  different or unprovable thread, wake defers instead of navigating, unless a
+  future exact `RestoreThreadId` is available and valid.
+
+Title matching is only a practical restoration guard, not a stable identity
+proof. DOM/app-server telemetry may later replace it with exact visible
+thread-id detection.
+
+Failure mode: emit `targeted_wake_refused` with
+`foreground_codex_restore_unproven_*` and exit with retryable code `16`.
+
+---
+
 ## Migration plan
 
 **Phase W1 - pause_bridge gating** (D1)
