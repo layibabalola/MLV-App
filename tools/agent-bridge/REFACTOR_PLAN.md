@@ -37,6 +37,16 @@
   no-silent-success process rule to `bridge_trigger_heuristics.md`.
 - Phase 18 final readiness passed 10/10 validation: Claude and two full-scope stranger-agent reviews scored the shipped workflow-guardrail hardening 10/10. Remaining items such as AgentBridge facade/service extraction, cross-project guided dashboard polish, catch-up preview/policy drift proposal UI, optional live Desktop targeted-wake dogfood for broad distribution, and a real Claude thread-addressable wake primitive are explicit follow-up roadmap work, not Phase 18 blockers.
 
+**Status checkpoint (2026-05-03 America/Chicago):**
+- Phase 18 final 10/10 validation loop complete: Claude 10/10, two full-scope stranger-agent 10/10 reviews (Stranger 2 initially 8/10; Unicode-safe CLI gap fixed in 58e5a5ef and re-scored 10/10). 250 tests OK. User sign-off pending.
+- fork/master fast-forwarded to 58e5a5ef; remote integration branch deleted.
+- Pending worktree cleanup: the integration worktree at `C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration` cannot be removed until the watcher-config `repo_root` and `wake_codex.ps1` path references are migrated to the main checkout (`C:\!Layi Wkspc\MLV-App`). Migration sequence: (1) run `configure_watcher.py` from the main checkout to update `watcher-config.json` with the new `repo_root` and script paths; (2) restart the watcher so it picks up the updated config; (3) verify `bridge_process_status` shows the new paths; (4) then `git worktree remove` the integration worktree.
+
+**Follow-up roadmap items identified 2026-05-03:**
+- `server_wrapper.py` self-healing shipped (Fix A + Fix B, 251 tests). Desktop restart required once to bootstrap onto new wrapper; after that restarts are no longer needed for code-change or crash scenarios.
+- Wake script composer cleanup on failure: `wake_codex.ps1` does not revert the Codex composer to its prior state when a nudge fails (backpressure, wrong thread, etc.). The injected text is left stranded and the user must clean it up manually. Fix: `finally` block must clear any injected composer text (select-all + delete or restore prior content) in addition to the existing clipboard save/restore.
+- Superseded session backpressure confusion: when a peer rotates sessions, unread messages in the old superseded bucket still count against the backpressure gate. `nudge_peer` and `send_to_peer` should exclude superseded sessions from the unread count -- only the active session inbox should gate backpressure. This caused false `backpressure_rejected_nudge_attempted` status during session rotation on 2026-05-03.
+
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
 - Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
 - Backups: `C:\Users\obabalola\.codex\config.toml.bak-20260428T160012` and `C:\Users\obabalola\AppData\Roaming\Claude\claude_desktop_config.json.bak-20260428T160012`.

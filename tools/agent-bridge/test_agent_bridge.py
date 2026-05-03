@@ -781,7 +781,7 @@ class AgentBridgeTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     proc.kill()
 
-    def test_server_wrapper_code_change_marks_refresh_without_child_restart(self) -> None:
+    def test_server_wrapper_code_change_marks_refresh_and_restarts_child(self) -> None:
         self.state_dir.mkdir(parents=True)
         (self.state_dir / "tool-manifest.json").write_text(
             json.dumps(
@@ -809,17 +809,108 @@ class AgentBridgeTests(unittest.TestCase):
 
             self.assertTrue(supervisor._restart_child())
 
-            self.assertIsNone(child.poll())
-            self.assertEqual(child.pid, supervisor._current_child().pid)
+            replacement = supervisor._current_child()
+            self.assertIsNotNone(child.poll())
+            self.assertIsNotNone(replacement)
+            self.assertNotEqual(child.pid, replacement.pid)
             refresh = json.loads((self.state_dir / "tool-refresh-status.json").read_text(encoding="utf-8"))
             self.assertTrue(refresh["refresh_required"])
             self.assertEqual("bridge_code_changed_during_wrapper_session", refresh["reason"])
             audit = (self.state_dir / "messages.jsonl").read_text(encoding="utf-8")
             self.assertIn("mcp_server_refresh_required", audit)
-            self.assertNotIn("mcp_server_self_restarted", audit)
+            self.assertIn("mcp_server_self_restarted", audit)
         finally:
             supervisor._shutdown_child()
             supervisor._join_all_stdout_threads()
+
+    def test_server_wrapper_respawns_unexpected_child_exit_without_refresh_required(self) -> None:
+        class BlockingInput:
+            def __init__(self) -> None:
+                self._closed = False
+                self._condition = threading.Condition()
+
+            def close(self) -> None:
+                with self._condition:
+                    self._closed = True
+                    self._condition.notify_all()
+
+            def read(self, size: int) -> bytes:
+                with self._condition:
+                    while not self._closed:
+                        self._condition.wait(timeout=0.1)
+                    return b""
+
+        class NullOutput:
+            def write(self, data: bytes) -> int:
+                return len(data)
+
+            def flush(self) -> None:
+                return None
+
+        self.state_dir.mkdir(parents=True)
+        flag_path = self.tempdir / "crash-once.flag"
+        launch_log = self.tempdir / "launches.log"
+        script = (
+            "import os, pathlib, sys, time\n"
+            "launch_log = pathlib.Path(%r)\n"
+            "flag_path = pathlib.Path(%r)\n"
+            "with launch_log.open('a', encoding='utf-8') as handle:\n"
+            "    handle.write(str(os.getpid()) + '\\n')\n"
+            "    handle.flush()\n"
+            "if not flag_path.exists():\n"
+            "    flag_path.write_text('crashed', encoding='utf-8')\n"
+            "    sys.exit(7)\n"
+            "time.sleep(60)\n"
+        ) % (str(launch_log), str(flag_path))
+        stdin_stream = BlockingInput()
+        supervisor = ServerSupervisor(
+            command=[sys.executable, "-c", script],
+            state_dir=self.state_dir,
+            watch_paths=[],
+            config=SupervisorConfig(loop_sleep_seconds=0.01, terminate_timeout_seconds=0.5),
+            stdin_stream=stdin_stream,
+            stdout_stream=NullOutput(),
+            stderr_target=subprocess.DEVNULL,
+        )
+        result: Dict[str, int] = {}
+        thread = threading.Thread(target=lambda: result.setdefault("exit_code", supervisor.run()), daemon=True)
+        thread.start()
+        try:
+            deadline = time.time() + 3.0
+            launches: List[int] = []
+            while time.time() < deadline:
+                if launch_log.exists():
+                    launches = [
+                        int(line)
+                        for line in launch_log.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                if len(launches) >= 2:
+                    break
+                time.sleep(0.02)
+
+            self.assertGreaterEqual(len(launches), 2)
+            self.assertNotEqual(launches[0], launches[1])
+            replacement = supervisor._current_child()
+            self.assertIsNotNone(replacement)
+            self.assertEqual(replacement.pid, launches[1])
+            self.assertIsNone(replacement.poll())
+            self.assertTrue(thread.is_alive())
+            self.assertNotIn("exit_code", result)
+
+            events = read_jsonl(self.state_dir / "messages.jsonl")
+            refresh_events = [event for event in events if event.get("action") == "mcp_server_refresh_required"]
+            restart_events = [event for event in events if event.get("action") == "mcp_server_self_restarted"]
+            self.assertEqual(refresh_events, [])
+            self.assertEqual(len(restart_events), 1)
+            self.assertEqual(restart_events[0]["reason"], "unexpected_child_exit")
+            self.assertEqual(restart_events[0]["previous_exit_code"], 7)
+        finally:
+            stdin_stream.close()
+            supervisor._stop_event.set()
+            supervisor._shutdown_child()
+            supervisor._join_all_stdout_threads()
+            thread.join(timeout=2.0)
 
     def test_wake_codex_builds_quoted_inner_command_for_space_paths(self) -> None:
         script = Path(__file__).resolve().parent / "wake_codex.ps1"
@@ -4509,6 +4600,97 @@ for index in range(count):
         self.assertIn("UNREAD_WORK_AFTER: 0", row["body"])
         actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
         self.assertIn("backpressure_resolved", actions)
+
+    def test_check_inbox_empty_self_heals_stale_backpressure_pending(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        for index in range(SESSION_BACKPRESSURE_LIMIT):
+            sent = bridge.send_to_peer(
+                "claude",
+                "codex",
+                "[[handoff:codex]] unread %d" % index,
+                session_id="codex-live",
+            )
+            self.assertTrue(sent.ok)
+        blocked = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] blocked by pressure",
+            session_id="codex-live",
+        )
+        self.assertFalse(blocked.ok)
+
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        rows = read_jsonl(bridge.inbox_path("codex"))
+        for row in rows:
+            if row.get("session_id") == "codex-live":
+                row["read_at"] = now
+        write_jsonl(bridge.inbox_path("codex"), rows)
+
+        checked = bridge.check_inbox("codex", "codex-live")
+
+        self.assertEqual(checked.status, "empty")
+        healed = checked.data["backpressure_self_healed"]
+        self.assertEqual(healed[0]["session_id"], "codex-live")
+        self.assertEqual(healed[0]["reason"], "unread_below_limit")
+        state_after = read_json(bridge.state_path, {})
+        self.assertNotIn("codex:codex-live", state_after.get("backpressure_pending", {}))
+        actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
+        self.assertIn("backpressure_self_healed", actions)
+
+    def test_nudge_peer_self_heals_superseded_session_backpressure_pending(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-old", project="mlv-app")
+        for index in range(SESSION_BACKPRESSURE_LIMIT):
+            sent = bridge.send_to_peer(
+                "claude",
+                "codex",
+                "[[handoff:codex]] old unread %d" % index,
+                session_id="codex-old",
+            )
+            self.assertTrue(sent.ok)
+        blocked = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] blocked by old pressure",
+            session_id="codex-old",
+        )
+        self.assertFalse(blocked.ok)
+        state = read_json(bridge.state_path, {})
+        self.assertIn("codex:codex-old", state.get("backpressure_pending", {}))
+
+        registry = read_json(bridge.session_registry_path, {})
+        project = registry["projects"]["mlv-app"]
+        project["active"]["codex"] = "codex-live"
+        project["sessions"]["codex-old"]["status"] = "superseded"
+        project["sessions"]["codex-old"]["superseded_by"] = "codex-live"
+        project["sessions"]["codex-old"]["superseded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        project["sessions"]["codex-live"] = {
+            "session_id": "codex-live",
+            "agent": "codex",
+            "status": "active",
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "activated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        write_json(bridge.session_registry_path, registry)
+
+        nudge = bridge.nudge_peer("codex", "codex-live")
+
+        self.assertEqual(nudge.status, "backpressure_rejected_no_nudge_no_unread")
+        healed = nudge.data["nudge"]["backpressure_self_healed"]
+        self.assertEqual(healed[0]["session_id"], "codex-old")
+        self.assertEqual(healed[0]["reason"], "session_not_active")
+        state_after = read_json(bridge.state_path, {})
+        self.assertNotIn("codex:codex-old", state_after.get("backpressure_pending", {}))
+        old_unread = [
+            row for row in read_jsonl(bridge.inbox_path("codex"))
+            if row.get("session_id") == "codex-old" and not row.get("read_at")
+        ]
+        self.assertEqual(len(old_unread), SESSION_BACKPRESSURE_LIMIT)
+        actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
+        self.assertIn("backpressure_self_healed", actions)
 
     def test_health_and_dashboard_surface_backpressure_blocked_sender(self) -> None:
         bridge = AgentBridge(self.state_dir)

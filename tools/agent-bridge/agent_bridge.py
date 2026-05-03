@@ -963,6 +963,82 @@ class AgentBridge:
             resolutions.append(resolution)
         return resolutions
 
+    def _self_heal_stale_backpressure_pending(
+        self,
+        state: Dict[str, Any],
+        registry: Dict[str, Any],
+        *,
+        receiver_agent: str,
+        via: str,
+    ) -> List[Dict[str, Any]]:
+        pending = state.setdefault("backpressure_pending", {})
+        if not isinstance(pending, dict):
+            state["backpressure_pending"] = {}
+            return []
+        receiver = normalize_agent(receiver_agent)
+        inbox_rows = self.transport.read_inbox(
+            self._identity(receiver, None),
+            self.inbox_path(receiver),
+            unread_only=False,
+        )
+        healed: List[Dict[str, Any]] = []
+        for key, record in list(pending.items()):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("receiver_agent") or "").strip().lower() != receiver:
+                continue
+            bucket = str(record.get("session_id") or DEFAULT_SESSION_ID)
+            info = self._bucket_info(registry, bucket)
+            limit = record.get("limit")
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                limit = self._backpressure_limit_for_bucket(registry, bucket)
+            if limit is None:
+                continue
+            unread_work = [
+                row
+                for row in inbox_rows
+                if str(row.get("session_id") or DEFAULT_SESSION_ID) == bucket
+                and not row.get("read_at")
+                and not row.get("superseded_at")
+                and row.get("marker_variant") != "control"
+            ]
+            unread_count = len(unread_work)
+            session_record = info.get("record") if info.get("inbox_level") == INBOX_LEVEL_SESSION else None
+            session_inactive = bool(
+                session_record
+                and (
+                    session_record.get("status") != "active"
+                    or info.get("active_session") != bucket
+                )
+            )
+            if not session_inactive and unread_count >= int(limit):
+                continue
+            reason = "session_not_active" if session_inactive else "unread_below_limit"
+            pending.pop(key, None)
+            resolution = {
+                "receiver_agent": receiver,
+                "session_id": bucket,
+                "via": via,
+                "reason": reason,
+                "unread_work_after": unread_count,
+                "limit": int(limit),
+                "first_rejected_at": record.get("first_rejected_at"),
+                "last_rejected_at": record.get("last_rejected_at"),
+            }
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "backpressure_self_healed",
+                    "accepted": True,
+                    **resolution,
+                }
+            )
+            healed.append(resolution)
+        return healed
+
     def _audit(self, event: Dict[str, Any]) -> None:
         agent = str(event.get("from") or event.get("agent") or "codex").strip().lower()
         if agent not in AGENTS:
@@ -5037,12 +5113,32 @@ class AgentBridge:
                 implementation_ack = {"changed": False}
                 catchup_digests = []
 
+            backpressure_self_healed: List[Dict[str, Any]] = []
+            if record_seen:
+                state = self._load_state()
+                backpressure_self_healed = self._self_heal_stale_backpressure_pending(
+                    state,
+                    registry,
+                    receiver_agent=target,
+                    via="check_inbox",
+                )
+                if backpressure_self_healed:
+                    self._save_state(state)
+
             if not unread:
                 if session is None:
                     scope = "all buckets"
                 else:
                     scope = "session %s" % session if not include_parents else "session %s (+parents)" % session
-                return BridgeResult(True, "empty", "No unread bridge messages for %s in %s." % (target, scope))
+                data: Dict[str, Any] = {}
+                if backpressure_self_healed:
+                    data["backpressure_self_healed"] = backpressure_self_healed
+                return BridgeResult(
+                    True,
+                    "empty",
+                    "No unread bridge messages for %s in %s." % (target, scope),
+                    data,
+                )
 
             delivered = "\n\n".join(row["delivered_message"] for row in unread)
             returned_buckets = sorted({str(row.get("session_id")) for row in unread})
@@ -5055,6 +5151,7 @@ class AgentBridge:
                     "messages": unread,
                     "buckets": returned_buckets if buckets is None else buckets,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "backpressure_self_healed": backpressure_self_healed,
                     "implementation_ack": implementation_ack,
                     "catchup_digests": catchup_digests,
                 },
@@ -5356,6 +5453,17 @@ class AgentBridge:
                 implementation_ack = {"changed": False}
                 catchup_digests = []
 
+            state = self._load_state()
+            registry = self._load_session_registry()
+            backpressure_self_healed = self._self_heal_stale_backpressure_pending(
+                state,
+                registry,
+                receiver_agent=target,
+                via="mark_read",
+            )
+            if backpressure_self_healed:
+                self._save_state(state)
+
             self._audit(
                 {
                     "id": str(uuid.uuid4()),
@@ -5367,6 +5475,7 @@ class AgentBridge:
                     "accepted": True,
                     "changed": changed,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "backpressure_self_healed": backpressure_self_healed,
                     "implementation_ack": implementation_ack,
                     "catchup_digests": catchup_digests,
                 }
@@ -5380,6 +5489,7 @@ class AgentBridge:
                     "changed": changed,
                     "stale_bypass": stale_bypass,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "backpressure_self_healed": backpressure_self_healed,
                     "implementation_ack": implementation_ack,
                     "catchup_digests": catchup_digests,
                 },
@@ -5508,6 +5618,17 @@ class AgentBridge:
                     "message_id": message_id,
                     "wake_rearmed": changed,
                 }
+        state = self._load_state()
+        registry = self._load_session_registry()
+        backpressure_self_healed = self._self_heal_stale_backpressure_pending(
+            state,
+            registry,
+            receiver_agent=agent,
+            via="nudge_peer",
+        )
+        if backpressure_self_healed:
+            self._save_state(state)
+            result["backpressure_self_healed"] = backpressure_self_healed
         self._audit(
             {
                 "id": str(uuid.uuid4()),

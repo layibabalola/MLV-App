@@ -139,6 +139,7 @@ class ServerSupervisor:
         self.now_fn = now_fn
 
         self._state_lock = threading.Lock()
+        self._stdout_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._child: Optional[subprocess.Popen[bytes]] = None
         self._stdout_threads: Dict[int, threading.Thread] = {}
@@ -179,8 +180,13 @@ class ServerSupervisor:
 
                 exit_code = child.poll()
                 if exit_code is not None and not self._is_restarting():
-                    self._join_stdout_thread(child.pid)
-                    return exit_code
+                    if self._stdin_eof:
+                        self._join_stdout_thread(child.pid)
+                        return exit_code
+                    if not self._respawn_after_child_exit(child, exit_code):
+                        self._join_stdout_thread(child.pid)
+                        return exit_code or 1
+                    continue
 
                 if self._stop_event.wait(self.config.loop_sleep_seconds):
                     if self._thread_error is not None:
@@ -344,8 +350,9 @@ class ServerSupervisor:
                 if not chunk:
                     return
                 self._note_io()
-                self.stdout_stream.write(chunk)
-                self.stdout_stream.flush()
+                with self._stdout_lock:
+                    self.stdout_stream.write(chunk)
+                    self.stdout_stream.flush()
         except BaseException as exc:
             self._thread_error = exc
             self._stop_event.set()
@@ -386,51 +393,117 @@ class ServerSupervisor:
             changed_files = sorted(str(path) for path in self._pending_changed_files)
             self._pending_changed_files.clear()
             self._last_change_time = None
+        return self._replace_child(
+            changed_files=changed_files,
+            reason="bridge_code_changed_during_wrapper_session",
+        )
+
+    def _respawn_after_child_exit(self, child: subprocess.Popen[bytes], exit_code: int) -> bool:
+        return self._replace_child(
+            changed_files=[],
+            reason="unexpected_child_exit",
+            previous_child=child,
+            previous_exit_code=exit_code,
+            refresh_required=False,
+        )
+
+    def _replace_child(
+        self,
+        *,
+        changed_files: List[str],
+        reason: str,
+        previous_child: Optional[subprocess.Popen[bytes]] = None,
+        previous_exit_code: Optional[int] = None,
+        refresh_required: bool = True,
+    ) -> bool:
+        restart_at = self.now_fn()
+        if self._restart_limit_reached(
+            restart_at,
+            changed_files,
+            reason=reason,
+            previous_exit_code=previous_exit_code,
+        ):
+            return False
+
+        previous_snapshot = self._read_tool_manifest_snapshot() or {}
+        restart_started_at = self.now_fn()
+        with self._state_lock:
+            cutoff = restart_at - self.config.restart_window_seconds
+            self._restart_history = [stamp for stamp in self._restart_history if stamp >= cutoff]
+            self._restart_history.append(restart_at)
             self._restart_in_progress = True
-            child = self._child
+            child = previous_child or self._child
+            if child is self._child:
+                self._child = None
 
         if child is None:
             with self._state_lock:
                 self._restart_in_progress = False
             return False
 
-        restart_at = self.now_fn()
-        snapshot = self._read_tool_manifest_snapshot() or {}
-        if snapshot:
-            self._mark_tool_refresh_required(
-                previous_snapshot=snapshot,
-                current_snapshot=snapshot,
+        old_child_pid = child.pid
+        try:
+            self._terminate_child(child)
+            self._join_stdout_thread(old_child_pid)
+            new_child = self._spawn_child()
+            if refresh_required:
+                current_snapshot = (
+                    self._wait_for_tool_manifest_snapshot(previous_mtime_ns=previous_snapshot.get("mtime_ns"))
+                    or self._read_tool_manifest_snapshot()
+                    or {}
+                )
+                self._mark_tool_refresh_required(
+                    previous_snapshot=previous_snapshot,
+                    current_snapshot=current_snapshot,
+                    changed_files=changed_files,
+                    reason=reason,
+                )
+                self._append_audit_event(
+                    action="mcp_server_refresh_required",
+                    child_pid=old_child_pid,
+                    changed_files=changed_files,
+                    reason=reason,
+                )
+
+            self._append_audit_event(
+                action="mcp_server_self_restarted",
+                old_child_pid=old_child_pid,
+                new_child_pid=new_child.pid,
                 changed_files=changed_files,
-                reason="bridge_code_changed_during_wrapper_session",
+                reason=reason,
+                previous_exit_code=previous_exit_code,
+                elapsed_ms=int(round((self.now_fn() - restart_started_at) * 1000)),
             )
+            return True
+        except BaseException as exc:
+            self._report_error("agent-bridge server wrapper restart failed: %s" % exc)
+            return False
+        finally:
+            with self._state_lock:
+                self._restart_in_progress = False
 
-        with self._state_lock:
-            cutoff = restart_at - self.config.restart_window_seconds
-            self._restart_history = [stamp for stamp in self._restart_history if stamp >= cutoff]
-            self._restart_history.append(restart_at)
-            self._restart_in_progress = False
-
-        self._append_audit_event(
-            action="mcp_server_refresh_required",
-            child_pid=child.pid,
-            changed_files=changed_files,
-            reason="bridge_code_changed_during_wrapper_session",
-        )
-        return True
-
-    def _restart_limit_reached(self, restart_at: float, changed_files: List[str]) -> bool:
+    def _restart_limit_reached(
+        self,
+        restart_at: float,
+        changed_files: List[str],
+        *,
+        reason: str,
+        previous_exit_code: Optional[int] = None,
+    ) -> bool:
         with self._state_lock:
             cutoff = restart_at - self.config.restart_window_seconds
             recent = [stamp for stamp in self._restart_history if stamp >= cutoff]
-        if len(recent) < self.config.max_restarts_per_window - 1:
+        if len(recent) < self.config.max_restarts_per_window:
             return False
         self._append_audit_event(
             action="mcp_server_self_restart_aborted_loop",
             changed_files=changed_files,
             attempted_restart_count=len(recent) + 1,
             restart_window_seconds=self.config.restart_window_seconds,
+            reason=reason,
+            previous_exit_code=previous_exit_code,
         )
-        self._report_error("agent-bridge server wrapper aborted restart loop protection")
+        self._report_error("agent-bridge server wrapper aborted restart loop protection (%s)" % reason)
         return True
 
     def _terminate_child(self, child: subprocess.Popen[bytes]) -> None:
@@ -443,7 +516,6 @@ class ServerSupervisor:
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait(timeout=self.config.terminate_timeout_seconds)
-        _close_pipe(child.stdout)
 
     def _shutdown_child(self) -> None:
         child = self._current_child()
