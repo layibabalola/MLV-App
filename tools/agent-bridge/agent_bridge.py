@@ -10132,9 +10132,19 @@ def _default_state_dir() -> Path:
 
 def _print_cli_result(result: BridgeResult, *, output_format: str) -> None:
     if output_format == "json":
-        print(json.dumps(dataclasses.asdict(result), indent=2, sort_keys=True))
+        _safe_cli_print(json.dumps(dataclasses.asdict(result), indent=2, sort_keys=True, ensure_ascii=True))
         return
-    print(result.message)
+    _safe_cli_print(result.message)
+
+
+def _safe_cli_print(text: str) -> None:
+    """Print bridge CLI output without crashing on legacy Windows code pages."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        safe = text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace")
+        print(safe)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

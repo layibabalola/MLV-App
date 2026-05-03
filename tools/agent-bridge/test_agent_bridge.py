@@ -27,6 +27,7 @@ from agent_bridge import (
     SESSION_BACKPRESSURE_LIMIT,
     AgentBridge,
     PROTECTED_DOC_TOKENS,
+    _safe_cli_print,
     normalize_project,
     normalize_session,
 )
@@ -173,6 +174,28 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("--session-id", result.stdout)
         self.assertIn("Reads local bridge state files only", result.stdout)
         self.assertIn("Use the MCP tool for cross-machine access", result.stdout)
+
+    def test_safe_cli_print_escapes_unicode_on_legacy_windows_stdout(self) -> None:
+        class Cp1252Stdout:
+            encoding = "cp1252"
+
+            def __init__(self) -> None:
+                self.chunks: List[str] = []
+
+            def write(self, text: str) -> int:
+                text.encode(self.encoding)
+                self.chunks.append(text)
+                return len(text)
+
+            def flush(self) -> None:
+                return None
+
+        fake_stdout = Cp1252Stdout()
+
+        with patch("sys.stdout", fake_stdout):
+            _safe_cli_print("APPROVED \u2713 \u2014 ready")
+
+        self.assertEqual("APPROVED \\u2713 \u2014 ready\n", "".join(fake_stdout.chunks))
 
     def test_review_loop_state_tracks_request_result_handled_and_closeout(self) -> None:
         bridge = AgentBridge(self.state_dir)

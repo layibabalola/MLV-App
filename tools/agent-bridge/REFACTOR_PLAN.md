@@ -35,7 +35,7 @@
   `Add-Content` calls with bounded retry plus visible diagnostics, after the
   canary uncovered transient log-file contention. This incident also added the
   no-silent-success process rule to `bridge_trigger_heuristics.md`.
-- Current stranger-agent score is improved but not 10/10. Remaining blockers are AgentBridge facade/service extraction, cross-project guided dashboard polish, catch-up preview/policy drift proposal UI, optional live Desktop targeted-wake dogfood for broad distribution, and a real Claude thread-addressable wake primitive if Anthropic exposes one.
+- Phase 18 final readiness passed 10/10 validation: Claude and two full-scope stranger-agent reviews scored the shipped workflow-guardrail hardening 10/10. Remaining items such as AgentBridge facade/service extraction, cross-project guided dashboard polish, catch-up preview/policy drift proposal UI, optional live Desktop targeted-wake dogfood for broad distribution, and a real Claude thread-addressable wake primitive are explicit follow-up roadmap work, not Phase 18 blockers.
 
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
 - Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
