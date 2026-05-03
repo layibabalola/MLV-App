@@ -48,6 +48,20 @@ platform/build-*
 # Durable findings go under .claude/ and are tracked; .claude-state/ is scratch.
 .claude-state/
 
+# Per-machine Claude Code settings (permissions, local hooks). The shared
+# .claude/settings.json (if it exists) is tracked; this one stays local.
+.claude/settings.local.json
+
+# Local bridge monitor/runtime breadcrumbs should live under bridge state or
+# scratch; ignore accidental root-level drops.
+monitor-*.runtime.json
+peer-*.runtime.json
+watcher.runtime.json
+presence-*.runtime.json
+.bridge-state/
+bridge-root.json
+MOVED_TO.json
+
 # Python bytecode (e.g. tools/agent-bridge/)
 __pycache__/
 *.pyc
