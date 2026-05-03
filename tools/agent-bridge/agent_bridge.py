@@ -732,13 +732,22 @@ class AgentBridge:
                 "blocked_since": (record or {}).get("first_rejected_at"),
                 "last_rejected_at": (record or {}).get("last_rejected_at"),
                 "recommendation": (
-                    "Mark unread work messages read for %s bucket %s to unblock %s."
+                    "Run dry-run receipt cleanup for %s bucket %s, then read and disposition the blocking work to unblock %s."
                     % (receiver, session_id, blocked_sender_agent or "sender")
                     if status == "BACKPRESSURE_BLOCKED"
                     else "Read and disposition %s bucket %s soon; it is approaching the backpressure limit."
                     % (receiver, session_id)
                 ),
             }
+            if status == "BACKPRESSURE_BLOCKED":
+                item.update(
+                    {
+                        "remediation_command": 'receipt_debt_cleanup(agent="%s", apply=false, rearm_stale_unread=true)'
+                        % receiver,
+                        "remediation_safe_to_run": True,
+                        "remediation_mutates_state": False,
+                    }
+                )
             if status == "BACKPRESSURE_BLOCKED":
                 blocked_items.append(item)
             else:
@@ -4570,8 +4579,10 @@ class AgentBridge:
                 if row.get("marker_variant") != "control"
             ]
             delivery_backpressure_limit = self._backpressure_limit_for_level(delivery_level)
+            is_control_message = marker["marker_variant"] == "control"
             if (
                 delivery_level == INBOX_LEVEL_SESSION
+                and not is_control_message
                 and delivery_backpressure_limit is not None
                 and len(unread_work) >= delivery_backpressure_limit
             ):
@@ -4599,6 +4610,7 @@ class AgentBridge:
                 return reject(reason)
             if (
                 delivery_level == INBOX_LEVEL_PROJECT
+                and not is_control_message
                 and delivery_backpressure_limit is not None
                 and len(unread_work) >= delivery_backpressure_limit
             ):
@@ -7270,6 +7282,7 @@ class AgentBridge:
         buckets: List[Dict[str, Any]] = []
         totals = {
             "unread_count": 0,
+            "unread_work_count": 0,
             "old_unread_over_threshold_count": 0,
             "old_unread_threshold_seconds": unread_threshold_seconds,
             "stale_unread_count": 0,
@@ -7295,6 +7308,7 @@ class AgentBridge:
                         "agent": agent,
                         "session_id": session,
                         "unread_count": 0,
+                        "unread_work_count": 0,
                         "oldest_unread_age_seconds": None,
                         "old_unread_over_threshold_count": 0,
                         "stale_unread_count": 0,
@@ -7309,6 +7323,9 @@ class AgentBridge:
                 if not row.get("read_at"):
                     entry["unread_count"] += 1
                     totals["unread_count"] += 1
+                    if row.get("marker_variant") != "control":
+                        entry["unread_work_count"] += 1
+                        totals["unread_work_count"] += 1
                     if created_age is not None and (
                         entry["oldest_unread_age_seconds"] is None
                         or created_age > entry["oldest_unread_age_seconds"]
@@ -7350,6 +7367,38 @@ class AgentBridge:
             "totals": totals,
             "buckets": buckets,
             "errors": errors,
+        }
+
+    def _health_stale_unread_watchdog(self, now_dt: datetime) -> Dict[str, Any]:
+        read = self._health_read_jsonl(self.audit_path, "stale_unread_watchdog")
+        events: List[Dict[str, Any]] = []
+        cutoff = now_dt - timedelta(hours=24)
+        for row in read["rows"][-500:]:
+            if row.get("action") != "stale_unread_watchdog_rearmed":
+                continue
+            timestamp = parse_iso_datetime(row.get("timestamp"))
+            if timestamp and timestamp < cutoff:
+                continue
+            events.append(
+                {
+                    "status": "STALE_UNREAD_WATCHDOG_REARMED",
+                    "event_ts": row.get("timestamp"),
+                    "agent": row.get("agent"),
+                    "session_id": row.get("session_id"),
+                    "project": row.get("project"),
+                    "runtime_status": row.get("runtime_status"),
+                    "rearmed_count": int(row.get("rearmed_count") or len(row.get("message_ids") or [])),
+                    "message_ids": list(row.get("message_ids") or [])[:20],
+                    "remediation_command": 'receipt_debt_cleanup(agent="%s", apply=false, rearm_stale_unread=true)'
+                    % (row.get("agent") or "claude"),
+                }
+            )
+        return {
+            "status": "rearmed" if events else ("error" if read["status"] == "error" else "ok"),
+            "path": read["path"],
+            "rearm_count": len(events),
+            "items": events[-20:],
+            "error": read["error"],
         }
 
     def _claude_monitor_runtime_command(self, *, session_id: str, project: str) -> str:
@@ -7697,6 +7746,7 @@ class AgentBridge:
         server = core.get("server") or {}
         stuck_wakes = core.get("stuck_wakes") or {}
         inboxes = core.get("inboxes") or {}
+        stale_unread_watchdog = core.get("stale_unread_watchdog") or {}
         claude_monitor = core.get("claude_monitor") or {}
         extended = snapshot.get("extended") or {}
         wake_breaker = extended.get("wake_breaker") or {}
@@ -7717,6 +7767,8 @@ class AgentBridge:
         if int((core.get("backpressure") or {}).get("blocked_count") or 0) > 0:
             return "degraded"
         if int((core.get("backpressure") or {}).get("warning_count") or 0) > 0:
+            return "degraded"
+        if stale_unread_watchdog.get("status") == "error":
             return "degraded"
         if (server.get("mcp_reconnect") or {}).get("impact_class") in {
             "tool_access_risk",
@@ -7750,6 +7802,7 @@ class AgentBridge:
         server = core.get("server") or {}
         stuck_wakes = core.get("stuck_wakes") or {}
         inboxes = core.get("inboxes") or {}
+        stale_unread_watchdog = core.get("stale_unread_watchdog") or {}
         backpressure = core.get("backpressure") or {}
         claude_monitor = core.get("claude_monitor") or {}
         totals = inboxes.get("totals") or {}
@@ -7815,16 +7868,17 @@ class AgentBridge:
             add(
                 "clear_backpressure_blocker",
                 "high",
-                "Backpressure is blocking %s from sending to %s bucket %s."
+                "Backpressure is blocking %s from sending to %s bucket %s; run a dry-run receipt diagnostic before mutating state."
                 % (
                     first.get("blocked_sender_agent") or "a sender",
                     first.get("receiver_agent") or "receiver",
                     first.get("receiver_session_id") or "<unknown>",
                 ),
-                'check_inbox(agent="%s", session_id="%s", mark_read=false); mark_read(message_id="<handled-id>")'
-                % (first.get("receiver_agent") or caller, first.get("receiver_session_id") or "<bucket>"),
-                safe_to_run=False,
-                mutates_state=True,
+                first.get("remediation_command")
+                or 'receipt_debt_cleanup(agent="%s", apply=false, rearm_stale_unread=true)'
+                % (first.get("receiver_agent") or caller),
+                safe_to_run=bool(first.get("remediation_safe_to_run", True)),
+                mutates_state=bool(first.get("remediation_mutates_state", False)),
             )
         elif int(backpressure.get("warning_count") or 0) > 0:
             first = (backpressure.get("items") or [{}])[0]
@@ -7869,6 +7923,20 @@ class AgentBridge:
                 "Wake succeeded but messages remain unread; rearm only stale ids for normal wake retry.",
                 'receipt_debt_cleanup(agent="%s", apply=true, rearm_stale_unread=true)' % caller,
                 mutates_state=True,
+            )
+        if int(stale_unread_watchdog.get("rearm_count") or 0) > 0:
+            first_rearm = (stale_unread_watchdog.get("items") or [{}])[-1]
+            add(
+                "inspect_stale_unread_watchdog",
+                "normal",
+                "The stale-unread watchdog re-armed %s message(s) for %s session %s."
+                % (
+                    first_rearm.get("rearmed_count") or 0,
+                    first_rearm.get("agent") or "agent",
+                    first_rearm.get("session_id") or "<unknown>",
+                ),
+                first_rearm.get("remediation_command")
+                or 'receipt_debt_cleanup(agent="%s", apply=false, rearm_stale_unread=true)' % caller,
             )
         if int(totals.get("handled_not_seen_count") or 0) > 0:
             add(
@@ -8113,6 +8181,9 @@ class AgentBridge:
                 errors.append({"metric": "%s_wakes" % key, "error": wake_processes[key].get("error")})
         inboxes = self._health_inboxes(now_dt)
         errors.extend(inboxes.get("errors") or [])
+        stale_unread_watchdog = self._health_stale_unread_watchdog(now_dt)
+        if stale_unread_watchdog.get("status") == "error":
+            errors.append({"metric": "stale_unread_watchdog", "error": stale_unread_watchdog.get("error")})
         claude_monitor = self._health_claude_monitor(active_sessions, now_dt)
         errors.extend(claude_monitor.get("errors") or [])
         registry_data = registry_read["data"] if isinstance(registry_read["data"], dict) else self._default_session_registry()
@@ -8154,6 +8225,7 @@ class AgentBridge:
                 "in_flight_wakes": wake_processes["in_flight"],
                 "stuck_wakes": wake_processes["stuck"],
                 "inboxes": inboxes,
+                "stale_unread_watchdog": stale_unread_watchdog,
                 "claude_monitor": claude_monitor,
                 "backpressure": backpressure,
             },
@@ -8687,7 +8759,7 @@ class AgentBridge:
             info = self._bucket_info(registry, session_id)
             if project_name and info.get("project") != project_name:
                 continue
-            unread_count = int(bucket.get("unread_count") or 0)
+            unread_count = int(bucket.get("unread_work_count", bucket.get("unread_count") or 0) or 0)
             unread_total += unread_count
             limit = self._backpressure_limit_for_bucket(registry, session_id)
             if limit is None:
@@ -8715,6 +8787,15 @@ class AgentBridge:
                 "last_rejected_at": None,
                 "recommendation": "Read and disposition the unread work item(s) in bucket %s." % session_id,
             }
+            if unread_count >= limit:
+                item.update(
+                    {
+                        "remediation_command": 'receipt_debt_cleanup(agent="%s", apply=false, rearm_stale_unread=true)'
+                        % (bucket.get("agent") or "codex"),
+                        "remediation_safe_to_run": True,
+                        "remediation_mutates_state": False,
+                    }
+                )
             if unread_count >= limit:
                 blocked.append(item)
             else:
@@ -9037,6 +9118,9 @@ class AgentBridge:
                     "dashboard_reads": read_status,
                     "backpressure": backpressure_status,
                     "claude_monitor": (health_snapshot.get("core") or {}).get("claude_monitor", {})
+                    if isinstance(health_snapshot, dict)
+                    else {},
+                    "stale_unread_watchdog": (health_snapshot.get("core") or {}).get("stale_unread_watchdog", {})
                     if isinstance(health_snapshot, dict)
                     else {},
                     "catchup": catchup_status,

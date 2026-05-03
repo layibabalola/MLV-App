@@ -71,6 +71,7 @@ WAKE_BREAKER_WINDOW_S = 5 * 60
 WAKE_BREAKER_IDLE_CLOSE_S = 15 * 60
 WAKE_BREAKER_SCHEMA_VERSION = 1
 CLAUDE_MONITOR_UNREAD_ESCALATION_S = 60
+STALE_UNREAD_WATCHDOG_REARM_S = 5 * 60
 WAKE_TELEMETRY_PREFIX = "AGENT_BRIDGE_WAKE_TELEMETRY "
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
 ACTIVE_SESSION_ID_SOURCE = "active_session"
@@ -392,6 +393,119 @@ def _append_wake_audit(inbox_path: Path, event: Dict[str, Any]) -> None:
         storage_append_jsonl(audit_path, event)
     except OSError as exc:
         print(f"[agent-bridge] failed to write wake audit event: {exc}", flush=True)
+
+
+def _rearm_stale_unread_without_monitor(
+    *,
+    state_path: Path,
+    inbox_path: Path,
+    session_id: str,
+    project: str,
+    seen_ids: set,
+    toasted_ids: set,
+    pending_ids: set,
+    paused_ids: set,
+) -> List[str]:
+    runtime = _claude_monitor_runtime_status(inbox_path.parent, session_id, project)
+    if runtime.get("fresh"):
+        return []
+    now_dt = datetime.now(timezone.utc)
+    candidates: List[Dict[str, Any]] = []
+    for row in unread_for_session(inbox_path, session_id):
+        message_id = str(row.get("id") or "")
+        if not message_id or message_id in pending_ids or message_id in paused_ids:
+            continue
+        if row.get("marker_variant") == "control":
+            continue
+        if message_id not in seen_ids and message_id not in toasted_ids:
+            continue
+        created = _parse_dt(str(row.get("created_at") or ""))
+        if not created:
+            continue
+        age_seconds = max(0, int((now_dt - created).total_seconds()))
+        if age_seconds >= STALE_UNREAD_WATCHDOG_REARM_S:
+            candidate = dict(row)
+            candidate["age_seconds"] = age_seconds
+            candidates.append(candidate)
+    if not candidates:
+        return []
+
+    def _merge(existing: Dict[str, Any]) -> Dict[str, Any]:
+        rearm_events = list(existing.get("stale_unread_watchdog_rearms") or [])
+        rearmed_ids = {
+            str(item.get("message_id") or "")
+            for item in rearm_events
+            if isinstance(item, dict) and item.get("message_id")
+        }
+        current_seen = {str(item) for item in existing.get("seen_ids", []) if str(item)}
+        current_toasted = {str(item) for item in existing.get("toasted_ids", []) if str(item)}
+        new_events: List[Dict[str, Any]] = []
+        for row in candidates:
+            message_id = str(row.get("id") or "")
+            if not message_id or message_id in rearmed_ids:
+                continue
+            if message_id not in current_seen and message_id not in current_toasted:
+                continue
+            current_seen.discard(message_id)
+            current_toasted.discard(message_id)
+            event = {
+                "message_id": message_id,
+                "agent": "claude",
+                "session_id": session_id,
+                "project": project,
+                "runtime_status": runtime.get("status"),
+                "age_seconds": row.get("age_seconds"),
+                "rearmed_at": utc_now(),
+            }
+            rearm_events.append(event)
+            new_events.append(event)
+        if not new_events:
+            return existing
+        updated = dict(existing)
+        updated["seen_ids"] = sorted(current_seen)[-500:]
+        updated["toasted_ids"] = sorted(current_toasted)[-500:]
+        updated["stale_unread_watchdog_rearms"] = rearm_events[-200:]
+        updated["_new_stale_unread_watchdog_rearms"] = new_events
+        return updated
+
+    updated = storage_update_json(
+        state_path,
+        {
+            "seen_ids": [],
+            "toasted_ids": [],
+            "pending_wake_verifications": [],
+            "paused_wake_messages": [],
+            "unknown_origin_warnings": [],
+            "wake_fire_history": [],
+            "claude_monitor_escalations": [],
+            "stale_unread_watchdog_rearms": [],
+        },
+        _merge,
+    )
+    events = list(updated.get("_new_stale_unread_watchdog_rearms") or [])
+    if "_new_stale_unread_watchdog_rearms" in updated:
+        updated.pop("_new_stale_unread_watchdog_rearms", None)
+        storage_write_json(state_path, updated)
+    seen_ids.clear()
+    seen_ids.update(str(item) for item in updated.get("seen_ids", []) if str(item))
+    toasted_ids.clear()
+    toasted_ids.update(str(item) for item in updated.get("toasted_ids", []) if str(item))
+    if events:
+        message_ids = [str(event.get("message_id") or "") for event in events if event.get("message_id")]
+        _append_wake_audit(
+            inbox_path,
+            {
+                "action": "stale_unread_watchdog_rearmed",
+                "agent": "claude",
+                "session_id": session_id,
+                "project": project,
+                "message_ids": message_ids,
+                "rearmed_count": len(message_ids),
+                "runtime_status": runtime.get("status"),
+                "oldest_age_seconds": max(int(event.get("age_seconds") or 0) for event in events),
+            },
+        )
+    return [str(event.get("message_id") or "") for event in events if event.get("message_id")]
 
 
 def _watcher_state_dir(state_path: Path) -> Path:
@@ -1941,6 +2055,16 @@ def process_session_once(
                 wake_fire_history,
                 toasted_ids,
             )
+        _rearm_stale_unread_without_monitor(
+            state_path=state_path,
+            inbox_path=inbox_path,
+            session_id=session_id,
+            project=project,
+            seen_ids=seen_ids,
+            toasted_ids=toasted_ids,
+            pending_ids=pending_ids,
+            paused_ids=paused_ids,
+        )
     new_msgs = [
         m for m in unread
         if m.get("id") not in seen_ids and m.get("id") not in pending_ids and m.get("id") not in paused_ids

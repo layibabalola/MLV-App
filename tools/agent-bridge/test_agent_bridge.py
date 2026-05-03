@@ -4528,6 +4528,82 @@ for index in range(count):
         surface = dashboard.data["overview"]["status_surfaces"]["backpressure"]
         self.assertEqual(surface["status"], "blocked")
         self.assertEqual(surface["items"][0]["blocked_sender_session"], "claude-live")
+        self.assertIn("receipt_debt_cleanup", blocked["remediation_command"])
+        self.assertFalse(blocked["remediation_mutates_state"])
+        self.assertTrue(
+            any(
+                item["id"] == "clear_backpressure_blocker" and "receipt_debt_cleanup" in item["command"]
+                for item in health.data["snapshot"]["recommended_actions"]
+            )
+        )
+
+    def test_control_messages_do_not_count_against_backpressure_limits(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        for index in range(SESSION_BACKPRESSURE_LIMIT):
+            sent = bridge.send_to_peer(
+                "claude",
+                "codex",
+                "[[handoff:codex]] session work %d" % index,
+                session_id="codex-live",
+                sender_session_id="claude-live",
+            )
+            self.assertTrue(sent.ok)
+
+        control = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex control]]\nTYPE: SESSION_UPDATE\nSUMMARY: control still routes",
+            session_id="codex-live",
+            sender_session_id="claude-live",
+        )
+        self.assertTrue(control.ok)
+        blocked = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] session overflow",
+            session_id="codex-live",
+            sender_session_id="claude-live",
+        )
+        self.assertFalse(blocked.ok)
+        self.assertIn("5 unread >= 5", blocked.message)
+
+        health = bridge.bridge_health_panel("claude", include_extended=True)
+        bucket = [
+            item
+            for item in health.data["snapshot"]["core"]["inboxes"]["buckets"]
+            if item["agent"] == "codex" and item["session_id"] == "codex-live"
+        ][0]
+        self.assertEqual(bucket["unread_count"], SESSION_BACKPRESSURE_LIMIT + 1)
+        self.assertEqual(bucket["unread_work_count"], SESSION_BACKPRESSURE_LIMIT)
+
+        for index in range(PROJECT_BACKPRESSURE_LIMIT):
+            sent = bridge.send_to_peer(
+                "claude",
+                "codex",
+                "[[handoff:codex]] project work %d" % index,
+                session_id="mlv-app",
+                sender_session_id="claude-live",
+            )
+            self.assertTrue(sent.ok)
+        project_control = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex control]]\nTYPE: SESSION_UPDATE\nSUMMARY: project control still routes",
+            session_id="mlv-app",
+            sender_session_id="claude-live",
+        )
+        self.assertTrue(project_control.ok)
+        project_blocked = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] project overflow",
+            session_id="mlv-app",
+            sender_session_id="claude-live",
+        )
+        self.assertFalse(project_blocked.ok)
+        self.assertIn("10 unread >= 10", project_blocked.message)
 
     def test_health_panel_reports_claude_unread_without_monitor(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -4594,6 +4670,189 @@ for index in range(count):
         self.assertFalse(rows[0].get("read_at"))
         audit_rows = read_jsonl(state_dir / "messages.jsonl")
         self.assertEqual(audit_rows[-1]["action"], "claude_unread_without_monitor")
+
+    def test_watcher_rearms_stale_unread_claude_message_without_marking_read(self) -> None:
+        bridge_root = self.tempdir / "watcher-stale-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        inbox = state_dir / "inbox-claude.jsonl"
+        message = {
+            "id": "claude-stale",
+            "to": "claude",
+            "from": "codex",
+            "session_id": "claude-live",
+            "body": "[[handoff:claude]] stale review",
+            "created_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds"),
+        }
+        append_jsonl(inbox, message)
+        state_path = bridge_root / "watcher-state.json"
+        write_json(
+            state_path,
+            {
+                "seen_ids": ["claude-stale"],
+                "toasted_ids": ["claude-stale"],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+            },
+        )
+        config = {
+            "agent": "claude",
+            "session_id": "claude-live",
+            "project": "mlv-app",
+            "inbox": str(inbox),
+            "on_message": "log",
+        }
+
+        surfaced = watcher.process_session_once(config, seen_ids=set(), state_path=state_path, toasts_enabled=False)
+        second = watcher.process_session_once(config, seen_ids=set(), state_path=state_path, toasts_enabled=False)
+
+        self.assertEqual(surfaced, ["claude-stale"])
+        self.assertEqual(second, [])
+        rows = read_jsonl(inbox)
+        self.assertFalse(rows[0].get("read_at"))
+        state = read_json(state_path, {})
+        self.assertIn("claude-stale", state.get("seen_ids") or [])
+        self.assertEqual((state.get("stale_unread_watchdog_rearms") or [])[0]["message_id"], "claude-stale")
+        audit_rows = read_jsonl(state_dir / "messages.jsonl")
+        rearm_rows = [row for row in audit_rows if row.get("action") == "stale_unread_watchdog_rearmed"]
+        self.assertEqual(len(rearm_rows), 1)
+        self.assertEqual(rearm_rows[0]["message_ids"], ["claude-stale"])
+
+        bridge = AgentBridge(state_dir)
+        health = bridge.bridge_health_panel("codex", include_extended=True)
+        watchdog = health.data["snapshot"]["core"]["stale_unread_watchdog"]
+        self.assertEqual(watchdog["status"], "rearmed")
+        self.assertEqual(watchdog["items"][0]["status"], "STALE_UNREAD_WATCHDOG_REARMED")
+        dashboard = bridge.dashboard_overview("codex", project="mlv-app")
+        self.assertEqual(
+            dashboard.data["overview"]["status_surfaces"]["stale_unread_watchdog"]["items"][0]["status"],
+            "STALE_UNREAD_WATCHDOG_REARMED",
+        )
+
+    def test_watcher_does_not_rearm_stale_unread_when_claude_monitor_is_fresh(self) -> None:
+        bridge_root = self.tempdir / "watcher-fresh-monitor-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        inbox = state_dir / "inbox-claude.jsonl"
+        append_jsonl(
+            inbox,
+            {
+                "id": "claude-stale-fresh-monitor",
+                "to": "claude",
+                "from": "codex",
+                "session_id": "claude-live",
+                "body": "[[handoff:claude]] stale but monitor is fresh",
+                "created_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds"),
+            },
+        )
+        write_json(
+            bridge_root / "monitor-claude-claude-live.runtime.json",
+            {
+                "schema_version": 1,
+                "agent": "claude",
+                "session_id": "claude-live",
+                "project": "mlv-app",
+                "monitor_pid": 0,
+                "heartbeat_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "poll_interval_seconds": 2,
+                "script_name": "bridge_monitor_poll.py",
+                "watched_buckets": ["claude-live", "mlv-app"],
+            },
+        )
+        state_path = bridge_root / "watcher-state.json"
+        write_json(
+            state_path,
+            {
+                "seen_ids": ["claude-stale-fresh-monitor"],
+                "toasted_ids": ["claude-stale-fresh-monitor"],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+            },
+        )
+
+        surfaced = watcher.process_session_once(
+            {
+                "agent": "claude",
+                "session_id": "claude-live",
+                "project": "mlv-app",
+                "inbox": str(inbox),
+                "on_message": "log",
+            },
+            seen_ids=set(),
+            state_path=state_path,
+            toasts_enabled=False,
+        )
+
+        self.assertEqual(surfaced, [])
+        state = read_json(state_path, {})
+        self.assertNotIn("stale_unread_watchdog_rearms", state)
+        self.assertEqual(read_jsonl(state_dir / "messages.jsonl"), [])
+
+    def test_watcher_stale_rearm_skips_pending_paused_and_control_rows(self) -> None:
+        bridge_root = self.tempdir / "watcher-stale-skip-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        inbox = state_dir / "inbox-claude.jsonl"
+        stale_created = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds")
+        for message_id, extra in (
+            ("claude-pending", {}),
+            ("claude-paused", {}),
+            ("claude-control", {"marker_variant": "control"}),
+        ):
+            row = {
+                "id": message_id,
+                "to": "claude",
+                "from": "codex",
+                "session_id": "claude-live",
+                "body": "[[handoff:claude]] %s" % message_id,
+                "created_at": stale_created,
+            }
+            row.update(extra)
+            append_jsonl(inbox, row)
+        state_path = bridge_root / "watcher-state.json"
+        write_json(state_dir / "state.json", {"paused": True})
+        write_json(
+            state_path,
+            {
+                "seen_ids": ["claude-pending", "claude-paused", "claude-control"],
+                "toasted_ids": ["claude-pending", "claude-paused", "claude-control"],
+                "pending_wake_verifications": [
+                    {"agent": "claude", "session_id": "claude-live", "message_id": "claude-pending"}
+                ],
+                "paused_wake_messages": [
+                    {"agent": "claude", "session_id": "claude-live", "message_id": "claude-paused"}
+                ],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+            },
+        )
+
+        surfaced = watcher.process_session_once(
+            {
+                "agent": "claude",
+                "session_id": "claude-live",
+                "project": "mlv-app",
+                "inbox": str(inbox),
+                "on_message": "log",
+            },
+            seen_ids=set(),
+            state_path=state_path,
+            toasts_enabled=False,
+        )
+
+        self.assertEqual(surfaced, [])
+        state = read_json(state_path, {})
+        self.assertNotIn("stale_unread_watchdog_rearms", state)
+        rearm_rows = [
+            row
+            for row in read_jsonl(state_dir / "messages.jsonl")
+            if row.get("action") == "stale_unread_watchdog_rearmed"
+        ]
+        self.assertEqual(rearm_rows, [])
 
     def test_backpressure_warns_at_sixty_percent_threshold_before_hard_limit(self) -> None:
         bridge = AgentBridge(self.state_dir)
