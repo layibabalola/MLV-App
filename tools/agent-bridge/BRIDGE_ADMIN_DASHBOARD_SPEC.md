@@ -254,6 +254,13 @@ marker cleanup and read-receipt backfill. All other recommended actions remain
 copy-only instructions. Direct buttons POST to `/api/recommended-action` with the
 dashboard token and CSRF header.
 
+When top-level health is degraded or broken, the Operational Signals section
+must show core causes from `health.core` before secondary status surfaces. These
+include watcher delivery state, stale MCP server markers, MCP reconnect proof,
+receipt metadata debt, and stuck wake verification. This prevents a confusing
+state where all secondary surfaces look stable while the overall health banner is
+still broken.
+
 Local chat can also call the `open_dashboard` MCP tool. The tool starts or
 reuses the in-process dashboard server, opens the tokenized URL in the default
 browser, and returns only a token-free URL to chat.

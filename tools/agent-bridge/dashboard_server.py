@@ -1409,6 +1409,126 @@ def _dashboard_html(
       return '<span class="pill '+toneClass("success")+'">'+escapeHtml(label)+" stable"+'</span>';
     }
 
+    function findRecommendedAction(actions, id){
+      return toArray(actions).find(function(action){
+        return String((action || {}).id || "") === id;
+      }) || null;
+    }
+
+    function renderCoreCauseCard(config){
+      const action=config.action || null;
+      const actionId=String((action || {}).id || config.actionId || "");
+      const command=String(config.command || ((action || {}).command) || "");
+      const directActionLabel=DIRECT_ACTION_LABELS[actionId] || "";
+      const details=toArray(config.details).map(function(row){
+        return detailRow(row.label, row.value);
+      }).join("");
+      return '<article class="status-card">'
+        + '<div class="surface-header"><div><div class="section-kicker">Core health cause</div><h3 class="surface-title">'+escapeHtml(config.title || "Core signal")+'</h3></div>'
+        + '<span class="pill '+toneClass(config.tone || "warning")+'">'+escapeHtml(config.status || "Needs attention")+'</span></div>'
+        + '<div class="surface-stat">'+escapeHtml(String(config.stat == null ? "!" : config.stat))+'</div>'
+        + '<p class="surface-copy">'+escapeHtml(config.copy || "This core bridge signal needs operator attention.")+'</p>'
+        + (details ? '<dl class="detail-list">'+details+'</dl>' : "")
+        + (command ? '<div class="button-row">'
+          + (directActionLabel ? '<button type="button" class="button button-primary" data-action="apply-recommended-action" data-action-id="'+escapeHtml(actionId)+'" data-focus-key="core-run-'+escapeHtml(actionId)+'">'+escapeHtml(directActionLabel)+'</button>' : '')
+          + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml(command)+'" data-copy-label="Core remediation command" data-focus-key="core-copy-'+escapeHtml(actionId || config.title || "command")+'">Copy remediation</button>'
+          + '</div>' : "")
+        + '</article>';
+    }
+
+    function renderCoreCauseCards(health, recommended){
+      const core=((health || {}).core) || {};
+      const cards=[];
+      const watcher=core.watcher || {};
+      if(watcher.running === false || watcher.stale || watcher.root_mismatch){
+        const action=findRecommendedAction(recommended, "restart_watcher");
+        cards.push(renderCoreCauseCard({
+          title:"Watcher delivery loop",
+          status:watcher.stale ? "Stale" : "Not running",
+          tone:watcher.stale ? "danger" : "warning",
+          stat:watcher.running === false ? "Off" : "!",
+          copy:"Direct bridge tools can still communicate, but passive wake/toast delivery is not armed until the watcher is running for this bridge root.",
+          action:action,
+          details:[
+            {label:"Expected", value:watcher.expected === false ? "not armed" : "armed"},
+            {label:"PID", value:watcher.pid || watcher.pid_marker || "none"},
+            {label:"Runtime", value:watcher.runtime ? "present" : "missing"}
+          ]
+        }));
+      }
+      const server=core.server || {};
+      const staleMarkerCount=Number(server.stale_server_marker_count || 0);
+      if(staleMarkerCount > 0){
+        const action=findRecommendedAction(recommended, "compact_stale_server_markers");
+        cards.push(renderCoreCauseCard({
+          title:"MCP server markers",
+          status:"Stale markers",
+          tone:"danger",
+          stat:staleMarkerCount,
+          copy:"Dead MCP server PID/runtime marker files are still present, so process health looks worse than the live process set.",
+          action:action,
+          details:[
+            {label:"Total markers", value:server.mcp_server_marker_count || staleMarkerCount},
+            {label:"Stale markers", value:staleMarkerCount},
+            {label:"Cleanup", value:action ? "allowlisted direct action" : "copy remediation"}
+          ]
+        }));
+      }
+      const reconnect=server.mcp_reconnect || {};
+      if(["tool_access_risk","client_reconnect_likely_required"].includes(String(reconnect.impact_class || "")) || reconnect.reconnect_required){
+        const action=findRecommendedAction(recommended, "reconnect_mcp_host");
+        cards.push(renderCoreCauseCard({
+          title:"MCP reconnect proof",
+          status:"Unproven",
+          tone:"warning",
+          stat:reconnect.wrapper_launches_last_5m || reconnect.wrapper_launch_count_today || "?",
+          copy:"The wrapper relaunched, but the dashboard has not seen fresh MCP tool activity proving the host reconnected to the new server.",
+          action:action,
+          details:[
+            {label:"Impact", value:reconnect.impact_class || "reconnect required"},
+            {label:"Wrapper PID", value:reconnect.wrapper_pid || "unknown"},
+            {label:"Tool activity", value:reconnect.last_tool_activity_at || "not observed"}
+          ]
+        }));
+      }
+      const inboxes=core.inboxes || {};
+      const receiptTotals=inboxes.totals || {};
+      const handledNotSeen=Number(receiptTotals.handled_not_seen_count || 0);
+      if(handledNotSeen > 0){
+        const action=findRecommendedAction(recommended, "backfill_read_receipts");
+        cards.push(renderCoreCauseCard({
+          title:"Receipt metadata debt",
+          status:"Backfill available",
+          tone:"warning",
+          stat:handledNotSeen,
+          copy:"Some rows are already read or handled but predate reliable seen_at receipts. Backfill repairs metadata without marking unread work read.",
+          action:action,
+          details:[
+            {label:"Affected rows", value:handledNotSeen},
+            {label:"Unread work", value:receiptTotals.unread_work_count || 0},
+            {label:"Buckets scanned", value:inboxes.bucket_count || "unknown"}
+          ]
+        }));
+      }
+      const stuckWakes=core.stuck_wakes || {};
+      if(Number(stuckWakes.count || 0) > 0){
+        const action=findRecommendedAction(recommended, "inspect_stuck_wakes");
+        cards.push(renderCoreCauseCard({
+          title:"Wake verification",
+          status:"Stuck",
+          tone:"danger",
+          stat:stuckWakes.count,
+          copy:"At least one wake attempt has not reached a terminal verification state.",
+          action:action,
+          details:[
+            {label:"Stuck wakes", value:stuckWakes.count},
+            {label:"Source", value:"wake verification ledger"}
+          ]
+        }));
+      }
+      return cards.join("");
+    }
+
     function renderActionCard(action, index){
       const severity=String((action || {}).severity || "normal");
       const tone=toneForSeverity(severity);
@@ -1604,13 +1724,16 @@ def _dashboard_html(
       const surfaceOrder=["dashboard_reads","backpressure","claude_monitor","stale_unread_watchdog","catchup","contracts","policy_drift","guardrail_debt"];
       const attentionSurfaces=surfaceOrder.filter(function(key){ return surfaces[key] && surfaceNeedsAttention(key, surfaces[key]); });
       const stableSurfaces=surfaceOrder.filter(function(key){ return surfaces[key] && !surfaceNeedsAttention(key, surfaces[key]); });
-      const surfaceCards=attentionSurfaces.length ? attentionSurfaces.map(function(key){ return renderSurfaceCard(key, surfaces[key]); }).join("") : (
+      const coreCauseCards=renderCoreCauseCards(health, recommended);
+      const secondarySurfaceCards=attentionSurfaces.map(function(key){ return renderSurfaceCard(key, surfaces[key]); }).join("");
+      const fallbackSurfaceCards=(coreCauseCards || secondarySurfaceCards) ? "" : (
         healthTone === "danger"
           ? '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Health alert</div><h3 class="surface-title">Top-level health is still broken</h3></div><span class="pill '+toneClass("danger")+'">Broken</span></div><div class="surface-stat">'+escapeHtml(String(recommended.length || 1))+'</div><p class="surface-copy">'+escapeHtml("The primary recovery path above addresses the current broken-health signal. Use the follow-up sections for secondary work only.")+'</p></article>'
           : ((recommendedForGrid.length || pending.length)
             ? '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Status surface</div><h3 class="surface-title">Core surfaces are stable, but follow-up work remains</h3></div><span class="pill '+toneClass("warning")+'">Follow-up</span></div><div class="surface-stat">'+escapeHtml(String(recommendedForGrid.length + pending.length))+'</div><p class="surface-copy">The bridge is calm at the surface level, but there are still queued actions below that need operator attention.</p></article>'
             : '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Status surface</div><h3 class="surface-title">All monitored surfaces stable</h3></div><span class="pill '+toneClass("success")+'">Stable</span></div><div class="surface-stat">0</div><p class="surface-copy">Nothing across reads, inbox pressure, policy drift, contracts, or guardrail debt currently needs escalation.</p></article>')
       );
+      const surfaceCards=coreCauseCards+secondarySurfaceCards+fallbackSurfaceCards;
       const stableSurfaceStrip=stableSurfaces.length ? '<div class="stable-strip">'+stableSurfaces.map(function(key){ return renderStableSurfaceChip(key, surfaces[key]); }).join("")+'</div>' : "";
       const actionCards=recommendedForGrid.length ? recommendedForGrid.map(renderActionCard).join("") : emptyState("Primary recovery already pinned above", "No secondary follow-up actions remain beyond the spotlighted recovery step.");
       const pairCards=activePairingsList.length ? '<div class="cards-grid">'+activePairingsList.map(renderPairCard).join("")+'</div>' : emptyState("No active primary pairings", "There are no active same-project routes in this scope, so nothing is expanded as a live primary.");
@@ -1665,7 +1788,7 @@ def _dashboard_html(
         + '</div>'
         + '<div class="hero-visual">'+heroVisual(overview)+'</div>'
         + '</section>'
-        + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">At a glance</span><h2 class="section-title">Operational signals</h2><p class="section-copy">Only the surfaces that need attention stay expanded. Stable systems collapse into a lightweight readiness strip so the first scan stays sharp.</p></div></div><div class="status-grid">'+surfaceCards+'</div>'+stableSurfaceStrip+'</section>'
+        + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">At a glance</span><h2 class="section-title">Operational signals</h2><p class="section-copy">Core health causes stay expanded first, then secondary surfaces that need attention. Stable systems collapse into a lightweight readiness strip so the first scan stays sharp.</p></div></div><div class="status-grid">'+surfaceCards+'</div>'+stableSurfaceStrip+'</section>'
         + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Do next</span><h2 class="section-title">Recommended actions</h2><p class="section-copy">'+escapeHtml(recommendedSectionCopy)+'</p></div></div><div class="action-grid">'+actionCards+'</div></section>'
         + '<section class="meta-grid">'
         + '<section class="panel section"><div class="section-head"><div><span class="section-kicker">Live routes</span><h2 class="section-title">Pairings</h2><p class="section-copy">Active primaries stay expanded. Secondary and pending routes are summarized separately so the operator can scan what matters now first.</p></div></div><div class="section-stack">'+pairCards+pairQueue+'</div></section>'
