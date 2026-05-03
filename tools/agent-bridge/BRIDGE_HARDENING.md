@@ -238,7 +238,7 @@ session pruning. Tests for all four.
 `bridge status` full health report:
 ```
 project:     mlv-app
-rendezvous:  mlv-app (derived from git root: C:\!Layi Wkspc\MLV-App)
+rendezvous:  mlv-app (derived from git root: C:\Repos\MLV-App)
 claude:      84b53694  active   last-read: 2m ago
 codex:       2bcb0bb1  active   last-seen: 5m ago
 inbox:       0 unread

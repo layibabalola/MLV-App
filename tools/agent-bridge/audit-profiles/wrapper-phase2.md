@@ -57,7 +57,7 @@ If any of these is missing or skipped, push back.
 - [ ] stderr passes through unchanged
 - [ ] mtime poll thread runs separately, 2s cadence
 - [ ] Watched files computed via `Path(__file__).parent` glob (no
-  hardcoded `C:\!Layi Wkspc` literal — would break the 7b3e688f
+  hardcoded `C:\Path With Spaces` literal — would break the 7b3e688f
   portability fix)
 - [ ] Debounce: `last_change_time = time.monotonic()`; restart only
   fires when `now - last_change_time >= 1.0`

@@ -638,8 +638,8 @@ class AgentBridgeTests(unittest.TestCase):
         # Regression for the os.execv-on-Windows argv-quoting bug fixed at
         # server_wrapper.py:84. Pre-fix, os.execv joined argv elements with
         # bare spaces, so a server.py path containing a space (e.g. under
-        # "C:\!Layi Wkspc\...") was re-tokenized in the child and Python
-        # exited with "can't find '__main__' module in 'C:\\!Layi'".
+        # "C:\Path With Spaces\...") was re-tokenized in the child and Python
+        # exited with "can't find '__main__' module in 'C:\\Path'".
         # Forces the failure surface by deliberately putting a space in the
         # bridge-root path; asserts the wrapper reached past the audit
         # breadcrumb (proving exec/spawn was attempted) and the child did
@@ -4924,7 +4924,7 @@ for index in range(count):
             Path(__file__).resolve().parent / "codex_pre_response.ps1",
             Path(__file__).resolve().parent / "codex_pre_final.ps1",
         ]
-        forbidden = ["C:\\Users\\obabalola", "C:\\!Layi Wkspc"]
+        forbidden = ["C:" + "\\Users\\obabalola", "C:" + "\\!Layi Wkspc"]
         for path in paths:
             text = path.read_text(encoding="utf-8")
             for value in forbidden:
