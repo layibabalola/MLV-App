@@ -419,6 +419,31 @@ function New-KeyLParam {
     return [IntPtr]$v
 }
 
+function Send-ClearComposerViaPostMessage {
+    param($ComposerElement)
+
+    $nativeHwnd = [IntPtr]::Zero
+    try { $nativeHwnd = [IntPtr]([uint32]$ComposerElement.Current.NativeWindowHandle) } catch {}
+    if ($nativeHwnd -eq [IntPtr]::Zero) {
+        return $false
+    }
+
+    try {
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr]65, (New-KeyLParam -ScanCode 0x1E)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr]65, (New-KeyLParam -ScanCode 0x1E -KeyUp)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D -KeyUp)) | Out-Null
+        Start-Sleep -Milliseconds 50
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53 -KeyUp)) | Out-Null
+        Start-Sleep -Milliseconds 80
+        return $true
+    } catch {
+        Write-Host ("[wake_codex] Composer cleanup PostMessage exception: " + $_.Exception.Message)
+        return $false
+    }
+}
+
 function Send-BridgeMessageViaPostMessage {
     # Delivers $Value + Ctrl+Enter directly into the Chromium render widget via
     # PostMessage, bypassing the Windows foreground-window requirement entirely.
@@ -435,17 +460,9 @@ function Send-BridgeMessageViaPostMessage {
     Write-Host ("[wake_codex] PostMessage path: targeting hwnd=" + $nativeHwnd)
 
     try {
-        # Ctrl+A to select all existing composer text
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr]65, (New-KeyLParam -ScanCode 0x1E)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr]65, (New-KeyLParam -ScanCode 0x1E -KeyUp)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D -KeyUp)) | Out-Null
-        Start-Sleep -Milliseconds 30
-
-        # Delete selection
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53 -KeyUp)) | Out-Null
-        Start-Sleep -Milliseconds 30
+        if (-not (Send-ClearComposerViaPostMessage -ComposerElement $ComposerElement)) {
+            return $false
+        }
 
         # WM_PASTE: high-level semantic message that Chromium processes regardless of
         # foreground window status; equivalent to Edit > Paste in the app menu.
@@ -1163,15 +1180,16 @@ function Test-CodexWakePostflight {
     )
 
     $deadline = (Get-Date).AddMilliseconds([Math]::Max(250, $TimeoutMilliseconds))
+    $expected = ([string]$Value).Trim()
     while ((Get-Date) -lt $deadline) {
-        if (Test-CodexWindowContainsText -RootHwnd $RootHwnd -Value $Value -TimeoutMilliseconds 250) {
-            return @{ Ok = $true; Reason = "wake_command_rendered" }
-        }
         try {
             $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
             if ($null -ne $composer) {
                 $text = Get-CodexComposerTextReadOnly -Composer $composer
                 $trimmed = ([string]$text).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($expected) -and $trimmed.Equals($expected, [System.StringComparison]::Ordinal)) {
+                    return @{ Ok = $false; Reason = "wake_command_still_in_composer" }
+                }
                 $isPlaceholder = (Test-IsPlaceholderByStructure -Composer $composer) -or (Test-IsCodexPlaceholderText -Text $trimmed)
                 if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) {
                     return @{ Ok = $true; Reason = "composer_empty_after_submit" }
@@ -1180,9 +1198,110 @@ function Test-CodexWakePostflight {
         } catch {
             return @{ Ok = $false; Reason = "postflight_read_failed"; ExceptionText = $_.Exception.Message }
         }
+        if (Test-CodexWindowContainsText -RootHwnd $RootHwnd -Value $Value -TimeoutMilliseconds 250) {
+            return @{ Ok = $true; Reason = "wake_command_rendered" }
+        }
         Start-Sleep -Milliseconds 100
     }
     return @{ Ok = $false; Reason = "postflight_timeout" }
+}
+
+function Clear-InjectedWakeTextIfPresent {
+    param(
+        [IntPtr]$RootHwnd,
+        $ComposerElement,
+        [string]$Value,
+        [string]$DeliveryMode = "sendkeys",
+        [string]$Reason = "unknown"
+    )
+
+    $result = @{
+        Attempted = $false
+        Cleared = $false
+        Reason = $Reason
+        CleanupMode = ""
+        ComposerLengthBucket = "unknown"
+    }
+    $composer = $ComposerElement
+    if ($null -eq $composer) {
+        $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+    }
+    if ($null -eq $composer) {
+        $result.CleanupMode = "unavailable"
+        Write-PreflightAudit -Action "targeted_wake_injected_text_cleanup_skipped" -Fields @{
+            cleanup_reason = $Reason
+            skip_reason = "composer_unavailable"
+        }
+        return $result
+    }
+
+    $text = ""
+    try {
+        $text = [string](Get-CodexComposerTextReadOnly -Composer $composer)
+    } catch {
+        $result.CleanupMode = "read_failed"
+        Write-PreflightAudit -Action "targeted_wake_injected_text_cleanup_skipped" -Fields @{
+            cleanup_reason = $Reason
+            skip_reason = "composer_read_failed"
+            exception_text = $_.Exception.Message
+        }
+        return $result
+    }
+
+    $trimmed = $text.Trim()
+    $expected = ([string]$Value).Trim()
+    $result.ComposerLengthBucket = ConvertTo-ComposerLengthBucket -Length $trimmed.Length
+    if ([string]::IsNullOrWhiteSpace($expected) -or -not $trimmed.Equals($expected, [System.StringComparison]::Ordinal)) {
+        $result.CleanupMode = "exact_match_not_found"
+        Write-PreflightAudit -Action "targeted_wake_injected_text_cleanup_skipped" -Fields @{
+            cleanup_reason = $Reason
+            skip_reason = "composer_did_not_exactly_match_wake_text"
+            composer_length_bucket = $result.ComposerLengthBucket
+        }
+        return $result
+    }
+
+    $result.Attempted = $true
+    $cleanupMode = "postmessage"
+    $cleared = Send-ClearComposerViaPostMessage -ComposerElement $composer
+    if (-not $cleared) {
+        $cleanupMode = "sendkeys"
+        try {
+            $composer.SetFocus()
+            Start-Sleep -Milliseconds 80
+        } catch {}
+        if ([Win32Wake]::GetForegroundWindow() -eq $RootHwnd) {
+            try {
+                [System.Windows.Forms.SendKeys]::SendWait("^a")
+                Start-Sleep -Milliseconds 60
+                [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")
+                Start-Sleep -Milliseconds 100
+                $cleared = $true
+            } catch {
+                Write-Host ("[wake_codex] Composer cleanup SendKeys exception: " + $_.Exception.Message)
+                $cleared = $false
+            }
+        }
+    }
+
+    $result.CleanupMode = $cleanupMode
+    if ($cleared) {
+        try {
+            $afterText = [string](Get-CodexComposerTextReadOnly -Composer $composer)
+            $afterTrimmed = $afterText.Trim()
+            $isPlaceholder = (Test-IsPlaceholderByStructure -Composer $composer) -or (Test-IsCodexPlaceholderText -Text $afterTrimmed)
+            $cleared = [string]::IsNullOrWhiteSpace($afterTrimmed) -or $isPlaceholder
+        } catch {
+            $cleared = $true
+        }
+    }
+    $result.Cleared = [bool]$cleared
+    Write-PreflightAudit -Action $(if ($result.Cleared) { "targeted_wake_injected_text_cleared" } else { "targeted_wake_injected_text_cleanup_failed" }) -Fields @{
+        cleanup_reason = $Reason
+        cleanup_mode = $cleanupMode
+        composer_length_bucket = $result.ComposerLengthBucket
+    }
+    return $result
 }
 
 function Send-BridgeMessageKeys {
@@ -1598,13 +1717,19 @@ try {
         if (-not $pmOk) {
             # Do NOT fall back to SendKeys here: foreground is Claude Desktop, so
             # SendKeys would inject "check bridge inbox" into the Claude composer.
+            Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason "postmessage_delivery_failed" | Out-Null
             Write-Host "[wake_codex] PostMessage delivery failed with no safe fallback while foreground is locked. Deferring."
             exit 16
         }
         Write-Host ("[wake_codex] Sent via PostMessage: " + $Message + " (steer; preflight=" + $preflight.State + ")")
     } else {
         Write-StageEvent "STAGE5_SENDKEYS_START" ("preserve_draft=" + [string]([bool]$preflight.PreserveDraft))
-        Send-BridgeMessageKeys -Value $Message -DraftText $preflight.DraftText -PreserveDraft:([bool]$preflight.PreserveDraft)
+        try {
+            Send-BridgeMessageKeys -Value $Message -DraftText $preflight.DraftText -PreserveDraft:([bool]$preflight.PreserveDraft)
+        } catch {
+            Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason "sendkeys_delivery_exception" | Out-Null
+            throw
+        }
         Write-StageEvent "STAGE5_SENDKEYS_DONE"
         Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; preflight=" + $preflight.State + ")")
     }
@@ -1623,16 +1748,25 @@ try {
             }
             Write-Host ("[wake_codex] Wake postflight verified: " + [string]$postflight.Reason)
         } else {
+            $cleanup = Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason ([string]$postflight.Reason)
             Write-PreflightAudit -Action "targeted_wake_postflight_verification_failed" -Fields @{
                 message_hash = (Get-TextHash -Value $Message)
                 reason = [string]$postflight.Reason
+                cleanup_attempted = [bool]$cleanup.Attempted
+                cleanup_succeeded = [bool]$cleanup.Cleared
             }
             Write-WakeTelemetry -Fields @{
                 action = "wake_postflight_verification_failed"
                 reason = [string]$postflight.Reason
                 message_hash = (Get-TextHash -Value $Message)
+                cleanup_attempted = [bool]$cleanup.Attempted
+                cleanup_succeeded = [bool]$cleanup.Cleared
             }
             Write-Host ("[wake_codex] WARNING: wake postflight did not confirm visible delivery: " + [string]$postflight.Reason)
+            if ([bool]$cleanup.Cleared -or [string]$postflight.Reason -eq "wake_command_still_in_composer") {
+                Write-Host "[wake_codex] Deferred wake after cleaning unsent injected composer text."
+                exit 16
+            }
         }
     }
 

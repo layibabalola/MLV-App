@@ -725,6 +725,10 @@ def bootstrap(
     desktop_thread_id = _desktop_thread_id_for_bootstrap(agent, watcher_config)
     if retargeted_to_parent and bootstrap_parent_thread_id:
         desktop_thread_id = bootstrap_parent_thread_id
+    elif bootstrap_origin == "parent" and bootstrap_thread_id:
+        # The active parent thread is the wake target of record.  A stale
+        # watcher-config parent id must not pin future wakes to an archived chat.
+        desktop_thread_id = bootstrap_thread_id
     if bootstrap_origin == "parent" and not replace_trusted_parent:
         drift = _trusted_parent_thread_drift(
             bridge,

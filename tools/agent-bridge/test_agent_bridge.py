@@ -970,6 +970,9 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("function Test-CodexWindowContainsText", text)
         self.assertIn("function Get-CodexThreadTitleSnapshot", text)
         self.assertIn("function Test-CodexWakePostflight", text)
+        self.assertIn("function Clear-InjectedWakeTextIfPresent", text)
+        self.assertIn("wake_command_still_in_composer", text)
+        self.assertIn("targeted_wake_injected_text_cleared", text)
         self.assertIn("preflight_state_detected", text)
         self.assertIn("preflight_deferred_active_typing", text)
         self.assertIn("preflight_forced_after_cap", text)
@@ -994,6 +997,11 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertLess(
             helper.index("[Win32Wake]::BringWindowToTop($Hwnd)"),
             helper.index("[Win32Wake]::SetForegroundWindow($Hwnd)"),
+        )
+        postflight = text.split("function Test-CodexWakePostflight", 1)[1].split("function Send-BridgeMessageKeys", 1)[0]
+        self.assertLess(
+            postflight.index("wake_command_still_in_composer"),
+            postflight.index("Test-CodexWindowContainsText"),
         )
 
     def test_wake_codex_inner_command_preserves_targeted_sendkeys_flags(self) -> None:
@@ -5949,6 +5957,39 @@ for index in range(count):
         self.assertEqual(breadcrumb["session_id"], "codex-new")
         self.assertEqual(breadcrumb["desktop_thread_id"], "019dcfe4-bd5d-7841-a7c1-2e8969a777c5")
         self.assertEqual(breadcrumb["bootstrap_origin"], "parent")
+
+    def test_bootstrap_parent_thread_overrides_stale_watcher_thread_id(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        write_json(
+            config_path,
+            {
+                "schema_version": 1,
+                "codex_parent_thread_id": "archived-thread",
+                "sessions": [],
+            },
+        )
+
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "current-agent-bridge-thread"}, clear=True):
+            result = bootstrap(
+                state_dir=self.state_dir,
+                agent="codex",
+                cwd=str(ROOT),
+                previous_session_id=None,
+                session_id="codex-new",
+                project="mlv-app",
+                handshake_retries=1,
+                watcher_config=config_path,
+                start_watcher=False,
+            )
+
+        self.assertEqual(result["bootstrap_origin"], "parent")
+        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(breadcrumb["bootstrap_thread_id"], "current-agent-bridge-thread")
+        self.assertEqual(breadcrumb["desktop_thread_id"], "current-agent-bridge-thread")
+        status = AgentBridge(self.state_dir).session_status("mlv-app")
+        record = status.data["sessions"]["codex-new"]
+        self.assertEqual(record["bootstrap_thread_id"], "current-agent-bridge-thread")
+        self.assertEqual(record["desktop_thread_id"], "current-agent-bridge-thread")
 
     def test_configure_watcher_app_server_provider_writes_helper_template(self) -> None:
         bridge = AgentBridge(self.state_dir)
