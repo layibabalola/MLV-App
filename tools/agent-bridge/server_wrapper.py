@@ -233,7 +233,17 @@ class ServerSupervisor:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        # On Windows, replace() fails with WinError 32 if another process briefly holds
+        # the destination open. Retry a few times before propagating.
+        for attempt in range(4):
+            try:
+                tmp.replace(path)
+                return
+            except OSError:
+                if attempt < 3:
+                    time.sleep(0.05)
+                else:
+                    raise
 
     def _read_tool_manifest_snapshot(self) -> Optional[dict]:
         manifest = self._read_json_file(self._tool_manifest_path)
@@ -446,7 +456,17 @@ class ServerSupervisor:
             self._terminate_child(child)
             self._join_stdout_thread(old_child_pid)
             new_child = self._spawn_child()
-            if refresh_required:
+        except BaseException as exc:
+            self._report_error("agent-bridge server wrapper restart failed: %s" % exc)
+            return False
+        finally:
+            with self._state_lock:
+                self._restart_in_progress = False
+
+        # Child restarted successfully. Status-file writes below are non-fatal:
+        # a failure here must not kill the wrapper or orphan the new child.
+        if refresh_required:
+            try:
                 current_snapshot = (
                     self._wait_for_tool_manifest_snapshot(previous_mtime_ns=previous_snapshot.get("mtime_ns"))
                     or self._read_tool_manifest_snapshot()
@@ -464,7 +484,10 @@ class ServerSupervisor:
                     changed_files=changed_files,
                     reason=reason,
                 )
+            except Exception as exc:
+                self._report_error("agent-bridge server wrapper: tool-refresh status write failed (non-fatal): %s" % exc)
 
+        try:
             self._append_audit_event(
                 action="mcp_server_self_restarted",
                 old_child_pid=old_child_pid,
@@ -474,13 +497,10 @@ class ServerSupervisor:
                 previous_exit_code=previous_exit_code,
                 elapsed_ms=int(round((self.now_fn() - restart_started_at) * 1000)),
             )
-            return True
-        except BaseException as exc:
-            self._report_error("agent-bridge server wrapper restart failed: %s" % exc)
-            return False
-        finally:
-            with self._state_lock:
-                self._restart_in_progress = False
+        except Exception as exc:
+            self._report_error("agent-bridge server wrapper: audit append failed (non-fatal): %s" % exc)
+
+        return True
 
     def _restart_limit_reached(
         self,
