@@ -5,11 +5,14 @@ import uuid
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from agent_bridge import AgentBridge, BridgeResult, utc_now
 from compact import reap_stale_server_pids
+from core.paths import watcher_config_path_for_state_dir
+from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session
 
 
 LOCAL_DASHBOARD_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -834,6 +837,7 @@ def _dashboard_html(
     let refreshTimer=null;
     let modalReturnFocus=null;
     const DIRECT_ACTION_LABELS={
+      restart_watcher:"Start watcher now",
       compact_stale_server_markers:"Run cleanup now",
       backfill_read_receipts:"Backfill now"
     };
@@ -2018,6 +2022,7 @@ class BridgeDashboardHTTPServer(ThreadingHTTPServer):
         csrf_token: str,
         default_agent: str,
         default_project: Optional[str],
+        repo_root: Optional[str],
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.bridge = bridge
@@ -2025,6 +2030,7 @@ class BridgeDashboardHTTPServer(ThreadingHTTPServer):
         self.csrf_token = csrf_token
         self.default_agent = default_agent
         self.default_project = default_project
+        self.repo_root = repo_root
         self.shutdown_requested = threading.Event()
 
 
@@ -2034,9 +2040,61 @@ class BridgeDashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
 
+    def _recovery_cwd(self) -> str:
+        if self.server.repo_root:
+            return self.server.repo_root
+        watcher_config = watcher_config_path_for_state_dir(self.server.bridge.state_dir)
+        try:
+            payload = json.loads(watcher_config.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("repo_root"):
+                return str(payload["repo_root"])
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        return str(Path.cwd())
+
+    def _restart_watcher(self, *, agent: str, project: Optional[str]) -> BridgeResult:
+        watcher_config = watcher_config_path_for_state_dir(self.server.bridge.state_dir)
+        cwd = self._recovery_cwd()
+        before = inspect_bridge_runtime(
+            state_dir=self.server.bridge.state_dir,
+            agent=agent,
+            cwd=cwd,
+            project=project,
+            watcher_config=watcher_config,
+        )
+        if before.get("bridge_state") in {"UNBOOTSTRAPPED", "SUPERSEDED"}:
+            return BridgeResult(
+                False,
+                "needs_user_attention",
+                "Watcher restart needs a live bootstrapped session before it can safely self-heal.",
+                {"action_id": "restart_watcher", "before": before},
+            )
+        result = recover_bridge_session(
+            state_dir=self.server.bridge.state_dir,
+            agent=agent,
+            cwd=cwd,
+            project=project,
+            watcher_config=watcher_config,
+            start_watcher=True,
+        )
+        after = result.get("after", {}) if isinstance(result, dict) else {}
+        recovered = after.get("bridge_state") == "WATCHING"
+        return BridgeResult(
+            recovered,
+            "action_applied" if recovered else "needs_user_attention",
+            str(result.get("message") or "Watcher recovery finished.")
+            if isinstance(result, dict)
+            else "Watcher recovery finished.",
+            {"action_id": "restart_watcher", "result": result},
+        )
+
     def _run_safe_recommended_action(self, payload: Dict[str, Any]) -> BridgeResult:
         action_id = str(payload.get("action_id") or "").strip()
         agent = str(payload.get("agent") or self.server.default_agent)
+        project_value = payload.get("project") or self.server.default_project
+        project = str(project_value) if project_value else None
+        if action_id == "restart_watcher":
+            return self._restart_watcher(agent=agent, project=project)
         if action_id == "compact_stale_server_markers":
             result = reap_stale_server_pids(self.server.bridge.state_dir, max_age_hours=0, dry_run=False)
             return BridgeResult(
@@ -2210,6 +2268,7 @@ def start_dashboard_server(
     csrf_token: Optional[str] = None,
     default_agent: str = "codex",
     default_project: Optional[str] = None,
+    repo_root: Optional[str] = None,
 ) -> DashboardServerHandle:
     if host not in LOCAL_DASHBOARD_HOSTS:
         raise ValueError("dashboard may only bind localhost, 127.0.0.1, or ::1")
@@ -2223,6 +2282,7 @@ def start_dashboard_server(
         csrf_token=resolved_csrf,
         default_agent=default_agent,
         default_project=default_project,
+        repo_root=repo_root,
     )
     thread = threading.Thread(target=server.serve_forever, name="agent-bridge-dashboard", daemon=True)
     thread.start()

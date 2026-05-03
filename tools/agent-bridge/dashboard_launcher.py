@@ -29,12 +29,15 @@ import urllib.request
 sys.path.insert(0, str(Path(__file__).parent))
 
 from agent_bridge import AgentBridge  # noqa: E402
+from core.paths import watcher_config_path_for_state_dir  # noqa: E402
 from dashboard_server import DashboardServerHandle, start_dashboard_server  # noqa: E402
+from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session  # noqa: E402
 
 
 RUNTIME_FILENAME = "dashboard-launcher.runtime.json"
 RUNTIME_SCHEMA_VERSION = 1
 DEFAULT_HEALTH_INTERVAL_SECONDS = 30.0
+DEFAULT_WATCHER_HEAL_INTERVAL_SECONDS = 30.0
 
 
 def _utc_now() -> str:
@@ -43,6 +46,10 @@ def _utc_now() -> str:
 
 def _runtime_path(bridge_root: Path) -> Path:
     return bridge_root / "state" / RUNTIME_FILENAME
+
+
+def _default_repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def _read_runtime(path: Path) -> Optional[Dict[str, Any]]:
@@ -130,6 +137,7 @@ def _start_dashboard(
         port=port,
         default_agent="codex",
         default_project=project,
+        repo_root=str(_default_repo_root()),
     )
     _write_runtime(
         runtime_path,
@@ -143,12 +151,61 @@ def _start_dashboard(
     return handle
 
 
+def _self_heal_watcher_if_needed(*, bridge_root: Path, project: str, repo_root: Path) -> Dict[str, Any]:
+    state_dir = bridge_root / "state"
+    watcher_config = watcher_config_path_for_state_dir(state_dir)
+    try:
+        before = inspect_bridge_runtime(
+            state_dir=state_dir,
+            agent="codex",
+            cwd=str(repo_root),
+            project=project,
+            watcher_config=watcher_config,
+        )
+        if before.get("bridge_state") != "BOOTSTRAPPED_NOT_WATCHING":
+            return {
+                "ok": True,
+                "status": "skipped",
+                "bridge_state": before.get("bridge_state"),
+                "checked_at": _utc_now(),
+            }
+        recovered = recover_bridge_session(
+            state_dir=state_dir,
+            agent="codex",
+            cwd=str(repo_root),
+            project=project,
+            watcher_config=watcher_config,
+            start_watcher=True,
+        )
+        after = recovered.get("after", {}) if isinstance(recovered, dict) else {}
+        return {
+            "ok": after.get("bridge_state") == "WATCHING",
+            "status": recovered.get("status") if isinstance(recovered, dict) else "unknown",
+            "bridge_state": after.get("bridge_state"),
+            "checked_at": _utc_now(),
+            "message": recovered.get("message") if isinstance(recovered, dict) else None,
+        }
+    except Exception as exc:  # noqa: BLE001 - background health should report, not crash.
+        return {
+            "ok": False,
+            "status": "error",
+            "checked_at": _utc_now(),
+            "error": str(exc),
+        }
+
+
 def _serve_with_health_loop(args: argparse.Namespace, bridge_root: Path) -> int:
     runtime_path = _runtime_path(bridge_root)
     existing = _read_runtime(runtime_path)
     if existing and _dashboard_healthy(existing):
         url = _runtime_browser_url(existing, project=args.project)
         if url:
+            existing["last_watcher_self_heal"] = _self_heal_watcher_if_needed(
+                bridge_root=bridge_root,
+                project=args.project,
+                repo_root=_default_repo_root(),
+            )
+            _write_runtime(runtime_path, existing)
             print("Agent Bridge Dashboard: %s" % url, flush=True)
             print("Reusing existing dashboard supervisor.", flush=True)
             _open_browser(url, no_browser=args.no_browser)
@@ -168,6 +225,21 @@ def _serve_with_health_loop(args: argparse.Namespace, bridge_root: Path) -> int:
 
     stop_requested = False
     current_ref: Dict[str, DashboardServerHandle] = {"handle": handle}
+    repo_root = _default_repo_root()
+    last_watcher_self_heal = _self_heal_watcher_if_needed(
+        bridge_root=bridge_root,
+        project=args.project,
+        repo_root=repo_root,
+    )
+    last_watcher_heal_at = time.monotonic()
+    startup_payload = _runtime_payload(
+        bridge_root=bridge_root,
+        handle=handle,
+        project=args.project,
+        health_interval_seconds=args.health_interval_seconds,
+    )
+    startup_payload["last_watcher_self_heal"] = last_watcher_self_heal
+    _write_runtime(runtime_path, startup_payload)
 
     def _shutdown(signum, frame) -> None:  # noqa: ANN001
         nonlocal stop_requested
@@ -190,6 +262,16 @@ def _serve_with_health_loop(args: argparse.Namespace, bridge_root: Path) -> int:
                 health_interval_seconds=args.health_interval_seconds,
             )
         ):
+            if (
+                time.monotonic() - last_watcher_heal_at
+                >= max(float(args.watcher_heal_interval_seconds), 1.0)
+            ):
+                last_watcher_self_heal = _self_heal_watcher_if_needed(
+                    bridge_root=bridge_root,
+                    project=args.project,
+                    repo_root=repo_root,
+                )
+                last_watcher_heal_at = time.monotonic()
             payload = _runtime_payload(
                 bridge_root=bridge_root,
                 handle=current,
@@ -198,6 +280,7 @@ def _serve_with_health_loop(args: argparse.Namespace, bridge_root: Path) -> int:
             )
             payload["last_health_check_at"] = _utc_now()
             payload["last_health_status"] = "ok"
+            payload["last_watcher_self_heal"] = last_watcher_self_heal
             _write_runtime(runtime_path, payload)
             continue
 
@@ -291,6 +374,12 @@ def main() -> int:
         type=float,
         default=DEFAULT_HEALTH_INTERVAL_SECONDS,
         help="Background health check interval (default: 30 seconds)",
+    )
+    parser.add_argument(
+        "--watcher-heal-interval-seconds",
+        type=float,
+        default=DEFAULT_WATCHER_HEAL_INTERVAL_SECONDS,
+        help="Background watcher self-heal interval (default: 30 seconds)",
     )
     args = parser.parse_args()
 

@@ -35,9 +35,25 @@ Requirements:
 - Read effective policy from the runtime policy registry, not markdown.
 - Use the same bridge APIs as natural-language local commands.
 - Audit all mutating actions.
+- Route direct recovery buttons through the same bounded recovery helpers as
+  CLI/chat recovery, not ad-hoc process spawning.
 
 Remote peers cannot use bridge messages to trigger dashboard confirmations,
 provide confirmation tokens, or modify dashboard auth settings.
+
+## Self-Healing Recovery
+
+The dashboard launcher is allowed to repair local infrastructure drift that is
+already proven by local state. In background mode it health-checks the dashboard
+server and, on the same cadence, inspects the bridge runtime. When the active
+session is bootstrapped but the watcher PID/runtime/lease is missing, the
+launcher calls `recover_bridge_session.py`'s recovery path to refresh
+`watcher-config.json` and re-arm the watcher. It does not bootstrap a missing or
+superseded agent session automatically.
+
+The dashboard also exposes `restart_watcher` as a direct local action when
+recommended by health. That button is limited to localhost, token and CSRF
+protected, and uses the same safe recovery path as the background supervisor.
 
 ## Dashboard Areas
 

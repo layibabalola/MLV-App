@@ -45,6 +45,7 @@ from core.routing import RoutingStatus, resolve_route
 from core.settings import load_settings, settings_path_for_state_dir
 from core.storage import append_jsonl, read_json, read_jsonl, with_schema_version, write_json, write_jsonl
 from core.transport import LocalFilesystemTransport
+from dashboard_launcher import _self_heal_watcher_if_needed
 from dashboard_server import start_dashboard_server
 from migrate_root import migrate_root
 from project_identity import derive_project_identity, normalize_rendezvous
@@ -2794,6 +2795,7 @@ for index in range(count):
             self.assertIn("if((!force && !autoRefreshEnabled) || modalResolver)", html)
             self.assertIn("await refresh(true)", html)
             self.assertIn("data-action=\"apply-recommended-action\"", html)
+            self.assertIn("Start watcher now", html)
             self.assertIn("/api/recommended-action", html)
             self.assertIn("id=\"modal-root\"", html)
             self.assertIn("renderCoreCauseCards", html)
@@ -2852,6 +2854,49 @@ for index in range(count):
         finally:
             handle.stop()
 
+    def test_dashboard_server_recommended_action_restarts_watcher_via_recovery(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        handle = start_dashboard_server(
+            bridge,
+            token="test-token",
+            csrf_token="csrf-token",
+            default_agent="codex",
+            default_project="mlv-app",
+            repo_root=str(ROOT),
+        )
+        try:
+            with patch(
+                "dashboard_server.inspect_bridge_runtime",
+                return_value={"bridge_state": "BOOTSTRAPPED_NOT_WATCHING"},
+            ), patch(
+                "dashboard_server.recover_bridge_session",
+                return_value={
+                    "status": "recovered",
+                    "message": "Recovered watcher/config state for codex in mlv-app.",
+                    "after": {"bridge_state": "WATCHING"},
+                },
+            ) as recovered:
+                req = urllib.request.Request(
+                    handle.url + "/api/recommended-action?token=test-token",
+                    data=json.dumps(
+                        {"action_id": "restart_watcher", "agent": "codex", "project": "mlv-app"}
+                    ).encode("utf-8"),
+                    headers={"X-CSRF-Token": "csrf-token", "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual("action_applied", payload["status"])
+            self.assertEqual("restart_watcher", payload["data"]["action_id"])
+            recovered.assert_called_once()
+            self.assertEqual("codex", recovered.call_args.kwargs["agent"])
+            self.assertEqual("mlv-app", recovered.call_args.kwargs["project"])
+            self.assertTrue(recovered.call_args.kwargs["start_watcher"])
+        finally:
+            handle.stop()
+
     def test_dashboard_server_recommended_action_rejects_unknown_direct_action(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("codex", "codex-live", project="mlv-app")
@@ -2865,7 +2910,7 @@ for index in range(count):
         try:
             req = urllib.request.Request(
                 handle.url + "/api/recommended-action?token=test-token",
-                data=json.dumps({"action_id": "restart_watcher"}).encode("utf-8"),
+                data=json.dumps({"action_id": "erase_everything"}).encode("utf-8"),
                 headers={"X-CSRF-Token": "csrf-token", "Content-Type": "application/json"},
                 method="POST",
             )
@@ -2878,6 +2923,32 @@ for index in range(count):
             rejected.exception.close()
         finally:
             handle.stop()
+
+    def test_dashboard_launcher_self_heals_bootstrapped_missing_watcher(self) -> None:
+        bridge_root = self.tempdir / "bridge-root"
+        (bridge_root / "state").mkdir(parents=True)
+        with patch(
+            "dashboard_launcher.inspect_bridge_runtime",
+            return_value={"bridge_state": "BOOTSTRAPPED_NOT_WATCHING"},
+        ), patch(
+            "dashboard_launcher.recover_bridge_session",
+            return_value={
+                "status": "recovered",
+                "message": "Recovered watcher/config state for codex in mlv-app.",
+                "after": {"bridge_state": "WATCHING"},
+            },
+        ) as recovered:
+            result = _self_heal_watcher_if_needed(
+                bridge_root=bridge_root,
+                project="mlv-app",
+                repo_root=ROOT,
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("recovered", result["status"])
+        self.assertEqual("WATCHING", result["bridge_state"])
+        recovered.assert_called_once()
+        self.assertEqual("codex", recovered.call_args.kwargs["agent"])
+        self.assertEqual("mlv-app", recovered.call_args.kwargs["project"])
 
     def test_dashboard_server_shutdown_endpoint_stops_server(self) -> None:
         bridge = AgentBridge(self.state_dir)
