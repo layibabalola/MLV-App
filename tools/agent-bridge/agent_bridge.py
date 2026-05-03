@@ -500,6 +500,10 @@ class AgentBridge:
         return self.state_dir / "reviewer-wait-state.jsonl"
 
     @property
+    def guardrail_debt_path(self) -> Path:
+        return self.state_dir / "guardrail-debt.jsonl"
+
+    @property
     def cross_project_pairs_dir(self) -> Path:
         return self.state_dir / "cross-project-pairs"
 
@@ -611,10 +615,48 @@ class AgentBridge:
         info = self._bucket_info(registry, session_id)
         return self._backpressure_limit_for_level(info["inbox_level"])
 
-    def _unread_work_counts_by_bucket(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    def _bucket_accepts_work_backpressure(
+        self,
+        registry: Dict[str, Any],
+        receiver_agent: str,
+        session_id: str,
+    ) -> bool:
+        info = self._bucket_info(registry, session_id)
+        if info["inbox_level"] != INBOX_LEVEL_SESSION:
+            return True
+        record = info.get("record")
+        if not isinstance(record, dict):
+            return True
+        return (
+            record.get("agent") == receiver_agent
+            and record.get("status") == "active"
+            and info.get("active_session") == session_id
+        )
+
+    def _row_counts_for_backpressure(
+        self,
+        registry: Dict[str, Any],
+        receiver_agent: str,
+        row: Dict[str, Any],
+    ) -> bool:
+        if row.get("read_at") or row.get("superseded_at") or row.get("marker_variant") == "control":
+            return False
+        bucket = str(row.get("session_id") or DEFAULT_SESSION_ID)
+        return self._bucket_accepts_work_backpressure(registry, receiver_agent, bucket)
+
+    def _unread_work_counts_by_bucket(
+        self,
+        rows: List[Dict[str, Any]],
+        registry: Optional[Dict[str, Any]] = None,
+        receiver_agent: Optional[str] = None,
+    ) -> Dict[str, int]:
         counts: Dict[str, int] = {}
+        receiver = (receiver_agent or "").strip().lower()
         for row in rows:
-            if row.get("read_at") or row.get("superseded_at") or row.get("marker_variant") == "control":
+            if registry is not None and receiver in AGENTS:
+                if not self._row_counts_for_backpressure(registry, receiver, row):
+                    continue
+            elif row.get("read_at") or row.get("superseded_at") or row.get("marker_variant") == "control":
                 continue
             bucket = str(row.get("session_id") or DEFAULT_SESSION_ID)
             counts[bucket] = counts.get(bucket, 0) + 1
@@ -763,9 +805,7 @@ class AgentBridge:
                 row
                 for row in inbox_cache.get(receiver, [])
                 if str(row.get("session_id") or DEFAULT_SESSION_ID) == session_id
-                and not row.get("read_at")
-                and not row.get("superseded_at")
-                and row.get("marker_variant") != "control"
+                and self._row_counts_for_backpressure(registry, receiver, row)
             ]
 
         for record in pending.values():
@@ -805,7 +845,11 @@ class AgentBridge:
 
         for receiver in sorted(AGENTS):
             _ = _unread_for_bucket(receiver, "")
-            buckets = self._unread_work_counts_by_bucket(inbox_cache.get(receiver, []))
+            buckets = self._unread_work_counts_by_bucket(
+                inbox_cache.get(receiver, []),
+                registry,
+                receiver,
+            )
             for session_id, unread_count in sorted(buckets.items()):
                 if (receiver, session_id) in seen_keys:
                     continue
@@ -1000,9 +1044,7 @@ class AgentBridge:
                 row
                 for row in inbox_rows
                 if str(row.get("session_id") or DEFAULT_SESSION_ID) == bucket
-                and not row.get("read_at")
-                and not row.get("superseded_at")
-                and row.get("marker_variant") != "control"
+                and self._row_counts_for_backpressure(registry, receiver, row)
             ]
             unread_count = len(unread_work)
             session_record = info.get("record") if info.get("inbox_level") == INBOX_LEVEL_SESSION else None
@@ -4658,7 +4700,7 @@ class AgentBridge:
 
             unread_work = [
                 row for row in self._unread_for(target, delivery_bucket)
-                if row.get("marker_variant") != "control"
+                if self._row_counts_for_backpressure(registry, target, row)
             ]
             delivery_backpressure_limit = self._backpressure_limit_for_level(delivery_level)
             is_control_message = marker["marker_variant"] == "control"
@@ -5059,7 +5101,7 @@ class AgentBridge:
             if mark_read and unread:
                 now = utc_now()
                 unread_ids = {row["id"] for row in unread}
-                before_counts = self._unread_work_counts_by_bucket(rows)
+                before_counts = self._unread_work_counts_by_bucket(rows, registry, target)
                 read_rows = [dict(row) for row in rows if row.get("id") in unread_ids]
                 for row in rows:
                     if row.get("id") in unread_ids:
@@ -5076,7 +5118,7 @@ class AgentBridge:
                     registry,
                     receiver_agent=target,
                     before_counts=before_counts,
-                    after_counts=self._unread_work_counts_by_bucket(rows),
+                    after_counts=self._unread_work_counts_by_bucket(rows, registry, target),
                     read_rows=read_rows,
                     via="check_inbox",
                 )
@@ -5264,7 +5306,8 @@ class AgentBridge:
                     if mark_read:
                         now = utc_now()
                         unread_ids = {row["id"] for row in unread}
-                        before_counts = self._unread_work_counts_by_bucket(rows)
+                        registry = self._load_session_registry()
+                        before_counts = self._unread_work_counts_by_bucket(rows, registry, target)
                         read_rows = [dict(row) for row in rows if row.get("id") in unread_ids]
                         for row in rows:
                             if row.get("id") in unread_ids:
@@ -5275,14 +5318,13 @@ class AgentBridge:
                             rows,
                             replace_session_ids=valid_sessions,
                         )
-                        registry = self._load_session_registry()
                         state = self._load_state()
                         backpressure_resolutions = self._resolve_backpressure_after_read(
                             state,
                             registry,
                             receiver_agent=target,
                             before_counts=before_counts,
-                            after_counts=self._unread_work_counts_by_bucket(rows),
+                            after_counts=self._unread_work_counts_by_bucket(rows, registry, target),
                             read_rows=read_rows,
                             via="wait_inbox",
                         )
@@ -5380,7 +5422,8 @@ class AgentBridge:
             path = self.inbox_path(target)
             target_identity = self._identity(target, session)
             rows = self.transport.read_inbox(target_identity, path, unread_only=False)
-            before_counts = self._unread_work_counts_by_bucket(rows)
+            registry = self._load_session_registry()
+            before_counts = self._unread_work_counts_by_bucket(rows, registry, target)
             now = utc_now()
             matched = False
             changed = False
@@ -5426,14 +5469,13 @@ class AgentBridge:
 
             backpressure_resolutions: List[Dict[str, Any]] = []
             if changed and read_rows:
-                registry = self._load_session_registry()
                 state = self._load_state()
                 backpressure_resolutions = self._resolve_backpressure_after_read(
                     state,
                     registry,
                     receiver_agent=target,
                     before_counts=before_counts,
-                    after_counts=self._unread_work_counts_by_bucket(rows),
+                    after_counts=self._unread_work_counts_by_bucket(rows, registry, target),
                     read_rows=read_rows,
                     via="mark_read",
                 )
@@ -5586,7 +5628,19 @@ class AgentBridge:
         return len(recent) >= WAKE_PREFIRE_LIMIT
 
     def _request_backpressure_nudge(self, *, agent: str, session: str, reason: str) -> Dict[str, Any]:
-        if self._wake_breaker_open_for_session(session):
+        state = self._load_state()
+        registry = self._load_session_registry()
+        backpressure_self_healed = self._self_heal_stale_backpressure_pending(
+            state,
+            registry,
+            receiver_agent=agent,
+            via="nudge_peer",
+        )
+        nudgeable_bucket = self._bucket_accepts_work_backpressure(registry, agent, session)
+        if not nudgeable_bucket:
+            status = "backpressure_rejected_no_nudge_no_unread"
+            result = {"status": status, "session_id": session, "reason": "session_not_active"}
+        elif self._wake_breaker_open_for_session(session):
             status = "backpressure_rejected_no_nudge_breaker_open"
             result = {"status": status, "session_id": session, "reason": "wake_breaker_open"}
         elif self._wake_prefire_limited_for_session(session):
@@ -5595,7 +5649,7 @@ class AgentBridge:
         else:
             unread_work = [
                 row for row in self._unread_for(agent, session)
-                if row.get("marker_variant") != "control"
+                if self._row_counts_for_backpressure(registry, agent, row)
             ]
             if not unread_work:
                 status = "backpressure_rejected_no_nudge_no_unread"
@@ -5618,14 +5672,6 @@ class AgentBridge:
                     "message_id": message_id,
                     "wake_rearmed": changed,
                 }
-        state = self._load_state()
-        registry = self._load_session_registry()
-        backpressure_self_healed = self._self_heal_stale_backpressure_pending(
-            state,
-            registry,
-            receiver_agent=agent,
-            via="nudge_peer",
-        )
         if backpressure_self_healed:
             self._save_state(state)
             result["backpressure_self_healed"] = backpressure_self_healed
@@ -8883,6 +8929,9 @@ class AgentBridge:
             if not isinstance(bucket, dict):
                 continue
             session_id = str(bucket.get("session_id") or DEFAULT_SESSION_ID)
+            receiver = str(bucket.get("agent") or "").strip().lower()
+            if receiver in AGENTS and not self._bucket_accepts_work_backpressure(registry, receiver, session_id):
+                continue
             info = self._bucket_info(registry, session_id)
             if project_name and info.get("project") != project_name:
                 continue
@@ -8891,7 +8940,7 @@ class AgentBridge:
             limit = self._backpressure_limit_for_bucket(registry, session_id)
             if limit is None:
                 continue
-            key = (bucket.get("agent"), session_id)
+            key = (receiver, session_id)
             if key in blocked_keys:
                 continue
             threshold = self._backpressure_warning_threshold(limit)
@@ -8899,7 +8948,7 @@ class AgentBridge:
                 continue
             item = {
                 "status": "BACKPRESSURE_BLOCKED" if unread_count >= limit else "BACKPRESSURE_WARN",
-                "receiver_agent": bucket.get("agent"),
+                "receiver_agent": receiver,
                 "receiver_session_id": session_id,
                 "inbox_level": info.get("inbox_level"),
                 "project": info.get("project"),
@@ -8992,6 +9041,68 @@ class AgentBridge:
             ],
         }
 
+    def _dashboard_guardrail_debt_status(
+        self,
+        registry: Dict[str, Any],
+        project_name: Optional[str],
+    ) -> Dict[str, Any]:
+        read = self._health_read_jsonl(self.guardrail_debt_path, "guardrail_debt")
+        if read["status"] == "error":
+            return {
+                "status": "unknown",
+                "scope": "project" if project_name else "global",
+                "project": project_name,
+                "active_debt_count": 0,
+                "by_severity": {},
+                "by_enforcement_tier": {},
+                "items": [],
+                "error": read.get("error"),
+            }
+        terminal = {"clean", "closed", "resolved", "cancelled", "canceled", "superseded"}
+        active: List[Dict[str, Any]] = []
+        for row in read.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            debt_status = str(row.get("debt_status") or row.get("status") or "open").strip().lower()
+            if debt_status in terminal:
+                continue
+            session_id = str(row.get("session_id") or "").strip()
+            if project_name:
+                if session_id == project_name:
+                    pass
+                elif not session_id or self._bucket_info(registry, session_id).get("project") != project_name:
+                    continue
+            item = {
+                "debt_id": row.get("debt_id") or row.get("id"),
+                "guard_id": row.get("guard_id"),
+                "severity": str(row.get("severity") or "warning").strip().lower(),
+                "enforcement_tier": str(row.get("enforcement_tier") or "unknown").strip().lower(),
+                "owner_agent": row.get("owner_agent"),
+                "session_id": session_id or None,
+                "source_message_id": row.get("source_message_id"),
+                "debt_status": debt_status,
+                "detected_at": row.get("detected_at") or row.get("created_at"),
+                "remediation": row.get("remediation"),
+            }
+            active.append(item)
+
+        by_severity: Dict[str, int] = {}
+        by_tier: Dict[str, int] = {}
+        for item in active:
+            severity = str(item.get("severity") or "warning")
+            tier = str(item.get("enforcement_tier") or "unknown")
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+            by_tier[tier] = by_tier.get(tier, 0) + 1
+        return {
+            "status": "action_required" if active else "ok",
+            "scope": "project" if project_name else "global",
+            "project": project_name,
+            "active_debt_count": len(active),
+            "by_severity": by_severity,
+            "by_enforcement_tier": by_tier,
+            "items": active[:20],
+        }
+
     def _dashboard_policy_drift_status(self, validation: BridgeResult) -> Dict[str, Any]:
         if not validation.ok:
             return {
@@ -9072,6 +9183,7 @@ class AgentBridge:
         catchup = status_surfaces.get("catchup") or {}
         contracts = status_surfaces.get("contracts") or {}
         policy_drift = status_surfaces.get("policy_drift") or {}
+        guardrail_debt = status_surfaces.get("guardrail_debt") or {}
         lines = [
             "# Bridge Admin Dashboard",
             "",
@@ -9135,6 +9247,39 @@ class AgentBridge:
                     self._markdown_cell(policy_drift.get("missing_doc_count", 0)),
                     self._markdown_cell(policy_drift.get("doc_drift_count", 0)),
                 ),
+                "| Guardrail debt | %s | %s active debt item(s) across %s enforcement tier(s). |"
+                % (
+                    self._markdown_cell(guardrail_debt.get("status")),
+                    self._markdown_cell(guardrail_debt.get("active_debt_count", 0)),
+                    self._markdown_cell(len(guardrail_debt.get("by_enforcement_tier") or {})),
+                ),
+            ]
+        )
+        guardrail_items = guardrail_debt.get("items") or []
+        if guardrail_items:
+            lines.extend(
+                [
+                    "",
+                    "## Guardrail Debt",
+                    "",
+                    "| Guard | Severity | Tier | Status | Session | Remediation |",
+                    "|---|---|---|---|---|---|",
+                ]
+            )
+            for item in guardrail_items[:8]:
+                lines.append(
+                    "| %s | %s | %s | %s | %s | %s |"
+                    % (
+                        self._markdown_cell(item.get("guard_id") or item.get("debt_id")),
+                        self._markdown_cell(item.get("severity")),
+                        self._markdown_cell(item.get("enforcement_tier")),
+                        self._markdown_cell(item.get("debt_status")),
+                        self._markdown_cell(item.get("session_id") or item.get("owner_agent")),
+                        self._markdown_cell(item.get("remediation")),
+                    )
+                )
+        lines.extend(
+            [
                 "",
                 "## Counts",
                 "",
@@ -9225,6 +9370,7 @@ class AgentBridge:
                 journal_error=journal_read.get("error"),
             )
             contract_status = self._dashboard_contract_status(contracts)
+            guardrail_debt_status = self._dashboard_guardrail_debt_status(registry, project_name)
             overview = {
                 "schema_version": 1,
                 "generated_at": utc_now(),
@@ -9253,6 +9399,7 @@ class AgentBridge:
                     "catchup": catchup_status,
                     "contracts": contract_status,
                     "policy_drift": policy_drift,
+                    "guardrail_debt": guardrail_debt_status,
                 },
                 "policy": {
                     "source": "runtime",

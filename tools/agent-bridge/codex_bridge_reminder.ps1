@@ -793,6 +793,128 @@ function Get-ReviewerWaitDebtDigest {
     }
 }
 
+function Get-GuardrailDebtDigest {
+    param(
+        [string]$StateDir,
+        [string]$OwnerAgent = "codex",
+        [string]$ProjectName = "",
+        [string]$PrivateSession = "",
+        [string]$RegistryPath = ""
+    )
+
+    $path = Join-Path $StateDir "guardrail-debt.jsonl"
+    if (-not (Test-Path $path)) {
+        return @{
+            banner = "guardrail_debt=empty"
+            hasDebt = $false
+        }
+    }
+
+    $scopedSessions = @{}
+    foreach ($session in @($ProjectName, $PrivateSession)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$session)) {
+            $scopedSessions[[string]$session] = $true
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RegistryPath) -and -not [string]::IsNullOrWhiteSpace($ProjectName) -and (Test-Path $RegistryPath)) {
+        try {
+            $registry = Get-Content -Raw $RegistryPath | ConvertFrom-Json
+            $project = $registry.projects.$ProjectName
+            if ($null -ne $project -and $null -ne $project.sessions) {
+                foreach ($prop in @($project.sessions.PSObject.Properties)) {
+                    if ($null -ne $prop -and -not [string]::IsNullOrWhiteSpace([string]$prop.Name)) {
+                        $scopedSessions[[string]$prop.Name] = $true
+                    }
+                }
+            }
+        } catch {
+            # Registry scoping is best-effort; explicit project/private buckets
+            # still protect the current closeout.
+        }
+    }
+
+    $terminalStatuses = @("clean", "closed", "resolved", "cancelled", "canceled", "superseded", "parked", "blocked", "displaced")
+    $debts = @()
+    try {
+        foreach ($line in Get-Content $path) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+            try {
+                $row = $line | ConvertFrom-Json
+            } catch {
+                continue
+            }
+            $owner = [string]$row.owner_agent
+            if (-not [string]::IsNullOrWhiteSpace($owner) -and $owner -ne $OwnerAgent) {
+                continue
+            }
+            $status = ([string]$row.debt_status).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($status)) {
+                $status = ([string]$row.status).Trim().ToLowerInvariant()
+            }
+            if ($terminalStatuses -contains $status) {
+                continue
+            }
+            $rowProject = [string]$row.project
+            $rowSession = [string]$row.session_id
+            if (
+                -not [string]::IsNullOrWhiteSpace($rowProject) -and
+                -not [string]::IsNullOrWhiteSpace($ProjectName) -and
+                $rowProject -ne $ProjectName
+            ) {
+                continue
+            }
+            if (
+                [string]::IsNullOrWhiteSpace($rowProject) -and
+                -not [string]::IsNullOrWhiteSpace($rowSession) -and
+                $scopedSessions.Count -gt 0 -and
+                -not $scopedSessions.ContainsKey($rowSession)
+            ) {
+                continue
+            }
+            $detectedAt = [datetimeoffset]::MinValue
+            try {
+                $detectedAt = [datetimeoffset]::Parse([string]$row.detected_at)
+            } catch {
+                try {
+                    $detectedAt = [datetimeoffset]::Parse([string]$row.created_at)
+                } catch {}
+            }
+            $debts += [pscustomobject]@{
+                debt_id = [string]$row.debt_id
+                guard_id = [string]$row.guard_id
+                detected_at = $detectedAt
+            }
+        }
+    } catch {
+        return @{
+            banner = "guardrail_debt=unreadable"
+            hasDebt = $false
+        }
+    }
+
+    if ($debts.Count -eq 0) {
+        return @{
+            banner = "guardrail_debt=empty"
+            hasDebt = $false
+        }
+    }
+
+    $top = $debts | Sort-Object detected_at | Select-Object -First 1
+    $label = [string]$top.guard_id
+    if ([string]::IsNullOrWhiteSpace($label)) {
+        $label = [string]$top.debt_id
+    }
+    if ([string]::IsNullOrWhiteSpace($label)) {
+        $label = "active"
+    }
+    return @{
+        banner = "guardrail_debt=$label"
+        hasDebt = $true
+    }
+}
+
 function Get-NextPendingBridgeActionDigest {
     param(
         [string]$StateDir,
@@ -1130,16 +1252,18 @@ $ledgerDigest = Get-NextPendingBridgeActionDigest -StateDir $resolvedStateDir -O
 $responseDebtDigest = Get-ResponseDebtDigest -StateDir $resolvedStateDir -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket
 $reviewCloseoutDebtDigest = Get-ReviewCloseoutDebtDigest -StateDir $resolvedStateDir -OwnerAgent "codex" -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket
 $reviewerWaitDebtDigest = Get-ReviewerWaitDebtDigest -StateDir $resolvedStateDir -OwnerAgent "codex"
+$guardrailDebtDigest = Get-GuardrailDebtDigest -StateDir $resolvedStateDir -OwnerAgent "codex" -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket -RegistryPath $SessionRegistryPath
 $ledgerHasPending = $ledgerDigest.StartsWith("ledger_top=")
 $responseDebtHasPending = [bool]$responseDebtDigest.hasDebt
 $reviewCloseoutHasPending = [bool]$reviewCloseoutDebtDigest.hasDebt
 $reviewerWaitHasPending = [bool]$reviewerWaitDebtDigest.hasDebt
+$guardrailDebtHasPending = [bool]$guardrailDebtDigest.hasDebt
 $executionIdle = $executionDigest.banner -eq "execution=idle"
 $executionHasActiveTask = $executionDigest.banner.StartsWith("active_task=")
 
 $stateLine = "Bridge state: $bridgeState"
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
-$digestLine = "Bridge digest: $heuristicsDigest ; $($executionDigest.banner) ; $ledgerDigest ; $($responseDebtDigest.banner) ; $($reviewCloseoutDebtDigest.banner) ; $($reviewerWaitDebtDigest.banner)"
+$digestLine = "Bridge digest: $heuristicsDigest ; $($executionDigest.banner) ; $ledgerDigest ; $($responseDebtDigest.banner) ; $($reviewCloseoutDebtDigest.banner) ; $($reviewerWaitDebtDigest.banner) ; $($guardrailDebtDigest.banner)"
 Write-Output $stateLine
 Write-Output $message
 Write-Output $digestLine
@@ -1164,6 +1288,9 @@ if ($HookPhase -eq "final" -and $reviewCloseoutHasPending) {
 if ($HookPhase -eq "final" -and $reviewerWaitHasPending) {
     Write-Output "FINAL-GUARD: background reviewer wait has no valid ETA/checkback, or its checkback is due. Ask the reviewer for an ETA/verdict, record reviewer_wait_state, or park/block the reviewer debt before final."
 }
+if ($HookPhase -eq "final" -and $guardrailDebtHasPending) {
+    Write-Output "FINAL-GUARD: active workflow guardrail debt exists. Resolve, close, cancel, supersede, or park the guardrail-debt row before 10/10 closeout."
+}
 
 if ($bridgeState -eq "UNBOOTSTRAPPED") {
     Write-Output "Recovery: run py -3 tools\agent-bridge\recover_bridge_session.py --state-dir `"$resolvedStateDir`" --agent codex --cwd . --watcher-config `"$WatcherConfigPath`""
@@ -1178,7 +1305,7 @@ if ($watchModeActive) {
     Write-Output "Do not use a persistent wait_inbox loop in the main working chat unless the user explicitly asked for that short test."
 }
 
-Write-ReminderLog -Path $LogPath -Line "$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest' response_debt='$($responseDebtDigest.banner)' review_closeout='$($reviewCloseoutDebtDigest.banner)' reviewer_wait='$($reviewerWaitDebtDigest.banner)' final_guard=$($HookPhase -eq "final" -and (($executionIdle -and $ledgerHasPending) -or $executionHasActiveTask -or $responseDebtHasPending -or $reviewCloseoutHasPending -or $reviewerWaitHasPending))" | Out-Null
+Write-ReminderLog -Path $LogPath -Line "$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest' response_debt='$($responseDebtDigest.banner)' review_closeout='$($reviewCloseoutDebtDigest.banner)' reviewer_wait='$($reviewerWaitDebtDigest.banner)' guardrail_debt='$($guardrailDebtDigest.banner)' final_guard=$($HookPhase -eq "final" -and (($executionIdle -and $ledgerHasPending) -or $executionHasActiveTask -or $responseDebtHasPending -or $reviewCloseoutHasPending -or $reviewerWaitHasPending -or $guardrailDebtHasPending))" | Out-Null
 
 if ($NoToast -or -not $toastEnabled -or $duplicateToastSuppressed) {
     exit 0

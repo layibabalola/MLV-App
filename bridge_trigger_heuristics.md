@@ -23,6 +23,25 @@ For the operational lifecycle spec, see `tools/agent-bridge/BRIDGE_WATCH_LIFECYC
 After bridge bootstrap succeeds, perform Codex-side inbox hygiene for the active session.
 Do not start a persistent blocking `wait_inbox` loop in the main working chat by default.
 
+Infrastructure reconnect status rule:
+
+- If Codex's MCP/bridge tools become available after having been unavailable,
+  send Claude a `STATUS_UPDATE` in the same turn that availability is
+  confirmed, before any other outbound bridge traffic.
+- Triggers include Codex Desktop restart, wrapper crash and respawn, context
+  compaction followed by bootstrap, or any other interruption where Codex could
+  not reliably call bridge tools.
+- Include whether the MCP connection was interrupted and is now restored, the
+  active Codex session GUID, the pair id if known or changed, current
+  wrapper/bridge state, and any messages queued, dropped, drained, or read
+  during the dark window.
+- Purpose: Claude may have sent messages, retried, or waited while Codex's MCP
+  path was dark. The explicit `STATUS_UPDATE` resets the shared delivery model
+  without requiring the user to relay state.
+- This is symmetric with Claude's reconnect-status rule. A missed reconnect
+  update is a self-repair event: add or tighten the trigger and bridge the
+  correction.
+
 Use a blocking loop only for a short, explicit smoke test or a deliberately parked bridge-watch session.
 The loop is not considered active until Codex explicitly calls `wait_inbox(...)` in a live turn.
 

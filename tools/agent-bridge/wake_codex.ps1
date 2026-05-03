@@ -14,8 +14,8 @@
 #   - Activates Codex regardless of current foreground (user reading Codex
 #     counts as idle from the OS's POV; the message still needs to be delivered).
 #   - If Codex itself is the foreground app on a different/unprovable thread,
-#     defers instead of switching the user's visible Codex thread without an
-#     exact restore path.
+#     delivery takes priority when ThreadId is valid; restore is best-effort
+#     unless an exact RestoreThreadId is available.
 #   - Clears the composer (Ctrl+A + Delete) before injection - any draft text
 #     the user left in the box will be wiped. This is a deliberate trade-off.
 #
@@ -665,8 +665,20 @@ function Test-ThreadTitleEquals {
     return $Actual.Trim().Equals($Expected.Trim(), [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-GenericCodexThreadTitle {
+    param([string]$Title)
+    $value = ($Title -as [string])
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $true
+    }
+    return $value.Trim().Equals("Codex", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-ExpectedThreadTitleFromRuntime {
     if (-not [string]::IsNullOrWhiteSpace($ExpectedThreadTitle)) {
+        if (Test-GenericCodexThreadTitle -Title $ExpectedThreadTitle) {
+            return ""
+        }
         return $ExpectedThreadTitle
     }
     if ([string]::IsNullOrWhiteSpace($StateDir) -or [string]::IsNullOrWhiteSpace($ThreadId)) {
@@ -683,6 +695,9 @@ function Get-ExpectedThreadTitleFromRuntime {
             return ""
         }
         if ($runtime.PSObject.Properties.Name -contains "desktop_thread_title_project_match" -and $runtime.desktop_thread_title_project_match -eq $false) {
+            return ""
+        }
+        if (Test-GenericCodexThreadTitle -Title ([string]$runtime.desktop_thread_title)) {
             return ""
         }
         return [string]$runtime.desktop_thread_title
@@ -707,11 +722,14 @@ function Test-ForegroundCodexNavigationSafety {
     if (-not $ProtectForegroundCodexThread) {
         return $result
     }
-    if ([string]::IsNullOrWhiteSpace($ThreadId)) {
-        return $result
-    }
     $foregroundProcessName = Get-ProcessNameForHwnd -Hwnd $ForegroundHwnd
     if ($foregroundProcessName -ne $ProcessName) {
+        return $result
+    }
+    if (-not (Test-CodexThreadId -Value $ThreadId)) {
+        $result.Ok = $false
+        $result.SkipNavigation = $false
+        $result.Reason = "foreground_codex_target_thread_unavailable"
         return $result
     }
 
@@ -720,7 +738,7 @@ function Test-ForegroundCodexNavigationSafety {
     $result.PreviousThreadTitle = [string]$snapshot.Title
     $result.ExpectedThreadTitle = [string]$expectedTitle
 
-    if (Test-ThreadTitleEquals -Actual ([string]$snapshot.Title) -Expected $expectedTitle) {
+    if ((-not (Test-GenericCodexThreadTitle -Title $expectedTitle)) -and (Test-ThreadTitleEquals -Actual ([string]$snapshot.Title) -Expected $expectedTitle)) {
         $result.Ok = $true
         $result.SkipNavigation = $true
         $result.Reason = "foreground_codex_already_target"
@@ -734,13 +752,9 @@ function Test-ForegroundCodexNavigationSafety {
         return $result
     }
 
-    $result.Ok = $false
+    $result.Ok = $true
     $result.SkipNavigation = $false
-    $result.Reason = if ([string]::IsNullOrWhiteSpace($expectedTitle)) {
-        "foreground_codex_restore_unproven_no_expected_title"
-    } else {
-        "foreground_codex_restore_unproven_title_mismatch"
-    }
+    $result.Reason = "navigate_restore_uuid_unproven"
     return $result
 }
 
@@ -1481,6 +1495,10 @@ if (-not $RunInnerWake) {
 }
 
 # --- Inner wake process: stages 3-6 only ---
+$cleanupOnUnhandledFailure = $false
+$cleanupRootHwnd = [IntPtr]::Zero
+$cleanupComposer = $null
+$cleanupDeliveryMode = "sendkeys"
 try {
     # --- Stage 3: wait for system-wide idle ---
     Write-StageEvent "STAGE3_IDLE_START" ("threshold=" + $IdleThresholdSeconds + "s max=" + $MaxWaitSeconds + "s")
@@ -1525,7 +1543,7 @@ try {
             previous_desktop_thread_title = [string]$navigationSafety.PreviousThreadTitle
             expected_desktop_thread_title = [string]$navigationSafety.ExpectedThreadTitle
         }
-        Write-Host ("[wake_codex] Targeted wake deferred: foreground is Codex on a thread we cannot restore. reason=" + [string]$navigationSafety.Reason)
+        Write-Host ("[wake_codex] Targeted wake deferred: valid target thread is unavailable. reason=" + [string]$navigationSafety.Reason)
         exit 16
     }
 
@@ -1721,6 +1739,10 @@ try {
             Write-Host "[wake_codex] PostMessage delivery failed with no safe fallback while foreground is locked. Deferring."
             exit 16
         }
+        $cleanupOnUnhandledFailure = $true
+        $cleanupRootHwnd = $codexHwnd
+        $cleanupComposer = $composerForFocus
+        $cleanupDeliveryMode = $deliveryMode
         Write-Host ("[wake_codex] Sent via PostMessage: " + $Message + " (steer; preflight=" + $preflight.State + ")")
     } else {
         Write-StageEvent "STAGE5_SENDKEYS_START" ("preserve_draft=" + [string]([bool]$preflight.PreserveDraft))
@@ -1730,6 +1752,10 @@ try {
             Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason "sendkeys_delivery_exception" | Out-Null
             throw
         }
+        $cleanupOnUnhandledFailure = $true
+        $cleanupRootHwnd = $codexHwnd
+        $cleanupComposer = $composerForFocus
+        $cleanupDeliveryMode = $deliveryMode
         Write-StageEvent "STAGE5_SENDKEYS_DONE"
         Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; preflight=" + $preflight.State + ")")
     }
@@ -1747,6 +1773,7 @@ try {
                 message_hash = (Get-TextHash -Value $Message)
             }
             Write-Host ("[wake_codex] Wake postflight verified: " + [string]$postflight.Reason)
+            $cleanupOnUnhandledFailure = $false
         } else {
             $cleanup = Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason ([string]$postflight.Reason)
             Write-PreflightAudit -Action "targeted_wake_postflight_verification_failed" -Fields @{
@@ -1764,10 +1791,15 @@ try {
             }
             Write-Host ("[wake_codex] WARNING: wake postflight did not confirm visible delivery: " + [string]$postflight.Reason)
             if ([bool]$cleanup.Cleared -or [string]$postflight.Reason -eq "wake_command_still_in_composer") {
+                if ([bool]$cleanup.Cleared) {
+                    $cleanupOnUnhandledFailure = $false
+                }
                 Write-Host "[wake_codex] Deferred wake after cleaning unsent injected composer text."
                 exit 16
             }
         }
+    } else {
+        $cleanupOnUnhandledFailure = $false
     }
 
     # --- Stage 6: restore previous foreground ---
@@ -1786,6 +1818,10 @@ try {
     Write-StageEvent "ERROR" $_.Exception.Message
     Write-Host ("[wake_codex] ERROR: " + $_.Exception.Message)
     exit 1
+} finally {
+    if ($cleanupOnUnhandledFailure -and $cleanupRootHwnd -ne [IntPtr]::Zero) {
+        Clear-InjectedWakeTextIfPresent -RootHwnd $cleanupRootHwnd -ComposerElement $cleanupComposer -Value $Message -DeliveryMode $cleanupDeliveryMode -Reason "unverified_delivery_finally" | Out-Null
+    }
 }
 
 exit 0

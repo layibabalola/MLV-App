@@ -980,11 +980,15 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("preflight_clipboard_restore_failed", text)
         self.assertIn("targeted_wake_presend_verified", text)
         self.assertIn("targeted_wake_postflight_verification_failed", text)
+        self.assertIn("$cleanupOnUnhandledFailure = $true", text)
+        self.assertIn("unverified_delivery_finally", text)
         self.assertIn("AGENT_BRIDGE_WAKE_TELEMETRY", text)
         self.assertIn("AllowLegacyNoPreflight", text)
         self.assertIn("RequireConstantMessage", text)
         self.assertIn("ProtectForegroundCodexThread", text)
-        self.assertIn("foreground_codex_restore_unproven", text)
+        self.assertIn("navigate_restore_uuid_unproven", text)
+        self.assertIn("function Test-GenericCodexThreadTitle", text)
+        self.assertIn("foreground_codex_target_thread_unavailable", text)
         self.assertIn("MaxPreSendRaceMilliseconds", text)
         self.assertIn("Add-Type -AssemblyName UIAutomationClient", text)
         self.assertIn("*ProseMirror*", text)
@@ -1002,6 +1006,40 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertLess(
             postflight.index("wake_command_still_in_composer"),
             postflight.index("Test-CodexWindowContainsText"),
+        )
+        inner = text.split("# --- Inner wake process: stages 3-6 only ---", 1)[1]
+        self.assertLess(
+            inner.index("$cleanupOnUnhandledFailure = $true"),
+            inner.index("} finally {"),
+        )
+        self.assertLess(
+            inner.index("} finally {"),
+            inner.index("unverified_delivery_finally"),
+        )
+        expected_title = text.split("function Get-ExpectedThreadTitleFromRuntime", 1)[1].split(
+            "function Test-ForegroundCodexNavigationSafety",
+            1,
+        )[0]
+        self.assertLess(
+            expected_title.index("Test-GenericCodexThreadTitle -Title $ExpectedThreadTitle"),
+            expected_title.index("return $ExpectedThreadTitle"),
+        )
+        self.assertLess(
+            expected_title.index('Test-GenericCodexThreadTitle -Title ([string]$runtime.desktop_thread_title)'),
+            expected_title.index("return [string]$runtime.desktop_thread_title"),
+        )
+        navigation_safety = text.split("function Test-ForegroundCodexNavigationSafety", 1)[1].split(
+            "function Test-TitleContainsProjectToken",
+            1,
+        )[0]
+        self.assertIn("-not (Test-GenericCodexThreadTitle -Title $expectedTitle)", navigation_safety)
+        self.assertLess(
+            navigation_safety.index("Test-CodexThreadId -Value $ThreadId"),
+            navigation_safety.index("Get-CodexThreadTitleSnapshot"),
+        )
+        self.assertLess(
+            navigation_safety.index("Test-CodexThreadId -Value $RestoreThreadId"),
+            navigation_safety.index("navigate_restore_uuid_unproven"),
         )
 
     def test_wake_codex_inner_command_preserves_targeted_sendkeys_flags(self) -> None:
@@ -1051,6 +1089,82 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("-ProtectForegroundCodexThread", result.stdout)
         self.assertIn("-ExpectedThreadTitle 'Agent Bridge'", result.stdout)
         self.assertIn("-RestoreThreadId '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'", result.stdout)
+
+    def test_wake_codex_unproven_foreground_codex_navigates_with_valid_target(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        text = script.read_text(encoding="utf-8")
+        function_text = (
+            "function Test-ForegroundCodexNavigationSafety"
+            + text.split("function Test-ForegroundCodexNavigationSafety", 1)[1].split(
+                "function Test-TitleContainsProjectToken",
+                1,
+            )[0]
+        )
+        harness = """
+$ProcessName = '__codex_test_process__'
+$ProtectForegroundCodexThread = $true
+$ThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'
+$RestoreThreadId = ''
+function Get-ProcessNameForHwnd { param([IntPtr]$Hwnd) return '__codex_test_process__' }
+function Get-CodexThreadTitleSnapshot { param([IntPtr]$RootHwnd, [string]$WindowTitle) return @{ Title = 'Codex'; Source = 'uia-root'; WindowTitle = $WindowTitle } }
+function Get-ExpectedThreadTitleFromRuntime { return 'MLV App primary' }
+function Test-GenericCodexThreadTitle { param([string]$Title) return $Title -eq 'Codex' }
+function Test-ThreadTitleEquals { param([string]$Actual, [string]$Expected) return $Actual -eq $Expected }
+function Test-CodexThreadId { param([string]$Value) return $Value -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+%s
+$result = Test-ForegroundCodexNavigationSafety -ForegroundHwnd ([IntPtr]1234) -ForegroundTitle 'Codex'
+$result | ConvertTo-Json -Compress
+""" % function_text
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", harness],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["Ok"])
+        self.assertFalse(payload["SkipNavigation"])
+        self.assertEqual("navigate_restore_uuid_unproven", payload["Reason"])
+
+    def test_wake_codex_unproven_foreground_codex_defers_without_valid_target(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        text = script.read_text(encoding="utf-8")
+        function_text = (
+            "function Test-ForegroundCodexNavigationSafety"
+            + text.split("function Test-ForegroundCodexNavigationSafety", 1)[1].split(
+                "function Test-TitleContainsProjectToken",
+                1,
+            )[0]
+        )
+        harness = """
+$ProcessName = '__codex_test_process__'
+$ProtectForegroundCodexThread = $true
+$ThreadId = ''
+$RestoreThreadId = ''
+function Get-ProcessNameForHwnd { param([IntPtr]$Hwnd) return '__codex_test_process__' }
+function Get-CodexThreadTitleSnapshot { param([IntPtr]$RootHwnd, [string]$WindowTitle) return @{ Title = 'Codex'; Source = 'uia-root'; WindowTitle = $WindowTitle } }
+function Get-ExpectedThreadTitleFromRuntime { return 'MLV App primary' }
+function Test-GenericCodexThreadTitle { param([string]$Title) return $Title -eq 'Codex' }
+function Test-ThreadTitleEquals { param([string]$Actual, [string]$Expected) return $Actual -eq $Expected }
+function Test-CodexThreadId { param([string]$Value) return $Value -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+%s
+$result = Test-ForegroundCodexNavigationSafety -ForegroundHwnd ([IntPtr]1234) -ForegroundTitle 'Codex'
+$result | ConvertTo-Json -Compress
+""" % function_text
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", harness],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["Ok"])
+        self.assertFalse(payload["SkipNavigation"])
+        self.assertEqual("foreground_codex_target_thread_unavailable", payload["Reason"])
 
     def test_wake_codex_defaults_to_agent_bridge_root_env_for_state_and_lock(self) -> None:
         script = Path(__file__).resolve().parent / "wake_codex.ps1"
@@ -2219,6 +2333,48 @@ for index in range(count):
             message_type="IMPLEMENTATION_UPDATE",
             related_session_id="codex-source",
         )
+        append_jsonl(
+            bridge.guardrail_debt_path,
+            {
+                "schema_version": 1,
+                "debt_id": "guardrail-target-open",
+                "guard_id": "WGI-09",
+                "severity": "warning",
+                "enforcement_tier": "tier2",
+                "owner_agent": "codex",
+                "session_id": "codex-target",
+                "source_message_id": "review-result-1",
+                "debt_status": "open",
+                "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "remediation": "send closeout handoff",
+            },
+        )
+        append_jsonl(
+            bridge.guardrail_debt_path,
+            {
+                "schema_version": 1,
+                "debt_id": "guardrail-target-resolved",
+                "guard_id": "WGI-01",
+                "severity": "warning",
+                "enforcement_tier": "tier2",
+                "owner_agent": "codex",
+                "session_id": "codex-target",
+                "debt_status": "resolved",
+            },
+        )
+        append_jsonl(
+            bridge.guardrail_debt_path,
+            {
+                "schema_version": 1,
+                "debt_id": "guardrail-foreign-open",
+                "guard_id": "WGI-06",
+                "severity": "warning",
+                "enforcement_tier": "tier3",
+                "owner_agent": "codex",
+                "session_id": "codex-source",
+                "debt_status": "open",
+            },
+        )
         for agent, session_id in (("codex", "codex-target"), ("claude", "claude-target")):
             for index in range(SESSION_BACKPRESSURE_LIMIT):
                 append_jsonl(
@@ -2260,6 +2416,11 @@ for index in range(count):
         self.assertEqual(1, surfaces["contracts"]["revoked_count"])
         self.assertEqual("warning", surfaces["policy_drift"]["status"])
         self.assertEqual(["definitely_missing_bridge_policy_doc.md"], surfaces["policy_drift"]["missing_docs"])
+        self.assertEqual("action_required", surfaces["guardrail_debt"]["status"])
+        self.assertEqual(1, surfaces["guardrail_debt"]["active_debt_count"])
+        self.assertEqual({"warning": 1}, surfaces["guardrail_debt"]["by_severity"])
+        self.assertEqual({"tier2": 1}, surfaces["guardrail_debt"]["by_enforcement_tier"])
+        self.assertEqual("WGI-09", surfaces["guardrail_debt"]["items"][0]["guard_id"])
         self.assertTrue(markdown_result.ok)
         self.assertIn("## Status Surfaces", markdown_result.message)
         self.assertIn("| Backpressure | blocked | 2 blocked bucket(s),", markdown_result.message)
@@ -2267,6 +2428,10 @@ for index in range(count):
         self.assertIn("| Catch-up | attention_required | 1 pending event(s) across 1 pair(s). |", markdown_result.message)
         self.assertIn("| Contracts | action_required | 1 reauthorization-required, 1 expiring soon, 1 revoked. |", markdown_result.message)
         self.assertIn("| Policy/doc drift | warning | 1 missing protected doc(s), 0 contradictory doc claim(s). |", markdown_result.message)
+        self.assertIn("| Guardrail debt | action_required | 1 active debt item(s) across 1 enforcement tier(s). |", markdown_result.message)
+        self.assertIn("## Guardrail Debt", markdown_result.message)
+        self.assertIn("| Guard | Severity | Tier | Status | Session | Remediation |", markdown_result.message)
+        self.assertIn("| WGI-09 | warning | tier2 | open | codex-target | send closeout handoff |", markdown_result.message)
 
     def test_dashboard_overview_read_path_does_not_mutate_corrupt_status_inputs(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -4699,6 +4864,103 @@ for index in range(count):
         self.assertEqual(len(old_unread), SESSION_BACKPRESSURE_LIMIT)
         actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
         self.assertIn("backpressure_self_healed", actions)
+
+    def test_nudge_peer_does_not_rearm_superseded_session_unread(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-old", project="mlv-app")
+        sent = []
+        for index in range(SESSION_BACKPRESSURE_LIMIT):
+            item = bridge.send_to_peer(
+                "claude",
+                "codex",
+                "[[handoff:codex]] old unread %d" % index,
+                session_id="codex-old",
+            )
+            self.assertTrue(item.ok)
+            sent.append(item.data["id"])
+        registry = read_json(bridge.session_registry_path, {})
+        project = registry["projects"]["mlv-app"]
+        project["active"]["codex"] = "codex-live"
+        project["sessions"]["codex-old"]["status"] = "superseded"
+        project["sessions"]["codex-old"]["superseded_by"] = "codex-live"
+        project["sessions"]["codex-live"] = {
+            "session_id": "codex-live",
+            "agent": "codex",
+            "status": "active",
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "activated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        write_json(bridge.session_registry_path, registry)
+        write_json(
+            bridge.watcher_state_path,
+            {
+                "seen_ids": [sent[0]],
+                "toasted_ids": [],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+            },
+        )
+
+        nudge = bridge.nudge_peer("codex", "codex-old")
+
+        self.assertEqual(nudge.status, "backpressure_rejected_no_nudge_no_unread")
+        self.assertEqual(nudge.data["nudge"]["reason"], "session_not_active")
+        watcher_state = read_json(bridge.watcher_state_path, {})
+        self.assertIn(sent[0], watcher_state["seen_ids"])
+        actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
+        self.assertNotIn("backpressure_rejected_nudge_attempted", actions)
+
+    def test_health_and_send_ignore_superseded_session_unread_for_backpressure(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-old", project="mlv-app")
+        for index in range(SESSION_BACKPRESSURE_LIMIT):
+            item = bridge.send_to_peer(
+                "claude",
+                "codex",
+                "[[handoff:codex]] old unread %d" % index,
+                session_id="codex-old",
+            )
+            self.assertTrue(item.ok)
+        registry = read_json(bridge.session_registry_path, {})
+        project = registry["projects"]["mlv-app"]
+        project["active"]["codex"] = "codex-live"
+        project["sessions"]["codex-old"]["status"] = "superseded"
+        project["sessions"]["codex-old"]["superseded_by"] = "codex-live"
+        project["sessions"]["codex-live"] = {
+            "session_id": "codex-live",
+            "agent": "codex",
+            "status": "active",
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "activated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        write_json(bridge.session_registry_path, registry)
+
+        sent_to_active = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] fresh active work",
+            session_id="codex-live",
+        )
+        health = bridge.bridge_health_panel("claude", include_extended=True)
+
+        self.assertTrue(sent_to_active.ok, sent_to_active.message)
+        backpressure = health.data["snapshot"]["core"]["backpressure"]
+        self.assertNotIn(
+            "codex-old",
+            {item["receiver_session_id"] for item in backpressure.get("items", [])},
+        )
+        dashboard = bridge.dashboard_overview("claude", project="mlv-app")
+        surface = dashboard.data["overview"]["status_surfaces"]["backpressure"]
+        self.assertEqual("ok", surface["status"])
+        self.assertEqual(0, surface["blocked_bucket_count"])
+        self.assertNotIn(
+            "codex-old",
+            {item["receiver_session_id"] for item in surface.get("items", [])},
+        )
 
     def test_health_and_dashboard_surface_backpressure_blocked_sender(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -7942,6 +8204,169 @@ for index in range(count):
         )
         self.assertIn("reviewer_wait=wait-1 checkback_due", result.stdout)
         self.assertIn("FINAL-GUARD: background reviewer wait has no valid ETA/checkback", result.stdout)
+
+    def test_codex_bridge_reminder_final_guard_for_active_guardrail_debt(self) -> None:
+        script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
+        bridge_root = self.tempdir / "guardrail-debt-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        append_jsonl(
+            state_dir / "guardrail-debt.jsonl",
+            {
+                "schema_version": 1,
+                "debt_id": "guardrail-open",
+                "guard_id": "WGI-09",
+                "severity": "warning",
+                "enforcement_tier": "tier2",
+                "owner_agent": "codex",
+                "session_id": "codex-live",
+                "debt_status": "open",
+                "detected_at": "2026-05-02T00:00:00+00:00",
+                "remediation": "send closeout handoff",
+            },
+        )
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WorkspaceRoot",
+                str(ROOT),
+                "-ProjectBucket",
+                "mlv-app",
+                "-PrivateBucket",
+                "codex-live",
+                "-SessionRegistryPath",
+                str(bridge_root / "session.json"),
+                "-WatcherConfigPath",
+                str(bridge_root / "watcher-config.json"),
+                "-WatcherPidPath",
+                str(bridge_root / "watcher.pid"),
+                "-BridgeWatchFlagPath",
+                str(bridge_root / "missing-watch.flag"),
+                "-SettingsPath",
+                str(bridge_root / "settings.json"),
+                "-LogPath",
+                str(state_dir / "codex-bridge-reminder.log"),
+                "-HookPhase",
+                "final",
+                "-NoToast",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("guardrail_debt=WGI-09", result.stdout)
+        self.assertIn("FINAL-GUARD: active workflow guardrail debt exists", result.stdout)
+
+    def test_codex_bridge_reminder_resolved_guardrail_debt_clears_guard(self) -> None:
+        script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
+        bridge_root = self.tempdir / "guardrail-debt-resolved-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        append_jsonl(
+            state_dir / "guardrail-debt.jsonl",
+            {
+                "schema_version": 1,
+                "debt_id": "guardrail-resolved",
+                "guard_id": "WGI-09",
+                "owner_agent": "codex",
+                "session_id": "codex-live",
+                "debt_status": "resolved",
+            },
+        )
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WorkspaceRoot",
+                str(ROOT),
+                "-ProjectBucket",
+                "mlv-app",
+                "-PrivateBucket",
+                "codex-live",
+                "-SessionRegistryPath",
+                str(bridge_root / "session.json"),
+                "-WatcherConfigPath",
+                str(bridge_root / "watcher-config.json"),
+                "-WatcherPidPath",
+                str(bridge_root / "watcher.pid"),
+                "-BridgeWatchFlagPath",
+                str(bridge_root / "missing-watch.flag"),
+                "-SettingsPath",
+                str(bridge_root / "settings.json"),
+                "-LogPath",
+                str(state_dir / "codex-bridge-reminder.log"),
+                "-HookPhase",
+                "final",
+                "-NoToast",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("guardrail_debt=empty", result.stdout)
+        self.assertNotIn("FINAL-GUARD: active workflow guardrail debt exists", result.stdout)
+
+    def test_codex_bridge_reminder_parked_guardrail_debt_clears_guard(self) -> None:
+        script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
+        bridge_root = self.tempdir / "guardrail-debt-parked-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        append_jsonl(
+            state_dir / "guardrail-debt.jsonl",
+            {
+                "schema_version": 1,
+                "debt_id": "guardrail-parked",
+                "guard_id": "WGI-09",
+                "owner_agent": "codex",
+                "session_id": "codex-live",
+                "debt_status": "parked",
+            },
+        )
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WorkspaceRoot",
+                str(ROOT),
+                "-ProjectBucket",
+                "mlv-app",
+                "-PrivateBucket",
+                "codex-live",
+                "-SessionRegistryPath",
+                str(bridge_root / "session.json"),
+                "-WatcherConfigPath",
+                str(bridge_root / "watcher-config.json"),
+                "-WatcherPidPath",
+                str(bridge_root / "watcher.pid"),
+                "-BridgeWatchFlagPath",
+                str(bridge_root / "missing-watch.flag"),
+                "-SettingsPath",
+                str(bridge_root / "settings.json"),
+                "-LogPath",
+                str(state_dir / "codex-bridge-reminder.log"),
+                "-HookPhase",
+                "final",
+                "-NoToast",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("guardrail_debt=empty", result.stdout)
+        self.assertNotIn("FINAL-GUARD: active workflow guardrail debt exists", result.stdout)
 
     def test_codex_bridge_reminder_review_closeout_sent_clears_guard(self) -> None:
         script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
