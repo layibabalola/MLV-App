@@ -72,6 +72,13 @@ WAKE_BREAKER_IDLE_CLOSE_S = 15 * 60
 WAKE_BREAKER_SCHEMA_VERSION = 1
 CLAUDE_MONITOR_UNREAD_ESCALATION_S = 60
 STALE_UNREAD_WATCHDOG_REARM_S = 5 * 60
+MONITOR_RESTART_CONTROL_TYPE = "MONITOR_RESTART_REQUIRED"
+MONITOR_RESTART_WATCH_FILES = (
+    "tools/agent-bridge/bridge_monitor_poll.py",
+    "tools/agent-bridge/server.py",
+    "tools/agent-bridge/agent_bridge.py",
+    "tools/agent-bridge/watcher.py",
+)
 WAKE_TELEMETRY_PREFIX = "AGENT_BRIDGE_WAKE_TELEMETRY "
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
 ACTIVE_SESSION_ID_SOURCE = "active_session"
@@ -506,6 +513,266 @@ def _rearm_stale_unread_without_monitor(
             },
         )
     return [str(event.get("message_id") or "") for event in events if event.get("message_id")]
+
+
+def _monitor_restart_command(state_dir: Path, session_id: str, project: str) -> str:
+    script = Path(__file__).resolve().parent / "bridge_monitor_poll.py"
+    return (
+        'Monitor(persistent=True, command="%s -u \\"%s\\" --state-dir \\"%s\\" '
+        '--agent claude --session-id %s --project %s --poll-interval-seconds 2")'
+        % (sys.executable, script, state_dir, session_id, project)
+    )
+
+
+def _monitor_restart_control_body(
+    *,
+    trigger: str,
+    reason: str,
+    state_dir: Path,
+    session_id: str,
+    project: str,
+    runtime: Optional[Dict[str, Any]] = None,
+    commit: Optional[str] = None,
+) -> str:
+    lines = [
+        "TYPE: CONTROL",
+        "SUBJECT: MONITOR_RESTART_REQUIRED",
+        "ACTION_REQUESTED: Stop any stale bridge Monitor task handle and start a fresh bridge_monitor_poll.py Monitor immediately.",
+        "TRIGGER: %s" % trigger,
+        "REASON: %s" % reason,
+        "COMMAND: %s" % _monitor_restart_command(state_dir, session_id, project),
+    ]
+    if runtime:
+        lines.append("RUNTIME_STATUS: %s" % (runtime.get("status") or "unknown"))
+        if runtime.get("age_seconds") is not None:
+            lines.append("RUNTIME_AGE_SECONDS: %s" % runtime.get("age_seconds"))
+    if commit:
+        lines.append("COMMIT: %s" % commit)
+    return "\n".join(lines)
+
+
+def _queue_monitor_restart_required_control(
+    *,
+    state_path: Path,
+    state_dir: Path,
+    session_id: str,
+    project: str,
+    trigger: str,
+    dedupe_value: str,
+    reason: str,
+    runtime: Optional[Dict[str, Any]] = None,
+    commit: Optional[str] = None,
+) -> Optional[str]:
+    key = "%s:%s:%s" % (session_id, trigger, dedupe_value)
+    state = load_seen(state_path)
+    controls = [item for item in state.get("monitor_restart_required_controls", []) if isinstance(item, dict)]
+    if any(str(item.get("key") or "") == key for item in controls):
+        return None
+    bridge = AgentBridge(state_dir)
+    body = _monitor_restart_control_body(
+        trigger=trigger,
+        reason=reason,
+        state_dir=state_dir,
+        session_id=session_id,
+        project=project,
+        runtime=runtime,
+        commit=commit,
+    )
+    with bridge._locked():
+        message_id = bridge._append_control_message(
+            target_agent="claude",
+            session_id=session_id,
+            sender="agent-bridge",
+            control_type=MONITOR_RESTART_CONTROL_TYPE,
+            summary="Claude Monitor restart required",
+            body=body,
+            status="action_required",
+            replace_existing_control=True,
+            inbox_level="session",
+            extra_fields={
+                "monitor_restart_trigger": trigger,
+                "monitor_restart_reason": reason,
+                "monitor_restart_commit": commit,
+            },
+        )
+        if message_id:
+            bridge._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "monitor_restart_required_control_sent",
+                    "agent": "claude",
+                    "session_id": session_id,
+                    "project": project,
+                    "trigger": trigger,
+                    "reason": reason,
+                    "runtime_status": (runtime or {}).get("status"),
+                    "commit": commit,
+                    "message_id": message_id,
+                    "accepted": True,
+                }
+            )
+    if not message_id:
+        return None
+    controls.append(
+        {
+            "key": key,
+            "session_id": session_id,
+            "project": project,
+            "trigger": trigger,
+            "reason": reason,
+            "message_id": message_id,
+            "commit": commit,
+            "created_at": utc_now(),
+        }
+    )
+    state["monitor_restart_required_controls"] = controls[-200:]
+    storage_write_json(state_path, state)
+    return message_id
+
+
+def _monitor_runtime_unhealthy_long_enough(
+    *,
+    state_path: Path,
+    session_id: str,
+    runtime: Dict[str, Any],
+    threshold_seconds: int = MONITOR_RUNTIME_MIN_TTL_S,
+) -> bool:
+    if runtime.get("fresh"):
+        state = load_seen(state_path)
+        observations = dict(state.get("monitor_runtime_observations") or {})
+        controls = [
+            item
+            for item in state.get("monitor_restart_required_controls", [])
+            if not (
+                isinstance(item, dict)
+                and item.get("session_id") == session_id
+                and item.get("trigger") == "monitor_stale"
+            )
+        ]
+        key_prefix = "%s:" % session_id
+        observations = {key: value for key, value in observations.items() if not str(key).startswith(key_prefix)}
+        state["monitor_runtime_observations"] = observations
+        state["monitor_restart_required_controls"] = controls
+        storage_write_json(state_path, state)
+        return False
+    status = str(runtime.get("status") or "missing")
+    age_seconds = runtime.get("age_seconds")
+    if age_seconds is not None:
+        try:
+            return int(age_seconds) >= int(runtime.get("freshness_ttl_seconds") or threshold_seconds)
+        except (TypeError, ValueError):
+            return True
+    state = load_seen(state_path)
+    observations = dict(state.get("monitor_runtime_observations") or {})
+    key = "%s:%s" % (session_id, status)
+    now = datetime.now(timezone.utc)
+    first_seen = _parse_dt(observations.get(key))
+    if not first_seen:
+        observations[key] = now.isoformat(timespec="seconds")
+        state["monitor_runtime_observations"] = observations
+        storage_write_json(state_path, state)
+        return False
+    return (now - first_seen).total_seconds() >= threshold_seconds
+
+
+def _maybe_queue_monitor_stale_control(
+    *,
+    session_config: Dict[str, Any],
+    state_path: Path,
+    state_dir: Path,
+) -> Optional[str]:
+    resolved = _resolve_session_config(session_config)
+    if resolved.get("agent") != "claude":
+        return None
+    session_id = str(resolved.get("session_id") or "")
+    project = str(resolved.get("project") or "")
+    if not session_id or not project or session_id == project:
+        return None
+    runtime = _claude_monitor_runtime_status(state_dir, session_id, project)
+    if not _monitor_runtime_unhealthy_long_enough(state_path=state_path, session_id=session_id, runtime=runtime):
+        return None
+    status = str(runtime.get("status") or "missing")
+    reason = "claude_monitor_%s" % status
+    return _queue_monitor_restart_required_control(
+        state_path=state_path,
+        state_dir=state_dir,
+        session_id=session_id,
+        project=project,
+        trigger="monitor_stale",
+        dedupe_value=status,
+        reason=reason,
+        runtime=runtime,
+    )
+
+
+def _latest_bridge_watch_commit(repo_root: Path) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "log", "-1", "--format=%H", "--", *MONITOR_RESTART_WATCH_FILES],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = (result.stdout or "").strip().splitlines()
+    return commit[0] if result.returncode == 0 and commit else None
+
+
+def _maybe_queue_commit_monitor_restart_controls(
+    *,
+    config: Dict[str, Any],
+    sessions: List[Dict[str, Any]],
+    state_path: Path,
+    state_dir: Path,
+) -> List[str]:
+    repo_value = config.get("repo_root") or config.get("canonical_root")
+    if not repo_value:
+        for session in sessions:
+            repo_value = session.get("repo_root") or session.get("canonical_root")
+            if repo_value:
+                break
+    if not repo_value:
+        return []
+    repo_root = Path(str(repo_value))
+    commit = _latest_bridge_watch_commit(repo_root)
+    if not commit:
+        return []
+    state = load_seen(state_path)
+    watch = dict(state.get("monitor_restart_commit_watch") or {})
+    previous = watch.get("last_commit")
+    if previous == commit:
+        return []
+    watch.update({"repo_root": str(repo_root), "last_commit": commit, "updated_at": utc_now()})
+    state["monitor_restart_commit_watch"] = watch
+    storage_write_json(state_path, state)
+    if not previous:
+        return []
+    queued: List[str] = []
+    for session in sessions:
+        resolved = _resolve_session_config(session)
+        if resolved.get("agent") != "claude":
+            continue
+        session_id = str(resolved.get("session_id") or "")
+        project = str(resolved.get("project") or "")
+        if not session_id or not project or session_id == project:
+            continue
+        message_id = _queue_monitor_restart_required_control(
+            state_path=state_path,
+            state_dir=state_dir,
+            session_id=session_id,
+            project=project,
+            trigger="bridge_code_commit",
+            dedupe_value=commit,
+            reason="bridge_monitor_related_code_changed",
+            commit=commit,
+        )
+        if message_id:
+            queued.append(message_id)
+    return queued
 
 
 def _watcher_state_dir(state_path: Path) -> Path:
@@ -2440,7 +2707,20 @@ def watch(
                     run_compaction(state_dir, settings)
                     last_compact = now
 
+                _maybe_queue_commit_monitor_restart_controls(
+                    config=config,
+                    sessions=sessions,
+                    state_path=state_path,
+                    state_dir=state_dir,
+                )
+
             for s in sessions:
+                if state_dir:
+                    _maybe_queue_monitor_stale_control(
+                        session_config=s,
+                        state_path=state_path,
+                        state_dir=state_dir,
+                    )
                 process_session_once(
                     s,
                     seen_ids=seen_ids,

@@ -4854,6 +4854,223 @@ for index in range(count):
         ]
         self.assertEqual(rearm_rows, [])
 
+    def test_watcher_queues_monitor_restart_control_after_missing_monitor_threshold(self) -> None:
+        bridge_root = self.tempdir / "monitor-restart-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        inbox = state_dir / "inbox-claude.jsonl"
+        state_path = bridge_root / "watcher-state.json"
+        write_json(
+            state_path,
+            {
+                "seen_ids": [],
+                "toasted_ids": [],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+                "monitor_runtime_observations": {
+                    "claude-live:missing": (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(timespec="seconds")
+                },
+            },
+        )
+        config = {
+            "agent": "claude",
+            "session_id": "claude-live",
+            "project": "mlv-app",
+            "inbox": str(inbox),
+            "on_message": "toast",
+        }
+
+        first = watcher._maybe_queue_monitor_stale_control(
+            session_config=config,
+            state_path=state_path,
+            state_dir=state_dir,
+        )
+        second = watcher._maybe_queue_monitor_stale_control(
+            session_config=config,
+            state_path=state_path,
+            state_dir=state_dir,
+        )
+
+        self.assertTrue(first)
+        self.assertIsNone(second)
+        rows = read_jsonl(inbox)
+        self.assertEqual(1, len(rows))
+        self.assertEqual(rows[0]["marker_variant"], "control")
+        self.assertEqual(rows[0]["control_type"], "MONITOR_RESTART_REQUIRED")
+        self.assertEqual(rows[0]["monitor_restart_trigger"], "monitor_stale")
+        self.assertIn("bridge_monitor_poll.py", rows[0]["body"])
+        audit = read_jsonl(state_dir / "messages.jsonl")
+        self.assertEqual(audit[-1]["action"], "monitor_restart_required_control_sent")
+        self.assertIn("ACTION_REQUESTED: Follow the control message instructions.", rows[0]["delivered_message"])
+
+    def test_watcher_waits_before_missing_monitor_restart_control(self) -> None:
+        bridge_root = self.tempdir / "monitor-restart-wait-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        state_path = bridge_root / "watcher-state.json"
+        config = {
+            "agent": "claude",
+            "session_id": "claude-live",
+            "project": "mlv-app",
+            "inbox": str(state_dir / "inbox-claude.jsonl"),
+            "on_message": "toast",
+        }
+
+        queued = watcher._maybe_queue_monitor_stale_control(
+            session_config=config,
+            state_path=state_path,
+            state_dir=state_dir,
+        )
+
+        self.assertIsNone(queued)
+        state = read_json(state_path, {})
+        self.assertIn("claude-live:missing", state.get("monitor_runtime_observations") or {})
+        self.assertEqual(read_jsonl(state_dir / "inbox-claude.jsonl"), [])
+
+    def test_watcher_queues_monitor_restart_control_for_stale_heartbeat(self) -> None:
+        bridge_root = self.tempdir / "monitor-stale-runtime-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        inbox = state_dir / "inbox-claude.jsonl"
+        state_path = bridge_root / "watcher-state.json"
+        write_json(
+            bridge_root / "monitor-claude-claude-live.runtime.json",
+            {
+                "schema_version": 1,
+                "agent": "claude",
+                "session_id": "claude-live",
+                "project": "mlv-app",
+                "monitor_pid": 0,
+                "heartbeat_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="seconds"),
+                "poll_interval_seconds": 2,
+                "script_name": "bridge_monitor_poll.py",
+                "watched_buckets": ["claude-live", "mlv-app"],
+            },
+        )
+
+        queued = watcher._maybe_queue_monitor_stale_control(
+            session_config={
+                "agent": "claude",
+                "session_id": "claude-live",
+                "project": "mlv-app",
+                "inbox": str(inbox),
+                "on_message": "toast",
+            },
+            state_path=state_path,
+            state_dir=state_dir,
+        )
+
+        self.assertTrue(queued)
+        row = read_jsonl(inbox)[0]
+        self.assertEqual(row["control_type"], "MONITOR_RESTART_REQUIRED")
+        self.assertEqual(row["monitor_restart_reason"], "claude_monitor_stale")
+        self.assertIn("RUNTIME_STATUS: stale", row["body"])
+
+    def test_monitor_restart_control_bypasses_full_claude_work_backpressure(self) -> None:
+        bridge_root = self.tempdir / "monitor-backpressure-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        bridge = AgentBridge(state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        for index in range(SESSION_BACKPRESSURE_LIMIT):
+            sent = bridge.send_to_peer(
+                "codex",
+                "claude",
+                "[[handoff:claude]] work backlog %d" % index,
+                session_id="claude-live",
+                sender_session_id="codex-live",
+            )
+            self.assertTrue(sent.ok)
+        rejected = bridge.send_to_peer(
+            "codex",
+            "claude",
+            "[[handoff:claude]] overflow",
+            session_id="claude-live",
+            sender_session_id="codex-live",
+        )
+        self.assertFalse(rejected.ok)
+        state_path = bridge_root / "watcher-state.json"
+        write_json(
+            state_path,
+            {
+                "seen_ids": [],
+                "toasted_ids": [],
+                "pending_wake_verifications": [],
+                "paused_wake_messages": [],
+                "unknown_origin_warnings": [],
+                "wake_fire_history": [],
+                "monitor_runtime_observations": {
+                    "claude-live:missing": (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(timespec="seconds")
+                },
+            },
+        )
+
+        control_id = watcher._maybe_queue_monitor_stale_control(
+            session_config={
+                "agent": "claude",
+                "session_id": "claude-live",
+                "project": "mlv-app",
+                "inbox": str(state_dir / "inbox-claude.jsonl"),
+                "on_message": "toast",
+            },
+            state_path=state_path,
+            state_dir=state_dir,
+        )
+
+        self.assertTrue(control_id)
+        rows = read_jsonl(state_dir / "inbox-claude.jsonl")
+        work_rows = [row for row in rows if row.get("marker_variant") != "control"]
+        control_rows = [row for row in rows if row.get("control_type") == "MONITOR_RESTART_REQUIRED"]
+        self.assertEqual(len(work_rows), SESSION_BACKPRESSURE_LIMIT)
+        self.assertEqual(len(control_rows), 1)
+
+    def test_watcher_queues_monitor_restart_control_on_bridge_code_commit_change(self) -> None:
+        bridge_root = self.tempdir / "monitor-commit-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        state_path = bridge_root / "watcher-state.json"
+        sessions = [
+            {
+                "agent": "claude",
+                "session_id": "claude-live",
+                "project": "mlv-app",
+                "inbox": str(state_dir / "inbox-claude.jsonl"),
+                "on_message": "toast",
+            }
+        ]
+        config = {"repo_root": str(ROOT), "sessions": sessions}
+
+        with patch("watcher._latest_bridge_watch_commit", side_effect=["old-commit", "new-commit", "new-commit"]):
+            baseline = watcher._maybe_queue_commit_monitor_restart_controls(
+                config=config,
+                sessions=sessions,
+                state_path=state_path,
+                state_dir=state_dir,
+            )
+            changed = watcher._maybe_queue_commit_monitor_restart_controls(
+                config=config,
+                sessions=sessions,
+                state_path=state_path,
+                state_dir=state_dir,
+            )
+            duplicate = watcher._maybe_queue_commit_monitor_restart_controls(
+                config=config,
+                sessions=sessions,
+                state_path=state_path,
+                state_dir=state_dir,
+            )
+
+        self.assertEqual(baseline, [])
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(duplicate, [])
+        rows = read_jsonl(state_dir / "inbox-claude.jsonl")
+        self.assertEqual(rows[0]["control_type"], "MONITOR_RESTART_REQUIRED")
+        self.assertEqual(rows[0]["monitor_restart_trigger"], "bridge_code_commit")
+        self.assertEqual(rows[0]["monitor_restart_commit"], "new-commit")
+
     def test_backpressure_warns_at_sixty_percent_threshold_before_hard_limit(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
@@ -5609,6 +5826,8 @@ for index in range(count):
             python_executable=sys.executable,
         )
 
+        self.assertEqual(Path(result["repo_root"]).resolve(), ROOT)
+        self.assertEqual(result["canonical_root"], str(derive_project_identity(str(ROOT))["canonical_root"]))
         claude_entries = [entry for entry in result["sessions"] if entry.get("agent") == "claude"]
         self.assertEqual(2, len(claude_entries))
         command_text = "\n".join(
@@ -8014,6 +8233,44 @@ for index in range(count):
         )
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         self.assertEqual(1, payload["schema_version"])
+        self.assertEqual(Path(payload["repo_root"]).resolve(), ROOT)
+        self.assertEqual(str(derive_project_identity(str(ROOT))["canonical_root"]), payload["canonical_root"])
+
+    def test_configure_watcher_repo_root_tracks_active_git_worktree(self) -> None:
+        config_path = self.tempdir / "watcher-config.json"
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+
+        payload = configure_watcher(
+            config_path=config_path,
+            state_dir=self.state_dir,
+            agent="claude",
+            project="mlv-app",
+            cwd=str(ROOT),
+            python_executable="py",
+        )
+
+        self.assertEqual(Path(payload["repo_root"]).resolve(), ROOT)
+        self.assertNotEqual(payload["repo_root"], payload["canonical_root"])
+        self.assertEqual(
+            watcher._latest_bridge_watch_commit(Path(payload["repo_root"])),
+            subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(ROOT),
+                    "log",
+                    "-1",
+                    "--format=%H",
+                    "--",
+                    "tools/agent-bridge/bridge_monitor_poll.py",
+                    "tools/agent-bridge/server.py",
+                    "tools/agent-bridge/agent_bridge.py",
+                    "tools/agent-bridge/watcher.py",
+                ],
+                text=True,
+            ).strip(),
+        )
 
     def test_load_settings_accepts_schema_version_metadata(self) -> None:
         settings_path = settings_path_for_state_dir(self.state_dir)

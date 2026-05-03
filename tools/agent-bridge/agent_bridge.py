@@ -2471,11 +2471,17 @@ class AgentBridge:
             self.transport.write_inbox_rows(identity, path, rows)
         now = utc_now()
         message_id = str(uuid.uuid4())
-        delivered = "From %s:\nTYPE: %s\nSTATUS: %s\nSUMMARY: %s\nACTION_REQUESTED: none\n\n%s" % (
+        action_requested = (
+            "Follow the control message instructions."
+            if (status or "").strip().lower() in {"action_required", "requires_action"}
+            else "none"
+        )
+        delivered = "From %s:\nTYPE: %s\nSTATUS: %s\nSUMMARY: %s\nACTION_REQUESTED: %s\n\n%s" % (
             sender.capitalize(),
             control_type,
             status,
             summary,
+            action_requested,
             body,
         )
         row = {

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -91,6 +92,22 @@ def is_managed_entry(
         return True
     session_id = entry.get("session_id")
     return session_id == project or session_id in project_session_ids
+
+
+def resolve_git_worktree_root(cwd: Optional[str], fallback: str) -> str:
+    start = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(start),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, TypeError):
+        return fallback
+    root = (completed.stdout or "").strip()
+    return root or fallback
 
 
 def merge_entry(existing: Optional[Dict[str, Any]], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -213,6 +230,10 @@ def configure_watcher(
         },
     )
     config.setdefault("schema_version", STATE_SCHEMA_VERSION)
+    config["canonical_root"] = str(identity["canonical_root"])
+    # Commit-change monitoring must follow the active checkout/worktree, while
+    # canonical_root remains the stable rendezvous identity across worktrees.
+    config["repo_root"] = resolve_git_worktree_root(cwd, str(identity["canonical_root"]))
     if agent == "codex" and parent_thread_id:
         if parent_thread_provenance not in PARENT_THREAD_ALLOWED_PROVENANCE:
             raise ValueError("parent_thread_id may only be written by an approved parent provenance")

@@ -35,6 +35,11 @@ After the hook fires, do these in order:
    `probe_server.py`; probes are diagnostics and will not keep Claude's inbox
    wake path armed. Before saying "waiting for Codex," verify the Monitor task
    is active. If no Monitor is running, start one before waiting.
+   If a bridge message arrives with `TYPE: CONTROL` and
+   `SUBJECT: MONITOR_RESTART_REQUIRED`, stop any stale Monitor task handle and
+   immediately start a fresh `bridge_monitor_poll.py` Monitor with the command
+   shown in the message. The watcher sends this control when it detects a stale
+   or missing Monitor heartbeat, or when bridge Monitor-related code changes.
 
 When a Monitor notification fires, call `mcp__agent-bridge__check_inbox` with
 `agent=claude`, `session_id=<active-guid-or-mlv-app>`, `mark_read=False`, then mark
