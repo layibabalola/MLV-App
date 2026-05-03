@@ -971,6 +971,10 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("function Get-CodexThreadTitleSnapshot", text)
         self.assertIn("function Test-CodexWakePostflight", text)
         self.assertIn("function Clear-InjectedWakeTextIfPresent", text)
+        self.assertIn("function Invoke-ClipboardOperation", text)
+        self.assertIn("function Save-ClipboardState", text)
+        self.assertIn("function Restore-ClipboardState", text)
+        self.assertIn("function Set-ClipboardTextForWake", text)
         self.assertIn("wake_command_still_in_composer", text)
         self.assertIn("targeted_wake_injected_text_cleared", text)
         self.assertIn("preflight_state_detected", text)
@@ -986,7 +990,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("AllowLegacyNoPreflight", text)
         self.assertIn("RequireConstantMessage", text)
         self.assertIn("ProtectForegroundCodexThread", text)
-        self.assertIn("navigate_restore_uuid_unproven", text)
+        self.assertIn("foreground_codex_restore_thread_unavailable", text)
         self.assertIn("function Test-GenericCodexThreadTitle", text)
         self.assertIn("foreground_codex_target_thread_unavailable", text)
         self.assertIn("MaxPreSendRaceMilliseconds", text)
@@ -1007,6 +1011,41 @@ class AgentBridgeTests(unittest.TestCase):
             postflight.index("wake_command_still_in_composer"),
             postflight.index("Test-CodexWindowContainsText"),
         )
+        postmessage_send = text.split("function Send-BridgeMessageViaPostMessage", 1)[1].split(
+            "# Codex Desktop placeholder strings",
+            1,
+        )[0]
+        self.assertLess(
+            postmessage_send.index("Save-ClipboardState -Context \"PostMessage path\""),
+            postmessage_send.index("Set-ClipboardTextForWake -Text $Value -Context \"PostMessage path\""),
+        )
+        self.assertLess(
+            postmessage_send.index("Set-ClipboardTextForWake -Text $Value -Context \"PostMessage path\""),
+            postmessage_send.index("Restore-ClipboardState -State $pmClipboardState"),
+        )
+        sendkeys = text.split("function Send-BridgeMessageKeys", 1)[1].split(
+            "function Invoke-CodexComposerUiaFallback",
+            1,
+        )[0]
+        self.assertLess(
+            sendkeys.index("Save-ClipboardState -Context \"SendKeys path\""),
+            sendkeys.index("Set-ClipboardTextForWake -Text $Value -Context \"SendKeys path\""),
+        )
+        self.assertLess(
+            sendkeys.index("Set-ClipboardTextForWake -Text $Value -Context \"SendKeys path\""),
+            sendkeys.index("Restore-ClipboardState -State $clipboardState"),
+        )
+        clipboard_text_helper = text.split("function Set-ClipboardTextForWake", 1)[1].split(
+            "function Send-ClearComposerViaPostMessage",
+            1,
+        )[0]
+        self.assertIn("Invoke-ClipboardOperation", clipboard_text_helper)
+        self.assertIn("[System.Windows.Forms.Clipboard]::SetText($Text)", clipboard_text_helper)
+        restore = text.split("function Restore-ClipboardState", 1)[1].split(
+            "function Set-ClipboardTextForWake",
+            1,
+        )[0]
+        self.assertIn("[System.Windows.Forms.Clipboard]::Clear()", restore)
         inner = text.split("# --- Inner wake process: stages 3-6 only ---", 1)[1]
         self.assertLess(
             inner.index("$cleanupOnUnhandledFailure = $true"),
@@ -1039,7 +1078,7 @@ class AgentBridgeTests(unittest.TestCase):
         )
         self.assertLess(
             navigation_safety.index("Test-CodexThreadId -Value $RestoreThreadId"),
-            navigation_safety.index("navigate_restore_uuid_unproven"),
+            navigation_safety.index("foreground_codex_restore_thread_unavailable"),
         )
 
     def test_wake_codex_inner_command_preserves_targeted_sendkeys_flags(self) -> None:
@@ -1090,7 +1129,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("-ExpectedThreadTitle 'Agent Bridge'", result.stdout)
         self.assertIn("-RestoreThreadId '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'", result.stdout)
 
-    def test_wake_codex_unproven_foreground_codex_navigates_with_valid_target(self) -> None:
+    def test_wake_codex_unproven_foreground_codex_defers_without_restore_id(self) -> None:
         script = Path(__file__).resolve().parent / "wake_codex.ps1"
         text = script.read_text(encoding="utf-8")
         function_text = (
@@ -1124,9 +1163,47 @@ $result | ConvertTo-Json -Compress
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
+        self.assertFalse(payload["Ok"])
+        self.assertFalse(payload["SkipNavigation"])
+        self.assertEqual("foreground_codex_restore_thread_unavailable", payload["Reason"])
+
+    def test_wake_codex_unproven_foreground_codex_allows_exact_restore_id(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        text = script.read_text(encoding="utf-8")
+        function_text = (
+            "function Test-ForegroundCodexNavigationSafety"
+            + text.split("function Test-ForegroundCodexNavigationSafety", 1)[1].split(
+                "function Test-TitleContainsProjectToken",
+                1,
+            )[0]
+        )
+        harness = """
+$ProcessName = '__codex_test_process__'
+$ProtectForegroundCodexThread = $true
+$ThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'
+$RestoreThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c7'
+function Get-ProcessNameForHwnd { param([IntPtr]$Hwnd) return '__codex_test_process__' }
+function Get-CodexThreadTitleSnapshot { param([IntPtr]$RootHwnd, [string]$WindowTitle) return @{ Title = 'Codex'; Source = 'uia-root'; WindowTitle = $WindowTitle } }
+function Get-ExpectedThreadTitleFromRuntime { return 'MLV App primary' }
+function Test-GenericCodexThreadTitle { param([string]$Title) return $Title -eq 'Codex' }
+function Test-ThreadTitleEquals { param([string]$Actual, [string]$Expected) return $Actual -eq $Expected }
+function Test-CodexThreadId { param([string]$Value) return $Value -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+%s
+$result = Test-ForegroundCodexNavigationSafety -ForegroundHwnd ([IntPtr]1234) -ForegroundTitle 'Codex'
+$result | ConvertTo-Json -Compress
+""" % function_text
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", harness],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
         self.assertTrue(payload["Ok"])
         self.assertFalse(payload["SkipNavigation"])
-        self.assertEqual("navigate_restore_uuid_unproven", payload["Reason"])
+        self.assertEqual("restore_thread_id_available", payload["Reason"])
 
     def test_wake_codex_unproven_foreground_codex_defers_without_valid_target(self) -> None:
         script = Path(__file__).resolve().parent / "wake_codex.ps1"
@@ -2573,6 +2650,217 @@ for index in range(count):
         finally:
             handle.stop()
 
+    def test_dashboard_server_root_auto_refreshes_visual_overview_without_reload(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        handle = start_dashboard_server(
+            bridge,
+            token="test-token",
+            csrf_token="csrf-token",
+            default_agent="codex",
+            default_project="mlv-app",
+        )
+        try:
+            with urllib.request.urlopen(handle.url + "/?token=test-token", timeout=5) as response:
+                html = response.read().decode("utf-8")
+            self.assertIn("script-src 'unsafe-inline'; connect-src 'self'", response.headers["Content-Security-Policy"])
+            self.assertIn("const TOKEN=", html)
+            self.assertIn("const PROJECT=", html)
+            self.assertIn("const INITIAL_PAYLOAD=", html)
+            self.assertIn("shutdownDashboard", html)
+            self.assertIn("format=json", html)
+            self.assertIn("setInterval(refresh, 5000)", html)
+            self.assertIn("id=\"dashboard-root\"", html)
+            self.assertIn("Operational signals", html)
+            self.assertIn("Copy recovery hint", html)
+        finally:
+            handle.stop()
+
+    def test_dashboard_server_shutdown_endpoint_stops_server(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        handle = start_dashboard_server(
+            bridge,
+            token="test-token",
+            csrf_token="csrf-token",
+            default_agent="codex",
+            default_project="mlv-app",
+        )
+        try:
+            req = urllib.request.Request(
+                handle.url + "/api/shutdown?token=test-token",
+                data=b"{}",
+                headers={"X-CSRF-Token": "csrf-token", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(payload["ok"])
+            deadline = time.time() + 5
+            while handle.thread.is_alive() and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(handle.shutdown_requested)
+            self.assertFalse(handle.thread.is_alive())
+        finally:
+            handle.stop()
+
+    def test_dashboard_launcher_no_browser_serves_dashboard(self) -> None:
+        script = Path(__file__).resolve().parent / "dashboard_launcher.py"
+        bridge_root = self.tempdir / "launcher-root"
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                "--bridge-root",
+                str(bridge_root),
+                "--project",
+                "mlv-app",
+                "--port",
+                "0",
+                "--no-browser",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        line_queue: queue.Queue[str] = queue.Queue()
+
+        def _read_first_line() -> None:
+            assert proc.stdout is not None
+            line_queue.put(proc.stdout.readline())
+
+        reader = threading.Thread(target=_read_first_line, daemon=True)
+        reader.start()
+        try:
+            try:
+                first_line = line_queue.get(timeout=10)
+            except queue.Empty:
+                proc.kill()
+                stderr = proc.stderr.read() if proc.stderr is not None else ""
+                self.fail("dashboard launcher did not print URL: %s" % stderr)
+            self.assertTrue(first_line.startswith("Agent Bridge Dashboard: "), first_line)
+            url = first_line.split(": ", 1)[1].strip()
+            with urllib.request.urlopen(url, timeout=5) as response:
+                self.assertEqual(200, response.status)
+                html = response.read().decode("utf-8")
+            self.assertIn("Agent Bridge Dashboard", html)
+            self.assertIn("Auto-refreshes every 5s", html)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
+    def test_dashboard_launcher_background_reuses_existing_supervisor(self) -> None:
+        script = Path(__file__).resolve().parent / "dashboard_launcher.py"
+        bridge_root = self.tempdir / "launcher-background-root"
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                "--bridge-root",
+                str(bridge_root),
+                "--project",
+                "mlv-app",
+                "--port",
+                "0",
+                "--no-browser",
+                "--background",
+                "--health-interval-seconds",
+                "1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        line_queue: queue.Queue[str] = queue.Queue()
+
+        def _read_first_line() -> None:
+            assert proc.stdout is not None
+            line_queue.put(proc.stdout.readline())
+
+        reader = threading.Thread(target=_read_first_line, daemon=True)
+        reader.start()
+        try:
+            try:
+                first_line = line_queue.get(timeout=10)
+            except queue.Empty:
+                proc.kill()
+                stderr = proc.stderr.read() if proc.stderr is not None else ""
+                self.fail("dashboard background launcher did not print URL: %s" % stderr)
+            self.assertTrue(first_line.startswith("Agent Bridge Dashboard: "), first_line)
+            runtime_path = bridge_root / "state" / "dashboard-launcher.runtime.json"
+            deadline = time.time() + 10
+            while not runtime_path.exists() and time.time() < deadline:
+                time.sleep(0.05)
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            first_pid = runtime["pid"]
+
+            second = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--bridge-root",
+                    str(bridge_root),
+                    "--project",
+                    "mlv-app",
+                    "--no-browser",
+                    "--background",
+                    "--health-interval-seconds",
+                    "1",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("Reusing existing dashboard supervisor.", second.stdout)
+            runtime_after_reuse = json.loads(runtime_path.read_text(encoding="utf-8"))
+            self.assertEqual(first_pid, runtime_after_reuse["pid"])
+
+            shutdown = urllib.request.Request(
+                runtime["url"] + "/api/shutdown?token=" + runtime["token"],
+                data=b"{}",
+                headers={"X-CSRF-Token": runtime["csrf_token"], "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(shutdown, timeout=5) as response:
+                self.assertEqual(200, response.status)
+            proc.wait(timeout=10)
+            stopped = json.loads(runtime_path.read_text(encoding="utf-8"))
+            self.assertEqual("stopped", stopped["status"])
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
+    def test_open_dashboard_tool_is_listed_in_manifest(self) -> None:
+        from server import create_mcp, write_tool_manifest
+
+        manifest = write_tool_manifest(
+            state_dir=self.state_dir,
+            mcp=create_mcp(AgentBridge(self.state_dir)),
+        )
+
+        self.assertIn("open_dashboard", manifest["tool_names"])
+        tool = next(item for item in manifest["tools"] if item["name"] == "open_dashboard")
+        self.assertIn("open it in the default browser", tool["description"])
+        self.assertNotIn("token", json.dumps(tool.get("inputSchema", {})).lower())
+
     def test_dashboard_server_rejects_non_local_bind_host(self) -> None:
         with self.assertRaises(ValueError):
             start_dashboard_server(AgentBridge(self.state_dir), host="0.0.0.0")
@@ -3303,6 +3591,120 @@ for index in range(count):
         self.assertEqual(
             "...dex-live",
             watcher._runtime_session_display_label(self.state_dir, "codex", "codex-live", "mlv-app"),
+        )
+
+    def test_generic_wake_title_is_unknown_not_false_mismatch(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        breadcrumb = build_peer_runtime_breadcrumb(
+            state_dir=self.state_dir,
+            agent="codex",
+            session_id="codex-live",
+            project="mlv-app",
+            desktop_thread_id="thr-codex",
+        )
+        breadcrumb.update(
+            {
+                "desktop_thread_title": "Prior Good Title",
+                "desktop_thread_title_project_match": True,
+            }
+        )
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+
+        telemetry = [
+            {
+                "timestamp": "2026-05-02T10:10:00+00:00",
+                "action": "thread_title_observed",
+                "desktop_thread_title": "Codex",
+                "desktop_thread_title_source": "uia_root_name",
+                "expected_project_token": "mlv-app",
+            },
+            {
+                "timestamp": "2026-05-02T10:10:01+00:00",
+                "action": "thread_title_unknown",
+                "desktop_thread_title": "Codex",
+                "desktop_thread_title_source": "uia_root_name",
+                "expected_project_token": "mlv-app",
+                "title_project_match": None,
+                "title_project_match_state": "generic_codex_title",
+            },
+        ]
+        watcher._cache_wake_telemetry(
+            inbox_path=bridge.inbox_path("codex"),
+            agent="codex",
+            session_id="codex-live",
+            message_id="msg-generic-title",
+            command_result={
+                "stdout": "\n".join(watcher.WAKE_TELEMETRY_PREFIX + json.dumps(item) for item in telemetry),
+            },
+        )
+
+        updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertNotIn("desktop_thread_title", updated)
+        self.assertIsNone(updated["desktop_thread_title_project_match"])
+        self.assertEqual("Codex", updated["last_unresolved_desktop_thread_title"])
+        self.assertNotIn("last_mismatched_desktop_thread_title", updated)
+
+    def test_watcher_template_accepts_optional_restore_thread_placeholder(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        breadcrumb = build_peer_runtime_breadcrumb(
+            state_dir=self.state_dir,
+            agent="codex",
+            session_id="codex-live",
+            project="mlv-app",
+            desktop_thread_id="019dcfe4-bd5d-7841-a7c1-2e8969a777c5",
+            bootstrap_origin="parent",
+        )
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+
+        resolved = watcher._resolve_command_template(
+            {
+                "agent": "codex",
+                "session_id": "codex-live",
+                "project": "mlv-app",
+                "on_message_command_template": [
+                    "wake",
+                    "-ThreadId",
+                    "{desktop_thread_id}",
+                    "-RestoreThreadId",
+                    "{restore_thread_id}",
+                    "-ExpectedProjectToken",
+                    "{project}",
+                ],
+            },
+            bridge.inbox_path("codex"),
+        )
+
+        self.assertTrue(resolved["ok"], resolved)
+        self.assertEqual(
+            [
+                "wake",
+                "-ThreadId",
+                "019dcfe4-bd5d-7841-a7c1-2e8969a777c5",
+                "-RestoreThreadId",
+                "",
+                "-ExpectedProjectToken",
+                "mlv-app",
+            ],
+            resolved["command"],
+        )
+
+        breadcrumb["restore_thread_id"] = "019dcfe4-bd5d-7841-a7c1-2e8969a777c6"
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+        resolved_with_restore = watcher._resolve_command_template(
+            {
+                "agent": "codex",
+                "session_id": "codex-live",
+                "project": "mlv-app",
+                "on_message_command_template": ["wake", "-RestoreThreadId", "{restore_thread_id}"],
+            },
+            bridge.inbox_path("codex"),
+        )
+
+        self.assertTrue(resolved_with_restore["ok"], resolved_with_restore)
+        self.assertEqual(
+            ["wake", "-RestoreThreadId", "019dcfe4-bd5d-7841-a7c1-2e8969a777c6"],
+            resolved_with_restore["command"],
         )
 
     def test_stale_unread_watchdog_can_rearm_seen_id(self) -> None:
@@ -6214,6 +6616,7 @@ for index in range(count):
         self.assertIn("-RequireConstantMessage", targeted_template)
         self.assertIn("-PostTypingVerify", targeted_template)
         self.assertIn("-ProtectForegroundCodexThread", targeted_template)
+        self.assertIn("-RestoreThreadId {restore_thread_id}", targeted_template)
         breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
         self.assertEqual(breadcrumb["schema_version"], 2)
         self.assertEqual(breadcrumb["session_id"], "codex-new")
@@ -6305,7 +6708,9 @@ for index in range(count):
         ]
         command_text = "\n".join(" ".join(command) for command in commands)
         self.assertIn("wake_codex.ps1", command_text)
+        self.assertIn("-Message Watcher says check bridge inbox", command_text)
         self.assertIn("-ThreadId {desktop_thread_id}", command_text)
+        self.assertIn("-RestoreThreadId {restore_thread_id}", command_text)
         self.assertIn("-ExpectedProjectToken {project}", command_text)
         self.assertIn("-StateDir %s" % self.state_dir, command_text)
         self.assertIn("-LockFile %s" % (self.state_dir.parent / "wake_codex.lock"), command_text)
@@ -7426,6 +7831,8 @@ for index in range(count):
             if entry.get("agent") == "codex"
         ]
         self.assertTrue(any("-ThreadId {desktop_thread_id}" in " ".join(command) for command in codex_commands))
+        self.assertTrue(any("-RestoreThreadId {restore_thread_id}" in " ".join(command) for command in codex_commands))
+        self.assertTrue(any("-Message Watcher says check bridge inbox" in " ".join(command) for command in codex_commands))
         self.assertTrue(any("-ExpectedProjectToken {project}" in " ".join(command) for command in codex_commands))
         self.assertTrue(any("-IdleThresholdSeconds 9" in " ".join(command) for command in codex_commands))
         self.assertTrue(any("-MaxWaitSeconds 77" in " ".join(command) for command in codex_commands))

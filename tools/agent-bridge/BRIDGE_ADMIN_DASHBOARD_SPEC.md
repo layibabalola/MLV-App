@@ -1,6 +1,6 @@
 # Bridge Admin Dashboard Spec
 
-**Status:** Partially implemented - backend health/pairing/contract surfaces and guided same-project pairing APIs exist; richer dashboard UI remains follow-up.
+**Status:** Partially implemented - backend health/pairing/contract surfaces, guided same-project pairing APIs, local launcher UX, auto-refresh, and chat-triggered dashboard opening exist; richer dashboard UI remains follow-up.
 **Owner:** Codex implements, Claude reviews
 **Scope:** Local web dashboard for pairings, contracts, policy status,
 backpressure, revocation, and audit visibility
@@ -221,11 +221,43 @@ Approve metadata-only catch-up for that peer.
 The local agent should display the same confirmation summary the dashboard would
 display, then call the same action.
 
+## Launcher UX
+
+The local dashboard has two operator-friendly entrypoints:
+
+- `tools/agent-bridge/dashboard_launcher.py` starts the local HTTP dashboard,
+  prints the authenticated URL in foreground mode, opens the browser by
+  default, and can run as a singleton background supervisor.
+- `tools/agent-bridge/dashboard-launcher/Agent Bridge Dashboard Launcher.bat`
+  is the double-click Windows launcher. It prefers `pyw` / `pythonw` so no
+  long-lived console remains visible, then falls back to minimized console
+  Python only if no windowless launcher is available.
+
+In background mode the launcher writes
+`state/dashboard-launcher.runtime.json` with the local URL, token, process id,
+and health metadata. A second launch first health-checks that runtime file; if
+the dashboard is alive it reuses the existing server and opens that URL instead
+of spawning another one. The supervisor health-checks the local dashboard at a
+bounded cadence and restarts the HTTP server if the server thread dies or
+`/api/overview` stops responding.
+
+The dashboard root page auto-refreshes every 5 seconds by fetching
+`/api/overview?format=markdown` with the session token. Updates replace the
+dashboard `<pre>` via `textContent`, never `innerHTML`, so bridge-supplied text
+is not interpreted as HTML. The page also includes a local Stop button that
+POSTs to `/api/shutdown` with the CSRF token; this exits the background
+supervisor cleanly. Task Manager remains an emergency stop fallback.
+
+Local chat can also call the `open_dashboard` MCP tool. The tool starts or
+reuses the in-process dashboard server, opens the tokenized URL in the default
+browser, and returns only a token-free URL to chat.
+
 ## API Surface
 
 Proposed local dashboard backend endpoints or equivalent MCP/CLI handlers:
 
 - `dashboard_overview`
+- `open_dashboard`
 - `list_pairings`
 - `pairing_details`
 - `start_guided_pairing`

@@ -419,6 +419,95 @@ function New-KeyLParam {
     return [IntPtr]$v
 }
 
+function Invoke-ClipboardOperation {
+    param(
+        [scriptblock]$Operation,
+        [string]$Context = "clipboard",
+        [int]$Attempts = 5,
+        [int]$DelayMilliseconds = 50
+    )
+    $lastException = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            return & $Operation
+        } catch {
+            $lastException = $_.Exception
+            if ($attempt -lt $Attempts) {
+                Start-Sleep -Milliseconds $DelayMilliseconds
+            }
+        }
+    }
+    if ($null -ne $lastException) {
+        throw ($Context + " failed after " + $Attempts + " attempts: " + $lastException.Message)
+    }
+    throw ($Context + " failed after " + $Attempts + " attempts")
+}
+
+function Save-ClipboardState {
+    param([string]$Context = "clipboard")
+    $state = @{
+        Saved = $false
+        HadData = $false
+        Data = $null
+        FormatCount = 0
+    }
+    try {
+        $data = Invoke-ClipboardOperation -Context ($Context + " clipboard save") -Operation {
+            [System.Windows.Forms.Clipboard]::GetDataObject()
+        }
+        $state.Saved = $true
+        if ($null -ne $data) {
+            $formats = @($data.GetFormats())
+            $state.Data = $data
+            $state.FormatCount = $formats.Count
+            $state.HadData = $formats.Count -gt 0
+        }
+    } catch {
+        Write-Host ("[wake_codex] WARNING: " + $Context + " clipboard save failed; restore will be best-effort only: " + $_.Exception.Message)
+    }
+    return $state
+}
+
+function Restore-ClipboardState {
+    param(
+        [hashtable]$State,
+        [string]$Context = "clipboard",
+        [switch]$AuditOnFailure
+    )
+    if ($null -eq $State -or -not [bool]$State.Saved) {
+        return
+    }
+    try {
+        if ([bool]$State.HadData) {
+            Invoke-ClipboardOperation -Context ($Context + " clipboard restore") -Operation {
+                [System.Windows.Forms.Clipboard]::SetDataObject($State.Data, $true)
+            } | Out-Null
+        } else {
+            Invoke-ClipboardOperation -Context ($Context + " clipboard clear") -Operation {
+                [System.Windows.Forms.Clipboard]::Clear()
+            } | Out-Null
+        }
+    } catch {
+        if ($AuditOnFailure -and (Get-Command Write-PreflightAudit -ErrorAction SilentlyContinue)) {
+            Write-PreflightAudit -Action "preflight_clipboard_restore_failed" -Fields @{
+                save_format_count = [int]$State.FormatCount
+                exception_text = $_.Exception.Message
+            }
+        }
+        Write-Host ("[wake_codex] WARNING: " + $Context + " clipboard restore failed. Use Win+V to recover from clipboard history: " + $_.Exception.Message)
+    }
+}
+
+function Set-ClipboardTextForWake {
+    param(
+        [string]$Text,
+        [string]$Context = "wake paste"
+    )
+    Invoke-ClipboardOperation -Context ($Context + " clipboard text set") -Operation {
+        [System.Windows.Forms.Clipboard]::SetText($Text)
+    } | Out-Null
+}
+
 function Send-ClearComposerViaPostMessage {
     param($ComposerElement)
 
@@ -459,6 +548,8 @@ function Send-BridgeMessageViaPostMessage {
     }
     Write-Host ("[wake_codex] PostMessage path: targeting hwnd=" + $nativeHwnd)
 
+    $pmClipboardState = Save-ClipboardState -Context "PostMessage path"
+
     try {
         if (-not (Send-ClearComposerViaPostMessage -ComposerElement $ComposerElement)) {
             return $false
@@ -466,7 +557,7 @@ function Send-BridgeMessageViaPostMessage {
 
         # WM_PASTE: high-level semantic message that Chromium processes regardless of
         # foreground window status; equivalent to Edit > Paste in the app menu.
-        [System.Windows.Forms.Clipboard]::SetText($Value)
+        Set-ClipboardTextForWake -Text $Value -Context "PostMessage path"
         Start-Sleep -Milliseconds 30
         [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_PASTE, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
         Start-Sleep -Milliseconds 100
@@ -482,6 +573,8 @@ function Send-BridgeMessageViaPostMessage {
     } catch {
         Write-Host ("[wake_codex] PostMessage path exception: " + $_.Exception.Message)
         return $false
+    } finally {
+        Restore-ClipboardState -State $pmClipboardState -Context "PostMessage path" -AuditOnFailure
     }
 }
 
@@ -674,6 +767,37 @@ function Test-GenericCodexThreadTitle {
     return $value.Trim().Equals("Codex", [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Write-ThreadTitleUnknown {
+    param(
+        [hashtable]$Snapshot,
+        [string]$Reason
+    )
+    $title = [string]$Snapshot.Title
+    Write-WakeTelemetry -Fields @{
+        action = "thread_title_unknown"
+        desktop_thread_title = $title
+        desktop_thread_title_source = [string]$Snapshot.Source
+        desktop_window_title = [string]$Snapshot.WindowTitle
+        expected_project_token = $ExpectedProjectToken
+        title_project_match = $null
+        title_project_match_state = $Reason
+    }
+    Write-PreflightAudit -Action "targeted_wake_title_unknown" -Fields @{
+        desktop_thread_title = $title
+        expected_project_token = $ExpectedProjectToken
+        reason = $Reason
+        hard_fail = [bool]$RequireTitleMatch
+    }
+    $detail = "project/thread title proof unavailable (" + $Reason + "); title='" + $title + "'"
+    if ($RequireTitleMatch) {
+        Write-Host ("[wake_codex] Targeted wake refused: " + $detail)
+        exit 3
+    }
+    if ($WarnOnTitleMismatch) {
+        Write-Host ("[wake_codex] WARNING: " + $detail + "; continuing because title match is warn-only.")
+    }
+}
+
 function Get-ExpectedThreadTitleFromRuntime {
     if (-not [string]::IsNullOrWhiteSpace($ExpectedThreadTitle)) {
         if (Test-GenericCodexThreadTitle -Title $ExpectedThreadTitle) {
@@ -752,9 +876,9 @@ function Test-ForegroundCodexNavigationSafety {
         return $result
     }
 
-    $result.Ok = $true
+    $result.Ok = $false
     $result.SkipNavigation = $false
-    $result.Reason = "navigate_restore_uuid_unproven"
+    $result.Reason = "foreground_codex_restore_thread_unavailable"
     return $result
 }
 
@@ -778,7 +902,15 @@ function Invoke-ThreadTitleProjectCertification {
         return
     }
     $title = [string]$Snapshot.Title
+    if (Test-GenericCodexThreadTitle -Title $title) {
+        Write-ThreadTitleUnknown -Snapshot $Snapshot -Reason "generic_codex_title"
+        return
+    }
     $matches = Test-TitleContainsProjectToken -Title $title -Token $ExpectedProjectToken
+    if ($null -eq $matches) {
+        Write-ThreadTitleUnknown -Snapshot $Snapshot -Reason "empty_or_unreadable_title"
+        return
+    }
     Write-WakeTelemetry -Fields @{
         action = "thread_title_certified"
         desktop_thread_title = $title
@@ -1325,20 +1457,8 @@ function Send-BridgeMessageKeys {
         [switch]$PreserveDraft
     )
 
-    $savedClipboard = $null
-    $savedFormatCount = 0
-    $clipboardSaved = $false
-    if ($PreserveDraft) {
-        try {
-            $savedClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
-            if ($null -ne $savedClipboard) {
-                $savedFormatCount = @($savedClipboard.GetFormats()).Count
-                $clipboardSaved = $savedFormatCount -gt 0
-            }
-        } catch {
-            Write-Host ("[wake_codex] WARNING: clipboard save failed; draft preservation will be best-effort only: " + $_.Exception.Message)
-        }
-    }
+    $clipboardState = Save-ClipboardState -Context "SendKeys path"
+    $savedFormatCount = [int]$clipboardState.FormatCount
 
     try {
         [System.Windows.Forms.SendKeys]::SendWait("^a")
@@ -1350,31 +1470,21 @@ function Send-BridgeMessageKeys {
         # character-by-character SendKeys. This collapses the interleave race
         # window from ~18 keystrokes to one compound event, and avoids AV
         # heuristics that flag character-sequence injection into foreign windows.
-        [System.Windows.Forms.Clipboard]::SetText($Value)
+        Set-ClipboardTextForWake -Text $Value -Context "SendKeys path"
         [System.Windows.Forms.SendKeys]::SendWait("^v")
         Start-Sleep -Milliseconds 100
         [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
 
         if ($PreserveDraft -and -not [string]::IsNullOrWhiteSpace($DraftText)) {
             Start-Sleep -Milliseconds 250
-            [System.Windows.Forms.Clipboard]::SetText($DraftText)
+            Set-ClipboardTextForWake -Text $DraftText -Context "SendKeys draft restore"
             [System.Windows.Forms.SendKeys]::SendWait("^v")
             $draftAuditFields = @{ save_format_count = $savedFormatCount; restore_succeeded = $true }
             if ($AuditDraftText) { $draftAuditFields["draft_text"] = $DraftText }
             Write-PreflightAudit -Action "preflight_draft_preserved" -Fields $draftAuditFields
         }
     } finally {
-        if ($PreserveDraft -and $clipboardSaved) {
-            try {
-                [System.Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true)
-            } catch {
-                Write-PreflightAudit -Action "preflight_clipboard_restore_failed" -Fields @{
-                    save_format_count = $savedFormatCount
-                    exception_text = $_.Exception.Message
-                }
-                Write-Host "[wake_codex] WARNING: Original clipboard could not be restored. Use Win+V to recover from clipboard history."
-            }
-        }
+        Restore-ClipboardState -State $clipboardState -Context "SendKeys path" -AuditOnFailure
     }
 }
 
@@ -1807,8 +1917,24 @@ try {
     Start-Sleep -Milliseconds 200
     if ($ProtectForegroundCodexThread -and (Test-CodexThreadId -Value $RestoreThreadId) -and $RestoreThreadId -ne $ThreadId) {
         Write-StageEvent "STAGE6_RESTORE_THREAD_START" ("thread=" + $RestoreThreadId)
+        Write-PreflightAudit -Action "targeted_wake_restore_thread_attempted" -Fields @{
+            restore_thread_id = $RestoreThreadId
+            target_thread_id = $ThreadId
+        }
+        Write-WakeTelemetry -Fields @{
+            action = "restore_thread_attempted"
+            restore_thread_id = $RestoreThreadId
+        }
         Open-CodexThread -Value $RestoreThreadId
         Write-StageEvent "STAGE6_RESTORE_THREAD_DONE"
+        Write-PreflightAudit -Action "targeted_wake_restore_thread_deeplink_opened" -Fields @{
+            restore_thread_id = $RestoreThreadId
+            target_thread_id = $ThreadId
+        }
+        Write-WakeTelemetry -Fields @{
+            action = "restore_thread_deeplink_opened"
+            restore_thread_id = $RestoreThreadId
+        }
     }
     [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
     Write-StageEvent "STAGE6_DONE" ("total=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s restored_to=" + $prevFgTitle)

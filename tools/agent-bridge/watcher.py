@@ -80,6 +80,7 @@ MONITOR_RESTART_WATCH_FILES = (
     "tools/agent-bridge/watcher.py",
 )
 WAKE_TELEMETRY_PREFIX = "AGENT_BRIDGE_WAKE_TELEMETRY "
+OPTIONAL_TEMPLATE_FIELDS = {"restore_thread_id"}
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
 ACTIVE_SESSION_ID_SOURCE = "active_session"
 _SESSION_REGISTRY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -1064,6 +1065,11 @@ def _runtime_session_display_label(
     return title or tail
 
 
+def _is_generic_codex_thread_title(value: Any) -> bool:
+    title = str(value or "").strip()
+    return not title or title.lower() == "codex"
+
+
 def _extract_wake_telemetry(stdout: Any) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     for raw_line in str(stdout or "").splitlines():
@@ -1109,6 +1115,7 @@ def _cache_wake_telemetry(
     for event in events:
         title = _truncate_ui_label(event.get("desktop_thread_title"))
         title_project_match = event.get("title_project_match")
+        generic_title = _is_generic_codex_thread_title(title)
         if title_project_match is False:
             if title:
                 peer["last_mismatched_desktop_thread_title"] = title
@@ -1118,6 +1125,18 @@ def _cache_wake_telemetry(
             peer.pop("desktop_thread_title_source", None)
             peer.pop("desktop_thread_title_observed_at", None)
             peer.pop("desktop_window_title", None)
+            changed = True
+        elif generic_title and title:
+            peer.pop("desktop_thread_title", None)
+            peer.pop("desktop_thread_title_source", None)
+            peer.pop("desktop_thread_title_observed_at", None)
+            peer.pop("desktop_window_title", None)
+            peer["last_unresolved_desktop_thread_title"] = title
+            peer["last_unresolved_desktop_thread_title_source"] = _truncate_ui_label(
+                event.get("desktop_thread_title_source"),
+                80,
+            )
+            peer["last_unresolved_desktop_thread_title_observed_at"] = str(event.get("timestamp") or utc_now())
             changed = True
         elif title:
             peer["desktop_thread_title"] = title
@@ -1744,10 +1763,11 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
         "session_id": str(peer.get("session_id") or ""),
         "project": str(peer.get("project") or ""),
         "deeplink_uri": deeplink_uri,
+        "restore_thread_id": str(peer.get("restore_thread_id") or ""),
     }
 
     required_fields = _template_required_fields(template)
-    missing = sorted(name for name in required_fields if not mapping.get(name))
+    missing = sorted(name for name in required_fields if name not in OPTIONAL_TEMPLATE_FIELDS and not mapping.get(name))
     if missing:
         return {
             "ok": False,

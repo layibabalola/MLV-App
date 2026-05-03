@@ -10,6 +10,8 @@
 - Scratch profiling / ephemeral measurements: `.claude-state/profiling/<date>-<topic>/`.
 - Curated, cross-session findings: update existing `.claude/analysis/<topic>.md` rather than scattering new files.
 - Use `.claude/ANALYSIS_LOG.md` only as the append-only historical log for already-tracked major investigations (do not create parallel logs elsewhere).
+- When a workflow or coordination gap is discovered, do not stop at a live correction. Add the smallest durable prevention mechanism that fits the failure mode in the same turn when feasible: a test, hook/check, ledger state, documented rule, or explicit roadmap item.
+- Do not run broad recursive searches over `%USERPROFILE%`, `$env:LOCALAPPDATA\Packages`, or other whole user/app-package trees during agent investigations. These locations can contain unrelated mail attachments, downloads, and app caches; target the known Codex/OpenAI/bridge state paths instead, and exclude `microsoft.windowscommunicationsapps_*` when a package-level search is unavoidable.
 - Separate claims into:
   - `Verified locally`
   - `Cross-checked from prior analysis`
@@ -50,6 +52,8 @@
 - After bootstrap:
   - surface any drained previous-session messages in the chat,
   - if a bridge message body is surfaced to Codex by `check_inbox`, `wait_inbox`, or an equivalent non-destructive read, treat that message as already read by Codex and mark it read in the bridge immediately, even if the follow-up work will happen later,
+  - if a surfaced bridge message is an `ACTION_REQUEST`, do not stop at an inbox summary. In the same turn, either start/continue implementation and record execution progress, record and park/block/displace it in the pending-action ledger with a reason, or explicitly name the user decision that blocks it.
+  - after replying to, acting on, parking, blocking, displacing, rejecting, or otherwise folding a substantive surfaced message into the active task, mark that bridge message handled with the matching disposition,
   - use the returned active session GUID for bridge traffic,
   - if Codex's MCP/bridge tools become available again after an interruption or Desktop restart, send Claude a `STATUS_UPDATE` in that same turn before other outbound bridge traffic; include the active session GUID, pair id if known, bridge state, and any queued/dropped/drained messages from the dark window,
   - if bridge consumption reports `SESSION_UPDATE: superseded`, stop bridge communication in this session.

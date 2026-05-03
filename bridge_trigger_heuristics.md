@@ -6,6 +6,12 @@ This file is Codex-specific bridge policy. It complements `AGENTS.md`.
 This file holds the evolving heuristics, wake-loop behavior, and message-handling discipline for Codex.
 For the operational lifecycle spec, see `tools/agent-bridge/BRIDGE_WATCH_LIFECYCLE.md`.
 
+## Durable Prevention Rule
+
+- When a bridge workflow gap surfaces, pair the immediate correction with a durable prevention mechanism whenever feasible in the same turn.
+- Prefer the smallest durable mechanism that would have caught or constrained the failure: regression test, pre-response/pre-final hook, ledger state, explicit `record_pending_bridge_action` / execution-task disposition, startup instruction, or roadmap item.
+- If a durable mechanism is too risky or too large for the current turn, record the blocked prevention work with owner, reason, and next checkpoint before returning.
+
 ## Bridge Non-Negotiables
 
 - Start every bridge-focused turn with non-destructive inbox hygiene on the active Codex private bucket and the project bucket.

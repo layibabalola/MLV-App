@@ -293,11 +293,13 @@ def configure_watcher(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", str(wake_script),
+            "-Message", "Watcher says check bridge inbox",
             "-IdleThresholdSeconds", str(settings.wake_idle_threshold_seconds),
             "-MaxWaitSeconds", str(settings.wake_max_wait_seconds),
             "-StateDir", str(state_dir),
             "-LockFile", str(state_dir.parent / "wake_codex.lock"),
             "-ThreadId", "{desktop_thread_id}",
+            "-RestoreThreadId", "{restore_thread_id}",
             "-ExpectedProjectToken", "{project}",
         ]
         if settings.wake_provider == "targeted_sendkeys":
