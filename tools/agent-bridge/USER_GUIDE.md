@@ -236,7 +236,7 @@ The default bridge root is `%USERPROFILE%\.agent-bridge`.
 | `disabled` | Toast/log only. Use when you want no focus-stealing and no composer typing. |
 | `app_server` | Background/headless wake. Useful for automation; Codex Desktop does not render the driven turn. |
 | `app_server_then_redraw` | Experimental/dead on current tested Desktop builds; retained for diagnostics. |
-| `sendkeys` | Unsafe legacy/debug-only broad SendKeys mode. Do not use for normal pairing; prefer `targeted_sendkeys`. |
+| `sendkeys` | Legacy/debug-only outer SendKeys helper path. It still uses the target and delivery-priority displacement flags, but it is not the normal pairing mode; prefer `targeted_sendkeys`. |
 
 Default settings are enough for interactive pairing. To opt out of visible
 auto-nudge:
@@ -265,6 +265,11 @@ because it is target-gated:
 This is still a UI nudge, so the user may see focus move to Codex briefly. That
 focus movement is intentional for the interactive UX: the user should see Codex
 receive, read, and respond to the bridge message.
+
+When foreground Codex is on another or unprovable thread and no exact restore id
+is available, the default watcher still prioritizes delivery. It may leave the
+visible Codex window on the bridge thread; the user can manually navigate back,
+and the displacement is recorded as `targeted_wake_delivery_priority_no_restore`.
 
 ## Status And Troubleshooting
 

@@ -67,8 +67,9 @@ These were added for injection safety. Keep them — they prevent wrong-chat inj
 | `-VerifyTargetGapMilliseconds` | `50` | Gap between the two target verifications |
 | `-MaxPreSendRaceMilliseconds` | `500` | Abort if > 500ms between verify and send (race guard) |
 | `-PostTypingVerify` | (switch) | Verify window is still Codex after typing |
-| `-ProtectForegroundCodexThread` | (switch) | If Codex is already foreground, do not navigate away unless the target is already proven visible or an exact restore id is available |
-| `-RestoreThreadId` | `{restore_thread_id}` | Exact previous-thread restore slot. Empty is allowed, but foreground-Codex protection then fails closed instead of displacing the user |
+| `-ProtectForegroundCodexThread` | (switch) | If Codex is already foreground, apply the foreground-Codex navigation guard before deeplinking |
+| `-AllowForegroundCodexThreadDisplacement` | (switch) | Production watcher opts into delivery priority: when the target id is valid but no exact restore id is available, proceed with an audited `foreground_codex_delivery_priority_no_restore` wake instead of leaving inbox work unread |
+| `-RestoreThreadId` | `{restore_thread_id}` | Exact previous-thread restore slot. Empty is allowed; without `-AllowForegroundCodexThreadDisplacement`, foreground-Codex protection fails closed instead of displacing the user |
 
 ---
 
@@ -140,7 +141,8 @@ Canonical template (both `kind: private` and `kind: rendezvous` Codex sessions):
   "-VerifyTargetGapMilliseconds", "50",
   "-MaxPreSendRaceMilliseconds", "500",
   "-PostTypingVerify",
-  "-ProtectForegroundCodexThread"
+  "-ProtectForegroundCodexThread",
+  "-AllowForegroundCodexThreadDisplacement"
 ]
 ```
 

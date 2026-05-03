@@ -56,7 +56,7 @@ read-modify-write race).
 | session_id | yes | UUID; current active session GUID |
 | desktop_app | yes | "claude-desktop" or "codex-desktop"; could expand |
 | desktop_thread_id | conditional | UUID; required when known, omitted when not (Claude Code in terminal has no thread id) |
-| restore_thread_id | optional | UUID for exact previous-thread restore. Empty/missing is allowed; targeted SendKeys must then fail closed if Codex is already foreground on a different or unprovable thread |
+| restore_thread_id | optional | UUID for exact previous-thread restore. Empty/missing is allowed; strict targeted SendKeys then fails closed if Codex is already foreground on a different or unprovable thread, while production delivery-priority wake may proceed only when `-AllowForegroundCodexThreadDisplacement` is explicit |
 | deeplink_template | conditional | required when desktop_thread_id is present; uses `{thread_id}` placeholder |
 | written_by_pid | yes | int; for staleness detection |
 | written_at | yes | ISO8601 UTC; for staleness detection |
@@ -156,7 +156,7 @@ watcher-config.
   "agent": "codex",
   "session_id": "74e288cf-...",
   "kind": "private",
-  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}", "-RestoreThreadId", "{restore_thread_id}"]
+  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}", "-RestoreThreadId", "{restore_thread_id}", "-AllowForegroundCodexThreadDisplacement"]
 }
 ```
 
@@ -166,7 +166,7 @@ watcher-config.
 {
   "agent": "codex",
   "kind": "private",
-  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}", "-RestoreThreadId", "{restore_thread_id}"]
+  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}", "-RestoreThreadId", "{restore_thread_id}", "-AllowForegroundCodexThreadDisplacement"]
 }
 ```
 

@@ -8468,6 +8468,15 @@ class AgentBridge:
             "last_wake_postflight_action": breadcrumb.get("last_wake_postflight_action"),
             "last_wake_postflight_reason": breadcrumb.get("last_wake_postflight_reason"),
             "last_wake_postflight_at": breadcrumb.get("last_wake_postflight_at"),
+            "last_wake_delivery_priority_action": breadcrumb.get("last_wake_delivery_priority_action"),
+            "last_wake_delivery_priority_at": breadcrumb.get("last_wake_delivery_priority_at"),
+            "last_wake_delivery_priority_target_thread_id": breadcrumb.get("last_wake_delivery_priority_target_thread_id"),
+            "last_wake_delivery_priority_previous_thread_title": breadcrumb.get(
+                "last_wake_delivery_priority_previous_thread_title"
+            ),
+            "last_wake_delivery_priority_expected_thread_title": breadcrumb.get(
+                "last_wake_delivery_priority_expected_thread_title"
+            ),
         }
 
     def _session_display_label(self, session_id: Optional[Any], runtime_display: Dict[str, Any]) -> Optional[str]:
@@ -9297,6 +9306,9 @@ class AgentBridge:
             ]
         )
         for row in overview.get("pairings") or []:
+            status = row.get("status")
+            if row.get("last_wake_delivery_priority_action"):
+                status = "%s (delivery-priority wake)" % (status or "unknown")
             lines.append(
                 "| %s | %s | %s | %s | %s | %s %s | %s |"
                 % (
@@ -9307,7 +9319,7 @@ class AgentBridge:
                     self._markdown_cell(row.get("desktop_thread_title") or ""),
                     self._markdown_cell(row.get("peer_agent")),
                     self._markdown_cell(row.get("peer_session_display") or row.get("peer_short_session_id")),
-                    self._markdown_cell(row.get("status")),
+                    self._markdown_cell(status),
                 )
             )
         if not overview.get("pairings"):

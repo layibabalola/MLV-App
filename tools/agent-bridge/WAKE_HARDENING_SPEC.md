@@ -296,16 +296,24 @@ Targeted SendKeys wake treats user UI state as transactional:
   the cached target thread title, wake skips deeplink navigation and types into
   the already-visible target.
 - If the previous foreground app is Codex but the current visible thread is a
-  different or unprovable thread, wake defers instead of navigating, unless a
-  exact `RestoreThreadId` is available and valid.
+  different or unprovable thread, strict wake defers instead of navigating,
+  unless an exact `RestoreThreadId` is available and valid.
+- Production targeted SendKeys wake explicitly opts into delivery priority with
+  `-AllowForegroundCodexThreadDisplacement`: if the target thread id is valid
+  but `RestoreThreadId` is empty, the wake may navigate anyway and records
+  `foreground_codex_delivery_priority_no_restore`. This can leave the user on
+  the bridge thread, but the user can manually navigate back; unread inbox work
+  and backpressure have much weaker recovery.
 
 Title matching is only a practical restoration guard, not a stable identity
 proof. Generic Desktop titles such as `Codex` are recorded as unknown, not as
 project mismatches. DOM/app-server telemetry may later replace title checks with
 exact visible thread-id detection.
 
-Failure mode: emit `targeted_wake_refused` with
+Strict failure mode: emit `targeted_wake_refused` with
 `foreground_codex_restore_thread_unavailable` and exit with retryable code `16`.
+Delivery-priority mode proceeds and emits
+`targeted_wake_delivery_priority_no_restore` for auditability.
 
 ---
 

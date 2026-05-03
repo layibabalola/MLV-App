@@ -14,8 +14,10 @@
 #   - Activates Codex regardless of current foreground (user reading Codex
 #     counts as idle from the OS's POV; the message still needs to be delivered).
 #   - If Codex itself is the foreground app on a different/unprovable thread,
-#     fails closed unless an exact RestoreThreadId is available. This prevents
-#     displacing the user's visible Codex thread without a verified restore slot.
+#     the strict guard fails closed unless an exact RestoreThreadId is available.
+#     The watcher may explicitly opt into delivery priority with
+#     -AllowForegroundCodexThreadDisplacement, accepting that the user may be
+#     left on the bridge thread so unread inbox work is not stranded.
 #   - Clears the composer (Ctrl+A + Delete) before injection - any draft text
 #     the user left in the box will be wiped. This is a deliberate trade-off.
 #
@@ -31,7 +33,8 @@
 #   13 = UIA SetFocus primary path + all Win32 fallbacks failed to acquire foreground
 #   14 = no Codex window after deeplink navigation
 #   15 = total runtime timeout exceeded
-#   16 = deferred (system idle never reached within MaxWaitSeconds; user typing).
+#   16 = deferred (system idle never reached within MaxWaitSeconds, user typing,
+#        or strict foreground-Codex non-displacement guard refused navigation).
 #        Watcher should retry; do NOT trip the wake breaker.
 
 param(
@@ -72,6 +75,7 @@ param(
     [string]$ExpectedThreadTitle = "",
     [string]$RestoreThreadId = "",
     [switch]$ProtectForegroundCodexThread,
+    [switch]$AllowForegroundCodexThreadDisplacement,
     [switch]$AllowLegacyNoPreflight,
     [switch]$SkipPreflight,
     [switch]$DryRun,
@@ -242,6 +246,9 @@ function New-InnerWakeCommand {
     }
     if ($ProtectForegroundCodexThread) {
         $innerCommandParts += "-ProtectForegroundCodexThread"
+    }
+    if ($AllowForegroundCodexThreadDisplacement) {
+        $innerCommandParts += "-AllowForegroundCodexThreadDisplacement"
     }
     if ($RequireConstantMessage) {
         $innerCommandParts += "-RequireConstantMessage"
@@ -876,10 +883,35 @@ function Test-ForegroundCodexNavigationSafety {
         return $result
     }
 
+    if ($AllowForegroundCodexThreadDisplacement) {
+        $result.Ok = $true
+        $result.SkipNavigation = $false
+        $result.Reason = "foreground_codex_delivery_priority_no_restore"
+        return $result
+    }
+
     $result.Ok = $false
     $result.SkipNavigation = $false
     $result.Reason = "foreground_codex_restore_thread_unavailable"
     return $result
+}
+
+function Write-ForegroundCodexDeliveryPriorityAudit {
+    param([hashtable]$NavigationSafety)
+
+    Write-StageEvent "STAGE4_DELIVERY_PRIORITY_DISPLACEMENT" "restore_thread_id=missing"
+    Write-PreflightAudit -Action "targeted_wake_delivery_priority_no_restore" -Fields @{
+        previous_desktop_thread_title = [string]$NavigationSafety.PreviousThreadTitle
+        expected_desktop_thread_title = [string]$NavigationSafety.ExpectedThreadTitle
+        target_thread_id = [string]$ThreadId
+        restore_thread_id_present = $false
+    }
+    Write-WakeTelemetry -Fields @{
+        action = "foreground_codex_delivery_priority_no_restore"
+        previous_desktop_thread_title = [string]$NavigationSafety.PreviousThreadTitle
+        expected_desktop_thread_title = [string]$NavigationSafety.ExpectedThreadTitle
+    }
+    Write-Host "[wake_codex] Delivery priority: foreground Codex may be displaced because no exact RestoreThreadId is available."
 }
 
 function Test-TitleContainsProjectToken {
@@ -1661,6 +1693,9 @@ try {
         Write-StageEvent "STAGE4_DEEPLINK_SKIPPED" ("reason=" + [string]$navigationSafety.Reason)
         Write-Host "[wake_codex] Foreground Codex appears to already be the target thread; skipping deeplink navigation."
     } else {
+        if ([string]$navigationSafety.Reason -eq "foreground_codex_delivery_priority_no_restore") {
+            Write-ForegroundCodexDeliveryPriorityAudit -NavigationSafety $navigationSafety
+        }
         Write-StageEvent "STAGE4_DEEPLINK_START" ("thread=" + $ThreadId)
         Open-CodexThread -Value $ThreadId
         Write-StageEvent "STAGE4_DEEPLINK_DONE"

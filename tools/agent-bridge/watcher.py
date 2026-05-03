@@ -1169,6 +1169,19 @@ def _cache_wake_telemetry(
             peer["last_wake_postflight_reason"] = _truncate_ui_label(event.get("reason"), 120)
             peer["last_wake_postflight_at"] = str(event.get("timestamp") or utc_now())
             changed = True
+        if action == "foreground_codex_delivery_priority_no_restore":
+            peer["last_wake_delivery_priority_action"] = action
+            peer["last_wake_delivery_priority_at"] = str(event.get("timestamp") or utc_now())
+            peer["last_wake_delivery_priority_target_thread_id"] = str(event.get("desktop_thread_id") or "")
+            peer["last_wake_delivery_priority_previous_thread_title"] = _truncate_ui_label(
+                event.get("previous_desktop_thread_title"),
+                120,
+            )
+            peer["last_wake_delivery_priority_expected_thread_title"] = _truncate_ui_label(
+                event.get("expected_desktop_thread_title"),
+                120,
+            )
+            changed = True
 
     if changed:
         write_runtime_breadcrumb(peer_path, peer)
@@ -1183,6 +1196,7 @@ def _cache_wake_telemetry(
                 if peer.get("desktop_thread_title_project_match") is False
                 else peer.get("desktop_thread_title"),
                 "postflight_action": peer.get("last_wake_postflight_action"),
+                "delivery_priority_action": peer.get("last_wake_delivery_priority_action"),
             },
         )
     return events

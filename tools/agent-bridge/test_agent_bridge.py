@@ -969,6 +969,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("function Invoke-TargetPreSendVerification", text)
         self.assertIn("function Test-CodexWindowContainsText", text)
         self.assertIn("function Get-CodexThreadTitleSnapshot", text)
+        self.assertIn("function Write-ForegroundCodexDeliveryPriorityAudit", text)
         self.assertIn("function Test-CodexWakePostflight", text)
         self.assertIn("function Clear-InjectedWakeTextIfPresent", text)
         self.assertIn("function Invoke-ClipboardOperation", text)
@@ -990,7 +991,11 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("AllowLegacyNoPreflight", text)
         self.assertIn("RequireConstantMessage", text)
         self.assertIn("ProtectForegroundCodexThread", text)
+        self.assertIn("AllowForegroundCodexThreadDisplacement", text)
         self.assertIn("foreground_codex_restore_thread_unavailable", text)
+        self.assertIn("foreground_codex_delivery_priority_no_restore", text)
+        self.assertIn("STAGE4_DELIVERY_PRIORITY_DISPLACEMENT", text)
+        self.assertIn("targeted_wake_delivery_priority_no_restore", text)
         self.assertIn("function Test-GenericCodexThreadTitle", text)
         self.assertIn("foreground_codex_target_thread_unavailable", text)
         self.assertIn("targeted_wake_restore_thread_deeplink_invoked_unverified", text)
@@ -1069,7 +1074,7 @@ class AgentBridgeTests(unittest.TestCase):
             expected_title.index("return [string]$runtime.desktop_thread_title"),
         )
         navigation_safety = text.split("function Test-ForegroundCodexNavigationSafety", 1)[1].split(
-            "function Test-TitleContainsProjectToken",
+            "function Write-ForegroundCodexDeliveryPriorityAudit",
             1,
         )[0]
         self.assertIn("-not (Test-GenericCodexThreadTitle -Title $expectedTitle)", navigation_safety)
@@ -1079,7 +1084,19 @@ class AgentBridgeTests(unittest.TestCase):
         )
         self.assertLess(
             navigation_safety.index("Test-CodexThreadId -Value $RestoreThreadId"),
+            navigation_safety.index("AllowForegroundCodexThreadDisplacement"),
+        )
+        self.assertLess(
+            navigation_safety.index("AllowForegroundCodexThreadDisplacement"),
             navigation_safety.index("foreground_codex_restore_thread_unavailable"),
+        )
+        stage4 = text.split("# --- Stage 4: activate Codex", 1)[1].split(
+            "# The deeplink can create or retarget a Codex window.",
+            1,
+        )[0]
+        self.assertLess(
+            stage4.index("Write-ForegroundCodexDeliveryPriorityAudit -NavigationSafety $navigationSafety"),
+            stage4.index("Open-CodexThread -Value $ThreadId"),
         )
 
     def test_wake_codex_inner_command_preserves_targeted_sendkeys_flags(self) -> None:
@@ -1105,6 +1122,7 @@ class AgentBridgeTests(unittest.TestCase):
                 "500",
                 "-PostTypingVerify",
                 "-ProtectForegroundCodexThread",
+                "-AllowForegroundCodexThreadDisplacement",
                 "-ExpectedThreadTitle",
                 "Agent Bridge",
                 "-RestoreThreadId",
@@ -1127,6 +1145,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("-MaxPreSendRaceMilliseconds 500", result.stdout)
         self.assertIn("-PostTypingVerify", result.stdout)
         self.assertIn("-ProtectForegroundCodexThread", result.stdout)
+        self.assertIn("-AllowForegroundCodexThreadDisplacement", result.stdout)
         self.assertIn("-ExpectedThreadTitle 'Agent Bridge'", result.stdout)
         self.assertIn("-RestoreThreadId '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'", result.stdout)
 
@@ -1143,6 +1162,7 @@ class AgentBridgeTests(unittest.TestCase):
         harness = """
 $ProcessName = '__codex_test_process__'
 $ProtectForegroundCodexThread = $true
+$AllowForegroundCodexThreadDisplacement = $false
 $ThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'
 $RestoreThreadId = ''
 function Get-ProcessNameForHwnd { param([IntPtr]$Hwnd) return '__codex_test_process__' }
@@ -1168,6 +1188,102 @@ $result | ConvertTo-Json -Compress
         self.assertFalse(payload["SkipNavigation"])
         self.assertEqual("foreground_codex_restore_thread_unavailable", payload["Reason"])
 
+    def test_wake_codex_delivery_priority_allows_unproven_foreground_codex_without_restore_id(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        text = script.read_text(encoding="utf-8")
+        function_text = (
+            "function Test-ForegroundCodexNavigationSafety"
+            + text.split("function Test-ForegroundCodexNavigationSafety", 1)[1].split(
+                "function Test-TitleContainsProjectToken",
+                1,
+            )[0]
+        )
+        harness = """
+$ProcessName = '__codex_test_process__'
+$ProtectForegroundCodexThread = $true
+$AllowForegroundCodexThreadDisplacement = $true
+$ThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'
+$RestoreThreadId = ''
+function Get-ProcessNameForHwnd { param([IntPtr]$Hwnd) return '__codex_test_process__' }
+function Get-CodexThreadTitleSnapshot { param([IntPtr]$RootHwnd, [string]$WindowTitle) return @{ Title = 'Codex'; Source = 'uia-root'; WindowTitle = $WindowTitle } }
+function Get-ExpectedThreadTitleFromRuntime { return 'MLV App primary' }
+function Test-GenericCodexThreadTitle { param([string]$Title) return $Title -eq 'Codex' }
+function Test-ThreadTitleEquals { param([string]$Actual, [string]$Expected) return $Actual -eq $Expected }
+function Test-CodexThreadId { param([string]$Value) return $Value -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+%s
+$result = Test-ForegroundCodexNavigationSafety -ForegroundHwnd ([IntPtr]1234) -ForegroundTitle 'Codex'
+$result | ConvertTo-Json -Compress
+""" % function_text
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", harness],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["Ok"])
+        self.assertFalse(payload["SkipNavigation"])
+        self.assertEqual("foreground_codex_delivery_priority_no_restore", payload["Reason"])
+
+    def test_wake_codex_delivery_priority_path_audits_before_navigation(self) -> None:
+        script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        text = script.read_text(encoding="utf-8")
+        function_text = (
+            "function Write-ForegroundCodexDeliveryPriorityAudit"
+            + text.split("function Write-ForegroundCodexDeliveryPriorityAudit", 1)[1].split(
+                "function Test-TitleContainsProjectToken",
+                1,
+            )[0]
+        )
+        harness = """
+$ThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'
+$events = New-Object System.Collections.ArrayList
+function Write-StageEvent {
+    param([string]$Stage, [string]$Detail = "")
+    [void]$events.Add(@{ kind = 'stage'; stage = $Stage; detail = $Detail })
+}
+function Write-PreflightAudit {
+    param([string]$Action, [hashtable]$Fields = @{})
+    [void]$events.Add(@{ kind = 'audit'; action = $Action; fields = $Fields })
+}
+function Write-WakeTelemetry {
+    param([hashtable]$Fields = @{})
+    [void]$events.Add(@{ kind = 'telemetry'; fields = $Fields })
+}
+function Write-Host {
+    param([Parameter(ValueFromRemainingArguments=$true)]$Object)
+    [void]$events.Add(@{ kind = 'host'; message = ($Object -join ' ') })
+}
+%s
+$navigationSafety = @{
+    PreviousThreadTitle = 'Codex'
+    ExpectedThreadTitle = 'MLV App primary'
+}
+Write-ForegroundCodexDeliveryPriorityAudit -NavigationSafety $navigationSafety
+$events | ConvertTo-Json -Compress -Depth 8
+""" % function_text
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", harness],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = json.loads(result.stdout)
+        stage = next(event for event in events if event["kind"] == "stage")
+        audit = next(event for event in events if event["kind"] == "audit")
+        telemetry = next(event for event in events if event["kind"] == "telemetry")
+        self.assertEqual("STAGE4_DELIVERY_PRIORITY_DISPLACEMENT", stage["stage"])
+        self.assertEqual("restore_thread_id=missing", stage["detail"])
+        self.assertEqual("targeted_wake_delivery_priority_no_restore", audit["action"])
+        self.assertEqual("019dcfe4-bd5d-7841-a7c1-2e8969a777c6", audit["fields"]["target_thread_id"])
+        self.assertFalse(audit["fields"]["restore_thread_id_present"])
+        self.assertEqual("Codex", audit["fields"]["previous_desktop_thread_title"])
+        self.assertEqual("foreground_codex_delivery_priority_no_restore", telemetry["fields"]["action"])
+
     def test_wake_codex_unproven_foreground_codex_allows_exact_restore_id(self) -> None:
         script = Path(__file__).resolve().parent / "wake_codex.ps1"
         text = script.read_text(encoding="utf-8")
@@ -1181,6 +1297,7 @@ $result | ConvertTo-Json -Compress
         harness = """
 $ProcessName = '__codex_test_process__'
 $ProtectForegroundCodexThread = $true
+$AllowForegroundCodexThreadDisplacement = $false
 $ThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c6'
 $RestoreThreadId = '019dcfe4-bd5d-7841-a7c1-2e8969a777c7'
 function Get-ProcessNameForHwnd { param([IntPtr]$Hwnd) return '__codex_test_process__' }
@@ -1219,6 +1336,7 @@ $result | ConvertTo-Json -Compress
         harness = """
 $ProcessName = '__codex_test_process__'
 $ProtectForegroundCodexThread = $true
+$AllowForegroundCodexThreadDisplacement = $true
 $ThreadId = ''
 $RestoreThreadId = ''
 function Get-ProcessNameForHwnd { param([IntPtr]$Hwnd) return '__codex_test_process__' }
@@ -3645,6 +3763,58 @@ for index in range(count):
         self.assertIsNone(updated["desktop_thread_title_project_match"])
         self.assertEqual("Codex", updated["last_unresolved_desktop_thread_title"])
         self.assertNotIn("last_mismatched_desktop_thread_title", updated)
+
+    def test_delivery_priority_wake_telemetry_is_cached_for_operator_state(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        breadcrumb = build_peer_runtime_breadcrumb(
+            state_dir=self.state_dir,
+            agent="codex",
+            session_id="codex-live",
+            project="mlv-app",
+            desktop_thread_id="019dcfe4-bd5d-7841-a7c1-2e8969a777c6",
+        )
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+
+        telemetry = {
+            "timestamp": "2026-05-02T10:20:00+00:00",
+            "action": "foreground_codex_delivery_priority_no_restore",
+            "desktop_thread_id": "019dcfe4-bd5d-7841-a7c1-2e8969a777c6",
+            "previous_desktop_thread_title": "Codex",
+            "expected_desktop_thread_title": "MLV App primary",
+        }
+        watcher._cache_wake_telemetry(
+            inbox_path=bridge.inbox_path("codex"),
+            agent="codex",
+            session_id="codex-live",
+            message_id="msg-delivery-priority",
+            command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+        )
+
+        updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertEqual(
+            "foreground_codex_delivery_priority_no_restore",
+            updated["last_wake_delivery_priority_action"],
+        )
+        self.assertEqual("2026-05-02T10:20:00+00:00", updated["last_wake_delivery_priority_at"])
+        self.assertEqual("Codex", updated["last_wake_delivery_priority_previous_thread_title"])
+        self.assertEqual("MLV App primary", updated["last_wake_delivery_priority_expected_thread_title"])
+
+        pairings = bridge.list_pairings("codex", project="mlv-app")
+        codex_row = next(row for row in pairings.data["pairings"] if row["agent"] == "codex")
+        self.assertEqual(
+            "foreground_codex_delivery_priority_no_restore",
+            codex_row["last_wake_delivery_priority_action"],
+        )
+        dashboard = bridge.dashboard_overview("codex", project="mlv-app", format="markdown")
+        self.assertIn("delivery-priority wake", dashboard.data["markdown"])
+        audits = read_jsonl(bridge.audit_path)
+        telemetry_audit = next(row for row in reversed(audits) if row.get("action") == "wake_telemetry_cached")
+        self.assertEqual(
+            "foreground_codex_delivery_priority_no_restore",
+            telemetry_audit.get("delivery_priority_action"),
+        )
 
     def test_generic_false_title_telemetry_is_defensively_unknown(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -6695,6 +6865,7 @@ for index in range(count):
         self.assertIn("-RequireConstantMessage", targeted_template)
         self.assertIn("-PostTypingVerify", targeted_template)
         self.assertIn("-ProtectForegroundCodexThread", targeted_template)
+        self.assertIn("-AllowForegroundCodexThreadDisplacement", targeted_template)
         self.assertIn("-RestoreThreadId {restore_thread_id}", targeted_template)
         breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
         self.assertEqual(breadcrumb["schema_version"], 2)
@@ -6764,7 +6935,7 @@ for index in range(count):
         self.assertIn("--timeout-seconds 77", command_text)
         self.assertNotIn("wake_codex.ps1", command_text)
 
-    def test_configure_watcher_targeted_sendkeys_provider_writes_strict_helper_template(self) -> None:
+    def test_configure_watcher_targeted_sendkeys_provider_writes_delivery_priority_helper_template(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("codex", "codex-live", project="mlv-app")
         settings_path_for_state_dir(self.state_dir).write_text(
@@ -6803,6 +6974,7 @@ for index in range(count):
         self.assertIn("-PostTypingVerify", command_text)
         self.assertIn("-WarnOnTitleMismatch", command_text)
         self.assertIn("-ProtectForegroundCodexThread", command_text)
+        self.assertIn("-AllowForegroundCodexThreadDisplacement", command_text)
         self.assertNotIn("codex_app_server_wake.py", command_text)
 
     def test_configure_watcher_claude_remains_monitor_owned_fail_closed(self) -> None:
@@ -7911,6 +8083,10 @@ for index in range(count):
         ]
         self.assertTrue(any("-ThreadId {desktop_thread_id}" in " ".join(command) for command in codex_commands))
         self.assertTrue(any("-RestoreThreadId {restore_thread_id}" in " ".join(command) for command in codex_commands))
+        self.assertTrue(
+            any("-AllowForegroundCodexThreadDisplacement" in " ".join(command) for command in codex_commands)
+        )
+        self.assertTrue(any("-ProtectForegroundCodexThread" in " ".join(command) for command in codex_commands))
         self.assertTrue(any("-Message Watcher says check bridge inbox" in " ".join(command) for command in codex_commands))
         self.assertTrue(any("-ExpectedProjectToken {project}" in " ".join(command) for command in codex_commands))
         self.assertTrue(any("-IdleThresholdSeconds 9" in " ".join(command) for command in codex_commands))

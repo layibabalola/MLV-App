@@ -302,22 +302,28 @@ def configure_watcher(
             "-RestoreThreadId", "{restore_thread_id}",
             "-ExpectedProjectToken", "{project}",
         ]
+        hardening_flags = [
+            "-RequireThreadId",
+            "-RequireConstantMessage",
+            "-VerifyTargetTwice",
+            "-VerifyTargetGapMilliseconds", "50",
+            "-MaxPreSendRaceMilliseconds", "500",
+            "-PostTypingVerify",
+            "-WarnOnTitleMismatch",
+            "-ProtectForegroundCodexThread",
+            "-AllowForegroundCodexThreadDisplacement",
+        ]
         if settings.wake_provider == "targeted_sendkeys":
             wake_command_template.extend(
                 [
                     # Run inner wake directly — avoids spawning a hidden child process
                     # which has no Win32 input queue and blocks AttachThreadInput.
                     "-RunInnerWake",
-                    "-RequireThreadId",
-                    "-RequireConstantMessage",
-                    "-VerifyTargetTwice",
-                    "-VerifyTargetGapMilliseconds", "50",
-                    "-MaxPreSendRaceMilliseconds", "500",
-                    "-PostTypingVerify",
-                    "-WarnOnTitleMismatch",
-                    "-ProtectForegroundCodexThread",
+                    *hardening_flags,
                 ]
             )
+        else:
+            wake_command_template.extend(hardening_flags)
     elif agent == "codex" and settings.wake_provider in {"app_server", "app_server_then_redraw"}:
         wake_script = Path(__file__).with_name("codex_app_server_wake.py")
         wake_command_template = [
