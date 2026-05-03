@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.storage import read_jsonl
-from server_wrapper import SupervisorConfig, _is_no_restart_file, run_supervisor
+from server_wrapper import SupervisorConfig, _is_restart_trigger_file, run_supervisor
 
 
 SERVER_SCRIPT = """\
@@ -147,7 +147,9 @@ class SupervisorHarness:
                 if not path.exists():
                     path.write_text("# watch\n", encoding="utf-8")
         else:
-            self.watch_files = [self.root / ("watch_%s.py" % index) for index in range(watch_count)]
+            core_dir = self.root / "core"
+            core_dir.mkdir(exist_ok=True)
+            self.watch_files = [core_dir / ("watch_%s.py" % index) for index in range(watch_count)]
             for index, path in enumerate(self.watch_files):
                 path.write_text("# %s\\n" % index, encoding="utf-8")
 
@@ -438,15 +440,16 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertEqual(harness.wait_for_exit(), 0)
 
 
-    def test_no_restart_file_predicate(self) -> None:
-        self.assertTrue(_is_no_restart_file(Path("dashboard_server.py")))
-        self.assertTrue(_is_no_restart_file(Path("watcher.py")))
-        self.assertTrue(_is_no_restart_file(Path("server_wrapper.py")))
-        self.assertTrue(_is_no_restart_file(Path("test_foo.py")))
-        self.assertTrue(_is_no_restart_file(Path("foo_test.py")))
-        self.assertFalse(_is_no_restart_file(Path("server.py")))
-        self.assertFalse(_is_no_restart_file(Path("agent_bridge.py")))
-        self.assertFalse(_is_no_restart_file(Path("core/storage.py")))
+    def test_restart_trigger_file_predicate(self) -> None:
+        self.assertTrue(_is_restart_trigger_file(Path("server.py")))
+        self.assertTrue(_is_restart_trigger_file(Path("agent_bridge.py")))
+        self.assertTrue(_is_restart_trigger_file(Path("core/storage.py")))
+        self.assertTrue(_is_restart_trigger_file(Path("core/routing.py")))
+        self.assertFalse(_is_restart_trigger_file(Path("dashboard_server.py")))
+        self.assertFalse(_is_restart_trigger_file(Path("watcher.py")))
+        self.assertFalse(_is_restart_trigger_file(Path("server_wrapper.py")))
+        self.assertFalse(_is_restart_trigger_file(Path("test_foo.py")))
+        self.assertFalse(_is_restart_trigger_file(Path("foo_test.py")))
 
     def test_no_restart_file_change_does_not_trigger_restart(self) -> None:
         case_dir = self.tempdir / "no-restart-case"

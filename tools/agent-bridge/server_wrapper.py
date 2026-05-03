@@ -93,34 +93,23 @@ def _read_available(stream: object, size: int) -> bytes:
     return stream.read(size)
 
 
-_NO_RESTART_FILENAMES: frozenset = frozenset({
-    # HTML template imported by server.py — changes never affect tool schema or signatures.
-    "dashboard_server.py",
-    # Standalone daemons and utilities not imported by server.py.
-    "watcher.py",
-    "bootstrap_session.py",
-    "bridge_monitor_poll.py",
-    "probe_server.py",
-    "configure_watcher.py",
-    "compact.py",
-    "consume_inbox.py",
-    "dashboard_launcher.py",
-    "codex_app_server_wake.py",
-    "project_identity.py",
-    "recover_bridge_session.py",
-    "recover_state.py",
-    "migrate_root.py",
-    "routing_policy.py",
-    "routing_rules.py",
-    # The wrapper process cannot hot-reload itself.
-    "server_wrapper.py",
+_RESTART_TRIGGER_FILENAMES: frozenset = frozenset({
+    # Tool definitions and the business logic they call into.
+    "server.py",
+    "agent_bridge.py",
+    # core/ modules are imported transitively by agent_bridge.py.
+    # Any .py file under the core/ subdirectory also qualifies (see _is_restart_trigger_file).
 })
 
 
-def _is_no_restart_file(path: Path) -> bool:
-    """Return True if changes to this file should never trigger an MCP server restart."""
-    name = path.name
-    return name in _NO_RESTART_FILENAMES or name.startswith("test_") or name.endswith("_test.py")
+def _is_restart_trigger_file(path: Path) -> bool:
+    """Return True if changes to this file should trigger an MCP server restart.
+
+    Everything else — dashboard HTML, standalone daemons, test files, utility
+    scripts — is ignored by default.  New files only enter the restart set when
+    they are explicitly added here or placed under core/.
+    """
+    return path.name in _RESTART_TRIGGER_FILENAMES or "core" in path.parts
 
 
 def _watch_bridge_code_files(base_dir: Path) -> List[Path]:
@@ -408,8 +397,8 @@ class ServerSupervisor:
                 previous = current
                 if not changed:
                     continue
-                restart_changed = [p for p in changed if not _is_no_restart_file(p)]
-                skipped_changed = [p for p in changed if _is_no_restart_file(p)]
+                restart_changed = [p for p in changed if _is_restart_trigger_file(p)]
+                skipped_changed = [p for p in changed if not _is_restart_trigger_file(p)]
                 if skipped_changed and not restart_changed:
                     self._append_audit_event(
                         action="mcp_server_restart_skipped_no_restart_files",
