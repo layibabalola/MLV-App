@@ -5627,7 +5627,21 @@ class AgentBridge:
                 recent.append(item)
         return len(recent) >= WAKE_PREFIRE_LIMIT
 
-    def _request_backpressure_nudge(self, *, agent: str, session: str, reason: str) -> Dict[str, Any]:
+    def _set_next_override_wake_message(self, message: str) -> None:
+        """Write an initiator label into watcher state for the next wake fire.
+
+        The watcher consumes this one-shot field immediately after using it so
+        subsequent fires (retries, unrelated messages) revert to the default
+        "Watcher says check bridge inbox" template value.
+        """
+        watcher_state = read_json(
+            self.watcher_state_path,
+            {"seen_ids": [], "pending_wake_verifications": []},
+        )
+        watcher_state["next_override_wake_message"] = message
+        write_json(self.watcher_state_path, watcher_state)
+
+    def _request_backpressure_nudge(self, *, agent: str, session: str, reason: str, nudge_wake_message: Optional[str] = None) -> Dict[str, Any]:
         state = self._load_state()
         registry = self._load_session_registry()
         backpressure_self_healed = self._self_heal_stale_backpressure_pending(
@@ -5664,6 +5678,8 @@ class AgentBridge:
                 changed = message_id in seen_ids
                 if changed:
                     watcher_state["seen_ids"] = [item for item in seen_ids if item != message_id]
+                    if nudge_wake_message:
+                        watcher_state["next_override_wake_message"] = nudge_wake_message
                     write_json(self.watcher_state_path, watcher_state)
                 status = "backpressure_rejected_nudge_attempted"
                 result = {
@@ -6057,6 +6073,7 @@ class AgentBridge:
             payload["updated_at"] = utc_now()
             if changed:
                 write_json(self.wake_breaker_path, payload)
+                self._set_next_override_wake_message("User says check bridge inbox")
             self._audit(
                 {
                     "id": str(uuid.uuid4()),
@@ -6082,6 +6099,12 @@ class AgentBridge:
                 session = normalize_session(session_id)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
+            # Derive the initiator label from the target: whoever is nudging
+            # Codex must be Claude, and vice versa.
+            override_msg = (
+                "Claude says check bridge inbox" if target == "codex"
+                else "Codex says check bridge inbox"
+            )
             if self._wake_breaker_open_for_session(session):
                 grant = self._grant_wake_breaker_bypass(
                     session,
@@ -6089,6 +6112,8 @@ class AgentBridge:
                     granted_by=target,
                     force=False,
                 )
+                # Bypass path: watcher fires next on its own; plant the override now.
+                self._set_next_override_wake_message(override_msg)
                 return BridgeResult(
                     True,
                     grant["status"],
@@ -6099,6 +6124,7 @@ class AgentBridge:
                 agent=target,
                 session=session,
                 reason="nudge_peer",
+                nudge_wake_message=override_msg,
             )
             return BridgeResult(
                 True,
@@ -10325,6 +10351,9 @@ class AgentBridge:
                 )
                 for session_id in open_sessions
             ]
+            if open_sessions:
+                # User explicitly asked to resume — label the next wake accordingly.
+                self._set_next_override_wake_message("User says check bridge inbox")
             self._audit(
                 {
                     "id": str(uuid.uuid4()),

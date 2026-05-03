@@ -1328,6 +1328,15 @@ def _save_watcher_state(
     seen_ids.update(str(item) for item in saved.get("seen_ids", []) if str(item))
 
 
+def _clear_override_wake_message(state_path: Path) -> None:
+    """Remove next_override_wake_message from watcher state after it has been consumed."""
+    def _clear(existing: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(existing)
+        result.pop("next_override_wake_message", None)
+        return result
+    storage_update_json(state_path, {}, _clear)
+
+
 def _bridge_is_paused(state_dir: Path) -> bool:
     state_path = state_dir / "state.json"
     if not state_path.exists():
@@ -1652,6 +1661,23 @@ def _format_template(template: Union[str, Sequence[str]], mapping: Dict[str, str
     return [str(value).format_map(mapping) for value in template]
 
 
+def _apply_message_override(cmd: List[str], override_message: str) -> List[str]:
+    """Replace the value following -Message in a command argv list.
+
+    Walks the list looking for the literal token ``-Message`` and replaces the
+    immediately following element with *override_message*.  Returns a copy; the
+    original list is unchanged.  If ``-Message`` is absent the list is returned
+    as-is so callers never receive an error for a template that doesn't carry the
+    flag.
+    """
+    result = list(cmd)
+    for i, arg in enumerate(result):
+        if arg == "-Message" and i + 1 < len(result):
+            result[i + 1] = override_message
+            return result
+    return result
+
+
 def _legacy_command_to_argv(command: str) -> Dict[str, Any]:
     raw = str(command or "").strip()
     if not raw:
@@ -1708,7 +1734,11 @@ def _legacy_command_to_argv(command: str) -> Dict[str, Any]:
     return {"ok": True, "command": argv}
 
 
-def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) -> Dict[str, Any]:
+def _resolve_command_template(
+    session_config: Dict[str, Any],
+    inbox_path: Path,
+    override_wake_message: Optional[str] = None,
+) -> Dict[str, Any]:
     template = session_config.get("on_message_command_template")
     if not template:
         command = session_config.get("on_message_command")
@@ -1805,7 +1835,10 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
             },
         }
 
-    return {"ok": True, "command": _format_template(template, mapping), "peer": peer}
+    cmd = _format_template(template, mapping)
+    if override_wake_message and isinstance(cmd, list):
+        cmd = _apply_message_override(cmd, override_wake_message)
+    return {"ok": True, "command": cmd, "peer": peer}
 
 
 def _warn_unknown_origin_once(
@@ -1965,6 +1998,13 @@ def _process_pending_wake_verifications(
     unknown_origin_warnings = unknown_origin_warnings or []
     wake_fire_history = wake_fire_history or []
 
+    # Read any pending initiator override so the wake message shows who triggered
+    # this nudge ("Claude says…", "User says…", etc.) rather than always "Watcher says…".
+    # The override is one-shot: cleared from state after the first successful fire.
+    _ow_state = load_seen(state_path)
+    _next_override_wake_message: Optional[str] = _ow_state.get("next_override_wake_message") or None
+    _override_consumed = False
+
     for entry in pending:
         if entry.get("agent") != agent or entry.get("session_id") != session_id:
             kept.append(entry)
@@ -2068,7 +2108,8 @@ def _process_pending_wake_verifications(
             )
             continue
 
-        resolved = _resolve_command_template(session_config, inbox_path)
+        _this_override = _next_override_wake_message if not _override_consumed else None
+        resolved = _resolve_command_template(session_config, inbox_path, override_wake_message=_this_override)
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
@@ -2120,6 +2161,8 @@ def _process_pending_wake_verifications(
             continue
         if command_result.get("ok"):
             _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
+            if _this_override:
+                _override_consumed = True
             # Wake spawn is not delivery; keep the row pending until
             # check_inbox/writeback stamps seen_at/read_at or retries exhaust.
             retry_count += 1
@@ -2155,6 +2198,8 @@ def _process_pending_wake_verifications(
 
     if changed:
         _save_watcher_state(state_path, seen_ids, kept, paused_messages, unknown_origin_warnings, wake_fire_history)
+    if _override_consumed:
+        _clear_override_wake_message(state_path)
     return kept
 
 

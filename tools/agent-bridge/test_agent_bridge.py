@@ -4034,6 +4034,63 @@ for index in range(count):
             resolved_with_restore["command"],
         )
 
+    def test_watcher_template_applies_wake_message_override(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        breadcrumb = build_peer_runtime_breadcrumb(
+            state_dir=self.state_dir,
+            agent="codex",
+            session_id="codex-live",
+            project="mlv-app",
+            desktop_thread_id="019dcfe4-bd5d-7841-a7c1-2e8969a777c5",
+            bootstrap_origin="parent",
+        )
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+        resolved = watcher._resolve_command_template(
+            {
+                "agent": "codex",
+                "session_id": "codex-live",
+                "project": "mlv-app",
+                "on_message_command_template": [
+                    "wake",
+                    "-Message",
+                    "Watcher says check bridge inbox",
+                    "-ExpectedProjectToken",
+                    "{project}",
+                ],
+            },
+            bridge.inbox_path("codex"),
+            override_wake_message="Claude says check bridge inbox",
+        )
+
+        self.assertTrue(resolved["ok"], resolved)
+        self.assertEqual(
+            [
+                "wake",
+                "-Message",
+                "Claude says check bridge inbox",
+                "-ExpectedProjectToken",
+                "mlv-app",
+            ],
+            resolved["command"],
+        )
+
+    def test_watcher_clear_override_wake_message_preserves_other_state(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        write_json(
+            bridge.watcher_state_path,
+            {
+                "seen_ids": ["msg-1"],
+                "next_override_wake_message": "Claude says check bridge inbox",
+                "pending_wake_verifications": [],
+            },
+        )
+
+        watcher._clear_override_wake_message(bridge.watcher_state_path)
+
+        state = read_json(bridge.watcher_state_path, {})
+        self.assertNotIn("next_override_wake_message", state)
+        self.assertEqual(["msg-1"], state["seen_ids"])
+
     def test_stale_unread_watchdog_can_rearm_seen_id(self) -> None:
         bridge = AgentBridge(self.state_dir)
         stale_created = (datetime.now(timezone.utc) - timedelta(seconds=400)).isoformat(timespec="seconds")
@@ -5089,6 +5146,8 @@ for index in range(count):
         resumed = bridge.resume_wake_for_session("codex-live")
         self.assertTrue(resumed.ok)
         self.assertEqual(resumed.status, "cleared")
+        watcher_state = read_json(bridge.watcher_state_path, {})
+        self.assertEqual("User says check bridge inbox", watcher_state["next_override_wake_message"])
 
         after = bridge.bridge_process_status()
         self.assertEqual(after.data["wake_breakers"]["open_session_count"], 0)
@@ -5142,6 +5201,8 @@ for index in range(count):
         grant = bridge.nudge_peer("codex", "codex-live")
         self.assertTrue(grant.ok)
         self.assertEqual(grant.status, "granted")
+        watcher_state = read_json(bridge.watcher_state_path, {})
+        self.assertEqual("Claude says check bridge inbox", watcher_state["next_override_wake_message"])
 
         with patch("watcher.run_command_for_session", return_value={"ok": True, "returncode": 0, "retryable": False}):
             watcher.process_session_once(
