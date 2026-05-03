@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.storage import read_jsonl
-from server_wrapper import SupervisorConfig, run_supervisor
+from server_wrapper import SupervisorConfig, _is_no_restart_file, run_supervisor
 
 
 SERVER_SCRIPT = """\
@@ -130,7 +130,7 @@ class BufferOutputStream:
 
 
 class SupervisorHarness:
-    def __init__(self, tempdir: Path, *, mode: str = "echo", watch_count: int = 1, tool_signature: Optional[str] = None) -> None:
+    def __init__(self, tempdir: Path, *, mode: str = "echo", watch_count: int = 1, tool_signature: Optional[str] = None, watch_paths: Optional[List[Path]] = None) -> None:
         self.root = tempdir
         self.state_dir = self.root / "bridge-root" / "state"
         self.state_dir.mkdir(parents=True)
@@ -141,9 +141,15 @@ class SupervisorHarness:
         if tool_signature is not None:
             self.tool_signature_file = self.root / "tool-signature.txt"
             self.tool_signature_file.write_text(tool_signature, encoding="utf-8")
-        self.watch_files = [self.root / ("watch_%s.py" % index) for index in range(watch_count)]
-        for index, path in enumerate(self.watch_files):
-            path.write_text("# %s\\n" % index, encoding="utf-8")
+        if watch_paths is not None:
+            self.watch_files = list(watch_paths)
+            for path in self.watch_files:
+                if not path.exists():
+                    path.write_text("# watch\n", encoding="utf-8")
+        else:
+            self.watch_files = [self.root / ("watch_%s.py" % index) for index in range(watch_count)]
+            for index, path in enumerate(self.watch_files):
+                path.write_text("# %s\\n" % index, encoding="utf-8")
 
         self.stdin_stream = QueueInputStream()
         self.stdout_stream = BufferOutputStream()
@@ -427,6 +433,72 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertTrue(status["refresh_required"])
         self.assertEqual(status["previous_signature"], "sig-a")
         self.assertEqual(status["current_signature"], "sig-b")
+
+        harness.stdin_stream.close()
+        self.assertEqual(harness.wait_for_exit(), 0)
+
+
+    def test_no_restart_file_predicate(self) -> None:
+        self.assertTrue(_is_no_restart_file(Path("dashboard_server.py")))
+        self.assertTrue(_is_no_restart_file(Path("watcher.py")))
+        self.assertTrue(_is_no_restart_file(Path("server_wrapper.py")))
+        self.assertTrue(_is_no_restart_file(Path("test_foo.py")))
+        self.assertTrue(_is_no_restart_file(Path("foo_test.py")))
+        self.assertFalse(_is_no_restart_file(Path("server.py")))
+        self.assertFalse(_is_no_restart_file(Path("agent_bridge.py")))
+        self.assertFalse(_is_no_restart_file(Path("core/storage.py")))
+
+    def test_no_restart_file_change_does_not_trigger_restart(self) -> None:
+        case_dir = self.tempdir / "no-restart-case"
+        case_dir.mkdir()
+        real_file = case_dir / "server.py"
+        real_file.write_text("# server\n", encoding="utf-8")
+        no_restart_file = case_dir / "dashboard_server.py"
+        no_restart_file.write_text("# dashboard\n", encoding="utf-8")
+
+        harness = SupervisorHarness(
+            self.tempdir / ("case-%s" % len(self._harnesses)),
+            watch_paths=[real_file, no_restart_file],
+        )
+        self._harnesses.append(harness)
+        harness.wait_for_launch_count(1)
+        harness.stdout_stream.wait_for(b"READY ")
+
+        no_restart_file.write_text("# touched\n", encoding="utf-8")
+        time.sleep(0.25)
+        self.assertEqual(len(harness.launch_pids()), 1, "no-restart file change must not trigger restart")
+        skipped = harness.wait_for_audit_events("mcp_server_restart_skipped_no_restart_files")
+        self.assertEqual(len(skipped), 1)
+        self.assertIn(str(no_restart_file), skipped[0]["skipped_files"])
+
+        real_file.write_text("# updated\n", encoding="utf-8")
+        harness.wait_for_launch_count(2)
+
+        harness.stdin_stream.close()
+        self.assertEqual(harness.wait_for_exit(), 0)
+
+    def test_mixed_file_change_restarts_on_restart_file_only(self) -> None:
+        case_dir = self.tempdir / "mixed-case"
+        case_dir.mkdir()
+        real_file = case_dir / "server.py"
+        real_file.write_text("# server\n", encoding="utf-8")
+        no_restart_file = case_dir / "dashboard_server.py"
+        no_restart_file.write_text("# dashboard\n", encoding="utf-8")
+
+        harness = SupervisorHarness(
+            self.tempdir / ("case-%s" % len(self._harnesses)),
+            watch_paths=[real_file, no_restart_file],
+        )
+        self._harnesses.append(harness)
+        harness.wait_for_launch_count(1)
+        harness.stdout_stream.wait_for(b"READY ")
+
+        real_file.write_text("# updated\n", encoding="utf-8")
+        no_restart_file.write_text("# also updated\n", encoding="utf-8")
+        harness.wait_for_launch_count(2)
+
+        refresh_events = harness.wait_for_audit_events("mcp_server_refresh_required")
+        self.assertEqual(refresh_events[0]["changed_files"], [str(real_file)])
 
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)

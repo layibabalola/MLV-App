@@ -93,6 +93,36 @@ def _read_available(stream: object, size: int) -> bytes:
     return stream.read(size)
 
 
+_NO_RESTART_FILENAMES: frozenset = frozenset({
+    # HTML template imported by server.py — changes never affect tool schema or signatures.
+    "dashboard_server.py",
+    # Standalone daemons and utilities not imported by server.py.
+    "watcher.py",
+    "bootstrap_session.py",
+    "bridge_monitor_poll.py",
+    "probe_server.py",
+    "configure_watcher.py",
+    "compact.py",
+    "consume_inbox.py",
+    "dashboard_launcher.py",
+    "codex_app_server_wake.py",
+    "project_identity.py",
+    "recover_bridge_session.py",
+    "recover_state.py",
+    "migrate_root.py",
+    "routing_policy.py",
+    "routing_rules.py",
+    # The wrapper process cannot hot-reload itself.
+    "server_wrapper.py",
+})
+
+
+def _is_no_restart_file(path: Path) -> bool:
+    """Return True if changes to this file should never trigger an MCP server restart."""
+    name = path.name
+    return name in _NO_RESTART_FILENAMES or name.startswith("test_") or name.endswith("_test.py")
+
+
 def _watch_bridge_code_files(base_dir: Path) -> List[Path]:
     return sorted(path for path in Path(base_dir).rglob("*.py") if "__pycache__" not in path.parts)
 
@@ -378,9 +408,17 @@ class ServerSupervisor:
                 previous = current
                 if not changed:
                     continue
+                restart_changed = [p for p in changed if not _is_no_restart_file(p)]
+                skipped_changed = [p for p in changed if _is_no_restart_file(p)]
+                if skipped_changed and not restart_changed:
+                    self._append_audit_event(
+                        action="mcp_server_restart_skipped_no_restart_files",
+                        skipped_files=sorted(str(p) for p in skipped_changed),
+                    )
+                    continue
                 now = self.now_fn()
                 with self._state_lock:
-                    self._pending_changed_files.update(changed)
+                    self._pending_changed_files.update(restart_changed)
                     self._last_change_time = now
         except BaseException as exc:
             self._thread_error = exc
