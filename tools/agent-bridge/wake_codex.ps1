@@ -14,8 +14,8 @@
 #   - Activates Codex regardless of current foreground (user reading Codex
 #     counts as idle from the OS's POV; the message still needs to be delivered).
 #   - If Codex itself is the foreground app on a different/unprovable thread,
-#     delivery takes priority when ThreadId is valid; restore is best-effort
-#     unless an exact RestoreThreadId is available.
+#     fails closed unless an exact RestoreThreadId is available. This prevents
+#     displacing the user's visible Codex thread without a verified restore slot.
 #   - Clears the composer (Ctrl+A + Delete) before injection - any draft text
 #     the user left in the box will be wiped. This is a deliberate trade-off.
 #
@@ -1927,12 +1927,12 @@ try {
         }
         Open-CodexThread -Value $RestoreThreadId
         Write-StageEvent "STAGE6_RESTORE_THREAD_DONE"
-        Write-PreflightAudit -Action "targeted_wake_restore_thread_deeplink_opened" -Fields @{
+        Write-PreflightAudit -Action "targeted_wake_restore_thread_deeplink_invoked_unverified" -Fields @{
             restore_thread_id = $RestoreThreadId
             target_thread_id = $ThreadId
         }
         Write-WakeTelemetry -Fields @{
-            action = "restore_thread_deeplink_opened"
+            action = "restore_thread_deeplink_invoked_unverified"
             restore_thread_id = $RestoreThreadId
         }
     }

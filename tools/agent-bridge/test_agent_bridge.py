@@ -993,6 +993,7 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("foreground_codex_restore_thread_unavailable", text)
         self.assertIn("function Test-GenericCodexThreadTitle", text)
         self.assertIn("foreground_codex_target_thread_unavailable", text)
+        self.assertIn("targeted_wake_restore_thread_deeplink_invoked_unverified", text)
         self.assertIn("MaxPreSendRaceMilliseconds", text)
         self.assertIn("Add-Type -AssemblyName UIAutomationClient", text)
         self.assertIn("*ProseMirror*", text)
@@ -3644,6 +3645,84 @@ for index in range(count):
         self.assertIsNone(updated["desktop_thread_title_project_match"])
         self.assertEqual("Codex", updated["last_unresolved_desktop_thread_title"])
         self.assertNotIn("last_mismatched_desktop_thread_title", updated)
+
+    def test_generic_false_title_telemetry_is_defensively_unknown(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        breadcrumb = build_peer_runtime_breadcrumb(
+            state_dir=self.state_dir,
+            agent="codex",
+            session_id="codex-live",
+            project="mlv-app",
+            desktop_thread_id="thr-codex",
+        )
+        breadcrumb.update(
+            {
+                "desktop_thread_title": "Prior Good Title",
+                "desktop_thread_title_project_match": True,
+            }
+        )
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+
+        telemetry = {
+            "timestamp": "2026-05-02T10:11:00+00:00",
+            "action": "thread_title_certified",
+            "desktop_thread_title": "Codex",
+            "desktop_thread_title_source": "uia_root_name",
+            "expected_project_token": "mlv-app",
+            "title_project_match": False,
+        }
+        watcher._cache_wake_telemetry(
+            inbox_path=bridge.inbox_path("codex"),
+            agent="codex",
+            session_id="codex-live",
+            message_id="msg-generic-false-title",
+            command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+        )
+
+        updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertNotIn("desktop_thread_title", updated)
+        self.assertIsNone(updated["desktop_thread_title_project_match"])
+        self.assertEqual("Codex", updated["last_unresolved_desktop_thread_title"])
+        self.assertNotIn("last_mismatched_desktop_thread_title", updated)
+
+    def test_empty_unknown_title_telemetry_clears_stale_title(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        breadcrumb = build_peer_runtime_breadcrumb(
+            state_dir=self.state_dir,
+            agent="codex",
+            session_id="codex-live",
+            project="mlv-app",
+            desktop_thread_id="thr-codex",
+        )
+        breadcrumb.update(
+            {
+                "desktop_thread_title": "Prior Good Title",
+                "desktop_thread_title_project_match": True,
+            }
+        )
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+
+        telemetry = {
+            "timestamp": "2026-05-02T10:12:00+00:00",
+            "action": "thread_title_unknown",
+            "expected_project_token": "mlv-app",
+            "title_project_match": None,
+            "title_project_match_state": "empty_or_unreadable_title",
+        }
+        watcher._cache_wake_telemetry(
+            inbox_path=bridge.inbox_path("codex"),
+            agent="codex",
+            session_id="codex-live",
+            message_id="msg-empty-unknown-title",
+            command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+        )
+
+        updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
+        self.assertNotIn("desktop_thread_title", updated)
+        self.assertIsNone(updated["desktop_thread_title_project_match"])
+        self.assertNotIn("last_unresolved_desktop_thread_title", updated)
 
     def test_watcher_template_accepts_optional_restore_thread_placeholder(self) -> None:
         bridge = AgentBridge(self.state_dir)

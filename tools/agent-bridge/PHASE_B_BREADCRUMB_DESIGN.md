@@ -56,6 +56,7 @@ read-modify-write race).
 | session_id | yes | UUID; current active session GUID |
 | desktop_app | yes | "claude-desktop" or "codex-desktop"; could expand |
 | desktop_thread_id | conditional | UUID; required when known, omitted when not (Claude Code in terminal has no thread id) |
+| restore_thread_id | optional | UUID for exact previous-thread restore. Empty/missing is allowed; targeted SendKeys must then fail closed if Codex is already foreground on a different or unprovable thread |
 | deeplink_template | conditional | required when desktop_thread_id is present; uses `{thread_id}` placeholder |
 | written_by_pid | yes | int; for staleness detection |
 | written_at | yes | ISO8601 UTC; for staleness detection |
@@ -155,7 +156,7 @@ watcher-config.
   "agent": "codex",
   "session_id": "74e288cf-...",
   "kind": "private",
-  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}"]
+  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}", "-RestoreThreadId", "{restore_thread_id}"]
 }
 ```
 
@@ -165,12 +166,13 @@ watcher-config.
 {
   "agent": "codex",
   "kind": "private",
-  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}"]
+  "on_message_command_template": ["powershell", "...", "-ThreadId", "{desktop_thread_id}", "-RestoreThreadId", "{restore_thread_id}"]
 }
 ```
 
 `on_message_command_template` uses placeholders that the watcher resolves
-from breadcrumb. Placeholders: `{desktop_thread_id}`, `{session_id}`,
+from breadcrumb. Placeholders: `{desktop_thread_id}`, `{restore_thread_id}`
+(optional; formats as empty string when absent), `{session_id}`,
 `{deeplink_template}` (if needed in future), `{agent}`.
 
 **Backward compat:** existing `on_message_command` (literal string) still

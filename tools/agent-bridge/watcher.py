@@ -1113,10 +1113,31 @@ def _cache_wake_telemetry(
 
     changed = False
     for event in events:
+        action = str(event.get("action") or "")
         title = _truncate_ui_label(event.get("desktop_thread_title"))
         title_project_match = event.get("title_project_match")
         generic_title = _is_generic_codex_thread_title(title)
-        if title_project_match is False:
+        title_event = action.startswith("thread_title")
+        unresolved_title = title_event and (
+            generic_title
+            or action == "thread_title_unknown"
+            or ("title_project_match" in event and title_project_match is None)
+        )
+        cached_title_project_match = None if unresolved_title else title_project_match
+        if unresolved_title:
+            peer.pop("desktop_thread_title", None)
+            peer.pop("desktop_thread_title_source", None)
+            peer.pop("desktop_thread_title_observed_at", None)
+            peer.pop("desktop_window_title", None)
+            if title:
+                peer["last_unresolved_desktop_thread_title"] = title
+                peer["last_unresolved_desktop_thread_title_source"] = _truncate_ui_label(
+                    event.get("desktop_thread_title_source"),
+                    80,
+                )
+                peer["last_unresolved_desktop_thread_title_observed_at"] = str(event.get("timestamp") or utc_now())
+            changed = True
+        elif title_project_match is False:
             if title:
                 peer["last_mismatched_desktop_thread_title"] = title
                 peer["last_mismatched_desktop_thread_title_source"] = _truncate_ui_label(event.get("desktop_thread_title_source"), 80)
@@ -1125,18 +1146,6 @@ def _cache_wake_telemetry(
             peer.pop("desktop_thread_title_source", None)
             peer.pop("desktop_thread_title_observed_at", None)
             peer.pop("desktop_window_title", None)
-            changed = True
-        elif generic_title and title:
-            peer.pop("desktop_thread_title", None)
-            peer.pop("desktop_thread_title_source", None)
-            peer.pop("desktop_thread_title_observed_at", None)
-            peer.pop("desktop_window_title", None)
-            peer["last_unresolved_desktop_thread_title"] = title
-            peer["last_unresolved_desktop_thread_title_source"] = _truncate_ui_label(
-                event.get("desktop_thread_title_source"),
-                80,
-            )
-            peer["last_unresolved_desktop_thread_title_observed_at"] = str(event.get("timestamp") or utc_now())
             changed = True
         elif title:
             peer["desktop_thread_title"] = title
@@ -1147,7 +1156,7 @@ def _cache_wake_telemetry(
                 peer["desktop_window_title"] = window_title
             changed = True
         if "title_project_match" in event:
-            peer["desktop_thread_title_project_match"] = title_project_match
+            peer["desktop_thread_title_project_match"] = cached_title_project_match
             changed = True
         if "expected_project_token" in event:
             peer["desktop_thread_title_expected_project_token"] = _truncate_ui_label(
