@@ -2280,6 +2280,27 @@ class AgentBridge:
         intent = str(record.get("pairing_intent") or "").strip().lower().replace("-", "_")
         return intent in {"", "active_primary"}
 
+    def _project_canonical_root_key(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            resolved = str(Path(text).resolve())
+        except OSError:
+            resolved = text
+        return resolved.replace("\\", "/").rstrip("/").casefold()
+
+    def _primary_pair_project_roots_match(
+        self,
+        left_record: Optional[Dict[str, Any]],
+        right_record: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not isinstance(left_record, dict) or not isinstance(right_record, dict):
+            return True
+        left_root = self._project_canonical_root_key(left_record.get("project_canonical_root"))
+        right_root = self._project_canonical_root_key(right_record.get("project_canonical_root"))
+        return not left_root or not right_root or left_root == right_root
+
     def _ensure_primary_pair_record(self, project_entry: Dict[str, Any], project: str) -> Optional[Dict[str, Any]]:
         active = project_entry.setdefault("active", {})
         claude_session_id = active.get("claude")
@@ -2295,6 +2316,11 @@ class AgentBridge:
             return None
         if not self._primary_pairing_intent_allows_autopair(
             codex_record if isinstance(codex_record, dict) else None
+        ):
+            return None
+        if not self._primary_pair_project_roots_match(
+            claude_record if isinstance(claude_record, dict) else None,
+            codex_record if isinstance(codex_record, dict) else None,
         ):
             return None
         return self._ensure_pair_record(
@@ -2374,6 +2400,8 @@ class AgentBridge:
                 "desktop_thread_id": None,
                 "bootstrap_thread_id": None,
                 "bootstrap_parent_thread_id": None,
+                "project_canonical_root": None,
+                "project_identity_source": None,
                 "tenant_id": LOCAL_DEFAULT_TENANT_ID,
             },
         )
@@ -2386,8 +2414,24 @@ class AgentBridge:
         record.setdefault("desktop_thread_id", None)
         record.setdefault("bootstrap_thread_id", None)
         record.setdefault("bootstrap_parent_thread_id", None)
+        record.setdefault("project_canonical_root", None)
+        record.setdefault("project_identity_source", None)
         record.setdefault("tenant_id", LOCAL_DEFAULT_TENANT_ID)
         return record
+
+    def _record_project_identity_metadata(
+        self,
+        record: Dict[str, Any],
+        *,
+        canonical_root: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        root = str(canonical_root or "").strip()
+        if root:
+            record["project_canonical_root"] = root
+        identity_source = str(source or "").strip()
+        if identity_source:
+            record["project_identity_source"] = identity_source
 
     def _clear_pending_pair_fields(self, record: Dict[str, Any]) -> None:
         for key in PENDING_PAIR_FIELDS:
@@ -2407,6 +2451,8 @@ class AgentBridge:
         desktop_thread_id: Optional[str] = None,
         bootstrap_thread_id: Optional[str] = None,
         bootstrap_parent_thread_id: Optional[str] = None,
+        project_canonical_root: Optional[str] = None,
+        project_identity_source: Optional[str] = None,
     ) -> BridgeResult:
         with self._locked():
             try:
@@ -2422,6 +2468,11 @@ class AgentBridge:
             record["desktop_thread_id"] = (desktop_thread_id or "").strip() or None
             record["bootstrap_thread_id"] = (bootstrap_thread_id or "").strip() or None
             record["bootstrap_parent_thread_id"] = (bootstrap_parent_thread_id or "").strip() or None
+            self._record_project_identity_metadata(
+                record,
+                canonical_root=project_canonical_root,
+                source=project_identity_source,
+            )
             for pair in (project_entry.get("pairs") or {}).values():
                 if isinstance(pair, dict) and pair.get("codex_session_id") == session:
                     pair["codex_desktop_thread_id"] = record.get("desktop_thread_id")
@@ -2798,6 +2849,8 @@ class AgentBridge:
         desktop_thread_id: Optional[str] = None,
         bootstrap_thread_id: Optional[str] = None,
         bootstrap_parent_thread_id: Optional[str] = None,
+        project_canonical_root: Optional[str] = None,
+        project_identity_source: Optional[str] = None,
     ) -> BridgeResult:
         """Register a same-project chat without mutating the active primary pair.
 
@@ -2879,6 +2932,11 @@ class AgentBridge:
                 record["pending_pair_timeout_seconds"] = consent_timeout_seconds
                 record["pending_pair_target_active_session"] = active.get(owner)
                 record["pending_pair_peer_session"] = active.get(peer_agent)
+            self._record_project_identity_metadata(
+                record,
+                canonical_root=project_canonical_root,
+                source=project_identity_source,
+            )
             project_entry["updated_at"] = now
             self._save_session_registry(registry)
             self._audit(
@@ -2923,6 +2981,8 @@ class AgentBridge:
         allow_supersede: bool = True,
         trusted_parent_eligible: bool = False,
         pairing_intent: Optional[str] = None,
+        project_canonical_root: Optional[str] = None,
+        project_identity_source: Optional[str] = None,
     ) -> BridgeResult:
         with self._locked():
             try:
@@ -3012,6 +3072,11 @@ class AgentBridge:
             record["bootstrap_origin"] = bootstrap_origin
             if pairing_intent:
                 record["pairing_intent"] = str(pairing_intent).strip().lower().replace("-", "_")
+            self._record_project_identity_metadata(
+                record,
+                canonical_root=project_canonical_root,
+                source=project_identity_source,
+            )
             if activation_status == "active":
                 self._clear_non_primary_fields(record)
             record["bootstrap_promoted_to_trusted"] = False
@@ -6082,36 +6147,52 @@ class AgentBridge:
                 },
             )
 
+    def _resume_wake_for_session_unlocked(
+        self,
+        session: str,
+        *,
+        override_wake_message: str = "User says check bridge inbox",
+    ) -> Dict[str, Any]:
+        payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+        sessions = payload.setdefault("sessions", {})
+        changed = bool(sessions.pop(session, None) is not None)
+        payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
+        payload["updated_at"] = utc_now()
+        if changed:
+            write_json(self.wake_breaker_path, payload)
+            if override_wake_message:
+                self._set_next_override_wake_message(override_wake_message)
+        self._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": utc_now(),
+                "action": "wake_breaker_closed",
+                "accepted": True,
+                "session_id": session,
+                "reason": "resume_call",
+                "changed": changed,
+            }
+        )
+        return {
+            "ok": True,
+            "status": "cleared" if changed else "already_clear",
+            "message": "Wake breaker cleared for %s." % session,
+            "session_id": session,
+            "changed": changed,
+        }
+
     def resume_wake_for_session(self, session_id: str) -> BridgeResult:
         with self._locked():
             try:
                 session = normalize_session(session_id)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
-            payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
-            sessions = payload.setdefault("sessions", {})
-            changed = bool(sessions.pop(session, None) is not None)
-            payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
-            payload["updated_at"] = utc_now()
-            if changed:
-                write_json(self.wake_breaker_path, payload)
-                self._set_next_override_wake_message("User says check bridge inbox")
-            self._audit(
-                {
-                    "id": str(uuid.uuid4()),
-                    "timestamp": utc_now(),
-                    "action": "wake_breaker_closed",
-                    "accepted": True,
-                    "session_id": session,
-                    "reason": "resume_call",
-                    "changed": changed,
-                }
-            )
+            result = self._resume_wake_for_session_unlocked(session)
             return BridgeResult(
-                True,
-                "cleared" if changed else "already_clear",
-                "Wake breaker cleared for %s." % session,
-                {"session_id": session, "changed": changed},
+                bool(result["ok"]),
+                str(result["status"]),
+                str(result["message"]),
+                {"session_id": session, "changed": result["changed"]},
             )
 
     def nudge_peer(self, agent: str, session_id: str) -> BridgeResult:
@@ -6148,6 +6229,37 @@ class AgentBridge:
                 reason="nudge_peer",
                 nudge_wake_message=override_msg,
             )
+            if nudge.get("reason") == "session_not_active":
+                original_status = str(nudge.get("status") or "")
+                try:
+                    resume = self._resume_wake_for_session_unlocked(
+                        session,
+                        override_wake_message=override_msg,
+                    )
+                except Exception as exc:
+                    resume = {
+                        "ok": False,
+                        "status": "failed",
+                        "message": str(exc),
+                        "session_id": session,
+                        "changed": False,
+                    }
+                nudge["fallback_from_status"] = original_status
+                nudge["resume_wake_for_session"] = resume
+                nudge["status"] = "session_not_active_wake_attempted"
+                self._audit(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "timestamp": utc_now(),
+                        "action": "session_not_active_wake_attempted",
+                        "accepted": True,
+                        "agent": target,
+                        "session_id": session,
+                        "fallback_from_status": original_status,
+                        "resume_status": resume.get("status"),
+                        "resume_ok": bool(resume.get("ok")),
+                    }
+                )
             return BridgeResult(
                 True,
                 nudge["status"],

@@ -2132,6 +2132,74 @@ for index in range(count):
         self.assertEqual(pair["claude_session_id"], "claude-live")
         self.assertEqual(pair["codex_session_id"], "codex-live")
 
+    def test_active_primary_same_canonical_root_creates_primary_pair(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        root = str((self.tempdir / "repo-a").resolve())
+        bridge.activate_session(
+            "claude",
+            "claude-live",
+            project="mlv-app",
+            pairing_intent="active_primary",
+            project_canonical_root=root,
+        )
+        activated = bridge.activate_session(
+            "codex",
+            "codex-live",
+            project="mlv-app",
+            pairing_intent="active_primary",
+            project_canonical_root=root,
+        )
+
+        self.assertEqual(activated.status, "active")
+        self.assertIsNotNone(activated.data["pair_id"])
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(1, len(status.data["pairs"]))
+
+    def test_active_primary_different_canonical_roots_do_not_pair(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        claude_root = str((self.tempdir / "repo-a").resolve())
+        codex_root = str((self.tempdir / "repo-b").resolve())
+        bridge.activate_session(
+            "claude",
+            "claude-live",
+            project="mlv-app",
+            pairing_intent="active_primary",
+            project_canonical_root=claude_root,
+        )
+        activated = bridge.activate_session(
+            "codex",
+            "codex-foreign",
+            project="mlv-app",
+            pairing_intent="active_primary",
+            project_canonical_root=codex_root,
+        )
+
+        self.assertEqual(activated.status, "active")
+        self.assertIsNone(activated.data["pair_id"])
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["claude"], "claude-live")
+        self.assertEqual(status.data["active"]["codex"], "codex-foreign")
+        self.assertEqual(status.data["pairs"], {})
+        self.assertEqual(status.data["sessions"]["claude-live"]["project_canonical_root"], claude_root)
+        self.assertEqual(status.data["sessions"]["codex-foreign"]["project_canonical_root"], codex_root)
+
+        pairings = bridge.list_pairings("codex", project="mlv-app")
+        self.assertTrue(pairings.ok)
+        self.assertEqual({item["pair_id"] for item in pairings.data["pairings"]}, {None})
+        details = bridge.pairing_details("codex", project="mlv-app", session_id="codex-foreign")
+        self.assertTrue(details.ok)
+        self.assertIsNone(details.data["pairing"]["pair_id"])
+        self.assertEqual(bridge.session_status("mlv-app").data["pairs"], {})
+
+        routed = bridge.send_to_peer(
+            "claude",
+            "codex",
+            "[[handoff:codex]] should not route through a mismatched active_primary",
+            sender_session_id="claude-live",
+        )
+        self.assertFalse(routed.ok)
+        self.assertIn("matched 0 active pair", routed.message)
+
     def test_background_same_project_claim_does_not_steal_primary_pair(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
@@ -5725,6 +5793,58 @@ for index in range(count):
         self.assertEqual(after.data["wake_breakers"]["open_session_count"], 0)
         self.assertEqual(bridge.wake_breaker_status("codex-live").data["session"], None)
 
+    def test_nudge_peer_session_not_active_attempts_resume_wake(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-old", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+
+        nudge = bridge.nudge_peer("codex", "codex-old")
+
+        self.assertTrue(nudge.ok)
+        self.assertEqual(nudge.status, "session_not_active_wake_attempted")
+        self.assertEqual(nudge.data["nudge"]["reason"], "session_not_active")
+        self.assertEqual(nudge.data["nudge"]["fallback_from_status"], "backpressure_rejected_no_nudge_no_unread")
+        self.assertEqual(nudge.data["nudge"]["resume_wake_for_session"]["status"], "already_clear")
+        actions = [item.get("action") for item in read_jsonl(bridge.audit_path)]
+        self.assertIn("session_not_active_wake_attempted", actions)
+
+    def test_nudge_peer_active_session_behavior_unchanged(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+
+        nudge = bridge.nudge_peer("codex", "codex-live")
+
+        self.assertTrue(nudge.ok)
+        self.assertEqual(nudge.status, "backpressure_rejected_no_nudge_no_unread")
+        self.assertEqual(nudge.data["nudge"]["reason"], "no_unread_work")
+        self.assertNotIn("resume_wake_for_session", nudge.data["nudge"])
+
+    def test_nudge_peer_session_not_active_resume_failure_is_nonfatal(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-old", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+
+        with patch.object(
+            bridge,
+            "_resume_wake_for_session_unlocked",
+            return_value={
+                "ok": False,
+                "status": "failed",
+                "message": "resume failed",
+                "session_id": "codex-old",
+                "changed": False,
+            },
+        ):
+            nudge = bridge.nudge_peer("codex", "codex-old")
+
+        self.assertTrue(nudge.ok)
+        self.assertEqual(nudge.status, "session_not_active_wake_attempted")
+        self.assertFalse(nudge.data["nudge"]["resume_wake_for_session"]["ok"])
+        self.assertEqual(nudge.data["nudge"]["resume_wake_for_session"]["message"], "resume failed")
+
     def test_nudge_peer_grants_bypass_and_watcher_consumes_seen_backlog(self) -> None:
         bridge = AgentBridge(self.state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -6268,7 +6388,7 @@ for index in range(count):
 
         nudge = bridge.nudge_peer("codex", "codex-old")
 
-        self.assertEqual(nudge.status, "backpressure_rejected_no_nudge_no_unread")
+        self.assertEqual(nudge.status, "session_not_active_wake_attempted")
         self.assertEqual(nudge.data["nudge"]["reason"], "session_not_active")
         watcher_state = read_json(bridge.watcher_state_path, {})
         self.assertIn(sent[0], watcher_state["seen_ids"])
@@ -7583,6 +7703,13 @@ for index in range(count):
         self.assertEqual(breadcrumb["session_id"], "codex-new")
         self.assertEqual(breadcrumb["desktop_thread_id"], "019dcfe4-bd5d-7841-a7c1-2e8969a777c5")
         self.assertEqual(breadcrumb["bootstrap_origin"], "parent")
+        identity = derive_project_identity(str(ROOT))
+        self.assertEqual(breadcrumb["project_canonical_root"], str(identity["canonical_root"]))
+        self.assertEqual(breadcrumb["project_identity_source"], identity["source"])
+        status = AgentBridge(self.state_dir).session_status("mlv-app")
+        record = status.data["sessions"]["codex-new"]
+        self.assertEqual(record["project_canonical_root"], str(identity["canonical_root"]))
+        self.assertEqual(record["project_identity_source"], identity["source"])
 
     def test_bootstrap_parent_thread_overrides_stale_watcher_thread_id(self) -> None:
         config_path = self.tempdir / "watcher-config.json"

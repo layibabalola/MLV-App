@@ -147,6 +147,8 @@ def build_peer_runtime_breadcrumb(
     bootstrap_parent_thread_id: Optional[str] = None,
     trusted_parent_session_id: Optional[str] = None,
     subagent_signals: Optional[Dict[str, Any]] = None,
+    project_canonical_root: Optional[str] = None,
+    project_identity_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     bridge_root = bridge_root_for_state_dir(Path(state_dir))
     breadcrumb: Dict[str, Any] = {
@@ -171,6 +173,10 @@ def build_peer_runtime_breadcrumb(
         breadcrumb["bootstrap_parent_thread_id"] = bootstrap_parent_thread_id
     if trusted_parent_session_id:
         breadcrumb["trusted_parent_session_id"] = trusted_parent_session_id
+    if project_canonical_root:
+        breadcrumb["project_canonical_root"] = str(project_canonical_root)
+    if project_identity_source:
+        breadcrumb["project_identity_source"] = str(project_identity_source)
     if agent == "codex":
         breadcrumb["deeplink_template"] = "codex://threads/{thread_id}"
     breadcrumb.update(_manifest_identity(bridge_root))
