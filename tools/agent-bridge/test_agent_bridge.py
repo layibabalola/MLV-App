@@ -2075,6 +2075,87 @@ for index in range(count):
         self.assertEqual(pair["claude_session_id"], "claude-live")
         self.assertEqual(pair["codex_session_id"], "codex-live")
 
+    def test_background_intent_active_session_does_not_create_primary_pair(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        activated = bridge.activate_session(
+            "codex",
+            "codex-background",
+            project="mlv-app",
+            pairing_intent="background",
+        )
+
+        self.assertEqual(activated.status, "active")
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-background")
+        self.assertEqual(status.data["pairs"], {})
+
+        self.assertEqual(bridge.list_pairings("codex", project="mlv-app").data["pairings"][0]["pair_id"], None)
+        details = bridge.pairing_details("codex", project="mlv-app", session_id="codex-background")
+        self.assertEqual(
+            details.data["pairing"]["pair_id"],
+            None,
+        )
+        self.assertEqual(bridge.session_status("mlv-app").data["pairs"], {})
+
+    def test_ask_first_intent_active_session_does_not_create_primary_pair(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        activated = bridge.activate_session(
+            "codex",
+            "codex-question",
+            project="mlv-app",
+            pairing_intent="ask_first",
+        )
+
+        self.assertEqual(activated.status, "active")
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-question")
+        self.assertEqual(status.data["pairs"], {})
+
+    def test_active_primary_intent_creates_primary_pair(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        activated = bridge.activate_session(
+            "codex",
+            "codex-live",
+            project="mlv-app",
+            pairing_intent="active_primary",
+        )
+
+        self.assertEqual(activated.status, "active")
+        status = bridge.session_status("mlv-app")
+        pairs = status.data["pairs"]
+        self.assertEqual(1, len(pairs))
+        pair = next(iter(pairs.values()))
+        self.assertEqual(pair["status"], "active")
+        self.assertEqual(pair["claude_session_id"], "claude-live")
+        self.assertEqual(pair["codex_session_id"], "codex-live")
+
+    def test_background_same_project_claim_does_not_steal_primary_pair(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session(
+            "codex",
+            "codex-primary",
+            project="mlv-app",
+            pairing_intent="active_primary",
+        )
+        original_pair_id = next(iter(bridge.session_status("mlv-app").data["pairs"]))
+
+        bridge.activate_session(
+            "codex",
+            "codex-background-claim",
+            project="mlv-app",
+            pairing_intent="background",
+        )
+
+        status = bridge.session_status("mlv-app")
+        self.assertEqual(status.data["active"]["codex"], "codex-background-claim")
+        self.assertEqual(status.data["pairs"][original_pair_id]["status"], "superseded")
+        self.assertEqual(1, len(status.data["pairs"]))
+        self.assertEqual(next(iter(status.data["pairs"].values()))["codex_session_id"], "codex-primary")
+
     def test_send_to_peer_rejects_ambiguous_sessionless_work(self) -> None:
         bridge = AgentBridge(self.state_dir)
         bridge.activate_session("claude", "claude-live", project="mlv-app")

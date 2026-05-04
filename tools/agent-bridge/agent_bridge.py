@@ -2273,11 +2273,29 @@ class AgentBridge:
         )
         return record
 
+    def _primary_pairing_intent_allows_autopair(self, record: Optional[Dict[str, Any]]) -> bool:
+        """Return whether a session record may materialize the primary pair."""
+        if not isinstance(record, dict):
+            return True
+        intent = str(record.get("pairing_intent") or "").strip().lower().replace("-", "_")
+        return intent in {"", "active_primary"}
+
     def _ensure_primary_pair_record(self, project_entry: Dict[str, Any], project: str) -> Optional[Dict[str, Any]]:
         active = project_entry.setdefault("active", {})
         claude_session_id = active.get("claude")
         codex_session_id = active.get("codex")
         if not claude_session_id or not codex_session_id:
+            return None
+        sessions = project_entry.setdefault("sessions", {})
+        claude_record = sessions.get(str(claude_session_id))
+        codex_record = sessions.get(str(codex_session_id))
+        if not self._primary_pairing_intent_allows_autopair(
+            claude_record if isinstance(claude_record, dict) else None
+        ):
+            return None
+        if not self._primary_pairing_intent_allows_autopair(
+            codex_record if isinstance(codex_record, dict) else None
+        ):
             return None
         return self._ensure_pair_record(
             project_entry,
