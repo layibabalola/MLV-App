@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -124,6 +125,7 @@ RATE_LIMIT_WINDOW_S = 60
 SESSION_REGISTRY_SCHEMA_VERSION = 3
 HANDOFF_RE = re.compile(r"\[\[handoff:(claude|codex)(?:\s+([a-z0-9_-]+))?\]\]", re.IGNORECASE)
 STOP_RE = re.compile(r"\[\[(done|handoff-to-user|pause-relay)\]\]", re.IGNORECASE)
+CODEX_APP_DOM_TITLE_CACHE_TTL_S = 15.0
 
 
 @dataclasses.dataclass
@@ -470,6 +472,8 @@ class AgentBridge:
         self._lock = threading.Lock()
         self.auth = LocalUserAuth(machine_id=LOCAL_DEFAULT_MACHINE_ID)
         self.transport = LocalFilesystemTransport()
+        self.live_app_dom_titles = False
+        self._codex_app_dom_title_cache: Optional[Dict[str, Any]] = None
 
     @property
     def state_path(self) -> Path:
@@ -7283,19 +7287,37 @@ class AgentBridge:
             latest_refresh_time = row_time(latest_refresh)
         reconnect_required_since = latest_refresh_time or latest_launch_time
 
-        tool_activity_actions = {"check_inbox", "wait_inbox", "mark_seen", "mark_read", "mark_handled", "send_to_peer"}
-        post_launch_tool_events: List[Dict[str, Any]] = []
+        mcp_tool_proofs = [row for row in rows if row.get("action") == "mcp_tool_access_proof"]
+        host_scoped_tool_proofs: List[Dict[str, Any]] = []
+        legacy_tool_activity_actions = {"check_inbox", "wait_inbox", "mark_seen", "mark_read", "mark_handled", "send_to_peer"}
+        legacy_post_launch_tool_events: List[Dict[str, Any]] = []
         if reconnect_required_since is not None:
-            post_launch_tool_events = [
+            for row in mcp_tool_proofs:
+                if (row_time(row) or datetime.min.replace(tzinfo=timezone.utc)) <= reconnect_required_since:
+                    continue
+                try:
+                    proof_wrapper_pid = int(row.get("wrapper_pid") or 0) or None
+                except (TypeError, ValueError):
+                    proof_wrapper_pid = None
+                if wrapper_pid is not None and proof_wrapper_pid != wrapper_pid:
+                    continue
+                host_scoped_tool_proofs.append(row)
+            legacy_post_launch_tool_events = [
                 row
                 for row in rows
-                if row.get("action") in tool_activity_actions
+                if row.get("action") in legacy_tool_activity_actions
                 and (row_time(row) or datetime.min.replace(tzinfo=timezone.utc)) > reconnect_required_since
             ]
-        latest_tool_event = None
-        if post_launch_tool_events:
-            latest_tool_event = max(
-                post_launch_tool_events,
+        latest_host_scoped_tool_proof = None
+        if host_scoped_tool_proofs:
+            latest_host_scoped_tool_proof = max(
+                host_scoped_tool_proofs,
+                key=lambda row: row_time(row) or datetime.min.replace(tzinfo=timezone.utc),
+            )
+        latest_legacy_tool_event = None
+        if legacy_post_launch_tool_events:
+            latest_legacy_tool_event = max(
+                legacy_post_launch_tool_events,
                 key=lambda row: row_time(row) or datetime.min.replace(tzinfo=timezone.utc),
             )
 
@@ -7317,7 +7339,7 @@ class AgentBridge:
             except (TypeError, ValueError):
                 inner_running = None
 
-        mcp_host_likely_reconnected = bool(post_launch_tool_events)
+        mcp_host_likely_reconnected = bool(host_scoped_tool_proofs)
         impact_class = "unknown_no_wrapper_audit"
         if latest_launch is not None:
             recent_launch = latest_launch_time is not None and latest_launch_time >= recent_cutoff
@@ -7350,8 +7372,15 @@ class AgentBridge:
             "latest_refresh_required": latest_refresh,
             "latest_refresh_required_at": latest_refresh.get("timestamp") if latest_refresh else None,
             "mcp_host_likely_reconnected": mcp_host_likely_reconnected,
-            "last_tool_activity_at": latest_tool_event.get("timestamp") if latest_tool_event else None,
-            "last_tool_activity": latest_tool_event,
+            "mcp_host_proof_source": "host_scoped_tool_call" if latest_host_scoped_tool_proof else None,
+            "last_tool_activity_at": latest_host_scoped_tool_proof.get("timestamp")
+            if latest_host_scoped_tool_proof
+            else None,
+            "last_tool_activity": latest_host_scoped_tool_proof,
+            "last_mcp_tool_access_proof": latest_host_scoped_tool_proof,
+            "host_scoped_tool_proof_count": len(host_scoped_tool_proofs),
+            "legacy_post_launch_tool_activity_count": len(legacy_post_launch_tool_events),
+            "last_legacy_tool_activity": latest_legacy_tool_event,
             "impact_class": impact_class,
             "reconnect_required": impact_class in {"tool_access_risk", "client_reconnect_likely_required"},
             "error": read["error"],
@@ -7415,8 +7444,9 @@ class AgentBridge:
             for session_id, record in ((project_entry or {}).get("sessions") or {}).items():
                 if not isinstance(record, dict):
                     continue
-                runtime_display = self._runtime_display_for_session(
-                    record.get("agent"),
+                runtime_display = self._session_runtime_display_for_record(
+                    record,
+                    agent=record.get("agent"),
                     session_id=session_id,
                     project=project_name,
                 )
@@ -8057,7 +8087,7 @@ class AgentBridge:
             add(
                 "reconnect_mcp_host",
                 "high",
-                "MCP wrapper relaunched and the host has not proven tool access after that launch.",
+                "MCP wrapper relaunched and this host has not emitted a wrapper-scoped MCP tool proof after that launch.",
                 "Restart/reconnect the MCP host, then rerun bridge_health_panel(agent=\"%s\", include_extended=true)."
                 % caller,
                 safe_to_run=False,
@@ -8484,7 +8514,7 @@ class AgentBridge:
             return {}
         title_project_match = breadcrumb.get("desktop_thread_title_project_match")
         title = "" if title_project_match is False else str(breadcrumb.get("desktop_thread_title") or "").strip()
-        return {
+        display = {
             "desktop_thread_title": title or None,
             "desktop_thread_title_source": breadcrumb.get("desktop_thread_title_source"),
             "desktop_thread_title_observed_at": breadcrumb.get("desktop_thread_title_observed_at"),
@@ -8504,6 +8534,194 @@ class AgentBridge:
                 "last_wake_delivery_priority_expected_thread_title"
             ),
         }
+        if agent_text == "codex" and title_project_match is not False:
+            current_title = str(display.get("desktop_thread_title") or "").strip()
+            if not current_title or current_title.lower() == "codex":
+                display.update(self._codex_thread_title_from_app_dom())
+        return display
+
+    def _codex_session_index_path(self) -> Path:
+        codex_home = os.environ.get("CODEX_HOME")
+        return (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "session_index.jsonl"
+
+    def _codex_thread_title_probe_path(self) -> Path:
+        return Path(__file__).resolve().parent / "codex_thread_title_probe.ps1"
+
+    def _codex_app_dom_snapshot(self) -> Dict[str, Any]:
+        if not self.live_app_dom_titles or sys.platform != "win32":
+            return {}
+        now = time.monotonic()
+        cached = self._codex_app_dom_title_cache
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            return dict(cached.get("snapshot") or {})
+
+        payload: Dict[str, Any] = {}
+        script_path = self._codex_thread_title_probe_path()
+        if script_path.exists():
+            try:
+                result = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=12,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    output = str(result.stdout or "").strip()
+                    if output:
+                        decoded = json.loads(output.splitlines()[-1])
+                        if isinstance(decoded, dict):
+                            payload = decoded
+            except (OSError, subprocess.SubprocessError, TimeoutError, JSONDecodeError, ValueError):
+                payload = {}
+
+        self._codex_app_dom_title_cache = {
+            "expires_at": now + CODEX_APP_DOM_TITLE_CACHE_TTL_S,
+            "snapshot": payload,
+        }
+        return dict(payload)
+
+    def _codex_thread_title_from_app_dom(self) -> Dict[str, Any]:
+        payload = self._codex_app_dom_snapshot()
+        if not payload.get("ok"):
+            return {}
+        title = str(payload.get("title") or "").strip()
+        if not title or title.lower() == "codex":
+            return {}
+        return {
+            "desktop_thread_title": title,
+            "desktop_thread_title_source": str(payload.get("source") or "codex_app_dom").strip(),
+            "desktop_thread_title_observed_at": payload.get("observed_at") or utc_now(),
+            "desktop_thread_title_project_match": None,
+            "desktop_window_title": payload.get("window_title"),
+        }
+
+    def _codex_visible_thread_titles_from_app_dom(self) -> Dict[str, Any]:
+        payload = self._codex_app_dom_snapshot()
+        if not payload.get("ok"):
+            return {}
+        titles: List[Dict[str, Any]] = []
+        for row in payload.get("visible_thread_titles") or []:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            if not title:
+                continue
+            titles.append({"title": title, "selected": bool(row.get("selected"))})
+        if not titles:
+            return {}
+        return {
+            "agent": "codex",
+            "source": "codex_app_dom_sidebar",
+            "observed_at": payload.get("observed_at") or utc_now(),
+            "selected_title": str(payload.get("title") or "").strip() or None,
+            "visible_thread_titles": titles,
+            "visible_thread_title_count": len(titles),
+        }
+
+    def _codex_thread_title_from_session_index(self, desktop_thread_id: Optional[Any]) -> Dict[str, Any]:
+        thread_id = str(desktop_thread_id or "").strip()
+        if not thread_id:
+            return {}
+        index_path = self._codex_session_index_path()
+        if not index_path.exists():
+            return {}
+        best: Optional[Dict[str, Any]] = None
+        best_updated_at: Optional[datetime] = None
+        try:
+            with index_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        row = json.loads(text)
+                    except JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict) or str(row.get("id") or "").strip() != thread_id:
+                        continue
+                    title = str(row.get("thread_name") or "").strip()
+                    if not title:
+                        continue
+                    updated_at = parse_iso_datetime(row.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc)
+                    if best is None or (best_updated_at is not None and updated_at >= best_updated_at):
+                        best = row
+                        best_updated_at = updated_at
+        except OSError:
+            return {}
+        if not best:
+            return {}
+        return {
+            "desktop_thread_title": str(best.get("thread_name") or "").strip(),
+            "desktop_thread_title_source": "codex_session_index",
+            "desktop_thread_title_observed_at": best.get("updated_at"),
+            "desktop_thread_title_project_match": None,
+        }
+
+    def _recorded_runtime_display_for_session(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        title_project_match = record.get("desktop_thread_title_project_match")
+        title = "" if title_project_match is False else str(record.get("desktop_thread_title") or "").strip()
+        display = {
+            "desktop_thread_title": title or None,
+            "desktop_thread_title_source": record.get("desktop_thread_title_source"),
+            "desktop_thread_title_observed_at": record.get("desktop_thread_title_observed_at"),
+            "desktop_thread_title_project_match": title_project_match,
+            "desktop_window_title": record.get("desktop_window_title"),
+            "desktop_thread_id": record.get("desktop_thread_id"),
+            "last_wake_postflight_action": record.get("last_wake_postflight_action"),
+            "last_wake_postflight_reason": record.get("last_wake_postflight_reason"),
+            "last_wake_postflight_at": record.get("last_wake_postflight_at"),
+            "last_wake_delivery_priority_action": record.get("last_wake_delivery_priority_action"),
+            "last_wake_delivery_priority_at": record.get("last_wake_delivery_priority_at"),
+            "last_wake_delivery_priority_target_thread_id": record.get("last_wake_delivery_priority_target_thread_id"),
+            "last_wake_delivery_priority_previous_thread_title": record.get(
+                "last_wake_delivery_priority_previous_thread_title"
+            ),
+            "last_wake_delivery_priority_expected_thread_title": record.get(
+                "last_wake_delivery_priority_expected_thread_title"
+            ),
+        }
+        if str(record.get("agent") or "").strip().lower() == "codex" and not display["desktop_thread_title"]:
+            display.update(self._codex_thread_title_from_session_index(record.get("desktop_thread_id")))
+        return display
+
+    def _session_runtime_display_for_record(
+        self,
+        record: Dict[str, Any],
+        *,
+        agent: Optional[Any],
+        session_id: Optional[Any],
+        project: Optional[Any],
+    ) -> Dict[str, Any]:
+        display = self._recorded_runtime_display_for_session(record)
+        runtime_display = self._runtime_display_for_session(
+            agent,
+            session_id=session_id,
+            project=project,
+        )
+        runtime_title = str(runtime_display.get("desktop_thread_title") or "").strip()
+        recorded_title = str(display.get("desktop_thread_title") or "").strip()
+        runtime_title_generic = runtime_title.lower() in {"codex", "claude"}
+        if runtime_display.get("desktop_thread_title_project_match") is False:
+            display["desktop_thread_title"] = None
+        for key, value in runtime_display.items():
+            if value is not None:
+                if (
+                    key.startswith("desktop_thread_title")
+                    and recorded_title
+                    and runtime_title_generic
+                    and runtime_display.get("desktop_thread_title_project_match") is None
+                ):
+                    continue
+                display[key] = value
+        return display
 
     def _session_display_label(self, session_id: Optional[Any], runtime_display: Dict[str, Any]) -> Optional[str]:
         short = self._short_id(session_id)
@@ -8612,7 +8830,12 @@ class AgentBridge:
         peer_agent = "claude" if agent == "codex" else "codex"
         active_pair = self._ensure_primary_pair_record(project_entry, project)
         actions = self._guided_pairing_actions(project_entry, agent=agent, session_id=session_id, record=record)
-        runtime_display = self._runtime_display_for_session(agent, session_id=session_id, project=project)
+        runtime_display = self._session_runtime_display_for_record(
+            record,
+            agent=agent,
+            session_id=session_id,
+            project=project,
+        )
         peer_runtime_display = self._runtime_display_for_session(
             peer_agent,
             session_id=active.get(peer_agent),
@@ -8636,6 +8859,9 @@ class AgentBridge:
             "peer_session_id": active.get(peer_agent),
             "peer_session_display": self._session_display_label(active.get(peer_agent), peer_runtime_display),
             "peer_desktop_thread_title": peer_runtime_display.get("desktop_thread_title"),
+            "peer_desktop_thread_title_project_match": peer_runtime_display.get(
+                "desktop_thread_title_project_match"
+            ),
             "pair_id": active_pair.get("pair_id") if isinstance(active_pair, dict) else None,
             "session": copy.deepcopy(record),
             "available_actions": actions,
@@ -8659,8 +8885,9 @@ class AgentBridge:
                     continue
                 peer_agent = "claude" if agent == "codex" else "codex"
                 record = sessions.get(session_id) if isinstance(sessions, dict) else {}
-                runtime_display = self._runtime_display_for_session(
-                    agent,
+                runtime_display = self._session_runtime_display_for_record(
+                    record if isinstance(record, dict) else {},
+                    agent=agent,
                     session_id=session_id,
                     project=current_project,
                 )
@@ -8688,6 +8915,9 @@ class AgentBridge:
                         "peer_short_session_id": self._short_id(active.get(peer_agent)),
                         "peer_session_display": peer_session_display,
                         "peer_desktop_thread_title": peer_runtime_display.get("desktop_thread_title"),
+                        "peer_desktop_thread_title_project_match": peer_runtime_display.get(
+                            "desktop_thread_title_project_match"
+                        ),
                         "status": record.get("status", "active") if isinstance(record, dict) else "active",
                         "bootstrap_origin": record.get("bootstrap_origin", "unknown") if isinstance(record, dict) else "unknown",
                         "available_actions": self._guided_pairing_actions(
@@ -8708,8 +8938,9 @@ class AgentBridge:
                 agent = str(record.get("agent") or "")
                 peer_agent = "claude" if agent == "codex" else "codex"
                 role = record.get("non_primary_role") or record.get("status")
-                runtime_display = self._runtime_display_for_session(
-                    agent,
+                runtime_display = self._session_runtime_display_for_record(
+                    record,
+                    agent=agent,
                     session_id=session_id,
                     project=current_project,
                 )
@@ -8736,6 +8967,9 @@ class AgentBridge:
                         "peer_short_session_id": self._short_id(active.get(peer_agent)),
                         "peer_session_display": peer_session_display,
                         "peer_desktop_thread_title": peer_runtime_display.get("desktop_thread_title"),
+                        "peer_desktop_thread_title_project_match": peer_runtime_display.get(
+                            "desktop_thread_title_project_match"
+                        ),
                         "status": record.get("status"),
                         "bootstrap_origin": record.get("bootstrap_origin", "unknown"),
                         "pairing_intent": record.get("pairing_intent"),
@@ -9409,6 +9643,9 @@ class AgentBridge:
             )
             contract_status = self._dashboard_contract_status(contracts)
             guardrail_debt_status = self._dashboard_guardrail_debt_status(registry, project_name)
+            app_dom_status = {
+                "codex": self._codex_visible_thread_titles_from_app_dom(),
+            }
             overview = {
                 "schema_version": 1,
                 "generated_at": utc_now(),
@@ -9438,6 +9675,7 @@ class AgentBridge:
                     "contracts": contract_status,
                     "policy_drift": policy_drift,
                     "guardrail_debt": guardrail_debt_status,
+                    "app_dom": app_dom_status,
                 },
                 "policy": {
                     "source": "runtime",

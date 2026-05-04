@@ -73,6 +73,8 @@ WAKE_BREAKER_SCHEMA_VERSION = 1
 CLAUDE_MONITOR_UNREAD_ESCALATION_S = 60
 STALE_UNREAD_WATCHDOG_REARM_S = 5 * 60
 MONITOR_RESTART_CONTROL_TYPE = "MONITOR_RESTART_REQUIRED"
+MCP_SERVER_RESTARTED_CONTROL_TYPE = "MCP_SERVER_RESTARTED"
+SERVER_STATUS_FILENAME = "server-status.json"
 MONITOR_RESTART_WATCH_FILES = (
     "tools/agent-bridge/bridge_monitor_poll.py",
     "tools/agent-bridge/server.py",
@@ -2703,6 +2705,80 @@ def _effective_toasts_enabled(config: Dict[str, Any], settings: BridgeSettings, 
     return bool(config.get("toasts_enabled", settings.toasts_enabled))
 
 
+def _maybe_notify_mcp_server_restart(
+    *,
+    state_dir: Path,
+    sessions: List[Dict[str, Any]],
+) -> None:
+    """Send a bridge-inbox notification when the MCP server wrapper flags a restart.
+
+    The wrapper writes server-status.json with needs_notification=true after each
+    code-change-triggered restart.  We pick it up here, send a single control
+    message to the Claude inbox so the user sees "server is back up" in chat,
+    then clear the flag to prevent duplicate sends.
+    """
+    status_path = state_dir / SERVER_STATUS_FILENAME
+    try:
+        if not status_path.exists():
+            return
+        data = storage_read_json(status_path)
+        if not data or not data.get("needs_notification"):
+            return
+
+        last_restart_at = str(data.get("last_restart_at") or "unknown")
+        elapsed_ms = data.get("last_restart_elapsed_ms")
+        child_pid = data.get("child_pid")
+        elapsed_str = ("%dms" % elapsed_ms) if elapsed_ms is not None else "unknown"
+
+        for s in sessions:
+            resolved = _resolve_session_config(s)
+            if str(resolved.get("agent") or "") != "claude":
+                continue
+            session_id = str(resolved.get("session_id") or "")
+            project = str(resolved.get("project") or "")
+            if not session_id:
+                continue
+
+            body = (
+                "MCP server restarted and is back up (PID %s).\n"
+                "Restarted at %s — took %s.\n"
+                "The 'Server disconnected' banner can be dismissed safely."
+            ) % (child_pid, last_restart_at, elapsed_str)
+
+            bridge = AgentBridge(state_dir)
+            with bridge._locked():
+                message_id = bridge._append_control_message(
+                    target_agent="claude",
+                    session_id=session_id,
+                    sender="agent-bridge",
+                    control_type=MCP_SERVER_RESTARTED_CONTROL_TYPE,
+                    summary="MCP server restarted — back up in %s" % elapsed_str,
+                    body=body,
+                    status="info",
+                    replace_existing_control=False,
+                    inbox_level="session",
+                    extra_fields={
+                        "mcp_restart_at": last_restart_at,
+                        "mcp_restart_elapsed_ms": elapsed_ms,
+                        "mcp_child_pid": child_pid,
+                    },
+                )
+            if message_id:
+                print(
+                    "[agent-bridge] MCP_SERVER_RESTARTED notification sent to Claude "
+                    "session ...%s (pid=%s elapsed=%s)" % (session_id[-8:], child_pid, elapsed_str),
+                    flush=True,
+                )
+            break
+
+        # Clear the flag regardless of whether we found a session — avoids
+        # a retry storm if no Claude session is currently registered.
+        data["needs_notification"] = False
+        storage_write_json(status_path, data)
+    except Exception as exc:
+        print("[agent-bridge] failed to process MCP server restart notification: %s" % exc, flush=True)
+
+
 def watch(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
@@ -2800,6 +2876,10 @@ def watch(
                     sessions=sessions,
                     state_path=state_path,
                     state_dir=state_dir,
+                )
+                _maybe_notify_mcp_server_restart(
+                    state_dir=state_dir,
+                    sessions=sessions,
                 )
 
             for s in sessions:

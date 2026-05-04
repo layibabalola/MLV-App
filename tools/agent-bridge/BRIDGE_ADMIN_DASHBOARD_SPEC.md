@@ -55,6 +55,17 @@ The dashboard also exposes `restart_watcher` as a direct local action when
 recommended by health. That button is limited to localhost, token and CSRF
 protected, and uses the same safe recovery path as the background supervisor.
 
+The MCP server wrapper owns stale server PID marker cleanup. On startup and at a
+bounded cadence while the wrapper is alive, it reaps dead or identity-mismatched
+`server-pids/` markers so process health does not depend on a human pressing the
+dashboard cleanup button.
+
+MCP reconnect warnings clear only after explicit host-scoped proof. The wrapper
+records `mcp_tool_access_proof` when the connected MCP host sends a `tools/call`
+request, tagged with the wrapper PID and child PID. Health treats that as proof
+only when it matches the latest wrapper launch, which prevents unrelated bridge
+CLI activity from masking a Desktop reconnect problem.
+
 ## Dashboard Areas
 
 ### Overview

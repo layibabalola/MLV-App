@@ -17,8 +17,9 @@ import urllib.error
 import urllib.request
 
 from agent_bridge import AgentBridge, add_common_args
+from compact import reap_stale_server_pids
 from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
-from dashboard_server import DashboardServerHandle, start_dashboard_server
+from dashboard_server import DEFAULT_DASHBOARD_PORT, DashboardServerHandle, start_dashboard_server
 
 
 _WINDOWS_PIPE_CHUNK_BYTES = 4096
@@ -182,7 +183,7 @@ def _dashboard_runtime_healthy(runtime: dict, *, timeout_seconds: float = 3.0) -
     if not url or not token:
         return False
     try:
-        with urllib.request.urlopen("%s/api/overview?%s" % (url, urlencode({"token": token})), timeout=timeout_seconds) as response:
+        with urllib.request.urlopen("%s/api/healthz?%s" % (url, urlencode({"token": token})), timeout=timeout_seconds) as response:
             return response.status == 200
     except (OSError, urllib.error.URLError, TimeoutError):
         return False
@@ -212,6 +213,10 @@ def as_dict(result):
 
 def register_server_pid(state_dir: Path):
     """Create a per-process MCP server marker and return its cleanup callback."""
+    try:
+        reap_stale_server_pids(Path(state_dir), max_age_hours=0, dry_run=False)
+    except Exception as exc:
+        print("agent-bridge MCP server stale marker cleanup failed (non-fatal): %s" % exc, file=sys.stderr, flush=True)
     pid_dir = Path(state_dir) / "server-pids"
     pid_path = pid_dir / f"server-{os.getpid()}.pid"
     runtime_path = pid_dir / f"server-{os.getpid()}.json"
@@ -812,8 +817,13 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
             if _dashboard_handle is None or not _dashboard_handle.thread.is_alive():
                 _dashboard_handle = start_dashboard_server(
                     bridge,
+                    token=str((runtime or {}).get("token") or "") or None,
+                    csrf_token=str((runtime or {}).get("csrf_token") or "") or None,
                     default_agent="codex",
                     default_project=selected_project,
+                    live_app_dom_titles=True,
+                    port=DEFAULT_DASHBOARD_PORT,
+                    fallback_to_ephemeral=True,
                 )
                 _write_dashboard_runtime(bridge.state_dir, handle=_dashboard_handle, project=selected_project)
             handle = _dashboard_handle

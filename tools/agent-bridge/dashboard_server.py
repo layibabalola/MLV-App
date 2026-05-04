@@ -16,6 +16,7 @@ from recover_bridge_session import inspect_bridge_runtime, recover_bridge_sessio
 
 
 LOCAL_DASHBOARD_HOSTS = {"127.0.0.1", "localhost", "::1"}
+DEFAULT_DASHBOARD_PORT = 64737
 
 
 @dataclass(frozen=True)
@@ -1105,15 +1106,58 @@ def _dashboard_html(
       });
     }
 
+    function isGenericThreadTitle(title){
+      const normalized=String(title || "").trim().toLowerCase();
+      return !normalized || normalized === "codex" || normalized === "claude";
+    }
+
+    function safeThreadTitle(pairing, prefix){
+      const keyPrefix=prefix ? prefix+"_" : "";
+      const match=(pairing || {})[keyPrefix+"desktop_thread_title_project_match"];
+      const title=String((pairing || {})[keyPrefix+"desktop_thread_title"] || "").trim();
+      if(match === false || isGenericThreadTitle(title)){
+        return "";
+      }
+      return title;
+    }
+
+    function pairingReadableLabel(pairing){
+      const title=safeThreadTitle(pairing, "");
+      if(title){
+        return title;
+      }
+      const display=String((pairing || {}).session_display || "").trim();
+      const short=shortId((pairing || {}).session_id || "");
+      const displayTitle=display.replace(/\\s*\\([^)]+\\)\\s*$/, "");
+      if(display && display !== short && !isGenericThreadTitle(displayTitle)){
+        return display;
+      }
+      const agent=titleCase((pairing || {}).agent || "agent");
+      const route=String((pairing || {}).role || (pairing || {}).status || "").replace(/_/g, " ");
+      return route ? agent+" "+titleCase(route) : agent;
+    }
+
+    function peerReadableLabel(pairing){
+      const title=safeThreadTitle(pairing, "peer");
+      if(title){
+        return title;
+      }
+      const display=String((pairing || {}).peer_session_display || "").trim();
+      const short=shortId((pairing || {}).peer_session_id || "");
+      const displayTitle=display.replace(/\\s*\\([^)]+\\)\\s*$/, "");
+      if(display && display !== short && !isGenericThreadTitle(displayTitle)){
+        return display;
+      }
+      return titleCase((pairing || {}).peer_agent || "peer")+" primary";
+    }
+
     function pairingTitle(pairing){
       const status=String((pairing || {}).status || "unknown");
       return ((pairing && pairing.project) ? pairing.project : "project")
         +" / "
         +titleCase(status === "active" ? ((pairing || {}).role || "active") : status)
         +" / "
-        +titleCase((pairing || {}).agent || "agent")
-        +" "
-        +shortId((pairing || {}).session_id || "");
+        +pairingReadableLabel(pairing);
     }
 
     function openModal(options){
@@ -1366,6 +1410,40 @@ def _dashboard_html(
         + '</article>';
     }
 
+    function renderAppDomCard(appDom){
+      const codex=(appDom || {}).codex || {};
+      const titles=toArray(codex.visible_thread_titles).filter(function(row){
+        return String((row || {}).title || "").trim();
+      });
+      if(!titles.length){
+        return "";
+      }
+      const selectedRow=titles.find(function(row){ return Boolean((row || {}).selected); }) || null;
+      const selectedTitle=String(codex.selected_title || ((selectedRow || {}).title) || "").trim();
+      const shown=titles.slice(0, 12);
+      const omitted=Math.max(0, titles.length - shown.length);
+      const titleText=titles.map(function(row){ return String((row || {}).title || "").trim(); }).filter(Boolean).join("\\n");
+      const chips=shown.map(function(row){
+        const title=String((row || {}).title || "").trim();
+        const selected=Boolean((row || {}).selected) || (selectedTitle && title === selectedTitle);
+        return '<span class="pill '+toneClass(selected ? "info" : "neutral")+'">'+escapeHtml(title)+'</span>';
+      }).join("")
+        + (omitted ? '<span class="pill '+toneClass("neutral")+'">+'+escapeHtml(String(omitted))+' more</span>' : "");
+      return '<article class="status-card">'
+        + '<div class="surface-header"><div><div class="section-kicker">App DOM</div><h3 class="surface-title">Codex sidebar titles</h3></div>'
+        + '<span class="pill '+toneClass("info")+'">Readable</span></div>'
+        + '<div class="surface-stat">'+escapeHtml(String(codex.visible_thread_title_count || titles.length))+'</div>'
+        + '<p class="surface-copy">Visible Codex sidebar titles are readable from the app DOM. Pair rows still need a recorded thread id or trusted source match before a title can be assigned.</p>'
+        + '<dl class="detail-list">'
+        + detailRow("Selected", selectedTitle || "none")
+        + detailRow("Source", codex.source || "codex_app_dom_sidebar")
+        + detailRow("Observed", formatDate(codex.observed_at || ""))
+        + '</dl>'
+        + '<div class="meta-chips">'+chips+'</div>'
+        + '<div class="button-row"><button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml(titleText)+'" data-copy-label="Visible Codex titles">Copy titles</button></div>'
+        + '</article>';
+    }
+
     function surfaceNeedsAttention(key, surface){
       const status=String((surface || {}).status || "unknown").toLowerCase();
       if(!["ok","active","current","clean"].includes(status)){
@@ -1557,6 +1635,8 @@ def _dashboard_html(
       const agent=String((pairing || {}).agent || "other").toLowerCase();
       const avatarClass=agent === "codex" ? "avatar-codex" : (agent === "claude" ? "avatar-claude" : "avatar-other");
       const status=String((pairing || {}).status || "unknown");
+      const threadTitle=safeThreadTitle(pairing, "");
+      const peerLabel=peerReadableLabel(pairing);
       const threadMatch=(pairing || {}).desktop_thread_title_project_match;
       let threadProof="Thread proof unknown";
       if(threadMatch === true){
@@ -1579,7 +1659,7 @@ def _dashboard_html(
         + '<div>'
         + '<div class="pair-header"><div><div class="section-kicker">Pairing</div><h3 class="pair-title">'+escapeHtml(pairingTitle(pairing))+'</h3></div>'
         + '<span class="pill '+toneClass(toneForStatus(status))+'">'+escapeHtml(titleCase(status))+'</span></div>'
-        + '<p class="pair-copy">'+escapeHtml("Connected to "+(((pairing || {}).peer_agent) || "peer")+" "+shortId((pairing || {}).peer_session_id || "")+" in a "+(((pairing || {}).relationship) || "paired")+" relationship.")+'</p>'
+        + '<p class="pair-copy">'+escapeHtml("Connected to "+peerLabel+" in a "+(((pairing || {}).relationship) || "paired")+" relationship.")+'</p>'
         + '</div></div>'
         + '<div class="pair-chips">'
         + '<span class="pill '+toneClass("info")+'">'+escapeHtml(titleCase((pairing || {}).role || "unknown"))+'</span>'
@@ -1587,6 +1667,7 @@ def _dashboard_html(
         + '<span class="pill '+toneClass((pairing || {}).last_wake_postflight_action ? "success" : "neutral")+'">'+escapeHtml(wakeReason)+'</span>'
         + '</div>'
         + '<dl class="detail-list">'
+        + detailRow("Thread title", threadTitle || "-")
         + detailRow("Session", shortId((pairing || {}).session_id || ""))
         + detailRow("Peer session", shortId((pairing || {}).peer_session_id || ""))
         + detailRow("Desktop thread", (pairing || {}).desktop_thread_id ? shortId((pairing || {}).desktop_thread_id || "") : "—")
@@ -1606,8 +1687,9 @@ def _dashboard_html(
     function renderPairQueueCard(items){
       const rows=items.slice(0, 6).map(function(pairing){
         const status=String((pairing || {}).status || "unknown");
+        const peerLabel=peerReadableLabel(pairing);
         return '<div class="summary-item">'
-          + '<div><div class="summary-item-title">'+escapeHtml(pairingTitle(pairing))+'</div><div class="summary-item-copy">'+escapeHtml("Peer "+(((pairing || {}).peer_agent) || "peer")+" "+shortId((pairing || {}).peer_session_id || "")+" · "+titleCase((pairing || {}).relationship || "paired"))+'</div></div>'
+          + '<div><div class="summary-item-title">'+escapeHtml(pairingTitle(pairing))+'</div><div class="summary-item-copy">'+escapeHtml("Peer "+peerLabel+" - "+titleCase((pairing || {}).relationship || "paired"))+'</div></div>'
           + '<div class="summary-item-actions">'
           + '<span class="pill '+toneClass(toneForStatus(status))+'">'+escapeHtml(titleCase(status))+'</span>'
           + '<button type="button" class="button button-secondary" data-action="copy-text" data-copy="'+escapeHtml((pairing || {}).session_id || "")+'" data-copy-label="Pending pair session ID" data-focus-key="queue-session-'+escapeHtml((pairing || {}).session_id || "")+'">Copy session</button>'
@@ -1729,15 +1811,16 @@ def _dashboard_html(
       const attentionSurfaces=surfaceOrder.filter(function(key){ return surfaces[key] && surfaceNeedsAttention(key, surfaces[key]); });
       const stableSurfaces=surfaceOrder.filter(function(key){ return surfaces[key] && !surfaceNeedsAttention(key, surfaces[key]); });
       const coreCauseCards=renderCoreCauseCards(health, recommended);
+      const appDomCard=renderAppDomCard(surfaces.app_dom || {});
       const secondarySurfaceCards=attentionSurfaces.map(function(key){ return renderSurfaceCard(key, surfaces[key]); }).join("");
-      const fallbackSurfaceCards=(coreCauseCards || secondarySurfaceCards) ? "" : (
+      const fallbackSurfaceCards=(coreCauseCards || appDomCard || secondarySurfaceCards) ? "" : (
         healthTone === "danger"
           ? '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Health alert</div><h3 class="surface-title">Top-level health is still broken</h3></div><span class="pill '+toneClass("danger")+'">Broken</span></div><div class="surface-stat">'+escapeHtml(String(recommended.length || 1))+'</div><p class="surface-copy">'+escapeHtml("The primary recovery path above addresses the current broken-health signal. Use the follow-up sections for secondary work only.")+'</p></article>'
           : ((recommendedForGrid.length || pending.length)
             ? '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Status surface</div><h3 class="surface-title">Core surfaces are stable, but follow-up work remains</h3></div><span class="pill '+toneClass("warning")+'">Follow-up</span></div><div class="surface-stat">'+escapeHtml(String(recommendedForGrid.length + pending.length))+'</div><p class="surface-copy">The bridge is calm at the surface level, but there are still queued actions below that need operator attention.</p></article>'
             : '<article class="status-card"><div class="surface-header"><div><div class="section-kicker">Status surface</div><h3 class="surface-title">All monitored surfaces stable</h3></div><span class="pill '+toneClass("success")+'">Stable</span></div><div class="surface-stat">0</div><p class="surface-copy">Nothing across reads, inbox pressure, policy drift, contracts, or guardrail debt currently needs escalation.</p></article>')
       );
-      const surfaceCards=coreCauseCards+secondarySurfaceCards+fallbackSurfaceCards;
+      const surfaceCards=coreCauseCards+appDomCard+secondarySurfaceCards+fallbackSurfaceCards;
       const stableSurfaceStrip=stableSurfaces.length ? '<div class="stable-strip">'+stableSurfaces.map(function(key){ return renderStableSurfaceChip(key, surfaces[key]); }).join("")+'</div>' : "";
       const actionCards=recommendedForGrid.length ? recommendedForGrid.map(renderActionCard).join("") : emptyState("Primary recovery already pinned above", "No secondary follow-up actions remain beyond the spotlighted recovery step.");
       const pairCards=activePairingsList.length ? '<div class="cards-grid">'+activePairingsList.map(renderPairCard).join("")+'</div>' : emptyState("No active primary pairings", "There are no active same-project routes in this scope, so nothing is expanded as a live primary.");
@@ -2171,6 +2254,14 @@ class BridgeDashboardHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         agent, project = self._agent_project()
+        if parsed.path == "/api/healthz":
+            _json_response(self, HTTPStatus.OK, {
+                "ok": True,
+                "status": "running",
+                "project": project,
+                "csrf_token": self.server.csrf_token,
+            })
+            return
         if parsed.path == "/api/overview":
             output_format = str(self._query().get("format") or "json")
             result = self.server.bridge.dashboard_overview(agent=agent, project=project, format=output_format)
@@ -2183,7 +2274,12 @@ class BridgeDashboardHandler(BaseHTTPRequestHandler):
             })
             return
         if parsed.path in {"", "/"}:
-            result = self.server.bridge.dashboard_overview(agent=agent, project=project, format="json")
+            live_app_dom_titles = self.server.bridge.live_app_dom_titles
+            self.server.bridge.live_app_dom_titles = False
+            try:
+                result = self.server.bridge.dashboard_overview(agent=agent, project=project, format="json")
+            finally:
+                self.server.bridge.live_app_dom_titles = live_app_dom_titles
             initial_payload = {
                 "ok": result.ok,
                 "status": result.status,
@@ -2269,21 +2365,36 @@ def start_dashboard_server(
     default_agent: str = "codex",
     default_project: Optional[str] = None,
     repo_root: Optional[str] = None,
+    live_app_dom_titles: bool = False,
+    fallback_to_ephemeral: bool = False,
 ) -> DashboardServerHandle:
     if host not in LOCAL_DASHBOARD_HOSTS:
         raise ValueError("dashboard may only bind localhost, 127.0.0.1, or ::1")
+    bridge.live_app_dom_titles = bool(live_app_dom_titles)
     resolved_token = token or generate_dashboard_token()
     resolved_csrf = csrf_token or secrets.token_urlsafe(24)
-    server = BridgeDashboardHTTPServer(
-        (host, int(port)),
-        BridgeDashboardHandler,
-        bridge=bridge,
-        token=resolved_token,
-        csrf_token=resolved_csrf,
-        default_agent=default_agent,
-        default_project=default_project,
-        repo_root=repo_root,
-    )
+    requested_port = int(port)
+
+    def _bind(bind_port: int) -> BridgeDashboardHTTPServer:
+        return BridgeDashboardHTTPServer(
+            (host, bind_port),
+            BridgeDashboardHandler,
+            bridge=bridge,
+            token=resolved_token,
+            csrf_token=resolved_csrf,
+            default_agent=default_agent,
+            default_project=default_project,
+            repo_root=repo_root,
+        )
+
+    try:
+        server = _bind(requested_port)
+        port_fallback = False
+    except OSError:
+        if not fallback_to_ephemeral or requested_port == 0:
+            raise
+        server = _bind(0)
+        port_fallback = True
     thread = threading.Thread(target=server.serve_forever, name="agent-bridge-dashboard", daemon=True)
     thread.start()
     actual_host, actual_port = server.server_address[:2]
@@ -2294,7 +2405,9 @@ def start_dashboard_server(
             "action": "dashboard_started",
             "accepted": True,
             "bind_host": actual_host,
+            "requested_port": requested_port,
             "port": actual_port,
+            "port_fallback": port_fallback,
             "auth_mode": "bearer_token",
             "csrf": True,
         }

@@ -3,6 +3,7 @@ import json
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -46,12 +47,13 @@ from core.settings import load_settings, settings_path_for_state_dir
 from core.storage import append_jsonl, read_json, read_jsonl, with_schema_version, write_json, write_jsonl
 from core.transport import LocalFilesystemTransport
 from dashboard_launcher import _self_heal_watcher_if_needed
-from dashboard_server import start_dashboard_server
+from dashboard_server import DEFAULT_DASHBOARD_PORT, start_dashboard_server
 from migrate_root import migrate_root
 from project_identity import derive_project_identity, normalize_rendezvous
 from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session
 from recover_state import recover_state
 from routing_policy import evaluate_message
+from server import register_server_pid
 from server_wrapper import ServerSupervisor, SupervisorConfig
 import watcher
 
@@ -824,6 +826,64 @@ class AgentBridgeTests(unittest.TestCase):
             supervisor._shutdown_child()
             supervisor._join_all_stdout_threads()
 
+    def test_server_wrapper_records_host_scoped_mcp_tool_access_proof(self) -> None:
+        supervisor = ServerSupervisor(
+            command=[sys.executable, "-c", "import time; time.sleep(60)"],
+            state_dir=self.state_dir,
+            watch_paths=[],
+            config=SupervisorConfig(loop_sleep_seconds=0.01),
+        )
+        payload = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "proof-1",
+                    "method": "tools/call",
+                    "params": {"name": "bridge_health_panel", "arguments": {"agent": "codex"}},
+                }
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+        remainder = supervisor._parse_stdin_for_requests(payload, b"")
+
+        self.assertEqual(remainder, b"")
+        with supervisor._state_lock:
+            self.assertIn("proof-1", supervisor._pending_request_ids)
+        events = read_jsonl(self.state_dir / "messages.jsonl")
+        proofs = [event for event in events if event.get("action") == "mcp_tool_access_proof"]
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual(proofs[0]["tool_name"], "bridge_health_panel")
+        self.assertEqual(proofs[0]["request_id"], "proof-1")
+        self.assertEqual(proofs[0]["wrapper_pid"], os.getpid())
+        self.assertEqual(proofs[0]["host_scope"], "wrapper:%s" % os.getpid())
+
+    def test_server_wrapper_periodically_reaps_stale_mcp_server_markers(self) -> None:
+        server_dir = self.state_dir / "server-pids"
+        server_dir.mkdir(parents=True)
+        marker = server_dir / "server-424242.pid"
+        runtime = server_dir / "server-424242.json"
+        marker.write_text("424242\n", encoding="utf-8")
+        runtime.write_text(
+            json.dumps({"schema_version": 1, "role": "mcp_server", "pid": 424242}),
+            encoding="utf-8",
+        )
+        supervisor = ServerSupervisor(
+            command=[sys.executable, "-c", "import time; time.sleep(60)"],
+            state_dir=self.state_dir,
+            watch_paths=[],
+            config=SupervisorConfig(stale_marker_max_age_hours=0),
+        )
+
+        with patch("compact.is_process_alive", return_value=False):
+            supervisor._maybe_reap_stale_server_markers(force=True)
+
+        self.assertFalse(marker.exists())
+        self.assertFalse(runtime.exists())
+        events = read_jsonl(self.state_dir / "messages.jsonl")
+        self.assertTrue(any(event.get("action") == "reap_stale_server_pids" for event in events))
+        self.assertTrue(any(event.get("action") == "mcp_server_stale_markers_self_healed" for event in events))
+
     def test_server_wrapper_respawns_unexpected_child_exit_without_refresh_required(self) -> None:
         class BlockingInput:
             def __init__(self) -> None:
@@ -998,6 +1058,8 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("STAGE4_DELIVERY_PRIORITY_DISPLACEMENT", text)
         self.assertIn("targeted_wake_delivery_priority_no_restore", text)
         self.assertIn("function Test-GenericCodexThreadTitle", text)
+        self.assertIn("function Get-CodexSelectedSidebarThreadTitle", text)
+        self.assertIn("codex_app_dom_sidebar_selected_thread", text)
         self.assertIn("foreground_codex_target_thread_unavailable", text)
         self.assertIn("targeted_wake_restore_thread_deeplink_invoked_unverified", text)
         self.assertIn("MaxPreSendRaceMilliseconds", text)
@@ -2757,6 +2819,15 @@ for index in range(count):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["csrf_token"], "csrf-token")
 
+            healthz = urllib.request.Request(
+                handle.url + "/api/healthz",
+                headers={"Authorization": "Bearer test-token"},
+            )
+            with urllib.request.urlopen(healthz, timeout=5) as response:
+                health_payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(health_payload["ok"])
+            self.assertEqual("running", health_payload["status"])
+
             post = urllib.request.Request(
                 handle.url + "/api/revoke",
                 data=json.dumps({"link_id": "xpair-missing", "project": "mlv-app"}).encode("utf-8"),
@@ -2799,6 +2870,11 @@ for index in range(count):
             self.assertIn("/api/recommended-action", html)
             self.assertIn("id=\"modal-root\"", html)
             self.assertIn("renderCoreCauseCards", html)
+            self.assertIn("safeThreadTitle", html)
+            self.assertIn("pairingReadableLabel", html)
+            self.assertIn("renderAppDomCard", html)
+            self.assertIn("Codex sidebar titles", html)
+            self.assertIn("Thread title", html)
             self.assertIn("Core health cause", html)
             self.assertIn("Watcher delivery loop", html)
             self.assertIn("MCP server markers", html)
@@ -3109,6 +3185,69 @@ for index in range(count):
             proc.wait(timeout=10)
             stopped = json.loads(runtime_path.read_text(encoding="utf-8"))
             self.assertEqual("stopped", stopped["status"])
+
+            restarted = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(script),
+                    "--bridge-root",
+                    str(bridge_root),
+                    "--project",
+                    "mlv-app",
+                    "--port",
+                    "0",
+                    "--no-browser",
+                    "--background",
+                    "--health-interval-seconds",
+                    "1",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            restart_queue: queue.Queue[str] = queue.Queue()
+
+            def _read_restart_line() -> None:
+                assert restarted.stdout is not None
+                restart_queue.put(restarted.stdout.readline())
+
+            restart_reader = threading.Thread(target=_read_restart_line, daemon=True)
+            restart_reader.start()
+            try:
+                try:
+                    restart_line = restart_queue.get(timeout=10)
+                except queue.Empty:
+                    restarted.kill()
+                    restart_stderr = restarted.stderr.read() if restarted.stderr is not None else ""
+                    self.fail("dashboard restart did not print URL: %s" % restart_stderr)
+                self.assertTrue(restart_line.startswith("Agent Bridge Dashboard: "), restart_line)
+                restarted_runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+                self.assertEqual(stopped["token"], restarted_runtime["token"])
+                self.assertEqual(stopped["csrf_token"], restarted_runtime["csrf_token"])
+                restart_shutdown = urllib.request.Request(
+                    restarted_runtime["url"] + "/api/shutdown?token=" + restarted_runtime["token"],
+                    data=b"{}",
+                    headers={
+                        "X-CSRF-Token": restarted_runtime["csrf_token"],
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(restart_shutdown, timeout=5) as response:
+                    self.assertEqual(200, response.status)
+                restarted.wait(timeout=10)
+            finally:
+                if restarted.poll() is None:
+                    restarted.terminate()
+                    try:
+                        restarted.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        restarted.kill()
+                        restarted.wait(timeout=5)
+                if restarted.stdout is not None:
+                    restarted.stdout.close()
+                if restarted.stderr is not None:
+                    restarted.stderr.close()
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -3138,6 +3277,41 @@ for index in range(count):
     def test_dashboard_server_rejects_non_local_bind_host(self) -> None:
         with self.assertRaises(ValueError):
             start_dashboard_server(AgentBridge(self.state_dir), host="0.0.0.0")
+
+    def test_dashboard_server_can_fallback_when_preferred_port_is_occupied(self) -> None:
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        occupied_port = blocker.getsockname()[1]
+        bridge = AgentBridge(self.state_dir)
+        handle = start_dashboard_server(
+            bridge,
+            port=occupied_port,
+            token="test-token",
+            fallback_to_ephemeral=True,
+        )
+        try:
+            self.assertNotEqual("http://127.0.0.1:%d" % occupied_port, handle.url)
+            with urllib.request.urlopen(handle.url + "/api/healthz?token=test-token", timeout=5) as response:
+                self.assertEqual(200, response.status)
+            audit = read_jsonl(bridge.audit_path)
+            started = next(row for row in reversed(audit) if row.get("action") == "dashboard_started")
+            self.assertEqual(occupied_port, started["requested_port"])
+            self.assertTrue(started["port_fallback"])
+        finally:
+            handle.stop()
+            blocker.close()
+
+    def test_dashboard_launcher_uses_stable_default_port(self) -> None:
+        script = Path(__file__).resolve().parent / "dashboard_launcher.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("default: %d" % DEFAULT_DASHBOARD_PORT, result.stdout)
 
     def test_target_session_id_alias_rejects_conflict(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -3753,6 +3927,173 @@ for index in range(count):
             "Agent Bridge - Codex (...dex-live)",
             watcher._runtime_session_display_label(self.state_dir, "codex", "codex-live", "mlv-app"),
         )
+
+    def test_recorded_non_primary_thread_title_surfaces_in_pairing_data(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        bridge.register_non_primary_session(
+            "codex",
+            "codex-pending",
+            project="mlv-app",
+            pairing_intent="ask_first",
+            desktop_thread_id="thr-pending",
+        )
+        registry = json.loads(bridge.session_registry_path.read_text(encoding="utf-8"))
+        record = registry["projects"]["mlv-app"]["sessions"]["codex-pending"]
+        record.update(
+            {
+                "desktop_thread_title": "Pair Queue Pending Thread",
+                "desktop_thread_title_source": "uia_root_name",
+                "desktop_thread_title_observed_at": "2026-05-03T16:08:00+00:00",
+                "desktop_thread_title_project_match": True,
+            }
+        )
+        write_json(bridge.session_registry_path, registry)
+
+        pairings = bridge.list_pairings("codex", project="mlv-app")
+        pending_row = next(row for row in pairings.data["pairings"] if row["session_id"] == "codex-pending")
+        self.assertEqual("Pair Queue Pending Thread", pending_row["desktop_thread_title"])
+        self.assertEqual("thr-pending", pending_row["desktop_thread_id"])
+        self.assertEqual("Pair Queue Pending Thread (codex-pe)", pending_row["session_display"])
+        self.assertIn("Pair Queue Pending Thread", pending_row["friendly_name"])
+
+        details = bridge.pairing_details("codex", project="mlv-app", session_id="codex-pending")
+        self.assertEqual("Pair Queue Pending Thread", details.data["pairing"]["desktop_thread_title"])
+        self.assertEqual("thr-pending", details.data["pairing"]["desktop_thread_id"])
+
+    def test_codex_session_index_thread_title_surfaces_in_pair_queue_data(self) -> None:
+        codex_home = self.tempdir / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "session_index.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "id": "thread-indexed",
+                            "thread_name": "Older Queue Title",
+                            "updated_at": "2026-05-03T15:00:00+00:00",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "id": "thread-indexed",
+                            "thread_name": "GUI Queue Title",
+                            "updated_at": "2026-05-03T16:00:00+00:00",
+                        }
+                    ),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        bridge = AgentBridge(self.state_dir)
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        bridge.register_non_primary_session(
+            "codex",
+            "codex-pending",
+            project="mlv-app",
+            pairing_intent="ask_first",
+            desktop_thread_id="thread-indexed",
+        )
+
+        with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            pairings = bridge.list_pairings("codex", project="mlv-app")
+
+        pending_row = next(row for row in pairings.data["pairings"] if row["session_id"] == "codex-pending")
+        self.assertEqual("GUI Queue Title", pending_row["desktop_thread_title"])
+        self.assertEqual("codex_session_index", pending_row["desktop_thread_title_source"])
+        self.assertEqual("GUI Queue Title (codex-pe)", pending_row["session_display"])
+        self.assertIn("GUI Queue Title", pending_row["friendly_name"])
+
+    def test_codex_app_dom_thread_title_overrides_generic_active_runtime_title(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.live_app_dom_titles = True
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+        breadcrumb = build_peer_runtime_breadcrumb(
+            state_dir=self.state_dir,
+            agent="codex",
+            session_id="codex-live",
+            project="mlv-app",
+            desktop_thread_id="thread-live",
+        )
+        breadcrumb.update(
+            {
+                "desktop_thread_title": "Codex",
+                "desktop_thread_title_source": "uia_root_name",
+                "desktop_thread_title_project_match": None,
+            }
+        )
+        write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"), breadcrumb)
+
+        payload = json.dumps(
+            {
+                "ok": True,
+                "title": "Show thread titles",
+                "source": "codex_app_dom_sidebar_selected_thread",
+                "observed_at": "2026-05-03T20:48:29+00:00",
+                "window_title": "Codex",
+            }
+        )
+        completed = subprocess.CompletedProcess(
+            ["powershell"],
+            0,
+            stdout=payload + "\n",
+            stderr="",
+        )
+        with patch("agent_bridge.sys.platform", "win32"), patch("agent_bridge.subprocess.run", return_value=completed):
+            pairings = bridge.list_pairings("codex", project="mlv-app")
+
+        codex_row = next(row for row in pairings.data["pairings"] if row["agent"] == "codex")
+        self.assertEqual("Show thread titles", codex_row["desktop_thread_title"])
+        self.assertEqual("codex_app_dom_sidebar_selected_thread", codex_row["desktop_thread_title_source"])
+        self.assertEqual("Show thread titles (codex-li)", codex_row["session_display"])
+
+    def test_codex_app_dom_visible_sidebar_titles_surface_in_dashboard(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        bridge.live_app_dom_titles = True
+        bridge.activate_session("claude", "claude-live", project="mlv-app")
+        bridge.activate_session("codex", "codex-live", project="mlv-app")
+
+        payload = json.dumps(
+            {
+                "ok": True,
+                "title": "Show thread titles",
+                "source": "codex_app_dom_sidebar_selected_thread",
+                "observed_at": "2026-05-03T20:48:29+00:00",
+                "window_title": "Codex",
+                "visible_thread_titles": [
+                    {"title": "Repo Hygiene", "selected": False},
+                    {"title": "Show thread titles", "selected": True},
+                    {"title": "Agent Bridge", "selected": False},
+                ],
+                "visible_thread_title_count": 3,
+            }
+        )
+        completed = subprocess.CompletedProcess(
+            ["powershell"],
+            0,
+            stdout=payload + "\n",
+            stderr="",
+        )
+        with patch("agent_bridge.sys.platform", "win32"), patch("agent_bridge.subprocess.run", return_value=completed):
+            result = bridge.dashboard_overview("codex", project="mlv-app")
+
+        codex_dom = result.data["overview"]["status_surfaces"]["app_dom"]["codex"]
+        self.assertEqual("Show thread titles", codex_dom["selected_title"])
+        self.assertEqual(3, codex_dom["visible_thread_title_count"])
+        self.assertEqual(
+            ["Repo Hygiene", "Show thread titles", "Agent Bridge"],
+            [row["title"] for row in codex_dom["visible_thread_titles"]],
+        )
+
+    def test_codex_thread_title_probe_filters_sidebar_controls(self) -> None:
+        text = (Path(__file__).resolve().parent / "codex_thread_title_probe.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Get-CodexVisibleSidebarTitles", text)
+        self.assertIn('"Show less"', text)
+        self.assertIn('"Show more"', text)
+        self.assertIn('"Chats"', text)
 
     def test_thread_title_display_rejects_project_mismatch(self) -> None:
         bridge = AgentBridge(self.state_dir)
@@ -5008,6 +5349,29 @@ for index in range(count):
         self.assertEqual(status.data["watcher"]["runtime"]["role"], "watcher")
         self.assertEqual(status.data["mcp_server_markers"][0]["runtime"]["role"], "mcp_server")
 
+    def test_register_server_pid_reaps_stale_markers_on_mcp_server_startup(self) -> None:
+        server_dir = self.state_dir / "server-pids"
+        server_dir.mkdir(parents=True)
+        stale_marker = server_dir / "server-424242.pid"
+        stale_runtime = server_dir / "server-424242.json"
+        stale_marker.write_text("424242\n", encoding="utf-8")
+        stale_runtime.write_text(
+            json.dumps({"schema_version": 1, "role": "mcp_server", "pid": 424242}),
+            encoding="utf-8",
+        )
+
+        with patch("compact.is_process_alive", return_value=False):
+            cleanup = register_server_pid(self.state_dir)
+        try:
+            self.assertFalse(stale_marker.exists())
+            self.assertFalse(stale_runtime.exists())
+            current_marker = server_dir / ("server-%s.pid" % os.getpid())
+            current_runtime = server_dir / ("server-%s.json" % os.getpid())
+            self.assertTrue(current_marker.exists())
+            self.assertTrue(current_runtime.exists())
+        finally:
+            cleanup()
+
     def test_bridge_process_status_flags_pid_reuse_server_marker(self) -> None:
         self.state_dir.mkdir(parents=True)
         bridge_root = self.state_dir.parent
@@ -5107,9 +5471,9 @@ for index in range(count):
         action_ids = {item["id"] for item in health.data["snapshot"]["recommended_actions"]}
         self.assertIn("reconnect_mcp_host", action_ids)
 
-    def test_bridge_process_status_marks_wrapper_reconnected_after_tool_activity(self) -> None:
+    def test_bridge_process_status_marks_wrapper_reconnected_after_host_scoped_tool_proof(self) -> None:
         bridge = AgentBridge(self.state_dir)
-        now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc)
         launch_at = (now - timedelta(minutes=10)).isoformat(timespec="seconds")
         restart_at = (now - timedelta(minutes=9)).isoformat(timespec="seconds")
         tool_at = (now - timedelta(minutes=8)).isoformat(timespec="seconds")
@@ -5137,9 +5501,12 @@ for index in range(count):
         append_jsonl(
             self.state_dir / "messages.jsonl",
             {
-                "action": "check_inbox",
+                "action": "mcp_tool_access_proof",
                 "timestamp": tool_at,
-                "agent": "codex",
+                "wrapper_pid": 424242,
+                "child_pid": 222,
+                "tool_name": "bridge_health_panel",
+                "host_scope": "wrapper:424242",
                 "accepted": True,
             },
         )
@@ -5150,8 +5517,55 @@ for index in range(count):
         reconnect = status.data["mcp_reconnect"]
         self.assertEqual(reconnect["impact_class"], "benign_hot_reload")
         self.assertTrue(reconnect["mcp_host_likely_reconnected"])
+        self.assertEqual(reconnect["mcp_host_proof_source"], "host_scoped_tool_call")
+        self.assertEqual(reconnect["host_scoped_tool_proof_count"], 1)
         self.assertEqual(reconnect["inner_pid"], 222)
         self.assertEqual(reconnect["inner_restart_count_today"], 1)
+
+    def test_bridge_process_status_ignores_legacy_or_wrong_wrapper_tool_activity_for_reconnect_proof(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        now = datetime.now(timezone.utc)
+        launch_at = (now - timedelta(minutes=1)).isoformat(timespec="seconds")
+        tool_at = (now - timedelta(seconds=30)).isoformat(timespec="seconds")
+        append_jsonl(
+            self.state_dir / "messages.jsonl",
+            {
+                "action": "mcp_server_wrapper_launch",
+                "timestamp": launch_at,
+                "pid": 424242,
+                "command": ["py", "server.py"],
+                "accepted": True,
+            },
+        )
+        append_jsonl(
+            self.state_dir / "messages.jsonl",
+            {
+                "action": "check_inbox",
+                "timestamp": tool_at,
+                "agent": "codex",
+                "accepted": True,
+            },
+        )
+        append_jsonl(
+            self.state_dir / "messages.jsonl",
+            {
+                "action": "mcp_tool_access_proof",
+                "timestamp": tool_at,
+                "wrapper_pid": 111111,
+                "tool_name": "bridge_health_panel",
+                "host_scope": "wrapper:111111",
+                "accepted": True,
+            },
+        )
+
+        with patch("agent_bridge.is_process_alive", return_value=True):
+            status = bridge.bridge_process_status()
+
+        reconnect = status.data["mcp_reconnect"]
+        self.assertEqual(reconnect["impact_class"], "tool_access_risk")
+        self.assertFalse(reconnect["mcp_host_likely_reconnected"])
+        self.assertEqual(reconnect["host_scoped_tool_proof_count"], 0)
+        self.assertEqual(reconnect["legacy_post_launch_tool_activity_count"], 1)
 
     def test_bridge_process_status_treats_bridge_code_refresh_as_tool_access_risk(self) -> None:
         bridge = AgentBridge(self.state_dir)

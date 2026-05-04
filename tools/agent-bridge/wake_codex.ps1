@@ -711,29 +711,176 @@ function Write-WakeTelemetry {
     }
 }
 
+function ConvertTo-CleanCodexThreadTitle {
+    param([string]$Title)
+    $text = ([string]$Title).Replace("`r", " ").Replace("`n", " ").Trim()
+    $text = [regex]::Replace($text, "\s+", " ")
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return ""
+    }
+    # Codex sidebar accessibility names can append relative ages without a
+    # separator, for example "Agent Bridge18h".
+    $text = [regex]::Replace($text, "(?<=\S)(?:\d+\s*(?:s|m|h|d|w)|\d+\s*(?:mo|y))$", "").Trim()
+    return $text
+}
+
+function Test-CodexThreadTitleCandidate {
+    param([string]$Title)
+    $text = ConvertTo-CleanCodexThreadTitle -Title $Title
+    if ([string]::IsNullOrWhiteSpace($text) -or $text.Length -gt 160) {
+        return $false
+    }
+    $blocked = @(
+        "Archive chat",
+        "Archive chat Pin chat",
+        "Automations",
+        "Back",
+        "Close",
+        "Collapse all",
+        "Codex",
+        "Edit",
+        "File",
+        "Filter sidebar chats",
+        "Forward",
+        "Help",
+        "Hide sidebar",
+        "Maximize",
+        "Minimize",
+        "New chat",
+        "Plugins",
+        "Projects",
+        "Search",
+        "Update",
+        "View",
+        "Window"
+    )
+    return $blocked -notcontains $text
+}
+
+function Get-CodexSelectedSidebarThreadTitle {
+    param([System.Windows.Automation.AutomationElement]$Root)
+    $rootRect = $Root.Current.BoundingRectangle
+    $all = $Root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        $element = $all.Item($i)
+        $controlType = $element.Current.ControlType.ProgrammaticName -replace "^ControlType\.", ""
+        if ($controlType -ne "ListItem") {
+            continue
+        }
+        $name = ConvertTo-CleanCodexThreadTitle -Title ([string]$element.Current.Name)
+        if (-not (Test-CodexThreadTitleCandidate -Title $name)) {
+            continue
+        }
+        $className = [string]$element.Current.ClassName
+        if ($className -notlike "*after:block*") {
+            continue
+        }
+        $rect = $element.Current.BoundingRectangle
+        if ($rect.Width -le 0 -or $rect.Height -le 0) {
+            continue
+        }
+        if ($rect.X -lt ($rootRect.X - 4) -or $rect.X -gt ($rootRect.X + $rootRect.Width)) {
+            continue
+        }
+        if ($rect.Y -lt ($rootRect.Y - 4) -or $rect.Y -gt ($rootRect.Y + $rootRect.Height)) {
+            continue
+        }
+        $children = $element.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        for ($j = 0; $j -lt $children.Count; $j++) {
+            $child = $children.Item($j)
+            $childType = $child.Current.ControlType.ProgrammaticName -replace "^ControlType\.", ""
+            if ($childType -ne "Button") {
+                continue
+            }
+            $childClass = [string]$child.Current.ClassName
+            if ($childClass -match "(^|\s)bg-token-list-hover-background(\s|$)") {
+                return $name
+            }
+        }
+    }
+    return ""
+}
+
+function Get-CodexTopHeaderThreadTitle {
+    param([System.Windows.Automation.AutomationElement]$Root)
+    $rootRect = $Root.Current.BoundingRectangle
+    $all = $Root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        $element = $all.Item($i)
+        $controlType = $element.Current.ControlType.ProgrammaticName -replace "^ControlType\.", ""
+        if ($controlType -ne "Text") {
+            continue
+        }
+        $rect = $element.Current.BoundingRectangle
+        if ($rect.Width -le 0 -or $rect.Height -le 0) {
+            continue
+        }
+        if ($rect.Y -lt $rootRect.Y -or $rect.Y -gt ($rootRect.Y + 260)) {
+            continue
+        }
+        $name = ConvertTo-CleanCodexThreadTitle -Title ([string]$element.Current.Name)
+        if (Test-CodexThreadTitleCandidate -Title $name) {
+            return $name
+        }
+    }
+    return ""
+}
+
 function Get-CodexThreadTitleSnapshot {
     param(
         [IntPtr]$RootHwnd,
         [string]$WindowTitle = ""
     )
     $uiaName = ""
+    $sidebarTitle = ""
+    $headerTitle = ""
     try {
         Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
         Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
         $root = [System.Windows.Automation.AutomationElement]::FromHandle($RootHwnd)
         if ($null -ne $root) {
-            $uiaName = [string]$root.Current.Name
+            $sidebarTitle = Get-CodexSelectedSidebarThreadTitle -Root $root
+            if ([string]::IsNullOrWhiteSpace($sidebarTitle)) {
+                $headerTitle = Get-CodexTopHeaderThreadTitle -Root $root
+            }
+            $uiaName = ConvertTo-CleanCodexThreadTitle -Title ([string]$root.Current.Name)
         }
     } catch {
         Write-Host ("[wake_codex] WARNING: UIA thread title read failed: " + $_.Exception.Message)
     }
-    $title = if (-not [string]::IsNullOrWhiteSpace($uiaName)) { $uiaName } else { [string]$WindowTitle }
-    $source = if (-not [string]::IsNullOrWhiteSpace($uiaName)) { "uia_root_name" } else { "win32_window_text" }
+    $windowTitleClean = ConvertTo-CleanCodexThreadTitle -Title $WindowTitle
+    $title = if (-not [string]::IsNullOrWhiteSpace($sidebarTitle)) {
+        $sidebarTitle
+    } elseif (-not [string]::IsNullOrWhiteSpace($headerTitle)) {
+        $headerTitle
+    } elseif (-not [string]::IsNullOrWhiteSpace($uiaName)) {
+        $uiaName
+    } else {
+        $windowTitleClean
+    }
+    $source = if (-not [string]::IsNullOrWhiteSpace($sidebarTitle)) {
+        "codex_app_dom_sidebar_selected_thread"
+    } elseif (-not [string]::IsNullOrWhiteSpace($headerTitle)) {
+        "codex_app_dom_top_header"
+    } elseif (-not [string]::IsNullOrWhiteSpace($uiaName)) {
+        "uia_root_name"
+    } else {
+        "win32_window_text"
+    }
     return @{
         Title = $title
         Source = $source
         UiaName = $uiaName
-        WindowTitle = [string]$WindowTitle
+        WindowTitle = $windowTitleClean
     }
 }
 

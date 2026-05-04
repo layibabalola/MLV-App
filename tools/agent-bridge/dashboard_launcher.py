@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from agent_bridge import AgentBridge  # noqa: E402
 from core.paths import watcher_config_path_for_state_dir  # noqa: E402
-from dashboard_server import DashboardServerHandle, start_dashboard_server  # noqa: E402
+from dashboard_server import DEFAULT_DASHBOARD_PORT, DashboardServerHandle, start_dashboard_server  # noqa: E402
 from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session  # noqa: E402
 
 
@@ -87,12 +87,12 @@ def _runtime_browser_url(runtime: Dict[str, Any], *, project: str) -> Optional[s
     return _url_with_query(url, token=token, project=project)
 
 
-def _dashboard_healthy(runtime: Dict[str, Any], *, timeout_seconds: float = 3.0) -> bool:
+def _dashboard_healthy(runtime: Dict[str, Any], *, timeout_seconds: float = 20.0) -> bool:
     url = str(runtime.get("url") or "").rstrip("/")
     token = str(runtime.get("token") or "")
     if not url or not token:
         return False
-    health_url = "%s/api/overview?%s" % (url, urlencode({"token": token}))
+    health_url = "%s/api/healthz?%s" % (url, urlencode({"token": token}))
     try:
         with urllib.request.urlopen(health_url, timeout=timeout_seconds) as response:
             return response.status == 200
@@ -130,14 +130,20 @@ def _start_dashboard(
     port: int,
     health_interval_seconds: float,
     runtime_path: Path,
+    token: Optional[str] = None,
+    csrf_token: Optional[str] = None,
 ) -> DashboardServerHandle:
     bridge = AgentBridge(bridge_root / "state")
     handle = start_dashboard_server(
         bridge,
         port=port,
+        token=token,
+        csrf_token=csrf_token,
         default_agent="codex",
         default_project=project,
         repo_root=str(_default_repo_root()),
+        live_app_dom_titles=True,
+        fallback_to_ephemeral=True,
     )
     _write_runtime(
         runtime_path,
@@ -217,6 +223,8 @@ def _serve_with_health_loop(args: argparse.Namespace, bridge_root: Path) -> int:
         port=args.port,
         health_interval_seconds=args.health_interval_seconds,
         runtime_path=runtime_path,
+        token=str((existing or {}).get("token") or "") or None,
+        csrf_token=str((existing or {}).get("csrf_token") or "") or None,
     )
     url = _url_with_query(handle.url, token=handle.token, project=args.project)
     print("Agent Bridge Dashboard: %s" % url, flush=True)
@@ -294,6 +302,8 @@ def _serve_with_health_loop(args: argparse.Namespace, bridge_root: Path) -> int:
             port=args.port,
             health_interval_seconds=args.health_interval_seconds,
             runtime_path=runtime_path,
+            token=str((_read_runtime(runtime_path) or {}).get("token") or "") or None,
+            csrf_token=str((_read_runtime(runtime_path) or {}).get("csrf_token") or "") or None,
         )
         current_ref["handle"] = current
 
@@ -320,6 +330,8 @@ def _serve_foreground(args: argparse.Namespace, bridge_root: Path) -> int:
         port=args.port,
         health_interval_seconds=args.health_interval_seconds,
         runtime_path=_runtime_path(bridge_root),
+        token=str((_read_runtime(_runtime_path(bridge_root)) or {}).get("token") or "") or None,
+        csrf_token=str((_read_runtime(_runtime_path(bridge_root)) or {}).get("csrf_token") or "") or None,
     )
     url = _url_with_query(handle.url, token=handle.token, project=args.project)
     print("Agent Bridge Dashboard: %s" % url, flush=True)
@@ -356,8 +368,8 @@ def main() -> int:
     parser.add_argument(
         "--port",
         type=int,
-        default=0,
-        help="Port to bind (default: 0 = OS-assigned)",
+        default=DEFAULT_DASHBOARD_PORT,
+        help="Port to bind (default: %d; falls back to an OS-assigned port if occupied)" % DEFAULT_DASHBOARD_PORT,
     )
     parser.add_argument(
         "--no-browser",
