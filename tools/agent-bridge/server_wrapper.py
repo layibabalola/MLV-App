@@ -8,11 +8,12 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Dict, List, Optional, Sequence, Set
+from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Set
 
+from compact import reap_stale_server_pids
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
-from core.storage import append_jsonl
+from core.storage import append_jsonl, read_json, write_json
 
 
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
@@ -23,9 +24,15 @@ DEFAULT_RESTART_WINDOW_SECONDS = 30.0
 DEFAULT_MAX_RESTARTS_PER_WINDOW = 4
 DEFAULT_CHUNK_SIZE = 65536
 DEFAULT_LOOP_SLEEP_SECONDS = 0.05
+DEFAULT_GRACEFUL_RESTART_TIMEOUT_SECONDS = 5.0
+DEFAULT_STALE_MARKER_REAP_INTERVAL_SECONDS = 10 * 60.0
+DEFAULT_STALE_MARKER_MAX_AGE_HOURS = 0
 TOOL_MANIFEST_FILENAME = "tool-manifest.json"
 TOOL_REFRESH_STATUS_FILENAME = "tool-refresh-status.json"
 TOOL_REFRESH_STATUS_SCHEMA_VERSION = 1
+SERVER_STATUS_FILENAME = "server-status.json"
+CODE_WATCHER_SNAPSHOT_FILENAME = "code-watcher-snapshot.json"
+CODE_WATCHER_SNAPSHOT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,9 @@ class SupervisorConfig:
     max_restarts_per_window: int = DEFAULT_MAX_RESTARTS_PER_WINDOW
     chunk_size: int = DEFAULT_CHUNK_SIZE
     loop_sleep_seconds: float = DEFAULT_LOOP_SLEEP_SECONDS
+    graceful_restart_timeout_seconds: float = DEFAULT_GRACEFUL_RESTART_TIMEOUT_SECONDS
+    stale_marker_reap_interval_seconds: float = DEFAULT_STALE_MARKER_REAP_INTERVAL_SECONDS
+    stale_marker_max_age_hours: int = DEFAULT_STALE_MARKER_MAX_AGE_HOURS
 
 
 def build_server_command(*, server_path: Path, state_dir: Path, max_hops: int, passthrough: List[str]) -> List[str]:
@@ -126,6 +136,23 @@ def _snapshot_mtimes(paths: Sequence[Path]) -> Dict[Path, Optional[int]]:
     return snapshot
 
 
+def _serialize_snapshot(snapshot: Dict[Path, Optional[int]]) -> Dict[str, Optional[int]]:
+    """Convert Path-keyed mtime dict to string-keyed for JSON serialization."""
+    return {str(k): v for k, v in snapshot.items()}
+
+
+def _deserialize_snapshot(data: Dict[str, Any], paths: Sequence[Path]) -> Dict[Path, Optional[int]]:
+    """Reconstruct a Path-keyed mtime dict from a JSON-deserialized string-keyed dict.
+    Only returns entries for paths currently in the watch list; stale entries are ignored."""
+    result: Dict[Path, Optional[int]] = {}
+    for path in paths:
+        key = str(path)
+        if key in data:
+            val = data[key]
+            result[path] = int(val) if val is not None else None
+    return result
+
+
 def _close_pipe(pipe: Optional[BinaryIO]) -> None:
     if pipe is None:
         return
@@ -173,11 +200,93 @@ class ServerSupervisor:
         self._thread_error: Optional[BaseException] = None
         self._tool_manifest_path = self.state_dir / TOOL_MANIFEST_FILENAME
         self._tool_refresh_status_path = self.state_dir / TOOL_REFRESH_STATUS_FILENAME
+        self._server_status_path = self.state_dir / SERVER_STATUS_FILENAME
+        self._snapshot_path = self.state_dir / CODE_WATCHER_SNAPSHOT_FILENAME
+        self._last_stale_marker_reap = 0.0
+        # In-flight JSON-RPC request IDs — cleared when the corresponding response
+        # is observed on stdout. Restart is deferred until this set drains (or the
+        # graceful-restart timeout expires) to avoid cutting off active requests.
+        self._pending_request_ids: Set[str] = set()
         self._clear_tool_refresh_status()
+
+    def _save_watcher_snapshot(self, snapshot: Dict[Path, Optional[int]]) -> None:
+        """Persist the mtime snapshot so the next wrapper startup can detect inter-session edits.
+
+        Uses core.storage.write_json for cross-process atomicity (directory-based file lock
+        + PID/UUID-keyed temp path + Windows-safe atomic rename). Non-fatal on any error.
+        """
+        payload: Dict[str, Any] = {
+            "schema_version": CODE_WATCHER_SNAPSHOT_SCHEMA_VERSION,
+            "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "wrapper_pid": os.getpid(),
+            "mtimes": _serialize_snapshot(snapshot),
+        }
+        try:
+            write_json(self._snapshot_path, payload)
+        except Exception as exc:
+            self._report_error(
+                "agent-bridge server wrapper: code-watcher snapshot write failed (non-fatal): %s" % exc
+            )
+            # Record the failure in the audit log so tests and operators can observe it
+            # without having to capture stderr.  _append_audit_event is itself non-fatal.
+            self._append_audit_event(
+                action="mcp_server_snapshot_write_failed",
+                reason=str(exc),
+            )
+
+    def _load_and_apply_persisted_snapshot(self) -> Dict[Path, Optional[int]]:
+        """Load the persisted mtime snapshot, detect any trigger-file changes that occurred
+        while the wrapper was not running, and queue them for an immediate restart.
+
+        Returns the current mtime dict to use as the in-memory polling baseline.
+
+        Save policy (Option B — "snapshot = last successfully handled state"):
+        - No snapshot / corrupt / wrong version → save current as new baseline, no restart queued.
+        - Snapshot present, no changes → refresh baseline on disk, no restart queued.
+        - Snapshot present, changes detected → do NOT save yet; _restart_child saves after success.
+          This ensures a failed or aborted restart leaves the snapshot stale so the change is
+          re-detected on the next startup.
+        """
+        current = _snapshot_mtimes(self.watch_paths)
+        raw = read_json(self._snapshot_path, {})
+        if not raw or raw.get("schema_version") != CODE_WATCHER_SNAPSHOT_SCHEMA_VERSION:
+            # First run, corrupt file, or schema upgrade — establish a clean baseline.
+            self._save_watcher_snapshot(current)
+            return current
+
+        persisted = _deserialize_snapshot(raw.get("mtimes") or {}, self.watch_paths)
+        changed_since_last_run = [
+            path for path in self.watch_paths
+            if _is_restart_trigger_file(path) and current.get(path) != persisted.get(path)
+        ]
+
+        if changed_since_last_run:
+            now = self.now_fn()
+            with self._state_lock:
+                self._pending_changed_files.update(changed_since_last_run)
+                self._last_change_time = now
+            self._append_audit_event(
+                action="mcp_server_restart_queued_from_persisted_snapshot",
+                changed_files=sorted(str(p) for p in changed_since_last_run),
+            )
+            # NOTE: we intentionally do NOT save the snapshot here.  See Option B comment
+            # above — _restart_child saves after a successful _replace_child only.
+            # If two supervisor instances start simultaneously and both detect the same
+            # change, both will queue a restart; the rate-limiter absorbs any excess.
+            # Last-writer-wins on the snapshot save is safe: they are all writing the
+            # same current mtimes, and only the successful restart path writes.
+        else:
+            # No trigger-file changes since last snapshot: refresh the on-disk baseline so
+            # future startups compare against recent state rather than a potentially ancient one.
+            self._save_watcher_snapshot(current)
+
+        return current
 
     def run(self) -> int:
         try:
-            self._spawn_child()
+            child = self._spawn_child()
+            self._write_server_status(status="running", child_pid=child.pid)
+            self._maybe_reap_stale_server_markers(force=True)
             self._stdin_thread = threading.Thread(target=self._pump_parent_stdin, name="agent-bridge-wrapper-stdin", daemon=True)
             self._stdin_thread.start()
             self._watch_thread = threading.Thread(target=self._watch_for_code_changes, name="agent-bridge-wrapper-watch", daemon=True)
@@ -192,6 +301,8 @@ class ServerSupervisor:
                     if not self._restart_child():
                         return 1
                     continue
+
+                self._maybe_reap_stale_server_markers()
 
                 child = self._current_child()
                 if child is None:
@@ -341,7 +452,31 @@ class ServerSupervisor:
             current_tool_names=payload["current_tool_names"],
         )
 
+    def _write_server_status(
+        self,
+        *,
+        status: str,
+        child_pid: Optional[int] = None,
+        last_restart_at: Optional[str] = None,
+        last_restart_elapsed_ms: Optional[int] = None,
+        needs_notification: bool = False,
+    ) -> None:
+        payload = {
+            "status": status,
+            "child_pid": child_pid,
+            "wrapper_pid": os.getpid(),
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "last_restart_at": last_restart_at,
+            "last_restart_elapsed_ms": last_restart_elapsed_ms,
+            "needs_notification": needs_notification,
+        }
+        try:
+            self._write_json_file(self._server_status_path, payload)
+        except Exception as exc:
+            self._report_error("agent-bridge server wrapper: server-status write failed (non-fatal): %s" % exc)
+
     def _pump_parent_stdin(self) -> None:
+        parse_buffer = b""
         try:
             while not self._stop_event.is_set():
                 chunk = _read_available(self.stdin_stream, self.config.chunk_size)
@@ -354,6 +489,9 @@ class ServerSupervisor:
                     return
 
                 self._note_io()
+                # Parse for in-flight request IDs before forwarding — best-effort,
+                # never blocks or raises; parse errors are silently discarded.
+                parse_buffer = self._parse_stdin_for_requests(chunk, parse_buffer)
                 pending = bytes(chunk)
                 while pending and not self._stop_event.is_set():
                     child_stdin = self._current_child_stdin()
@@ -371,6 +509,7 @@ class ServerSupervisor:
             self._stop_event.set()
 
     def _pump_child_stdout(self, child: subprocess.Popen[bytes]) -> None:
+        parse_buffer = b""
         try:
             if child.stdout is None:
                 return
@@ -379,6 +518,7 @@ class ServerSupervisor:
                 if not chunk:
                     return
                 self._note_io()
+                parse_buffer = self._parse_stdout_for_responses(chunk, parse_buffer)
                 with self._stdout_lock:
                     self.stdout_stream.write(chunk)
                     self.stdout_stream.flush()
@@ -388,9 +528,48 @@ class ServerSupervisor:
         finally:
             _close_pipe(child.stdout)
 
+    def _parse_stdin_for_requests(self, chunk: bytes, buffer: bytes) -> bytes:
+        """Record JSON-RPC request IDs arriving from Claude Desktop."""
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            if line.strip():
+                try:
+                    msg = json.loads(line.decode("utf-8", errors="replace"))
+                    if isinstance(msg, dict) and msg.get("id") is not None and "method" in msg:
+                        with self._state_lock:
+                            self._pending_request_ids.add(str(msg["id"]))
+                        if msg.get("method") == "tools/call":
+                            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+                            self._record_mcp_tool_access_proof(
+                                request_id=str(msg["id"]),
+                                tool_name=str(params.get("name") or "unknown"),
+                            )
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+        # Safety: discard unparsed buffer if it grows implausibly large.
+        return buffer if len(buffer) < 131072 else b""
+
+    def _parse_stdout_for_responses(self, chunk: bytes, buffer: bytes) -> bytes:
+        """Clear JSON-RPC request IDs when the child sends its response."""
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            if line.strip():
+                try:
+                    msg = json.loads(line.decode("utf-8", errors="replace"))
+                    if isinstance(msg, dict) and msg.get("id") is not None and (
+                        "result" in msg or "error" in msg
+                    ):
+                        with self._state_lock:
+                            self._pending_request_ids.discard(str(msg["id"]))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+        return buffer if len(buffer) < 131072 else b""
+
     def _watch_for_code_changes(self) -> None:
         try:
-            previous = _snapshot_mtimes(self.watch_paths)
+            previous = self._load_and_apply_persisted_snapshot()
             while not self._stop_event.wait(self.config.poll_interval_seconds):
                 current = _snapshot_mtimes(self.watch_paths)
                 changed = [path for path in self.watch_paths if current.get(path) != previous.get(path)]
@@ -422,20 +601,64 @@ class ServerSupervisor:
                 return False
             if now - self._last_io_time < self.config.idle_seconds:
                 return False
+            # Wait for in-flight JSON-RPC requests to drain before restarting so
+            # Claude Desktop doesn't receive a truncated response and show the
+            # "Server disconnected" banner. Force-restart after the graceful timeout
+            # to avoid stalling indefinitely on a hung request.
+            if self._pending_request_ids:
+                elapsed_since_change = now - self._last_change_time
+                if elapsed_since_change < self.config.graceful_restart_timeout_seconds:
+                    return False
             child = self._child
         return child is not None and child.poll() is None
 
     def _restart_child(self) -> bool:
         with self._state_lock:
             changed_files = sorted(str(path) for path in self._pending_changed_files)
+            # Capture the mtime snapshot HERE, under the lock, before clearing pending.
+            # This prevents a subtle silent-drop race: if we instead called
+            # _snapshot_mtimes() *after* the lock release (and after _replace_child),
+            # the watch thread could detect a new change between the clear and the stat,
+            # add it to _pending_changed_files, and the stat would read the newer mtime.
+            # If that follow-up restart were then rate-limited, _pending_changed_files
+            # would be cleared without a save, leaving the snapshot with the newer mtime —
+            # making the change invisible to both in-session detection and the next startup.
+            # Capturing here ensures the snapshot records the last state a restart was
+            # *initiated against*, not any state reached during the restart itself.
+            # Note: stat() calls while holding the lock are microsecond operations on local
+            # NTFS; the lock hold is negligible.
+            frozen_snapshot = _snapshot_mtimes(self.watch_paths)
+            # _pending_changed_files is drained unconditionally, before we know whether the
+            # restart will succeed or be rate-limited.  In-session recovery happens through
+            # the watch thread re-detecting changes; cross-session recovery through the
+            # NOT-saved snapshot (see below).
             self._pending_changed_files.clear()
             self._last_change_time = None
-        return self._replace_child(
+        success = self._replace_child(
             changed_files=changed_files,
             reason="bridge_code_changed_during_wrapper_session",
         )
+        if success:
+            # Persist the snapshot captured at the start of this method (before the clear).
+            # Any changes that arrived between the clear and now are already queued in
+            # _pending_changed_files by the watch thread and will trigger the next restart;
+            # we do NOT want to absorb them into the snapshot prematurely.
+            # If the restart failed or was aborted by the rate-limiter, we intentionally do
+            # NOT save — the next startup will re-detect the change and retry.
+            self._save_watcher_snapshot(frozen_snapshot)
+        return success
 
     def _respawn_after_child_exit(self, child: subprocess.Popen[bytes], exit_code: int) -> bool:
+        # Intentionally does NOT call _save_watcher_snapshot after a successful respawn.
+        # Rationale: this path handles an unexpected child crash, not a code change.
+        # - If there are trigger-file changes already queued in _pending_changed_files
+        #   (because a code change was detected just before the crash), those remain in
+        #   the set and will be handled by the next _restart_child call, which WILL save
+        #   the snapshot.
+        # - If no code changes are queued, the current snapshot is still valid (it
+        #   reflects the last successful restart state) and does not need refreshing.
+        # In both cases the "snapshot = last successfully handled code-change state"
+        # invariant (Option B) is preserved without an extra snapshot write here.
         return self._replace_child(
             changed_files=[],
             reason="unexpected_child_exit",
@@ -464,6 +687,7 @@ class ServerSupervisor:
 
         previous_snapshot = self._read_tool_manifest_snapshot() or {}
         restart_started_at = self.now_fn()
+        restart_at_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._state_lock:
             cutoff = restart_at - self.config.restart_window_seconds
             self._restart_history = [stamp for stamp in self._restart_history if stamp >= cutoff]
@@ -479,9 +703,15 @@ class ServerSupervisor:
             return False
 
         old_child_pid = child.pid
+        self._write_server_status(status="restarting", child_pid=old_child_pid)
         try:
             self._terminate_child(child)
             self._join_stdout_thread(old_child_pid)
+            # Discard in-flight request IDs — the old child is gone and those
+            # responses will never arrive; a clean slate prevents the new child
+            # from being blocked waiting for IDs that can never be cleared.
+            with self._state_lock:
+                self._pending_request_ids.clear()
             new_child = self._spawn_child()
         except BaseException as exc:
             self._report_error("agent-bridge server wrapper restart failed: %s" % exc)
@@ -492,6 +722,14 @@ class ServerSupervisor:
 
         # Child restarted successfully. Status-file writes below are non-fatal:
         # a failure here must not kill the wrapper or orphan the new child.
+        elapsed_ms = int(round((self.now_fn() - restart_started_at) * 1000))
+        self._write_server_status(
+            status="running",
+            child_pid=new_child.pid,
+            last_restart_at=restart_at_iso,
+            last_restart_elapsed_ms=elapsed_ms,
+            needs_notification=refresh_required,
+        )
         if refresh_required:
             try:
                 current_snapshot = (
@@ -602,6 +840,49 @@ class ServerSupervisor:
     def _note_io(self) -> None:
         with self._state_lock:
             self._last_io_time = self.now_fn()
+
+    def _maybe_reap_stale_server_markers(self, *, force: bool = False) -> None:
+        now = self.now_fn()
+        interval = max(float(self.config.stale_marker_reap_interval_seconds), 1.0)
+        if not force and now - self._last_stale_marker_reap < interval:
+            return
+        self._last_stale_marker_reap = now
+        try:
+            result = reap_stale_server_pids(
+                self.state_dir,
+                max_age_hours=self.config.stale_marker_max_age_hours,
+                dry_run=False,
+            )
+        except Exception as exc:
+            self._report_error("agent-bridge server wrapper stale marker cleanup failed (non-fatal): %s" % exc)
+            return
+        removed_runtime_orphans = result.get("removed_runtime_orphans") or []
+        removed = int(result.get("removed") or 0) + len(removed_runtime_orphans)
+        if removed:
+            self._append_audit_event(
+                action="mcp_server_stale_markers_self_healed",
+                checked=result.get("checked"),
+                checked_runtime_orphans=result.get("checked_runtime_orphans"),
+                removed=result.get("removed"),
+                removed_runtime_orphans=result.get("removed_runtime_orphans"),
+                removed_identity_mismatch=result.get("removed_identity_mismatch"),
+                max_age_hours=result.get("max_age_hours"),
+            )
+
+    def _record_mcp_tool_access_proof(self, *, request_id: str, tool_name: str) -> None:
+        child = self._current_child()
+        child_pid = child.pid if child is not None else None
+        self._append_audit_event(
+            action="mcp_tool_access_proof",
+            proof_schema_version=1,
+            request_id=request_id,
+            tool_name=tool_name,
+            wrapper_pid=os.getpid(),
+            child_pid=child_pid,
+            host_transport="stdio",
+            host_scope="wrapper:%s" % os.getpid(),
+            accepted=True,
+        )
 
     def _append_audit_event(self, *, action: str, **extra: object) -> None:
         try:
