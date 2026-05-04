@@ -143,7 +143,7 @@ The supervision pattern must therefore detect orphans regardless of lease status
 
 | # | Component | Pattern | Signature scope | Restart trigger | Default-ON | Audit event | Spec ref |
 |---|---|---|---|---|---|---|---|
-| 1 | `server.py` (MCP server) | A — wrapper | `server.py`, `core/runtime.py` | `server_wrapper.py` poll | yes | `mcp_server_wrapper_launch` | (Phase 2 work) |
+| 1 | `server.py` / `server_wrapper.py` (Desktop MCP stack) | A - wrapper + trampoline | `server.py`, `agent_bridge.py`, `server_wrapper.py`, `core/*.py` | `server_wrapper.py` poll; exit 77 via `server_wrapper_trampoline.py` for wrapper edits | yes | `mcp_server_self_restarted`, `mcp_server_wrapper_self_restart_requested`, `mcp_server_wrapper_launch` | (Phase 2 + trampoline work) |
 | 2 | `watcher.py` (inbox poller / wake fire) | B — helper + CS8 orphan sweep | `watcher.py`, `wake_codex.ps1`, `bootstrap_session.py`, `configure_watcher.py`, `agent_bridge.py`, `core/runtime.py` | `restart_watcher_for_code_change()` + `sweep_orphan_watchers()` invoked by `bootstrap_session.py` (default `True` per `d09b4c1a`) | yes | `watcher_restart_code_changed`, `orphan_watcher_killed` | `3a380df1` + `d09b4c1a` + (pending CS8 commit) |
 | 3 | (future) `bridge-d` daemon | TBD | TBD | TBD | yes | TBD | TBD |
 | 4 | (future) presence agent | TBD | TBD | TBD | yes | TBD | TBD |

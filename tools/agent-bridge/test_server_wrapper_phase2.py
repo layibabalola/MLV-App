@@ -1,4 +1,5 @@
 import io
+import queue
 import shutil
 import subprocess
 import sys
@@ -13,8 +14,9 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import server_wrapper as _sw
+import server_wrapper_trampoline as _trampoline
 from core.storage import read_jsonl
-from server_wrapper import SupervisorConfig, _is_restart_trigger_file, run_supervisor
+from server_wrapper import SERVER_WRAPPER_SELF_RESTART_EXIT_CODE, SupervisorConfig, _is_restart_trigger_file, run_supervisor
 
 
 SERVER_SCRIPT = """\
@@ -129,6 +131,18 @@ class BufferOutputStream:
                     raise AssertionError("timed out waiting for %r in %r" % (needle, bytes(self._buffer)))
                 self._condition.wait(timeout=remaining)
             return bytes(self._buffer)
+
+
+def write_and_wait_new_mtime(path: Path, content: str, timeout: float = 2.0) -> None:
+    before_mtime = path.stat().st_mtime_ns if path.exists() else None
+    path.write_text(content, encoding="utf-8")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        after_mtime = path.stat().st_mtime_ns if path.exists() else None
+        if after_mtime != before_mtime:
+            return
+        time.sleep(0.01)
+        path.write_text(content, encoding="utf-8")
 
 
 class SupervisorHarness:
@@ -496,11 +510,97 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertTrue(_is_restart_trigger_file(Path("agent_bridge.py")))
         self.assertTrue(_is_restart_trigger_file(Path("core/storage.py")))
         self.assertTrue(_is_restart_trigger_file(Path("core/routing.py")))
+        self.assertTrue(_is_restart_trigger_file(Path("server_wrapper.py")))
         self.assertFalse(_is_restart_trigger_file(Path("dashboard_server.py")))
         self.assertFalse(_is_restart_trigger_file(Path("watcher.py")))
-        self.assertFalse(_is_restart_trigger_file(Path("server_wrapper.py")))
         self.assertFalse(_is_restart_trigger_file(Path("test_foo.py")))
         self.assertFalse(_is_restart_trigger_file(Path("foo_test.py")))
+
+    def test_wrapper_file_change_exits_for_trampoline_self_restart(self) -> None:
+        wrapper_file = self.tempdir / "server_wrapper.py"
+        wrapper_file.write_text("# wrapper v1\n", encoding="utf-8")
+
+        harness = SupervisorHarness(
+            self.tempdir / ("case-%s" % len(self._harnesses)),
+            watch_paths=[wrapper_file],
+        )
+        self._harnesses.append(harness)
+        harness.wait_for_launch_count(1)
+        harness.stdout_stream.wait_for(b"READY ")
+
+        write_and_wait_new_mtime(wrapper_file, "# wrapper v2\n")
+
+        self.assertEqual(harness.wait_for_exit(timeout=5.0), SERVER_WRAPPER_SELF_RESTART_EXIT_CODE)
+        self.assertEqual(len(harness.launch_pids()), 1, "wrapper self-restart must not spawn a second child")
+        events = harness.wait_for_audit_events("mcp_server_wrapper_self_restart_requested")
+        self.assertEqual(events[0]["changed_files"], [str(wrapper_file)])
+        self.assertEqual(events[0]["exit_code"], SERVER_WRAPPER_SELF_RESTART_EXIT_CODE)
+
+        snapshot = harness.snapshot_data()
+        self.assertEqual(snapshot["mtimes"][str(wrapper_file)], wrapper_file.stat().st_mtime_ns)
+
+    def test_wrapper_self_restart_takes_precedence_for_mixed_changes(self) -> None:
+        wrapper_file = self.tempdir / "server_wrapper.py"
+        server_file = self.tempdir / "server.py"
+        wrapper_file.write_text("# wrapper v1\n", encoding="utf-8")
+        server_file.write_text("# server v1\n", encoding="utf-8")
+
+        harness = SupervisorHarness(
+            self.tempdir / ("case-%s" % len(self._harnesses)),
+            watch_paths=[wrapper_file, server_file],
+        )
+        self._harnesses.append(harness)
+        harness.wait_for_launch_count(1)
+        harness.stdout_stream.wait_for(b"READY ")
+
+        write_and_wait_new_mtime(wrapper_file, "# wrapper v2\n")
+        write_and_wait_new_mtime(server_file, "# server v2\n")
+
+        self.assertEqual(harness.wait_for_exit(timeout=5.0), SERVER_WRAPPER_SELF_RESTART_EXIT_CODE)
+        self.assertEqual(len(harness.launch_pids()), 1)
+        events = harness.wait_for_audit_events("mcp_server_wrapper_self_restart_requested")
+        self.assertEqual(events[0]["changed_files"], sorted([str(server_file), str(wrapper_file)]))
+        self.assertEqual(
+            [event for event in harness.audit_events() if event.get("action") == "mcp_server_self_restarted"],
+            [],
+        )
+
+    def test_partial_stdin_frame_delays_wrapper_self_restart_until_complete(self) -> None:
+        wrapper_file = self.tempdir / "server_wrapper.py"
+        wrapper_file.write_text("# wrapper v1\n", encoding="utf-8")
+        config = SupervisorConfig(
+            poll_interval_seconds=0.05,
+            debounce_seconds=0.05,
+            idle_seconds=0.0,
+            terminate_timeout_seconds=0.5,
+            restart_window_seconds=5.0,
+            max_restarts_per_window=4,
+            chunk_size=4096,
+            loop_sleep_seconds=0.01,
+            graceful_restart_timeout_seconds=1.0,
+        )
+
+        harness = SupervisorHarness(
+            self.tempdir / ("case-%s" % len(self._harnesses)),
+            watch_paths=[wrapper_file],
+            config=config,
+        )
+        self._harnesses.append(harness)
+        harness.wait_for_launch_count(1)
+        harness.stdout_stream.wait_for(b"READY ")
+
+        first_half = b'{"jsonrpc":"2.0","id":"partial-1","method":"tools/call"'
+        second_half = b',"params":{"name":"t"}}\n'
+        harness.stdin_stream.push(first_half)
+        harness.stdout_stream.wait_for(first_half)
+
+        write_and_wait_new_mtime(wrapper_file, "# wrapper v2\n")
+        time.sleep(0.25)
+        self.assertIsNone(harness.result.get("exit_code"), "partial JSON-RPC frame should delay self-restart")
+
+        harness.stdin_stream.push(second_half)
+        harness.stdout_stream.wait_for(second_half)
+        self.assertEqual(harness.wait_for_exit(timeout=5.0), SERVER_WRAPPER_SELF_RESTART_EXIT_CODE)
 
     def test_no_restart_file_change_does_not_trigger_restart(self) -> None:
         case_dir = self.tempdir / "no-restart-case"
@@ -556,6 +656,212 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
 
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
+
+
+class ServerWrapperTrampolineTests(unittest.TestCase):
+    def test_trampoline_relaunches_on_exit_77_and_returns_final_code(self) -> None:
+        calls: List[List[str]] = []
+        return_codes = [
+            SERVER_WRAPPER_SELF_RESTART_EXIT_CODE,
+            SERVER_WRAPPER_SELF_RESTART_EXIT_CODE,
+            0,
+        ]
+
+        def fake_call(command: List[str]) -> int:
+            calls.append(command)
+            return return_codes.pop(0)
+
+        rc = _trampoline.run_trampoline(
+            ["--bridge-root", "C:/bridge root"],
+            wrapper_path=Path("server_wrapper.py"),
+            call_fn=fake_call,
+            now_fn=lambda: 1.0,
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call[0] == sys.executable for call in calls))
+        self.assertTrue(all(call[1] == "server_wrapper.py" for call in calls))
+        self.assertTrue(all(call[2:] == ["--bridge-root", "C:/bridge root"] for call in calls))
+
+    def test_trampoline_aborts_exit_77_restart_loop(self) -> None:
+        calls = 0
+
+        def fake_call(command: List[str]) -> int:
+            nonlocal calls
+            calls += 1
+            return SERVER_WRAPPER_SELF_RESTART_EXIT_CODE
+
+        captured_stderr = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = captured_stderr
+        try:
+            rc = _trampoline.run_trampoline(
+                [],
+                wrapper_path=Path("server_wrapper.py"),
+                call_fn=fake_call,
+                now_fn=lambda: 5.0,
+            )
+        finally:
+            sys.stderr = old_stderr
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, _trampoline.DEFAULT_MAX_SELF_RESTARTS_PER_WINDOW + 1)
+        self.assertIn("aborted restart loop", captured_stderr.getvalue())
+
+
+class ServerWrapperTrampolineMcpSmokeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = Path(tempfile.mkdtemp(prefix="server-wrapper-trampoline-mcp-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tempdir, ignore_errors=True)
+
+    def _send(self, proc: subprocess.Popen[bytes], message: dict) -> None:
+        if proc.stdin is None:
+            raise AssertionError("process stdin is closed")
+        proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+
+    def _recv(
+        self,
+        proc: subprocess.Popen[bytes],
+        stdout_queue: "queue.Queue[bytes]",
+        stderr_lines: List[str],
+        *,
+        timeout: float = 10.0,
+    ) -> dict:
+        deadline = time.time() + timeout
+        line = bytearray()
+        while time.time() < deadline:
+            try:
+                chunk = stdout_queue.get(timeout=max(0.05, deadline - time.time()))
+            except queue.Empty:
+                if proc.poll() is not None:
+                    raise AssertionError("trampoline exited rc=%r stderr=%r" % (proc.returncode, "".join(stderr_lines)))
+                continue
+            if not chunk:
+                raise AssertionError("stdout closed rc=%r stderr=%r" % (proc.poll(), "".join(stderr_lines)))
+            line.extend(chunk)
+            if chunk == b"\n":
+                return json.loads(bytes(line).decode("utf-8"))
+        raise AssertionError("timed out waiting for MCP response; stderr=%r" % "".join(stderr_lines))
+
+    def _wait_for_audit_count(self, audit_path: Path, action: str, expected: int, timeout: float = 12.0) -> List[dict]:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rows = read_jsonl(audit_path) if audit_path.exists() else []
+            matches = [row for row in rows if row.get("action") == action]
+            if len(matches) >= expected:
+                return matches
+            time.sleep(0.05)
+        rows = read_jsonl(audit_path) if audit_path.exists() else []
+        raise AssertionError("timed out waiting for %s x%s; rows=%r" % (action, expected, rows))
+
+    def test_trampoline_preserves_mcp_tool_calls_across_wrapper_exit_77(self) -> None:
+        bridge_root = self.tempdir / "bridge-root"
+        watch_dir = self.tempdir / "watch"
+        watch_dir.mkdir()
+        watched_wrapper = watch_dir / "server_wrapper.py"
+        watched_wrapper.write_text("# wrapper v1\n", encoding="utf-8")
+        trampoline = Path(__file__).resolve().parent / "server_wrapper_trampoline.py"
+
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(trampoline),
+                "--bridge-root",
+                str(bridge_root),
+                "--watch-code-dir",
+                str(watch_dir),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        stdout_queue: "queue.Queue[bytes]" = queue.Queue()
+        stderr_lines: List[str] = []
+
+        def pump_stdout() -> None:
+            if proc.stdout is None:
+                return
+            for raw in iter(lambda: proc.stdout.read(1), b""):
+                stdout_queue.put(raw)
+            stdout_queue.put(b"")
+
+        def pump_stderr() -> None:
+            if proc.stderr is None:
+                return
+            for raw in iter(proc.stderr.readline, b""):
+                stderr_lines.append(raw.decode("utf-8", errors="replace"))
+
+        threading.Thread(target=pump_stdout, daemon=True).start()
+        threading.Thread(target=pump_stderr, daemon=True).start()
+        try:
+            self._send(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "init-1",
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "clientInfo": {"name": "trampoline-smoke", "version": "0.1"},
+                        "capabilities": {},
+                    },
+                },
+            )
+            init_response = self._recv(proc, stdout_queue, stderr_lines, timeout=12.0)
+            self.assertEqual(init_response["id"], "init-1")
+            self.assertEqual(init_response["result"]["serverInfo"]["name"], "agent-bridge")
+
+            self._send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+            self._send(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "call-before",
+                    "method": "tools/call",
+                    "params": {"name": "bridge_status", "arguments": {}},
+                },
+            )
+            before_response = self._recv(proc, stdout_queue, stderr_lines)
+            self.assertEqual(before_response["id"], "call-before")
+            self.assertNotIn("error", before_response)
+
+            audit_path = bridge_root / "state" / "messages.jsonl"
+            self._wait_for_audit_count(audit_path, "mcp_server_wrapper_launch", 1)
+            write_and_wait_new_mtime(watched_wrapper, "# wrapper v2\n")
+            self._wait_for_audit_count(audit_path, "mcp_server_wrapper_self_restart_requested", 1)
+            self._wait_for_audit_count(audit_path, "mcp_server_wrapper_launch", 2)
+            self._wait_for_audit_count(audit_path, "mcp_server_session_replayed", 1)
+
+            self._send(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "call-after",
+                    "method": "tools/call",
+                    "params": {"name": "bridge_status", "arguments": {}},
+                },
+            )
+            after_response = self._recv(proc, stdout_queue, stderr_lines)
+            self.assertEqual(after_response["id"], "call-after")
+            self.assertNotIn("error", after_response)
+        finally:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5.0)
 
 
 class ServerWrapperSnapshotTests(unittest.TestCase):
@@ -954,6 +1260,59 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         h2.stdin_stream.close()
         self.assertEqual(h2.wait_for_exit(), 0)
 
+    def test_wrapper_self_restart_snapshot_prevents_exit_77_loop(self) -> None:
+        """A handled server_wrapper.py edit must be saved before exit 77.
+
+        Without this, the trampoline relaunch would load a stale snapshot, see
+        the same server_wrapper.py mtime again, and immediately exit 77 forever.
+        """
+        wrapper_file = self.tempdir / "server_wrapper.py"
+        wrapper_file.write_text("# wrapper v1\n", encoding="utf-8")
+
+        h1_root = self._make_case_dir()
+        h1 = SupervisorHarness(h1_root, watch_paths=[wrapper_file])
+        self._harnesses.append(h1)
+        h1.wait_for_launch_count(1)
+        h1.stdout_stream.wait_for(b"READY ")
+        snap1 = h1.wait_for_snapshot()
+        h1.stdin_stream.close()
+        h1.wait_for_exit()
+
+        self._write_and_wait_new_mtime(wrapper_file, "# wrapper v2\n")
+        mtime_v2 = wrapper_file.stat().st_mtime_ns
+
+        h2_root = self._make_case_dir()
+        state2 = h2_root / "bridge-root" / "state"
+        state2.mkdir(parents=True)
+        shutil.copy2(str(snap1), str(state2 / "code-watcher-snapshot.json"))
+        h2 = SupervisorHarness(h2_root, watch_paths=[wrapper_file])
+        self._harnesses.append(h2)
+        self.assertEqual(h2.wait_for_exit(timeout=5.0), SERVER_WRAPPER_SELF_RESTART_EXIT_CODE)
+        h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
+        h2.wait_for_audit_events("mcp_server_wrapper_self_restart_requested")
+
+        snap2_data = json.loads((state2 / "code-watcher-snapshot.json").read_text(encoding="utf-8"))
+        self.assertEqual(snap2_data["mtimes"][str(wrapper_file)], mtime_v2)
+
+        h3_root = self._make_case_dir()
+        state3 = h3_root / "bridge-root" / "state"
+        state3.mkdir(parents=True)
+        shutil.copy2(str(state2 / "code-watcher-snapshot.json"), str(state3 / "code-watcher-snapshot.json"))
+        old_file_mtime_ns = (state3 / "code-watcher-snapshot.json").stat().st_mtime_ns
+        h3 = SupervisorHarness(h3_root, watch_paths=[wrapper_file])
+        self._harnesses.append(h3)
+        h3.wait_for_launch_count(1)
+        h3.stdout_stream.wait_for(b"READY ")
+        h3.wait_for_snapshot_ready(old_file_mtime_ns=old_file_mtime_ns)
+
+        self.assertEqual(len(h3.launch_pids()), 1)
+        self.assertEqual(
+            [event for event in h3.audit_events() if event.get("action") == "mcp_server_restart_queued_from_persisted_snapshot"],
+            [],
+        )
+        h3.stdin_stream.close()
+        self.assertEqual(h3.wait_for_exit(), 0)
+
     def test_new_trigger_file_between_sessions_restarts(self) -> None:
         """A brand-new trigger file that didn't exist in the old snapshot counts as changed."""
         original_file = self.tempdir / "server.py"
@@ -1047,7 +1406,8 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         self._harnesses.append(h2)
 
         # First startup-detected restart: snapshot starts at v1, file is v2 -> restart fires.
-        h2.wait_for_launch_count(2)
+        # The audit row is the reliable signal here; on a fast restart the first
+        # fake child can be terminated before its launch-log append reaches disk.
         h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
         h2.wait_for_audit_events("mcp_server_self_restarted")
 
@@ -1091,10 +1451,12 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         self._harnesses.append(h3)
 
         # Session 3 must detect the v3 change (unhandled in session 2) and restart.
-        h3.wait_for_launch_count(2)
+        # Use audit rather than launch-log count: startup restarts can kill the
+        # first fake child before its append reaches disk.
         events = h3.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
         self.assertEqual(len(events), 1)
         self.assertIn(str(trigger_file), events[0]["changed_files"])
+        h3.wait_for_audit_events("mcp_server_self_restarted")
 
         h3.stdin_stream.close()
         self.assertEqual(h3.wait_for_exit(), 0)
@@ -1213,10 +1575,10 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file])
         self._harnesses.append(h2)
 
-        h2.wait_for_launch_count(2)
         events = h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
         self.assertEqual(len(events), 1)
         self.assertIn(str(trigger_file), events[0]["changed_files"])
+        h2.wait_for_audit_events("mcp_server_self_restarted")
 
         h2.stdin_stream.close()
         self.assertEqual(h2.wait_for_exit(), 0)

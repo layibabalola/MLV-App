@@ -43,7 +43,7 @@
 - Pending worktree cleanup: watcher-config `repo_root`, Codex wake script paths, and the running watcher runtime now point at the main checkout (`C:\!Layi Wkspc\MLV-App`). The former integration directory at `C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration` is no longer registered by `git worktree list` and is empty, but Windows refused removal because another process still holds a handle to that directory. Cleanup is now blocked on that handle being released, not on watcher migration.
 
 **Follow-up roadmap items identified 2026-05-03:**
-- `server_wrapper.py` self-healing shipped (Fix A + Fix B, 251 tests). Desktop restart required once to bootstrap onto new wrapper; after that restarts are no longer needed for code-change or crash scenarios.
+- `server_wrapper.py` self-healing shipped (Fix A + Fix B, 251 tests). Follow-up trampoline work adds `server_wrapper_trampoline.py` so future Desktop configs can keep stdio open while the wrapper relaunches itself after exit 77.
 - Wake script composer cleanup on failure shipped in the 2026-05-03 Codex follow-up pass: `wake_codex.ps1` now tracks unverified wake injection and uses a final cleanup pass to clear exact-match stranded wake text after unhandled failure paths, in addition to existing postflight/clipboard cleanup.
 - Superseded session backpressure confusion shipped in the 2026-05-03 Codex follow-up pass: backpressure counting, health/dashboard surfacing, `send_to_peer`, and `nudge_peer` now exclude registered non-active/superseded session buckets from work backpressure. Superseded unread rows remain visible for receipt hygiene, but only active session/project buckets gate sends and wake rearm.
 - Targeted SendKeys thread proof/restore follow-up: the stale archived `desktop_thread_id` pin and stranded composer text are fixed in the May 3 wake-routing patch, and the wake contract now carries an explicit `RestoreThreadId` slot. Codex Desktop still often exposes only the generic UIA root title `Codex`; generic titles are treated as unknown rather than false project mismatches.
@@ -53,12 +53,12 @@
 - Dashboard operator UX follow-up: the live dashboard now preserves scroll/focus/details state across refreshes, supports pausing automatic refresh while keeping manual refresh active, uses in-dashboard modals instead of native prompts, pins the primary recovery command, collapses stable surfaces into readiness chips, and exposes `/api/recommended-action` only for allowlisted local remediations such as stale server marker cleanup and read-receipt backfill.
 
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
-- Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
+- Codex and Claude Desktop configs were backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge` at this checkpoint; new configs should use `tools\agent-bridge\server_wrapper_trampoline.py --bridge-root C:\Users\obabalola\.agent-bridge`.
 - Backups: `C:\Users\obabalola\.codex\config.toml.bak-20260428T160012` and `C:\Users\obabalola\AppData\Roaming\Claude\claude_desktop_config.json.bak-20260428T160012`.
 - Active Codex private bucket is `fadda757-5bbe-4a6c-9def-f27a04d118f4`; Codex notify config was corrected from superseded `9111dce5-3d33-4d06-b7a7-87dbf259b0c6`.
 - `recover_state.py --scan-historical` against `C:\Users\obabalola\.agent-bridge\state` is healthy; no stale-root or migration-history issues were reported.
 - Project-bucket backlog was surfaced and marked read for `3a6f6a03-b07a-4f87-91c7-88aef54b5ac7`, `ffcd534c-70ed-4229-bf5d-f12b270ed47f`, `82c724ec-ce33-4a20-ad1e-5c0ac5a1f05a`, `b3207397-7671-4a88-8243-d7204748b526`, and `1429d520-c80c-406f-852f-5b03a9513b51`.
-- Important correction: current `server_wrapper.py` resolves/rejects/audits and then `execv`s `server.py`; it does **not** monitor mtimes or auto-respawn on bridge code changes yet.
+- Historical correction: at this checkpoint `server_wrapper.py` resolved/rejected/audited and then `execv`ed `server.py`; later Phase 2 work made it supervise/restart bridge code changes, and trampoline follow-up covers wrapper self-restart.
 - Post-restart first checks: run `recover_state.py --scan-historical`, verify `bridge_process_status` shows new runtime breadcrumbs for MCP servers, then check Codex private bucket plus `mlv-app`.
 - Historical note: Claude ACTION_REQUEST `82c724ec` originally asked for
   `wake_codex.ps1 -ExpectedTitleMarker` and matching watcher-config

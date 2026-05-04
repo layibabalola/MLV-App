@@ -32,7 +32,7 @@ Codex `%USERPROFILE%\.codex\config.toml`:
 command = "py"
 args = [
   "-3",
-  "<repo>\\tools\\agent-bridge\\server_wrapper.py",
+  "<repo>\\tools\\agent-bridge\\server_wrapper_trampoline.py",
   "--bridge-root",
   "<bridge-root>"
 ]
@@ -47,7 +47,7 @@ Claude `claude_desktop_config.json`:
       "command": "py",
       "args": [
         "-3",
-        "<repo>\\tools\\agent-bridge\\server_wrapper.py",
+        "<repo>\\tools\\agent-bridge\\server_wrapper_trampoline.py",
         "--bridge-root",
         "<bridge-root>"
       ]

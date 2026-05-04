@@ -67,7 +67,8 @@ is described in `BRIDGE_LAN_TRANSPORT_SPEC.md` (Tier 3) and
 |---|---|
 | `agent_bridge.py` | Compatibility facade and current orchestration layer for routing, inboxes, sessions, receipts, and diagnostics. |
 | `server.py` | Import-safe FastMCP server factory and stdio entrypoint. |
-| `server_wrapper.py` | Resolver-aware Desktop MCP launcher; rejects moved roots, audits startup, then execs `server.py` without proxying stdio. |
+| `server_wrapper_trampoline.py` | Stable Desktop MCP entrypoint; keeps host stdio open and relaunches `server_wrapper.py` after handled exit-77 self-restarts. |
+| `server_wrapper.py` | Resolver-aware Desktop MCP launcher; rejects moved roots, audits startup, supervises `server.py`, and exits 77 when the wrapper itself changed. |
 | `core/storage.py` | JSON/JSONL helpers, atomic writes, schema-version helper, and quarantine of malformed JSONL rows. |
 | `core/addressing.py` | Typed address/message/sender models used by contract tests and routing seams. |
 | `core/routing.py` | Pure routing resolver for active/superseded/project/agent-level decisions. |
