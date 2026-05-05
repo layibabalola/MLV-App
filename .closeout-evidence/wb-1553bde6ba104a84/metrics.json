@@ -1,0 +1,16 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/server-wrapper-trampoline",
+  "committedDeltaPathCount": 68,
+  "createdAt": "2026-05-05T17:32:06+00:00",
+  "detectorHash": "7b7d1a10541be1b3c6a0cec5a0f9dd79",
+  "dirtyCounts": {
+    "foreignDirty": 1,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "4f8a341d9bc02541d97d6dd1df20773e3c167cd2",
+  "schemaVersion": "1.0",
+  "targetHead": "58e5a5efc80397067166731431d8cea002c1dcfc",
+  "workBlockId": "wb-1553bde6ba104a84"
+}
