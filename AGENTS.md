@@ -29,6 +29,21 @@
 - CI entrypoint for that scaffold is `.github/workflows/tests.yml`.
 - Keep the docs above synchronized with what is implemented now versus still planned next.
 
+## Brokered Auto-Closeout
+- The repo owns work-block closeout through `closeout.config.json`, `tools/repo_hygiene/brokered_closeout.py`, and the PowerShell adapters in `tools/closeout/`.
+- At the start of a non-trivial work block, prefer:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .`
+- Before any final response after non-trivial edits, always trigger closeout:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`
+- To audit whole-repo branch/worktree/stash cleanup, run:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .`
+- The trigger must run even when mutation will be blocked. The repo detector/auditor may retain or block, but final responses should not silently skip the closeout path.
+- Do not stash, commit, delete, or reset dirty paths classified as `foreignDirty`; they are retained and audited for their owning session or for later attribution.
+- High-impact mutation, including repo-sweep pruning, is allowed only after the exact closeout tuple passes review quorum: candidate id, action id, evidence hash, policy hash, and pinned refs.
+- For eligible symbolic actions, the repo auto-quorum actor may generate Codex/self plus independent policy-review artifacts and continue without user intervention. Manual-only, dirty, locked, protected, stale, or ambiguous candidates must print recoverable unblock detail instead.
+- Repo sweep retention is not complete at first classification. Non-protected retained candidates must get durable candidate investigation reports under `.claude-state/closeout/repo-sweep/candidate-reports/`; clean merge-required and clean checked-out branches may be auto-quorum clean-integrated, stale clean locked worktrees may be cleaned, redundant backup branches may be pruned, and dirty worktrees must include owned/unowned/foreign classification plus a recovery command.
+- Split-required owned dirty work should not remain a passive blocker. When policy allows, the dirty-split actor plans exact dirty paths, obtains autonomous quorum for symbolic action `split`, preserves those paths on a broker-claimed `closeout/split/...` branch/worktree, removes only those exact paths from the original after preservation is proven, audits the outcome, then reruns repair/finalize.
+
 ## Agent Bridge Startup
 - On session open in this repository, initialize the agent bridge before normal relay work.
 - For Codex-specific bridge heuristics, wake-loop behavior, and routing policy, also read `bridge_trigger_heuristics.md`.
