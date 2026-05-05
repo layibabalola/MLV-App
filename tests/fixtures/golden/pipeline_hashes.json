@@ -1,17 +1,17 @@
 {
-  "tiny_dual_iso.debayer.amaze.cpu.frame0": "7a9d3091ee7b5876e02d6308cad6e598394465d4141ef27fb93207e66ed32c34",
-  "tiny_dual_iso.debayer.bilinear.cpu.frame0": "33b328ae810bb74ae48c7ed2d94aa543266a6c4e5000424e02ef219d388eaee0",
-  "tiny_dual_iso.full16.frame0": "dfd6a6e8e025ac6f6d997f9a5b193e5816e86816cd21766c4a3f07cb8fc99ed6",
-  "tiny_dual_iso.full16.frame1": "1b2f970c7a5586aa0bc780e24e888a9c8ccc7616b9299e9cb88569fea2393ab9",
-  "tiny_dual_iso.gpu_preview_subset.exposure_0_75.frame0": "d4bf0df55340a482f5d3c7ff5ad2a0cbe2592c90a6479cde81f0175b9f517c05",
+  "tiny_dual_iso.debayer.amaze.cpu.frame0": "b63bdb0af7ef479569e35bd391d73da75f8dd2b2c42e040f1ba7a8c17bfc3ff5",
+  "tiny_dual_iso.debayer.bilinear.cpu.frame0": "c81880f2479847b0138cfbf92e73cbaae305967978a1bb550aa9edbc2bfa8068",
+  "tiny_dual_iso.full16.frame0": "d93c546abde7b3c28d619b1a26c0f989124c211f587068784a14238e3bdb83bf",
+  "tiny_dual_iso.full16.frame1": "8fd55f10054a7be94db4fe853cdd3a1b7889578d46a328be775ebdeec1543af7",
+  "tiny_dual_iso.gpu_preview_subset.exposure_0_75.frame0": "ed09bea1dcb5d01e159dd29490d161862b84902ca87b39de8e7dc752951c5f60",
   "tiny_dual_iso.gpu_preview_subset.exposure_0_75.signature.frame0": "2270930978597723434",
-  "tiny_dual_iso.gpu_preview_subset.frame0": "464e747e6c6efdc1c3c63278e51b8b15c91b2e4bd2c8771fc22525391a94e3ea",
+  "tiny_dual_iso.gpu_preview_subset.frame0": "102e1403753c8edfe73b18974317b41234eb00addfb845deac2c4e687f7a93b6",
   "tiny_dual_iso.gpu_preview_subset.frame1": "3c6071daf82039e78be7184d7f72e3c31b627b72150fa60c390fd9f1f4d0c628",
   "tiny_dual_iso.gpu_preview_subset.signature.frame0": "9630102517886493269",
   "tiny_dual_iso.gpu_preview_subset.signature.frame1": "9630102517886493269",
-  "tiny_dual_iso.preview16.frame0": "1ae7e257ab3aa7a7e84354ab1f8259a552e1abb87a79291f625f4aa05b825d32",
-  "tiny_dual_iso.preview16.frame1": "36a2af860114762f478d381e73b05c3d42285cfa033c1d7c56959e9b4d8523e0",
-  "tiny_dual_iso.preview16_vs_full_psnr.frame0": "11.8065",
-  "tiny_dual_iso.preview16_vs_full_psnr.frame1": "11.8260",
-  "tiny_dual_iso.preview_processing.cpu.frame0": "464e747e6c6efdc1c3c63278e51b8b15c91b2e4bd2c8771fc22525391a94e3ea"
+  "tiny_dual_iso.preview16.frame0": "75f6d3a1870cb57a14f291c099232f76a9d3071033936e363f6b823882239ac4",
+  "tiny_dual_iso.preview16.frame1": "476bfeb65be48b3ad0f17d452a46e4ab9f884c94c94c0f87a72241d7e4743ee7",
+  "tiny_dual_iso.preview16_vs_full_psnr.frame0": "10.9869",
+  "tiny_dual_iso.preview16_vs_full_psnr.frame1": "11.0066",
+  "tiny_dual_iso.preview_processing.cpu.frame0": "102e1403753c8edfe73b18974317b41234eb00addfb845deac2c4e687f7a93b6"
 }
