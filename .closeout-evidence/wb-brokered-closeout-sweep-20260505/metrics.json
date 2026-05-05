@@ -1,0 +1,16 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/server-wrapper-trampoline",
+  "committedDeltaPathCount": 60,
+  "createdAt": "2026-05-05T13:48:38+00:00",
+  "detectorHash": "e787fe0003d47e3e6816c11fe684680f",
+  "dirtyCounts": {
+    "foreignDirty": 1,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "05275cd17d05daf8495f9abf3efeaae54cb19d92",
+  "schemaVersion": "1.0",
+  "targetHead": "58e5a5efc80397067166731431d8cea002c1dcfc",
+  "workBlockId": "wb-brokered-closeout-sweep-20260505"
+}
