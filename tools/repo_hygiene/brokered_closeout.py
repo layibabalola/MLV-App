@@ -32,6 +32,7 @@ BROKER_SCHEMA_VERSION = "1.0"
 CONFIG_PATH = Path("closeout.config.json")
 HIGH_IMPACT_ACTIONS = [
     "clean_integrate",
+    "checkpoint-owned-dirty",
     "push_target",
     "delete_local_branch",
     "delete_remote_branch",
@@ -72,11 +73,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "commands": [
             {
                 "name": "brokered-closeout-tests",
-                "argv": ["python", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"],
+                "argv": ["py", "-3", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"],
             },
             {
                 "name": "repo-hygiene-policy",
-                "argv": ["python", "tools/repo-hygiene/hygiene.py", "--repo-root", ".", "verify-policy"],
+                "argv": ["py", "-3", "tools/repo-hygiene/hygiene.py", "--repo-root", ".", "verify-policy"],
             },
         ]
     },
@@ -94,6 +95,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     "dirty": {
         "unclaimedOutsideDelta": "foreign",
         "sensitiveUnownedBlocks": True,
+        "autoClaimCleanAtStart": True,
     },
     "dirtySplit": {
         "enabled": True,
@@ -151,6 +153,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
             "repo_sweep_clean_integrate",
+            "owned_dirty_checkpoint",
             "dirty_split",
             "foreign_dirty_integrated_branch_prune",
             "detached_dirty_preserve",
@@ -165,6 +168,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
             "test_repo_sweep_merge_failed_report_has_agent_resolution_packet",
             "test_finalize_auto_quorum_renews_stale_review_when_policy_allows",
+            "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
+            "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
+            "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
+            "test_owned_dirty_checkpoint_stages_only_exact_owned_paths",
+            "test_foreign_dirty_remains_retained_audited_and_does_not_block_independent_closeout",
+            "test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason",
+            "test_clean_integration_worktree_add_uses_longpaths_config",
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
             "test_missing_evidence_is_generated_and_committed_before_publish",
         ],
@@ -200,6 +210,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "autonomousActionClasses": [
             "integrated_branch_prune",
             "repo_sweep_clean_integrate",
+            "owned_dirty_checkpoint",
             "stale_locked_worktree_cleanup",
             "redundant_backup_prune",
             "dirty_split",
@@ -352,6 +363,10 @@ def git_stdout(repo_root: Path, args: Sequence[str], *, required: bool = True) -
     return result.stdout.strip()
 
 
+def run_git_longpaths(repo_root: Path, args: Sequence[str], *, check: bool = False):
+    return run_git(repo_root, ["-c", "core.longpaths=true", *args], check=check)
+
+
 def remote_exists(repo_root: Path, remote: str) -> bool:
     return run_git(repo_root, ["remote", "get-url", remote]).returncode == 0
 
@@ -424,6 +439,48 @@ def parse_status_paths(repo_root: Path) -> List[Dict[str, Any]]:
     return entries
 
 
+def dirty_baseline_snapshot(repo_root: Path) -> Dict[str, Any]:
+    entries: List[Dict[str, Any]] = []
+    for entry in parse_status_paths(repo_root):
+        path = str(entry["path"])
+        entries.append(
+            {
+                "status": entry.get("status"),
+                "path": path,
+                "originalPath": entry.get("originalPath"),
+                "contentSha256": file_content_hash(repo_root / path),
+            }
+        )
+    entries = sorted(entries, key=lambda item: str(item["path"]))
+    return {
+        "capturedAt": utc_now(),
+        "paths": [str(item["path"]) for item in entries],
+        "entries": entries,
+    }
+
+
+def manifest_dirty_baseline_paths(manifest: Dict[str, Any]) -> set[str]:
+    baseline = manifest.get("dirtyBaseline")
+    if not isinstance(baseline, dict):
+        return set()
+    paths = baseline.get("paths")
+    if isinstance(paths, list):
+        return {normalize_rel(str(path)) for path in paths if normalize_rel(str(path))}
+    entries = baseline.get("entries")
+    if isinstance(entries, list):
+        return {normalize_rel(str(item.get("path") if isinstance(item, dict) else "")) for item in entries}
+    return set()
+
+
+def manifest_has_dirty_baseline(manifest: Dict[str, Any]) -> bool:
+    return isinstance(manifest.get("dirtyBaseline"), dict)
+
+
+def baseline_dirty_recovery_command(paths: Sequence[str]) -> str:
+    joined = " ".join(sorted({normalize_rel(str(path)) for path in paths if normalize_rel(str(path))}))
+    return "split or checkpoint pre-existing dirty content for %s, then rerun work-block-complete -Finalize" % joined
+
+
 def changed_paths_between(repo_root: Path, target_ref: str, feature_head: str) -> List[str]:
     base = git_stdout(repo_root, ["merge-base", target_ref, feature_head])
     result = run_git(repo_root, ["diff", "--name-only", f"{base}..{feature_head}"], check=True)
@@ -462,6 +519,22 @@ def work_block_selection_key(manifest: Dict[str, Any]) -> Tuple[int, datetime, s
     if updated is None:
         updated = datetime.min.replace(tzinfo=timezone.utc)
     return (state_rank.get(str(manifest.get("state")), 0), updated, str(manifest.get("workBlockId") or ""))
+
+
+def work_block_selection_summary(manifest: Dict[str, Any], reason: str, candidate_count: int) -> Dict[str, Any]:
+    return {
+        "workBlockId": str(manifest.get("workBlockId") or ""),
+        "reason": reason,
+        "candidateCount": candidate_count,
+        "state": manifest.get("state"),
+        "updatedAt": manifest.get("updatedAt"),
+    }
+
+
+def attach_work_block_selection(manifest: Dict[str, Any], reason: str, candidate_count: int) -> Dict[str, Any]:
+    selected = dict(manifest)
+    selected["workBlockSelection"] = work_block_selection_summary(selected, reason, candidate_count)
+    return selected
 
 
 def append_event(repo_root: Path, config: Dict[str, Any], work_block_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
@@ -573,6 +646,7 @@ def start_work_block(
         if (block_dir / "manifest.json").exists():
             raise HygieneError("work block already exists: %s" % block_id)
         head = rev_parse(repo_root, "HEAD")
+        dirty_baseline = dirty_baseline_snapshot(repo_root)
         manifest = {
             "schemaVersion": BROKER_SCHEMA_VERSION,
             "workBlockId": block_id,
@@ -591,9 +665,21 @@ def start_work_block(
                 "createdAt": utc_now(),
             },
             "startHead": head,
+            "dirtyBaseline": dirty_baseline,
         }
         write_json(block_dir / "manifest.json", manifest)
-        append_event(repo_root, config, block_id, {"event": "work_block_started", "branch": branch, "head": head, "pathClaims": claims})
+        append_event(
+            repo_root,
+            config,
+            block_id,
+            {
+                "event": "work_block_started",
+                "branch": branch,
+                "head": head,
+                "pathClaims": claims,
+                "dirtyBaselinePaths": dirty_baseline["paths"],
+            },
+        )
     return {"status": "started", "workBlockId": block_id, "manifest": manifest}
 
 
@@ -717,21 +803,119 @@ def verify_closeout_tooling_current(repo_root_arg: Path, config: Optional[Dict[s
     return result
 
 
+def branch_work_block_candidates(repo_root: Path, config: Dict[str, Any], branch: str) -> List[Dict[str, Any]]:
+    root = work_blocks_root(repo_root, config)
+    candidates: List[Dict[str, Any]] = []
+    for manifest_file in sorted(root.glob("*/manifest.json")) if root.exists() else []:
+        manifest = read_json(manifest_file, {})
+        if manifest.get("branch") == branch and manifest.get("state") in {"active", "completed", "finalizing", "blocked"}:
+            candidates.append(manifest)
+    return candidates
+
+
+def bootstrap_response_broker_manifest(
+    repo_root_arg: Path,
+    *,
+    hook_phase: str = "response",
+    actor: str = "codex-response-hook",
+    path_claims: Optional[Sequence[str]] = None,
+    lease_seconds: int = 3600,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    branch = current_branch(repo_root)
+    if not branch:
+        return {"status": "skipped", "reason": "detached_head"}
+    if is_protected_branch(config, branch):
+        return {"status": "skipped", "reason": "protected_branch", "branch": branch}
+    claims = sorted({normalize_rel(path) for path in path_claims or [] if normalize_rel(str(path))})
+    with broker_lease(repo_root, config, "broker", lease_seconds=30):
+        candidates = branch_work_block_candidates(repo_root, config, branch)
+        if candidates:
+            selected = max(candidates, key=work_block_selection_key)
+            block_id = str(selected.get("workBlockId") or "")
+            updates: Dict[str, Any] = {
+                "actor": selected.get("actor") or actor,
+                "branch": branch,
+                "worktree": str(repo_root),
+                "lease": {"holder": actor, "seconds": lease_seconds, "createdAt": utc_now()},
+                "responseBroker": {"hookPhase": hook_phase, "refreshedAt": utc_now()},
+            }
+            if claims:
+                updates["pathClaims"] = sorted(set(manifest_path_claims(selected)).union(claims))
+            if not manifest_has_dirty_baseline(selected):
+                updates["dirtyBaseline"] = dirty_baseline_snapshot(repo_root)
+            manifest = update_manifest(repo_root, config, block_id, updates)
+            append_event(
+                repo_root,
+                config,
+                block_id,
+                {
+                    "event": "response_broker_refreshed",
+                    "hookPhase": hook_phase,
+                    "selection": work_block_selection_summary(manifest, "selected_by_branch_state_updated_workBlockId", len(candidates)),
+                    "dirtyBaselinePaths": manifest.get("dirtyBaseline", {}).get("paths", []),
+                },
+            )
+            return {
+                "status": "refreshed",
+                "workBlockId": block_id,
+                "manifest": manifest,
+                "workBlockSelection": work_block_selection_summary(manifest, "selected_by_branch_state_updated_workBlockId", len(candidates)),
+            }
+        block_id = "wb-%s" % uuid.uuid4().hex[:16]
+        head = rev_parse(repo_root, "HEAD")
+        dirty_baseline = dirty_baseline_snapshot(repo_root)
+        now = utc_now()
+        manifest = {
+            "schemaVersion": BROKER_SCHEMA_VERSION,
+            "workBlockId": block_id,
+            "state": "active",
+            "actor": actor,
+            "branch": branch,
+            "worktree": str(repo_root),
+            "targetBranch": config.get("git", {}).get("targetBranch", "master"),
+            "targetRemote": config.get("git", {}).get("remote", "origin"),
+            "pathClaims": claims,
+            "startedAt": now,
+            "updatedAt": now,
+            "lease": {"holder": actor, "seconds": lease_seconds, "createdAt": now},
+            "startHead": head,
+            "dirtyBaseline": dirty_baseline,
+            "responseBroker": {"hookPhase": hook_phase, "createdAt": now},
+        }
+        write_json(work_block_dir(repo_root, config, block_id) / "manifest.json", manifest)
+        append_event(
+            repo_root,
+            config,
+            block_id,
+            {
+                "event": "response_broker_bootstrapped",
+                "hookPhase": hook_phase,
+                "branch": branch,
+                "head": head,
+                "pathClaims": claims,
+                "dirtyBaselinePaths": dirty_baseline["paths"],
+            },
+        )
+        return {
+            "status": "created",
+            "workBlockId": block_id,
+            "manifest": manifest,
+            "workBlockSelection": work_block_selection_summary(manifest, "created_response_broker_manifest", 0),
+        }
+
+
 def ensure_work_block_for_current_branch(repo_root: Path, config: Dict[str, Any], work_block_id: Optional[str]) -> Dict[str, Any]:
     if work_block_id:
-        return load_manifest(repo_root, config, work_block_id)
+        return attach_work_block_selection(load_manifest(repo_root, config, work_block_id), "explicit_workBlockId", 1)
     branch = current_branch(repo_root)
     if branch:
-        root = work_blocks_root(repo_root, config)
-        candidates = []
-        for manifest_file in sorted(root.glob("*/manifest.json")) if root.exists() else []:
-            manifest = read_json(manifest_file, {})
-            if manifest.get("branch") == branch and manifest.get("state") in {"active", "completed", "blocked"}:
-                candidates.append(manifest)
+        candidates = branch_work_block_candidates(repo_root, config, branch)
         if candidates:
-            return max(candidates, key=work_block_selection_key)
+            return attach_work_block_selection(max(candidates, key=work_block_selection_key), "selected_by_branch_state_updated_workBlockId", len(candidates))
     implicit = start_work_block(repo_root, actor="codex-implicit", path_claims=[])
-    return implicit["manifest"]
+    return attach_work_block_selection(implicit["manifest"], "created_implicit_work_block", 0)
 
 
 def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = None) -> Dict[str, Any]:
@@ -747,35 +931,51 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
     dirty_paths = sorted({entry["path"] for entry in dirty_entries})
     all_claims = active_path_claims(repo_root, config)
     own_claims = set(manifest_path_claims(manifest))
+    baseline_paths = manifest_dirty_baseline_paths(manifest)
+    baseline_available = manifest_has_dirty_baseline(manifest)
     generated_patterns = config.get("paths", {}).get("generated", [])
     sensitive_patterns = config.get("paths", {}).get("sensitive", [])
     unclaimed_default = str(config.get("dirty", {}).get("unclaimedOutsideDelta", "foreign"))
+    auto_claim_clean = bool(config.get("dirty", {}).get("autoClaimCleanAtStart", True))
     owned_dirty: List[Dict[str, Any]] = []
     foreign_dirty: List[Dict[str, Any]] = []
     unowned_dirty: List[Dict[str, Any]] = []
+    mixed_dirty: List[Dict[str, Any]] = []
     for entry in dirty_entries:
         path = entry["path"]
         owner = all_claims.get(path)
         in_delta = path in delta_paths
         claimed_by_self = path in own_claims or owner == block_id
+        dirty_at_baseline = path in baseline_paths
         generated = path_matches_any(path, generated_patterns)
         sensitive = path_matches_any(path, sensitive_patterns)
         enriched = {
             **entry,
             "ownerWorkBlockId": owner,
             "inCompletedBranchDelta": in_delta,
+            "dirtyAtBrokerStart": dirty_at_baseline,
+            "dirtyBaselineAvailable": baseline_available,
             "generated": generated,
             "sensitive": sensitive,
         }
         if owner and owner != block_id:
             enriched["classificationReason"] = "path is claimed by another work block"
             foreign_dirty.append(enriched)
+        elif dirty_at_baseline and (in_delta or claimed_by_self):
+            enriched["classificationReason"] = "baseline dirty path overlaps candidate delta or claim"
+            enriched["blocker"] = "baseline-dirty-overlaps-candidate"
+            enriched["recoveryCommand"] = baseline_dirty_recovery_command([path])
+            mixed_dirty.append(enriched)
         elif in_delta or claimed_by_self:
             enriched["classificationReason"] = "path overlaps completed branch delta or block claim"
             owned_dirty.append(enriched)
         elif sensitive and bool(config.get("dirty", {}).get("sensitiveUnownedBlocks", True)):
             enriched["classificationReason"] = "unclaimed sensitive path"
             unowned_dirty.append(enriched)
+        elif auto_claim_clean and baseline_available and not dirty_at_baseline and not generated:
+            enriched["classificationReason"] = "path was clean or absent at broker dirty baseline"
+            enriched["autoClaimedByDirtyBaseline"] = True
+            owned_dirty.append(enriched)
         elif unclaimed_default == "foreign":
             enriched["classificationReason"] = "path is outside completed branch delta"
             foreign_dirty.append(enriched)
@@ -804,10 +1004,13 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
         "pinnedRefs": pinned_refs,
         "committedDeltaPaths": delta_paths,
         "dirtyPaths": dirty_paths,
+        "dirtyBaselinePaths": sorted(baseline_paths),
         "ownedDirty": owned_dirty,
+        "mixedDirty": mixed_dirty,
         "unownedDirty": unowned_dirty,
         "foreignDirty": foreign_dirty,
-        "eligible": not owned_dirty and not unowned_dirty,
+        "eligible": not owned_dirty and not unowned_dirty and not mixed_dirty,
+        "workBlockSelection": manifest.get("workBlockSelection"),
     }
     result["detectorHash"] = stable_hash(result)
     write_json(work_block_dir(repo_root, config, block_id) / "detector.json", result)
@@ -872,6 +1075,7 @@ def evidence_payloads(config: Dict[str, Any], detection: Dict[str, Any]) -> Dict
             "artifactKind": "metrics",
             "dirtyCounts": {
                 "ownedDirty": len(detection.get("ownedDirty", [])),
+                "mixedDirty": len(detection.get("mixedDirty", [])),
                 "foreignDirty": len(detection.get("foreignDirty", [])),
                 "unownedDirty": len(detection.get("unownedDirty", [])),
             },
@@ -983,11 +1187,15 @@ def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = No
     branch = detection["branch"]
     actions: List[Dict[str, Any]] = []
     blockers: List[str] = []
-    if detection["ownedDirty"]:
+    if detection.get("mixedDirty"):
+        paths = [item["path"] for item in detection.get("mixedDirty", [])]
+        blockers.append("baseline-dirty-overlaps-candidate:%s" % ",".join(paths))
+    if detection["ownedDirty"] and not detection.get("mixedDirty"):
         if bool(config.get("stashPolicy", {}).get("allowOwnedDirtyCheckpoint", True)):
             checkpoint = checkpoint_owned_work(repo_root, work_block_id=block_id)
             actions.append({"action": "checkpoint_owned_dirty", **checkpoint})
-            detection = detect_work_block(repo_root, work_block_id=block_id)
+            if checkpoint.get("status") == "success":
+                detection = detect_work_block(repo_root, work_block_id=block_id)
             if detection["ownedDirty"] and bool(config.get("dirtySplit", {}).get("autoRepairOwnedDirty", True)):
                 split = preserve_owned_dirty_split(repo_root, work_block_id=block_id)
                 actions.append({"action": "dirty_split", **split})
@@ -1065,6 +1273,7 @@ def finalize_evidence(config: Dict[str, Any], detection: Dict[str, Any]) -> Dict
         "workBlockId": detection["workBlockId"],
         "detectorHash": detection["detectorHash"],
         "ownedDirty": detection["ownedDirty"],
+        "mixedDirty": detection.get("mixedDirty", []),
         "unownedDirty": detection["unownedDirty"],
         "foreignDirty": detection["foreignDirty"],
         "committedDeltaPaths": detection["committedDeltaPaths"],
@@ -1237,6 +1446,12 @@ def autonomous_review_payloads(action_class: str, evidence: Dict[str, Any], conf
             "ancestry-safety-reviewer": "The preservation branch is pinned to the feature head before dirty paths are copied.",
             "mutation-scope-reviewer": "The action preserves exact paths before removing those same paths from the original worktree.",
         }
+    elif action_class == "owned_dirty_checkpoint":
+        rationales = {
+            "codex-self": "The repo actor generated an exact checkpoint tuple for owned dirty paths only.",
+            "ancestry-safety-reviewer": "The checkpoint is pinned to the current feature and target refs before staging.",
+            "mutation-scope-reviewer": "The commit stages only the exact owned dirty paths named in the tuple.",
+        }
     payloads: List[Dict[str, Any]] = []
     for reviewer in reviewers:
         payloads.append(
@@ -1399,7 +1614,7 @@ def dirty_split_evidence(repo_root: Path, config: Dict[str, Any], detection: Dic
 def plan_dirty_split_candidates(repo_root: Path, config: Dict[str, Any], detection: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not bool(config.get("dirtySplit", {}).get("enabled", True)):
         return []
-    if detection.get("unownedDirty"):
+    if detection.get("unownedDirty") or detection.get("mixedDirty"):
         return []
     paths = sorted({item["path"] for item in detection.get("ownedDirty", [])})
     if not paths:
@@ -1539,6 +1754,8 @@ def apply_dirty_split_candidate(repo_root_arg: Path, candidate: Dict[str, Any]) 
     blockers: List[str] = []
     if detection.get("unownedDirty"):
         blockers.append("unownedDirty")
+    if detection.get("mixedDirty"):
+        blockers.append("baseline-dirty-overlaps-candidate")
     missing_paths = [path for path in candidate["paths"] if not any(item["path"] == path for item in detection.get("ownedDirty", []))]
     if missing_paths:
         blockers.append("candidate_paths_not_owned_dirty")
@@ -1585,7 +1802,7 @@ def apply_dirty_split_candidate(repo_root_arg: Path, candidate: Dict[str, Any]) 
         add_args.extend([str(worktree_path), branch])
     else:
         add_args.extend(["-b", branch, str(worktree_path), str(candidate["pinnedRefs"]["feature"]["head"])])
-    add_worktree = run_git(repo_root, add_args)
+    add_worktree = run_git_longpaths(repo_root, add_args)
     if add_worktree.returncode != 0:
         payload = {"candidate": candidate, "operation": "worktree_add", "returncode": add_worktree.returncode, "stderr": add_worktree.stderr[-3000:]}
         write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=str(candidate["workBlockId"]), outcome="blocked")
@@ -1658,6 +1875,10 @@ def preserve_owned_dirty_split(repo_root_arg: Path, *, work_block_id: Optional[s
     limit = max(1, int(config.get("dirtySplit", {}).get("maxCandidatesPerRun", 1)))
     candidates = candidates[:limit]
     if not candidates:
+        if detection.get("mixedDirty"):
+            payload = {"reason": "baseline-dirty-overlaps-candidate", "mixedDirty": detection["mixedDirty"]}
+            write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=detection["workBlockId"], outcome="blocked")
+            return {"status": "blocked", **payload}
         if detection.get("unownedDirty"):
             payload = {"reason": "unowned_dirty_requires_triage", "unownedDirty": detection["unownedDirty"]}
             write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=detection["workBlockId"], outcome="blocked")
@@ -1864,7 +2085,7 @@ def finalize_work_block(
     else:
         integration_path = closeout_state_root(repo_root, config) / "integration-worktrees" / ("%s-%s" % (block_id, uuid.uuid4().hex[:8]))
         integration_path.parent.mkdir(parents=True, exist_ok=True)
-        add = run_git(repo_root, ["worktree", "add", "--detach", str(integration_path), target["head"]])
+        add = run_git_longpaths(repo_root, ["worktree", "add", "--detach", str(integration_path), target["head"]])
         if add.returncode != 0:
             payload = {"operation": "worktree_add", "returncode": add.returncode, "stderr": add.stderr[-4000:]}
             write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
@@ -1922,6 +2143,7 @@ def finalize_work_block(
         "recovery": recovery,
         "cleanup": cleanup,
         "foreignDirtyRetained": detection["foreignDirty"],
+        "workBlockSelection": detection.get("workBlockSelection"),
     }
     write_audit(repo_root, config, "success", success_payload, work_block_id=block_id, outcome="success")
     append_event(repo_root, config, block_id, {"event": "finalize_success", "targetHeadAfter": new_target_head})
@@ -1938,8 +2160,68 @@ def complete_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = N
     append_event(repo_root, config, block_id, {"event": "work_block_completed", "finalizeRequested": bool(finalize)})
     detection = detect_work_block(repo_root, work_block_id=block_id)
     if not finalize:
-        return {"status": "completed", "workBlockId": block_id, "detector": detection}
+        return {"status": "completed", "workBlockId": block_id, "workBlockSelection": manifest.get("workBlockSelection"), "detector": detection}
     return finalize_work_block(repo_root, work_block_id=block_id)
+
+
+def checkpoint_owned_dirty_action_id() -> str:
+    return "checkpoint-owned-dirty"
+
+
+def checkpoint_owned_dirty_candidate_id(work_block_id: str, paths: Sequence[str], detector_hash: str) -> str:
+    return "candidate:checkpoint-owned-dirty:%s" % stable_hash({"workBlockId": work_block_id, "paths": sorted(paths), "detectorHash": detector_hash}, 16)
+
+
+def checkpoint_owned_dirty_evidence(repo_root: Path, config: Dict[str, Any], detection: Dict[str, Any], paths: Sequence[str]) -> Dict[str, Any]:
+    path_set = set(paths)
+    owned_entries = [item for item in detection.get("ownedDirty", []) if item["path"] in path_set]
+    manifest = load_manifest(repo_root, config, str(detection["workBlockId"]))
+    return {
+        "workBlockId": detection["workBlockId"],
+        "branch": detection["branch"],
+        "featureHead": detection["featureHead"],
+        "targetHead": detection["targetHead"],
+        "detectorHash": detection["detectorHash"],
+        "paths": sorted(paths),
+        "ownedDirty": owned_entries,
+        "dirtyPathFingerprints": dirty_path_fingerprints(repo_root, owned_entries),
+        "foreignDirtyRetained": detection.get("foreignDirty", []),
+        "mixedDirty": detection.get("mixedDirty", []),
+        "unownedDirty": detection.get("unownedDirty", []),
+        "dirtyBaseline": manifest.get("dirtyBaseline"),
+        "policy": {
+            "allowOwnedDirtyCheckpoint": config.get("stashPolicy", {}).get("allowOwnedDirtyCheckpoint", True),
+            "autoClaimCleanAtStart": config.get("dirty", {}).get("autoClaimCleanAtStart", True),
+        },
+    }
+
+
+def plan_checkpoint_owned_dirty_candidate(repo_root: Path, config: Dict[str, Any], detection: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    paths = sorted({item["path"] for item in detection.get("ownedDirty", [])})
+    if not paths:
+        return None
+    candidate_id = checkpoint_owned_dirty_candidate_id(str(detection["workBlockId"]), paths, str(detection["detectorHash"]))
+    pinned_refs = {
+        "feature": detection["pinnedRefs"]["feature"],
+        "target": detection["pinnedRefs"]["target"],
+        "dirtyPaths": paths,
+    }
+    evidence = checkpoint_owned_dirty_evidence(repo_root, config, detection, paths)
+    return {
+        "candidateId": candidate_id,
+        "actionId": checkpoint_owned_dirty_action_id(),
+        "actionClass": "owned_dirty_checkpoint",
+        "workBlockId": detection["workBlockId"],
+        "paths": paths,
+        "evidence": evidence,
+        "evidenceHash": stable_hash(evidence),
+        "pinnedRefs": pinned_refs,
+    }
+
+
+def staged_path_set(repo_root: Path) -> set[str]:
+    result = run_git(repo_root, ["diff", "--cached", "--name-only", "--"], check=True)
+    return {normalize_rel(line) for line in result.stdout.splitlines() if normalize_rel(line)}
 
 
 def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] = None, message: str = "brokered closeout checkpoint") -> Dict[str, Any]:
@@ -1947,21 +2229,94 @@ def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] =
     config = load_closeout_config(repo_root)
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
     block_id = detection["workBlockId"]
+    if detection.get("mixedDirty"):
+        paths = [item["path"] for item in detection["mixedDirty"]]
+        payload = {
+            "reason": "baseline-dirty-overlaps-candidate",
+            "mixedDirty": detection["mixedDirty"],
+            "recoveryCommand": baseline_dirty_recovery_command(paths),
+        }
+        write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
+        return {"status": "blocked", **payload}
     if detection["unownedDirty"]:
         payload = {"reason": "checkpoint_refuses_non_owned_dirty", "foreignDirty": detection["foreignDirty"], "unownedDirty": detection["unownedDirty"]}
         write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
         return {"status": "blocked", **payload}
     if detection["foreignDirty"]:
         write_audit(repo_root, config, "retained_foreign_dirty", {"foreignDirty": detection["foreignDirty"]}, work_block_id=block_id, outcome="retained")
-    paths = sorted({item["path"] for item in detection["ownedDirty"]})
-    if not paths:
+    candidate = plan_checkpoint_owned_dirty_candidate(repo_root, config, detection)
+    if not candidate:
         return {"status": "noop", "reason": "no_owned_dirty"}
+    paths = candidate["paths"]
+    blockers: List[str] = []
+    staged_before = staged_path_set(repo_root)
+    outside_staged_before = sorted(staged_before.difference(paths))
+    if outside_staged_before:
+        blockers.append("staged_paths_outside_owned_dirty")
+    quorum_result = ensure_autonomous_quorum(
+        repo_root,
+        config,
+        candidate_id=candidate["candidateId"],
+        action_id=candidate["actionId"],
+        evidence_hash=candidate["evidenceHash"],
+        pinned_refs=candidate["pinnedRefs"],
+        evidence=candidate["evidence"],
+        action_class=candidate["actionClass"],
+        blockers=blockers,
+    )
+    if not quorum_result["quorum"]["ok"]:
+        payload = {"candidate": candidate, "quorum": quorum_result, "blockers": blockers, "outsideStagedPaths": outside_staged_before}
+        write_audit(repo_root, config, "checkpoint_owned_dirty_blocked", payload, work_block_id=block_id, outcome="blocked")
+        return {"status": "blocked", "reason": quorum_result["quorum"]["reason"] or "checkpoint_owned_dirty_blocked", **payload}
+    latest_detection = detect_work_block(repo_root, work_block_id=block_id)
+    latest_candidate = plan_checkpoint_owned_dirty_candidate(repo_root, config, latest_detection)
+    if (
+        not latest_candidate
+        or latest_candidate["candidateId"] != candidate["candidateId"]
+        or latest_candidate["evidenceHash"] != candidate["evidenceHash"]
+        or latest_candidate["pinnedRefs"] != candidate["pinnedRefs"]
+        or latest_detection.get("mixedDirty")
+        or latest_detection.get("unownedDirty")
+    ):
+        payload = {"candidate": candidate, "latestCandidate": latest_candidate, "latestDetectionHash": latest_detection.get("detectorHash")}
+        write_audit(repo_root, config, "checkpoint_owned_dirty_stale_tuple", payload, work_block_id=block_id, outcome="blocked")
+        return {"status": "blocked", "reason": "stale_tuple", **payload}
     add = run_git(repo_root, ["add", "--", *paths])
     if add.returncode != 0:
-        return {"status": "blocked", "reason": "git_add_failed", "stderr": add.stderr}
+        payload = {"candidate": candidate, "paths": paths, "stderr": add.stderr[-3000:]}
+        write_audit(repo_root, config, "checkpoint_owned_dirty_blocked", payload, work_block_id=block_id, outcome="blocked")
+        return {"status": "blocked", "reason": "git_add_failed", **payload}
+    staged_after = staged_path_set(repo_root)
+    outside_staged_after = sorted(staged_after.difference(paths))
+    missing_staged = sorted(set(paths).difference(staged_after))
+    if outside_staged_after or missing_staged:
+        payload = {
+            "candidate": candidate,
+            "paths": paths,
+            "stagedPaths": sorted(staged_after),
+            "outsideStagedPaths": outside_staged_after,
+            "missingStagedPaths": missing_staged,
+        }
+        write_audit(repo_root, config, "checkpoint_owned_dirty_blocked", payload, work_block_id=block_id, outcome="blocked")
+        return {"status": "blocked", "reason": "checkpoint_stage_scope_mismatch", **payload}
     commit = run_git(repo_root, ["commit", "-m", message])
-    payload = {"paths": paths, "returncode": commit.returncode, "stdout": commit.stdout[-4000:], "stderr": commit.stderr[-4000:]}
-    write_audit(repo_root, config, "checkpoint", payload, work_block_id=block_id, outcome="success" if commit.returncode == 0 else "blocked")
+    payload = {
+        "candidateId": candidate["candidateId"],
+        "actionId": candidate["actionId"],
+        "actionClass": candidate["actionClass"],
+        "evidenceHash": candidate["evidenceHash"],
+        "pinnedRefs": candidate["pinnedRefs"],
+        "quorum": quorum_result["quorum"],
+        "paths": paths,
+        "stagedPaths": sorted(staged_after.intersection(paths)),
+        "returncode": commit.returncode,
+        "stdout": commit.stdout[-4000:],
+        "stderr": commit.stderr[-4000:],
+    }
+    if commit.returncode == 0:
+        payload["commit"] = git_stdout(repo_root, ["rev-parse", "HEAD"])
+        append_event(repo_root, config, block_id, {"event": "owned_dirty_checkpointed", "paths": paths, "commit": payload["commit"]})
+    write_audit(repo_root, config, "checkpoint_owned_dirty", payload, work_block_id=block_id, outcome="success" if commit.returncode == 0 else "blocked")
     return {"status": "success" if commit.returncode == 0 else "blocked", **payload}
 
 
@@ -2382,7 +2737,7 @@ def simulate_clean_integration(repo_root: Path, config: Dict[str, Any], *, targe
         "targetHead": target_head,
         "branchHead": branch_head,
     }
-    add = run_git(repo_root, ["worktree", "add", "--detach", str(integration_path), target_head])
+    add = run_git_longpaths(repo_root, ["worktree", "add", "--detach", str(integration_path), target_head])
     if add.returncode != 0:
         return {"clean": False, "reason": "probe_worktree_failed", "attempt": attempt, "returncode": add.returncode, "stderr": add.stderr[-2000:], "validationStatus": "not_reached"}
     try:
@@ -3043,7 +3398,7 @@ def apply_detached_dirty_preserve(repo_root: Path, config: Dict[str, Any], plan:
         add_args.extend([str(preservation_path), branch])
     else:
         add_args.extend(["-b", branch, str(preservation_path), base_head])
-    add = run_git(repo_root, add_args)
+    add = run_git_longpaths(repo_root, add_args)
     if add.returncode != 0:
         action = {"status": "blocked", "reason": "preservation_worktree_failed", "returncode": add.returncode, "stderr": add.stderr[-3000:], "report": report}
         write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
@@ -3115,7 +3470,7 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
         return {"status": "blocked", "reason": "branch_head_drifted", "branch": branch, "expected": branch_head, "actual": current_head}
     integration_path = closeout_state_root(repo_root, config) / "rs-iw" / uuid.uuid4().hex[:12]
     integration_path.parent.mkdir(parents=True, exist_ok=True)
-    add = run_git(repo_root, ["worktree", "add", "--detach", str(integration_path), target["head"]])
+    add = run_git_longpaths(repo_root, ["worktree", "add", "--detach", str(integration_path), target["head"]])
     if add.returncode != 0:
         return {"status": "blocked", "reason": "integration_worktree_failed", "returncode": add.returncode, "stderr": add.stderr[-2000:]}
     try:

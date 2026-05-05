@@ -211,6 +211,15 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
         self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
 
+    def test_clean_integration_worktree_add_uses_longpaths_config(self) -> None:
+        text = (ROOT / "tools" / "repo_hygiene" / "brokered_closeout.py").read_text(encoding="utf-8")
+        self.assertIn("def run_git_longpaths", text)
+        self.assertIn('"core.longpaths=true"', text)
+        self.assertIn('run_git_longpaths(repo_root, ["worktree", "add", "--detach"', text)
+        self.assertIn("add_worktree = run_git_longpaths(repo_root, add_args)", text)
+        self.assertIn("add = run_git_longpaths(repo_root, add_args)", text)
+        self.assertNotIn('run_git(repo_root, ["worktree", "add"', text)
+
     def test_completion_without_id_prefers_latest_active_block_over_old_blocked_block(self) -> None:
         repo = self.init_repo(remote=False)
         git(repo, "checkout", "-b", "codex/select-latest")
