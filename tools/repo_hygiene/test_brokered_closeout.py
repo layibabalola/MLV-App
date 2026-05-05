@@ -95,6 +95,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "autoQuorum": {
                 "enabled": True,
                 "requiredScore": 10,
+                "allowStaleReviewRenewal": True,
                 "reviewers": ["codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
                 "autonomousActionClasses": [
                     "integrated_branch_prune",
@@ -244,7 +245,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "codex/test-work")
 
     def test_stale_review_tuple_blocks_when_target_moves(self) -> None:
-        repo = self.init_repo()
+        repo = self.init_repo(config_updates={"autoQuorum": {"allowStaleReviewRenewal": False}})
         self.make_feature(repo, "wb-stale-review")
         self.approve_current_tuple(repo, "wb-stale-review")
         git(repo, "checkout", "master")
@@ -257,6 +258,21 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["reason"], "stale_review")
         self.assertIn("stale_review", self.audit_types(repo))
         self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "codex/test-work")
+
+    def test_finalize_auto_quorum_renews_stale_review_when_policy_allows(self) -> None:
+        repo = self.init_repo()
+        self.make_feature(repo, "wb-renew-stale-review")
+        self.approve_current_tuple(repo, "wb-renew-stale-review")
+        (repo / "feature-followup.txt").write_text("follow-up after review\n", encoding="utf-8")
+        git(repo, "add", "feature-followup.txt")
+        git(repo, "commit", "-m", "feature follow-up")
+
+        result = finalize_work_block(repo, work_block_id="wb-renew-stale-review")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["quorum"]["matchingApprovals"], 3)
+        self.assertIn("auto_quorum", self.audit_types(repo))
+        self.assertEqual(git(repo, "show", "master:feature-followup.txt").stdout, "follow-up after review\n")
 
     def test_validation_failure_blocks_after_clean_merge(self) -> None:
         repo = self.init_repo(
