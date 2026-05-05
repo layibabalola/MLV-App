@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/fix-windows-scaffold-ci",
+  "createdAt": "2026-05-05T21:02:39+00:00",
+  "detectorHash": "c10a1e54e59eccb10022aa06aab5a453",
+  "featureHead": "f5e858ff966468f3637dd7b1287b9c13713b9f83",
+  "schemaVersion": "1.0",
+  "targetHead": "2dfa70fc7075ff07f44c4bfaf4d3d06c9586af4f",
+  "workBlockId": "wb-7449a89359054df5",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
