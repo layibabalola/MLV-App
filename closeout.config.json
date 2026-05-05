@@ -35,7 +35,8 @@
   },
   "dirty": {
     "unclaimedOutsideDelta": "foreign",
-    "sensitiveUnownedBlocks": true
+    "sensitiveUnownedBlocks": true,
+    "autoClaimCleanAtStart": true
   },
   "dirtySplit": {
     "enabled": true,
@@ -89,10 +90,11 @@
       "tools/repo-hygiene/hygiene.config.json"
     ],
     "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation"],
-    "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+    "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "repo_sweep_prune_merged", "split"],
     "requiredAutoQuorumActions": [
       "integrated_branch_prune",
       "repo_sweep_clean_integrate",
+      "owned_dirty_checkpoint",
       "dirty_split",
       "foreign_dirty_integrated_branch_prune",
       "detached_dirty_preserve",
@@ -107,6 +109,12 @@
       "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
       "test_repo_sweep_merge_failed_report_has_agent_resolution_packet",
       "test_finalize_auto_quorum_renews_stale_review_when_policy_allows",
+      "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
+      "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
+      "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
+      "test_owned_dirty_checkpoint_stages_only_exact_owned_paths",
+      "test_foreign_dirty_remains_retained_audited_and_does_not_block_independent_closeout",
+      "test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason",
       "test_clean_integration_worktree_add_uses_longpaths_config",
       "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
       "test_missing_evidence_is_generated_and_committed_before_publish"
@@ -134,6 +142,7 @@
     "allowedReviewers": ["codex", "claude", "human", "local-test"],
     "highImpactActions": [
       "clean_integrate",
+      "checkpoint-owned-dirty",
       "push_target",
       "delete_local_branch",
       "delete_remote_branch",
@@ -154,6 +163,7 @@
     "autonomousActionClasses": [
       "integrated_branch_prune",
       "repo_sweep_clean_integrate",
+      "owned_dirty_checkpoint",
       "stale_locked_worktree_cleanup",
       "redundant_backup_prune",
       "dirty_split",
