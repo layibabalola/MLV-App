@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     sweep = sub.add_parser("sweep", help="Plan or apply whole-repo branch/worktree/stash cleanup.")
     sweep.add_argument("--apply", action="store_true")
     sweep.add_argument("--print-tuple", action="store_true")
+    sweep.add_argument("--candidate-id")
 
     sub.add_parser("contract", help="Print broker/config/script parity information.")
     return parser
@@ -154,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.print_tuple:
                 result = repo_sweep_tuple(repo_root)
             else:
-                result = repo_sweep(repo_root, apply=args.apply)
+                result = repo_sweep(repo_root, apply=args.apply, candidate_id=args.candidate_id)
         elif args.command == "contract":
             result = broker_contract(repo_root)
         else:
