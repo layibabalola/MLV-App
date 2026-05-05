@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/retained-remediation-actor",
+  "createdAt": "2026-05-05T21:05:30+00:00",
+  "detectorHash": "65f6aaddceb3c4b49de06f3d49e14b96",
+  "featureHead": "9a3587f34c741c51388615fa5494e45aabc1a20a",
+  "schemaVersion": "1.0",
+  "targetHead": "c075c9b49f9616ea0eb9d0dad24d2a908025173a",
+  "workBlockId": "wb-retained-remediation-actor-20260505",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\worktrees\\retained-remediation-actor"
+}

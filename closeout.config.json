@@ -90,9 +90,12 @@
       "tools/repo-hygiene/hygiene.config.json"
     ],
     "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation"],
-    "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+    "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split"],
     "requiredAutoQuorumActions": [
       "integrated_branch_prune",
+      "integrated_remote_feature_prune",
+      "patch_equivalent_remote_feature_prune",
+      "remote_feature_clean_integrate",
       "repo_sweep_clean_integrate",
       "owned_dirty_checkpoint",
       "dirty_split",
@@ -125,7 +128,12 @@
       "test_clean_integration_worktree_add_uses_longpaths_config",
       "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
       "test_missing_evidence_is_generated_and_committed_before_publish",
-      "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun"
+      "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun",
+      "test_remediate_retained_actor_applies_one_candidate_per_run",
+      "test_repo_sweep_remote_integrated_feature_branch_is_pruned",
+      "test_repo_sweep_remote_patch_equivalent_feature_branch_is_pruned",
+      "test_repo_sweep_remote_unique_feature_branch_clean_integrates_and_prunes",
+      "test_repo_sweep_remote_conflicting_feature_branch_writes_investigation_packet"
     ],
     "requiredSymbols": [
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -137,6 +145,8 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediate_retained_candidates"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
       {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
@@ -175,6 +185,9 @@
     "reviewers": ["codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
     "autonomousActionClasses": [
       "integrated_branch_prune",
+      "integrated_remote_feature_prune",
+      "patch_equivalent_remote_feature_prune",
+      "remote_feature_clean_integrate",
       "repo_sweep_clean_integrate",
       "owned_dirty_checkpoint",
       "stale_locked_worktree_cleanup",
@@ -210,7 +223,12 @@
     "allowCleanCheckedOutIntegration": true,
     "allowStaleLockedWorktreeCleanup": true,
     "lockedWorktreeStaleHours": 24,
-    "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"]
+    "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"],
+    "fetchBeforeRemoteSweep": true,
+    "remoteFeaturePatterns": [],
+    "pruneRemoteFeatureBranches": true,
+    "cleanIntegrateRemoteFeatureBranches": true,
+    "deleteRemoteFeatureAfterCleanIntegrate": true
   },
   "blockerAutoRemediation": {
     "enabled": true,
@@ -232,6 +250,7 @@
     "review-quorum.ps1",
     "orphan-quarantine.ps1",
     "audit-closeout.ps1",
-    "repo-sweep-closeout.ps1"
+    "repo-sweep-closeout.ps1",
+    "remediate-retained-closeout.ps1"
   ]
 }
