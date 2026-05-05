@@ -133,6 +133,16 @@ and the candidate is still eligible. The auto-quorum actor regenerates exact-tup
 reviews against current evidence and pinned refs, revalidates immediately before
 mutation, and blocks only when refs, dirty state, policy, or validation no longer
 satisfy the action.
+A target push non-fast-forward means the target moved during closeout. Treat it
+as a recoverable race, never as permission to force-push: fetch the target
+(`git fetch fork master` in this repo), fast-forward/update the local target
+only when the fetched ref proves it is a descendant, then rerun
+`tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`. If the fetched
+target already contains the attempted closeout head, finalize may continue. If
+the target moved to different work, block as `target_push_rerun_required` with
+the attempted head, fetched target head, local target head, and recovery
+commands. If another automation keeps updating `master`, wait for that closeout
+to finish, fetch again, and rerun.
 Before reporting a closeout blocker as authoritative, run the configured
 closeout tooling baseline check. Missing actors, policy fields, contract checks,
 repair paths, or required tests are `closeout_tooling_stale`; stale tooling

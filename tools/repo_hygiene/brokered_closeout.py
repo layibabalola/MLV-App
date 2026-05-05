@@ -184,11 +184,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_clean_integration_worktree_add_uses_longpaths_config",
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
             "test_missing_evidence_is_generated_and_committed_before_publish",
+            "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun",
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def checkpoint_owned_dirty_action_id"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_detached_preservation_commit"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_target_push_failure"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
@@ -2001,6 +2003,95 @@ def update_local_target(repo_root: Path, target_branch: str, new_head: str) -> D
     return {"targetBranch": target_branch, "newHead": new_head, "returncode": result.returncode, "stderr": result.stderr[-2000:]}
 
 
+def push_failed_non_fast_forward(push_result: Dict[str, Any]) -> bool:
+    text = "%s\n%s" % (push_result.get("stdout") or "", push_result.get("stderr") or "")
+    lowered = text.lower()
+    return "non-fast-forward" in lowered or "updates were rejected" in lowered or "fetch first" in lowered
+
+
+def target_push_recovery_command(remote: str, target_branch: str) -> Dict[str, Any]:
+    return {
+        "fetch": "git fetch %s %s" % (remote, target_branch),
+        "integrateLocalTarget": "switch to %s, then run git merge --ff-only %s/%s" % (target_branch, remote, target_branch),
+        "rerunCloseout": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\work-block-complete.ps1 -RepoRoot . -Finalize",
+        "raceAdvice": "If another closeout keeps moving %s/%s, wait for it to finish, fetch again, then rerun closeout." % (remote, target_branch),
+    }
+
+
+def repair_target_push_failure(
+    repo_root: Path,
+    config: Dict[str, Any],
+    *,
+    target_branch: str,
+    remote: str,
+    attempted_head: str,
+    push_result: Dict[str, Any],
+    work_block_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    command = target_push_recovery_command(remote, target_branch)
+    recovery: Dict[str, Any] = {
+        "status": "blocked",
+        "reason": "target_push_failed",
+        "recoveryCommand": command,
+        "safeRecovery": command,
+        "push": push_result,
+        "remote": remote,
+        "targetBranch": target_branch,
+        "attemptedHead": attempted_head,
+    }
+    if not push_failed_non_fast_forward(push_result):
+        write_audit(repo_root, config, "target_push_recovery", recovery, work_block_id=work_block_id, outcome="blocked")
+        return recovery
+    fetch = run_git(repo_root, ["fetch", "--prune", remote, target_branch])
+    remote_ref = f"refs/remotes/{remote}/{target_branch}"
+    local_ref = f"refs/heads/{target_branch}"
+    remote_head = rev_parse(repo_root, remote_ref, required=False)
+    local_head = rev_parse(repo_root, local_ref, required=False)
+    recovery.update(
+        {
+            "reason": "target_push_non_fast_forward",
+            "fetch": {"returncode": fetch.returncode, "stdout": fetch.stdout[-2000:], "stderr": fetch.stderr[-2000:]},
+            "remoteHeadAfterFetch": remote_head,
+            "localHeadBeforeUpdate": local_head,
+        }
+    )
+    if fetch.returncode != 0:
+        recovery["reason"] = "target_push_recovery_fetch_failed"
+        write_audit(repo_root, config, "target_push_recovery", recovery, work_block_id=work_block_id, outcome="blocked")
+        return recovery
+    if not remote_head:
+        recovery["reason"] = "target_push_remote_ref_missing_after_fetch"
+        write_audit(repo_root, config, "target_push_recovery", recovery, work_block_id=work_block_id, outcome="blocked")
+        return recovery
+    if local_head != remote_head and (not local_head or is_ancestor(repo_root, local_head, remote_head)):
+        local_update = update_local_target(repo_root, target_branch, remote_head)
+        recovery["localTargetUpdate"] = local_update
+        recovery["localHeadAfterUpdate"] = rev_parse(repo_root, local_ref, required=False)
+        if local_update["returncode"] != 0:
+            recovery["reason"] = "target_push_local_update_failed"
+            write_audit(repo_root, config, "target_push_recovery", recovery, work_block_id=work_block_id, outcome="blocked")
+            return recovery
+    elif local_head != remote_head:
+        recovery["reason"] = "target_push_local_target_not_fast_forwardable"
+        write_audit(repo_root, config, "target_push_recovery", recovery, work_block_id=work_block_id, outcome="blocked")
+        return recovery
+    else:
+        recovery["localHeadAfterUpdate"] = local_head
+    if remote_head == attempted_head or is_ancestor(repo_root, attempted_head, remote_head):
+        recovery.update({"status": "success", "reason": "target_push_remote_already_contains_attempted_head", "targetHeadAfter": remote_head})
+        write_audit(repo_root, config, "target_push_recovery", recovery, work_block_id=work_block_id, outcome="success")
+        return recovery
+    recovery.update(
+        {
+            "status": "blocked",
+            "reason": "target_push_rerun_required",
+            "targetHeadAfter": remote_head,
+        }
+    )
+    write_audit(repo_root, config, "target_push_recovery", recovery, work_block_id=work_block_id, outcome="blocked")
+    return recovery
+
+
 def cleanup_after_success(
     repo_root: Path,
     config: Dict[str, Any],
@@ -2112,6 +2203,7 @@ def finalize_work_block(
     new_target_head = target["head"]
     push_result: Optional[Dict[str, Any]] = None
     recovery: Optional[Dict[str, Any]] = None
+    local_update: Optional[Dict[str, Any]] = None
     if already_integrated:
         local_head = rev_parse(repo_root, f"refs/heads/{target_branch}", required=False)
         if local_head != target["head"]:
@@ -2157,11 +2249,24 @@ def finalize_work_block(
             push = run_git(integration_path, ["push", str(target.get("remote")), f"HEAD:{target_branch}"])
             push_result = {"remote": target.get("remote"), "targetBranch": target_branch, "returncode": push.returncode, "stdout": push.stdout[-4000:], "stderr": push.stderr[-4000:]}
             if push.returncode != 0:
-                write_audit(repo_root, config, "partial_push_recovery", push_result, work_block_id=block_id, outcome="blocked")
-                remove_worktree(repo_root, integration_path)
-                update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "target_push_failed"})
-                return {"status": "blocked", "reason": "target_push_failed", "push": push_result}
-        local_update = update_local_target(repo_root, target_branch, new_target_head)
+                recovery = repair_target_push_failure(
+                    repo_root,
+                    config,
+                    target_branch=target_branch,
+                    remote=str(target.get("remote")),
+                    attempted_head=new_target_head,
+                    push_result=push_result,
+                    work_block_id=block_id,
+                )
+                if recovery["status"] != "success":
+                    remove_worktree(repo_root, integration_path)
+                    append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": recovery["reason"]})
+                    update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": recovery["reason"]})
+                    return {"status": "blocked", "reason": recovery["reason"], "push": push_result, "recovery": recovery}
+                new_target_head = str(recovery["targetHeadAfter"])
+                local_update = recovery.get("localTargetUpdate")
+        if local_update is None:
+            local_update = update_local_target(repo_root, target_branch, new_target_head)
         if local_update["returncode"] != 0:
             write_audit(repo_root, config, "partial_push_recovery", local_update, work_block_id=block_id, outcome="blocked")
             remove_worktree(repo_root, integration_path)
@@ -3599,16 +3704,30 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
             return {"status": "blocked", "reason": "validation_failed", "validations": validations}
         new_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
         push_result: Optional[Dict[str, Any]] = None
+        recovery: Optional[Dict[str, Any]] = None
+        local_update: Optional[Dict[str, Any]] = None
         if target["mode"] == "remote":
             push = run_git(integration_path, ["push", str(target.get("remote")), f"HEAD:{target_branch}"])
             push_result = {"remote": target.get("remote"), "targetBranch": target_branch, "returncode": push.returncode, "stdout": push.stdout[-2000:], "stderr": push.stderr[-2000:]}
             if push.returncode != 0:
-                return {"status": "blocked", "reason": "target_push_failed", "push": push_result}
-        local_update = update_local_target(repo_root, target_branch, new_head)
+                recovery = repair_target_push_failure(
+                    repo_root,
+                    config,
+                    target_branch=target_branch,
+                    remote=str(target.get("remote")),
+                    attempted_head=new_head,
+                    push_result=push_result,
+                )
+                if recovery["status"] != "success":
+                    return {"status": "blocked", "reason": recovery["reason"], "push": push_result, "recovery": recovery}
+                new_head = str(recovery["targetHeadAfter"])
+                local_update = recovery.get("localTargetUpdate")
+        if local_update is None:
+            local_update = update_local_target(repo_root, target_branch, new_head)
         if local_update["returncode"] != 0:
             return {"status": "blocked", "reason": "local_target_update_failed", "localUpdate": local_update, "push": push_result}
         cleanup = cleanup_branch_after_sweep_action(repo_root, config, plan, item)
-        result = {"status": "success", "action": "clean_integrate", "branch": branch, "newTargetHead": new_head, "validations": validations, "push": push_result, "localUpdate": local_update, "cleanup": cleanup}
+        result = {"status": "success", "action": "clean_integrate", "branch": branch, "newTargetHead": new_head, "validations": validations, "push": push_result, "recovery": recovery, "localUpdate": local_update, "cleanup": cleanup}
         write_audit(repo_root, config, "success", result, outcome="success")
         return result
     finally:
