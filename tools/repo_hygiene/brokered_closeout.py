@@ -2670,7 +2670,7 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
     current_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
     if current_head != branch_head:
         return {"status": "blocked", "reason": "branch_head_drifted", "branch": branch, "expected": branch_head, "actual": current_head}
-    integration_path = closeout_state_root(repo_root, config) / "repo-sweep" / "integration-worktrees" / ("%s-%s" % (safe_state_name(branch), uuid.uuid4().hex[:8]))
+    integration_path = closeout_state_root(repo_root, config) / "rs-iw" / uuid.uuid4().hex[:12]
     integration_path.parent.mkdir(parents=True, exist_ok=True)
     add = run_git(repo_root, ["worktree", "add", "--detach", str(integration_path), target["head"]])
     if add.returncode != 0:
