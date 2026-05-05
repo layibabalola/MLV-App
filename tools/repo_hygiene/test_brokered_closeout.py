@@ -304,6 +304,22 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("success", self.audit_types(repo))
         self.assertIn("branch_deletion", self.audit_types(repo))
 
+    def test_other_work_block_claim_takes_precedence_over_branch_delta(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/claimed-delta")
+        start_work_block(repo, work_block_id="wb-current", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("committed\n", encoding="utf-8")
+        git(repo, "add", "owned.txt")
+        git(repo, "commit", "-m", "owned committed")
+        start_work_block(repo, work_block_id="wb-z-other", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("other dirty\n", encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-current")
+
+        self.assertFalse(detection["ownedDirty"], detection)
+        self.assertEqual([item["path"] for item in detection["foreignDirty"]], ["owned.txt"])
+        self.assertEqual(detection["foreignDirty"][0]["ownerWorkBlockId"], "wb-z-other")
+
     def test_no_origin_local_only_closeout_updates_target_and_prunes_branch(self) -> None:
         repo = self.init_repo(remote=False)
         self.make_feature(repo, "wb-local-only")
@@ -313,6 +329,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "master")
         self.assertEqual((repo / "work.txt").read_text(encoding="utf-8"), "feature work\n")
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/test-work", check=False).returncode, 0)
+
+    def test_finalize_auto_quorum_resolves_missing_review(self) -> None:
+        repo = self.init_repo(remote=False)
+        self.make_feature(repo, "wb-auto-finalize")
+
+        result = finalize_work_block(repo, work_block_id="wb-auto-finalize")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertIn("auto_quorum", self.audit_types(repo))
+        self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "master")
 
     def test_partial_push_recovery_updates_local_target_and_cleans_branch(self) -> None:
         repo = self.init_repo(remote=True)
@@ -506,6 +532,23 @@ class BrokeredCloseoutTests(unittest.TestCase):
         deletion = next(item for item in result["actions"] if item.get("branch") == "codex/topic-backup" and item.get("action") == "delete_local_branch")
         self.assertTrue(deletion["forced"])
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/topic-backup", check=False).returncode, 0)
+
+    def test_repo_sweep_apply_candidate_id_mutates_only_that_candidate(self) -> None:
+        repo = self.init_repo()
+        git(repo, "branch", "codex/first-backup", "master")
+        git(repo, "branch", "codex/second-backup", "master")
+        plan = repo_sweep(repo)
+        candidate = next(
+            item
+            for item in plan["promotedCandidates"]
+            if item["pinnedRefs"]["branch"]["branch"] == "codex/first-backup"
+        )
+
+        result = repo_sweep(repo, apply=True, candidate_id=candidate["candidateId"])
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/first-backup", check=False).returncode, 0)
+        self.assertEqual(git(repo, "rev-parse", "--verify", "codex/second-backup", check=False).returncode, 0)
 
     def test_repo_sweep_dirty_current_worktree_gets_ownership_classification(self) -> None:
         repo = self.init_repo()

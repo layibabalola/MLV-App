@@ -119,6 +119,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "dropStashesInSweep": False,
         "protectedWorktreeRoots": [".claude/worktrees/**"],
     },
+    "responseHookLifecycle": {
+        "skipSessionWorktreeSignal": "SkipSessionWorktree",
+        "skipAuditField": "session_worktree_bootstrap",
+        "readOnlyHookPhases": ["response", "final"],
+        "managedSessionWorktreeRoots": [".codex-worktrees/**"],
+        "bootstrapAllowedOnlyByExplicitStart": True,
+    },
     "repair": {
         "autoPublishFeatureBranch": True,
         "allowedPublishRemotes": ["fork", "origin"],
@@ -133,10 +140,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo_hygiene/brokered_closeout.py",
             "tools/repo_hygiene/work_block_cli.py",
             "tools/repo_hygiene/test_brokered_closeout.py",
+            "tools/agent-bridge/codex_pre_response.ps1",
+            "tools/agent-bridge/codex_pre_final.ps1",
+            "tools/agent-bridge/codex_bridge_reminder.ps1",
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"],
+        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle"],
         "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
         "requiredAutoQuorumActions": ["integrated_branch_prune", "repo_sweep_clean_integrate", "dirty_split"],
         "requiredTests": [
@@ -149,6 +159,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
+            {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
+            {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
+            {"path": "tools/agent-bridge/codex_bridge_reminder.ps1", "contains": "session_worktree_bootstrap=skipped"},
         ],
     },
     "evidenceRepair": {
@@ -713,15 +726,15 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
             "generated": generated,
             "sensitive": sensitive,
         }
-        if in_delta or claimed_by_self:
+        if owner and owner != block_id:
+            enriched["classificationReason"] = "path is claimed by another work block"
+            foreign_dirty.append(enriched)
+        elif in_delta or claimed_by_self:
             enriched["classificationReason"] = "path overlaps completed branch delta or block claim"
             owned_dirty.append(enriched)
         elif sensitive and bool(config.get("dirty", {}).get("sensitiveUnownedBlocks", True)):
             enriched["classificationReason"] = "unclaimed sensitive path"
             unowned_dirty.append(enriched)
-        elif owner and owner != block_id:
-            enriched["classificationReason"] = "path is claimed by another work block"
-            foreign_dirty.append(enriched)
         elif unclaimed_default == "foreign":
             enriched["classificationReason"] = "path is outside completed branch delta"
             foreign_dirty.append(enriched)
@@ -1750,6 +1763,19 @@ def finalize_work_block(
         evidence_hash=evidence_hash,
         pinned_refs=detection["pinnedRefs"],
     )
+    if not quorum["ok"] and quorum["reason"] == "review_quorum_missing":
+        quorum_result = ensure_autonomous_quorum(
+            repo_root,
+            config,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=detection["pinnedRefs"],
+            evidence=evidence,
+            action_class="repo_sweep_clean_integrate",
+            blockers=[],
+        )
+        quorum = quorum_result["quorum"]
     if not quorum["ok"]:
         audit_type = "stale_review" if quorum["reason"] == "stale_review" else "review_quorum_blocked"
         payload = {"candidateId": candidate_id, "actionId": action_id, "evidenceHash": evidence_hash, "quorum": quorum}
@@ -2652,9 +2678,16 @@ def cleanup_branch_after_sweep_action(repo_root: Path, config: Dict[str, Any], p
             write_audit(repo_root, config, "worktree_deletion", action, outcome="success" if action["returncode"] == 0 else "blocked")
             if action["returncode"] != 0:
                 return actions
+    force_reason = None
+    if not force_branch_delete:
+        branch_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
+        target_head = rev_parse(repo_root, f"refs/heads/{target_branch}", required=False) or str(plan["pinnedRefs"]["target"]["head"])
+        if branch_head and target_head and is_ancestor(repo_root, branch_head, target_head):
+            force_branch_delete = current_branch(repo_root) != target_branch
+            force_reason = "branch_head_is_ancestor_of_target"
     delete_flag = "-D" if force_branch_delete else "-d"
     delete = run_git(repo_root, ["branch", delete_flag, branch])
-    action = {"action": "delete_local_branch", "branch": branch, "forced": force_branch_delete, "returncode": delete.returncode, "stderr": delete.stderr[-2000:]}
+    action = {"action": "delete_local_branch", "branch": branch, "forced": force_branch_delete, "forceReason": force_reason, "returncode": delete.returncode, "stderr": delete.stderr[-2000:]}
     actions.append(action)
     write_audit(repo_root, config, "branch_deletion", action, outcome="success" if delete.returncode == 0 else "blocked")
     return actions
@@ -2670,7 +2703,7 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
     current_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
     if current_head != branch_head:
         return {"status": "blocked", "reason": "branch_head_drifted", "branch": branch, "expected": branch_head, "actual": current_head}
-    integration_path = closeout_state_root(repo_root, config) / "repo-sweep" / "integration-worktrees" / ("%s-%s" % (safe_state_name(branch), uuid.uuid4().hex[:8]))
+    integration_path = closeout_state_root(repo_root, config) / "rs-iw" / uuid.uuid4().hex[:12]
     integration_path.parent.mkdir(parents=True, exist_ok=True)
     add = run_git(repo_root, ["worktree", "add", "--detach", str(integration_path), target["head"]])
     if add.returncode != 0:
@@ -2705,7 +2738,7 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
         write_audit(repo_root, config, "snapshot_pruning", {"action": "integration_worktree_remove", **removal}, outcome="success" if removal["returncode"] == 0 else "blocked")
 
 
-def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
+def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     tooling = verify_closeout_tooling_current(repo_root, config)
@@ -2745,8 +2778,12 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
         return {"status": "planned", **payload}
     actions: List[Dict[str, Any]] = []
     quorum_results: List[Dict[str, Any]] = []
+    matched_candidate = candidate_id is None
     if bool(config.get("repoSweep", {}).get("pruneMergedLocalBranches", True)):
         for item, candidate in zip(prunable_branches, branch_candidates):
+            if candidate_id and candidate["candidateId"] != candidate_id:
+                continue
+            matched_candidate = True
             current_head = rev_parse(repo_root, f"refs/heads/{item['branch']}", required=False)
             blockers: List[str] = []
             if current_head != item["head"]:
@@ -2771,6 +2808,9 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
             actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item))
     branch_by_name = {item["branch"]: item for item in plan["branchPlans"]}
     for report, candidate in zip(promoted_reports, promoted_candidates):
+        if candidate_id and candidate["candidateId"] != candidate_id:
+            continue
+        matched_candidate = True
         item = branch_by_name.get(report["branch"])
         if not item:
             continue
@@ -2807,18 +2847,33 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
         elif report["recommendedAction"] in {"prune_now", "cleanup_worktree_and_prune"}:
             actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item, force_branch_delete=report.get("actionClass") == "redundant_backup_prune"))
     if bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False)):
+        if candidate_id:
+            candidate_worktrees = []
         for item in candidate_worktrees:
             action = {"action": "remove_clean_detached_worktree", **remove_worktree(repo_root, Path(str(item["path"])))}
             actions.append(action)
             write_audit(repo_root, config, "snapshot_pruning", action, outcome="success" if action["returncode"] == 0 else "blocked")
     if bool(config.get("cleanupPolicy", {}).get("dropStashesInSweep", False)):
+        if candidate_id:
+            candidate_stashes = []
         for item in candidate_stashes:
             drop = run_git(repo_root, ["stash", "drop", item["ref"]])
             action = {"action": "drop_stash", "stash": item["ref"], "returncode": drop.returncode, "stderr": drop.stderr[-2000:]}
             actions.append(action)
             write_audit(repo_root, config, "snapshot_pruning", action, outcome="success" if drop.returncode == 0 else "blocked")
+    if candidate_id and not matched_candidate:
+        result = {
+            "status": "blocked",
+            "reason": "candidate_not_found_or_not_promoted",
+            "candidateId": candidate_id,
+            "branchCandidates": branch_candidates,
+            "promotedCandidates": promoted_candidates,
+        }
+        write_audit(repo_root, config, "blocked_repair", result, outcome="blocked")
+        return result
     result = {
         "status": "success",
+        "candidateId": candidate_id,
         "plan": plan,
         "tuple": tuple_info,
         "branchCandidates": branch_candidates,
@@ -2849,7 +2904,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"]
+    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),
