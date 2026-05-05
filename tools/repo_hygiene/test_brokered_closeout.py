@@ -484,6 +484,29 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(report["recommendedAction"], "prune_now")
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/master-backup", check=False).returncode, 0)
 
+    def test_repo_sweep_patch_equivalent_backup_branch_is_pruned(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/topic-backup")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "backup duplicate work")
+        git(repo, "checkout", "master")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "integrated duplicate work")
+        (repo / "target-only.txt").write_text("target-only\n", encoding="utf-8")
+        git(repo, "add", "target-only.txt")
+        git(repo, "commit", "-m", "target-only follow-up")
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/topic-backup")
+        self.assertEqual(report["backupAnalysis"]["redundantWith"]["kind"], "target_patch_equivalent")
+        self.assertEqual(report["recommendedAction"], "prune_now")
+        deletion = next(item for item in result["actions"] if item.get("branch") == "codex/topic-backup" and item.get("action") == "delete_local_branch")
+        self.assertTrue(deletion["forced"])
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/topic-backup", check=False).returncode, 0)
+
     def test_repo_sweep_dirty_current_worktree_gets_ownership_classification(self) -> None:
         repo = self.init_repo()
         git(repo, "checkout", "-b", "codex/dirty-owned")
@@ -546,6 +569,26 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["reason"], "stale_tuple")
         self.assertIn("dirty_split_stale_tuple", self.audit_types(repo))
         self.assertEqual((repo / "owned.txt").read_text(encoding="utf-8"), "second dirty drift\n")
+
+    def test_dirty_split_reuses_feature_head_branch_with_sparse_worktree(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/split-retry")
+        start_work_block(repo, work_block_id="wb-split-retry", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("owned committed\n", encoding="utf-8")
+        git(repo, "add", "owned.txt")
+        git(repo, "commit", "-m", "owned committed")
+        (repo / "owned.txt").write_text("owned dirty retry\n", encoding="utf-8")
+        detection = detect_work_block(repo, work_block_id="wb-split-retry")
+        candidate = plan_dirty_split_candidates(repo, load_closeout_config(repo), detection)[0]
+        git(repo, "branch", candidate["preservationBranch"], detection["featureHead"])
+
+        result = apply_dirty_split_candidate(repo, candidate)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(git(repo, "show", f"{candidate['preservationBranch']}:owned.txt").stdout, "owned dirty retry\n")
+        self.assertEqual((repo / "owned.txt").read_text(encoding="utf-8"), "owned committed\n")
+        sparse = git(Path(result["preservationWorktree"]), "config", "--get", "core.sparseCheckout").stdout.strip()
+        self.assertEqual(sparse, "true")
 
     def test_dirty_split_mutates_only_one_candidate_per_run_and_audits(self) -> None:
         repo = self.init_repo()
