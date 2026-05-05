@@ -164,6 +164,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_detached_dirty_worktree_is_preserved_before_cleanup",
             "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
             "test_repo_sweep_merge_failed_report_has_agent_resolution_packet",
+            "test_finalize_auto_quorum_renews_stale_review_when_policy_allows",
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
             "test_missing_evidence_is_generated_and_committed_before_publish",
         ],
@@ -194,6 +195,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     "autoQuorum": {
         "enabled": True,
         "requiredScore": 10,
+        "allowStaleReviewRenewal": True,
         "reviewers": ["codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
         "autonomousActionClasses": [
             "integrated_branch_prune",
@@ -1816,7 +1818,8 @@ def finalize_work_block(
         evidence_hash=evidence_hash,
         pinned_refs=detection["pinnedRefs"],
     )
-    if not quorum["ok"] and quorum["reason"] == "review_quorum_missing":
+    stale_review_renewal = quorum["reason"] == "stale_review" and bool(config.get("autoQuorum", {}).get("allowStaleReviewRenewal", True))
+    if not quorum["ok"] and (quorum["reason"] == "review_quorum_missing" or stale_review_renewal):
         quorum_result = ensure_autonomous_quorum(
             repo_root,
             config,
