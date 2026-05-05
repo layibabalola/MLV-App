@@ -113,6 +113,11 @@ must include conflict paths and an agent-resolution packet. Protected locked
 worktrees stay inspect-only unless `blockerAutoRemediation.explicitProtectedWorktreeActions`
 names the exact path, branch, lock reason, action, evidence hash, and recovery
 route.
+Stale review tuples are not terminal when `autoQuorum.allowStaleReviewRenewal=true`
+and the candidate is still eligible. The auto-quorum actor regenerates exact-tuple
+reviews against current evidence and pinned refs, revalidates immediately before
+mutation, and blocks only when refs, dirty state, policy, or validation no longer
+satisfy the action.
 Before reporting a closeout blocker as authoritative, run the configured
 closeout tooling baseline check. Missing actors, policy fields, contract checks,
 repair paths, or required tests are `closeout_tooling_stale`; stale tooling
