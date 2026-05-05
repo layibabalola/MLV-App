@@ -103,6 +103,16 @@ for symbolic action `split`, preserves those paths on a broker-claimed
 `closeout/split/...` branch/worktree, removes only those exact paths from the
 original after preservation is proven, audits the outcome, and then repair or
 finalize can rerun.
+Retained blockers enter the blocker auto-remediation queue before becoming
+terminal. Foreign-dirty integrated branches can switch or detach their worktree
+to the target and prune the completed branch only when dirty paths do not
+overlap the target delta. Dirty detached worktrees can be preserved to
+`closeout/recovery/detached/...` and removed only after exact-path preservation
+is committed. Patch-equivalent non-backup branches can be pruned. Merge failures
+must include conflict paths and an agent-resolution packet. Protected locked
+worktrees stay inspect-only unless `blockerAutoRemediation.explicitProtectedWorktreeActions`
+names the exact path, branch, lock reason, action, evidence hash, and recovery
+route.
 Before reporting a closeout blocker as authoritative, run the configured
 closeout tooling baseline check. Missing actors, policy fields, contract checks,
 repair paths, or required tests are `closeout_tooling_stale`; stale tooling
@@ -112,6 +122,13 @@ When publish/upstream/final-push repair is blocked only by missing metrics,
 handoff, session, or closeout evidence, generate the configured evidence bundle,
 claim and commit only those evidence files, retain unrelated dirty work, and
 rerun safe publish repair before stopping.
+Response, metrics, timestamp, and final-completion hooks are read-only with
+respect to managed session worktree lifecycle. Codex response/final adapters pass
+`-SkipSessionWorktree` and record `session_worktree_bootstrap=skipped`; such
+hooks may refresh context and completion evidence, but they must not create,
+reuse, refresh, or resurrect `.codex-worktrees/` or session worktree branches.
+Managed session worktrees are created only by explicit start/bootstrap commands,
+so repo sweep cleanup remains final.
 
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 

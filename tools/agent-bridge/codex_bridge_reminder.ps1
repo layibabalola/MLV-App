@@ -12,6 +12,7 @@ param(
     [ValidateSet("response", "final")]
     [string]$HookPhase = "response",
     [int]$DedupSeconds = 30,
+    [switch]$SkipSessionWorktree,
     [switch]$Force,
     [switch]$NoToast
 )
@@ -1265,6 +1266,9 @@ $stateLine = "Bridge state: $bridgeState"
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
 $digestLine = "Bridge digest: $heuristicsDigest ; $($executionDigest.banner) ; $ledgerDigest ; $($responseDebtDigest.banner) ; $($reviewCloseoutDebtDigest.banner) ; $($reviewerWaitDebtDigest.banner) ; $($guardrailDebtDigest.banner)"
 Write-Output $stateLine
+if ($SkipSessionWorktree) {
+    Write-Output "Session worktree bootstrap: skipped"
+}
 Write-Output $message
 Write-Output $digestLine
 if ($executionDigest.resume) {
@@ -1305,7 +1309,8 @@ if ($watchModeActive) {
     Write-Output "Do not use a persistent wait_inbox loop in the main working chat unless the user explicitly asked for that short test."
 }
 
-Write-ReminderLog -Path $LogPath -Line "$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest' response_debt='$($responseDebtDigest.banner)' review_closeout='$($reviewCloseoutDebtDigest.banner)' reviewer_wait='$($reviewerWaitDebtDigest.banner)' guardrail_debt='$($guardrailDebtDigest.banner)' final_guard=$($HookPhase -eq "final" -and (($executionIdle -and $ledgerHasPending) -or $executionHasActiveTask -or $responseDebtHasPending -or $reviewCloseoutHasPending -or $reviewerWaitHasPending -or $guardrailDebtHasPending))" | Out-Null
+$sessionWorktreeBootstrapField = if ($SkipSessionWorktree) { "session_worktree_bootstrap=skipped" } else { "session_worktree_bootstrap=unspecified" }
+Write-ReminderLog -Path $LogPath -Line "$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState $sessionWorktreeBootstrapField watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest' response_debt='$($responseDebtDigest.banner)' review_closeout='$($reviewCloseoutDebtDigest.banner)' reviewer_wait='$($reviewerWaitDebtDigest.banner)' guardrail_debt='$($guardrailDebtDigest.banner)' final_guard=$($HookPhase -eq "final" -and (($executionIdle -and $ledgerHasPending) -or $executionHasActiveTask -or $responseDebtHasPending -or $reviewCloseoutHasPending -or $reviewerWaitHasPending -or $guardrailDebtHasPending))" | Out-Null
 
 if ($NoToast -or -not $toastEnabled -or $duplicateToastSuppressed) {
     exit 0
