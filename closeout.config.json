@@ -61,6 +61,13 @@
     "dropStashesInSweep": false,
     "protectedWorktreeRoots": [".claude/worktrees/**"]
   },
+  "responseHookLifecycle": {
+    "skipSessionWorktreeSignal": "SkipSessionWorktree",
+    "skipAuditField": "session_worktree_bootstrap",
+    "readOnlyHookPhases": ["response", "final"],
+    "managedSessionWorktreeRoots": [".codex-worktrees/**"],
+    "bootstrapAllowedOnlyByExplicitStart": true
+  },
   "repair": {
     "autoPublishFeatureBranch": true,
     "allowedPublishRemotes": ["fork", "origin"],
@@ -75,22 +82,42 @@
       "tools/repo_hygiene/brokered_closeout.py",
       "tools/repo_hygiene/work_block_cli.py",
       "tools/repo_hygiene/test_brokered_closeout.py",
+      "tools/agent-bridge/codex_pre_response.ps1",
+      "tools/agent-bridge/codex_pre_final.ps1",
+      "tools/agent-bridge/codex_bridge_reminder.ps1",
       "tools/repo-hygiene/closeout.contract.json",
       "tools/repo-hygiene/hygiene.config.json"
     ],
-    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"],
+    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation"],
     "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
-    "requiredAutoQuorumActions": ["integrated_branch_prune", "repo_sweep_clean_integrate", "dirty_split"],
+    "requiredAutoQuorumActions": [
+      "integrated_branch_prune",
+      "repo_sweep_clean_integrate",
+      "dirty_split",
+      "foreign_dirty_integrated_branch_prune",
+      "detached_dirty_preserve",
+      "redundant_branch_prune",
+      "explicit_protected_worktree_cleanup"
+    ],
     "requiredTests": [
       "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
       "test_dirty_split_stale_tuple_is_rejected_before_mutation",
+      "test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes",
+      "test_repo_sweep_detached_dirty_worktree_is_preserved_before_cleanup",
+      "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
+      "test_repo_sweep_merge_failed_report_has_agent_resolution_packet",
       "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
       "test_missing_evidence_is_generated_and_committed_before_publish"
     ],
     "requiredSymbols": [
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
-      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"}
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
+      {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
+      {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
+      {"path": "tools/agent-bridge/codex_bridge_reminder.ps1", "contains": "session_worktree_bootstrap=skipped"}
     ]
   },
   "evidenceRepair": {
@@ -126,7 +153,11 @@
       "repo_sweep_clean_integrate",
       "stale_locked_worktree_cleanup",
       "redundant_backup_prune",
-      "dirty_split"
+      "dirty_split",
+      "foreign_dirty_integrated_branch_prune",
+      "detached_dirty_preserve",
+      "redundant_branch_prune",
+      "explicit_protected_worktree_cleanup"
     ],
     "manualOnlyActionClasses": [
       "protected_branch",
@@ -149,6 +180,16 @@
     "allowStaleLockedWorktreeCleanup": true,
     "lockedWorktreeStaleHours": 24,
     "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"]
+  },
+  "blockerAutoRemediation": {
+    "enabled": true,
+    "allowForeignDirtyIntegratedBranchSwitch": true,
+    "allowDetachedDirtyPreservation": true,
+    "allowSensitiveDetachedDirtyPreservation": false,
+    "maxDetachedDirtyPaths": 25,
+    "prunePatchEquivalentBranches": true,
+    "maxConflictFilesForAgent": 8,
+    "explicitProtectedWorktreeActions": []
   },
   "scripts": [
     "start-work-block.ps1",

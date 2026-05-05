@@ -160,6 +160,14 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("no_publish", IMPLEMENTED_CLOSEOUT_PUBLISH_MODES)
         for signal in IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS:
             self.assertIn(signal, load_config(ROOT)["portability"]["closeout_trigger_signal_ids"])
+        self.assertIn("repo-sweep-retained-blocker", IMPLEMENTED_CLOSEOUT_CANDIDATE_KINDS)
+        self.assertIn("detached-dirty-worktree", IMPLEMENTED_CLOSEOUT_CANDIDATE_KINDS)
+        self.assertIn("protected-worktree-cleanup", IMPLEMENTED_CLOSEOUT_CANDIDATE_KINDS)
+        self.assertIn("foreign_dirty_integrated_branch_prune", IMPLEMENTED_CLOSEOUT_ACTION_IDS)
+        self.assertIn("detached_dirty_preserve", IMPLEMENTED_CLOSEOUT_ACTION_IDS)
+        self.assertIn("explicit_protected_worktree_cleanup", IMPLEMENTED_CLOSEOUT_ACTION_IDS)
+        self.assertIn("resolve_conflicts_with_agent", IMPLEMENTED_CLOSEOUT_ACTION_IDS)
+        self.assertIn("retained_blocker_auto_remediation", IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS)
         for action in IMPLEMENTED_DASHBOARD_ACTION_IDS:
             self.assertIn(action, load_config(ROOT)["portability"]["dashboard_action_ids"])
         self.assertTrue(load_config(ROOT)["closeout"]["auto_trigger"]["enabled"])

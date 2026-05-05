@@ -110,7 +110,10 @@
       "commit-unit",
       "merge-readiness",
       "publish-target",
-      "prune-after-publish"
+      "prune-after-publish",
+      "repo-sweep-retained-blocker",
+      "detached-dirty-worktree",
+      "protected-worktree-cleanup"
     ],
     "closeout_action_ids": [
       "commit_unit_commit",
@@ -118,14 +121,19 @@
       "publish_direct_branch",
       "local_merge",
       "prune_after_publish",
-      "split"
+      "split",
+      "foreign_dirty_integrated_branch_prune",
+      "detached_dirty_preserve",
+      "explicit_protected_worktree_cleanup",
+      "resolve_conflicts_with_agent"
     ],
     "closeout_publish_modes": ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"],
     "closeout_trigger_signal_ids": [
       "dirty_current_work",
       "dirty_generated_only",
       "clean_feature_branch_ready_to_publish",
-      "hygiene_cleanup_recommendations"
+      "hygiene_cleanup_recommendations",
+      "retained_blocker_auto_remediation"
     ],
     "closeout_contract": "tools/repo-hygiene/closeout.contract.json",
     "policy_doc": "tools/repo-hygiene/POLICY.md",
@@ -177,7 +185,8 @@
         "dirty_current_work",
         "dirty_generated_only",
         "clean_feature_branch_ready_to_publish",
-        "hygiene_cleanup_recommendations"
+        "hygiene_cleanup_recommendations",
+        "retained_blocker_auto_remediation"
       ]
     }
   }

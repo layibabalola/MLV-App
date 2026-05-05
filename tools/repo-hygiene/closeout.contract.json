@@ -41,7 +41,10 @@
     "commit-unit",
     "merge-readiness",
     "publish-target",
-    "prune-after-publish"
+    "prune-after-publish",
+    "repo-sweep-retained-blocker",
+    "detached-dirty-worktree",
+    "protected-worktree-cleanup"
   ],
   "action_ids": [
     "commit_unit_commit",
@@ -49,7 +52,11 @@
     "publish_direct_branch",
     "local_merge",
     "prune_after_publish",
-    "split"
+    "split",
+    "foreign_dirty_integrated_branch_prune",
+    "detached_dirty_preserve",
+    "explicit_protected_worktree_cleanup",
+    "resolve_conflicts_with_agent"
   ],
   "publish_modes": [
     "pr_only",
@@ -61,7 +68,8 @@
     "dirty_current_work",
     "dirty_generated_only",
     "clean_feature_branch_ready_to_publish",
-    "hygiene_cleanup_recommendations"
+    "hygiene_cleanup_recommendations",
+    "retained_blocker_auto_remediation"
   ],
   "review_sources": [
     "codex_background_agent",

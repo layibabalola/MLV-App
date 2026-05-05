@@ -53,6 +53,9 @@ IMPLEMENTED_CLOSEOUT_CANDIDATE_KINDS = [
     "merge-readiness",
     "publish-target",
     "prune-after-publish",
+    "repo-sweep-retained-blocker",
+    "detached-dirty-worktree",
+    "protected-worktree-cleanup",
 ]
 IMPLEMENTED_CLOSEOUT_ACTION_IDS = [
     "commit_unit_commit",
@@ -61,6 +64,10 @@ IMPLEMENTED_CLOSEOUT_ACTION_IDS = [
     "local_merge",
     "prune_after_publish",
     "split",
+    "foreign_dirty_integrated_branch_prune",
+    "detached_dirty_preserve",
+    "explicit_protected_worktree_cleanup",
+    "resolve_conflicts_with_agent",
 ]
 IMPLEMENTED_CLOSEOUT_PUBLISH_MODES = ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"]
 IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS = [
@@ -68,6 +75,7 @@ IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS = [
     "dirty_generated_only",
     "clean_feature_branch_ready_to_publish",
     "hygiene_cleanup_recommendations",
+    "retained_blocker_auto_remediation",
 ]
 IMPLEMENTED_CLOSEOUT_ARTIFACT_NAMES = [
     "decision-packet.json",
