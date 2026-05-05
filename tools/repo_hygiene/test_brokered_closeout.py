@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 
 from .brokered_closeout import (
+    bootstrap_response_broker_manifest,
     broker_contract,
+    checkpoint_owned_work,
     complete_work_block,
     detect_work_block,
     finalize_action_id,
@@ -68,7 +70,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "fetchBeforeEvidence": True,
             },
             "validation": {"commands": []},
-            "dirty": {"unclaimedOutsideDelta": "foreign", "sensitiveUnownedBlocks": True},
+            "dirty": {"unclaimedOutsideDelta": "foreign", "sensitiveUnownedBlocks": True, "autoClaimCleanAtStart": True},
             "dirtySplit": {
                 "enabled": True,
                 "autoRepairOwnedDirty": True,
@@ -89,7 +91,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "reviewQuorum": {
                 "requiredApprovals": 1,
                 "allowedReviewers": ["local-test"],
-                "highImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+                "highImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "repo_sweep_prune_merged", "split"],
                 "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"],
             },
             "autoQuorum": {
@@ -100,6 +102,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "autonomousActionClasses": [
                     "integrated_branch_prune",
                     "repo_sweep_clean_integrate",
+                    "owned_dirty_checkpoint",
                     "stale_locked_worktree_cleanup",
                     "redundant_backup_prune",
                     "dirty_split",
@@ -201,6 +204,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("pinnedRefs", config["reviewQuorum"]["tupleFields"])
         self.assertIn("repo_sweep_prune_merged", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("split", config["reviewQuorum"]["highImpactActions"])
+        self.assertIn("checkpoint-owned-dirty", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("dirtySplit", contract["requiredConfigKeys"])
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
         self.assertIn("evidenceRepair", contract["requiredConfigKeys"])
@@ -208,10 +212,21 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("blockerAutoRemediation", contract["requiredConfigKeys"])
         self.assertIn("foreign_dirty_integrated_branch_prune", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
+        self.assertIn("owned_dirty_checkpoint", config["autoQuorum"]["autonomousActionClasses"])
+        self.assertTrue(config["dirty"]["autoClaimCleanAtStart"])
         self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
         self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
 
-    def test_completion_without_id_prefers_latest_active_block_over_old_blocked_block(self) -> None:
+    def test_clean_integration_worktree_add_uses_longpaths_config(self) -> None:
+        text = (ROOT / "tools" / "repo_hygiene" / "brokered_closeout.py").read_text(encoding="utf-8")
+        self.assertIn("def run_git_longpaths", text)
+        self.assertIn('"core.longpaths=true"', text)
+        self.assertIn('run_git_longpaths(repo_root, ["worktree", "add", "--detach"', text)
+        self.assertIn("add_worktree = run_git_longpaths(repo_root, add_args)", text)
+        self.assertIn("add = run_git_longpaths(repo_root, add_args)", text)
+        self.assertNotIn('run_git(repo_root, ["worktree", "add"', text)
+
+    def test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason(self) -> None:
         repo = self.init_repo(remote=False)
         git(repo, "checkout", "-b", "codex/select-latest")
         old = start_work_block(repo, work_block_id="wb-a-old", actor="local-test")
@@ -230,6 +245,81 @@ class BrokeredCloseoutTests(unittest.TestCase):
         result = complete_work_block(repo, finalize=False)
 
         self.assertEqual(result["workBlockId"], "wb-z-new")
+        self.assertEqual(result["workBlockSelection"]["reason"], "selected_by_branch_state_updated_workBlockId")
+        self.assertEqual(result["workBlockSelection"]["candidateCount"], 2)
+
+    def test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/pre-response")
+        (repo / "baseline-dirty.txt").write_text("dirty before hook\n", encoding="utf-8")
+        worktrees_before = git(repo, "worktree", "list", "--porcelain").stdout
+
+        result = bootstrap_response_broker_manifest(repo, hook_phase="response", actor="local-test-hook")
+
+        worktrees_after = git(repo, "worktree", "list", "--porcelain").stdout
+        manifest = result["manifest"]
+        self.assertIn(result["status"], {"created", "refreshed"})
+        self.assertEqual(manifest["branch"], "codex/pre-response")
+        self.assertEqual(Path(manifest["worktree"]).resolve(), repo.resolve())
+        self.assertEqual(manifest["startHead"], git(repo, "rev-parse", "HEAD").stdout.strip())
+        self.assertIn("baseline-dirty.txt", manifest["dirtyBaseline"]["paths"])
+        self.assertIn("lease", manifest)
+        self.assertEqual(manifest["pathClaims"], [])
+        self.assertEqual(worktrees_after, worktrees_before)
+
+    def test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/clean-at-start")
+        start_work_block(repo, work_block_id="wb-clean-start", actor="local-test")
+        (repo / "new-owned.txt").write_text("owned after baseline\n", encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-clean-start")
+        self.assertEqual([item["path"] for item in detection["ownedDirty"]], ["new-owned.txt"])
+        self.assertTrue(detection["ownedDirty"][0]["autoClaimedByDirtyBaseline"])
+
+        result = finalize_work_block(repo, work_block_id="wb-clean-start")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(git(repo, "show", "master:new-owned.txt").stdout, "owned after baseline\n")
+        self.assertIn("checkpoint_owned_dirty", self.audit_types(repo))
+        self.assertIn("auto_quorum", self.audit_types(repo))
+
+    def test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/mixed-baseline")
+        (repo / "mixed.txt").write_text("dirty before broker\n", encoding="utf-8")
+        start_work_block(repo, work_block_id="wb-mixed", actor="local-test", path_claims=["mixed.txt"])
+        head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        detection = detect_work_block(repo, work_block_id="wb-mixed")
+        self.assertFalse(detection["ownedDirty"], detection)
+        self.assertEqual([item["path"] for item in detection["mixedDirty"]], ["mixed.txt"])
+        self.assertEqual(detection["mixedDirty"][0]["blocker"], "baseline-dirty-overlaps-candidate")
+
+        result = checkpoint_owned_work(repo, work_block_id="wb-mixed")
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "baseline-dirty-overlaps-candidate")
+        self.assertEqual(git(repo, "diff", "--cached", "--name-only").stdout, "")
+        self.assertEqual(git(repo, "rev-parse", "HEAD").stdout.strip(), head_before)
+
+    def test_owned_dirty_checkpoint_stages_only_exact_owned_paths(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/exact-checkpoint")
+        start_work_block(repo, work_block_id="wb-exact", actor="local-test")
+        start_work_block(repo, work_block_id="wb-other-foreign", actor="local-test", path_claims=["foreign.txt"])
+        (repo / "owned.txt").write_text("owned checkpoint\n", encoding="utf-8")
+        (repo / "foreign.txt").write_text("foreign stays dirty\n", encoding="utf-8")
+
+        result = checkpoint_owned_work(repo, work_block_id="wb-exact")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["paths"], ["owned.txt"])
+        self.assertEqual(result["stagedPaths"], ["owned.txt"])
+        self.assertEqual(git(repo, "show", "HEAD:owned.txt").stdout, "owned checkpoint\n")
+        self.assertEqual(git(repo, "show", "HEAD:foreign.txt").stdout, "base foreign\n")
+        self.assertEqual((repo / "foreign.txt").read_text(encoding="utf-8"), "foreign stays dirty\n")
+        self.assertEqual(git(repo, "diff", "--cached", "--name-only").stdout, "")
 
     def test_stale_refs_block_finalize_before_mutation(self) -> None:
         repo = self.init_repo()
@@ -350,9 +440,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("def baseline_actor", tool_path.read_text(encoding="utf-8"))
         self.assertTrue(result["tooling"]["updated"])
 
-    def test_foreign_dirty_does_not_block_independent_local_closeout(self) -> None:
+    def test_foreign_dirty_remains_retained_audited_and_does_not_block_independent_closeout(self) -> None:
         repo = self.init_repo()
         self.make_feature(repo, "wb-foreign")
+        start_work_block(repo, work_block_id="wb-foreign-owner", actor="local-test", path_claims=["foreign.txt"])
         (repo / "foreign.txt").write_text("dirty but unrelated\n", encoding="utf-8")
         detection = detect_work_block(repo, work_block_id="wb-foreign")
         self.assertFalse(detection["ownedDirty"])
@@ -361,6 +452,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.approve_current_tuple(repo, "wb-foreign")
         result = finalize_work_block(repo, work_block_id="wb-foreign")
         self.assertEqual(result["status"], "success")
+        self.assertEqual([item["path"] for item in result["foreignDirtyRetained"]], ["foreign.txt"])
         self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "master")
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/test-work", check=False).returncode, 0)
         self.assertEqual((repo / "foreign.txt").read_text(encoding="utf-8"), "dirty but unrelated\n")
@@ -420,6 +512,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
     def test_safe_local_branch_pruning_retains_foreign_dirty_files(self) -> None:
         repo = self.init_repo()
         self.make_feature(repo, "wb-prune")
+        start_work_block(repo, work_block_id="wb-prune-foreign-owner", actor="local-test", path_claims=["foreign.txt"])
         (repo / "foreign.txt").write_text("keep my local edit\n", encoding="utf-8")
         self.approve_current_tuple(repo, "wb-prune")
         result = finalize_work_block(repo, work_block_id="wb-prune")
@@ -750,6 +843,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         (repo / "owned.txt").write_text("owned committed\n", encoding="utf-8")
         git(repo, "add", "owned.txt")
         git(repo, "commit", "-m", "owned committed")
+        start_work_block(repo, work_block_id="wb-split-foreign-owner", actor="local-test", path_claims=["foreign.txt"])
         (repo / "owned.txt").write_text("owned dirty preserved\n", encoding="utf-8")
         (repo / "foreign.txt").write_text("foreign dirty retained\n", encoding="utf-8")
 
@@ -850,6 +944,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         (repo / "owned.txt").write_text("owned committed\n", encoding="utf-8")
         git(repo, "add", "owned.txt")
         git(repo, "commit", "-m", "owned committed")
+        start_work_block(repo, work_block_id="wb-checkpoint-foreign-owner", actor="local-test", path_claims=["foreign.txt"])
         (repo / "owned.txt").write_text("owned checkpointed\n", encoding="utf-8")
         (repo / "foreign.txt").write_text("foreign retained\n", encoding="utf-8")
 
@@ -860,7 +955,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["status"], "repaired", result)
         self.assertEqual(git(repo, "show", "HEAD:owned.txt").stdout, "owned checkpointed\n")
         self.assertEqual((repo / "foreign.txt").read_text(encoding="utf-8"), "foreign retained\n")
-        self.assertIn("checkpoint", self.audit_types(repo))
+        self.assertIn("checkpoint_owned_dirty", self.audit_types(repo))
         self.assertIn("retained_foreign_dirty", self.audit_types(repo))
 
     def test_missing_evidence_is_generated_and_committed_before_publish(self) -> None:

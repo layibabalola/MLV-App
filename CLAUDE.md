@@ -134,6 +134,9 @@ hooks may refresh context and completion evidence, but they must not create,
 reuse, refresh, or resurrect `.codex-worktrees/` or session worktree branches.
 Managed session worktrees are created only by explicit start/bootstrap commands,
 so repo sweep cleanup remains final.
+Clean integration and remediation actors must create temporary Git worktrees with
+`core.longpaths=true` on Windows so tracked long-path evidence/profiling files
+cannot block closeout before validation starts.
 
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 
