@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/repo-sweep-policy-recommendations",
+  "committedDeltaPathCount": 3,
+  "createdAt": "2026-05-05T19:52:15+00:00",
+  "detectorHash": "196befa91dafb37b6c829d3bcc6bf021",
+  "dirtyCounts": {
+    "foreignDirty": 1,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "257fa62941566341337749a585b10398facdd94a",
+  "schemaVersion": "1.0",
+  "targetHead": "548e173198481fe33e7ba7db8e19b5b7b4079c9c",
+  "workBlockId": "wb-retained-blocker-remediation-hardening-20260505"
+}

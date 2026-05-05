@@ -164,10 +164,17 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
             "test_dirty_split_stale_tuple_is_rejected_before_mutation",
             "test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes",
+            "test_repo_sweep_foreign_dirty_integrated_branch_detaches_linked_worktree_and_prunes",
+            "test_repo_sweep_foreign_dirty_target_overlap_blocks_with_exact_path_evidence",
             "test_repo_sweep_detached_dirty_worktree_is_preserved_before_cleanup",
+            "test_repo_sweep_detached_dirty_preservation_refuses_stale_or_missing_commit_before_cleanup",
             "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
+            "test_repo_sweep_protected_locked_worktree_without_exact_policy_is_inspect_only",
             "test_repo_sweep_merge_failed_report_has_agent_resolution_packet",
             "test_finalize_auto_quorum_renews_stale_review_when_policy_allows",
+            "test_stale_review_tuple_blocks_when_target_moves",
+            "test_repo_sweep_patch_equivalent_non_backup_branch_auto_quorum_prunes",
+            "test_repo_sweep_retained_terminal_outcomes_prove_remediation_attempted_or_excluded",
             "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
             "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
             "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
@@ -181,6 +188,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def checkpoint_owned_dirty_action_id"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_detached_preservation_commit"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
@@ -239,6 +247,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "stashMode": "retain",
         "agentDispatchMode": "deterministic",
         "investigateRetainedCandidates": True,
+        "retainedBlockerAutoRemediation": {"enabled": True},
+        "recoveryBranchPrefix": "closeout/recovery/detached",
+        "allowForeignDirtyIntegratedBranchPrune": True,
+        "allowPatchEquivalentPrune": True,
+        "protectedLockedWorktreeExactPolicy": [],
         "allowCleanCheckedOutIntegration": True,
         "allowStaleLockedWorktreeCleanup": True,
         "lockedWorktreeStaleHours": 24,
@@ -1592,6 +1605,28 @@ def dirty_path_fingerprints(repo_root: Path, entries: Sequence[Dict[str, Any]]) 
     return rows
 
 
+def verify_detached_preservation_commit(repo_root: Path, *, branch: str, commit_head: str, entries_by_path: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    branch_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
+    missing: List[str] = []
+    unexpected_present: List[str] = []
+    for path, entry in sorted(entries_by_path.items()):
+        exists = run_git(repo_root, ["cat-file", "-e", f"{commit_head}:{path}"]).returncode == 0
+        if "D" in str(entry.get("status") or ""):
+            if exists:
+                unexpected_present.append(path)
+        elif not exists:
+            missing.append(path)
+    ok = branch_head == commit_head and not missing and not unexpected_present
+    return {
+        "ok": ok,
+        "branch": branch,
+        "expectedHead": commit_head,
+        "actualHead": branch_head,
+        "missingPaths": missing,
+        "unexpectedPresentDeletedPaths": unexpected_present,
+    }
+
+
 def dirty_split_evidence(repo_root: Path, config: Dict[str, Any], detection: Dict[str, Any], paths: Sequence[str]) -> Dict[str, Any]:
     path_set = set(paths)
     owned_entries = [item for item in detection["ownedDirty"] if item["path"] in path_set]
@@ -2578,7 +2613,48 @@ def is_stale_lock(lock: Dict[str, Any], config: Dict[str, Any]) -> bool:
 
 
 def blocker_auto_remediation_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    return config.get("blockerAutoRemediation", {}) if bool(config.get("blockerAutoRemediation", {}).get("enabled", True)) else {}
+    repo_sweep = config.get("repoSweep", {})
+    retained = repo_sweep.get("retainedBlockerAutoRemediation", {})
+    if isinstance(retained, dict) and not bool(retained.get("enabled", True)):
+        return {}
+    legacy = config.get("blockerAutoRemediation", {})
+    if not bool(legacy.get("enabled", True)):
+        legacy = {}
+    merged = dict(legacy)
+    if "allowForeignDirtyIntegratedBranchPrune" in repo_sweep:
+        merged["allowForeignDirtyIntegratedBranchSwitch"] = bool(repo_sweep.get("allowForeignDirtyIntegratedBranchPrune"))
+    if "recoveryBranchPrefix" in repo_sweep:
+        merged["detachedDirtyBranchPrefix"] = repo_sweep.get("recoveryBranchPrefix")
+    if "allowPatchEquivalentPrune" in repo_sweep:
+        merged["prunePatchEquivalentBranches"] = bool(repo_sweep.get("allowPatchEquivalentPrune"))
+    if "protectedLockedWorktreeExactPolicy" in repo_sweep:
+        merged["explicitProtectedWorktreeActions"] = repo_sweep.get("protectedLockedWorktreeExactPolicy") or []
+    return merged
+
+
+def remediation_proof(config: Dict[str, Any], *, recommended_action: str, action_class: str, blockers: Sequence[str]) -> Dict[str, Any]:
+    auto = blocker_auto_remediation_config(config)
+    attempted = recommended_action in {
+        "clean_integrate_now",
+        "prune_now",
+        "cleanup_worktree_and_prune",
+        "split_now",
+        "switch_target_and_prune",
+        "preserve_detached_dirty_now",
+    }
+    excluded: List[str] = []
+    if not auto:
+        excluded.append("repoSweep.retainedBlockerAutoRemediation.disabled")
+    excluded.extend(str(blocker) for blocker in blockers)
+    if action_class == "active_locked_worktree" and "protected_worktree_root" in blockers:
+        excluded.append("repoSweep.protectedLockedWorktreeExactPolicy.missing_or_mismatched")
+    if action_class == "dirty_worktree" and "foreign_dirty_target_overlap" in blockers:
+        excluded.append("foreign_dirty_target_overlap")
+    return {
+        "symbolicRemediationAttempted": attempted,
+        "policyEligible": attempted or bool(excluded),
+        "excludedByExactPolicy": sorted({item for item in excluded if item}),
+    }
 
 
 def ref_delta_paths(repo_root: Path, left_ref: str, right_ref: str) -> List[str]:
@@ -3128,13 +3204,24 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
         "worktree": item.get("worktree"),
         "worktreeDirty": item.get("worktreeDirty"),
     }
+    report["remediationProof"] = remediation_proof(
+        config,
+        recommended_action=recommended_action,
+        action_class=action_class,
+        blockers=blockers,
+    )
     report["evidenceHash"] = stable_hash({key: value for key, value in report.items() if key != "reportPath"})
     return write_candidate_report(repo_root, config, report)
 
 
 def detached_dirty_preservation_branch(config: Dict[str, Any], candidate_id: str) -> str:
-    prefix = normalize_rel(str(config.get("blockerAutoRemediation", {}).get("detachedDirtyBranchPrefix") or "closeout/recovery/detached")).strip("/")
+    prefix = normalize_rel(str(blocker_auto_remediation_config(config).get("detachedDirtyBranchPrefix") or "closeout/recovery/detached")).strip("/")
     return "%s/%s" % (prefix, stable_hash(candidate_id, 12))
+
+
+def is_recovery_branch(config: Dict[str, Any], branch: str) -> bool:
+    prefix = normalize_rel(str(blocker_auto_remediation_config(config).get("detachedDirtyBranchPrefix") or "closeout/recovery/detached")).strip("/")
+    return normalize_rel(branch).startswith(prefix + "/")
 
 
 def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3194,6 +3281,12 @@ def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan
         "worktreeDirty": dirty_state,
         "preservationBranch": detached_dirty_preservation_branch(config, candidate_id),
     }
+    report["remediationProof"] = remediation_proof(
+        config,
+        recommended_action=recommended_action,
+        action_class=action_class,
+        blockers=blockers,
+    )
     report["evidenceHash"] = stable_hash({key: value for key, value in report.items() if key != "reportPath"})
     return write_candidate_report(repo_root, config, report)
 
@@ -3240,6 +3333,10 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
             "mergeMode": config.get("repoSweep", {}).get("mergeMode"),
             "allowCleanCheckedOutIntegration": config.get("repoSweep", {}).get("allowCleanCheckedOutIntegration", True),
             "allowStaleLockedWorktreeCleanup": config.get("repoSweep", {}).get("allowStaleLockedWorktreeCleanup", True),
+            "retainedBlockerAutoRemediation": config.get("repoSweep", {}).get("retainedBlockerAutoRemediation"),
+            "allowForeignDirtyIntegratedBranchPrune": config.get("repoSweep", {}).get("allowForeignDirtyIntegratedBranchPrune"),
+            "allowPatchEquivalentPrune": config.get("repoSweep", {}).get("allowPatchEquivalentPrune"),
+            "protectedLockedWorktreeExactPolicy": config.get("repoSweep", {}).get("protectedLockedWorktreeExactPolicy"),
         },
     }
     return {
@@ -3436,6 +3533,17 @@ def apply_detached_dirty_preserve(repo_root: Path, config: Dict[str, Any], plan:
             write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
             return action
         commit_head = git_stdout(preservation_path, ["rev-parse", "HEAD"])
+        verification = verify_detached_preservation_commit(repo_root, branch=branch, commit_head=commit_head, entries_by_path=entries_by_path)
+        if not verification["ok"]:
+            action = {
+                "status": "blocked",
+                "reason": "preservation_commit_stale_or_incomplete",
+                "verification": verification,
+                "copied": copied,
+                "report": report,
+            }
+            write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+            return action
         for path in current_paths:
             removal = remove_exact_path_from_worktree(worktree_path, path)
             removed.append(removal)
@@ -3523,6 +3631,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         item
         for item in plan["branchPlans"]
         if item["disposition"] == "prune_merged_branch" and not path_matches_any(str(item["branch"]), backup_patterns)
+        and not is_recovery_branch(config, str(item["branch"]))
     ]
     candidate_worktrees = [item for item in plan["worktreePlans"] if item["disposition"] == "candidate_clean_detached_worktree_prune"]
     candidate_stashes = [item for item in plan["stashPlans"] if item["disposition"] == "candidate_stash_drop"]
