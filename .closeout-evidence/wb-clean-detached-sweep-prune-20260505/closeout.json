@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/clean-detached-sweep-prune",
+  "createdAt": "2026-05-05T20:03:20+00:00",
+  "detectorHash": "7ef60653ea27062e1100c15637aa004a",
+  "eligible": true,
+  "featureHead": "346b29dee1baf28723300cf1199af1415cdb1d71",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/clean-detached-sweep-prune",
+      "head": "346b29dee1baf28723300cf1199af1415cdb1d71"
+    },
+    "target": {
+      "branch": "master",
+      "head": "f8729f9264dd21aeacc3589d10b95528753c60df",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "f8729f9264dd21aeacc3589d10b95528753c60df",
+  "workBlockId": "wb-clean-detached-sweep-prune-20260505"
+}
