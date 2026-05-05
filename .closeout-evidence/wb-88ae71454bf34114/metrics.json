@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/fix-windows-scaffold-ci",
+  "committedDeltaPathCount": 0,
+  "createdAt": "2026-05-05T20:54:01+00:00",
+  "detectorHash": "f308db091951342009f5b1cd6d6c1cc1",
+  "dirtyCounts": {
+    "foreignDirty": 5,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "5953c35041dd3aaa4535e1b989ce9d81266e1891",
+  "schemaVersion": "1.0",
+  "targetHead": "5953c35041dd3aaa4535e1b989ce9d81266e1891",
+  "workBlockId": "wb-88ae71454bf34114"
+}
