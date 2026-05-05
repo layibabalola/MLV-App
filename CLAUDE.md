@@ -162,6 +162,34 @@ so repo sweep cleanup remains final.
 Clean integration and remediation actors must create temporary Git worktrees with
 `core.longpaths=true` on Windows so tracked long-path evidence/profiling files
 cannot block closeout before validation starts.
+Closeout completion is a fixed point, not the first successful merge. After
+finalize, response/final hooks, evidence repair, tooling-baseline repair, repo
+sweep, or remote cleanup, rerun detector/sweep until the current worktree is on
+the target branch, current dirty state is classified, no local feature branch for
+the completed work block remains, no clean tool-owned detached integration
+worktree remains, no post-final evidence commit is stranded on a feature ref,
+and any retained remote feature branch has an explicit policy-retention audit. If
+a hook or repair actor creates new evidence, commits, worktrees, or refs after a
+reported success, closeout must continue.
+Remote feature branches are temporary unless policy explicitly retains them.
+After target integration, compare every completed feature upstream against the
+target using ancestry first and patch-id/cherry equivalence second. Delete
+integrated or patch-equivalent remote feature refs through an audited symbolic
+action, or retain them with a durable reason such as unique work, manual-only
+policy, protected branch policy, or ambiguous evidence. Evidence-only commits
+stranded on a remote feature ref must be integrated into the target or retained
+with exact blocker evidence before the remote ref is deleted.
+Remaining-candidate cleanup is a bounded remediation queue. Older `fork/codex/*`
+branches must undergo redundancy analysis against the target and known related
+branches before retention. Clean locked worktrees may be cleaned only when stale,
+unprotected, and exact ownership/lock evidence proves safety; protected locked
+worktrees require an exact protected-worktree policy tuple. Clean merge-conflicting
+worktrees require a candidate-specific conflict remediation packet with files,
+hunks when available, validation commands, and a recovery command. Dirty detached
+worktrees with sensitive paths must be preserved by exact path to a recovery
+branch only when policy proves the sensitive paths are safe to copy; otherwise
+retain with the sensitive path list, owner/age evidence, and a manual recovery
+command.
 
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 
