@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/server-wrapper-trampoline",
+  "createdAt": "2026-05-05T19:26:32+00:00",
+  "detectorHash": "106180294435bf305734ea94a428626f",
+  "eligible": true,
+  "featureHead": "b85a3f259e1ec9a69bfc0723e332916a4f388696",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/server-wrapper-trampoline",
+      "head": "b85a3f259e1ec9a69bfc0723e332916a4f388696"
+    },
+    "target": {
+      "branch": "master",
+      "head": "33e0655e47a451b803081b179da3d72b8d4dc3ab",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "33e0655e47a451b803081b179da3d72b8d4dc3ab",
+  "workBlockId": "wb-b0e68a3bb70f45e8"
+}
