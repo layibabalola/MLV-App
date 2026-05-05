@@ -507,6 +507,23 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(deletion["forced"])
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/topic-backup", check=False).returncode, 0)
 
+    def test_repo_sweep_apply_candidate_id_mutates_only_that_candidate(self) -> None:
+        repo = self.init_repo()
+        git(repo, "branch", "codex/first-backup", "master")
+        git(repo, "branch", "codex/second-backup", "master")
+        plan = repo_sweep(repo)
+        candidate = next(
+            item
+            for item in plan["promotedCandidates"]
+            if item["pinnedRefs"]["branch"]["branch"] == "codex/first-backup"
+        )
+
+        result = repo_sweep(repo, apply=True, candidate_id=candidate["candidateId"])
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/first-backup", check=False).returncode, 0)
+        self.assertEqual(git(repo, "rev-parse", "--verify", "codex/second-backup", check=False).returncode, 0)
+
     def test_repo_sweep_dirty_current_worktree_gets_ownership_classification(self) -> None:
         repo = self.init_repo()
         git(repo, "checkout", "-b", "codex/dirty-owned")

@@ -2705,7 +2705,7 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
         write_audit(repo_root, config, "snapshot_pruning", {"action": "integration_worktree_remove", **removal}, outcome="success" if removal["returncode"] == 0 else "blocked")
 
 
-def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
+def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     tooling = verify_closeout_tooling_current(repo_root, config)
@@ -2745,8 +2745,12 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
         return {"status": "planned", **payload}
     actions: List[Dict[str, Any]] = []
     quorum_results: List[Dict[str, Any]] = []
+    matched_candidate = candidate_id is None
     if bool(config.get("repoSweep", {}).get("pruneMergedLocalBranches", True)):
         for item, candidate in zip(prunable_branches, branch_candidates):
+            if candidate_id and candidate["candidateId"] != candidate_id:
+                continue
+            matched_candidate = True
             current_head = rev_parse(repo_root, f"refs/heads/{item['branch']}", required=False)
             blockers: List[str] = []
             if current_head != item["head"]:
@@ -2771,6 +2775,9 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
             actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item))
     branch_by_name = {item["branch"]: item for item in plan["branchPlans"]}
     for report, candidate in zip(promoted_reports, promoted_candidates):
+        if candidate_id and candidate["candidateId"] != candidate_id:
+            continue
+        matched_candidate = True
         item = branch_by_name.get(report["branch"])
         if not item:
             continue
@@ -2807,18 +2814,33 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
         elif report["recommendedAction"] in {"prune_now", "cleanup_worktree_and_prune"}:
             actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item, force_branch_delete=report.get("actionClass") == "redundant_backup_prune"))
     if bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False)):
+        if candidate_id:
+            candidate_worktrees = []
         for item in candidate_worktrees:
             action = {"action": "remove_clean_detached_worktree", **remove_worktree(repo_root, Path(str(item["path"])))}
             actions.append(action)
             write_audit(repo_root, config, "snapshot_pruning", action, outcome="success" if action["returncode"] == 0 else "blocked")
     if bool(config.get("cleanupPolicy", {}).get("dropStashesInSweep", False)):
+        if candidate_id:
+            candidate_stashes = []
         for item in candidate_stashes:
             drop = run_git(repo_root, ["stash", "drop", item["ref"]])
             action = {"action": "drop_stash", "stash": item["ref"], "returncode": drop.returncode, "stderr": drop.stderr[-2000:]}
             actions.append(action)
             write_audit(repo_root, config, "snapshot_pruning", action, outcome="success" if drop.returncode == 0 else "blocked")
+    if candidate_id and not matched_candidate:
+        result = {
+            "status": "blocked",
+            "reason": "candidate_not_found_or_not_promoted",
+            "candidateId": candidate_id,
+            "branchCandidates": branch_candidates,
+            "promotedCandidates": promoted_candidates,
+        }
+        write_audit(repo_root, config, "blocked_repair", result, outcome="blocked")
+        return result
     result = {
         "status": "success",
+        "candidateId": candidate_id,
         "plan": plan,
         "tuple": tuple_info,
         "branchCandidates": branch_candidates,
