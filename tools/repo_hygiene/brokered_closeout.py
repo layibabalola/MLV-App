@@ -1501,8 +1501,9 @@ def apply_dirty_split_candidate(repo_root_arg: Path, candidate: Dict[str, Any]) 
         return {"status": "blocked", "reason": "stale_tuple", **payload}
     worktree_path = dirty_split_worktree_root(repo_root, config) / safe_state_name(candidate["preservationBranch"])
     branch = str(candidate["preservationBranch"])
-    if rev_parse(repo_root, f"refs/heads/{branch}", required=False):
-        payload = {"candidate": candidate, "branch": branch, "reason": "preservation_branch_exists"}
+    existing_branch_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
+    if existing_branch_head and existing_branch_head != str(candidate["pinnedRefs"]["feature"]["head"]):
+        payload = {"candidate": candidate, "branch": branch, "head": existing_branch_head, "reason": "preservation_branch_exists"}
         write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=str(candidate["workBlockId"]), outcome="blocked")
         return {"status": "blocked", "reason": "preservation_branch_exists", **payload}
     if worktree_path.exists():
@@ -1511,11 +1512,34 @@ def apply_dirty_split_candidate(repo_root_arg: Path, candidate: Dict[str, Any]) 
         return {"status": "blocked", "reason": "preservation_worktree_exists", **payload}
     copied: List[Dict[str, Any]] = []
     removed: List[Dict[str, Any]] = []
-    add_worktree = run_git(repo_root, ["worktree", "add", "-b", branch, str(worktree_path), str(candidate["pinnedRefs"]["feature"]["head"])])
+    add_args = ["worktree", "add", "--no-checkout"]
+    if existing_branch_head:
+        add_args.extend([str(worktree_path), branch])
+    else:
+        add_args.extend(["-b", branch, str(worktree_path), str(candidate["pinnedRefs"]["feature"]["head"])])
+    add_worktree = run_git(repo_root, add_args)
     if add_worktree.returncode != 0:
         payload = {"candidate": candidate, "operation": "worktree_add", "returncode": add_worktree.returncode, "stderr": add_worktree.stderr[-3000:]}
         write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=str(candidate["workBlockId"]), outcome="blocked")
         return {"status": "blocked", "reason": "preservation_worktree_failed", **payload}
+    for operation, args in [
+        ("sparse_checkout_init", ["sparse-checkout", "init", "--no-cone"]),
+        ("sparse_checkout_set", ["sparse-checkout", "set", "--no-cone", *candidate["paths"]]),
+        ("sparse_checkout_checkout", ["checkout"]),
+    ]:
+        result = run_git(worktree_path, args)
+        if result.returncode != 0:
+            cleanup = remove_worktree(repo_root, worktree_path)
+            payload = {
+                "candidate": candidate,
+                "operation": operation,
+                "returncode": result.returncode,
+                "stdout": result.stdout[-2000:],
+                "stderr": result.stderr[-3000:],
+                "cleanup": cleanup,
+            }
+            write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=str(candidate["workBlockId"]), outcome="blocked")
+            return {"status": "blocked", "reason": "preservation_sparse_checkout_failed", **payload}
     try:
         entries_by_path = {item["path"]: item for item in latest_detection.get("ownedDirty", [])}
         for path in candidate["paths"]:
@@ -2162,9 +2186,18 @@ def backup_branch_analysis(repo_root: Path, config: Dict[str, Any], plan: Dict[s
     branch_head = str(item["head"])
     branch_tree = tree_hash(repo_root, branch_head)
     target_tree = tree_hash(repo_root, target_head)
+    cherry = run_git(repo_root, ["cherry", "-v", target_head, branch_head])
+    cherry_rows = [line.strip() for line in cherry.stdout.splitlines() if line.strip()] if cherry.returncode == 0 else []
     redundant_with: Optional[Dict[str, Any]] = None
     if branch_tree == target_tree or is_ancestor(repo_root, branch_head, target_head):
         redundant_with = {"kind": "target", "ref": plan["pinnedRefs"]["target"]["ref"], "head": target_head}
+    elif cherry_rows and all(row.startswith("-") for row in cherry_rows):
+        redundant_with = {
+            "kind": "target_patch_equivalent",
+            "ref": plan["pinnedRefs"]["target"]["ref"],
+            "head": target_head,
+            "cherry": cherry_rows,
+        }
     else:
         for other in plan["branchPlans"]:
             if other["branch"] == branch:
@@ -2179,6 +2212,7 @@ def backup_branch_analysis(repo_root: Path, config: Dict[str, Any], plan: Dict[s
         "branchTree": branch_tree,
         "targetTree": target_tree,
         "patchId": patch_id_for_range(repo_root, target_head, branch_head),
+        "cherry": cherry_rows,
         "redundantWith": redundant_with,
     }
 
@@ -2587,7 +2621,7 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
     }
 
 
-def cleanup_branch_after_sweep_action(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> List[Dict[str, Any]]:
+def cleanup_branch_after_sweep_action(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any], *, force_branch_delete: bool = False) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     branch = str(item["branch"])
     worktree = item.get("worktree") or {}
@@ -2618,8 +2652,9 @@ def cleanup_branch_after_sweep_action(repo_root: Path, config: Dict[str, Any], p
             write_audit(repo_root, config, "worktree_deletion", action, outcome="success" if action["returncode"] == 0 else "blocked")
             if action["returncode"] != 0:
                 return actions
-    delete = run_git(repo_root, ["branch", "-d", branch])
-    action = {"action": "delete_local_branch", "branch": branch, "returncode": delete.returncode, "stderr": delete.stderr[-2000:]}
+    delete_flag = "-D" if force_branch_delete else "-d"
+    delete = run_git(repo_root, ["branch", delete_flag, branch])
+    action = {"action": "delete_local_branch", "branch": branch, "forced": force_branch_delete, "returncode": delete.returncode, "stderr": delete.stderr[-2000:]}
     actions.append(action)
     write_audit(repo_root, config, "branch_deletion", action, outcome="success" if delete.returncode == 0 else "blocked")
     return actions
@@ -2770,7 +2805,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
             actions.append(action)
             write_audit(repo_root, config, "dirty_split_success" if action.get("status") == "success" else "dirty_split_blocked_preservation", {"candidate": candidate, "report": report, "action": action}, outcome="success" if action.get("status") == "success" else "blocked")
         elif report["recommendedAction"] in {"prune_now", "cleanup_worktree_and_prune"}:
-            actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item))
+            actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item, force_branch_delete=report.get("actionClass") == "redundant_backup_prune"))
     if bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False)):
         for item in candidate_worktrees:
             action = {"action": "remove_clean_detached_worktree", **remove_worktree(repo_root, Path(str(item["path"])))}
