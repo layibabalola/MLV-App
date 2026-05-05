@@ -20,6 +20,7 @@ from .brokered_closeout import (
     preserve_owned_dirty_split,
     quarantine_orphans,
     record_review_approval,
+    remediate_retained_candidates,
     repair_eligibility,
     repo_sweep,
     repo_sweep_tuple,
@@ -85,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--apply", action="store_true")
     sweep.add_argument("--print-tuple", action="store_true")
     sweep.add_argument("--candidate-id")
+
+    remediate = sub.add_parser("remediate-retained", help="Run the bounded retained-candidate remediation queue.")
+    remediate.add_argument("--apply", action="store_true")
+    remediate.add_argument("--candidate-id")
 
     sub.add_parser("contract", help="Print broker/config/script parity information.")
     return parser
@@ -164,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = repo_sweep_tuple(repo_root)
             else:
                 result = repo_sweep(repo_root, apply=args.apply, candidate_id=args.candidate_id)
+        elif args.command == "remediate-retained":
+            result = remediate_retained_candidates(repo_root, apply=args.apply, candidate_id=args.candidate_id)
         elif args.command == "contract":
             result = broker_contract(repo_root)
         else:

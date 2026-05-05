@@ -80,6 +80,12 @@ To audit cross-branch cleanup, run:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .
 ```
 
+To advance retained cleanup one safe candidate at a time, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\remediate-retained-closeout.ps1 -RepoRoot . -Apply
+```
+
 The trigger must run even when mutation is not eligible. The detector classifies
 dirty paths as `ownedDirty`, `unownedDirty`, or `foreignDirty`; foreign dirty
 work is retained and audited, never stashed or deleted by this workflow.
@@ -179,6 +185,12 @@ action, or retain them with a durable reason such as unique work, manual-only
 policy, protected branch policy, or ambiguous evidence. Evidence-only commits
 stranded on a remote feature ref must be integrated into the target or retained
 with exact blocker evidence before the remote ref is deleted.
+Retained remediation is a dedicated repo actor, not a chat follow-up.
+`remediate-retained-closeout.ps1 -Apply` wraps repo sweep and selects exactly
+one promoted candidate per run unless `-CandidateId` is supplied. Remote feature
+refs configured by `repoSweep.remoteFeaturePatterns` are planned alongside local
+branches and can be exact-tuple pruned or clean-integrated from the remote ref,
+then deleted after the target is updated.
 Remaining-candidate cleanup is a bounded remediation queue. Older `fork/codex/*`
 branches must undergo redundancy analysis against the target and known related
 branches before retention. Clean locked worktrees may be cleaned only when stale,

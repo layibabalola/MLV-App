@@ -54,6 +54,7 @@ REQUIRED_SCRIPT_NAMES = [
     "orphan-quarantine.ps1",
     "audit-closeout.ps1",
     "repo-sweep-closeout.ps1",
+    "remediate-retained-closeout.ps1",
 ]
 
 
@@ -149,9 +150,12 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/hygiene.config.json",
         ],
         "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation"],
-        "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+        "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
+            "integrated_remote_feature_prune",
+            "patch_equivalent_remote_feature_prune",
+            "remote_feature_clean_integrate",
             "repo_sweep_clean_integrate",
             "owned_dirty_checkpoint",
             "dirty_split",
@@ -185,6 +189,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
             "test_missing_evidence_is_generated_and_committed_before_publish",
             "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun",
+            "test_remediate_retained_actor_applies_one_candidate_per_run",
+            "test_repo_sweep_remote_integrated_feature_branch_is_pruned",
+            "test_repo_sweep_remote_patch_equivalent_feature_branch_is_pruned",
+            "test_repo_sweep_remote_unique_feature_branch_clean_integrates_and_prunes",
+            "test_repo_sweep_remote_conflicting_feature_branch_writes_investigation_packet",
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -196,6 +205,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediate_retained_candidates"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
             {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
@@ -222,6 +233,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "reviewers": ["codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
         "autonomousActionClasses": [
             "integrated_branch_prune",
+            "integrated_remote_feature_prune",
+            "patch_equivalent_remote_feature_prune",
+            "remote_feature_clean_integrate",
             "repo_sweep_clean_integrate",
             "owned_dirty_checkpoint",
             "stale_locked_worktree_cleanup",
@@ -258,6 +272,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "allowStaleLockedWorktreeCleanup": True,
         "lockedWorktreeStaleHours": 24,
         "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"],
+        "fetchBeforeRemoteSweep": True,
+        "remoteFeaturePatterns": [],
+        "pruneRemoteFeatureBranches": True,
+        "cleanIntegrateRemoteFeatureBranches": True,
+        "deleteRemoteFeatureAfterCleanIntegrate": True,
     },
     "blockerAutoRemediation": {
         "enabled": True,
@@ -2741,7 +2760,9 @@ def remediation_proof(config: Dict[str, Any], *, recommended_action: str, action
     auto = blocker_auto_remediation_config(config)
     attempted = recommended_action in {
         "clean_integrate_now",
+        "clean_integrate_remote_now",
         "prune_now",
+        "prune_remote_now",
         "cleanup_worktree_and_prune",
         "split_now",
         "switch_target_and_prune",
@@ -2995,6 +3016,92 @@ def stash_rows(repo_root: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def remote_feature_patterns(config: Dict[str, Any]) -> List[str]:
+    configured = config.get("repoSweep", {}).get("remoteFeaturePatterns", [])
+    if isinstance(configured, list) and configured:
+        return [str(item) for item in configured]
+    return [str(item) for item in config.get("git", {}).get("featureBranchPatterns", [])]
+
+
+def remote_feature_rows(repo_root: Path, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    git_config = config.get("git", {})
+    remote = str(git_config.get("remote", "origin"))
+    if not remote_exists(repo_root, remote):
+        return []
+    if bool(config.get("repoSweep", {}).get("fetchBeforeRemoteSweep", True)):
+        run_git(repo_root, ["fetch", "--prune", remote])
+    target_branch = str(git_config.get("targetBranch", "master"))
+    patterns = remote_feature_patterns(config)
+    result = run_git(repo_root, ["for-each-ref", f"refs/remotes/{remote}", "--format=%(refname:short)%1f%(objectname)%1f%(subject)"])
+    if result.returncode != 0:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\x1f")
+        while len(parts) < 3:
+            parts.append("")
+        ref_short = parts[0]
+        prefix = f"{remote}/"
+        if not ref_short.startswith(prefix):
+            continue
+        branch = ref_short[len(prefix) :]
+        if branch == "HEAD" or branch == target_branch:
+            continue
+        if patterns and not path_matches_any(branch, patterns):
+            continue
+        rows.append({"remote": remote, "branch": branch, "ref": ref_short, "head": parts[1], "subject": parts[2]})
+    return rows
+
+
+def cherry_rows_between(repo_root: Path, target_head: str, branch_head: str) -> List[str]:
+    cherry = run_git(repo_root, ["cherry", "-v", target_head, branch_head])
+    if cherry.returncode != 0:
+        return []
+    return [line.strip() for line in cherry.stdout.splitlines() if line.strip()]
+
+
+def remote_feature_plan_for(repo_root: Path, config: Dict[str, Any], target: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
+    branch = str(row["branch"])
+    head = str(row["head"])
+    target_head = str(target["head"])
+    protected = is_protected_branch(config, branch)
+    ancestor = is_ancestor(repo_root, head, target_head)
+    branch_tree = tree_hash(repo_root, head)
+    target_tree = tree_hash(repo_root, target_head)
+    tree_equal = branch_tree == target_tree
+    cherry = cherry_rows_between(repo_root, target_head, head)
+    patch_equivalent = bool(cherry) and all(line.startswith("-") for line in cherry)
+    prune_patch_equivalent = bool(blocker_auto_remediation_config(config).get("prunePatchEquivalentBranches", True))
+    disposition = "retain_remote_feature"
+    reason = "remote feature requires investigation"
+    if protected:
+        disposition = "retain_protected_remote_feature"
+        reason = "remote branch is protected by policy"
+    elif ancestor or tree_equal:
+        disposition = "prune_integrated_remote_feature"
+        reason = "remote feature head is already integrated into target"
+    elif patch_equivalent and prune_patch_equivalent:
+        disposition = "prune_patch_equivalent_remote_feature"
+        reason = "remote feature patch is equivalent to target"
+    else:
+        disposition = "merge_required_remote_feature"
+        reason = "remote feature has work not proven integrated"
+    return {
+        **row,
+        "protected": protected,
+        "ancestorOfTarget": ancestor,
+        "treeEqualsTarget": tree_equal,
+        "branchTree": branch_tree,
+        "targetTree": target_tree,
+        "cherry": cherry,
+        "patchEquivalentToTarget": patch_equivalent,
+        "disposition": disposition,
+        "reason": reason,
+    }
+
+
 def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     target = target_ref_for(repo_root, config)
     worktrees = parse_worktree_list(repo_root)
@@ -3066,6 +3173,7 @@ def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         }
         for stash in stashes
     ]
+    remote_feature_plans = [remote_feature_plan_for(repo_root, config, target, row) for row in remote_feature_rows(repo_root, config)]
     pinned_refs = {
         "target": {
             "branch": target["targetBranch"],
@@ -3075,12 +3183,14 @@ def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
             "mode": target["mode"],
         },
         "branches": [{"branch": item["branch"], "head": item["head"]} for item in branch_plans],
+        "remoteFeatures": [{"remote": item["remote"], "branch": item["branch"], "ref": item["ref"], "head": item["head"]} for item in remote_feature_plans],
         "stashes": [{"ref": item["ref"], "head": item["head"]} for item in stash_plans],
     }
     plan = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "target": target,
         "branchPlans": branch_plans,
+        "remoteFeaturePlans": remote_feature_plans,
         "worktreePlans": worktree_plans,
         "stashPlans": stash_plans,
         "pinnedRefs": pinned_refs,
@@ -3140,6 +3250,48 @@ def branch_prune_candidate(config: Dict[str, Any], plan: Dict[str, Any], item: D
         "actionClass": "integrated_branch_prune",
         "evidence": evidence,
         "evidenceHash": evidence_hash,
+        "pinnedRefs": pinned_refs,
+    }
+
+
+def remote_feature_action_class(item: Dict[str, Any]) -> str:
+    if item.get("disposition") == "prune_patch_equivalent_remote_feature":
+        return "patch_equivalent_remote_feature_prune"
+    return "integrated_remote_feature_prune"
+
+
+def remote_feature_prune_candidate(config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+    pinned_refs = {
+        "target": plan["pinnedRefs"]["target"],
+        "remoteFeature": {"remote": item["remote"], "branch": item["branch"], "ref": item["ref"], "head": item["head"]},
+    }
+    evidence = {
+        "candidate": {
+            "remote": item["remote"],
+            "branch": item["branch"],
+            "ref": item["ref"],
+            "head": item["head"],
+            "disposition": item["disposition"],
+            "reason": item["reason"],
+            "ancestorOfTarget": item["ancestorOfTarget"],
+            "treeEqualsTarget": item["treeEqualsTarget"],
+            "patchEquivalentToTarget": item["patchEquivalentToTarget"],
+            "cherry": item["cherry"],
+            "protected": item["protected"],
+        },
+        "target": plan["pinnedRefs"]["target"],
+        "policy": {
+            "pruneRemoteFeatureBranches": config.get("repoSweep", {}).get("pruneRemoteFeatureBranches", True),
+            "allowPatchEquivalentPrune": config.get("repoSweep", {}).get("allowPatchEquivalentPrune", True),
+            "remoteFeaturePatterns": remote_feature_patterns(config),
+        },
+    }
+    return {
+        "candidateId": "candidate:remote-feature-prune:%s" % stable_hash({"remote": item["remote"], "branch": item["branch"], "head": item["head"], "target": pinned_refs["target"]}, 16),
+        "actionId": "delete_remote_branch",
+        "actionClass": remote_feature_action_class(item),
+        "evidence": evidence,
+        "evidenceHash": stable_hash(evidence),
         "pinnedRefs": pinned_refs,
     }
 
@@ -3319,6 +3471,85 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
     return write_candidate_report(repo_root, config, report)
 
 
+def investigate_remote_feature_candidate(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    disposition = str(item.get("disposition") or "")
+    if disposition in {"prune_integrated_remote_feature", "prune_patch_equivalent_remote_feature"}:
+        return None
+    branch = str(item["branch"])
+    branch_head = str(item["head"])
+    target = plan["pinnedRefs"]["target"]
+    target_head = str(target["head"])
+    candidate_id = report_candidate_id("repo-sweep-remote-feature-investigate", item)
+    merge_base = git_stdout(repo_root, ["merge-base", target_head, branch_head], required=False)
+    scope = {
+        "mergeBase": merge_base,
+        "aheadBehind": ahead_behind_between(repo_root, target_head, branch_head),
+        "changedPaths": changed_paths_between(repo_root, target_head, branch_head) if merge_base else [],
+        "commitSubjects": branch_commit_subjects(repo_root, target_head, branch_head),
+        "lastCommitDate": branch_commit_date(repo_root, branch_head),
+        "cherry": item.get("cherry") or [],
+        "patchId": patch_id_for_range(repo_root, target_head, branch_head),
+        "treeEqualsTarget": item.get("treeEqualsTarget"),
+        "patchEquivalentToTarget": item.get("patchEquivalentToTarget"),
+    }
+    backup = backup_branch_analysis(repo_root, config, plan, {"branch": branch, "head": branch_head})
+    recommended_action = "retain_with_proven_blocker"
+    action_class = "ambiguous_merge_required"
+    blockers: List[str] = []
+    recovery_command = "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\remediate-retained-closeout.ps1 -RepoRoot . -Apply"
+    if item.get("protected"):
+        action_class = "protected_branch"
+        blockers.append("protected_remote_branch")
+        recovery_command = "change closeout.config.json protectedBranches or manually inspect this remote branch"
+    elif backup.get("redundantWith") and bool(blocker_auto_remediation_config(config).get("prunePatchEquivalentBranches", True)):
+        recommended_action = "prune_remote_now"
+        action_class = "patch_equivalent_remote_feature_prune"
+    elif bool(config.get("repoSweep", {}).get("cleanIntegrateRemoteFeatureBranches", True)):
+        merge_probe = simulate_clean_integration(repo_root, config, target_head=target_head, branch_head=branch_head)
+        scope["mergeProbe"] = merge_probe
+        if merge_probe.get("clean") and str(config.get("repoSweep", {}).get("mergeMode", "auto_clean")) == "auto_clean":
+            recommended_action = "clean_integrate_remote_now"
+            action_class = "remote_feature_clean_integrate"
+        else:
+            blockers.append(str(merge_probe.get("reason") or "remote_merge_required_ambiguous"))
+            resolution_packet = agent_conflict_resolution_packet(config, candidate_id=candidate_id, branch=branch, merge_probe=merge_probe, changed_paths=scope["changedPaths"])
+            if resolution_packet:
+                scope["agentResolutionPacket"] = resolution_packet
+    else:
+        blockers.append("remote_feature_clean_integrate_disabled")
+    report = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "reportType": "repo_sweep_remote_feature_investigation",
+        "candidateId": candidate_id,
+        "remote": item.get("remote"),
+        "remoteRef": item.get("ref"),
+        "branch": branch,
+        "head": branch_head,
+        "sourceDisposition": disposition,
+        "reason": item.get("reason"),
+        "agentDispatch": investigation_agent_payload(config, candidate_id, "repo-sweep-remote-feature-investigator"),
+        "target": target,
+        "scope": scope,
+        "backupAnalysis": backup,
+        "lockInspection": None,
+        "dirtyClassification": None,
+        "recommendedAction": recommended_action,
+        "actionClass": action_class,
+        "blockers": blockers,
+        "recoveryCommand": recovery_command,
+        "worktree": None,
+        "worktreeDirty": {"exists": False, "dirty": False, "paths": []},
+    }
+    report["remediationProof"] = remediation_proof(
+        config,
+        recommended_action=recommended_action,
+        action_class=action_class,
+        blockers=blockers,
+    )
+    report["evidenceHash"] = stable_hash({key: value for key, value in report.items() if key != "reportPath"})
+    return write_candidate_report(repo_root, config, report)
+
+
 def detached_dirty_preservation_branch(config: Dict[str, Any], candidate_id: str) -> str:
     prefix = normalize_rel(str(blocker_auto_remediation_config(config).get("detachedDirtyBranchPrefix") or "closeout/recovery/detached")).strip("/")
     return "%s/%s" % (prefix, stable_hash(candidate_id, 12))
@@ -3404,18 +3635,25 @@ def investigation_reports(repo_root: Path, config: Dict[str, Any], plan: Dict[st
         for report in (investigate_branch_candidate(repo_root, config, plan, item) for item in plan["branchPlans"])
         if report is not None
     ]
+    remote_feature_reports = [
+        report
+        for report in (investigate_remote_feature_candidate(repo_root, config, plan, item) for item in plan.get("remoteFeaturePlans", []))
+        if report is not None
+    ]
     worktree_reports = [
         report
         for report in (investigate_worktree_candidate(repo_root, config, plan, item) for item in plan["worktreePlans"])
         if report is not None
     ]
-    reports = branch_reports + worktree_reports
+    reports = branch_reports + remote_feature_reports + worktree_reports
     return sorted(reports, key=lambda item: (str(item.get("actionClass")), str(item.get("branch")), str(item.get("head"))))
 
 
 def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
     action = str(report["recommendedAction"])
     if action == "clean_integrate_now":
+        action_id = "clean_integrate"
+    elif action == "clean_integrate_remote_now":
         action_id = "clean_integrate"
     elif action == "cleanup_worktree_and_prune":
         action_id = "worktree_cleanup"
@@ -3425,11 +3663,14 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
         action_id = "worktree_cleanup"
     elif action == "preserve_detached_dirty_now":
         action_id = "orphan_quarantine"
+    elif action == "prune_remote_now":
+        action_id = "delete_remote_branch"
     else:
         action_id = "delete_local_branch"
     pinned_refs = {
         "target": plan["pinnedRefs"]["target"],
         "branch": {"branch": report.get("branch"), "head": report.get("head")},
+        "remoteFeature": {"remote": report.get("remote"), "branch": report.get("branch"), "ref": report.get("remoteRef"), "head": report.get("head")} if report.get("remoteRef") else None,
         "worktree": report.get("worktree"),
     }
     evidence = {
@@ -3442,6 +3683,9 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
             "allowForeignDirtyIntegratedBranchPrune": config.get("repoSweep", {}).get("allowForeignDirtyIntegratedBranchPrune"),
             "allowPatchEquivalentPrune": config.get("repoSweep", {}).get("allowPatchEquivalentPrune"),
             "protectedLockedWorktreeExactPolicy": config.get("repoSweep", {}).get("protectedLockedWorktreeExactPolicy"),
+            "pruneRemoteFeatureBranches": config.get("repoSweep", {}).get("pruneRemoteFeatureBranches"),
+            "cleanIntegrateRemoteFeatureBranches": config.get("repoSweep", {}).get("cleanIntegrateRemoteFeatureBranches"),
+            "deleteRemoteFeatureAfterCleanIntegrate": config.get("repoSweep", {}).get("deleteRemoteFeatureAfterCleanIntegrate"),
         },
     }
     return {
@@ -3735,6 +3979,126 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
         write_audit(repo_root, config, "snapshot_pruning", {"action": "integration_worktree_remove", **removal}, outcome="success" if removal["returncode"] == 0 else "blocked")
 
 
+def delete_remote_feature_ref(repo_root: Path, config: Dict[str, Any], *, remote: str, branch: str, expected_head: str) -> Dict[str, Any]:
+    ref = f"refs/remotes/{remote}/{branch}"
+    current_head = rev_parse(repo_root, ref, required=False)
+    if current_head is None:
+        action = {"status": "success", "action": "delete_remote_branch", "remote": remote, "branch": branch, "alreadyMissing": True, "expectedHead": expected_head}
+        write_audit(repo_root, config, "remote_branch_deletion", action, outcome="success")
+        return action
+    if current_head != expected_head:
+        action = {"status": "blocked", "reason": "remote_feature_head_drifted", "remote": remote, "branch": branch, "expected": expected_head, "actual": current_head}
+        write_audit(repo_root, config, "stale_refs", action, outcome="blocked")
+        return action
+    delete = run_git(repo_root, ["push", remote, "--delete", branch])
+    run_git(repo_root, ["fetch", "--prune", remote])
+    action = {
+        "status": "success" if delete.returncode == 0 else "blocked",
+        "action": "delete_remote_branch",
+        "remote": remote,
+        "branch": branch,
+        "expectedHead": expected_head,
+        "returncode": delete.returncode,
+        "stdout": delete.stdout[-2000:],
+        "stderr": delete.stderr[-2000:],
+    }
+    write_audit(repo_root, config, "remote_branch_deletion", action, outcome="success" if delete.returncode == 0 else "blocked")
+    return action
+
+
+def remote_feature_prune_still_eligible(repo_root: Path, item: Dict[str, Any], target_head: str) -> bool:
+    head = str(item["head"])
+    if is_ancestor(repo_root, head, target_head):
+        return True
+    if tree_hash(repo_root, head) == tree_hash(repo_root, target_head):
+        return True
+    if item.get("disposition") == "prune_patch_equivalent_remote_feature":
+        cherry = cherry_rows_between(repo_root, target_head, head)
+        return bool(cherry) and all(line.startswith("-") for line in cherry)
+    return False
+
+
+def apply_remote_feature_prune(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+    target = target_ref_for(repo_root, config)
+    if target["head"] != plan["pinnedRefs"]["target"]["head"]:
+        action = {"status": "blocked", "reason": "target_head_drifted", "expected": plan["pinnedRefs"]["target"], "actual": target}
+        write_audit(repo_root, config, "stale_refs", action, outcome="blocked")
+        return action
+    remote = str(item["remote"])
+    branch = str(item["branch"])
+    current_head = rev_parse(repo_root, str(item["ref"]), required=False)
+    if current_head != item["head"]:
+        action = {"status": "blocked", "reason": "remote_feature_head_drifted", "remote": remote, "branch": branch, "expected": item["head"], "actual": current_head}
+        write_audit(repo_root, config, "stale_refs", action, outcome="blocked")
+        return action
+    if not remote_feature_prune_still_eligible(repo_root, item, str(target["head"])):
+        action = {"status": "blocked", "reason": "remote_feature_no_longer_prunable", "remote": remote, "branch": branch, "head": item["head"], "target": target}
+        write_audit(repo_root, config, "cleanup_retention", action, outcome="retained")
+        return action
+    return delete_remote_feature_ref(repo_root, config, remote=remote, branch=branch, expected_head=str(item["head"]))
+
+
+def apply_remote_feature_clean_integrate(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
+    target = target_ref_for(repo_root, config)
+    if target["head"] != plan["pinnedRefs"]["target"]["head"]:
+        return {"status": "blocked", "reason": "target_head_drifted", "expected": plan["pinnedRefs"]["target"], "actual": target}
+    remote = str(report.get("remote") or target.get("remote") or config.get("git", {}).get("remote", "origin"))
+    branch = str(report["branch"])
+    remote_ref = str(report.get("remoteRef") or f"{remote}/{branch}")
+    branch_head = str(report["head"])
+    current_head = rev_parse(repo_root, remote_ref, required=False)
+    if current_head != branch_head:
+        action = {"status": "blocked", "reason": "remote_feature_head_drifted", "remote": remote, "branch": branch, "expected": branch_head, "actual": current_head}
+        write_audit(repo_root, config, "stale_refs", action, outcome="blocked")
+        return action
+    target_branch = str(plan["pinnedRefs"]["target"]["branch"])
+    integration_path = closeout_state_root(repo_root, config) / "rs-remote-iw" / uuid.uuid4().hex[:12]
+    integration_path.parent.mkdir(parents=True, exist_ok=True)
+    add = run_git_longpaths(repo_root, ["worktree", "add", "--detach", str(integration_path), target["head"]])
+    if add.returncode != 0:
+        return {"status": "blocked", "reason": "integration_worktree_failed", "returncode": add.returncode, "stderr": add.stderr[-2000:]}
+    try:
+        merge = run_git(integration_path, ["merge", "--no-ff", "--no-edit", branch_head])
+        if merge.returncode != 0:
+            return {"status": "blocked", "reason": "merge_failed", "returncode": merge.returncode, "stdout": merge.stdout[-2000:], "stderr": merge.stderr[-2000:]}
+        diff_check = run_git(integration_path, ["diff", "--check"])
+        if diff_check.returncode != 0:
+            return {"status": "blocked", "reason": "diff_check_failed", "returncode": diff_check.returncode, "stdout": diff_check.stdout[-2000:], "stderr": diff_check.stderr[-2000:]}
+        validations = run_validations(repo_root, config, integration_path)
+        failed = next((row for row in validations if row["returncode"] != 0), None)
+        if failed:
+            return {"status": "blocked", "reason": "validation_failed", "validations": validations}
+        new_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        push_result: Optional[Dict[str, Any]] = None
+        if target["mode"] == "remote":
+            push = run_git(integration_path, ["push", str(target.get("remote")), f"HEAD:{target_branch}"])
+            push_result = {"remote": target.get("remote"), "targetBranch": target_branch, "returncode": push.returncode, "stdout": push.stdout[-2000:], "stderr": push.stderr[-2000:]}
+            if push.returncode != 0:
+                return {"status": "blocked", "reason": "target_push_failed", "push": push_result}
+        local_update = update_local_target(repo_root, target_branch, new_head)
+        if local_update["returncode"] != 0:
+            return {"status": "blocked", "reason": "local_target_update_failed", "localUpdate": local_update, "push": push_result}
+        remote_cleanup: Optional[Dict[str, Any]] = None
+        if bool(config.get("repoSweep", {}).get("deleteRemoteFeatureAfterCleanIntegrate", True)):
+            remote_cleanup = delete_remote_feature_ref(repo_root, config, remote=remote, branch=branch, expected_head=branch_head)
+        result = {
+            "status": "success" if not remote_cleanup or remote_cleanup.get("status") == "success" else "blocked",
+            "action": "clean_integrate_remote_feature",
+            "remote": remote,
+            "branch": branch,
+            "newTargetHead": new_head,
+            "validations": validations,
+            "push": push_result,
+            "localUpdate": local_update,
+            "remoteCleanup": remote_cleanup,
+        }
+        write_audit(repo_root, config, "success" if result["status"] == "success" else "cleanup_retention", result, outcome="success" if result["status"] == "success" else "blocked")
+        return result
+    finally:
+        removal = remove_worktree(repo_root, integration_path)
+        write_audit(repo_root, config, "snapshot_pruning", {"action": "integration_worktree_remove", **removal}, outcome="success" if removal["returncode"] == 0 else "blocked")
+
+
 def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
@@ -3752,15 +4116,21 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         if item["disposition"] == "prune_merged_branch" and not path_matches_any(str(item["branch"]), backup_patterns)
         and not is_recovery_branch(config, str(item["branch"]))
     ]
+    prunable_remote_features = [
+        item
+        for item in plan.get("remoteFeaturePlans", [])
+        if item["disposition"] in {"prune_integrated_remote_feature", "prune_patch_equivalent_remote_feature"}
+    ]
     candidate_worktrees = [item for item in plan["worktreePlans"] if item["disposition"] == "candidate_clean_detached_worktree_prune"]
     candidate_stashes = [item for item in plan["stashPlans"] if item["disposition"] == "candidate_stash_drop"]
     branch_candidates = [branch_prune_candidate(config, plan, item) for item in prunable_branches]
+    remote_feature_candidates = [remote_feature_prune_candidate(config, plan, item) for item in prunable_remote_features]
     retained_reports = investigation_reports(repo_root, config, plan)
     promoted_reports = [
         report
         for report in retained_reports
         if report.get("recommendedAction")
-        in {"clean_integrate_now", "prune_now", "cleanup_worktree_and_prune", "split_now", "switch_target_and_prune", "preserve_detached_dirty_now"}
+        in {"clean_integrate_now", "clean_integrate_remote_now", "prune_now", "prune_remote_now", "cleanup_worktree_and_prune", "split_now", "switch_target_and_prune", "preserve_detached_dirty_now"}
     ]
     promoted_candidates = [candidate_from_report(config, plan, report) for report in promoted_reports]
     follow_up_candidates = retained_reports
@@ -3769,6 +4139,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             "plan": plan,
             "tuple": tuple_info,
             "branchCandidates": branch_candidates,
+            "remoteFeatureCandidates": remote_feature_candidates,
             "retainedCandidateReports": retained_reports,
             "promotedCandidates": promoted_candidates,
             "followUpCandidates": follow_up_candidates,
@@ -3805,6 +4176,37 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                 write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, **quorum_result}, outcome="blocked")
                 continue
             actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item))
+    if bool(config.get("repoSweep", {}).get("pruneRemoteFeatureBranches", True)):
+        for item, candidate in zip(prunable_remote_features, remote_feature_candidates):
+            if candidate_id and candidate["candidateId"] != candidate_id:
+                continue
+            matched_candidate = True
+            blockers: List[str] = []
+            current_head = rev_parse(repo_root, str(item["ref"]), required=False)
+            current_target = target_ref_for(repo_root, config)
+            if current_head != item["head"]:
+                blockers.append("remote_feature_head_drifted")
+            if current_target["head"] != plan["pinnedRefs"]["target"]["head"]:
+                blockers.append("target_head_drifted")
+            if not blockers and not remote_feature_prune_still_eligible(repo_root, item, str(plan["pinnedRefs"]["target"]["head"])):
+                blockers.append("remote_feature_no_longer_prunable")
+            quorum_result = ensure_autonomous_quorum(
+                repo_root,
+                config,
+                candidate_id=candidate["candidateId"],
+                action_id=candidate["actionId"],
+                evidence_hash=candidate["evidenceHash"],
+                pinned_refs=candidate["pinnedRefs"],
+                evidence=candidate["evidence"],
+                action_class=candidate["actionClass"],
+                blockers=blockers,
+            )
+            quorum_results.append({"candidate": candidate, **quorum_result})
+            if not quorum_result["quorum"]["ok"]:
+                write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, **quorum_result}, outcome="blocked")
+                continue
+            action = apply_remote_feature_prune(repo_root, config, plan, item)
+            actions.append(action)
     branch_by_name = {item["branch"]: item for item in plan["branchPlans"]}
     for report, candidate in zip(promoted_reports, promoted_candidates):
         if candidate_id and candidate["candidateId"] != candidate_id:
@@ -3831,6 +4233,42 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                 write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, "report": report, **quorum_result}, outcome="blocked")
                 continue
             action = apply_detached_dirty_preserve(repo_root, config, plan, report)
+            actions.append(action)
+            continue
+        if report["recommendedAction"] in {"clean_integrate_remote_now", "prune_remote_now"}:
+            blockers = list(report.get("blockers") or [])
+            current_target = target_ref_for(repo_root, config)
+            current_remote_head = rev_parse(repo_root, str(report.get("remoteRef") or ""), required=False)
+            if current_remote_head != report["head"]:
+                blockers.append("remote_feature_head_drifted")
+            if current_target["head"] != plan["pinnedRefs"]["target"]["head"]:
+                blockers.append("target_head_drifted")
+            quorum_result = ensure_autonomous_quorum(
+                repo_root,
+                config,
+                candidate_id=candidate["candidateId"],
+                action_id=candidate["actionId"],
+                evidence_hash=candidate["evidenceHash"],
+                pinned_refs=candidate["pinnedRefs"],
+                evidence=candidate["evidence"],
+                action_class=candidate["actionClass"],
+                blockers=blockers,
+            )
+            quorum_results.append({"candidate": candidate, "report": report, **quorum_result})
+            if not quorum_result["quorum"]["ok"]:
+                write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, "report": report, **quorum_result}, outcome="blocked")
+                continue
+            if report["recommendedAction"] == "clean_integrate_remote_now":
+                action = apply_remote_feature_clean_integrate(repo_root, config, plan, report)
+            else:
+                remote_item = {
+                    "remote": report.get("remote"),
+                    "branch": report.get("branch"),
+                    "ref": report.get("remoteRef"),
+                    "head": report.get("head"),
+                    "disposition": "prune_patch_equivalent_remote_feature",
+                }
+                action = apply_remote_feature_prune(repo_root, config, plan, remote_item)
             actions.append(action)
             continue
         item = branch_by_name.get(report["branch"])
@@ -3905,6 +4343,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             "reason": "candidate_not_found_or_not_promoted",
             "candidateId": candidate_id,
             "branchCandidates": branch_candidates,
+            "remoteFeatureCandidates": remote_feature_candidates,
             "promotedCandidates": promoted_candidates,
         }
         write_audit(repo_root, config, "blocked_repair", result, outcome="blocked")
@@ -3915,6 +4354,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         "plan": plan,
         "tuple": tuple_info,
         "branchCandidates": branch_candidates,
+        "remoteFeatureCandidates": remote_feature_candidates,
         "retainedCandidateReports": retained_reports,
         "promotedCandidates": promoted_candidates,
         "followUpCandidates": follow_up_candidates,
@@ -3922,6 +4362,40 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         "actions": actions,
     }
     write_audit(repo_root, config, "success", result, outcome="success")
+    return result
+
+
+def ordered_retained_remediation_candidates(planned: Dict[str, Any]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    candidates.extend(planned.get("branchCandidates") or [])
+    candidates.extend(planned.get("remoteFeatureCandidates") or [])
+    candidates.extend(planned.get("promotedCandidates") or [])
+    return [item for item in candidates if item.get("candidateId")]
+
+
+def remediate_retained_candidates(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    if not apply:
+        planned = repo_sweep(repo_root, apply=False, candidate_id=candidate_id)
+        result = {"actor": "retained-remediation", **planned}
+        write_audit(repo_root, config, "retained_remediation", {"apply": False, "candidateId": candidate_id, "resultStatus": planned.get("status")}, outcome="recorded")
+        return result
+    if candidate_id:
+        applied = repo_sweep(repo_root, apply=True, candidate_id=candidate_id)
+        result = {"actor": "retained-remediation", "selectedCandidateId": candidate_id, **applied}
+        write_audit(repo_root, config, "retained_remediation", {"apply": True, "candidateId": candidate_id, "resultStatus": applied.get("status")}, outcome="success" if applied.get("status") == "success" else "blocked")
+        return result
+    planned = repo_sweep(repo_root, apply=False)
+    candidates = ordered_retained_remediation_candidates(planned)
+    if not candidates:
+        result = {**planned, "actor": "retained-remediation", "status": "success", "reason": "no_promoted_candidates"}
+        write_audit(repo_root, config, "retained_remediation", {"apply": True, "candidateId": None, "resultStatus": "no_promoted_candidates"}, outcome="success")
+        return result
+    selected = str(candidates[0]["candidateId"])
+    applied = repo_sweep(repo_root, apply=True, candidate_id=selected)
+    result = {"actor": "retained-remediation", "selectedCandidateId": selected, "plannedCandidateCount": len(candidates), **applied}
+    write_audit(repo_root, config, "retained_remediation", {"apply": True, "candidateId": selected, "candidateCount": len(candidates), "resultStatus": applied.get("status")}, outcome="success" if applied.get("status") == "success" else "blocked")
     return result
 
 

@@ -56,6 +56,7 @@ IMPLEMENTED_CLOSEOUT_CANDIDATE_KINDS = [
     "repo-sweep-retained-blocker",
     "detached-dirty-worktree",
     "protected-worktree-cleanup",
+    "remote-feature-branch",
 ]
 IMPLEMENTED_CLOSEOUT_ACTION_IDS = [
     "commit_unit_commit",
@@ -64,6 +65,9 @@ IMPLEMENTED_CLOSEOUT_ACTION_IDS = [
     "local_merge",
     "prune_after_publish",
     "split",
+    "delete_remote_branch",
+    "remote_feature_clean_integrate",
+    "remote_feature_prune",
     "foreign_dirty_integrated_branch_prune",
     "detached_dirty_preserve",
     "explicit_protected_worktree_cleanup",
