@@ -2161,7 +2161,9 @@ def complete_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = N
     detection = detect_work_block(repo_root, work_block_id=block_id)
     if not finalize:
         return {"status": "completed", "workBlockId": block_id, "workBlockSelection": manifest.get("workBlockSelection"), "detector": detection}
-    return finalize_work_block(repo_root, work_block_id=block_id)
+    result = finalize_work_block(repo_root, work_block_id=block_id)
+    result["workBlockSelection"] = manifest.get("workBlockSelection")
+    return result
 
 
 def checkpoint_owned_dirty_action_id() -> str:
