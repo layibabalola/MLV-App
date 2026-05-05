@@ -25,6 +25,7 @@ from .brokered_closeout import (
     record_review_approval,
     repair_target_push_failure,
     repair_eligibility,
+    remediate_retained_candidates,
     repo_sweep,
     repo_sweep_tuple,
     stable_hash,
@@ -93,7 +94,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "reviewQuorum": {
                 "requiredApprovals": 1,
                 "allowedReviewers": ["local-test"],
-                "highImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+                "highImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split"],
                 "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"],
             },
             "autoQuorum": {
@@ -103,6 +104,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "reviewers": ["codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
                 "autonomousActionClasses": [
                     "integrated_branch_prune",
+                    "integrated_remote_feature_prune",
+                    "patch_equivalent_remote_feature_prune",
+                    "remote_feature_clean_integrate",
                     "repo_sweep_clean_integrate",
                     "owned_dirty_checkpoint",
                     "stale_locked_worktree_cleanup",
@@ -132,6 +136,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "allowStaleLockedWorktreeCleanup": True,
                 "lockedWorktreeStaleHours": 24,
                 "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"],
+                "fetchBeforeRemoteSweep": True,
+                "remoteFeaturePatterns": [],
+                "pruneRemoteFeatureBranches": True,
+                "cleanIntegrateRemoteFeatureBranches": True,
+                "deleteRemoteFeatureAfterCleanIntegrate": True,
             },
             "blockerAutoRemediation": {
                 "enabled": True,
@@ -802,6 +811,119 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["status"], "success", result)
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/first-backup", check=False).returncode, 0)
         self.assertEqual(git(repo, "rev-parse", "--verify", "codex/second-backup", check=False).returncode, 0)
+
+    def test_repo_sweep_remote_integrated_feature_branch_is_pruned(self) -> None:
+        repo = self.init_repo(remote=True)
+        git(repo, "checkout", "-b", "codex/remote-integrated")
+        (repo / "remote-integrated.txt").write_text("remote integrated\n", encoding="utf-8")
+        git(repo, "add", "remote-integrated.txt")
+        git(repo, "commit", "-m", "remote integrated branch")
+        git(repo, "push", "origin", "codex/remote-integrated")
+        git(repo, "checkout", "master")
+        git(repo, "merge", "--no-ff", "codex/remote-integrated", "-m", "merge remote integrated")
+        git(repo, "push", "origin", "master")
+        git(repo, "branch", "-D", "codex/remote-integrated")
+
+        result = repo_sweep(repo, apply=True)
+
+        self.assertEqual(result["status"], "success", result)
+        candidate = next(item for item in result["remoteFeatureCandidates"] if item["pinnedRefs"]["remoteFeature"]["branch"] == "codex/remote-integrated")
+        self.assertEqual(candidate["actionId"], "delete_remote_branch")
+        self.assertTrue(any(item.get("action") == "delete_remote_branch" and item.get("branch") == "codex/remote-integrated" for item in result["actions"]))
+        self.assertEqual(git(repo, "ls-remote", "--heads", "origin", "codex/remote-integrated").stdout.strip(), "")
+        self.assertIn("remote_branch_deletion", self.audit_types(repo))
+
+    def test_repo_sweep_remote_patch_equivalent_feature_branch_is_pruned(self) -> None:
+        repo = self.init_repo(remote=True)
+        git(repo, "checkout", "-b", "codex/remote-copy")
+        (repo / "dup-remote.txt").write_text("same remote patch\n", encoding="utf-8")
+        git(repo, "add", "dup-remote.txt")
+        git(repo, "commit", "-m", "remote duplicate patch")
+        git(repo, "push", "origin", "codex/remote-copy")
+        git(repo, "checkout", "master")
+        (repo / "dup-remote.txt").write_text("same remote patch\n", encoding="utf-8")
+        git(repo, "add", "dup-remote.txt")
+        git(repo, "commit", "-m", "target duplicate patch")
+        (repo / "target-after-dup.txt").write_text("target follow-up\n", encoding="utf-8")
+        git(repo, "add", "target-after-dup.txt")
+        git(repo, "commit", "-m", "target follow-up")
+        git(repo, "push", "origin", "master")
+        git(repo, "branch", "-D", "codex/remote-copy")
+
+        result = repo_sweep(repo, apply=True)
+
+        candidate = next(item for item in result["remoteFeatureCandidates"] if item["pinnedRefs"]["remoteFeature"]["branch"] == "codex/remote-copy")
+        self.assertEqual(candidate["actionClass"], "patch_equivalent_remote_feature_prune")
+        quorum = next(item for item in result["quorumResults"] if item["candidate"]["candidateId"] == candidate["candidateId"])
+        self.assertTrue(quorum["autoGenerated"])
+        self.assertTrue(quorum["quorum"]["ok"])
+        self.assertEqual(git(repo, "ls-remote", "--heads", "origin", "codex/remote-copy").stdout.strip(), "")
+
+    def test_repo_sweep_remote_unique_feature_branch_clean_integrates_and_prunes(self) -> None:
+        repo = self.init_repo(remote=True)
+        git(repo, "checkout", "-b", "codex/remote-unique")
+        (repo / "remote-unique.txt").write_text("remote unique work\n", encoding="utf-8")
+        git(repo, "add", "remote-unique.txt")
+        git(repo, "commit", "-m", "remote unique branch")
+        git(repo, "push", "origin", "codex/remote-unique")
+        git(repo, "checkout", "master")
+        git(repo, "branch", "-D", "codex/remote-unique")
+
+        result = remediate_retained_candidates(repo, apply=True)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["actor"], "retained-remediation")
+        report = next(item for item in result["retainedCandidateReports"] if item.get("remoteRef") == "origin/codex/remote-unique")
+        self.assertEqual(report["recommendedAction"], "clean_integrate_remote_now")
+        self.assertTrue(any(item.get("action") == "clean_integrate_remote_feature" and item.get("branch") == "codex/remote-unique" for item in result["actions"]))
+        self.assertEqual(git(repo, "show", "master:remote-unique.txt").stdout, "remote unique work\n")
+        self.assertEqual(git(repo, "ls-remote", "--heads", "origin", "codex/remote-unique").stdout.strip(), "")
+
+    def test_repo_sweep_remote_conflicting_feature_branch_writes_investigation_packet(self) -> None:
+        repo = self.init_repo(remote=True)
+        (repo / "remote-conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "remote-conflict.txt")
+        git(repo, "commit", "-m", "remote conflict base")
+        git(repo, "push", "origin", "master")
+        git(repo, "checkout", "-b", "codex/remote-conflict")
+        (repo / "remote-conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "remote-conflict.txt")
+        git(repo, "commit", "-m", "remote conflict branch")
+        git(repo, "push", "origin", "codex/remote-conflict")
+        git(repo, "checkout", "master")
+        (repo / "remote-conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "remote-conflict.txt")
+        git(repo, "commit", "-m", "remote conflict target")
+        git(repo, "push", "origin", "master")
+        git(repo, "branch", "-D", "codex/remote-conflict")
+
+        result = repo_sweep(repo)
+
+        report = next(item for item in result["retainedCandidateReports"] if item.get("remoteRef") == "origin/codex/remote-conflict")
+        self.assertEqual(report["reportType"], "repo_sweep_remote_feature_investigation")
+        self.assertEqual(report["recommendedAction"], "retain_with_proven_blocker")
+        self.assertEqual(report["scope"]["mergeProbe"]["reason"], "merge_failed")
+        self.assertEqual(report["scope"]["agentResolutionPacket"]["symbolicAction"], "resolve-conflicts-with-agent")
+
+    def test_remediate_retained_actor_applies_one_candidate_per_run(self) -> None:
+        repo = self.init_repo(remote=True)
+        for name in ("codex/remote-one", "codex/remote-two"):
+            git(repo, "checkout", "-b", name)
+            (repo / ("%s.txt" % name.replace("/", "-"))).write_text("%s\n" % name, encoding="utf-8")
+            git(repo, "add", ("%s.txt" % name.replace("/", "-")))
+            git(repo, "commit", "-m", "work %s" % name)
+            git(repo, "push", "origin", name)
+            git(repo, "checkout", "master")
+            git(repo, "merge", "--no-ff", name, "-m", "merge %s" % name)
+            git(repo, "push", "origin", "master")
+            git(repo, "branch", "-D", name)
+
+        result = remediate_retained_candidates(repo, apply=True)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["plannedCandidateCount"], 2)
+        remaining = git(repo, "ls-remote", "--heads", "origin", "codex/remote-one", "codex/remote-two").stdout.strip().splitlines()
+        self.assertEqual(len([line for line in remaining if line.strip()]), 1)
 
     def test_repo_sweep_dirty_current_worktree_gets_ownership_classification(self) -> None:
         repo = self.init_repo()
