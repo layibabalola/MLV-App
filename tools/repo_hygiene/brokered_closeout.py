@@ -3215,8 +3215,13 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
 
 
 def detached_dirty_preservation_branch(config: Dict[str, Any], candidate_id: str) -> str:
-    prefix = normalize_rel(str(config.get("blockerAutoRemediation", {}).get("detachedDirtyBranchPrefix") or "closeout/recovery/detached")).strip("/")
+    prefix = normalize_rel(str(blocker_auto_remediation_config(config).get("detachedDirtyBranchPrefix") or "closeout/recovery/detached")).strip("/")
     return "%s/%s" % (prefix, stable_hash(candidate_id, 12))
+
+
+def is_recovery_branch(config: Dict[str, Any], branch: str) -> bool:
+    prefix = normalize_rel(str(blocker_auto_remediation_config(config).get("detachedDirtyBranchPrefix") or "closeout/recovery/detached")).strip("/")
+    return normalize_rel(branch).startswith(prefix + "/")
 
 
 def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3626,6 +3631,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         item
         for item in plan["branchPlans"]
         if item["disposition"] == "prune_merged_branch" and not path_matches_any(str(item["branch"]), backup_patterns)
+        and not is_recovery_branch(config, str(item["branch"]))
     ]
     candidate_worktrees = [item for item in plan["worktreePlans"] if item["disposition"] == "candidate_clean_detached_worktree_prune"]
     candidate_stashes = [item for item in plan["stashPlans"] if item["disposition"] == "candidate_stash_drop"]
