@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/repo-sweep-policy-recommendations",
+  "createdAt": "2026-05-05T19:52:15+00:00",
+  "detectorHash": "196befa91dafb37b6c829d3bcc6bf021",
+  "eligible": true,
+  "featureHead": "257fa62941566341337749a585b10398facdd94a",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/repo-sweep-policy-recommendations",
+      "head": "257fa62941566341337749a585b10398facdd94a"
+    },
+    "target": {
+      "branch": "master",
+      "head": "548e173198481fe33e7ba7db8e19b5b7b4079c9c",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "548e173198481fe33e7ba7db8e19b5b7b4079c9c",
+  "workBlockId": "wb-retained-blocker-remediation-hardening-20260505"
+}
