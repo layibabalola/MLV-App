@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/fix-windows-scaffold-ci",
+  "createdAt": "2026-05-05T21:06:46+00:00",
+  "detectorHash": "511c39a11396b6b1f73d523d2174d645",
+  "eligible": true,
+  "featureHead": "26714882e42e7b30b281e1b84698704924db4159",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/fix-windows-scaffold-ci",
+      "head": "26714882e42e7b30b281e1b84698704924db4159"
+    },
+    "target": {
+      "branch": "master",
+      "head": "c075c9b49f9616ea0eb9d0dad24d2a908025173a",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "c075c9b49f9616ea0eb9d0dad24d2a908025173a",
+  "workBlockId": "wb-df87888c520941d2"
+}

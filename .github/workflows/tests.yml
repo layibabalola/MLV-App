@@ -155,3 +155,4 @@ jobs:
         with:
           name: gui_tests_output
           path: gui_tests_output.txt
+          if-no-files-found: ignore
