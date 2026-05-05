@@ -330,6 +330,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual((repo / "work.txt").read_text(encoding="utf-8"), "feature work\n")
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/test-work", check=False).returncode, 0)
 
+    def test_finalize_auto_quorum_resolves_missing_review(self) -> None:
+        repo = self.init_repo(remote=False)
+        self.make_feature(repo, "wb-auto-finalize")
+
+        result = finalize_work_block(repo, work_block_id="wb-auto-finalize")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertIn("auto_quorum", self.audit_types(repo))
+        self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "master")
+
     def test_partial_push_recovery_updates_local_target_and_cleans_branch(self) -> None:
         repo = self.init_repo(remote=True)
         self.make_feature(repo, "wb-partial-push")

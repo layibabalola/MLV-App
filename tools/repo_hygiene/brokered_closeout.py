@@ -1763,6 +1763,19 @@ def finalize_work_block(
         evidence_hash=evidence_hash,
         pinned_refs=detection["pinnedRefs"],
     )
+    if not quorum["ok"] and quorum["reason"] == "review_quorum_missing":
+        quorum_result = ensure_autonomous_quorum(
+            repo_root,
+            config,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=detection["pinnedRefs"],
+            evidence=evidence,
+            action_class="repo_sweep_clean_integrate",
+            blockers=[],
+        )
+        quorum = quorum_result["quorum"]
     if not quorum["ok"]:
         audit_type = "stale_review" if quorum["reason"] == "stale_review" else "review_quorum_blocked"
         payload = {"candidateId": candidate_id, "actionId": action_id, "evidenceHash": evidence_hash, "quorum": quorum}
