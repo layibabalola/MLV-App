@@ -47,6 +47,7 @@
 - Stale review tuples are not terminal when `autoQuorum.allowStaleReviewRenewal=true` and the candidate is still eligible. The auto-quorum actor regenerates exact-tuple reviews against the current evidence and pinned refs, revalidates immediately before mutation, and blocks only when refs, dirty state, policy, or validation no longer satisfy the action.
 - Before treating closeout blockers as authoritative, the worktree must pass the configured closeout tooling baseline check. Missing actors, config fields, contract checks, repair paths, or required tests must be reported as `closeout_tooling_stale`; the actor may update from the configured baseline only when doing so will not overwrite dirty or broker-owned paths.
 - If publish/upstream/final-push repair is blocked only by missing metrics, handoff, session, or closeout evidence, the evidence repair actor must generate and claim only the configured evidence files, commit only those paths, retain unrelated dirty work, and rerun the safe publish repair before reporting a blocker.
+- Clean integration and remediation actors must create temporary Git worktrees with `core.longpaths=true` on Windows so tracked long-path evidence/profiling files cannot block closeout before validation starts.
 
 ## Agent Bridge Startup
 - On session open in this repository, initialize the agent bridge before normal relay work.
