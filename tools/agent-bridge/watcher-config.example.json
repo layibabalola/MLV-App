@@ -14,7 +14,7 @@
       "on_message": "toast"
     },
     {
-      "_comment": "Codex private inbox - toast + optional wake_codex.ps1; the helper should include -ThreadId when CODEX_THREAD_ID is known.",
+      "_comment": "Codex private inbox - toast + optional targeted wake. Use the managed argv template so strict foreground protection and explicit delivery-priority displacement are both visible.",
       "agent": "codex",
       "kind": "private",
       "project": "mlv-app",
@@ -22,7 +22,34 @@
       "session_id": "YOUR-CODEX-SESSION-GUID",
       "inbox": "C:\\Users\\YOUR_USERNAME\\.agent-bridge\\state\\inbox-codex.jsonl",
       "on_message": "toast",
-      "on_message_command": "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\path\\to\\wake_codex.ps1 -ThreadId YOUR-CODEX-DESKTOP-THREAD-GUID"
+      "on_message_command_template": [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:\\path\\to\\wake_codex.ps1",
+        "-Message",
+        "Watcher says check bridge inbox",
+        "-ThreadId",
+        "{desktop_thread_id}",
+        "-RestoreThreadId",
+        "{restore_thread_id}",
+        "-ExpectedProjectToken",
+        "{project}",
+        "-RunInnerWake",
+        "-RequireThreadId",
+        "-RequireConstantMessage",
+        "-VerifyTargetTwice",
+        "-VerifyTargetGapMilliseconds",
+        "50",
+        "-MaxPreSendRaceMilliseconds",
+        "500",
+        "-PostTypingVerify",
+        "-WarnOnTitleMismatch",
+        "-ProtectForegroundCodexThread",
+        "-AllowForegroundCodexThreadDisplacement"
+      ]
     },
     {
       "_comment": "Optional project rendezvous/control-plane watch.",

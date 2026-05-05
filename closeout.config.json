@@ -1,0 +1,165 @@
+{
+  "schemaVersion": "1.0",
+  "policyVersion": "2026-05-05.brokered-closeout",
+  "stateRoot": ".claude-state/closeout",
+  "git": {
+    "targetBranch": "master",
+    "remote": "fork",
+    "allowLocalOnly": true,
+    "protectedBranches": ["master", "main", "develop", "release/*"],
+    "featureBranchPatterns": ["codex/*", "claude/*", "hygiene/*", "work/*", "feature/*"],
+    "fetchBeforeEvidence": true
+  },
+  "validation": {
+    "commands": [
+      {
+        "name": "brokered-closeout-tests",
+        "argv": ["python", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"]
+      },
+      {
+        "name": "repo-hygiene-policy",
+        "argv": ["python", "tools/repo-hygiene/hygiene.py", "--repo-root", ".", "verify-policy"]
+      }
+    ]
+  },
+  "paths": {
+    "generated": [
+      ".claude-state/**",
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "**/build*/**",
+      "platform/**/build*/**"
+    ],
+    "sensitive": [".claude/**", ".claude", ".git/**", ".git"],
+    "state": ".claude-state/closeout"
+  },
+  "dirty": {
+    "unclaimedOutsideDelta": "foreign",
+    "sensitiveUnownedBlocks": true
+  },
+  "dirtySplit": {
+    "enabled": true,
+    "autoRepairOwnedDirty": true,
+    "autoCheckpointOwnedDirty": true,
+    "branchPrefix": "closeout/split",
+    "worktreeRoot": ".claude-state/closeout/dirty-splits/worktrees",
+    "maxCandidatesPerRun": 1,
+    "registerBrokerOwnership": true
+  },
+  "stashPolicy": {
+    "allowAutoStash": false,
+    "allowForeignDirtyStash": false,
+    "allowOwnedDirtyCheckpoint": true
+  },
+  "cleanupPolicy": {
+    "deleteLocalBranchAfterSuccess": true,
+    "deleteRemoteBranchAfterSuccess": false,
+    "pruneSnapshotsAfterSuccess": true,
+    "removeIntegrationWorktreeAfterFailure": true,
+    "retainOriginalWorktreeOnTreeMismatch": true,
+    "removeCleanDetachedWorktreesInSweep": false,
+    "dropStashesInSweep": false,
+    "protectedWorktreeRoots": [".claude/worktrees/**"]
+  },
+  "repair": {
+    "autoPublishFeatureBranch": true,
+    "allowedPublishRemotes": ["fork", "origin"],
+    "setUpstreamOnPublish": true
+  },
+  "toolingBaseline": {
+    "enabled": true,
+    "baselineRef": null,
+    "autoUpdate": true,
+    "paths": [
+      "closeout.config.json",
+      "tools/repo_hygiene/brokered_closeout.py",
+      "tools/repo_hygiene/work_block_cli.py",
+      "tools/repo_hygiene/test_brokered_closeout.py",
+      "tools/repo-hygiene/closeout.contract.json",
+      "tools/repo-hygiene/hygiene.config.json"
+    ],
+    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"],
+    "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+    "requiredAutoQuorumActions": ["integrated_branch_prune", "repo_sweep_clean_integrate", "dirty_split"],
+    "requiredTests": [
+      "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
+      "test_dirty_split_stale_tuple_is_rejected_before_mutation",
+      "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
+      "test_missing_evidence_is_generated_and_committed_before_publish"
+    ],
+    "requiredSymbols": [
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"}
+    ]
+  },
+  "evidenceRepair": {
+    "enabled": true,
+    "evidenceRoot": ".closeout-evidence",
+    "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
+    "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
+    "commitMessage": "brokered closeout evidence repair"
+  },
+  "reviewQuorum": {
+    "requiredApprovals": 1,
+    "allowedReviewers": ["codex", "claude", "human", "local-test"],
+    "highImpactActions": [
+      "clean_integrate",
+      "push_target",
+      "delete_local_branch",
+      "delete_remote_branch",
+      "worktree_cleanup",
+      "snapshot_prune",
+      "orphan_quarantine",
+      "stash_promote",
+      "repo_sweep_prune_merged",
+      "split"
+    ],
+    "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"]
+  },
+  "autoQuorum": {
+    "enabled": true,
+    "requiredScore": 10,
+    "reviewers": ["codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
+    "autonomousActionClasses": [
+      "integrated_branch_prune",
+      "repo_sweep_clean_integrate",
+      "stale_locked_worktree_cleanup",
+      "redundant_backup_prune",
+      "dirty_split"
+    ],
+    "manualOnlyActionClasses": [
+      "protected_branch",
+      "dirty_worktree",
+      "locked_worktree",
+      "ambiguous_merge_required",
+      "active_locked_worktree",
+      "unowned_dirty_triage"
+    ]
+  },
+  "repoSweep": {
+    "enabled": true,
+    "mergeMode": "auto_clean",
+    "pruneMergedLocalBranches": true,
+    "pruneWorktrees": "clean_detached_only",
+    "stashMode": "retain",
+    "agentDispatchMode": "deterministic",
+    "investigateRetainedCandidates": true,
+    "allowCleanCheckedOutIntegration": true,
+    "allowStaleLockedWorktreeCleanup": true,
+    "lockedWorktreeStaleHours": 24,
+    "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"]
+  },
+  "scripts": [
+    "start-work-block.ps1",
+    "work-block-complete.ps1",
+    "detect-closeout.ps1",
+    "repair-closeout.ps1",
+    "publish-checkpoint.ps1",
+    "finalize-closeout.ps1",
+    "review-quorum.ps1",
+    "orphan-quarantine.ps1",
+    "audit-closeout.ps1",
+    "repo-sweep-closeout.ps1"
+  ]
+}

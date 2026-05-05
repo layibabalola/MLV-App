@@ -7,12 +7,19 @@ import io
 import json
 import os
 import signal
+import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
+import urllib.error
+import urllib.request
 
 from agent_bridge import AgentBridge, add_common_args
+from compact import reap_stale_server_pids
 from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
+from dashboard_server import DEFAULT_DASHBOARD_PORT, DashboardServerHandle, start_dashboard_server
 
 
 _WINDOWS_PIPE_CHUNK_BYTES = 4096
@@ -132,6 +139,62 @@ DESTRUCTIVE_WRITE = {
 }
 
 TOOL_MANIFEST_SCHEMA_VERSION = 1
+_DASHBOARD_RUNTIME_FILENAME = "dashboard-launcher.runtime.json"
+_dashboard_handle: Optional[DashboardServerHandle] = None
+_dashboard_handle_lock = threading.Lock()
+
+
+def _read_dashboard_runtime(state_dir: Path) -> Optional[dict]:
+    try:
+        path = Path(state_dir) / _DASHBOARD_RUNTIME_FILENAME
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _write_dashboard_runtime(state_dir: Path, *, handle: DashboardServerHandle, project: str) -> None:
+    path = Path(state_dir) / _DASHBOARD_RUNTIME_FILENAME
+    payload = {
+        "schema_version": 1,
+        "status": "running",
+        "pid": os.getpid(),
+        "state_dir": str(state_dir),
+        "url": handle.url,
+        "token": handle.token,
+        "csrf_token": handle.csrf_token,
+        "project": project,
+        "updated_at": build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_dashboard", pid=os.getpid())[
+            "timestamp"
+        ],
+        "source": "open_dashboard_mcp_tool",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name("%s.%s.tmp" % (path.name, os.getpid()))
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _dashboard_runtime_healthy(runtime: dict, *, timeout_seconds: float = 3.0) -> bool:
+    url = str(runtime.get("url") or "").rstrip("/")
+    token = str(runtime.get("token") or "")
+    if not url or not token:
+        return False
+    try:
+        with urllib.request.urlopen("%s/api/healthz?%s" % (url, urlencode({"token": token})), timeout=timeout_seconds) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return False
+
+
+def _dashboard_safe_url(base_url: str, *, project: str) -> str:
+    return "%s/?%s" % (base_url.rstrip("/"), urlencode({"project": project}))
+
+
+def _dashboard_token_url(base_url: str, *, token: str, project: str) -> str:
+    return "%s/?%s" % (base_url.rstrip("/"), urlencode({"token": token, "project": project}))
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -150,6 +213,10 @@ def as_dict(result):
 
 def register_server_pid(state_dir: Path):
     """Create a per-process MCP server marker and return its cleanup callback."""
+    try:
+        reap_stale_server_pids(Path(state_dir), max_age_hours=0, dry_run=False)
+    except Exception as exc:
+        print("agent-bridge MCP server stale marker cleanup failed (non-fatal): %s" % exc, file=sys.stderr, flush=True)
     pid_dir = Path(state_dir) / "server-pids"
     pid_path = pid_dir / f"server-{os.getpid()}.pid"
     runtime_path = pid_dir / f"server-{os.getpid()}.json"
@@ -708,6 +775,85 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
     def dashboard_overview(agent: str, project: Optional[str] = None, format: str = "json") -> dict:
         """Return the local admin dashboard overview as JSON or escaped markdown."""
         return as_dict(bridge.dashboard_overview(agent=agent, project=project, format=format))
+
+    @mcp.tool(annotations=NON_DESTRUCTIVE_WRITE)
+    def open_dashboard(project: Optional[str] = None) -> dict:
+        """Start the local dashboard server if needed and open it in the default browser."""
+        global _dashboard_handle
+
+        selected_project = (project or "mlv-app").strip() or "mlv-app"
+        runtime = _read_dashboard_runtime(bridge.state_dir)
+        if runtime and _dashboard_runtime_healthy(runtime):
+            runtime_url = str(runtime.get("url") or "")
+            runtime_token = str(runtime.get("token") or "")
+            url_with_token = _dashboard_token_url(runtime_url, token=runtime_token, project=selected_project)
+            safe_url = _dashboard_safe_url(runtime_url, project=selected_project)
+            try:
+                if sys.platform == "win32":
+                    subprocess.Popen(
+                        ["cmd", "/c", "start", "", url_with_token],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    import webbrowser
+
+                    webbrowser.open(url_with_token)
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "status": "open_failed",
+                    "url": safe_url,
+                    "message": "Dashboard is already running, but browser launch failed: %s" % exc,
+                }
+            return {
+                "ok": True,
+                "status": "opened",
+                "url": safe_url,
+                "message": "Dashboard opened in browser. Reused existing background server.",
+            }
+
+        with _dashboard_handle_lock:
+            if _dashboard_handle is None or not _dashboard_handle.thread.is_alive():
+                _dashboard_handle = start_dashboard_server(
+                    bridge,
+                    token=str((runtime or {}).get("token") or "") or None,
+                    csrf_token=str((runtime or {}).get("csrf_token") or "") or None,
+                    default_agent="codex",
+                    default_project=selected_project,
+                    live_app_dom_titles=True,
+                    port=DEFAULT_DASHBOARD_PORT,
+                    fallback_to_ephemeral=True,
+                )
+                _write_dashboard_runtime(bridge.state_dir, handle=_dashboard_handle, project=selected_project)
+            handle = _dashboard_handle
+
+        url_with_token = _dashboard_token_url(handle.url, token=handle.token, project=selected_project)
+        safe_url = _dashboard_safe_url(handle.url, project=selected_project)
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(
+                    ["cmd", "/c", "start", "", url_with_token],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                import webbrowser
+
+                webbrowser.open(url_with_token)
+        except OSError as exc:
+            return {
+                "ok": False,
+                "status": "open_failed",
+                "url": safe_url,
+                "message": "Dashboard server started, but browser launch failed: %s" % exc,
+            }
+        return {
+            "ok": True,
+            "status": "opened",
+            "url": safe_url,
+            "message": "Dashboard opened in browser. Auto-refreshes every 5s.",
+        }
 
     @mcp.tool(annotations=READ_ONLY)
     def list_pairings(agent: str, project: Optional[str] = None) -> dict:

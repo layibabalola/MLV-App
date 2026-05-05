@@ -10,6 +10,8 @@
 - Scratch profiling / ephemeral measurements: `.claude-state/profiling/<date>-<topic>/`.
 - Curated, cross-session findings: update existing `.claude/analysis/<topic>.md` rather than scattering new files.
 - Use `.claude/ANALYSIS_LOG.md` only as the append-only historical log for already-tracked major investigations (do not create parallel logs elsewhere).
+- When a workflow or coordination gap is discovered, do not stop at a live correction. Add the smallest durable prevention mechanism that fits the failure mode in the same turn when feasible: a test, hook/check, ledger state, documented rule, or explicit roadmap item.
+- Do not run broad recursive searches over `%USERPROFILE%`, `$env:LOCALAPPDATA\Packages`, or other whole user/app-package trees during agent investigations. These locations can contain unrelated mail attachments, downloads, and app caches; target the known Codex/OpenAI/bridge state paths instead, and exclude `microsoft.windowscommunicationsapps_*` when a package-level search is unavoidable.
 - Separate claims into:
   - `Verified locally`
   - `Cross-checked from prior analysis`
@@ -26,6 +28,23 @@
 - Seed automated coverage now lives under `tests/`.
 - CI entrypoint for that scaffold is `.github/workflows/tests.yml`.
 - Keep the docs above synchronized with what is implemented now versus still planned next.
+
+## Brokered Auto-Closeout
+- The repo owns work-block closeout through `closeout.config.json`, `tools/repo_hygiene/brokered_closeout.py`, and the PowerShell adapters in `tools/closeout/`.
+- At the start of a non-trivial work block, prefer:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .`
+- Before any final response after non-trivial edits, always trigger closeout:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`
+- To audit whole-repo branch/worktree/stash cleanup, run:
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .`
+- The trigger must run even when mutation will be blocked. The repo detector/auditor may retain or block, but final responses should not silently skip the closeout path.
+- Do not stash, commit, delete, or reset dirty paths classified as `foreignDirty`; they are retained and audited for their owning session or for later attribution.
+- High-impact mutation, including repo-sweep pruning, is allowed only after the exact closeout tuple passes review quorum: candidate id, action id, evidence hash, policy hash, and pinned refs.
+- For eligible symbolic actions, the repo auto-quorum actor may generate Codex/self plus independent policy-review artifacts and continue without user intervention. Manual-only, dirty, locked, protected, stale, or ambiguous candidates must print recoverable unblock detail instead.
+- Repo sweep retention is not complete at first classification. Non-protected retained candidates must get durable candidate investigation reports under `.claude-state/closeout/repo-sweep/candidate-reports/`; clean merge-required and clean checked-out branches may be auto-quorum clean-integrated, stale clean locked worktrees may be cleaned, redundant backup branches may be pruned, and dirty worktrees must include owned/unowned/foreign classification plus a recovery command.
+- Split-required owned dirty work should not remain a passive blocker. When policy allows, the dirty-split actor plans exact dirty paths, obtains autonomous quorum for symbolic action `split`, preserves those paths on a broker-claimed `closeout/split/...` branch/worktree, removes only those exact paths from the original after preservation is proven, audits the outcome, then reruns repair/finalize.
+- Before treating closeout blockers as authoritative, the worktree must pass the configured closeout tooling baseline check. Missing actors, config fields, contract checks, repair paths, or required tests must be reported as `closeout_tooling_stale`; the actor may update from the configured baseline only when doing so will not overwrite dirty or broker-owned paths.
+- If publish/upstream/final-push repair is blocked only by missing metrics, handoff, session, or closeout evidence, the evidence repair actor must generate and claim only the configured evidence files, commit only those paths, retain unrelated dirty work, and rerun the safe publish repair before reporting a blocker.
 
 ## Agent Bridge Startup
 - On session open in this repository, initialize the agent bridge before normal relay work.
@@ -50,7 +69,10 @@
 - After bootstrap:
   - surface any drained previous-session messages in the chat,
   - if a bridge message body is surfaced to Codex by `check_inbox`, `wait_inbox`, or an equivalent non-destructive read, treat that message as already read by Codex and mark it read in the bridge immediately, even if the follow-up work will happen later,
+  - if a surfaced bridge message is an `ACTION_REQUEST`, do not stop at an inbox summary. In the same turn, either start/continue implementation and record execution progress, record and park/block/displace it in the pending-action ledger with a reason, or explicitly name the user decision that blocks it.
+  - after replying to, acting on, parking, blocking, displacing, rejecting, or otherwise folding a substantive surfaced message into the active task, mark that bridge message handled with the matching disposition,
   - use the returned active session GUID for bridge traffic,
+  - if Codex's MCP/bridge tools become available again after an interruption or Desktop restart, send Claude a `STATUS_UPDATE` in that same turn before other outbound bridge traffic; include the active session GUID, pair id if known, bridge state, and any queued/dropped/drained messages from the dark window,
   - if bridge consumption reports `SESSION_UPDATE: superseded`, stop bridge communication in this session.
   - do not start a persistent `wait_inbox` loop in the main working chat by default; only use it for an explicit short smoke test or parked bridge-watch session described in `bridge_trigger_heuristics.md`.
 

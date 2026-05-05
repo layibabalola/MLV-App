@@ -37,13 +37,28 @@
   no-silent-success process rule to `bridge_trigger_heuristics.md`.
 - Phase 18 final readiness passed 10/10 validation: Claude and two full-scope stranger-agent reviews scored the shipped workflow-guardrail hardening 10/10. Remaining items such as AgentBridge facade/service extraction, cross-project guided dashboard polish, catch-up preview/policy drift proposal UI, optional live Desktop targeted-wake dogfood for broad distribution, and a real Claude thread-addressable wake primitive are explicit follow-up roadmap work, not Phase 18 blockers.
 
+**Status checkpoint (2026-05-03 America/Chicago):**
+- Phase 18 final 10/10 validation loop complete: Claude 10/10, two full-scope stranger-agent 10/10 reviews (Stranger 2 initially 8/10; Unicode-safe CLI gap fixed in 58e5a5ef and re-scored 10/10). 250 tests OK. User sign-off pending.
+- fork/master fast-forwarded to 58e5a5ef; remote integration branch deleted.
+- Pending worktree cleanup: watcher-config `repo_root`, Codex wake script paths, and the running watcher runtime now point at the main checkout (`C:\!Layi Wkspc\MLV-App`). The former integration directory at `C:\!Layi Wkspc\MLV-App\.claude\worktrees\festive-boyd-integration` is no longer registered by `git worktree list` and is empty, but Windows refused removal because another process still holds a handle to that directory. Cleanup is now blocked on that handle being released, not on watcher migration.
+
+**Follow-up roadmap items identified 2026-05-03:**
+- `server_wrapper.py` self-healing shipped (Fix A + Fix B, 251 tests). Follow-up trampoline work adds `server_wrapper_trampoline.py` so future Desktop configs can keep stdio open while the wrapper relaunches itself after exit 77.
+- Wake script composer cleanup on failure shipped in the 2026-05-03 Codex follow-up pass: `wake_codex.ps1` now tracks unverified wake injection and uses a final cleanup pass to clear exact-match stranded wake text after unhandled failure paths, in addition to existing postflight/clipboard cleanup.
+- Superseded session backpressure confusion shipped in the 2026-05-03 Codex follow-up pass: backpressure counting, health/dashboard surfacing, `send_to_peer`, and `nudge_peer` now exclude registered non-active/superseded session buckets from work backpressure. Superseded unread rows remain visible for receipt hygiene, but only active session/project buckets gate sends and wake rearm.
+- Targeted SendKeys thread proof/restore follow-up: the stale archived `desktop_thread_id` pin and stranded composer text are fixed in the May 3 wake-routing patch, and the wake contract now carries an explicit `RestoreThreadId` slot. Codex Desktop still often exposes only the generic UIA root title `Codex`; generic titles are treated as unknown rather than false project mismatches.
+- Stage 6 restore-thread UUID gap: the strict guard still fails closed with retryable exit 16 when `RestoreThreadId` is empty and Codex itself is the foreground app on a different or unprovable thread, but the production targeted watcher now opts into explicit delivery priority with `-AllowForegroundCodexThreadDisplacement`. In that mode a valid target thread may be opened without exact restore and logs `targeted_wake_delivery_priority_no_restore`, because near-realtime inbox delivery is preferred over non-stranding. Durable future work remains a real previous-thread identity primitive or a live-rendering app-server wake path.
+- Phase 18 dashboard guardrail-debt visibility and initial stop-time enforcement shipped in the 2026-05-03 Codex follow-up pass: `dashboard_overview` reads `state\guardrail-debt.jsonl` without mutation and surfaces active debt by severity, guard id, enforcement tier, session, and remediation in JSON and markdown status surfaces. `codex_pre_final.ps1` / `codex_bridge_reminder.ps1` now include active guardrail debt in the final digest and emit a `FINAL-GUARD` before 10/10 closeout while scoped rows remain open. Broader automatic WGI debt emission remains follow-up work.
+- Dashboard Launcher UX shipped in the 2026-05-03 Codex dashboard follow-up pass: `dashboard_launcher.py` and the Windows double-click launcher start/reuse a singleton local dashboard, prefer hidden/background launch, write `dashboard-launcher.runtime.json`, health-check and restart the HTTP server during the launcher lifetime, expose a dashboard Stop button via `/api/shutdown`, auto-refresh dashboard JSON every 5 seconds without full reload, and provide the `open_dashboard` MCP tool while returning only a token-free URL to chat.
+- Dashboard operator UX follow-up: the live dashboard now preserves scroll/focus/details state across refreshes, supports pausing automatic refresh while keeping manual refresh active, uses in-dashboard modals instead of native prompts, pins the primary recovery command, collapses stable surfaces into readiness chips, and exposes `/api/recommended-action` only for allowlisted local remediations such as stale server marker cleanup and read-receipt backfill.
+
 **Restart checkpoint (2026-04-28 16:00 America/Chicago):**
-- Codex and Claude Desktop configs have already been backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge`.
+- Codex and Claude Desktop configs were backed up and updated to launch `tools\agent-bridge\server_wrapper.py --bridge-root C:\Users\obabalola\.agent-bridge` at this checkpoint; new configs should use `tools\agent-bridge\server_wrapper_trampoline.py --bridge-root C:\Users\obabalola\.agent-bridge`.
 - Backups: `C:\Users\obabalola\.codex\config.toml.bak-20260428T160012` and `C:\Users\obabalola\AppData\Roaming\Claude\claude_desktop_config.json.bak-20260428T160012`.
 - Active Codex private bucket is `fadda757-5bbe-4a6c-9def-f27a04d118f4`; Codex notify config was corrected from superseded `9111dce5-3d33-4d06-b7a7-87dbf259b0c6`.
 - `recover_state.py --scan-historical` against `C:\Users\obabalola\.agent-bridge\state` is healthy; no stale-root or migration-history issues were reported.
 - Project-bucket backlog was surfaced and marked read for `3a6f6a03-b07a-4f87-91c7-88aef54b5ac7`, `ffcd534c-70ed-4229-bf5d-f12b270ed47f`, `82c724ec-ce33-4a20-ad1e-5c0ac5a1f05a`, `b3207397-7671-4a88-8243-d7204748b526`, and `1429d520-c80c-406f-852f-5b03a9513b51`.
-- Important correction: current `server_wrapper.py` resolves/rejects/audits and then `execv`s `server.py`; it does **not** monitor mtimes or auto-respawn on bridge code changes yet.
+- Historical correction: at this checkpoint `server_wrapper.py` resolved/rejected/audited and then `execv`ed `server.py`; later Phase 2 work made it supervise/restart bridge code changes, and trampoline follow-up covers wrapper self-restart.
 - Post-restart first checks: run `recover_state.py --scan-historical`, verify `bridge_process_status` shows new runtime breadcrumbs for MCP servers, then check Codex private bucket plus `mlv-app`.
 - Historical note: Claude ACTION_REQUEST `82c724ec` originally asked for
   `wake_codex.ps1 -ExpectedTitleMarker` and matching watcher-config
@@ -60,6 +75,30 @@
 - Claude final canonical: `0cf7467c`
 - Codex final canonical: `37543812`
 - Reconciled v1.1: `b7b3da65` → Codex approval `5a8ebc18`
+
+---
+
+## Prerequisites for Standalone Repo Extraction
+
+Before agent-bridge is extracted into its own standalone repository/product,
+the closeout hooks must be made portable. Currently three files hardcode
+`"mlv-app"` as the project bucket:
+
+- `tools/agent-bridge/codex_pre_response.ps1` (lines 42-43)
+- `tools/agent-bridge/codex_pre_final.ps1` (lines 42-43)
+- `tools/agent-bridge/codex_bridge_reminder.ps1` (line 4)
+
+**Complete technical spec:** `.claude-state/closeout-config-driven-approach-v5.md`
+- Rated 10/10 by two independent cold reviewers (7 review rounds, all issues resolved)
+- Implementation-ready — no open blockers
+- Adds `main()` CLI entrypoint to `project_identity.py`, updates all three PS1
+  hooks to auto-derive the project bucket from the workspace git root, adds tests
+
+**Gate:** This change must be implemented **before or as part of** the extraction.
+Extracting with hardcoded `"mlv-app"` and then patching portability in the new
+repo is more fragile than shipping portability here first. Claude and Codex both
+have the spec; either agent can drive implementation when extraction is next on
+the roadmap.
 
 ---
 
@@ -1105,7 +1144,7 @@ Phase 7 (wake hardening)
 | 82 | Watcher stale-unread watchdog escalates unread Claude work after a bounded threshold by writing a diagnostic/audit row and user-visible notification; it must not mark read or claim Claude cognition without `read_at`/`handled_at` | 18 |
 | 83 | Reviewer wait discipline is ledger/guard enforced: background stranger waits write `reviewer-wait-state.jsonl`; final guard warns when no verdict, no future ETA/checkback, and no parked/blocked/cancelled status exists; CLI/MCP helpers expose start/update/status | 18 |
 | 84 | Watcher sends `TYPE: CONTROL / marker_variant=control / SUBJECT: MONITOR_RESTART_REQUIRED` to Claude's active session inbox on two triggers: (a) Monitor heartbeat absent/stale ≥ the AC80 stale-classification threshold; (b) watcher detects a new commit that modifies any of bridge_monitor_poll.py, server.py, agent_bridge.py, or watcher.py (polled via git log since last watcher tick); CLAUDE.md documents that Claude must stop any stale Monitor task handle and start a fresh Monitor instance immediately on receipt of this control message; control messages are exempt from backpressure per AC74 | 18 |
-| 78 | Targeted SendKeys wake treats user UI state as transactional: if the foreground is Codex on a different or unprovable thread and no exact restore thread id is available, the wake defers instead of navigating away; non-Codex foreground restore remains best-effort | 19 |
+| 78 | Targeted SendKeys wake treats user UI state as transactional but delivery-priority by default: if the foreground is Codex on a different or unprovable thread and no exact restore UUID is available, strict callers fail closed with retryable exit 16, while the production watcher explicitly passes `-AllowForegroundCodexThreadDisplacement` so a valid target thread still receives the nudge and the displacement risk is audited with `targeted_wake_delivery_priority_no_restore`; when a valid `RestoreThreadId` is supplied, Stage 6 invokes that deeplink and marks the restore proof as unverified until an exact visible-thread primitive exists | 19 |
 
 ## Final 10/10 Validation Loop
 

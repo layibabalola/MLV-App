@@ -73,6 +73,8 @@ WAKE_BREAKER_SCHEMA_VERSION = 1
 CLAUDE_MONITOR_UNREAD_ESCALATION_S = 60
 STALE_UNREAD_WATCHDOG_REARM_S = 5 * 60
 MONITOR_RESTART_CONTROL_TYPE = "MONITOR_RESTART_REQUIRED"
+MCP_SERVER_RESTARTED_CONTROL_TYPE = "MCP_SERVER_RESTARTED"
+SERVER_STATUS_FILENAME = "server-status.json"
 MONITOR_RESTART_WATCH_FILES = (
     "tools/agent-bridge/bridge_monitor_poll.py",
     "tools/agent-bridge/server.py",
@@ -80,6 +82,7 @@ MONITOR_RESTART_WATCH_FILES = (
     "tools/agent-bridge/watcher.py",
 )
 WAKE_TELEMETRY_PREFIX = "AGENT_BRIDGE_WAKE_TELEMETRY "
+OPTIONAL_TEMPLATE_FIELDS = {"restore_thread_id"}
 LEGACY_COMMAND_FORBIDDEN_CHARS = {"&", "|", ";", ">", "<", "`"}
 ACTIVE_SESSION_ID_SOURCE = "active_session"
 _SESSION_REGISTRY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -1064,6 +1067,11 @@ def _runtime_session_display_label(
     return title or tail
 
 
+def _is_generic_codex_thread_title(value: Any) -> bool:
+    title = str(value or "").strip()
+    return not title or title.lower() == "codex"
+
+
 def _extract_wake_telemetry(stdout: Any) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     for raw_line in str(stdout or "").splitlines():
@@ -1107,9 +1115,31 @@ def _cache_wake_telemetry(
 
     changed = False
     for event in events:
+        action = str(event.get("action") or "")
         title = _truncate_ui_label(event.get("desktop_thread_title"))
         title_project_match = event.get("title_project_match")
-        if title_project_match is False:
+        generic_title = _is_generic_codex_thread_title(title)
+        title_event = action.startswith("thread_title")
+        unresolved_title = title_event and (
+            generic_title
+            or action == "thread_title_unknown"
+            or ("title_project_match" in event and title_project_match is None)
+        )
+        cached_title_project_match = None if unresolved_title else title_project_match
+        if unresolved_title:
+            peer.pop("desktop_thread_title", None)
+            peer.pop("desktop_thread_title_source", None)
+            peer.pop("desktop_thread_title_observed_at", None)
+            peer.pop("desktop_window_title", None)
+            if title:
+                peer["last_unresolved_desktop_thread_title"] = title
+                peer["last_unresolved_desktop_thread_title_source"] = _truncate_ui_label(
+                    event.get("desktop_thread_title_source"),
+                    80,
+                )
+                peer["last_unresolved_desktop_thread_title_observed_at"] = str(event.get("timestamp") or utc_now())
+            changed = True
+        elif title_project_match is False:
             if title:
                 peer["last_mismatched_desktop_thread_title"] = title
                 peer["last_mismatched_desktop_thread_title_source"] = _truncate_ui_label(event.get("desktop_thread_title_source"), 80)
@@ -1128,7 +1158,7 @@ def _cache_wake_telemetry(
                 peer["desktop_window_title"] = window_title
             changed = True
         if "title_project_match" in event:
-            peer["desktop_thread_title_project_match"] = title_project_match
+            peer["desktop_thread_title_project_match"] = cached_title_project_match
             changed = True
         if "expected_project_token" in event:
             peer["desktop_thread_title_expected_project_token"] = _truncate_ui_label(
@@ -1140,6 +1170,19 @@ def _cache_wake_telemetry(
             peer["last_wake_postflight_action"] = str(event.get("action") or "")
             peer["last_wake_postflight_reason"] = _truncate_ui_label(event.get("reason"), 120)
             peer["last_wake_postflight_at"] = str(event.get("timestamp") or utc_now())
+            changed = True
+        if action == "foreground_codex_delivery_priority_no_restore":
+            peer["last_wake_delivery_priority_action"] = action
+            peer["last_wake_delivery_priority_at"] = str(event.get("timestamp") or utc_now())
+            peer["last_wake_delivery_priority_target_thread_id"] = str(event.get("desktop_thread_id") or "")
+            peer["last_wake_delivery_priority_previous_thread_title"] = _truncate_ui_label(
+                event.get("previous_desktop_thread_title"),
+                120,
+            )
+            peer["last_wake_delivery_priority_expected_thread_title"] = _truncate_ui_label(
+                event.get("expected_desktop_thread_title"),
+                120,
+            )
             changed = True
 
     if changed:
@@ -1155,6 +1198,7 @@ def _cache_wake_telemetry(
                 if peer.get("desktop_thread_title_project_match") is False
                 else peer.get("desktop_thread_title"),
                 "postflight_action": peer.get("last_wake_postflight_action"),
+                "delivery_priority_action": peer.get("last_wake_delivery_priority_action"),
             },
         )
     return events
@@ -1284,6 +1328,15 @@ def _save_watcher_state(
     )
     seen_ids.clear()
     seen_ids.update(str(item) for item in saved.get("seen_ids", []) if str(item))
+
+
+def _clear_override_wake_message(state_path: Path) -> None:
+    """Remove next_override_wake_message from watcher state after it has been consumed."""
+    def _clear(existing: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(existing)
+        result.pop("next_override_wake_message", None)
+        return result
+    storage_update_json(state_path, {}, _clear)
 
 
 def _bridge_is_paused(state_dir: Path) -> bool:
@@ -1610,6 +1663,23 @@ def _format_template(template: Union[str, Sequence[str]], mapping: Dict[str, str
     return [str(value).format_map(mapping) for value in template]
 
 
+def _apply_message_override(cmd: List[str], override_message: str) -> List[str]:
+    """Replace the value following -Message in a command argv list.
+
+    Walks the list looking for the literal token ``-Message`` and replaces the
+    immediately following element with *override_message*.  Returns a copy; the
+    original list is unchanged.  If ``-Message`` is absent the list is returned
+    as-is so callers never receive an error for a template that doesn't carry the
+    flag.
+    """
+    result = list(cmd)
+    for i, arg in enumerate(result):
+        if arg == "-Message" and i + 1 < len(result):
+            result[i + 1] = override_message
+            return result
+    return result
+
+
 def _legacy_command_to_argv(command: str) -> Dict[str, Any]:
     raw = str(command or "").strip()
     if not raw:
@@ -1666,7 +1736,11 @@ def _legacy_command_to_argv(command: str) -> Dict[str, Any]:
     return {"ok": True, "command": argv}
 
 
-def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) -> Dict[str, Any]:
+def _resolve_command_template(
+    session_config: Dict[str, Any],
+    inbox_path: Path,
+    override_wake_message: Optional[str] = None,
+) -> Dict[str, Any]:
     template = session_config.get("on_message_command_template")
     if not template:
         command = session_config.get("on_message_command")
@@ -1744,10 +1818,11 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
         "session_id": str(peer.get("session_id") or ""),
         "project": str(peer.get("project") or ""),
         "deeplink_uri": deeplink_uri,
+        "restore_thread_id": str(peer.get("restore_thread_id") or ""),
     }
 
     required_fields = _template_required_fields(template)
-    missing = sorted(name for name in required_fields if not mapping.get(name))
+    missing = sorted(name for name in required_fields if name not in OPTIONAL_TEMPLATE_FIELDS and not mapping.get(name))
     if missing:
         return {
             "ok": False,
@@ -1762,7 +1837,10 @@ def _resolve_command_template(session_config: Dict[str, Any], inbox_path: Path) 
             },
         }
 
-    return {"ok": True, "command": _format_template(template, mapping), "peer": peer}
+    cmd = _format_template(template, mapping)
+    if override_wake_message and isinstance(cmd, list):
+        cmd = _apply_message_override(cmd, override_wake_message)
+    return {"ok": True, "command": cmd, "peer": peer}
 
 
 def _warn_unknown_origin_once(
@@ -1922,6 +2000,13 @@ def _process_pending_wake_verifications(
     unknown_origin_warnings = unknown_origin_warnings or []
     wake_fire_history = wake_fire_history or []
 
+    # Read any pending initiator override so the wake message shows who triggered
+    # this nudge ("Claude says…", "User says…", etc.) rather than always "Watcher says…".
+    # The override is one-shot: cleared from state after the first successful fire.
+    _ow_state = load_seen(state_path)
+    _next_override_wake_message: Optional[str] = _ow_state.get("next_override_wake_message") or None
+    _override_consumed = False
+
     for entry in pending:
         if entry.get("agent") != agent or entry.get("session_id") != session_id:
             kept.append(entry)
@@ -2025,7 +2110,8 @@ def _process_pending_wake_verifications(
             )
             continue
 
-        resolved = _resolve_command_template(session_config, inbox_path)
+        _this_override = _next_override_wake_message if not _override_consumed else None
+        resolved = _resolve_command_template(session_config, inbox_path, override_wake_message=_this_override)
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
@@ -2077,6 +2163,8 @@ def _process_pending_wake_verifications(
             continue
         if command_result.get("ok"):
             _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
+            if _this_override:
+                _override_consumed = True
             # Wake spawn is not delivery; keep the row pending until
             # check_inbox/writeback stamps seen_at/read_at or retries exhaust.
             retry_count += 1
@@ -2112,6 +2200,8 @@ def _process_pending_wake_verifications(
 
     if changed:
         _save_watcher_state(state_path, seen_ids, kept, paused_messages, unknown_origin_warnings, wake_fire_history)
+    if _override_consumed:
+        _clear_override_wake_message(state_path)
     return kept
 
 
@@ -2615,6 +2705,80 @@ def _effective_toasts_enabled(config: Dict[str, Any], settings: BridgeSettings, 
     return bool(config.get("toasts_enabled", settings.toasts_enabled))
 
 
+def _maybe_notify_mcp_server_restart(
+    *,
+    state_dir: Path,
+    sessions: List[Dict[str, Any]],
+) -> None:
+    """Send a bridge-inbox notification when the MCP server wrapper flags a restart.
+
+    The wrapper writes server-status.json with needs_notification=true after each
+    code-change-triggered restart.  We pick it up here, send a single control
+    message to the Claude inbox so the user sees "server is back up" in chat,
+    then clear the flag to prevent duplicate sends.
+    """
+    status_path = state_dir / SERVER_STATUS_FILENAME
+    try:
+        if not status_path.exists():
+            return
+        data = storage_read_json(status_path)
+        if not data or not data.get("needs_notification"):
+            return
+
+        last_restart_at = str(data.get("last_restart_at") or "unknown")
+        elapsed_ms = data.get("last_restart_elapsed_ms")
+        child_pid = data.get("child_pid")
+        elapsed_str = ("%dms" % elapsed_ms) if elapsed_ms is not None else "unknown"
+
+        for s in sessions:
+            resolved = _resolve_session_config(s)
+            if str(resolved.get("agent") or "") != "claude":
+                continue
+            session_id = str(resolved.get("session_id") or "")
+            project = str(resolved.get("project") or "")
+            if not session_id:
+                continue
+
+            body = (
+                "MCP server restarted and is back up (PID %s).\n"
+                "Restarted at %s — took %s.\n"
+                "The 'Server disconnected' banner can be dismissed safely."
+            ) % (child_pid, last_restart_at, elapsed_str)
+
+            bridge = AgentBridge(state_dir)
+            with bridge._locked():
+                message_id = bridge._append_control_message(
+                    target_agent="claude",
+                    session_id=session_id,
+                    sender="agent-bridge",
+                    control_type=MCP_SERVER_RESTARTED_CONTROL_TYPE,
+                    summary="MCP server restarted — back up in %s" % elapsed_str,
+                    body=body,
+                    status="info",
+                    replace_existing_control=False,
+                    inbox_level="session",
+                    extra_fields={
+                        "mcp_restart_at": last_restart_at,
+                        "mcp_restart_elapsed_ms": elapsed_ms,
+                        "mcp_child_pid": child_pid,
+                    },
+                )
+            if message_id:
+                print(
+                    "[agent-bridge] MCP_SERVER_RESTARTED notification sent to Claude "
+                    "session ...%s (pid=%s elapsed=%s)" % (session_id[-8:], child_pid, elapsed_str),
+                    flush=True,
+                )
+            break
+
+        # Clear the flag regardless of whether we found a session — avoids
+        # a retry storm if no Claude session is currently registered.
+        data["needs_notification"] = False
+        storage_write_json(status_path, data)
+    except Exception as exc:
+        print("[agent-bridge] failed to process MCP server restart notification: %s" % exc, flush=True)
+
+
 def watch(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
@@ -2712,6 +2876,10 @@ def watch(
                     sessions=sessions,
                     state_path=state_path,
                     state_dir=state_dir,
+                )
+                _maybe_notify_mcp_server_restart(
+                    state_dir=state_dir,
+                    sessions=sessions,
                 )
 
             for s in sessions:

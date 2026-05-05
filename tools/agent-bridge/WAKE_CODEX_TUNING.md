@@ -32,7 +32,7 @@ These parameters were empirically tuned to achieve ~2.5s end-to-end wake latency
 
 | Parameter | Production value | Default in script | Notes |
 |---|---|---|---|
-| `-Message` | `"Watcher says check bridge inbox"` | `"check bridge inbox"` | **Must be set.** Identifies sender in Codex chat. Approved list in `$script:ApprovedWakeMessages`. |
+| `-Message` | `"Watcher says check bridge inbox"` | `"check bridge inbox"` | Hardcoded in `configure_watcher.py` template (was previously omitted, causing initiator to silently disappear each session restart). Approved list in `$script:ApprovedWakeMessages`. |
 | `-IdleThresholdSeconds` | `0` | `5` | Fire even while user is typing elsewhere. Bridge messages are urgent. |
 | `-FastPathIdleSeconds` | `0` | `1` | Fire immediately if composer is empty. Was 1; dropped to 0 for latency. |
 | `-DraftStabilitySeconds` | `5` | `5` | If composer has draft, wait 5s stable before firing. Protects in-progress Codex response. Do not lower. |
@@ -67,6 +67,9 @@ These were added for injection safety. Keep them — they prevent wrong-chat inj
 | `-VerifyTargetGapMilliseconds` | `50` | Gap between the two target verifications |
 | `-MaxPreSendRaceMilliseconds` | `500` | Abort if > 500ms between verify and send (race guard) |
 | `-PostTypingVerify` | (switch) | Verify window is still Codex after typing |
+| `-ProtectForegroundCodexThread` | (switch) | If Codex is already foreground, apply the foreground-Codex navigation guard before deeplinking |
+| `-AllowForegroundCodexThreadDisplacement` | (switch) | Production watcher opts into delivery priority: when the target id is valid but no exact restore id is available, proceed with an audited `foreground_codex_delivery_priority_no_restore` wake instead of leaving inbox work unread |
+| `-RestoreThreadId` | `{restore_thread_id}` | Exact previous-thread restore slot. Empty is allowed; without `-AllowForegroundCodexThreadDisplacement`, foreground-Codex protection fails closed instead of displacing the user |
 
 ---
 
@@ -84,6 +87,17 @@ The `-RequireConstantMessage` flag requires the injected text to match one of th
 
 Use `"Watcher says check bridge inbox"` (the production value) so the Codex chat
 shows who triggered the wake. Other values are available for debug/testing.
+
+---
+
+## Clipboard handling
+
+Both SendKeys and PostMessage delivery paths temporarily use the Windows
+clipboard for atomic paste. The wake script must save the original clipboard
+state before setting wake text and restore it in `finally`, even when the
+original clipboard was empty. An empty original clipboard should be restored by
+clearing the clipboard, not by skipping restore. Clipboard save/set/restore calls
+also use short retries because Windows may briefly lock the clipboard.
 
 ---
 
@@ -119,13 +133,16 @@ Canonical template (both `kind: private` and `kind: rendezvous` Codex sessions):
   "-DraftStabilitySeconds", "5",
   "-DeeplinkSleepMilliseconds", "150",
   "-ThreadId", "{desktop_thread_id}",
+  "-RestoreThreadId", "{restore_thread_id}",
   "-Message", "Watcher says check bridge inbox",
   "-RequireThreadId",
   "-RequireConstantMessage",
   "-VerifyTargetTwice",
   "-VerifyTargetGapMilliseconds", "50",
   "-MaxPreSendRaceMilliseconds", "500",
-  "-PostTypingVerify"
+  "-PostTypingVerify",
+  "-ProtectForegroundCodexThread",
+  "-AllowForegroundCodexThreadDisplacement"
 ]
 ```
 

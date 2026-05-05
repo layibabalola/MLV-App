@@ -48,6 +48,15 @@ platform/build-*
 # Durable findings go under .claude/ and are tracked; .claude-state/ is scratch.
 .claude-state/
 
+# Local nested agent worktrees are load-bearing but not repo content.
+.claude/worktrees/
+
+# Local property-test cache.
+.hypothesis/
+
+# Local agent prompt scratch.
+CLAUDE_CODE_PROMPTS.md
+
 # Per-machine Claude Code settings (permissions, local hooks). The shared
 # .claude/settings.json (if it exists) is tracked; this one stays local.
 .claude/settings.local.json
@@ -66,3 +75,6 @@ MOVED_TO.json
 __pycache__/
 *.pyc
 *.pyo
+
+# Extracted local FFmpeg binary; release archives above remain tracked.
+platform/qt/FFmpeg/ffmpeg.exe

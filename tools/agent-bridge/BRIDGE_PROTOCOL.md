@@ -81,9 +81,11 @@ event actions:
 | `send_control` | bridge | Control message routed | control_type |
 | `record_implementation_event` | bridge MCP | Durable implementation progress journal entry recorded for peer catch-up | owner_agent, peer_agent, sequence |
 | `mcp_server_wrapper_launch` | server_wrapper | Wrapper started a `server.py` | command, parent_pid |
-| `mcp_server_refresh_required` | server_wrapper | Bridge Python code changed during one live MCP client session; existing child was kept alive because MCP stdio initialization is stateful | child_pid, changed_files, reason |
-| `mcp_server_self_restarted` | wrapper Phase 2 legacy | Historical auto-restart on bridge code change; do not emit for new code paths | old_child_pid, new_child_pid, changed_files, elapsed_ms |
-| `mcp_tools_refresh_required` | server_wrapper | Tool/code refresh requires MCP host reconnect/reload | reason, previous_signature, current_signature, changed_files, previous_tool_names, current_tool_names |
+| `mcp_server_refresh_required` | server_wrapper | Bridge Python code changed during one live MCP client session; inner `server.py` restarted under the wrapper | child_pid, changed_files, reason |
+| `mcp_server_self_restarted` | server_wrapper | Inner `server.py` child restarted or respawned under a live wrapper | old_child_pid, new_child_pid, changed_files, elapsed_ms |
+| `mcp_server_wrapper_self_restart_requested` | server_wrapper | `server_wrapper.py` changed; wrapper saved its watcher snapshot and exited 77 for trampoline relaunch | old_child_pid, changed_files, exit_code, elapsed_ms |
+| `mcp_server_session_replayed` | server_wrapper | Stored MCP initialize/initialized frames were replayed into a fresh child after restart/relaunch | child_pid, initialize_id, initialized |
+| `mcp_tools_refresh_required` | server_wrapper | Tool/code refresh may require MCP host reconnect/reload for cached tool-list/schema changes | reason, previous_signature, current_signature, changed_files, previous_tool_names, current_tool_names |
 | `wake_skipped_paused` | watcher | Pause was active when wake would have fired | message_id |
 | `wake_skipped_wrong_chat` | watcher | Phase B UUID-mismatch (reserved) | window_title?, expected_thread_id |
 | `wake_skipped_wrong_project` | watcher | project_scope mismatch | active_project, expected_project |

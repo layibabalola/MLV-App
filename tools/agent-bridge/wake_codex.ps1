@@ -14,8 +14,10 @@
 #   - Activates Codex regardless of current foreground (user reading Codex
 #     counts as idle from the OS's POV; the message still needs to be delivered).
 #   - If Codex itself is the foreground app on a different/unprovable thread,
-#     defers instead of switching the user's visible Codex thread without an
-#     exact restore path.
+#     the strict guard fails closed unless an exact RestoreThreadId is available.
+#     The watcher may explicitly opt into delivery priority with
+#     -AllowForegroundCodexThreadDisplacement, accepting that the user may be
+#     left on the bridge thread so unread inbox work is not stranded.
 #   - Clears the composer (Ctrl+A + Delete) before injection - any draft text
 #     the user left in the box will be wiped. This is a deliberate trade-off.
 #
@@ -31,7 +33,8 @@
 #   13 = UIA SetFocus primary path + all Win32 fallbacks failed to acquire foreground
 #   14 = no Codex window after deeplink navigation
 #   15 = total runtime timeout exceeded
-#   16 = deferred (system idle never reached within MaxWaitSeconds; user typing).
+#   16 = deferred (system idle never reached within MaxWaitSeconds, user typing,
+#        or strict foreground-Codex non-displacement guard refused navigation).
 #        Watcher should retry; do NOT trip the wake breaker.
 
 param(
@@ -72,6 +75,7 @@ param(
     [string]$ExpectedThreadTitle = "",
     [string]$RestoreThreadId = "",
     [switch]$ProtectForegroundCodexThread,
+    [switch]$AllowForegroundCodexThreadDisplacement,
     [switch]$AllowLegacyNoPreflight,
     [switch]$SkipPreflight,
     [switch]$DryRun,
@@ -242,6 +246,9 @@ function New-InnerWakeCommand {
     }
     if ($ProtectForegroundCodexThread) {
         $innerCommandParts += "-ProtectForegroundCodexThread"
+    }
+    if ($AllowForegroundCodexThreadDisplacement) {
+        $innerCommandParts += "-AllowForegroundCodexThreadDisplacement"
     }
     if ($RequireConstantMessage) {
         $innerCommandParts += "-RequireConstantMessage"
@@ -419,6 +426,120 @@ function New-KeyLParam {
     return [IntPtr]$v
 }
 
+function Invoke-ClipboardOperation {
+    param(
+        [scriptblock]$Operation,
+        [string]$Context = "clipboard",
+        [int]$Attempts = 5,
+        [int]$DelayMilliseconds = 50
+    )
+    $lastException = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            return & $Operation
+        } catch {
+            $lastException = $_.Exception
+            if ($attempt -lt $Attempts) {
+                Start-Sleep -Milliseconds $DelayMilliseconds
+            }
+        }
+    }
+    if ($null -ne $lastException) {
+        throw ($Context + " failed after " + $Attempts + " attempts: " + $lastException.Message)
+    }
+    throw ($Context + " failed after " + $Attempts + " attempts")
+}
+
+function Save-ClipboardState {
+    param([string]$Context = "clipboard")
+    $state = @{
+        Saved = $false
+        HadData = $false
+        Data = $null
+        FormatCount = 0
+    }
+    try {
+        $data = Invoke-ClipboardOperation -Context ($Context + " clipboard save") -Operation {
+            [System.Windows.Forms.Clipboard]::GetDataObject()
+        }
+        $state.Saved = $true
+        if ($null -ne $data) {
+            $formats = @($data.GetFormats())
+            $state.Data = $data
+            $state.FormatCount = $formats.Count
+            $state.HadData = $formats.Count -gt 0
+        }
+    } catch {
+        Write-Host ("[wake_codex] WARNING: " + $Context + " clipboard save failed; restore will be best-effort only: " + $_.Exception.Message)
+    }
+    return $state
+}
+
+function Restore-ClipboardState {
+    param(
+        [hashtable]$State,
+        [string]$Context = "clipboard",
+        [switch]$AuditOnFailure
+    )
+    if ($null -eq $State -or -not [bool]$State.Saved) {
+        return
+    }
+    try {
+        if ([bool]$State.HadData) {
+            Invoke-ClipboardOperation -Context ($Context + " clipboard restore") -Operation {
+                [System.Windows.Forms.Clipboard]::SetDataObject($State.Data, $true)
+            } | Out-Null
+        } else {
+            Invoke-ClipboardOperation -Context ($Context + " clipboard clear") -Operation {
+                [System.Windows.Forms.Clipboard]::Clear()
+            } | Out-Null
+        }
+    } catch {
+        if ($AuditOnFailure -and (Get-Command Write-PreflightAudit -ErrorAction SilentlyContinue)) {
+            Write-PreflightAudit -Action "preflight_clipboard_restore_failed" -Fields @{
+                save_format_count = [int]$State.FormatCount
+                exception_text = $_.Exception.Message
+            }
+        }
+        Write-Host ("[wake_codex] WARNING: " + $Context + " clipboard restore failed. Use Win+V to recover from clipboard history: " + $_.Exception.Message)
+    }
+}
+
+function Set-ClipboardTextForWake {
+    param(
+        [string]$Text,
+        [string]$Context = "wake paste"
+    )
+    Invoke-ClipboardOperation -Context ($Context + " clipboard text set") -Operation {
+        [System.Windows.Forms.Clipboard]::SetText($Text)
+    } | Out-Null
+}
+
+function Send-ClearComposerViaPostMessage {
+    param($ComposerElement)
+
+    $nativeHwnd = [IntPtr]::Zero
+    try { $nativeHwnd = [IntPtr]([uint32]$ComposerElement.Current.NativeWindowHandle) } catch {}
+    if ($nativeHwnd -eq [IntPtr]::Zero) {
+        return $false
+    }
+
+    try {
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr]65, (New-KeyLParam -ScanCode 0x1E)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr]65, (New-KeyLParam -ScanCode 0x1E -KeyUp)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D -KeyUp)) | Out-Null
+        Start-Sleep -Milliseconds 50
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53)) | Out-Null
+        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53 -KeyUp)) | Out-Null
+        Start-Sleep -Milliseconds 80
+        return $true
+    } catch {
+        Write-Host ("[wake_codex] Composer cleanup PostMessage exception: " + $_.Exception.Message)
+        return $false
+    }
+}
+
 function Send-BridgeMessageViaPostMessage {
     # Delivers $Value + Ctrl+Enter directly into the Chromium render widget via
     # PostMessage, bypassing the Windows foreground-window requirement entirely.
@@ -434,22 +555,16 @@ function Send-BridgeMessageViaPostMessage {
     }
     Write-Host ("[wake_codex] PostMessage path: targeting hwnd=" + $nativeHwnd)
 
-    try {
-        # Ctrl+A to select all existing composer text
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr]65, (New-KeyLParam -ScanCode 0x1E)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr]65, (New-KeyLParam -ScanCode 0x1E -KeyUp)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_CONTROL, (New-KeyLParam -ScanCode 0x1D -KeyUp)) | Out-Null
-        Start-Sleep -Milliseconds 30
+    $pmClipboardState = Save-ClipboardState -Context "PostMessage path"
 
-        # Delete selection
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYDOWN,   [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53)) | Out-Null
-        [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_KEYUP_MSG, [IntPtr][Win32Wake]::VK_DELETE, (New-KeyLParam -ScanCode 0x53 -KeyUp)) | Out-Null
-        Start-Sleep -Milliseconds 30
+    try {
+        if (-not (Send-ClearComposerViaPostMessage -ComposerElement $ComposerElement)) {
+            return $false
+        }
 
         # WM_PASTE: high-level semantic message that Chromium processes regardless of
         # foreground window status; equivalent to Edit > Paste in the app menu.
-        [System.Windows.Forms.Clipboard]::SetText($Value)
+        Set-ClipboardTextForWake -Text $Value -Context "PostMessage path"
         Start-Sleep -Milliseconds 30
         [Win32Wake]::PostMessage($nativeHwnd, [Win32Wake]::WM_PASTE, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
         Start-Sleep -Milliseconds 100
@@ -465,6 +580,8 @@ function Send-BridgeMessageViaPostMessage {
     } catch {
         Write-Host ("[wake_codex] PostMessage path exception: " + $_.Exception.Message)
         return $false
+    } finally {
+        Restore-ClipboardState -State $pmClipboardState -Context "PostMessage path" -AuditOnFailure
     }
 }
 
@@ -594,29 +711,176 @@ function Write-WakeTelemetry {
     }
 }
 
+function ConvertTo-CleanCodexThreadTitle {
+    param([string]$Title)
+    $text = ([string]$Title).Replace("`r", " ").Replace("`n", " ").Trim()
+    $text = [regex]::Replace($text, "\s+", " ")
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return ""
+    }
+    # Codex sidebar accessibility names can append relative ages without a
+    # separator, for example "Agent Bridge18h".
+    $text = [regex]::Replace($text, "(?<=\S)(?:\d+\s*(?:s|m|h|d|w)|\d+\s*(?:mo|y))$", "").Trim()
+    return $text
+}
+
+function Test-CodexThreadTitleCandidate {
+    param([string]$Title)
+    $text = ConvertTo-CleanCodexThreadTitle -Title $Title
+    if ([string]::IsNullOrWhiteSpace($text) -or $text.Length -gt 160) {
+        return $false
+    }
+    $blocked = @(
+        "Archive chat",
+        "Archive chat Pin chat",
+        "Automations",
+        "Back",
+        "Close",
+        "Collapse all",
+        "Codex",
+        "Edit",
+        "File",
+        "Filter sidebar chats",
+        "Forward",
+        "Help",
+        "Hide sidebar",
+        "Maximize",
+        "Minimize",
+        "New chat",
+        "Plugins",
+        "Projects",
+        "Search",
+        "Update",
+        "View",
+        "Window"
+    )
+    return $blocked -notcontains $text
+}
+
+function Get-CodexSelectedSidebarThreadTitle {
+    param([System.Windows.Automation.AutomationElement]$Root)
+    $rootRect = $Root.Current.BoundingRectangle
+    $all = $Root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        $element = $all.Item($i)
+        $controlType = $element.Current.ControlType.ProgrammaticName -replace "^ControlType\.", ""
+        if ($controlType -ne "ListItem") {
+            continue
+        }
+        $name = ConvertTo-CleanCodexThreadTitle -Title ([string]$element.Current.Name)
+        if (-not (Test-CodexThreadTitleCandidate -Title $name)) {
+            continue
+        }
+        $className = [string]$element.Current.ClassName
+        if ($className -notlike "*after:block*") {
+            continue
+        }
+        $rect = $element.Current.BoundingRectangle
+        if ($rect.Width -le 0 -or $rect.Height -le 0) {
+            continue
+        }
+        if ($rect.X -lt ($rootRect.X - 4) -or $rect.X -gt ($rootRect.X + $rootRect.Width)) {
+            continue
+        }
+        if ($rect.Y -lt ($rootRect.Y - 4) -or $rect.Y -gt ($rootRect.Y + $rootRect.Height)) {
+            continue
+        }
+        $children = $element.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        for ($j = 0; $j -lt $children.Count; $j++) {
+            $child = $children.Item($j)
+            $childType = $child.Current.ControlType.ProgrammaticName -replace "^ControlType\.", ""
+            if ($childType -ne "Button") {
+                continue
+            }
+            $childClass = [string]$child.Current.ClassName
+            if ($childClass -match "(^|\s)bg-token-list-hover-background(\s|$)") {
+                return $name
+            }
+        }
+    }
+    return ""
+}
+
+function Get-CodexTopHeaderThreadTitle {
+    param([System.Windows.Automation.AutomationElement]$Root)
+    $rootRect = $Root.Current.BoundingRectangle
+    $all = $Root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        $element = $all.Item($i)
+        $controlType = $element.Current.ControlType.ProgrammaticName -replace "^ControlType\.", ""
+        if ($controlType -ne "Text") {
+            continue
+        }
+        $rect = $element.Current.BoundingRectangle
+        if ($rect.Width -le 0 -or $rect.Height -le 0) {
+            continue
+        }
+        if ($rect.Y -lt $rootRect.Y -or $rect.Y -gt ($rootRect.Y + 260)) {
+            continue
+        }
+        $name = ConvertTo-CleanCodexThreadTitle -Title ([string]$element.Current.Name)
+        if (Test-CodexThreadTitleCandidate -Title $name) {
+            return $name
+        }
+    }
+    return ""
+}
+
 function Get-CodexThreadTitleSnapshot {
     param(
         [IntPtr]$RootHwnd,
         [string]$WindowTitle = ""
     )
     $uiaName = ""
+    $sidebarTitle = ""
+    $headerTitle = ""
     try {
         Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
         Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
         $root = [System.Windows.Automation.AutomationElement]::FromHandle($RootHwnd)
         if ($null -ne $root) {
-            $uiaName = [string]$root.Current.Name
+            $sidebarTitle = Get-CodexSelectedSidebarThreadTitle -Root $root
+            if ([string]::IsNullOrWhiteSpace($sidebarTitle)) {
+                $headerTitle = Get-CodexTopHeaderThreadTitle -Root $root
+            }
+            $uiaName = ConvertTo-CleanCodexThreadTitle -Title ([string]$root.Current.Name)
         }
     } catch {
         Write-Host ("[wake_codex] WARNING: UIA thread title read failed: " + $_.Exception.Message)
     }
-    $title = if (-not [string]::IsNullOrWhiteSpace($uiaName)) { $uiaName } else { [string]$WindowTitle }
-    $source = if (-not [string]::IsNullOrWhiteSpace($uiaName)) { "uia_root_name" } else { "win32_window_text" }
+    $windowTitleClean = ConvertTo-CleanCodexThreadTitle -Title $WindowTitle
+    $title = if (-not [string]::IsNullOrWhiteSpace($sidebarTitle)) {
+        $sidebarTitle
+    } elseif (-not [string]::IsNullOrWhiteSpace($headerTitle)) {
+        $headerTitle
+    } elseif (-not [string]::IsNullOrWhiteSpace($uiaName)) {
+        $uiaName
+    } else {
+        $windowTitleClean
+    }
+    $source = if (-not [string]::IsNullOrWhiteSpace($sidebarTitle)) {
+        "codex_app_dom_sidebar_selected_thread"
+    } elseif (-not [string]::IsNullOrWhiteSpace($headerTitle)) {
+        "codex_app_dom_top_header"
+    } elseif (-not [string]::IsNullOrWhiteSpace($uiaName)) {
+        "uia_root_name"
+    } else {
+        "win32_window_text"
+    }
     return @{
         Title = $title
         Source = $source
         UiaName = $uiaName
-        WindowTitle = [string]$WindowTitle
+        WindowTitle = $windowTitleClean
     }
 }
 
@@ -648,8 +912,51 @@ function Test-ThreadTitleEquals {
     return $Actual.Trim().Equals($Expected.Trim(), [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-GenericCodexThreadTitle {
+    param([string]$Title)
+    $value = ($Title -as [string])
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $true
+    }
+    return $value.Trim().Equals("Codex", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Write-ThreadTitleUnknown {
+    param(
+        [hashtable]$Snapshot,
+        [string]$Reason
+    )
+    $title = [string]$Snapshot.Title
+    Write-WakeTelemetry -Fields @{
+        action = "thread_title_unknown"
+        desktop_thread_title = $title
+        desktop_thread_title_source = [string]$Snapshot.Source
+        desktop_window_title = [string]$Snapshot.WindowTitle
+        expected_project_token = $ExpectedProjectToken
+        title_project_match = $null
+        title_project_match_state = $Reason
+    }
+    Write-PreflightAudit -Action "targeted_wake_title_unknown" -Fields @{
+        desktop_thread_title = $title
+        expected_project_token = $ExpectedProjectToken
+        reason = $Reason
+        hard_fail = [bool]$RequireTitleMatch
+    }
+    $detail = "project/thread title proof unavailable (" + $Reason + "); title='" + $title + "'"
+    if ($RequireTitleMatch) {
+        Write-Host ("[wake_codex] Targeted wake refused: " + $detail)
+        exit 3
+    }
+    if ($WarnOnTitleMismatch) {
+        Write-Host ("[wake_codex] WARNING: " + $detail + "; continuing because title match is warn-only.")
+    }
+}
+
 function Get-ExpectedThreadTitleFromRuntime {
     if (-not [string]::IsNullOrWhiteSpace($ExpectedThreadTitle)) {
+        if (Test-GenericCodexThreadTitle -Title $ExpectedThreadTitle) {
+            return ""
+        }
         return $ExpectedThreadTitle
     }
     if ([string]::IsNullOrWhiteSpace($StateDir) -or [string]::IsNullOrWhiteSpace($ThreadId)) {
@@ -666,6 +973,9 @@ function Get-ExpectedThreadTitleFromRuntime {
             return ""
         }
         if ($runtime.PSObject.Properties.Name -contains "desktop_thread_title_project_match" -and $runtime.desktop_thread_title_project_match -eq $false) {
+            return ""
+        }
+        if (Test-GenericCodexThreadTitle -Title ([string]$runtime.desktop_thread_title)) {
             return ""
         }
         return [string]$runtime.desktop_thread_title
@@ -690,11 +1000,14 @@ function Test-ForegroundCodexNavigationSafety {
     if (-not $ProtectForegroundCodexThread) {
         return $result
     }
-    if ([string]::IsNullOrWhiteSpace($ThreadId)) {
-        return $result
-    }
     $foregroundProcessName = Get-ProcessNameForHwnd -Hwnd $ForegroundHwnd
     if ($foregroundProcessName -ne $ProcessName) {
+        return $result
+    }
+    if (-not (Test-CodexThreadId -Value $ThreadId)) {
+        $result.Ok = $false
+        $result.SkipNavigation = $false
+        $result.Reason = "foreground_codex_target_thread_unavailable"
         return $result
     }
 
@@ -703,7 +1016,7 @@ function Test-ForegroundCodexNavigationSafety {
     $result.PreviousThreadTitle = [string]$snapshot.Title
     $result.ExpectedThreadTitle = [string]$expectedTitle
 
-    if (Test-ThreadTitleEquals -Actual ([string]$snapshot.Title) -Expected $expectedTitle) {
+    if ((-not (Test-GenericCodexThreadTitle -Title $expectedTitle)) -and (Test-ThreadTitleEquals -Actual ([string]$snapshot.Title) -Expected $expectedTitle)) {
         $result.Ok = $true
         $result.SkipNavigation = $true
         $result.Reason = "foreground_codex_already_target"
@@ -717,14 +1030,35 @@ function Test-ForegroundCodexNavigationSafety {
         return $result
     }
 
+    if ($AllowForegroundCodexThreadDisplacement) {
+        $result.Ok = $true
+        $result.SkipNavigation = $false
+        $result.Reason = "foreground_codex_delivery_priority_no_restore"
+        return $result
+    }
+
     $result.Ok = $false
     $result.SkipNavigation = $false
-    $result.Reason = if ([string]::IsNullOrWhiteSpace($expectedTitle)) {
-        "foreground_codex_restore_unproven_no_expected_title"
-    } else {
-        "foreground_codex_restore_unproven_title_mismatch"
-    }
+    $result.Reason = "foreground_codex_restore_thread_unavailable"
     return $result
+}
+
+function Write-ForegroundCodexDeliveryPriorityAudit {
+    param([hashtable]$NavigationSafety)
+
+    Write-StageEvent "STAGE4_DELIVERY_PRIORITY_DISPLACEMENT" "restore_thread_id=missing"
+    Write-PreflightAudit -Action "targeted_wake_delivery_priority_no_restore" -Fields @{
+        previous_desktop_thread_title = [string]$NavigationSafety.PreviousThreadTitle
+        expected_desktop_thread_title = [string]$NavigationSafety.ExpectedThreadTitle
+        target_thread_id = [string]$ThreadId
+        restore_thread_id_present = $false
+    }
+    Write-WakeTelemetry -Fields @{
+        action = "foreground_codex_delivery_priority_no_restore"
+        previous_desktop_thread_title = [string]$NavigationSafety.PreviousThreadTitle
+        expected_desktop_thread_title = [string]$NavigationSafety.ExpectedThreadTitle
+    }
+    Write-Host "[wake_codex] Delivery priority: foreground Codex may be displaced because no exact RestoreThreadId is available."
 }
 
 function Test-TitleContainsProjectToken {
@@ -747,7 +1081,15 @@ function Invoke-ThreadTitleProjectCertification {
         return
     }
     $title = [string]$Snapshot.Title
+    if (Test-GenericCodexThreadTitle -Title $title) {
+        Write-ThreadTitleUnknown -Snapshot $Snapshot -Reason "generic_codex_title"
+        return
+    }
     $matches = Test-TitleContainsProjectToken -Title $title -Token $ExpectedProjectToken
+    if ($null -eq $matches) {
+        Write-ThreadTitleUnknown -Snapshot $Snapshot -Reason "empty_or_unreadable_title"
+        return
+    }
     Write-WakeTelemetry -Fields @{
         action = "thread_title_certified"
         desktop_thread_title = $title
@@ -1163,15 +1505,16 @@ function Test-CodexWakePostflight {
     )
 
     $deadline = (Get-Date).AddMilliseconds([Math]::Max(250, $TimeoutMilliseconds))
+    $expected = ([string]$Value).Trim()
     while ((Get-Date) -lt $deadline) {
-        if (Test-CodexWindowContainsText -RootHwnd $RootHwnd -Value $Value -TimeoutMilliseconds 250) {
-            return @{ Ok = $true; Reason = "wake_command_rendered" }
-        }
         try {
             $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
             if ($null -ne $composer) {
                 $text = Get-CodexComposerTextReadOnly -Composer $composer
                 $trimmed = ([string]$text).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($expected) -and $trimmed.Equals($expected, [System.StringComparison]::Ordinal)) {
+                    return @{ Ok = $false; Reason = "wake_command_still_in_composer" }
+                }
                 $isPlaceholder = (Test-IsPlaceholderByStructure -Composer $composer) -or (Test-IsCodexPlaceholderText -Text $trimmed)
                 if ([string]::IsNullOrWhiteSpace($trimmed) -or $isPlaceholder) {
                     return @{ Ok = $true; Reason = "composer_empty_after_submit" }
@@ -1180,9 +1523,110 @@ function Test-CodexWakePostflight {
         } catch {
             return @{ Ok = $false; Reason = "postflight_read_failed"; ExceptionText = $_.Exception.Message }
         }
+        if (Test-CodexWindowContainsText -RootHwnd $RootHwnd -Value $Value -TimeoutMilliseconds 250) {
+            return @{ Ok = $true; Reason = "wake_command_rendered" }
+        }
         Start-Sleep -Milliseconds 100
     }
     return @{ Ok = $false; Reason = "postflight_timeout" }
+}
+
+function Clear-InjectedWakeTextIfPresent {
+    param(
+        [IntPtr]$RootHwnd,
+        $ComposerElement,
+        [string]$Value,
+        [string]$DeliveryMode = "sendkeys",
+        [string]$Reason = "unknown"
+    )
+
+    $result = @{
+        Attempted = $false
+        Cleared = $false
+        Reason = $Reason
+        CleanupMode = ""
+        ComposerLengthBucket = "unknown"
+    }
+    $composer = $ComposerElement
+    if ($null -eq $composer) {
+        $composer = Get-CodexComposerElement -RootHwnd $RootHwnd
+    }
+    if ($null -eq $composer) {
+        $result.CleanupMode = "unavailable"
+        Write-PreflightAudit -Action "targeted_wake_injected_text_cleanup_skipped" -Fields @{
+            cleanup_reason = $Reason
+            skip_reason = "composer_unavailable"
+        }
+        return $result
+    }
+
+    $text = ""
+    try {
+        $text = [string](Get-CodexComposerTextReadOnly -Composer $composer)
+    } catch {
+        $result.CleanupMode = "read_failed"
+        Write-PreflightAudit -Action "targeted_wake_injected_text_cleanup_skipped" -Fields @{
+            cleanup_reason = $Reason
+            skip_reason = "composer_read_failed"
+            exception_text = $_.Exception.Message
+        }
+        return $result
+    }
+
+    $trimmed = $text.Trim()
+    $expected = ([string]$Value).Trim()
+    $result.ComposerLengthBucket = ConvertTo-ComposerLengthBucket -Length $trimmed.Length
+    if ([string]::IsNullOrWhiteSpace($expected) -or -not $trimmed.Equals($expected, [System.StringComparison]::Ordinal)) {
+        $result.CleanupMode = "exact_match_not_found"
+        Write-PreflightAudit -Action "targeted_wake_injected_text_cleanup_skipped" -Fields @{
+            cleanup_reason = $Reason
+            skip_reason = "composer_did_not_exactly_match_wake_text"
+            composer_length_bucket = $result.ComposerLengthBucket
+        }
+        return $result
+    }
+
+    $result.Attempted = $true
+    $cleanupMode = "postmessage"
+    $cleared = Send-ClearComposerViaPostMessage -ComposerElement $composer
+    if (-not $cleared) {
+        $cleanupMode = "sendkeys"
+        try {
+            $composer.SetFocus()
+            Start-Sleep -Milliseconds 80
+        } catch {}
+        if ([Win32Wake]::GetForegroundWindow() -eq $RootHwnd) {
+            try {
+                [System.Windows.Forms.SendKeys]::SendWait("^a")
+                Start-Sleep -Milliseconds 60
+                [System.Windows.Forms.SendKeys]::SendWait("{DELETE}")
+                Start-Sleep -Milliseconds 100
+                $cleared = $true
+            } catch {
+                Write-Host ("[wake_codex] Composer cleanup SendKeys exception: " + $_.Exception.Message)
+                $cleared = $false
+            }
+        }
+    }
+
+    $result.CleanupMode = $cleanupMode
+    if ($cleared) {
+        try {
+            $afterText = [string](Get-CodexComposerTextReadOnly -Composer $composer)
+            $afterTrimmed = $afterText.Trim()
+            $isPlaceholder = (Test-IsPlaceholderByStructure -Composer $composer) -or (Test-IsCodexPlaceholderText -Text $afterTrimmed)
+            $cleared = [string]::IsNullOrWhiteSpace($afterTrimmed) -or $isPlaceholder
+        } catch {
+            $cleared = $true
+        }
+    }
+    $result.Cleared = [bool]$cleared
+    Write-PreflightAudit -Action $(if ($result.Cleared) { "targeted_wake_injected_text_cleared" } else { "targeted_wake_injected_text_cleanup_failed" }) -Fields @{
+        cleanup_reason = $Reason
+        cleanup_mode = $cleanupMode
+        composer_length_bucket = $result.ComposerLengthBucket
+    }
+    return $result
 }
 
 function Send-BridgeMessageKeys {
@@ -1192,20 +1636,8 @@ function Send-BridgeMessageKeys {
         [switch]$PreserveDraft
     )
 
-    $savedClipboard = $null
-    $savedFormatCount = 0
-    $clipboardSaved = $false
-    if ($PreserveDraft) {
-        try {
-            $savedClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
-            if ($null -ne $savedClipboard) {
-                $savedFormatCount = @($savedClipboard.GetFormats()).Count
-                $clipboardSaved = $savedFormatCount -gt 0
-            }
-        } catch {
-            Write-Host ("[wake_codex] WARNING: clipboard save failed; draft preservation will be best-effort only: " + $_.Exception.Message)
-        }
-    }
+    $clipboardState = Save-ClipboardState -Context "SendKeys path"
+    $savedFormatCount = [int]$clipboardState.FormatCount
 
     try {
         [System.Windows.Forms.SendKeys]::SendWait("^a")
@@ -1217,31 +1649,21 @@ function Send-BridgeMessageKeys {
         # character-by-character SendKeys. This collapses the interleave race
         # window from ~18 keystrokes to one compound event, and avoids AV
         # heuristics that flag character-sequence injection into foreign windows.
-        [System.Windows.Forms.Clipboard]::SetText($Value)
+        Set-ClipboardTextForWake -Text $Value -Context "SendKeys path"
         [System.Windows.Forms.SendKeys]::SendWait("^v")
         Start-Sleep -Milliseconds 100
         [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
 
         if ($PreserveDraft -and -not [string]::IsNullOrWhiteSpace($DraftText)) {
             Start-Sleep -Milliseconds 250
-            [System.Windows.Forms.Clipboard]::SetText($DraftText)
+            Set-ClipboardTextForWake -Text $DraftText -Context "SendKeys draft restore"
             [System.Windows.Forms.SendKeys]::SendWait("^v")
             $draftAuditFields = @{ save_format_count = $savedFormatCount; restore_succeeded = $true }
             if ($AuditDraftText) { $draftAuditFields["draft_text"] = $DraftText }
             Write-PreflightAudit -Action "preflight_draft_preserved" -Fields $draftAuditFields
         }
     } finally {
-        if ($PreserveDraft -and $clipboardSaved) {
-            try {
-                [System.Windows.Forms.Clipboard]::SetDataObject($savedClipboard, $true)
-            } catch {
-                Write-PreflightAudit -Action "preflight_clipboard_restore_failed" -Fields @{
-                    save_format_count = $savedFormatCount
-                    exception_text = $_.Exception.Message
-                }
-                Write-Host "[wake_codex] WARNING: Original clipboard could not be restored. Use Win+V to recover from clipboard history."
-            }
-        }
+        Restore-ClipboardState -State $clipboardState -Context "SendKeys path" -AuditOnFailure
     }
 }
 
@@ -1362,6 +1784,10 @@ if (-not $RunInnerWake) {
 }
 
 # --- Inner wake process: stages 3-6 only ---
+$cleanupOnUnhandledFailure = $false
+$cleanupRootHwnd = [IntPtr]::Zero
+$cleanupComposer = $null
+$cleanupDeliveryMode = "sendkeys"
 try {
     # --- Stage 3: wait for system-wide idle ---
     Write-StageEvent "STAGE3_IDLE_START" ("threshold=" + $IdleThresholdSeconds + "s max=" + $MaxWaitSeconds + "s")
@@ -1406,7 +1832,7 @@ try {
             previous_desktop_thread_title = [string]$navigationSafety.PreviousThreadTitle
             expected_desktop_thread_title = [string]$navigationSafety.ExpectedThreadTitle
         }
-        Write-Host ("[wake_codex] Targeted wake deferred: foreground is Codex on a thread we cannot restore. reason=" + [string]$navigationSafety.Reason)
+        Write-Host ("[wake_codex] Targeted wake deferred: valid target thread is unavailable. reason=" + [string]$navigationSafety.Reason)
         exit 16
     }
 
@@ -1414,6 +1840,9 @@ try {
         Write-StageEvent "STAGE4_DEEPLINK_SKIPPED" ("reason=" + [string]$navigationSafety.Reason)
         Write-Host "[wake_codex] Foreground Codex appears to already be the target thread; skipping deeplink navigation."
     } else {
+        if ([string]$navigationSafety.Reason -eq "foreground_codex_delivery_priority_no_restore") {
+            Write-ForegroundCodexDeliveryPriorityAudit -NavigationSafety $navigationSafety
+        }
         Write-StageEvent "STAGE4_DEEPLINK_START" ("thread=" + $ThreadId)
         Open-CodexThread -Value $ThreadId
         Write-StageEvent "STAGE4_DEEPLINK_DONE"
@@ -1598,13 +2027,27 @@ try {
         if (-not $pmOk) {
             # Do NOT fall back to SendKeys here: foreground is Claude Desktop, so
             # SendKeys would inject "check bridge inbox" into the Claude composer.
+            Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason "postmessage_delivery_failed" | Out-Null
             Write-Host "[wake_codex] PostMessage delivery failed with no safe fallback while foreground is locked. Deferring."
             exit 16
         }
+        $cleanupOnUnhandledFailure = $true
+        $cleanupRootHwnd = $codexHwnd
+        $cleanupComposer = $composerForFocus
+        $cleanupDeliveryMode = $deliveryMode
         Write-Host ("[wake_codex] Sent via PostMessage: " + $Message + " (steer; preflight=" + $preflight.State + ")")
     } else {
         Write-StageEvent "STAGE5_SENDKEYS_START" ("preserve_draft=" + [string]([bool]$preflight.PreserveDraft))
-        Send-BridgeMessageKeys -Value $Message -DraftText $preflight.DraftText -PreserveDraft:([bool]$preflight.PreserveDraft)
+        try {
+            Send-BridgeMessageKeys -Value $Message -DraftText $preflight.DraftText -PreserveDraft:([bool]$preflight.PreserveDraft)
+        } catch {
+            Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason "sendkeys_delivery_exception" | Out-Null
+            throw
+        }
+        $cleanupOnUnhandledFailure = $true
+        $cleanupRootHwnd = $codexHwnd
+        $cleanupComposer = $composerForFocus
+        $cleanupDeliveryMode = $deliveryMode
         Write-StageEvent "STAGE5_SENDKEYS_DONE"
         Write-Host ("[wake_codex] Sent: " + $Message + " + Ctrl+Enter (steer; preflight=" + $preflight.State + ")")
     }
@@ -1622,18 +2065,33 @@ try {
                 message_hash = (Get-TextHash -Value $Message)
             }
             Write-Host ("[wake_codex] Wake postflight verified: " + [string]$postflight.Reason)
+            $cleanupOnUnhandledFailure = $false
         } else {
+            $cleanup = Clear-InjectedWakeTextIfPresent -RootHwnd $codexHwnd -ComposerElement $composerForFocus -Value $Message -DeliveryMode $deliveryMode -Reason ([string]$postflight.Reason)
             Write-PreflightAudit -Action "targeted_wake_postflight_verification_failed" -Fields @{
                 message_hash = (Get-TextHash -Value $Message)
                 reason = [string]$postflight.Reason
+                cleanup_attempted = [bool]$cleanup.Attempted
+                cleanup_succeeded = [bool]$cleanup.Cleared
             }
             Write-WakeTelemetry -Fields @{
                 action = "wake_postflight_verification_failed"
                 reason = [string]$postflight.Reason
                 message_hash = (Get-TextHash -Value $Message)
+                cleanup_attempted = [bool]$cleanup.Attempted
+                cleanup_succeeded = [bool]$cleanup.Cleared
             }
             Write-Host ("[wake_codex] WARNING: wake postflight did not confirm visible delivery: " + [string]$postflight.Reason)
+            if ([bool]$cleanup.Cleared -or [string]$postflight.Reason -eq "wake_command_still_in_composer") {
+                if ([bool]$cleanup.Cleared) {
+                    $cleanupOnUnhandledFailure = $false
+                }
+                Write-Host "[wake_codex] Deferred wake after cleaning unsent injected composer text."
+                exit 16
+            }
         }
+    } else {
+        $cleanupOnUnhandledFailure = $false
     }
 
     # --- Stage 6: restore previous foreground ---
@@ -1641,8 +2099,24 @@ try {
     Start-Sleep -Milliseconds 200
     if ($ProtectForegroundCodexThread -and (Test-CodexThreadId -Value $RestoreThreadId) -and $RestoreThreadId -ne $ThreadId) {
         Write-StageEvent "STAGE6_RESTORE_THREAD_START" ("thread=" + $RestoreThreadId)
+        Write-PreflightAudit -Action "targeted_wake_restore_thread_attempted" -Fields @{
+            restore_thread_id = $RestoreThreadId
+            target_thread_id = $ThreadId
+        }
+        Write-WakeTelemetry -Fields @{
+            action = "restore_thread_attempted"
+            restore_thread_id = $RestoreThreadId
+        }
         Open-CodexThread -Value $RestoreThreadId
         Write-StageEvent "STAGE6_RESTORE_THREAD_DONE"
+        Write-PreflightAudit -Action "targeted_wake_restore_thread_deeplink_invoked_unverified" -Fields @{
+            restore_thread_id = $RestoreThreadId
+            target_thread_id = $ThreadId
+        }
+        Write-WakeTelemetry -Fields @{
+            action = "restore_thread_deeplink_invoked_unverified"
+            restore_thread_id = $RestoreThreadId
+        }
     }
     [Win32Wake]::SetForegroundWindow($prevFg) | Out-Null
     Write-StageEvent "STAGE6_DONE" ("total=" + [Math]::Round($script:WakeStart.Elapsed.TotalSeconds, 3) + "s restored_to=" + $prevFgTitle)
@@ -1652,6 +2126,10 @@ try {
     Write-StageEvent "ERROR" $_.Exception.Message
     Write-Host ("[wake_codex] ERROR: " + $_.Exception.Message)
     exit 1
+} finally {
+    if ($cleanupOnUnhandledFailure -and $cleanupRootHwnd -ne [IntPtr]::Zero) {
+        Clear-InjectedWakeTextIfPresent -RootHwnd $cleanupRootHwnd -ComposerElement $cleanupComposer -Value $Message -DeliveryMode $cleanupDeliveryMode -Reason "unverified_delivery_finally" | Out-Null
+    }
 }
 
 exit 0

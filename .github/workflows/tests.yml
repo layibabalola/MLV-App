@@ -8,8 +8,12 @@ on:
       - "tests/**"
       - "src/**"
       - "platform/qt/**"
+      - "tools/repo_hygiene/**"
+      - "tools/repo-hygiene/**"
+      - "tools/closeout/**"
+      - "closeout.config.json"
       - "AGENTS.md"
-      - ".claude/CLAUDE.md"
+      - "CLAUDE.md"
   push:
     branches:
       - master
@@ -18,10 +22,36 @@ on:
       - "tests/**"
       - "src/**"
       - "platform/qt/**"
+      - "tools/repo_hygiene/**"
+      - "tools/repo-hygiene/**"
+      - "tools/closeout/**"
+      - "closeout.config.json"
       - "AGENTS.md"
-      - ".claude/CLAUDE.md"
+      - "CLAUDE.md"
 
 jobs:
+  repo-hygiene-python:
+    name: Repo Hygiene Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run repo hygiene Python tests
+        run: |
+          python -m unittest tools.repo_hygiene.test_repo_hygiene -v
+          python -m unittest tools.repo_hygiene.test_brokered_closeout -v
+          python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
+
   windows-scaffold:
     name: Windows Scaffold
     runs-on: windows-latest
@@ -41,6 +71,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Run repo hygiene Python tests
+        run: |
+          python -m unittest tools.repo_hygiene.test_repo_hygiene -v
+          python -m unittest tools.repo_hygiene.test_brokered_closeout -v
+          python tools\repo-hygiene\hygiene.py --repo-root . verify-policy
 
       - name: Install aqtinstall
         run: |

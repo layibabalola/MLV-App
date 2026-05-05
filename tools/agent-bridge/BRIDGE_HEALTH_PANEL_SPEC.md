@@ -165,8 +165,8 @@ MCP server health is two-layer: the **wrapper process** (parent; holds the stdio
 
 | Event | Audit action | User impact |
 |---|---|---|
-| Bridge code changed under wrapper | `mcp_server_refresh_required` | Host reconnect/reload required. MCP stdio initialization is stateful, so the wrapper must not hot-restart `server.py` under an initialized host. |
-| Wrapper exit + relaunch | `mcp_server_wrapper_launch` | MCP host must reconnect; agent loses bridge tool access for that turn |
+| Bridge code changed under wrapper | `mcp_server_refresh_required` | Inner `server.py` was restarted under the live wrapper; ordinary tool calls should continue, but tool-list/schema changes may still require host reconnect/reload. |
+| Wrapper exit + trampoline relaunch | `mcp_server_wrapper_self_restart_requested` + `mcp_server_wrapper_launch` | `server_wrapper_trampoline.py` keeps stdio open while the wrapper relaunches after exit 77. |
 
 - [ ] Globs `<bridge-root>/state/server-pids/server-*.json`; for each: `pid`, `agent`, `started_at`, breadcrumb `mtime_age_seconds`.
 - [ ] Verifies each PID alive and, on Windows, verifies the runtime breadcrumb
@@ -378,7 +378,7 @@ These are invariants that production documentation must state explicitly:
 1. **Message durability:** JSONL inbox messages survive any MCP server restart, wrapper crash, or machine reboot. The only way to lose a queued message is explicit `clear_bucket` or manual JSONL deletion. Field users should not fear data loss during MCP instability.
 2. **Tool access during outage:** Bridge MCP tool calls (`check_inbox`, `send_to_peer`, etc.) will fail while the wrapper is down. This is a *tool access* failure, not a bridge protocol failure. The watcher continues to fire toasts and wake helpers independently of the MCP server.
 3. **Recovery path:** HP4 `impact_class == "tool_access_risk"` + `recovery_hint` → `bridge_reconnect_mcp`. That is the complete self-service recovery flow.
-4. **No transparent MCP hot-reload:** file-watch changes produce `mcp_server_refresh_required` and keep the current child alive. Field users should reconnect/reload the MCP host; replacing `server.py` under an initialized stdio host is not protocol-safe.
+4. **Transparent process self-heal, not tool-list hot-reload:** file-watch changes restart the affected bridge process layer, and the trampoline can relaunch `server_wrapper.py` after exit 77 without closing host stdio. Field users should still reconnect/reload the MCP host before expecting newly added, removed, or renamed tools to appear in the host's cached tool list.
 
 ---
 
