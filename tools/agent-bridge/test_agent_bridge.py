@@ -275,6 +275,9 @@ class AgentBridgeTests(unittest.TestCase):
             self.assertIn("check-inbox --help", text)
             self.assertIn("--agent", text)
             self.assertIn("--format", text)
+            self.assertIn("-SkipSessionWorktree", text)
+            self.assertNotIn("bootstrap_session.py", text)
+            self.assertNotIn("git worktree add", text)
 
     def test_codex_bridge_reminder_log_writes_use_retry_helper(self) -> None:
         text = (Path(__file__).resolve().parent / "codex_bridge_reminder.ps1").read_text(encoding="utf-8")
@@ -1511,6 +1514,43 @@ $result | ConvertTo-Json -Compress
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((bridge_root / "state" / "codex-bridge-reminder.log").exists())
         self.assertIn("Bridge hygiene", result.stdout)
+
+    def test_codex_bridge_reminder_records_skipped_session_worktree_bootstrap(self) -> None:
+        script = Path(__file__).resolve().parent / "codex_bridge_reminder.ps1"
+        bridge_root = self.tempdir / "skip worktree bridge root"
+        workspace = self.tempdir / "workspace"
+        workspace.mkdir()
+
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-BridgeRoot",
+                str(bridge_root),
+                "-WorkspaceRoot",
+                str(workspace),
+                "-ProjectBucket",
+                "mlv-app",
+                "-PrivateBucket",
+                "codex-live",
+                "-SkipSessionWorktree",
+                "-NoToast",
+                "-Force",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Session worktree bootstrap: skipped", result.stdout)
+        log_text = (bridge_root / "state" / "codex-bridge-reminder.log").read_text(encoding="utf-8")
+        self.assertIn("session_worktree_bootstrap=skipped", log_text)
+        self.assertFalse((workspace / ".codex-worktrees").exists())
 
     def test_wake_codex_input_size_smoke_runs_under_powershell(self) -> None:
         script = Path(__file__).resolve().parent / "wake_codex.ps1"
