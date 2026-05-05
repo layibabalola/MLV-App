@@ -944,6 +944,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         (repo / "owned.txt").write_text("owned committed\n", encoding="utf-8")
         git(repo, "add", "owned.txt")
         git(repo, "commit", "-m", "owned committed")
+        start_work_block(repo, work_block_id="wb-checkpoint-foreign-owner", actor="local-test", path_claims=["foreign.txt"])
         (repo / "owned.txt").write_text("owned checkpointed\n", encoding="utf-8")
         (repo / "foreign.txt").write_text("foreign retained\n", encoding="utf-8")
 
@@ -954,7 +955,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["status"], "repaired", result)
         self.assertEqual(git(repo, "show", "HEAD:owned.txt").stdout, "owned checkpointed\n")
         self.assertEqual((repo / "foreign.txt").read_text(encoding="utf-8"), "foreign retained\n")
-        self.assertIn("checkpoint", self.audit_types(repo))
+        self.assertIn("checkpoint_owned_dirty", self.audit_types(repo))
         self.assertIn("retained_foreign_dirty", self.audit_types(repo))
 
     def test_missing_evidence_is_generated_and_committed_before_publish(self) -> None:
