@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .brokered_closeout import (
     audit_summary,
+    bootstrap_response_broker_manifest,
     broker_contract,
     checkpoint_owned_work,
     complete_work_block,
@@ -37,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--work-block-id")
     start.add_argument("--actor", default="codex")
     start.add_argument("--claim", action="append", default=[], help="Repo-relative path claim. May be repeated.")
+
+    bootstrap = sub.add_parser("bootstrap-response", help="Create or refresh the response-hook broker manifest.")
+    bootstrap.add_argument("--hook-phase", default="response")
+    bootstrap.add_argument("--actor", default="codex-response-hook")
+    bootstrap.add_argument("--claim", action="append", default=[], help="Repo-relative path claim. May be repeated.")
 
     complete = sub.add_parser("complete", help="Mark a work block complete; optionally finalize.")
     complete.add_argument("--work-block-id")
@@ -118,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         repo_root = resolve_repo_root(Path(args.repo_root))
         if args.command == "start":
             result = start_work_block(repo_root, work_block_id=args.work_block_id, actor=args.actor, path_claims=args.claim)
+        elif args.command == "bootstrap-response":
+            result = bootstrap_response_broker_manifest(repo_root, hook_phase=args.hook_phase, actor=args.actor, path_claims=args.claim)
         elif args.command == "complete":
             result = complete_work_block(repo_root, work_block_id=args.work_block_id, finalize=args.finalize)
         elif args.command == "detect":
