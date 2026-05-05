@@ -19,6 +19,7 @@ from .brokered_closeout import (
     apply_dirty_split_candidate,
     preserve_owned_dirty_split,
     record_review_approval,
+    repair_eligibility,
     repo_sweep,
     repo_sweep_tuple,
     stable_hash,
@@ -75,6 +76,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "worktreeRoot": ".claude-state/closeout/dirty-splits/worktrees",
                 "maxCandidatesPerRun": 1,
                 "registerBrokerOwnership": True,
+            },
+            "toolingBaseline": {"enabled": False},
+            "evidenceRepair": {
+                "enabled": False,
+                "evidenceRoot": ".closeout-evidence",
+                "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
+                "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
+                "commitMessage": "brokered closeout evidence repair",
             },
             "reviewQuorum": {
                 "requiredApprovals": 1,
@@ -171,6 +180,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("repo_sweep_prune_merged", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("split", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("dirtySplit", contract["requiredConfigKeys"])
+        self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
+        self.assertIn("evidenceRepair", contract["requiredConfigKeys"])
 
     def test_stale_refs_block_finalize_before_mutation(self) -> None:
         repo = self.init_repo()
@@ -217,6 +228,64 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["reason"], "validation_failed")
         self.assertIn("validation_failure", self.audit_types(repo))
         self.assertEqual(git(repo, "rev-parse", "--verify", "codex/test-work").returncode, 0)
+
+    def test_closeout_tooling_stale_blocks_before_hygiene_blocker(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "toolingBaseline": {
+                    "enabled": True,
+                    "autoUpdate": False,
+                    "requiredTests": ["test_missing_future_closeout_actor"],
+                    "requiredSymbols": [
+                        {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def missing_future_actor"}
+                    ],
+                }
+            }
+        )
+        self.make_feature(repo, "wb-tooling-stale")
+        (repo / "work.txt").write_text("dirty blocker should not be authoritative\n", encoding="utf-8")
+
+        result = finalize_work_block(repo, work_block_id="wb-tooling-stale")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "closeout_tooling_stale")
+        missing_kinds = {item["kind"] for item in result["tooling"]["missing"]}
+        self.assertIn("test", missing_kinds)
+        self.assertIn("symbol", missing_kinds)
+        self.assertIn("closeout_tooling_stale", self.audit_types(repo))
+
+    def test_closeout_tooling_stale_auto_updates_only_safe_paths(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "toolingBaseline": {
+                    "enabled": True,
+                    "baselineRef": "master",
+                    "autoUpdate": True,
+                    "paths": ["tools/repo_hygiene/brokered_closeout.py"],
+                    "requiredTests": [],
+                    "requiredSymbols": [
+                        {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def baseline_actor"}
+                    ],
+                }
+            }
+        )
+        tool_path = repo / "tools" / "repo_hygiene" / "brokered_closeout.py"
+        tool_path.parent.mkdir(parents=True, exist_ok=True)
+        tool_path.write_text("def baseline_actor():\n    return True\n", encoding="utf-8")
+        git(repo, "add", "tools/repo_hygiene/brokered_closeout.py")
+        git(repo, "commit", "-m", "baseline tooling")
+        git(repo, "checkout", "-b", "codex/stale-tooling")
+        tool_path.write_text("def old_actor():\n    return False\n", encoding="utf-8")
+        git(repo, "add", "tools/repo_hygiene/brokered_closeout.py")
+        git(repo, "commit", "-m", "stale tooling")
+        start_work_block(repo, work_block_id="wb-tooling-update", actor="local-test", path_claims=["work.txt"])
+
+        result = repair_eligibility(repo, work_block_id="wb-tooling-update")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "closeout_tooling_stale")
+        self.assertIn("def baseline_actor", tool_path.read_text(encoding="utf-8"))
+        self.assertTrue(result["tooling"]["updated"])
 
     def test_foreign_dirty_does_not_block_independent_local_closeout(self) -> None:
         repo = self.init_repo()
@@ -535,6 +604,56 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual((repo / "foreign.txt").read_text(encoding="utf-8"), "foreign retained\n")
         self.assertIn("checkpoint", self.audit_types(repo))
         self.assertIn("retained_foreign_dirty", self.audit_types(repo))
+
+    def test_missing_evidence_is_generated_and_committed_before_publish(self) -> None:
+        repo = self.init_repo(
+            remote=True,
+            config_updates={
+                "evidenceRepair": {
+                    "enabled": True,
+                    "evidenceRoot": ".closeout-evidence",
+                    "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
+                    "requiredFor": ["publish_missing_upstream"],
+                    "commitMessage": "test evidence repair",
+                }
+            },
+        )
+        self.make_feature(repo, "wb-evidence-repair")
+
+        result = repair_eligibility(repo, work_block_id="wb-evidence-repair")
+
+        self.assertEqual(result["status"], "repaired", result)
+        actions = [item["action"] for item in result["actions"]]
+        self.assertLess(actions.index("evidence_repair"), actions.index("publish_missing_upstream"))
+        for artifact in ["metrics.json", "handoff.json", "session.json", "closeout.json"]:
+            path = f".closeout-evidence/wb-evidence-repair/{artifact}"
+            self.assertEqual(git(repo, "cat-file", "-e", f"HEAD:{path}", check=False).returncode, 0)
+        self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "codex/test-work@{upstream}").stdout.strip(), "origin/codex/test-work")
+        self.assertIn("evidence_repair", self.audit_types(repo))
+
+    def test_evidence_repair_refuses_claimed_evidence_path(self) -> None:
+        repo = self.init_repo(
+            remote=True,
+            config_updates={
+                "evidenceRepair": {
+                    "enabled": True,
+                    "requiredFor": ["publish_missing_upstream"],
+                }
+            },
+        )
+        self.make_feature(repo, "wb-evidence-blocked")
+        start_work_block(
+            repo,
+            work_block_id="wb-other-evidence-owner",
+            actor="local-test",
+            path_claims=[".closeout-evidence/wb-evidence-blocked/metrics.json"],
+        )
+
+        result = repair_eligibility(repo, work_block_id="wb-evidence-blocked")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(any(str(item).startswith("evidenceRepairFailed") for item in result["blockers"]))
+        self.assertIn("evidence_repair_blocked", self.audit_types(repo))
 
 
 if __name__ == "__main__":

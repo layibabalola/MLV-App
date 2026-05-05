@@ -124,6 +124,40 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "allowedPublishRemotes": ["fork", "origin"],
         "setUpstreamOnPublish": True,
     },
+    "toolingBaseline": {
+        "enabled": False,
+        "baselineRef": None,
+        "autoUpdate": True,
+        "paths": [
+            "closeout.config.json",
+            "tools/repo_hygiene/brokered_closeout.py",
+            "tools/repo_hygiene/work_block_cli.py",
+            "tools/repo_hygiene/test_brokered_closeout.py",
+            "tools/repo-hygiene/closeout.contract.json",
+            "tools/repo-hygiene/hygiene.config.json",
+        ],
+        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"],
+        "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+        "requiredAutoQuorumActions": ["integrated_branch_prune", "repo_sweep_clean_integrate", "dirty_split"],
+        "requiredTests": [
+            "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
+            "test_dirty_split_stale_tuple_is_rejected_before_mutation",
+            "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
+            "test_missing_evidence_is_generated_and_committed_before_publish",
+        ],
+        "requiredSymbols": [
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
+        ],
+    },
+    "evidenceRepair": {
+        "enabled": True,
+        "evidenceRoot": ".closeout-evidence",
+        "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
+        "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
+        "commitMessage": "brokered closeout evidence repair",
+    },
     "reviewQuorum": {
         "requiredApprovals": 1,
         "allowedReviewers": ["codex", "claude", "human", "local-test"],
@@ -205,6 +239,15 @@ def load_closeout_config(repo_root_arg: Path) -> Dict[str, Any]:
         raise HygieneError("closeout stateRoot must stay under .claude-state/")
     config["policyHash"] = stable_hash(config, 32)
     return config
+
+
+def config_path_value(config: Dict[str, Any], dotted: str) -> Any:
+    value: Any = config
+    for part in dotted.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
 
 
 def closeout_state_root(repo_root: Path, config: Dict[str, Any]) -> Path:
@@ -511,6 +554,118 @@ def update_manifest(repo_root: Path, config: Dict[str, Any], work_block_id: str,
     return manifest
 
 
+def closeout_tooling_recovery_command() -> str:
+    return "git status --short && git checkout <tooling-baseline> -- closeout.config.json tools/closeout tools/repo_hygiene tools/repo-hygiene && rerun closeout"
+
+
+def baseline_ref_for_tooling(repo_root: Path, config: Dict[str, Any]) -> Optional[str]:
+    baseline = config.get("toolingBaseline", {})
+    configured = baseline.get("baselineRef")
+    if configured:
+        return str(configured)
+    try:
+        target = target_ref_for(repo_root, config)
+    except HygieneError:
+        return None
+    return str(target["ref"])
+
+
+def git_show_text(repo_root: Path, ref: str, path: str) -> Optional[str]:
+    result = run_git(repo_root, ["show", f"{ref}:{path}"])
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def dirty_path_set(repo_root: Path) -> set[str]:
+    return {entry["path"] for entry in parse_status_paths(repo_root)}
+
+
+def can_update_tooling_path(repo_root: Path, config: Dict[str, Any], path: str, dirty_paths: set[str], claims: Dict[str, str]) -> Tuple[bool, Optional[str]]:
+    normalized = normalize_rel(path)
+    if normalized in dirty_paths:
+        return False, "path_has_dirty_work"
+    if normalized in claims:
+        return False, "path_is_claimed_by_work_block:%s" % claims[normalized]
+    local = repo_root / normalized
+    if local.exists() and not local.is_file():
+        return False, "path_is_not_regular_file"
+    return True, None
+
+
+def verify_closeout_tooling_current(repo_root_arg: Path, config: Optional[Dict[str, Any]] = None, *, attempt_update: bool = True) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = config or load_closeout_config(repo_root)
+    baseline = config.get("toolingBaseline", {})
+    if not bool(baseline.get("enabled", False)):
+        return {"ok": True, "status": "disabled", "missing": [], "updated": []}
+
+    missing: List[Dict[str, Any]] = []
+    for key in baseline.get("requiredConfigKeys", []):
+        if config_path_value(config, str(key)) is None:
+            missing.append({"kind": "config_key", "key": str(key)})
+    high_impact = set(config.get("reviewQuorum", {}).get("highImpactActions", []))
+    for action in baseline.get("requiredHighImpactActions", []):
+        if action not in high_impact:
+            missing.append({"kind": "high_impact_action", "action": str(action)})
+    autonomous = set(config.get("autoQuorum", {}).get("autonomousActionClasses", []))
+    for action in baseline.get("requiredAutoQuorumActions", []):
+        if action not in autonomous:
+            missing.append({"kind": "auto_quorum_action", "action": str(action)})
+    test_path = repo_root / "tools" / "repo_hygiene" / "test_brokered_closeout.py"
+    test_text = test_path.read_text(encoding="utf-8") if test_path.exists() else ""
+    for test_name in baseline.get("requiredTests", []):
+        if str(test_name) not in test_text:
+            missing.append({"kind": "test", "test": str(test_name), "path": normalize_rel(str(test_path.relative_to(repo_root))) if test_path.exists() else "tools/repo_hygiene/test_brokered_closeout.py"})
+    for required in baseline.get("requiredSymbols", []):
+        path = normalize_rel(str(required.get("path") or ""))
+        contains = str(required.get("contains") or "")
+        text = (repo_root / path).read_text(encoding="utf-8") if path and (repo_root / path).exists() else ""
+        if not path or contains not in text:
+            missing.append({"kind": "symbol", "path": path, "contains": contains})
+    for script in REQUIRED_SCRIPT_NAMES:
+        if not (repo_root / "tools" / "closeout" / script).exists():
+            missing.append({"kind": "actor", "path": normalize_rel(f"tools/closeout/{script}")})
+
+    updated: List[Dict[str, Any]] = []
+    blocked_updates: List[Dict[str, Any]] = []
+    if missing and attempt_update and bool(baseline.get("autoUpdate", True)):
+        ref = baseline_ref_for_tooling(repo_root, config)
+        dirty_paths = dirty_path_set(repo_root)
+        claims = active_path_claims(repo_root, config)
+        candidate_paths = sorted({normalize_rel(str(item.get("path") or item.get("key") or "")) for item in missing if item.get("path")})
+        candidate_paths.extend(normalize_rel(str(path)) for path in baseline.get("paths", []) if normalize_rel(str(path)))
+        for path in sorted({path for path in candidate_paths if path}):
+            allowed, reason = can_update_tooling_path(repo_root, config, path, dirty_paths, claims)
+            if not allowed:
+                blocked_updates.append({"path": path, "reason": reason})
+                continue
+            if not ref:
+                blocked_updates.append({"path": path, "reason": "no_tooling_baseline_ref"})
+                continue
+            content = git_show_text(repo_root, ref, path)
+            if content is None:
+                blocked_updates.append({"path": path, "reason": "path_missing_from_baseline", "baselineRef": ref})
+                continue
+            target = repo_root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8", newline="")
+            updated.append({"path": path, "baselineRef": ref})
+
+    result = {
+        "ok": not missing,
+        "status": "current" if not missing else "closeout_tooling_stale",
+        "missing": missing,
+        "updated": updated,
+        "blockedUpdates": blocked_updates,
+        "recoveryCommand": closeout_tooling_recovery_command(),
+        "authoritative": not missing,
+    }
+    if missing:
+        write_audit(repo_root, config, "closeout_tooling_stale", result, outcome="blocked")
+    return result
+
+
 def ensure_work_block_for_current_branch(repo_root: Path, config: Dict[str, Any], work_block_id: Optional[str]) -> Dict[str, Any]:
     if work_block_id:
         return load_manifest(repo_root, config, work_block_id)
@@ -620,9 +775,155 @@ def ahead_behind(repo_root: Path, upstream: str) -> Dict[str, int]:
     return {"ahead": int(ahead or "0"), "behind": int(behind or "0")}
 
 
+def evidence_root(repo_root: Path, config: Dict[str, Any]) -> Path:
+    root = normalize_rel(str(config.get("evidenceRepair", {}).get("evidenceRoot") or ".closeout-evidence"))
+    if not root or root.startswith("../") or root == ".." or root.startswith(".claude/"):
+        raise HygieneError("invalid evidenceRepair.evidenceRoot: %s" % root)
+    return (repo_root / root).resolve()
+
+
+def evidence_rel_paths(config: Dict[str, Any], work_block_id: str) -> List[str]:
+    root = normalize_rel(str(config.get("evidenceRepair", {}).get("evidenceRoot") or ".closeout-evidence")).strip("/")
+    artifacts = [normalize_rel(str(item)) for item in config.get("evidenceRepair", {}).get("requiredArtifacts", [])]
+    return [normalize_rel("%s/%s/%s" % (root, safe_state_name(work_block_id), artifact)) for artifact in artifacts if artifact]
+
+
+def git_path_tracked(repo_root: Path, rel_path: str, rev: str = "HEAD") -> bool:
+    return run_git(repo_root, ["cat-file", "-e", f"{rev}:{rel_path}"]).returncode == 0
+
+
+def evidence_missing_or_dirty(repo_root: Path, config: Dict[str, Any], work_block_id: str) -> List[str]:
+    paths = evidence_rel_paths(config, work_block_id)
+    missing: List[str] = []
+    for path in paths:
+        status = run_git(repo_root, ["status", "--porcelain=v1", "--", path])
+        if status.stdout.strip() or not git_path_tracked(repo_root, path):
+            missing.append(path)
+    return missing
+
+
+def evidence_payloads(config: Dict[str, Any], detection: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    base = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "createdAt": utc_now(),
+        "workBlockId": detection["workBlockId"],
+        "branch": detection["branch"],
+        "featureHead": detection["featureHead"],
+        "targetHead": detection["targetHead"],
+        "detectorHash": detection["detectorHash"],
+    }
+    return {
+        "metrics.json": {
+            **base,
+            "artifactKind": "metrics",
+            "dirtyCounts": {
+                "ownedDirty": len(detection.get("ownedDirty", [])),
+                "foreignDirty": len(detection.get("foreignDirty", [])),
+                "unownedDirty": len(detection.get("unownedDirty", [])),
+            },
+            "committedDeltaPathCount": len(detection.get("committedDeltaPaths", [])),
+        },
+        "handoff.json": {
+            **base,
+            "artifactKind": "handoff",
+            "summary": "Generated by brokered closeout evidence repair before publish/final push.",
+            "foreignDirtyRetained": [item["path"] for item in detection.get("foreignDirty", [])],
+        },
+        "session.json": {
+            **base,
+            "artifactKind": "session",
+            "actor": "brokered-closeout",
+            "worktree": str(Path.cwd()),
+        },
+        "closeout.json": {
+            **base,
+            "artifactKind": "closeout",
+            "pinnedRefs": detection.get("pinnedRefs"),
+            "eligible": detection.get("eligible"),
+        },
+    }
+
+
+def repair_missing_evidence(repo_root_arg: Path, config: Dict[str, Any], detection: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    if not bool(config.get("evidenceRepair", {}).get("enabled", True)):
+        return {"status": "disabled", "reason": "evidenceRepair.enabled is false"}
+    work_block_id = str(detection["workBlockId"])
+    paths = evidence_rel_paths(config, work_block_id)
+    missing = evidence_missing_or_dirty(repo_root, config, work_block_id)
+    if not missing:
+        return {"status": "noop", "reason": "required_evidence_present", "paths": paths}
+    claims = active_path_claims(repo_root, config)
+    manifest = load_manifest(repo_root, config, work_block_id)
+    own_claims = set(manifest_path_claims(manifest))
+    blocked: List[Dict[str, Any]] = []
+    for path in paths:
+        owner = claims.get(path)
+        if owner and owner != work_block_id:
+            blocked.append({"path": path, "reason": "claimed_by_other_work_block", "ownerWorkBlockId": owner})
+        if path_matches_any(path, config.get("paths", {}).get("sensitive", [])):
+            blocked.append({"path": path, "reason": "evidence_path_is_sensitive"})
+    if blocked:
+        payload = {"reason": reason, "blocked": blocked, "paths": paths}
+        write_audit(repo_root, config, "evidence_repair_blocked", payload, work_block_id=work_block_id, outcome="blocked")
+        return {"status": "blocked", **payload}
+    payloads = evidence_payloads(config, detection)
+    root = evidence_root(repo_root, config)
+    root.mkdir(parents=True, exist_ok=True)
+    for rel_path in paths:
+        artifact = Path(rel_path).name
+        target = safe_repo_path(repo_root, rel_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_json(target, payloads.get(artifact, {"schemaVersion": BROKER_SCHEMA_VERSION, "workBlockId": work_block_id, "artifactKind": artifact}))
+    updated_claims = sorted(own_claims.union(paths))
+    update_manifest(repo_root, config, work_block_id, {"pathClaims": updated_claims})
+    add = run_git(repo_root, ["add", "--", *paths])
+    if add.returncode != 0:
+        result = {"status": "blocked", "reason": "evidence_git_add_failed", "paths": paths, "stderr": add.stderr[-3000:]}
+        write_audit(repo_root, config, "evidence_repair_blocked", result, work_block_id=work_block_id, outcome="blocked")
+        return result
+    commit = run_git(repo_root, ["commit", "-m", str(config.get("evidenceRepair", {}).get("commitMessage") or "brokered closeout evidence repair")])
+    if commit.returncode != 0:
+        result = {"status": "blocked", "reason": "evidence_commit_failed", "paths": paths, "stdout": commit.stdout[-3000:], "stderr": commit.stderr[-3000:]}
+        write_audit(repo_root, config, "evidence_repair_blocked", result, work_block_id=work_block_id, outcome="blocked")
+        return result
+    validations: List[Dict[str, Any]] = []
+    if bool(config.get("evidenceRepair", {}).get("validateAfterCommit", False)):
+        validations = run_validations(repo_root, config, repo_root)
+        failed = next((item for item in validations if item["returncode"] != 0), None)
+        if failed:
+            result = {"status": "blocked", "reason": "evidence_validation_failed", "paths": paths, "validations": validations}
+            write_audit(repo_root, config, "evidence_repair_blocked", result, work_block_id=work_block_id, outcome="blocked")
+            return result
+    result = {"status": "success", "reason": reason, "paths": paths, "commit": git_stdout(repo_root, ["rev-parse", "HEAD"]), "validations": validations}
+    write_audit(repo_root, config, "evidence_repair", result, work_block_id=work_block_id, outcome="success")
+    append_event(repo_root, config, work_block_id, {"event": "evidence_repaired", "reason": reason, "paths": paths, "commit": result["commit"]})
+    return result
+
+
+def ensure_evidence_for_repair(repo_root: Path, config: Dict[str, Any], detection: Dict[str, Any], reason: str, actions: List[Dict[str, Any]], blockers: List[str]) -> Dict[str, Any]:
+    if not bool(config.get("evidenceRepair", {}).get("enabled", True)):
+        return detection
+    required_for = set(config.get("evidenceRepair", {}).get("requiredFor", []))
+    if reason not in required_for:
+        return detection
+    missing = evidence_missing_or_dirty(repo_root, config, str(detection["workBlockId"]))
+    if not missing:
+        return detection
+    evidence = repair_missing_evidence(repo_root, config, detection, reason=reason)
+    actions.append({"action": "evidence_repair", **evidence})
+    if evidence["status"] != "success":
+        blockers.append("evidenceRepairFailed:%s" % reason)
+        return detection
+    return detect_work_block(repo_root, work_block_id=str(detection["workBlockId"]))
+
+
 def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    tooling = verify_closeout_tooling_current(repo_root, config)
+    if not tooling["ok"]:
+        return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
     block_id = detection["workBlockId"]
     branch = detection["branch"]
@@ -649,6 +950,7 @@ def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = No
             blockers.append("ownedDirty")
     if detection["unownedDirty"]:
         blockers.append("unownedDirty")
+    detection = ensure_evidence_for_repair(repo_root, config, detection, "final_push", actions, blockers)
     remote = str(config.get("git", {}).get("remote", "origin"))
     has_remote = remote_exists(repo_root, remote)
     if not has_remote:
@@ -661,14 +963,16 @@ def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = No
         allowed_remotes = set(config.get("repair", {}).get("allowedPublishRemotes", []))
         if not upstream:
             if bool(config.get("repair", {}).get("autoPublishFeatureBranch", False)) and remote in allowed_remotes:
-                push_args = ["push"]
-                if bool(config.get("repair", {}).get("setUpstreamOnPublish", True)):
-                    push_args.append("-u")
-                push_args.extend([remote, f"HEAD:{branch}"])
-                push = run_git(repo_root, push_args)
-                actions.append({"action": "publish_missing_upstream", "remote": remote, "branch": branch, "returncode": push.returncode})
-                if push.returncode != 0:
-                    blockers.append("publishMissingUpstreamFailed")
+                detection = ensure_evidence_for_repair(repo_root, config, detection, "publish_missing_upstream", actions, blockers)
+                if not any(str(item).startswith("evidenceRepairFailed") for item in blockers):
+                    push_args = ["push"]
+                    if bool(config.get("repair", {}).get("setUpstreamOnPublish", True)):
+                        push_args.append("-u")
+                    push_args.extend([remote, f"HEAD:{branch}"])
+                    push = run_git(repo_root, push_args)
+                    actions.append({"action": "publish_missing_upstream", "remote": remote, "branch": branch, "returncode": push.returncode})
+                    if push.returncode != 0:
+                        blockers.append("publishMissingUpstreamFailed")
             else:
                 blockers.append("missingUpstream")
         else:
@@ -676,10 +980,13 @@ def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = No
             if ab["behind"] > 0:
                 blockers.append("featureBehindUpstream")
             elif ab["ahead"] > 0 and bool(config.get("repair", {}).get("autoPublishFeatureBranch", False)):
-                push = run_git(repo_root, ["push", remote, f"HEAD:{branch}"])
-                actions.append({"action": "publish_ahead_only", "remote": remote, "branch": branch, "aheadBehind": ab, "returncode": push.returncode})
-                if push.returncode != 0:
-                    blockers.append("publishAheadOnlyFailed")
+                detection = ensure_evidence_for_repair(repo_root, config, detection, "publish_ahead_only", actions, blockers)
+                if not any(str(item).startswith("evidenceRepairFailed") for item in blockers):
+                    ab = ahead_behind(repo_root, upstream)
+                    push = run_git(repo_root, ["push", remote, f"HEAD:{branch}"])
+                    actions.append({"action": "publish_ahead_only", "remote": remote, "branch": branch, "aheadBehind": ab, "returncode": push.returncode})
+                    if push.returncode != 0:
+                        blockers.append("publishAheadOnlyFailed")
     status = "repaired" if not blockers else "blocked"
     payload = {"detectionHash": detection["detectorHash"], "actions": actions, "blockers": blockers}
     write_json(work_block_dir(repo_root, config, block_id) / "repair.json", payload)
@@ -1389,6 +1696,9 @@ def finalize_work_block(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    tooling = verify_closeout_tooling_current(repo_root, config)
+    if not tooling["ok"]:
+        return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
     block_id = detection["workBlockId"]
     update_manifest(repo_root, config, block_id, {"state": "finalizing", "completedAt": utc_now()})
@@ -1403,6 +1713,7 @@ def finalize_work_block(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "repair_blocked"})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "repair_blocked"})
         return {"status": "blocked", "reason": "repair_blocked", "repair": repair, "detection": detection}
+    detection = detect_work_block(repo_root, work_block_id=block_id)
     evidence = finalize_evidence(config, detection)
     evidence_hash = stable_hash(evidence)
     candidate_id = finalize_candidate_id(block_id)
@@ -2362,6 +2673,9 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
 def repo_sweep(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    tooling = verify_closeout_tooling_current(repo_root, config)
+    if not tooling["ok"]:
+        return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
     if not bool(config.get("repoSweep", {}).get("enabled", True)):
         return {"status": "disabled", "reason": "repoSweep.enabled is false"}
     plan = repo_sweep_plan(repo_root, config)
@@ -2500,7 +2814,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "stashPolicy", "cleanupPolicy", "reviewQuorum"]
+    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),

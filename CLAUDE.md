@@ -103,6 +103,15 @@ for symbolic action `split`, preserves those paths on a broker-claimed
 `closeout/split/...` branch/worktree, removes only those exact paths from the
 original after preservation is proven, audits the outcome, and then repair or
 finalize can rerun.
+Before reporting a closeout blocker as authoritative, run the configured
+closeout tooling baseline check. Missing actors, policy fields, contract checks,
+repair paths, or required tests are `closeout_tooling_stale`; stale tooling
+output is not a final hygiene blocker. Auto-update from the configured baseline
+is allowed only when it does not overwrite dirty or broker-owned paths.
+When publish/upstream/final-push repair is blocked only by missing metrics,
+handoff, session, or closeout evidence, generate the configured evidence bundle,
+claim and commit only those evidence files, retain unrelated dirty work, and
+rerun safe publish repair before stopping.
 
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 
