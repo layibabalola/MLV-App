@@ -66,6 +66,40 @@
     "allowedPublishRemotes": ["fork", "origin"],
     "setUpstreamOnPublish": true
   },
+  "toolingBaseline": {
+    "enabled": true,
+    "baselineRef": null,
+    "autoUpdate": true,
+    "paths": [
+      "closeout.config.json",
+      "tools/repo_hygiene/brokered_closeout.py",
+      "tools/repo_hygiene/work_block_cli.py",
+      "tools/repo_hygiene/test_brokered_closeout.py",
+      "tools/repo-hygiene/closeout.contract.json",
+      "tools/repo-hygiene/hygiene.config.json"
+    ],
+    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"],
+    "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+    "requiredAutoQuorumActions": ["integrated_branch_prune", "repo_sweep_clean_integrate", "dirty_split"],
+    "requiredTests": [
+      "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
+      "test_dirty_split_stale_tuple_is_rejected_before_mutation",
+      "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
+      "test_missing_evidence_is_generated_and_committed_before_publish"
+    ],
+    "requiredSymbols": [
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"}
+    ]
+  },
+  "evidenceRepair": {
+    "enabled": true,
+    "evidenceRoot": ".closeout-evidence",
+    "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
+    "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
+    "commitMessage": "brokered closeout evidence repair"
+  },
   "reviewQuorum": {
     "requiredApprovals": 1,
     "allowedReviewers": ["codex", "claude", "human", "local-test"],
