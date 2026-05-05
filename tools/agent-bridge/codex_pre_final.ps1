@@ -29,6 +29,15 @@ function Assert-BridgeCliContract {
 
 Assert-BridgeCliContract -Root $root
 
+$closeoutCli = Join-Path $root "tools\closeout\Invoke-CloseoutCli.ps1"
+if (Test-Path $closeoutCli) {
+    try {
+        & $closeoutCli -RepoRoot $root -Arguments @("bootstrap-response", "--hook-phase", "final", "--actor", "codex-final-hook") | Out-Null
+    } catch {
+        Write-Warning ("Response broker bootstrap skipped: " + $_.Exception.Message)
+    }
+}
+
 $args = @(
     "-NoProfile",
     "-ExecutionPolicy",

@@ -149,7 +149,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/hygiene.config.json",
         ],
         "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation"],
-        "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
+        "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "repo_sweep_prune_merged", "split"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
             "repo_sweep_clean_integrate",
