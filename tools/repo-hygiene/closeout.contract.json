@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "artifact_names": [
+    "decision-packet.json",
+    "codex-closeout-recommendation.json",
+    "agent-review-*.json",
+    "approval.json",
+    "approval-anchor.json",
+    "apply-validation.json",
+    "executor-handoff.json",
+    "state.json",
+    "events.jsonl",
+    "trusted-approval-nonce.public.json",
+    "trusted-provenance-key.public.json"
+  ],
+  "cli_subcommands": [
+    "open",
+    "trigger",
+    "status",
+    "codex-review",
+    "agent-review",
+    "approve",
+    "validate-apply"
+  ],
+  "states": [
+    "opened",
+    "awaiting_codex_review",
+    "codex_reviewing",
+    "reviewed",
+    "awaiting_user_approval",
+    "approved",
+    "applying",
+    "applied",
+    "blocked",
+    "failed",
+    "aborted",
+    "parked"
+  ],
+  "candidate_kinds": [
+    "closeout-transaction",
+    "commit-unit",
+    "merge-readiness",
+    "publish-target",
+    "prune-after-publish"
+  ],
+  "action_ids": [
+    "commit_unit_commit",
+    "publish_pr",
+    "publish_direct_branch",
+    "local_merge",
+    "prune_after_publish",
+    "split"
+  ],
+  "publish_modes": [
+    "pr_only",
+    "direct_push_branch",
+    "local_merge_only",
+    "no_publish"
+  ],
+  "trigger_signal_ids": [
+    "dirty_current_work",
+    "dirty_generated_only",
+    "clean_feature_branch_ready_to_publish",
+    "hygiene_cleanup_recommendations"
+  ],
+  "review_sources": [
+    "codex_background_agent",
+    "manual_read_only_agent"
+  ],
+  "approval_sources": [
+    "codex_desktop",
+    "dashboard_trusted_adapter",
+    "local_interactive_cli"
+  ],
+  "required_read_only_reviewers": 2,
+  "allow_review_waiver": false,
+  "requires_signed_provenance": true,
+  "role_specific_provenance_keys": true,
+  "cli_secret_transport": "environment",
+  "executor_boundary": "validate-apply emits executor-handoff.json; validation is not mutation or completion"
+}

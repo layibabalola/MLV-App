@@ -1,0 +1,184 @@
+{
+  "schema_version": "1.0",
+  "policy_version": "2026-05-03.v3",
+  "state_root": ".claude-state/repo-hygiene",
+  "sensitive_roots": {
+    "curated": [".claude"],
+    "load_bearing": [".claude/worktrees"],
+    "scratch": [".claude-state"]
+  },
+  "root_registry": {
+    ".claude": "curated-agent-context",
+    ".claude-state": "ignored-agent-scratch",
+    ".claude/worktrees": "load-bearing-local-worktrees",
+    "tools/agent-bridge": "agent-bridge-tooling",
+    "tools/repo_hygiene": "portable-hygiene-package",
+    "tools/repo-hygiene": "repo-local-hygiene-policy-and-cli",
+    "docs": "tracked-documentation",
+    ".github/workflows": "ci-workflows",
+    "tests": "tracked-test-scaffold",
+    "platform/qt/FFmpeg": "external-runtime-binary-area",
+    "platform/qt/raw2mlv": "vendored-or-external-tooling",
+    "src/librtprocess": "vendored-or-external-library",
+    "src/mlv/liblj92": "vendored-or-external-library",
+    "platform/qt/avir": "vendored-or-external-library",
+    "platform/qt/maddy": "vendored-or-external-library",
+    "platform/build-*": "ignored-build-output",
+    "**/build-*": "ignored-build-output"
+  },
+  "integration_base": {
+    "explicit": null,
+    "fallbacks": ["origin/HEAD", "origin/master", "origin/main", "master", "main"],
+    "protected_branch_patterns": ["master", "main", "develop", "release/*"],
+    "remote_freshness_required_for_apply": true
+  },
+  "thresholds": {
+    "generated_run_retention_days": 30,
+    "generated_run_keep_latest": 20,
+    "worktree_stale_days": 7,
+    "stash_report_days": 14,
+    "orphan_size_mb": 512,
+    "observation_hours": 24,
+    "quarantine_retention_days": 30,
+    "archive_ref_retention_days": 90,
+    "dashboard_cooldown_hours": 24,
+    "apply_lock_stale_hours": 1
+  },
+  "allowed_roots": {
+    "R1": [".claude-state/repo-hygiene/runs", ".claude-state/repo-hygiene/quarantine"],
+    "R3": [".claude/worktrees"]
+  },
+  "tracked_ignored_allowlist": [
+    "osx_installer/BuildInstaller.sh",
+    "platform/mlv_blender/build.sh"
+  ],
+  "required_ignore_samples": {
+    "must_be_ignored": [
+      ".claude-state/probe.tmp",
+      ".claude/worktrees/probe",
+      ".hypothesis/probe",
+      "tools/repo_hygiene/__pycache__/x.pyc",
+      "monitor-probe.runtime.json",
+      "platform/qt/FFmpeg/ffmpeg.exe"
+    ],
+    "must_not_be_ignored": [
+      "tools/repo_hygiene/core.py",
+      "tools/repo-hygiene/POLICY.md",
+      "tools/repo-hygiene/closeout.contract.json",
+      ".github/workflows/tests.yml",
+      "tests/README.md"
+    ]
+  },
+  "dirty_triage": {
+    "current_work_paths": [
+      "tools/agent-bridge/**",
+      "tools/repo_hygiene/**",
+      "tools/repo-hygiene/**"
+    ],
+    "generated_patterns": [
+      ".claude-state/**",
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "platform/**/build*/**",
+      "**/build-*/**",
+      ".hypothesis/**"
+    ],
+    "source_patterns": ["**/*.py", "**/*.cpp", "**/*.c", "**/*.h", "**/*.hpp", "**/*.ps1"],
+    "test_patterns": ["tests/**", "tools/**/test_*.py", "**/*test*.cpp"],
+    "config_patterns": ["**/*.json", "**/*.yml", "**/*.yaml", "**/*.toml", "**/*.pro", ".gitignore"],
+    "doc_patterns": ["**/*.md", "docs/**"]
+  },
+  "portability": {
+    "risk_tiers": ["R0", "R1", "R2", "R3", "R4", "R5"],
+    "candidate_kinds": ["generated-report", "dirty-group", "branch", "worktree", "orphan-dir", "stash"],
+    "action_ids": [
+      "retain",
+      "ask",
+      "commit",
+      "split",
+      "stash",
+      "ignore-generated",
+      "repo_hygiene_prune_old_runs",
+      "branch_archive_delete",
+      "worktree_remove",
+      "orphan_quarantine",
+      "stash_promote"
+    ],
+    "dashboard_action_ids": ["repo_hygiene_prune_old_runs"],
+    "closeout_candidate_kinds": [
+      "closeout-transaction",
+      "commit-unit",
+      "merge-readiness",
+      "publish-target",
+      "prune-after-publish"
+    ],
+    "closeout_action_ids": [
+      "commit_unit_commit",
+      "publish_pr",
+      "publish_direct_branch",
+      "local_merge",
+      "prune_after_publish",
+      "split"
+    ],
+    "closeout_publish_modes": ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"],
+    "closeout_trigger_signal_ids": [
+      "dirty_current_work",
+      "dirty_generated_only",
+      "clean_feature_branch_ready_to_publish",
+      "hygiene_cleanup_recommendations"
+    ],
+    "closeout_contract": "tools/repo-hygiene/closeout.contract.json",
+    "policy_doc": "tools/repo-hygiene/POLICY.md",
+    "test_modules": ["tools/repo_hygiene/test_repo_hygiene.py"],
+    "required_doc_tokens": [
+      "R0",
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R5",
+      "candidate ID",
+      "policy hash",
+      "repo_hygiene_prune_old_runs",
+      "dirty-file triage",
+      "stash_promote",
+      "closeout transaction",
+      "Codex review",
+      "trusted approval",
+      "auto trigger",
+      "clean_feature_branch_ready_to_publish",
+      "closeout.contract.json"
+    ]
+  },
+  "closeout": {
+    "publish_modes": ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"],
+    "default_publish_mode": "no_publish",
+    "allowed_publish_remotes": ["fork"],
+    "direct_push_branch_patterns": ["codex/*", "hygiene/*"],
+    "trusted_approval_sources": ["codex_desktop", "dashboard_trusted_adapter", "local_interactive_cli"],
+    "allowed_review_sources": ["codex_background_agent", "manual_read_only_agent"],
+    "require_codex_review": true,
+    "required_read_only_reviewers": 2,
+    "allow_review_waiver": false,
+    "nonterminal_states": [
+      "awaiting_codex_review",
+      "codex_reviewing",
+      "reviewed",
+      "awaiting_user_approval",
+      "approved",
+      "applying",
+      "blocked",
+      "parked"
+    ],
+    "auto_trigger": {
+      "enabled": true,
+      "minimum_score": 1.0,
+      "signals": [
+        "dirty_current_work",
+        "dirty_generated_only",
+        "clean_feature_branch_ready_to_publish",
+        "hygiene_cleanup_recommendations"
+      ]
+    }
+  }
+}
