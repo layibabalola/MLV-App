@@ -14,11 +14,11 @@
     "commands": [
       {
         "name": "brokered-closeout-tests",
-        "argv": ["python", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"]
+        "argv": ["py", "-3", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"]
       },
       {
         "name": "repo-hygiene-policy",
-        "argv": ["python", "tools/repo-hygiene/hygiene.py", "--repo-root", ".", "verify-policy"]
+        "argv": ["py", "-3", "tools/repo-hygiene/hygiene.py", "--repo-root", ".", "verify-policy"]
       }
     ]
   },
