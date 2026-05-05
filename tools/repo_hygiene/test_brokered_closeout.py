@@ -839,15 +839,19 @@ class BrokeredCloseoutTests(unittest.TestCase):
         detached = self.tempdir / "dirty-detached-preserve"
         git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
         (detached / "README.md").write_text("detached dirty readme\n", encoding="utf-8")
+        (detached / "detached-only.txt").write_text("another exact dirty path\n", encoding="utf-8")
 
         result = repo_sweep(repo, apply=True)
 
         report = next(item for item in result["retainedCandidateReports"] if item["sourceDisposition"] == "retain_dirty_detached_worktree")
         self.assertEqual(report["recommendedAction"], "preserve_detached_dirty_now")
+        self.assertEqual(report["preservationBranch"].split("/")[:3], ["closeout", "recovery", "detached"])
         action = next(item for item in result["actions"] if item.get("action") == "detached_dirty_preserve")
         self.assertEqual(action["status"], "success", action)
         self.assertFalse(detached.exists())
+        self.assertEqual(sorted(item["path"] for item in action["copied"]), ["README.md", "detached-only.txt"])
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:README.md").stdout, "detached dirty readme\n")
+        self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:detached-only.txt").stdout, "another exact dirty path\n")
         self.assertIn("orphan_quarantine", self.audit_types(repo))
 
     def test_repo_sweep_detached_dirty_preservation_refuses_stale_or_missing_commit_before_cleanup(self) -> None:
@@ -947,6 +951,34 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(report["actionClass"], "explicit_protected_worktree_cleanup")
         self.assertFalse(locked_worktree.exists())
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/protected-lock", check=False).returncode, 0)
+
+    def test_repo_sweep_protected_locked_worktree_without_exact_policy_is_inspect_only(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "repoSweep": {"lockedWorktreeStaleHours": 0},
+                "cleanupPolicy": {"protectedWorktreeRoots": [".protected-worktrees/**"]},
+            }
+        )
+        git(repo, "checkout", "-b", "codex/protected-inspect")
+        (repo / "protected.txt").write_text("protected lock work\n", encoding="utf-8")
+        git(repo, "add", "protected.txt")
+        git(repo, "commit", "-m", "protected lock branch")
+        git(repo, "checkout", "master")
+        git(repo, "merge", "--no-ff", "codex/protected-inspect", "-m", "merge protected lock")
+        protected_root = repo / ".protected-worktrees"
+        protected_root.mkdir(exist_ok=True)
+        locked_worktree = protected_root / "locked-inspect"
+        git(repo, "worktree", "add", str(locked_worktree), "codex/protected-inspect")
+        git(repo, "worktree", "lock", "--reason", "pid=999999 protected inspect test", str(locked_worktree))
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/protected-inspect")
+        self.assertEqual(report["actionClass"], "active_locked_worktree")
+        self.assertEqual(report["recommendedAction"], "retain_with_proven_blocker")
+        self.assertTrue(locked_worktree.exists())
+        self.assertEqual(git(repo, "rev-parse", "--verify", "codex/protected-inspect").returncode, 0)
+        self.assertFalse(any(item.get("branch") == "codex/protected-inspect" for item in result["actions"]))
 
     def test_repo_sweep_merge_failed_report_has_agent_resolution_packet(self) -> None:
         repo = self.init_repo()
