@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .brokered_closeout import (
     broker_contract,
+    complete_work_block,
     detect_work_block,
     finalize_action_id,
     finalize_candidate_id,
@@ -95,7 +96,17 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "enabled": True,
                 "requiredScore": 10,
                 "reviewers": ["codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
-                "autonomousActionClasses": ["integrated_branch_prune", "repo_sweep_clean_integrate", "stale_locked_worktree_cleanup", "redundant_backup_prune", "dirty_split"],
+                "autonomousActionClasses": [
+                    "integrated_branch_prune",
+                    "repo_sweep_clean_integrate",
+                    "stale_locked_worktree_cleanup",
+                    "redundant_backup_prune",
+                    "dirty_split",
+                    "foreign_dirty_integrated_branch_prune",
+                    "detached_dirty_preserve",
+                    "redundant_branch_prune",
+                    "explicit_protected_worktree_cleanup",
+                ],
                 "manualOnlyActionClasses": ["protected_branch", "dirty_worktree", "locked_worktree", "ambiguous_merge_required", "active_locked_worktree", "unowned_dirty_triage"],
             },
             "repoSweep": {
@@ -110,6 +121,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "allowStaleLockedWorktreeCleanup": True,
                 "lockedWorktreeStaleHours": 24,
                 "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"],
+            },
+            "blockerAutoRemediation": {
+                "enabled": True,
+                "allowForeignDirtyIntegratedBranchSwitch": True,
+                "allowDetachedDirtyPreservation": True,
+                "allowSensitiveDetachedDirtyPreservation": False,
+                "maxDetachedDirtyPaths": 25,
+                "prunePatchEquivalentBranches": True,
+                "maxConflictFilesForAgent": 8,
+                "explicitProtectedWorktreeActions": [],
             },
         }
         if updates:
@@ -182,6 +203,32 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("dirtySplit", contract["requiredConfigKeys"])
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
         self.assertIn("evidenceRepair", contract["requiredConfigKeys"])
+        self.assertIn("responseHookLifecycle", contract["requiredConfigKeys"])
+        self.assertIn("blockerAutoRemediation", contract["requiredConfigKeys"])
+        self.assertIn("foreign_dirty_integrated_branch_prune", config["autoQuorum"]["autonomousActionClasses"])
+        self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
+        self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
+        self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
+
+    def test_completion_without_id_prefers_latest_active_block_over_old_blocked_block(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/select-latest")
+        old = start_work_block(repo, work_block_id="wb-a-old", actor="local-test")
+        old_manifest_path = repo / ".claude-state" / "closeout" / "work-blocks" / old["workBlockId"] / "manifest.json"
+        old_manifest = json.loads(old_manifest_path.read_text(encoding="utf-8"))
+        old_manifest.update(
+            {
+                "state": "blocked",
+                "blockedReason": "review_quorum_missing",
+                "updatedAt": "2026-01-01T00:00:00+00:00",
+            }
+        )
+        old_manifest_path.write_text(json.dumps(old_manifest, indent=2), encoding="utf-8")
+        start_work_block(repo, work_block_id="wb-z-new", actor="local-test")
+
+        result = complete_work_block(repo, finalize=False)
+
+        self.assertEqual(result["workBlockId"], "wb-z-new")
 
     def test_stale_refs_block_finalize_before_mutation(self) -> None:
         repo = self.init_repo()
@@ -570,6 +617,115 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(classification["workBlockId"], "wb-dirty-owned")
         self.assertEqual([item["path"] for item in classification["ownedDirty"]], ["owned.txt"])
         self.assertEqual([item["path"] for item in classification["foreignDirty"]], ["foreign-dirty.txt"])
+
+    def test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/foreign-integrated")
+        (repo / "integrated.txt").write_text("integrated\n", encoding="utf-8")
+        git(repo, "add", "integrated.txt")
+        git(repo, "commit", "-m", "integrated branch")
+        git(repo, "checkout", "master")
+        git(repo, "merge", "--no-ff", "codex/foreign-integrated", "-m", "merge integrated branch")
+        git(repo, "checkout", "codex/foreign-integrated")
+        (repo / "foreign-local.txt").write_text("foreign dirty stays\n", encoding="utf-8")
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/foreign-integrated")
+        self.assertEqual(report["recommendedAction"], "switch_target_and_prune")
+        self.assertEqual(report["actionClass"], "foreign_dirty_integrated_branch_prune")
+        self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "master")
+        self.assertEqual((repo / "foreign-local.txt").read_text(encoding="utf-8"), "foreign dirty stays\n")
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/foreign-integrated", check=False).returncode, 0)
+
+    def test_repo_sweep_detached_dirty_worktree_is_preserved_before_cleanup(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "dirty-detached-preserve"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+        (detached / "README.md").write_text("detached dirty readme\n", encoding="utf-8")
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["sourceDisposition"] == "retain_dirty_detached_worktree")
+        self.assertEqual(report["recommendedAction"], "preserve_detached_dirty_now")
+        action = next(item for item in result["actions"] if item.get("action") == "detached_dirty_preserve")
+        self.assertEqual(action["status"], "success", action)
+        self.assertFalse(detached.exists())
+        self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:README.md").stdout, "detached dirty readme\n")
+        self.assertIn("orphan_quarantine", self.audit_types(repo))
+
+    def test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "repoSweep": {"lockedWorktreeStaleHours": 0},
+                "cleanupPolicy": {"protectedWorktreeRoots": [".protected-worktrees/**"]},
+            }
+        )
+        git(repo, "checkout", "-b", "codex/protected-lock")
+        (repo / "protected.txt").write_text("protected lock work\n", encoding="utf-8")
+        git(repo, "add", "protected.txt")
+        git(repo, "commit", "-m", "protected lock branch")
+        git(repo, "checkout", "master")
+        git(repo, "merge", "--no-ff", "codex/protected-lock", "-m", "merge protected lock")
+        protected_root = repo / ".protected-worktrees"
+        protected_root.mkdir(exist_ok=True)
+        locked_worktree = protected_root / "locked"
+        git(repo, "worktree", "add", str(locked_worktree), "codex/protected-lock")
+        lock_reason = "pid=999999 protected stale test"
+        git(repo, "worktree", "lock", "--reason", lock_reason, str(locked_worktree))
+
+        plan = repo_sweep(repo)
+        retained = next(item for item in plan["retainedCandidateReports"] if item["branch"] == "codex/protected-lock")
+        self.assertEqual(retained["actionClass"], "active_locked_worktree")
+        evidence = retained["scope"]["protectedWorktreeCleanupEvidence"]
+        self.write_config(
+            repo,
+            {
+                "repoSweep": {"lockedWorktreeStaleHours": 0},
+                "cleanupPolicy": {"protectedWorktreeRoots": [".protected-worktrees/**"]},
+                "blockerAutoRemediation": {
+                    "explicitProtectedWorktreeActions": [
+                        {
+                            "branch": "codex/protected-lock",
+                            "path": evidence["path"],
+                            "lockReason": lock_reason,
+                            "action": "cleanup_worktree_and_prune",
+                            "evidenceHash": evidence["evidenceHash"],
+                            "recoveryCommand": "restore branch from reflog if cleanup was wrong",
+                        }
+                    ]
+                },
+            },
+        )
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/protected-lock")
+        self.assertEqual(report["actionClass"], "explicit_protected_worktree_cleanup")
+        self.assertFalse(locked_worktree.exists())
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/protected-lock", check=False).returncode, 0)
+
+    def test_repo_sweep_merge_failed_report_has_agent_resolution_packet(self) -> None:
+        repo = self.init_repo()
+        (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/conflict")
+        (repo / "conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "branch conflict")
+        git(repo, "checkout", "master")
+        (repo / "conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "target conflict")
+
+        result = repo_sweep(repo)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/conflict")
+        self.assertEqual(report["recommendedAction"], "retain_with_proven_blocker")
+        self.assertEqual(report["scope"]["mergeProbe"]["reason"], "merge_failed")
+        self.assertEqual(report["scope"]["mergeProbe"]["conflicts"], ["conflict.txt"])
+        self.assertEqual(report["scope"]["agentResolutionPacket"]["symbolicAction"], "resolve-conflicts-with-agent")
 
     def test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign(self) -> None:
         repo = self.init_repo()

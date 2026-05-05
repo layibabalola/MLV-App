@@ -39,6 +39,7 @@ $args = @(
     $root,
     "-HookPhase",
     "final",
+    "-SkipSessionWorktree",
     "-ProjectBucket",
     "mlv-app"
 )
