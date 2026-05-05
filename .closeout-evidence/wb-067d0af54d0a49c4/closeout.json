@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/repo-sweep-policy-recommendations",
+  "createdAt": "2026-05-05T19:59:00+00:00",
+  "detectorHash": "46b28c0aa1337adecc5075a9e63e01c1",
+  "eligible": true,
+  "featureHead": "c587246127910458bf7a9937a8a2989080acac43",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/repo-sweep-policy-recommendations",
+      "head": "c587246127910458bf7a9937a8a2989080acac43"
+    },
+    "target": {
+      "branch": "master",
+      "head": "548e173198481fe33e7ba7db8e19b5b7b4079c9c",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "548e173198481fe33e7ba7db8e19b5b7b4079c9c",
+  "workBlockId": "wb-067d0af54d0a49c4"
+}
