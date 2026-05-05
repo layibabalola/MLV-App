@@ -584,6 +584,18 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(packet_path.exists())
         self.assertTrue((packet_path.parent / "accepted-review-manifest.json").exists())
 
+    def test_repo_sweep_prune_worktrees_clean_detached_only_removes_clean_detached(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "clean-detached-worktree"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+
+        applied = repo_sweep(repo, apply=True)
+
+        self.assertEqual(applied["status"], "success")
+        self.assertFalse(detached.exists())
+        self.assertTrue(any(item.get("action") == "remove_clean_detached_worktree" for item in applied["actions"]))
+        self.assertIn("snapshot_pruning", self.audit_types(repo))
+
     def test_repo_sweep_manual_only_candidate_reports_recoverable_unblock_detail(self) -> None:
         repo = self.init_repo(config_updates={"autoQuorum": {"autonomousActionClasses": [], "manualOnlyActionClasses": ["integrated_branch_prune"]}})
         git(repo, "checkout", "-b", "codex/merged")

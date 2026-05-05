@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/clean-detached-sweep-prune",
+  "committedDeltaPathCount": 2,
+  "createdAt": "2026-05-05T20:03:20+00:00",
+  "detectorHash": "7ef60653ea27062e1100c15637aa004a",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "346b29dee1baf28723300cf1199af1415cdb1d71",
+  "schemaVersion": "1.0",
+  "targetHead": "f8729f9264dd21aeacc3589d10b95528753c60df",
+  "workBlockId": "wb-clean-detached-sweep-prune-20260505"
+}
