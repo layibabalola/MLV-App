@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/server-wrapper-trampoline",
+  "createdAt": "2026-05-05T19:03:09+00:00",
+  "detectorHash": "fa14631743b2963eb91f406f3571eee5",
+  "featureHead": "111efa4c0f3be296a00d6f83a04e45d7409dd13d",
+  "schemaVersion": "1.0",
+  "targetHead": "876a7cfb587e60e061468b51ba22d8dfa607f5c9",
+  "workBlockId": "wb-013dff207dff49f4",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
