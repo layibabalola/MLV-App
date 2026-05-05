@@ -23,6 +23,7 @@ from .brokered_closeout import (
     apply_dirty_split_candidate,
     preserve_owned_dirty_split,
     record_review_approval,
+    repair_target_push_failure,
     repair_eligibility,
     repo_sweep,
     repo_sweep_tuple,
@@ -522,6 +523,51 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), feature_head)
         self.assertIn("partial_push_recovery", self.audit_types(repo))
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/test-work", check=False).returncode, 0)
+
+    def test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun(self) -> None:
+        repo = self.init_repo(remote=True)
+        base_master = git(repo, "rev-parse", "master").stdout.strip()
+        git(repo, "checkout", "-b", "codex/attempted-target", "master")
+        (repo / "attempted.txt").write_text("attempted closeout merge\n", encoding="utf-8")
+        git(repo, "add", "attempted.txt")
+        git(repo, "commit", "-m", "attempted target merge")
+        attempted_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "checkout", "-b", "codex/remote-move", "master")
+        (repo / "remote.txt").write_text("other closeout won first\n", encoding="utf-8")
+        git(repo, "add", "remote.txt")
+        git(repo, "commit", "-m", "move remote target")
+        remote_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", "HEAD:master")
+        self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), base_master)
+
+        result = repair_target_push_failure(
+            repo,
+            load_closeout_config(repo),
+            target_branch="master",
+            remote="origin",
+            attempted_head=attempted_head,
+            push_result={
+                "remote": "origin",
+                "targetBranch": "master",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "! [rejected] HEAD -> master (fetch first)\nerror: failed to push some refs\nhint: Updates were rejected because the remote contains work that you do not have locally.\n",
+            },
+            work_block_id="wb-non-ff",
+        )
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "target_push_rerun_required")
+        self.assertEqual(result["attemptedHead"], attempted_head)
+        self.assertEqual(result["remoteHeadAfterFetch"], remote_head)
+        self.assertEqual(result["localHeadBeforeUpdate"], base_master)
+        self.assertEqual(result["localHeadAfterUpdate"], remote_head)
+        self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), remote_head)
+        recovery_text = json.dumps(result["recoveryCommand"], sort_keys=True)
+        self.assertIn("git fetch origin master", recovery_text)
+        self.assertIn("work-block-complete.ps1", recovery_text)
+        self.assertNotIn("force", recovery_text.lower())
+        self.assertIn("target_push_recovery", self.audit_types(repo))
 
     def test_safe_local_branch_pruning_retains_foreign_dirty_files(self) -> None:
         repo = self.init_repo()

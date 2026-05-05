@@ -124,12 +124,14 @@
       "test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason",
       "test_clean_integration_worktree_add_uses_longpaths_config",
       "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
-      "test_missing_evidence_is_generated_and_committed_before_publish"
+      "test_missing_evidence_is_generated_and_committed_before_publish",
+      "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun"
     ],
     "requiredSymbols": [
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def checkpoint_owned_dirty_action_id"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_detached_preservation_commit"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_target_push_failure"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
