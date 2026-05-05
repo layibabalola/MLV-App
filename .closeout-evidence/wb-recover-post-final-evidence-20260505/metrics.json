@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/recover-post-final-evidence",
+  "committedDeltaPathCount": 4,
+  "createdAt": "2026-05-05T20:09:41+00:00",
+  "detectorHash": "673c9e593ddc3de2c596cd719be39c39",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "b58cd7ab79516e463a69d646daf8bf8d137beea5",
+  "schemaVersion": "1.0",
+  "targetHead": "523f4ca307d4e8aaa640c2cfc9ce164ce865f1a6",
+  "workBlockId": "wb-recover-post-final-evidence-20260505"
+}
