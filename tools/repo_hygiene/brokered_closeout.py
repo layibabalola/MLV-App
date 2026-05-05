@@ -3761,7 +3761,11 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                     allow_protected_worktree=report.get("actionClass") == "explicit_protected_worktree_cleanup",
                 )
             )
-    if bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False)):
+    remove_clean_detached = (
+        bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False))
+        or str(config.get("repoSweep", {}).get("pruneWorktrees") or "") == "clean_detached_only"
+    )
+    if remove_clean_detached:
         if candidate_id:
             candidate_worktrees = []
         for item in candidate_worktrees:
