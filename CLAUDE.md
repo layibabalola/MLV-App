@@ -90,6 +90,21 @@ For eligible symbolic actions, the repo auto-quorum actor may write Codex/self
 plus independent policy-review artifacts and continue without user intervention.
 Manual-only, dirty, locked, protected, stale, or ambiguous candidates must print
 recoverable unblock detail instead of silently stopping.
+Response/final hooks remain read-only for managed session worktrees: they must
+not checkout, create worktrees, pull, reset, stash, or clean. The pre-response
+hook may create or refresh the lightweight broker manifest for the current
+response work block, recording the work block id, branch, worktree path, start
+head, dirty baseline, lease, and path claims when available.
+Dirty paths created after that broker baseline can be auto-claimed only when the
+manifest proves they were clean or absent at start, they are not generated-only,
+and no other active work block claims them. Eligible `ownedDirty` paths are
+checkpointed through exact-tuple autonomous quorum using symbolic action
+`checkpoint-owned-dirty`; the checkpoint stages only the exact owned paths,
+commits through the broker, then reruns detection and finalize. Paths already
+dirty at the broker baseline are `mixedDirty`/`unownedDirty` when they overlap a
+claim or candidate delta and must block with
+`baseline-dirty-overlaps-candidate` plus exact recovery detail rather than being
+whole-file checkpointed.
 Repo sweep retention is an investigated outcome, not a first-pass label. For
 non-protected retained candidates, the sweep actor writes durable candidate
 investigation reports under `.claude-state/closeout/repo-sweep/candidate-reports/`.

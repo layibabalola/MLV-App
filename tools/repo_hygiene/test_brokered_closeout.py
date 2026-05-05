@@ -224,7 +224,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn('run_git_longpaths(repo_root, ["worktree", "add", "--detach"', text)
         self.assertIn("add_worktree = run_git_longpaths(repo_root, add_args)", text)
         self.assertIn("add = run_git_longpaths(repo_root, add_args)", text)
+        self.assertIn('run_git_longpaths(repo_root, ["worktree", "remove"', text)
+        self.assertIn('run_git_longpaths(repo_root, ["worktree", "prune"', text)
         self.assertNotIn('run_git(repo_root, ["worktree", "add"', text)
+        self.assertNotIn('run_git(repo_root, ["worktree", "remove"', text)
 
     def test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason(self) -> None:
         repo = self.init_repo(remote=False)

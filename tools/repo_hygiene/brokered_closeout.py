@@ -179,11 +179,14 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_missing_evidence_is_generated_and_committed_before_publish",
         ],
         "requiredSymbols": [
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def checkpoint_owned_dirty_action_id"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
+            {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
             {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
             {"path": "tools/agent-bridge/codex_bridge_reminder.ps1", "contains": "session_worktree_bootstrap=skipped"},
@@ -1951,10 +1954,10 @@ def is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
 
 
 def remove_worktree(repo_root: Path, path: Path) -> Dict[str, Any]:
-    result = run_git(repo_root, ["worktree", "remove", "--force", "--force", str(path)])
+    result = run_git_longpaths(repo_root, ["worktree", "remove", "--force", "--force", str(path)])
     if result.returncode != 0 and path.exists():
         shutil.rmtree(path, ignore_errors=True)
-    prune = run_git(repo_root, ["worktree", "prune"])
+    prune = run_git_longpaths(repo_root, ["worktree", "prune"])
     return {"path": str(path), "returncode": result.returncode, "stderr": result.stderr[-2000:], "pruneReturncode": prune.returncode, "pruneStderr": prune.stderr[-2000:]}
 
 
