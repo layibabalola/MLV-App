@@ -2652,9 +2652,16 @@ def cleanup_branch_after_sweep_action(repo_root: Path, config: Dict[str, Any], p
             write_audit(repo_root, config, "worktree_deletion", action, outcome="success" if action["returncode"] == 0 else "blocked")
             if action["returncode"] != 0:
                 return actions
+    force_reason = None
+    if not force_branch_delete:
+        branch_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
+        target_head = rev_parse(repo_root, f"refs/heads/{target_branch}", required=False) or str(plan["pinnedRefs"]["target"]["head"])
+        if branch_head and target_head and is_ancestor(repo_root, branch_head, target_head):
+            force_branch_delete = current_branch(repo_root) != target_branch
+            force_reason = "branch_head_is_ancestor_of_target"
     delete_flag = "-D" if force_branch_delete else "-d"
     delete = run_git(repo_root, ["branch", delete_flag, branch])
-    action = {"action": "delete_local_branch", "branch": branch, "forced": force_branch_delete, "returncode": delete.returncode, "stderr": delete.stderr[-2000:]}
+    action = {"action": "delete_local_branch", "branch": branch, "forced": force_branch_delete, "forceReason": force_reason, "returncode": delete.returncode, "stderr": delete.stderr[-2000:]}
     actions.append(action)
     write_audit(repo_root, config, "branch_deletion", action, outcome="success" if delete.returncode == 0 else "blocked")
     return actions
