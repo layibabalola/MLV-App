@@ -726,15 +726,15 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
             "generated": generated,
             "sensitive": sensitive,
         }
-        if in_delta or claimed_by_self:
+        if owner and owner != block_id:
+            enriched["classificationReason"] = "path is claimed by another work block"
+            foreign_dirty.append(enriched)
+        elif in_delta or claimed_by_self:
             enriched["classificationReason"] = "path overlaps completed branch delta or block claim"
             owned_dirty.append(enriched)
         elif sensitive and bool(config.get("dirty", {}).get("sensitiveUnownedBlocks", True)):
             enriched["classificationReason"] = "unclaimed sensitive path"
             unowned_dirty.append(enriched)
-        elif owner and owner != block_id:
-            enriched["classificationReason"] = "path is claimed by another work block"
-            foreign_dirty.append(enriched)
         elif unclaimed_default == "foreign":
             enriched["classificationReason"] = "path is outside completed branch delta"
             foreign_dirty.append(enriched)
