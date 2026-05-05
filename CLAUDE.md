@@ -56,6 +56,54 @@ Hardening plan and audit log: `tools/agent-bridge/BRIDGE_HARDENING.md`
 
 ## Agent Bridge — Session Closeout
 
+### Repo-Owned Work Block Closeout
+
+This repo now owns the work-block completion transaction. Claude Code,
+Claude Desktop, Codex, humans, hooks, and future adapters should all call the
+same repo-local scripts instead of inventing surface-specific closeout logic.
+
+For non-trivial work, start a brokered block with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .
+```
+
+Before declaring the work complete, always run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize
+```
+
+To audit cross-branch cleanup, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .
+```
+
+The trigger must run even when mutation is not eligible. The detector classifies
+dirty paths as `ownedDirty`, `unownedDirty`, or `foreignDirty`; foreign dirty
+work is retained and audited, never stashed or deleted by this workflow.
+High-impact mutation, including repo-sweep pruning, requires the exact review
+tuple recorded by the broker: candidate id, action id, evidence hash, policy
+hash, and pinned refs.
+For eligible symbolic actions, the repo auto-quorum actor may write Codex/self
+plus independent policy-review artifacts and continue without user intervention.
+Manual-only, dirty, locked, protected, stale, or ambiguous candidates must print
+recoverable unblock detail instead of silently stopping.
+Repo sweep retention is an investigated outcome, not a first-pass label. For
+non-protected retained candidates, the sweep actor writes durable candidate
+investigation reports under `.claude-state/closeout/repo-sweep/candidate-reports/`.
+Clean merge-required branches and clean checked-out branches can be promoted to
+auto-quorum clean integration, stale clean locked worktrees can be cleaned,
+redundant backup branches can be pruned, and dirty worktrees must carry
+owned/unowned/foreign classification plus a recovery command.
+Split-required owned dirty work should not stay a passive blocker. When policy
+allows, the dirty-split actor plans exact dirty paths, obtains autonomous quorum
+for symbolic action `split`, preserves those paths on a broker-claimed
+`closeout/split/...` branch/worktree, removes only those exact paths from the
+original after preservation is proven, audits the outcome, and then repair or
+finalize can rerun.
+
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 
 The pre-final hook (`codex_pre_final.ps1`) is advisory and may not fire on

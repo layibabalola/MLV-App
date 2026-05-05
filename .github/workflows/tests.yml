@@ -10,6 +10,8 @@ on:
       - "platform/qt/**"
       - "tools/repo_hygiene/**"
       - "tools/repo-hygiene/**"
+      - "tools/closeout/**"
+      - "closeout.config.json"
       - "AGENTS.md"
       - "CLAUDE.md"
   push:
@@ -22,6 +24,8 @@ on:
       - "platform/qt/**"
       - "tools/repo_hygiene/**"
       - "tools/repo-hygiene/**"
+      - "tools/closeout/**"
+      - "closeout.config.json"
       - "AGENTS.md"
       - "CLAUDE.md"
 
@@ -45,6 +49,7 @@ jobs:
       - name: Run repo hygiene Python tests
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
+          python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
   windows-scaffold:
@@ -70,6 +75,7 @@ jobs:
       - name: Run repo hygiene Python tests
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
+          python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python tools\repo-hygiene\hygiene.py --repo-root . verify-policy
 
       - name: Install aqtinstall
