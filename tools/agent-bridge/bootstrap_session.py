@@ -725,6 +725,10 @@ def bootstrap(
     desktop_thread_id = _desktop_thread_id_for_bootstrap(agent, watcher_config)
     if retargeted_to_parent and bootstrap_parent_thread_id:
         desktop_thread_id = bootstrap_parent_thread_id
+    elif bootstrap_origin == "parent" and bootstrap_thread_id:
+        # The active parent thread is the wake target of record.  A stale
+        # watcher-config parent id must not pin future wakes to an archived chat.
+        desktop_thread_id = bootstrap_thread_id
     if bootstrap_origin == "parent" and not replace_trusted_parent:
         drift = _trusted_parent_thread_drift(
             bridge,
@@ -782,6 +786,8 @@ def bootstrap(
             desktop_thread_id=desktop_thread_id,
             bootstrap_thread_id=bootstrap_thread_id,
             bootstrap_parent_thread_id=bootstrap_parent_thread_id,
+            project_canonical_root=str(identity.get("canonical_root") or ""),
+            project_identity_source=str(identity.get("source") or ""),
         )
         prompt = (
             _pairing_prompt(
@@ -863,6 +869,8 @@ def bootstrap(
         allow_supersede=bootstrap_origin != "unknown" or resolved_pairing["intent"] == "active_primary",
         trusted_parent_eligible=bootstrap_origin == "parent",
         pairing_intent=resolved_pairing["intent"],
+        project_canonical_root=str(identity.get("canonical_root") or ""),
+        project_identity_source=str(identity.get("source") or ""),
     )
     drained: List[Dict[str, Any]] = activation.data.get("drained_messages", []) if activation.ok else []
     peer_session = activation.data.get("active_peer_session") if activation.ok else None
@@ -904,6 +912,8 @@ def bootstrap(
         bootstrap_parent_thread_id=bootstrap_parent_thread_id,
         trusted_parent_session_id=activation.data.get("trusted_parent_session") if activation.ok else None,
         subagent_signals=subagent_signals,
+        project_canonical_root=str(identity.get("canonical_root") or ""),
+        project_identity_source=str(identity.get("source") or ""),
     )
     bridge.record_session_runtime_metadata(
         agent=agent,
@@ -912,6 +922,8 @@ def bootstrap(
         desktop_thread_id=desktop_thread_id,
         bootstrap_thread_id=bootstrap_thread_id,
         bootstrap_parent_thread_id=bootstrap_parent_thread_id,
+        project_canonical_root=str(identity.get("canonical_root") or ""),
+        project_identity_source=str(identity.get("source") or ""),
     )
     write_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent), peer_breadcrumb)
 

@@ -54,6 +54,121 @@ Hardening plan and audit log: `tools/agent-bridge/BRIDGE_HARDENING.md`
 
 ---
 
+## Agent Bridge — Session Closeout
+
+### Repo-Owned Work Block Closeout
+
+This repo now owns the work-block completion transaction. Claude Code,
+Claude Desktop, Codex, humans, hooks, and future adapters should all call the
+same repo-local scripts instead of inventing surface-specific closeout logic.
+
+For non-trivial work, start a brokered block with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .
+```
+
+Before declaring the work complete, always run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize
+```
+
+To audit cross-branch cleanup, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .
+```
+
+The trigger must run even when mutation is not eligible. The detector classifies
+dirty paths as `ownedDirty`, `unownedDirty`, or `foreignDirty`; foreign dirty
+work is retained and audited, never stashed or deleted by this workflow.
+High-impact mutation, including repo-sweep pruning, requires the exact review
+tuple recorded by the broker: candidate id, action id, evidence hash, policy
+hash, and pinned refs.
+For eligible symbolic actions, the repo auto-quorum actor may write Codex/self
+plus independent policy-review artifacts and continue without user intervention.
+Manual-only, dirty, locked, protected, stale, or ambiguous candidates must print
+recoverable unblock detail instead of silently stopping.
+Repo sweep retention is an investigated outcome, not a first-pass label. For
+non-protected retained candidates, the sweep actor writes durable candidate
+investigation reports under `.claude-state/closeout/repo-sweep/candidate-reports/`.
+Clean merge-required branches and clean checked-out branches can be promoted to
+auto-quorum clean integration, stale clean locked worktrees can be cleaned,
+redundant backup branches can be pruned, and dirty worktrees must carry
+owned/unowned/foreign classification plus a recovery command.
+Split-required owned dirty work should not stay a passive blocker. When policy
+allows, the dirty-split actor plans exact dirty paths, obtains autonomous quorum
+for symbolic action `split`, preserves those paths on a broker-claimed
+`closeout/split/...` branch/worktree, removes only those exact paths from the
+original after preservation is proven, audits the outcome, and then repair or
+finalize can rerun.
+Before reporting a closeout blocker as authoritative, run the configured
+closeout tooling baseline check. Missing actors, policy fields, contract checks,
+repair paths, or required tests are `closeout_tooling_stale`; stale tooling
+output is not a final hygiene blocker. Auto-update from the configured baseline
+is allowed only when it does not overwrite dirty or broker-owned paths.
+When publish/upstream/final-push repair is blocked only by missing metrics,
+handoff, session, or closeout evidence, generate the configured evidence bundle,
+claim and commit only those evidence files, retain unrelated dirty work, and
+rerun safe publish repair before stopping.
+
+### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
+
+The pre-final hook (`codex_pre_final.ps1`) is advisory and may not fire on
+every turn. Before any response that claims bridge-related work is complete
+— any sentence containing "done", "complete", "finished", "all set", "that's
+all", or equivalent — explicitly verify all three:
+
+1. `next_pending_bridge_action` — top item is non-actionable or already
+   dispositioned (no open actionable Claude-owned items remaining)
+2. Inbox is drained — `check_inbox` returned empty or every surfaced message
+   is marked handled
+3. Every message surfaced in this turn has a disposition code
+   (`acting` / `parked` / `blocked` / `displaced` / `rejected`)
+
+If any of the three fails, address the debt before delivering the response.
+
+### Gap 2 — Context Pressure: Proactive STATUS_UPDATE
+
+User stops are undetectable — accept as a known gap with no mitigation.
+For context compaction (the only closeable case):
+
+**Proxy signals for approaching session limits:**
+- A prior compaction message is visible in context
+- Substantial bridge traffic has occurred in this session (many send/receive cycles)
+- System context contains a compaction notice
+
+When any proxy signal is present, before concluding substantial bridge work:
+1. Send Codex a `STATUS_UPDATE` containing: active session GUID, summary of
+   open ledger items, any unsent/queued messages, and the note
+   "Claude context approaching limits — bootstrap next session to resume"
+2. Record the STATUS_UPDATE as sent in the ledger to prevent duplicate sends
+
+Do NOT wait for the hard context wall. Send proactively when the first
+proxy signal appears — treat it as a voluntary graceful shutdown.
+
+### Gap 3 — Monitor Liveness Before "Waiting for Codex"
+
+Before any response that says Claude is waiting for Codex's reply, follow
+the full recovery chain — do not skip steps:
+
+1. Monitor task active in-context with correct session id → proceed
+2. Monitor missing or stale → attempt restart with known session id and params
+3. Session id unknown (compaction wiped it, bootstrap never ran) → run
+   `bootstrap_session.py` first to re-register and get a valid GUID,
+   then start Monitor
+4. Only after Monitor is confirmed live → deliver the response
+
+Skipping to step 2 without a valid session id produces a broken Monitor
+that silently fails — still sitting doing nothing, just with an
+active-looking task. The goal is a **confirmed-live** Monitor, not just
+a started one.
+
+Also check at the start of any turn resuming after a long idle.
+
+---
+
 ## Architecture (Locked — Do Not Deviate)
 
 - **Fork of MLV-App** — not a rewrite, not a new tool

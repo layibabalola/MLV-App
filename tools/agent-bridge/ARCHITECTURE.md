@@ -67,7 +67,8 @@ is described in `BRIDGE_LAN_TRANSPORT_SPEC.md` (Tier 3) and
 |---|---|
 | `agent_bridge.py` | Compatibility facade and current orchestration layer for routing, inboxes, sessions, receipts, and diagnostics. |
 | `server.py` | Import-safe FastMCP server factory and stdio entrypoint. |
-| `server_wrapper.py` | Resolver-aware Desktop MCP launcher; rejects moved roots, audits startup, then execs `server.py` without proxying stdio. |
+| `server_wrapper_trampoline.py` | Stable Desktop MCP entrypoint; keeps host stdio open and relaunches `server_wrapper.py` after handled exit-77 self-restarts. |
+| `server_wrapper.py` | Resolver-aware Desktop MCP launcher; rejects moved roots, audits startup, supervises `server.py`, and exits 77 when the wrapper itself changed. |
 | `core/storage.py` | JSON/JSONL helpers, atomic writes, schema-version helper, and quarantine of malformed JSONL rows. |
 | `core/addressing.py` | Typed address/message/sender models used by contract tests and routing seams. |
 | `core/routing.py` | Pure routing resolver for active/superseded/project/agent-level decisions. |
@@ -280,10 +281,16 @@ Codex wake is not equivalent to Claude Monitor. Claude Monitor is scoped to
 the active Claude conversation and must be restarted after compaction or a new
 Claude session start. Codex wake is only thread-scoped when the protected parent
 thread id is configured and the `codex://threads/<id>` navigation succeeds;
-the default `targeted_sendkeys` path requires that thread identity and fails
-closed when it cannot verify it. The old active-window broad SendKeys behavior
-is retained only as the unsafe `wake_provider="sendkeys"` debug/legacy mode and
-must not be used for normal pairing.
+the default `targeted_sendkeys` path requires that target thread identity and
+uses the foreground-Codex guard. Strict callers that omit
+`-AllowForegroundCodexThreadDisplacement` fail closed when foreground Codex is
+on a different or unprovable thread and no exact `RestoreThreadId` is available.
+The production watcher passes that displacement switch explicitly, so near
+realtime inbox nudging still wins and the possible thread displacement is
+audited as `targeted_wake_delivery_priority_no_restore`.
+`wake_provider="sendkeys"` is retained only as a legacy/debug outer-helper path;
+it carries the same target and displacement flags, but `targeted_sendkeys`
+remains the normal pairing mode.
 
 If no receipt appears after the grace period, the watcher retries per
 `WAKE_MAX_RETRIES`. After the retry limit, it writes a

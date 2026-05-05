@@ -277,7 +277,7 @@ all wake delivery requires window activation.
 
 ## D6 - User UI State Restoration Boundary
 
-**Status:** Initial guard implemented in `wake_codex.ps1` Stage 4.
+**Status:** Guard implemented in `wake_codex.ps1` Stage 4.
 
 ### Problem
 
@@ -296,15 +296,24 @@ Targeted SendKeys wake treats user UI state as transactional:
   the cached target thread title, wake skips deeplink navigation and types into
   the already-visible target.
 - If the previous foreground app is Codex but the current visible thread is a
-  different or unprovable thread, wake defers instead of navigating, unless a
-  future exact `RestoreThreadId` is available and valid.
+  different or unprovable thread, strict wake defers instead of navigating,
+  unless an exact `RestoreThreadId` is available and valid.
+- Production targeted SendKeys wake explicitly opts into delivery priority with
+  `-AllowForegroundCodexThreadDisplacement`: if the target thread id is valid
+  but `RestoreThreadId` is empty, the wake may navigate anyway and records
+  `foreground_codex_delivery_priority_no_restore`. This can leave the user on
+  the bridge thread, but the user can manually navigate back; unread inbox work
+  and backpressure have much weaker recovery.
 
 Title matching is only a practical restoration guard, not a stable identity
-proof. DOM/app-server telemetry may later replace it with exact visible
-thread-id detection.
+proof. Generic Desktop titles such as `Codex` are recorded as unknown, not as
+project mismatches. DOM/app-server telemetry may later replace title checks with
+exact visible thread-id detection.
 
-Failure mode: emit `targeted_wake_refused` with
-`foreground_codex_restore_unproven_*` and exit with retryable code `16`.
+Strict failure mode: emit `targeted_wake_refused` with
+`foreground_codex_restore_thread_unavailable` and exit with retryable code `16`.
+Delivery-priority mode proceeds and emits
+`targeted_wake_delivery_priority_no_restore` for auditability.
 
 ---
 

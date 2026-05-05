@@ -293,12 +293,25 @@ def configure_watcher(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", str(wake_script),
+            "-Message", "Watcher says check bridge inbox",
             "-IdleThresholdSeconds", str(settings.wake_idle_threshold_seconds),
             "-MaxWaitSeconds", str(settings.wake_max_wait_seconds),
             "-StateDir", str(state_dir),
             "-LockFile", str(state_dir.parent / "wake_codex.lock"),
             "-ThreadId", "{desktop_thread_id}",
+            "-RestoreThreadId", "{restore_thread_id}",
             "-ExpectedProjectToken", "{project}",
+        ]
+        hardening_flags = [
+            "-RequireThreadId",
+            "-RequireConstantMessage",
+            "-VerifyTargetTwice",
+            "-VerifyTargetGapMilliseconds", "50",
+            "-MaxPreSendRaceMilliseconds", "500",
+            "-PostTypingVerify",
+            "-WarnOnTitleMismatch",
+            "-ProtectForegroundCodexThread",
+            "-AllowForegroundCodexThreadDisplacement",
         ]
         if settings.wake_provider == "targeted_sendkeys":
             wake_command_template.extend(
@@ -306,16 +319,11 @@ def configure_watcher(
                     # Run inner wake directly — avoids spawning a hidden child process
                     # which has no Win32 input queue and blocks AttachThreadInput.
                     "-RunInnerWake",
-                    "-RequireThreadId",
-                    "-RequireConstantMessage",
-                    "-VerifyTargetTwice",
-                    "-VerifyTargetGapMilliseconds", "50",
-                    "-MaxPreSendRaceMilliseconds", "500",
-                    "-PostTypingVerify",
-                    "-WarnOnTitleMismatch",
-                    "-ProtectForegroundCodexThread",
+                    *hardening_flags,
                 ]
             )
+        else:
+            wake_command_template.extend(hardening_flags)
     elif agent == "codex" and settings.wake_provider in {"app_server", "app_server_then_redraw"}:
         wake_script = Path(__file__).with_name("codex_app_server_wake.py")
         wake_command_template = [

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -124,6 +125,7 @@ RATE_LIMIT_WINDOW_S = 60
 SESSION_REGISTRY_SCHEMA_VERSION = 3
 HANDOFF_RE = re.compile(r"\[\[handoff:(claude|codex)(?:\s+([a-z0-9_-]+))?\]\]", re.IGNORECASE)
 STOP_RE = re.compile(r"\[\[(done|handoff-to-user|pause-relay)\]\]", re.IGNORECASE)
+CODEX_APP_DOM_TITLE_CACHE_TTL_S = 15.0
 
 
 @dataclasses.dataclass
@@ -470,6 +472,8 @@ class AgentBridge:
         self._lock = threading.Lock()
         self.auth = LocalUserAuth(machine_id=LOCAL_DEFAULT_MACHINE_ID)
         self.transport = LocalFilesystemTransport()
+        self.live_app_dom_titles = False
+        self._codex_app_dom_title_cache: Optional[Dict[str, Any]] = None
 
     @property
     def state_path(self) -> Path:
@@ -498,6 +502,10 @@ class AgentBridge:
     @property
     def reviewer_wait_state_path(self) -> Path:
         return self.state_dir / "reviewer-wait-state.jsonl"
+
+    @property
+    def guardrail_debt_path(self) -> Path:
+        return self.state_dir / "guardrail-debt.jsonl"
 
     @property
     def cross_project_pairs_dir(self) -> Path:
@@ -611,10 +619,48 @@ class AgentBridge:
         info = self._bucket_info(registry, session_id)
         return self._backpressure_limit_for_level(info["inbox_level"])
 
-    def _unread_work_counts_by_bucket(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    def _bucket_accepts_work_backpressure(
+        self,
+        registry: Dict[str, Any],
+        receiver_agent: str,
+        session_id: str,
+    ) -> bool:
+        info = self._bucket_info(registry, session_id)
+        if info["inbox_level"] != INBOX_LEVEL_SESSION:
+            return True
+        record = info.get("record")
+        if not isinstance(record, dict):
+            return True
+        return (
+            record.get("agent") == receiver_agent
+            and record.get("status") == "active"
+            and info.get("active_session") == session_id
+        )
+
+    def _row_counts_for_backpressure(
+        self,
+        registry: Dict[str, Any],
+        receiver_agent: str,
+        row: Dict[str, Any],
+    ) -> bool:
+        if row.get("read_at") or row.get("superseded_at") or row.get("marker_variant") == "control":
+            return False
+        bucket = str(row.get("session_id") or DEFAULT_SESSION_ID)
+        return self._bucket_accepts_work_backpressure(registry, receiver_agent, bucket)
+
+    def _unread_work_counts_by_bucket(
+        self,
+        rows: List[Dict[str, Any]],
+        registry: Optional[Dict[str, Any]] = None,
+        receiver_agent: Optional[str] = None,
+    ) -> Dict[str, int]:
         counts: Dict[str, int] = {}
+        receiver = (receiver_agent or "").strip().lower()
         for row in rows:
-            if row.get("read_at") or row.get("superseded_at") or row.get("marker_variant") == "control":
+            if registry is not None and receiver in AGENTS:
+                if not self._row_counts_for_backpressure(registry, receiver, row):
+                    continue
+            elif row.get("read_at") or row.get("superseded_at") or row.get("marker_variant") == "control":
                 continue
             bucket = str(row.get("session_id") or DEFAULT_SESSION_ID)
             counts[bucket] = counts.get(bucket, 0) + 1
@@ -763,9 +809,7 @@ class AgentBridge:
                 row
                 for row in inbox_cache.get(receiver, [])
                 if str(row.get("session_id") or DEFAULT_SESSION_ID) == session_id
-                and not row.get("read_at")
-                and not row.get("superseded_at")
-                and row.get("marker_variant") != "control"
+                and self._row_counts_for_backpressure(registry, receiver, row)
             ]
 
         for record in pending.values():
@@ -805,7 +849,11 @@ class AgentBridge:
 
         for receiver in sorted(AGENTS):
             _ = _unread_for_bucket(receiver, "")
-            buckets = self._unread_work_counts_by_bucket(inbox_cache.get(receiver, []))
+            buckets = self._unread_work_counts_by_bucket(
+                inbox_cache.get(receiver, []),
+                registry,
+                receiver,
+            )
             for session_id, unread_count in sorted(buckets.items()):
                 if (receiver, session_id) in seen_keys:
                     continue
@@ -962,6 +1010,80 @@ class AgentBridge:
             )
             resolutions.append(resolution)
         return resolutions
+
+    def _self_heal_stale_backpressure_pending(
+        self,
+        state: Dict[str, Any],
+        registry: Dict[str, Any],
+        *,
+        receiver_agent: str,
+        via: str,
+    ) -> List[Dict[str, Any]]:
+        pending = state.setdefault("backpressure_pending", {})
+        if not isinstance(pending, dict):
+            state["backpressure_pending"] = {}
+            return []
+        receiver = normalize_agent(receiver_agent)
+        inbox_rows = self.transport.read_inbox(
+            self._identity(receiver, None),
+            self.inbox_path(receiver),
+            unread_only=False,
+        )
+        healed: List[Dict[str, Any]] = []
+        for key, record in list(pending.items()):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("receiver_agent") or "").strip().lower() != receiver:
+                continue
+            bucket = str(record.get("session_id") or DEFAULT_SESSION_ID)
+            info = self._bucket_info(registry, bucket)
+            limit = record.get("limit")
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                limit = self._backpressure_limit_for_bucket(registry, bucket)
+            if limit is None:
+                continue
+            unread_work = [
+                row
+                for row in inbox_rows
+                if str(row.get("session_id") or DEFAULT_SESSION_ID) == bucket
+                and self._row_counts_for_backpressure(registry, receiver, row)
+            ]
+            unread_count = len(unread_work)
+            session_record = info.get("record") if info.get("inbox_level") == INBOX_LEVEL_SESSION else None
+            session_inactive = bool(
+                session_record
+                and (
+                    session_record.get("status") != "active"
+                    or info.get("active_session") != bucket
+                )
+            )
+            if not session_inactive and unread_count >= int(limit):
+                continue
+            reason = "session_not_active" if session_inactive else "unread_below_limit"
+            pending.pop(key, None)
+            resolution = {
+                "receiver_agent": receiver,
+                "session_id": bucket,
+                "via": via,
+                "reason": reason,
+                "unread_work_after": unread_count,
+                "limit": int(limit),
+                "first_rejected_at": record.get("first_rejected_at"),
+                "last_rejected_at": record.get("last_rejected_at"),
+            }
+            self._audit(
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": utc_now(),
+                    "action": "backpressure_self_healed",
+                    "accepted": True,
+                    **resolution,
+                }
+            )
+            healed.append(resolution)
+        return healed
 
     def _audit(self, event: Dict[str, Any]) -> None:
         agent = str(event.get("from") or event.get("agent") or "codex").strip().lower()
@@ -2151,11 +2273,55 @@ class AgentBridge:
         )
         return record
 
+    def _primary_pairing_intent_allows_autopair(self, record: Optional[Dict[str, Any]]) -> bool:
+        """Return whether a session record may materialize the primary pair."""
+        if not isinstance(record, dict):
+            return True
+        intent = str(record.get("pairing_intent") or "").strip().lower().replace("-", "_")
+        return intent in {"", "active_primary"}
+
+    def _project_canonical_root_key(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            resolved = str(Path(text).resolve())
+        except OSError:
+            resolved = text
+        return resolved.replace("\\", "/").rstrip("/").casefold()
+
+    def _primary_pair_project_roots_match(
+        self,
+        left_record: Optional[Dict[str, Any]],
+        right_record: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not isinstance(left_record, dict) or not isinstance(right_record, dict):
+            return True
+        left_root = self._project_canonical_root_key(left_record.get("project_canonical_root"))
+        right_root = self._project_canonical_root_key(right_record.get("project_canonical_root"))
+        return not left_root or not right_root or left_root == right_root
+
     def _ensure_primary_pair_record(self, project_entry: Dict[str, Any], project: str) -> Optional[Dict[str, Any]]:
         active = project_entry.setdefault("active", {})
         claude_session_id = active.get("claude")
         codex_session_id = active.get("codex")
         if not claude_session_id or not codex_session_id:
+            return None
+        sessions = project_entry.setdefault("sessions", {})
+        claude_record = sessions.get(str(claude_session_id))
+        codex_record = sessions.get(str(codex_session_id))
+        if not self._primary_pairing_intent_allows_autopair(
+            claude_record if isinstance(claude_record, dict) else None
+        ):
+            return None
+        if not self._primary_pairing_intent_allows_autopair(
+            codex_record if isinstance(codex_record, dict) else None
+        ):
+            return None
+        if not self._primary_pair_project_roots_match(
+            claude_record if isinstance(claude_record, dict) else None,
+            codex_record if isinstance(codex_record, dict) else None,
+        ):
             return None
         return self._ensure_pair_record(
             project_entry,
@@ -2234,6 +2400,8 @@ class AgentBridge:
                 "desktop_thread_id": None,
                 "bootstrap_thread_id": None,
                 "bootstrap_parent_thread_id": None,
+                "project_canonical_root": None,
+                "project_identity_source": None,
                 "tenant_id": LOCAL_DEFAULT_TENANT_ID,
             },
         )
@@ -2246,8 +2414,24 @@ class AgentBridge:
         record.setdefault("desktop_thread_id", None)
         record.setdefault("bootstrap_thread_id", None)
         record.setdefault("bootstrap_parent_thread_id", None)
+        record.setdefault("project_canonical_root", None)
+        record.setdefault("project_identity_source", None)
         record.setdefault("tenant_id", LOCAL_DEFAULT_TENANT_ID)
         return record
+
+    def _record_project_identity_metadata(
+        self,
+        record: Dict[str, Any],
+        *,
+        canonical_root: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        root = str(canonical_root or "").strip()
+        if root:
+            record["project_canonical_root"] = root
+        identity_source = str(source or "").strip()
+        if identity_source:
+            record["project_identity_source"] = identity_source
 
     def _clear_pending_pair_fields(self, record: Dict[str, Any]) -> None:
         for key in PENDING_PAIR_FIELDS:
@@ -2267,6 +2451,8 @@ class AgentBridge:
         desktop_thread_id: Optional[str] = None,
         bootstrap_thread_id: Optional[str] = None,
         bootstrap_parent_thread_id: Optional[str] = None,
+        project_canonical_root: Optional[str] = None,
+        project_identity_source: Optional[str] = None,
     ) -> BridgeResult:
         with self._locked():
             try:
@@ -2282,6 +2468,11 @@ class AgentBridge:
             record["desktop_thread_id"] = (desktop_thread_id or "").strip() or None
             record["bootstrap_thread_id"] = (bootstrap_thread_id or "").strip() or None
             record["bootstrap_parent_thread_id"] = (bootstrap_parent_thread_id or "").strip() or None
+            self._record_project_identity_metadata(
+                record,
+                canonical_root=project_canonical_root,
+                source=project_identity_source,
+            )
             for pair in (project_entry.get("pairs") or {}).values():
                 if isinstance(pair, dict) and pair.get("codex_session_id") == session:
                     pair["codex_desktop_thread_id"] = record.get("desktop_thread_id")
@@ -2658,6 +2849,8 @@ class AgentBridge:
         desktop_thread_id: Optional[str] = None,
         bootstrap_thread_id: Optional[str] = None,
         bootstrap_parent_thread_id: Optional[str] = None,
+        project_canonical_root: Optional[str] = None,
+        project_identity_source: Optional[str] = None,
     ) -> BridgeResult:
         """Register a same-project chat without mutating the active primary pair.
 
@@ -2739,6 +2932,11 @@ class AgentBridge:
                 record["pending_pair_timeout_seconds"] = consent_timeout_seconds
                 record["pending_pair_target_active_session"] = active.get(owner)
                 record["pending_pair_peer_session"] = active.get(peer_agent)
+            self._record_project_identity_metadata(
+                record,
+                canonical_root=project_canonical_root,
+                source=project_identity_source,
+            )
             project_entry["updated_at"] = now
             self._save_session_registry(registry)
             self._audit(
@@ -2783,6 +2981,8 @@ class AgentBridge:
         allow_supersede: bool = True,
         trusted_parent_eligible: bool = False,
         pairing_intent: Optional[str] = None,
+        project_canonical_root: Optional[str] = None,
+        project_identity_source: Optional[str] = None,
     ) -> BridgeResult:
         with self._locked():
             try:
@@ -2872,6 +3072,11 @@ class AgentBridge:
             record["bootstrap_origin"] = bootstrap_origin
             if pairing_intent:
                 record["pairing_intent"] = str(pairing_intent).strip().lower().replace("-", "_")
+            self._record_project_identity_metadata(
+                record,
+                canonical_root=project_canonical_root,
+                source=project_identity_source,
+            )
             if activation_status == "active":
                 self._clear_non_primary_fields(record)
             record["bootstrap_promoted_to_trusted"] = False
@@ -4582,7 +4787,7 @@ class AgentBridge:
 
             unread_work = [
                 row for row in self._unread_for(target, delivery_bucket)
-                if row.get("marker_variant") != "control"
+                if self._row_counts_for_backpressure(registry, target, row)
             ]
             delivery_backpressure_limit = self._backpressure_limit_for_level(delivery_level)
             is_control_message = marker["marker_variant"] == "control"
@@ -4983,7 +5188,7 @@ class AgentBridge:
             if mark_read and unread:
                 now = utc_now()
                 unread_ids = {row["id"] for row in unread}
-                before_counts = self._unread_work_counts_by_bucket(rows)
+                before_counts = self._unread_work_counts_by_bucket(rows, registry, target)
                 read_rows = [dict(row) for row in rows if row.get("id") in unread_ids]
                 for row in rows:
                     if row.get("id") in unread_ids:
@@ -5000,7 +5205,7 @@ class AgentBridge:
                     registry,
                     receiver_agent=target,
                     before_counts=before_counts,
-                    after_counts=self._unread_work_counts_by_bucket(rows),
+                    after_counts=self._unread_work_counts_by_bucket(rows, registry, target),
                     read_rows=read_rows,
                     via="check_inbox",
                 )
@@ -5037,12 +5242,32 @@ class AgentBridge:
                 implementation_ack = {"changed": False}
                 catchup_digests = []
 
+            backpressure_self_healed: List[Dict[str, Any]] = []
+            if record_seen:
+                state = self._load_state()
+                backpressure_self_healed = self._self_heal_stale_backpressure_pending(
+                    state,
+                    registry,
+                    receiver_agent=target,
+                    via="check_inbox",
+                )
+                if backpressure_self_healed:
+                    self._save_state(state)
+
             if not unread:
                 if session is None:
                     scope = "all buckets"
                 else:
                     scope = "session %s" % session if not include_parents else "session %s (+parents)" % session
-                return BridgeResult(True, "empty", "No unread bridge messages for %s in %s." % (target, scope))
+                data: Dict[str, Any] = {}
+                if backpressure_self_healed:
+                    data["backpressure_self_healed"] = backpressure_self_healed
+                return BridgeResult(
+                    True,
+                    "empty",
+                    "No unread bridge messages for %s in %s." % (target, scope),
+                    data,
+                )
 
             delivered = "\n\n".join(row["delivered_message"] for row in unread)
             returned_buckets = sorted({str(row.get("session_id")) for row in unread})
@@ -5055,6 +5280,7 @@ class AgentBridge:
                     "messages": unread,
                     "buckets": returned_buckets if buckets is None else buckets,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "backpressure_self_healed": backpressure_self_healed,
                     "implementation_ack": implementation_ack,
                     "catchup_digests": catchup_digests,
                 },
@@ -5167,7 +5393,8 @@ class AgentBridge:
                     if mark_read:
                         now = utc_now()
                         unread_ids = {row["id"] for row in unread}
-                        before_counts = self._unread_work_counts_by_bucket(rows)
+                        registry = self._load_session_registry()
+                        before_counts = self._unread_work_counts_by_bucket(rows, registry, target)
                         read_rows = [dict(row) for row in rows if row.get("id") in unread_ids]
                         for row in rows:
                             if row.get("id") in unread_ids:
@@ -5178,14 +5405,13 @@ class AgentBridge:
                             rows,
                             replace_session_ids=valid_sessions,
                         )
-                        registry = self._load_session_registry()
                         state = self._load_state()
                         backpressure_resolutions = self._resolve_backpressure_after_read(
                             state,
                             registry,
                             receiver_agent=target,
                             before_counts=before_counts,
-                            after_counts=self._unread_work_counts_by_bucket(rows),
+                            after_counts=self._unread_work_counts_by_bucket(rows, registry, target),
                             read_rows=read_rows,
                             via="wait_inbox",
                         )
@@ -5283,7 +5509,8 @@ class AgentBridge:
             path = self.inbox_path(target)
             target_identity = self._identity(target, session)
             rows = self.transport.read_inbox(target_identity, path, unread_only=False)
-            before_counts = self._unread_work_counts_by_bucket(rows)
+            registry = self._load_session_registry()
+            before_counts = self._unread_work_counts_by_bucket(rows, registry, target)
             now = utc_now()
             matched = False
             changed = False
@@ -5329,14 +5556,13 @@ class AgentBridge:
 
             backpressure_resolutions: List[Dict[str, Any]] = []
             if changed and read_rows:
-                registry = self._load_session_registry()
                 state = self._load_state()
                 backpressure_resolutions = self._resolve_backpressure_after_read(
                     state,
                     registry,
                     receiver_agent=target,
                     before_counts=before_counts,
-                    after_counts=self._unread_work_counts_by_bucket(rows),
+                    after_counts=self._unread_work_counts_by_bucket(rows, registry, target),
                     read_rows=read_rows,
                     via="mark_read",
                 )
@@ -5356,6 +5582,17 @@ class AgentBridge:
                 implementation_ack = {"changed": False}
                 catchup_digests = []
 
+            state = self._load_state()
+            registry = self._load_session_registry()
+            backpressure_self_healed = self._self_heal_stale_backpressure_pending(
+                state,
+                registry,
+                receiver_agent=target,
+                via="mark_read",
+            )
+            if backpressure_self_healed:
+                self._save_state(state)
+
             self._audit(
                 {
                     "id": str(uuid.uuid4()),
@@ -5367,6 +5604,7 @@ class AgentBridge:
                     "accepted": True,
                     "changed": changed,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "backpressure_self_healed": backpressure_self_healed,
                     "implementation_ack": implementation_ack,
                     "catchup_digests": catchup_digests,
                 }
@@ -5380,6 +5618,7 @@ class AgentBridge:
                     "changed": changed,
                     "stale_bypass": stale_bypass,
                     "backpressure_resolutions": backpressure_resolutions,
+                    "backpressure_self_healed": backpressure_self_healed,
                     "implementation_ack": implementation_ack,
                     "catchup_digests": catchup_digests,
                 },
@@ -5475,8 +5714,34 @@ class AgentBridge:
                 recent.append(item)
         return len(recent) >= WAKE_PREFIRE_LIMIT
 
-    def _request_backpressure_nudge(self, *, agent: str, session: str, reason: str) -> Dict[str, Any]:
-        if self._wake_breaker_open_for_session(session):
+    def _set_next_override_wake_message(self, message: str) -> None:
+        """Write an initiator label into watcher state for the next wake fire.
+
+        The watcher consumes this one-shot field immediately after using it so
+        subsequent fires (retries, unrelated messages) revert to the default
+        "Watcher says check bridge inbox" template value.
+        """
+        watcher_state = read_json(
+            self.watcher_state_path,
+            {"seen_ids": [], "pending_wake_verifications": []},
+        )
+        watcher_state["next_override_wake_message"] = message
+        write_json(self.watcher_state_path, watcher_state)
+
+    def _request_backpressure_nudge(self, *, agent: str, session: str, reason: str, nudge_wake_message: Optional[str] = None) -> Dict[str, Any]:
+        state = self._load_state()
+        registry = self._load_session_registry()
+        backpressure_self_healed = self._self_heal_stale_backpressure_pending(
+            state,
+            registry,
+            receiver_agent=agent,
+            via="nudge_peer",
+        )
+        nudgeable_bucket = self._bucket_accepts_work_backpressure(registry, agent, session)
+        if not nudgeable_bucket:
+            status = "backpressure_rejected_no_nudge_no_unread"
+            result = {"status": status, "session_id": session, "reason": "session_not_active"}
+        elif self._wake_breaker_open_for_session(session):
             status = "backpressure_rejected_no_nudge_breaker_open"
             result = {"status": status, "session_id": session, "reason": "wake_breaker_open"}
         elif self._wake_prefire_limited_for_session(session):
@@ -5485,7 +5750,7 @@ class AgentBridge:
         else:
             unread_work = [
                 row for row in self._unread_for(agent, session)
-                if row.get("marker_variant") != "control"
+                if self._row_counts_for_backpressure(registry, agent, row)
             ]
             if not unread_work:
                 status = "backpressure_rejected_no_nudge_no_unread"
@@ -5500,6 +5765,8 @@ class AgentBridge:
                 changed = message_id in seen_ids
                 if changed:
                     watcher_state["seen_ids"] = [item for item in seen_ids if item != message_id]
+                    if nudge_wake_message:
+                        watcher_state["next_override_wake_message"] = nudge_wake_message
                     write_json(self.watcher_state_path, watcher_state)
                 status = "backpressure_rejected_nudge_attempted"
                 result = {
@@ -5508,6 +5775,9 @@ class AgentBridge:
                     "message_id": message_id,
                     "wake_rearmed": changed,
                 }
+        if backpressure_self_healed:
+            self._save_state(state)
+            result["backpressure_self_healed"] = backpressure_self_healed
         self._audit(
             {
                 "id": str(uuid.uuid4()),
@@ -5877,35 +6147,52 @@ class AgentBridge:
                 },
             )
 
+    def _resume_wake_for_session_unlocked(
+        self,
+        session: str,
+        *,
+        override_wake_message: str = "User says check bridge inbox",
+    ) -> Dict[str, Any]:
+        payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+        sessions = payload.setdefault("sessions", {})
+        changed = bool(sessions.pop(session, None) is not None)
+        payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
+        payload["updated_at"] = utc_now()
+        if changed:
+            write_json(self.wake_breaker_path, payload)
+            if override_wake_message:
+                self._set_next_override_wake_message(override_wake_message)
+        self._audit(
+            {
+                "id": str(uuid.uuid4()),
+                "timestamp": utc_now(),
+                "action": "wake_breaker_closed",
+                "accepted": True,
+                "session_id": session,
+                "reason": "resume_call",
+                "changed": changed,
+            }
+        )
+        return {
+            "ok": True,
+            "status": "cleared" if changed else "already_clear",
+            "message": "Wake breaker cleared for %s." % session,
+            "session_id": session,
+            "changed": changed,
+        }
+
     def resume_wake_for_session(self, session_id: str) -> BridgeResult:
         with self._locked():
             try:
                 session = normalize_session(session_id)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
-            payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
-            sessions = payload.setdefault("sessions", {})
-            changed = bool(sessions.pop(session, None) is not None)
-            payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
-            payload["updated_at"] = utc_now()
-            if changed:
-                write_json(self.wake_breaker_path, payload)
-            self._audit(
-                {
-                    "id": str(uuid.uuid4()),
-                    "timestamp": utc_now(),
-                    "action": "wake_breaker_closed",
-                    "accepted": True,
-                    "session_id": session,
-                    "reason": "resume_call",
-                    "changed": changed,
-                }
-            )
+            result = self._resume_wake_for_session_unlocked(session)
             return BridgeResult(
-                True,
-                "cleared" if changed else "already_clear",
-                "Wake breaker cleared for %s." % session,
-                {"session_id": session, "changed": changed},
+                bool(result["ok"]),
+                str(result["status"]),
+                str(result["message"]),
+                {"session_id": session, "changed": result["changed"]},
             )
 
     def nudge_peer(self, agent: str, session_id: str) -> BridgeResult:
@@ -5915,6 +6202,12 @@ class AgentBridge:
                 session = normalize_session(session_id)
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
+            # Derive the initiator label from the target: whoever is nudging
+            # Codex must be Claude, and vice versa.
+            override_msg = (
+                "Claude says check bridge inbox" if target == "codex"
+                else "Codex says check bridge inbox"
+            )
             if self._wake_breaker_open_for_session(session):
                 grant = self._grant_wake_breaker_bypass(
                     session,
@@ -5922,6 +6215,8 @@ class AgentBridge:
                     granted_by=target,
                     force=False,
                 )
+                # Bypass path: watcher fires next on its own; plant the override now.
+                self._set_next_override_wake_message(override_msg)
                 return BridgeResult(
                     True,
                     grant["status"],
@@ -5932,7 +6227,39 @@ class AgentBridge:
                 agent=target,
                 session=session,
                 reason="nudge_peer",
+                nudge_wake_message=override_msg,
             )
+            if nudge.get("reason") == "session_not_active":
+                original_status = str(nudge.get("status") or "")
+                try:
+                    resume = self._resume_wake_for_session_unlocked(
+                        session,
+                        override_wake_message=override_msg,
+                    )
+                except Exception as exc:
+                    resume = {
+                        "ok": False,
+                        "status": "failed",
+                        "message": str(exc),
+                        "session_id": session,
+                        "changed": False,
+                    }
+                nudge["fallback_from_status"] = original_status
+                nudge["resume_wake_for_session"] = resume
+                nudge["status"] = "session_not_active_wake_attempted"
+                self._audit(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "timestamp": utc_now(),
+                        "action": "session_not_active_wake_attempted",
+                        "accepted": True,
+                        "agent": target,
+                        "session_id": session,
+                        "fallback_from_status": original_status,
+                        "resume_status": resume.get("status"),
+                        "resume_ok": bool(resume.get("ok")),
+                    }
+                )
             return BridgeResult(
                 True,
                 nudge["status"],
@@ -7090,19 +7417,37 @@ class AgentBridge:
             latest_refresh_time = row_time(latest_refresh)
         reconnect_required_since = latest_refresh_time or latest_launch_time
 
-        tool_activity_actions = {"check_inbox", "wait_inbox", "mark_seen", "mark_read", "mark_handled", "send_to_peer"}
-        post_launch_tool_events: List[Dict[str, Any]] = []
+        mcp_tool_proofs = [row for row in rows if row.get("action") == "mcp_tool_access_proof"]
+        host_scoped_tool_proofs: List[Dict[str, Any]] = []
+        legacy_tool_activity_actions = {"check_inbox", "wait_inbox", "mark_seen", "mark_read", "mark_handled", "send_to_peer"}
+        legacy_post_launch_tool_events: List[Dict[str, Any]] = []
         if reconnect_required_since is not None:
-            post_launch_tool_events = [
+            for row in mcp_tool_proofs:
+                if (row_time(row) or datetime.min.replace(tzinfo=timezone.utc)) <= reconnect_required_since:
+                    continue
+                try:
+                    proof_wrapper_pid = int(row.get("wrapper_pid") or 0) or None
+                except (TypeError, ValueError):
+                    proof_wrapper_pid = None
+                if wrapper_pid is not None and proof_wrapper_pid != wrapper_pid:
+                    continue
+                host_scoped_tool_proofs.append(row)
+            legacy_post_launch_tool_events = [
                 row
                 for row in rows
-                if row.get("action") in tool_activity_actions
+                if row.get("action") in legacy_tool_activity_actions
                 and (row_time(row) or datetime.min.replace(tzinfo=timezone.utc)) > reconnect_required_since
             ]
-        latest_tool_event = None
-        if post_launch_tool_events:
-            latest_tool_event = max(
-                post_launch_tool_events,
+        latest_host_scoped_tool_proof = None
+        if host_scoped_tool_proofs:
+            latest_host_scoped_tool_proof = max(
+                host_scoped_tool_proofs,
+                key=lambda row: row_time(row) or datetime.min.replace(tzinfo=timezone.utc),
+            )
+        latest_legacy_tool_event = None
+        if legacy_post_launch_tool_events:
+            latest_legacy_tool_event = max(
+                legacy_post_launch_tool_events,
                 key=lambda row: row_time(row) or datetime.min.replace(tzinfo=timezone.utc),
             )
 
@@ -7124,7 +7469,7 @@ class AgentBridge:
             except (TypeError, ValueError):
                 inner_running = None
 
-        mcp_host_likely_reconnected = bool(post_launch_tool_events)
+        mcp_host_likely_reconnected = bool(host_scoped_tool_proofs)
         impact_class = "unknown_no_wrapper_audit"
         if latest_launch is not None:
             recent_launch = latest_launch_time is not None and latest_launch_time >= recent_cutoff
@@ -7157,8 +7502,15 @@ class AgentBridge:
             "latest_refresh_required": latest_refresh,
             "latest_refresh_required_at": latest_refresh.get("timestamp") if latest_refresh else None,
             "mcp_host_likely_reconnected": mcp_host_likely_reconnected,
-            "last_tool_activity_at": latest_tool_event.get("timestamp") if latest_tool_event else None,
-            "last_tool_activity": latest_tool_event,
+            "mcp_host_proof_source": "host_scoped_tool_call" if latest_host_scoped_tool_proof else None,
+            "last_tool_activity_at": latest_host_scoped_tool_proof.get("timestamp")
+            if latest_host_scoped_tool_proof
+            else None,
+            "last_tool_activity": latest_host_scoped_tool_proof,
+            "last_mcp_tool_access_proof": latest_host_scoped_tool_proof,
+            "host_scoped_tool_proof_count": len(host_scoped_tool_proofs),
+            "legacy_post_launch_tool_activity_count": len(legacy_post_launch_tool_events),
+            "last_legacy_tool_activity": latest_legacy_tool_event,
             "impact_class": impact_class,
             "reconnect_required": impact_class in {"tool_access_risk", "client_reconnect_likely_required"},
             "error": read["error"],
@@ -7222,8 +7574,9 @@ class AgentBridge:
             for session_id, record in ((project_entry or {}).get("sessions") or {}).items():
                 if not isinstance(record, dict):
                     continue
-                runtime_display = self._runtime_display_for_session(
-                    record.get("agent"),
+                runtime_display = self._session_runtime_display_for_record(
+                    record,
+                    agent=record.get("agent"),
                     session_id=session_id,
                     project=project_name,
                 )
@@ -7864,7 +8217,7 @@ class AgentBridge:
             add(
                 "reconnect_mcp_host",
                 "high",
-                "MCP wrapper relaunched and the host has not proven tool access after that launch.",
+                "MCP wrapper relaunched and this host has not emitted a wrapper-scoped MCP tool proof after that launch.",
                 "Restart/reconnect the MCP host, then rerun bridge_health_panel(agent=\"%s\", include_extended=true)."
                 % caller,
                 safe_to_run=False,
@@ -8291,7 +8644,7 @@ class AgentBridge:
             return {}
         title_project_match = breadcrumb.get("desktop_thread_title_project_match")
         title = "" if title_project_match is False else str(breadcrumb.get("desktop_thread_title") or "").strip()
-        return {
+        display = {
             "desktop_thread_title": title or None,
             "desktop_thread_title_source": breadcrumb.get("desktop_thread_title_source"),
             "desktop_thread_title_observed_at": breadcrumb.get("desktop_thread_title_observed_at"),
@@ -8301,7 +8654,204 @@ class AgentBridge:
             "last_wake_postflight_action": breadcrumb.get("last_wake_postflight_action"),
             "last_wake_postflight_reason": breadcrumb.get("last_wake_postflight_reason"),
             "last_wake_postflight_at": breadcrumb.get("last_wake_postflight_at"),
+            "last_wake_delivery_priority_action": breadcrumb.get("last_wake_delivery_priority_action"),
+            "last_wake_delivery_priority_at": breadcrumb.get("last_wake_delivery_priority_at"),
+            "last_wake_delivery_priority_target_thread_id": breadcrumb.get("last_wake_delivery_priority_target_thread_id"),
+            "last_wake_delivery_priority_previous_thread_title": breadcrumb.get(
+                "last_wake_delivery_priority_previous_thread_title"
+            ),
+            "last_wake_delivery_priority_expected_thread_title": breadcrumb.get(
+                "last_wake_delivery_priority_expected_thread_title"
+            ),
         }
+        if agent_text == "codex" and title_project_match is not False:
+            current_title = str(display.get("desktop_thread_title") or "").strip()
+            if not current_title or current_title.lower() == "codex":
+                display.update(self._codex_thread_title_from_app_dom())
+        return display
+
+    def _codex_session_index_path(self) -> Path:
+        codex_home = os.environ.get("CODEX_HOME")
+        return (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "session_index.jsonl"
+
+    def _codex_thread_title_probe_path(self) -> Path:
+        return Path(__file__).resolve().parent / "codex_thread_title_probe.ps1"
+
+    def _codex_app_dom_snapshot(self) -> Dict[str, Any]:
+        if not self.live_app_dom_titles or sys.platform != "win32":
+            return {}
+        now = time.monotonic()
+        cached = self._codex_app_dom_title_cache
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            return dict(cached.get("snapshot") or {})
+
+        payload: Dict[str, Any] = {}
+        script_path = self._codex_thread_title_probe_path()
+        if script_path.exists():
+            try:
+                result = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=12,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    output = str(result.stdout or "").strip()
+                    if output:
+                        decoded = json.loads(output.splitlines()[-1])
+                        if isinstance(decoded, dict):
+                            payload = decoded
+            except (OSError, subprocess.SubprocessError, TimeoutError, JSONDecodeError, ValueError):
+                payload = {}
+
+        self._codex_app_dom_title_cache = {
+            "expires_at": now + CODEX_APP_DOM_TITLE_CACHE_TTL_S,
+            "snapshot": payload,
+        }
+        return dict(payload)
+
+    def _codex_thread_title_from_app_dom(self) -> Dict[str, Any]:
+        payload = self._codex_app_dom_snapshot()
+        if not payload.get("ok"):
+            return {}
+        title = str(payload.get("title") or "").strip()
+        if not title or title.lower() == "codex":
+            return {}
+        return {
+            "desktop_thread_title": title,
+            "desktop_thread_title_source": str(payload.get("source") or "codex_app_dom").strip(),
+            "desktop_thread_title_observed_at": payload.get("observed_at") or utc_now(),
+            "desktop_thread_title_project_match": None,
+            "desktop_window_title": payload.get("window_title"),
+        }
+
+    def _codex_visible_thread_titles_from_app_dom(self) -> Dict[str, Any]:
+        payload = self._codex_app_dom_snapshot()
+        if not payload.get("ok"):
+            return {}
+        titles: List[Dict[str, Any]] = []
+        for row in payload.get("visible_thread_titles") or []:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            if not title:
+                continue
+            titles.append({"title": title, "selected": bool(row.get("selected"))})
+        if not titles:
+            return {}
+        return {
+            "agent": "codex",
+            "source": "codex_app_dom_sidebar",
+            "observed_at": payload.get("observed_at") or utc_now(),
+            "selected_title": str(payload.get("title") or "").strip() or None,
+            "visible_thread_titles": titles,
+            "visible_thread_title_count": len(titles),
+        }
+
+    def _codex_thread_title_from_session_index(self, desktop_thread_id: Optional[Any]) -> Dict[str, Any]:
+        thread_id = str(desktop_thread_id or "").strip()
+        if not thread_id:
+            return {}
+        index_path = self._codex_session_index_path()
+        if not index_path.exists():
+            return {}
+        best: Optional[Dict[str, Any]] = None
+        best_updated_at: Optional[datetime] = None
+        try:
+            with index_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        row = json.loads(text)
+                    except JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict) or str(row.get("id") or "").strip() != thread_id:
+                        continue
+                    title = str(row.get("thread_name") or "").strip()
+                    if not title:
+                        continue
+                    updated_at = parse_iso_datetime(row.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc)
+                    if best is None or (best_updated_at is not None and updated_at >= best_updated_at):
+                        best = row
+                        best_updated_at = updated_at
+        except OSError:
+            return {}
+        if not best:
+            return {}
+        return {
+            "desktop_thread_title": str(best.get("thread_name") or "").strip(),
+            "desktop_thread_title_source": "codex_session_index",
+            "desktop_thread_title_observed_at": best.get("updated_at"),
+            "desktop_thread_title_project_match": None,
+        }
+
+    def _recorded_runtime_display_for_session(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        title_project_match = record.get("desktop_thread_title_project_match")
+        title = "" if title_project_match is False else str(record.get("desktop_thread_title") or "").strip()
+        display = {
+            "desktop_thread_title": title or None,
+            "desktop_thread_title_source": record.get("desktop_thread_title_source"),
+            "desktop_thread_title_observed_at": record.get("desktop_thread_title_observed_at"),
+            "desktop_thread_title_project_match": title_project_match,
+            "desktop_window_title": record.get("desktop_window_title"),
+            "desktop_thread_id": record.get("desktop_thread_id"),
+            "last_wake_postflight_action": record.get("last_wake_postflight_action"),
+            "last_wake_postflight_reason": record.get("last_wake_postflight_reason"),
+            "last_wake_postflight_at": record.get("last_wake_postflight_at"),
+            "last_wake_delivery_priority_action": record.get("last_wake_delivery_priority_action"),
+            "last_wake_delivery_priority_at": record.get("last_wake_delivery_priority_at"),
+            "last_wake_delivery_priority_target_thread_id": record.get("last_wake_delivery_priority_target_thread_id"),
+            "last_wake_delivery_priority_previous_thread_title": record.get(
+                "last_wake_delivery_priority_previous_thread_title"
+            ),
+            "last_wake_delivery_priority_expected_thread_title": record.get(
+                "last_wake_delivery_priority_expected_thread_title"
+            ),
+        }
+        if str(record.get("agent") or "").strip().lower() == "codex" and not display["desktop_thread_title"]:
+            display.update(self._codex_thread_title_from_session_index(record.get("desktop_thread_id")))
+        return display
+
+    def _session_runtime_display_for_record(
+        self,
+        record: Dict[str, Any],
+        *,
+        agent: Optional[Any],
+        session_id: Optional[Any],
+        project: Optional[Any],
+    ) -> Dict[str, Any]:
+        display = self._recorded_runtime_display_for_session(record)
+        runtime_display = self._runtime_display_for_session(
+            agent,
+            session_id=session_id,
+            project=project,
+        )
+        runtime_title = str(runtime_display.get("desktop_thread_title") or "").strip()
+        recorded_title = str(display.get("desktop_thread_title") or "").strip()
+        runtime_title_generic = runtime_title.lower() in {"codex", "claude"}
+        if runtime_display.get("desktop_thread_title_project_match") is False:
+            display["desktop_thread_title"] = None
+        for key, value in runtime_display.items():
+            if value is not None:
+                if (
+                    key.startswith("desktop_thread_title")
+                    and recorded_title
+                    and runtime_title_generic
+                    and runtime_display.get("desktop_thread_title_project_match") is None
+                ):
+                    continue
+                display[key] = value
+        return display
 
     def _session_display_label(self, session_id: Optional[Any], runtime_display: Dict[str, Any]) -> Optional[str]:
         short = self._short_id(session_id)
@@ -8410,7 +8960,12 @@ class AgentBridge:
         peer_agent = "claude" if agent == "codex" else "codex"
         active_pair = self._ensure_primary_pair_record(project_entry, project)
         actions = self._guided_pairing_actions(project_entry, agent=agent, session_id=session_id, record=record)
-        runtime_display = self._runtime_display_for_session(agent, session_id=session_id, project=project)
+        runtime_display = self._session_runtime_display_for_record(
+            record,
+            agent=agent,
+            session_id=session_id,
+            project=project,
+        )
         peer_runtime_display = self._runtime_display_for_session(
             peer_agent,
             session_id=active.get(peer_agent),
@@ -8434,6 +8989,9 @@ class AgentBridge:
             "peer_session_id": active.get(peer_agent),
             "peer_session_display": self._session_display_label(active.get(peer_agent), peer_runtime_display),
             "peer_desktop_thread_title": peer_runtime_display.get("desktop_thread_title"),
+            "peer_desktop_thread_title_project_match": peer_runtime_display.get(
+                "desktop_thread_title_project_match"
+            ),
             "pair_id": active_pair.get("pair_id") if isinstance(active_pair, dict) else None,
             "session": copy.deepcopy(record),
             "available_actions": actions,
@@ -8457,8 +9015,9 @@ class AgentBridge:
                     continue
                 peer_agent = "claude" if agent == "codex" else "codex"
                 record = sessions.get(session_id) if isinstance(sessions, dict) else {}
-                runtime_display = self._runtime_display_for_session(
-                    agent,
+                runtime_display = self._session_runtime_display_for_record(
+                    record if isinstance(record, dict) else {},
+                    agent=agent,
                     session_id=session_id,
                     project=current_project,
                 )
@@ -8486,6 +9045,9 @@ class AgentBridge:
                         "peer_short_session_id": self._short_id(active.get(peer_agent)),
                         "peer_session_display": peer_session_display,
                         "peer_desktop_thread_title": peer_runtime_display.get("desktop_thread_title"),
+                        "peer_desktop_thread_title_project_match": peer_runtime_display.get(
+                            "desktop_thread_title_project_match"
+                        ),
                         "status": record.get("status", "active") if isinstance(record, dict) else "active",
                         "bootstrap_origin": record.get("bootstrap_origin", "unknown") if isinstance(record, dict) else "unknown",
                         "available_actions": self._guided_pairing_actions(
@@ -8506,8 +9068,9 @@ class AgentBridge:
                 agent = str(record.get("agent") or "")
                 peer_agent = "claude" if agent == "codex" else "codex"
                 role = record.get("non_primary_role") or record.get("status")
-                runtime_display = self._runtime_display_for_session(
-                    agent,
+                runtime_display = self._session_runtime_display_for_record(
+                    record,
+                    agent=agent,
                     session_id=session_id,
                     project=current_project,
                 )
@@ -8534,6 +9097,9 @@ class AgentBridge:
                         "peer_short_session_id": self._short_id(active.get(peer_agent)),
                         "peer_session_display": peer_session_display,
                         "peer_desktop_thread_title": peer_runtime_display.get("desktop_thread_title"),
+                        "peer_desktop_thread_title_project_match": peer_runtime_display.get(
+                            "desktop_thread_title_project_match"
+                        ),
                         "status": record.get("status"),
                         "bootstrap_origin": record.get("bootstrap_origin", "unknown"),
                         "pairing_intent": record.get("pairing_intent"),
@@ -8762,6 +9328,9 @@ class AgentBridge:
             if not isinstance(bucket, dict):
                 continue
             session_id = str(bucket.get("session_id") or DEFAULT_SESSION_ID)
+            receiver = str(bucket.get("agent") or "").strip().lower()
+            if receiver in AGENTS and not self._bucket_accepts_work_backpressure(registry, receiver, session_id):
+                continue
             info = self._bucket_info(registry, session_id)
             if project_name and info.get("project") != project_name:
                 continue
@@ -8770,7 +9339,7 @@ class AgentBridge:
             limit = self._backpressure_limit_for_bucket(registry, session_id)
             if limit is None:
                 continue
-            key = (bucket.get("agent"), session_id)
+            key = (receiver, session_id)
             if key in blocked_keys:
                 continue
             threshold = self._backpressure_warning_threshold(limit)
@@ -8778,7 +9347,7 @@ class AgentBridge:
                 continue
             item = {
                 "status": "BACKPRESSURE_BLOCKED" if unread_count >= limit else "BACKPRESSURE_WARN",
-                "receiver_agent": bucket.get("agent"),
+                "receiver_agent": receiver,
                 "receiver_session_id": session_id,
                 "inbox_level": info.get("inbox_level"),
                 "project": info.get("project"),
@@ -8871,6 +9440,68 @@ class AgentBridge:
             ],
         }
 
+    def _dashboard_guardrail_debt_status(
+        self,
+        registry: Dict[str, Any],
+        project_name: Optional[str],
+    ) -> Dict[str, Any]:
+        read = self._health_read_jsonl(self.guardrail_debt_path, "guardrail_debt")
+        if read["status"] == "error":
+            return {
+                "status": "unknown",
+                "scope": "project" if project_name else "global",
+                "project": project_name,
+                "active_debt_count": 0,
+                "by_severity": {},
+                "by_enforcement_tier": {},
+                "items": [],
+                "error": read.get("error"),
+            }
+        terminal = {"clean", "closed", "resolved", "cancelled", "canceled", "superseded"}
+        active: List[Dict[str, Any]] = []
+        for row in read.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            debt_status = str(row.get("debt_status") or row.get("status") or "open").strip().lower()
+            if debt_status in terminal:
+                continue
+            session_id = str(row.get("session_id") or "").strip()
+            if project_name:
+                if session_id == project_name:
+                    pass
+                elif not session_id or self._bucket_info(registry, session_id).get("project") != project_name:
+                    continue
+            item = {
+                "debt_id": row.get("debt_id") or row.get("id"),
+                "guard_id": row.get("guard_id"),
+                "severity": str(row.get("severity") or "warning").strip().lower(),
+                "enforcement_tier": str(row.get("enforcement_tier") or "unknown").strip().lower(),
+                "owner_agent": row.get("owner_agent"),
+                "session_id": session_id or None,
+                "source_message_id": row.get("source_message_id"),
+                "debt_status": debt_status,
+                "detected_at": row.get("detected_at") or row.get("created_at"),
+                "remediation": row.get("remediation"),
+            }
+            active.append(item)
+
+        by_severity: Dict[str, int] = {}
+        by_tier: Dict[str, int] = {}
+        for item in active:
+            severity = str(item.get("severity") or "warning")
+            tier = str(item.get("enforcement_tier") or "unknown")
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+            by_tier[tier] = by_tier.get(tier, 0) + 1
+        return {
+            "status": "action_required" if active else "ok",
+            "scope": "project" if project_name else "global",
+            "project": project_name,
+            "active_debt_count": len(active),
+            "by_severity": by_severity,
+            "by_enforcement_tier": by_tier,
+            "items": active[:20],
+        }
+
     def _dashboard_policy_drift_status(self, validation: BridgeResult) -> Dict[str, Any]:
         if not validation.ok:
             return {
@@ -8951,6 +9582,7 @@ class AgentBridge:
         catchup = status_surfaces.get("catchup") or {}
         contracts = status_surfaces.get("contracts") or {}
         policy_drift = status_surfaces.get("policy_drift") or {}
+        guardrail_debt = status_surfaces.get("guardrail_debt") or {}
         lines = [
             "# Bridge Admin Dashboard",
             "",
@@ -9014,6 +9646,39 @@ class AgentBridge:
                     self._markdown_cell(policy_drift.get("missing_doc_count", 0)),
                     self._markdown_cell(policy_drift.get("doc_drift_count", 0)),
                 ),
+                "| Guardrail debt | %s | %s active debt item(s) across %s enforcement tier(s). |"
+                % (
+                    self._markdown_cell(guardrail_debt.get("status")),
+                    self._markdown_cell(guardrail_debt.get("active_debt_count", 0)),
+                    self._markdown_cell(len(guardrail_debt.get("by_enforcement_tier") or {})),
+                ),
+            ]
+        )
+        guardrail_items = guardrail_debt.get("items") or []
+        if guardrail_items:
+            lines.extend(
+                [
+                    "",
+                    "## Guardrail Debt",
+                    "",
+                    "| Guard | Severity | Tier | Status | Session | Remediation |",
+                    "|---|---|---|---|---|---|",
+                ]
+            )
+            for item in guardrail_items[:8]:
+                lines.append(
+                    "| %s | %s | %s | %s | %s | %s |"
+                    % (
+                        self._markdown_cell(item.get("guard_id") or item.get("debt_id")),
+                        self._markdown_cell(item.get("severity")),
+                        self._markdown_cell(item.get("enforcement_tier")),
+                        self._markdown_cell(item.get("debt_status")),
+                        self._markdown_cell(item.get("session_id") or item.get("owner_agent")),
+                        self._markdown_cell(item.get("remediation")),
+                    )
+                )
+        lines.extend(
+            [
                 "",
                 "## Counts",
                 "",
@@ -9031,6 +9696,9 @@ class AgentBridge:
             ]
         )
         for row in overview.get("pairings") or []:
+            status = row.get("status")
+            if row.get("last_wake_delivery_priority_action"):
+                status = "%s (delivery-priority wake)" % (status or "unknown")
             lines.append(
                 "| %s | %s | %s | %s | %s | %s %s | %s |"
                 % (
@@ -9041,7 +9709,7 @@ class AgentBridge:
                     self._markdown_cell(row.get("desktop_thread_title") or ""),
                     self._markdown_cell(row.get("peer_agent")),
                     self._markdown_cell(row.get("peer_session_display") or row.get("peer_short_session_id")),
-                    self._markdown_cell(row.get("status")),
+                    self._markdown_cell(status),
                 )
             )
         if not overview.get("pairings"):
@@ -9104,6 +9772,10 @@ class AgentBridge:
                 journal_error=journal_read.get("error"),
             )
             contract_status = self._dashboard_contract_status(contracts)
+            guardrail_debt_status = self._dashboard_guardrail_debt_status(registry, project_name)
+            app_dom_status = {
+                "codex": self._codex_visible_thread_titles_from_app_dom(),
+            }
             overview = {
                 "schema_version": 1,
                 "generated_at": utc_now(),
@@ -9132,6 +9804,8 @@ class AgentBridge:
                     "catchup": catchup_status,
                     "contracts": contract_status,
                     "policy_drift": policy_drift,
+                    "guardrail_debt": guardrail_debt_status,
+                    "app_dom": app_dom_status,
                 },
                 "policy": {
                     "source": "runtime",
@@ -10045,6 +10719,9 @@ class AgentBridge:
                 )
                 for session_id in open_sessions
             ]
+            if open_sessions:
+                # User explicitly asked to resume — label the next wake accordingly.
+                self._set_next_override_wake_message("User says check bridge inbox")
             self._audit(
                 {
                     "id": str(uuid.uuid4()),

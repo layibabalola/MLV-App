@@ -1,6 +1,6 @@
 # Bridge Admin Dashboard Spec
 
-**Status:** Partially implemented - backend health/pairing/contract surfaces and guided same-project pairing APIs exist; richer dashboard UI remains follow-up.
+**Status:** Partially implemented - backend health/pairing/contract surfaces, guided same-project pairing APIs, local launcher UX, auto-refresh, and chat-triggered dashboard opening exist; richer dashboard UI remains follow-up.
 **Owner:** Codex implements, Claude reviews
 **Scope:** Local web dashboard for pairings, contracts, policy status,
 backpressure, revocation, and audit visibility
@@ -35,9 +35,36 @@ Requirements:
 - Read effective policy from the runtime policy registry, not markdown.
 - Use the same bridge APIs as natural-language local commands.
 - Audit all mutating actions.
+- Route direct recovery buttons through the same bounded recovery helpers as
+  CLI/chat recovery, not ad-hoc process spawning.
 
 Remote peers cannot use bridge messages to trigger dashboard confirmations,
 provide confirmation tokens, or modify dashboard auth settings.
+
+## Self-Healing Recovery
+
+The dashboard launcher is allowed to repair local infrastructure drift that is
+already proven by local state. In background mode it health-checks the dashboard
+server and, on the same cadence, inspects the bridge runtime. When the active
+session is bootstrapped but the watcher PID/runtime/lease is missing, the
+launcher calls `recover_bridge_session.py`'s recovery path to refresh
+`watcher-config.json` and re-arm the watcher. It does not bootstrap a missing or
+superseded agent session automatically.
+
+The dashboard also exposes `restart_watcher` as a direct local action when
+recommended by health. That button is limited to localhost, token and CSRF
+protected, and uses the same safe recovery path as the background supervisor.
+
+The MCP server wrapper owns stale server PID marker cleanup. On startup and at a
+bounded cadence while the wrapper is alive, it reaps dead or identity-mismatched
+`server-pids/` markers so process health does not depend on a human pressing the
+dashboard cleanup button.
+
+MCP reconnect warnings clear only after explicit host-scoped proof. The wrapper
+records `mcp_tool_access_proof` when the connected MCP host sends a `tools/call`
+request, tagged with the wrapper PID and child PID. Health treats that as proof
+only when it matches the latest wrapper launch, which prevents unrelated bridge
+CLI activity from masking a Desktop reconnect problem.
 
 ## Dashboard Areas
 
@@ -221,11 +248,57 @@ Approve metadata-only catch-up for that peer.
 The local agent should display the same confirmation summary the dashboard would
 display, then call the same action.
 
+## Launcher UX
+
+The local dashboard has two operator-friendly entrypoints:
+
+- `tools/agent-bridge/dashboard_launcher.py` starts the local HTTP dashboard,
+  prints the authenticated URL in foreground mode, opens the browser by
+  default, and can run as a singleton background supervisor.
+- `tools/agent-bridge/dashboard-launcher/Agent Bridge Dashboard Launcher.bat`
+  is the double-click Windows launcher. It prefers `pyw` / `pythonw` so no
+  long-lived console remains visible, then falls back to minimized console
+  Python only if no windowless launcher is available.
+
+In background mode the launcher writes
+`state/dashboard-launcher.runtime.json` with the local URL, token, process id,
+and health metadata. A second launch first health-checks that runtime file; if
+the dashboard is alive it reuses the existing server and opens that URL instead
+of spawning another one. The supervisor health-checks the local dashboard at a
+bounded cadence and restarts the HTTP server if the server thread dies or
+`/api/overview` stops responding.
+
+The dashboard root page auto-refreshes every 5 seconds by fetching
+`/api/overview?format=json` with the session token. Operators can pause live
+refresh without disabling the manual "Refresh now" button. The page includes a
+local Stop button that POSTs to `/api/shutdown` with the CSRF token; this exits
+the background supervisor cleanly. Task Manager remains an emergency stop
+fallback.
+
+The UI may expose direct buttons only for allowlisted low-risk remediation
+actions whose implementation is local and bounded, currently stale MCP server
+marker cleanup and read-receipt backfill. All other recommended actions remain
+copy-only instructions. Direct buttons POST to `/api/recommended-action` with the
+dashboard token and CSRF header.
+
+When top-level health is degraded or broken, the Operational Signals section
+must show core causes from `health.core` before secondary status surfaces. These
+include watcher delivery state, stale MCP server markers, MCP reconnect proof,
+receipt metadata debt, and stuck wake verification. This prevents a confusing
+state where all secondary surfaces look stable while the overall health banner is
+still broken.
+
+Local chat can also call the `open_dashboard` MCP tool. The tool starts or
+reuses the in-process dashboard server, opens the tokenized URL in the default
+browser, and returns only a token-free URL to chat.
+
 ## API Surface
 
 Proposed local dashboard backend endpoints or equivalent MCP/CLI handlers:
 
 - `dashboard_overview`
+- `open_dashboard`
+- `recommended_action`
 - `list_pairings`
 - `pairing_details`
 - `start_guided_pairing`

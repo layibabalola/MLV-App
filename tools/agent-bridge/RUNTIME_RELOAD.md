@@ -4,18 +4,39 @@ Bridge MCP servers are normal Python processes. They import `agent_bridge.py`,
 `server.py`, and `core/*` once at process start. Python does not hot-reload those
 modules after a Git checkout, patch, or commit.
 
-The Desktop MCP wrapper must also keep the already-initialized `server.py` child
-alive after code changes. MCP stdio initialization is stateful; replacing the
-child process under a connected host can close the transport or leave the host
-and child in different protocol states. Code changes therefore set
-`tool-refresh-status.json` to `refresh_required` and emit
-`mcp_server_refresh_required` / `mcp_tools_refresh_required` audit rows instead
-of hot-restarting the child.
+Desktop MCP configs launch `server_wrapper_trampoline.py`, which keeps the host
+stdio pipe open while `server_wrapper.py` supervises the inner `server.py`
+process. Ordinary bridge-code changes restart the child under the wrapper.
+Changes to `server_wrapper.py` itself are handled by saving the code-watcher
+snapshot and exiting with code 77; the trampoline relaunches the wrapper unless
+its restart-loop guard trips.
+
+The wrapper persists the host's MCP `initialize` / `notifications/initialized`
+frames in `state/mcp-session-replay.json` and replays them into each fresh child
+before forwarding new host requests. That keeps ordinary tool calls valid after
+an inner child restart or an exit-77 wrapper relaunch without asking the host to
+repeat initialization.
+
+Known limitation: there is still a small theoretical byte-loss window during an
+exit-77 wrapper relaunch. Once the wrapper has decided to exit, the stdin pump
+may already be blocked in a low-level read; bytes the host sends during that
+final handoff window can be consumed by the old wrapper before the trampoline
+starts the new one. The risk is bounded by the idle gate and partial JSON-RPC
+frame delay, and current smoke coverage exercises ordinary post-relaunch tool
+calls plus split-frame delay, but it does not prove delivery for bytes sent after
+the self-restart decision and before process exit.
+
+Tool schema/list changes can still require a client/session refresh because the
+host may cache the tool list it saw during MCP initialization. In that case the
+wrapper sets `tool-refresh-status.json` to `refresh_required` and emits
+`mcp_server_refresh_required` / `mcp_tools_refresh_required` audit rows.
 
 ## Rule
 
-After changing bridge Python code, restart each MCP client session before using
-that client's MCP tools as proof of the new behavior.
+After changing bridge Python code, a fresh probe is still the strongest proof of
+new behavior. Existing Desktop sessions should continue to answer ordinary tool
+calls after wrapper/child self-heal, but restart the MCP client/session before
+expecting newly added or renamed tools to appear in the host's cached tool list.
 
 Fresh direct probes such as `probe_server.py` spawn a new interpreter and test the
 current files. Existing Claude Desktop, Claude Code, Codex Desktop, or Codex

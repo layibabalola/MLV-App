@@ -517,9 +517,12 @@ Current product default:
   respond in chat.
 - `disabled` is the explicit local opt-out for users who want toast/log-only
   behavior with no focus stealing and no composer typing.
-- `sendkeys` remains legacy and should not be used for default interactive
-  pairing because it lacks the strict thread-id, pre-send-verification,
-  race-window, and post-typing diagnostics provided by `targeted_sendkeys`.
+- `sendkeys` remains a legacy/debug outer-helper path and should not be used
+  for default interactive pairing. It now carries the same target,
+  foreground-Codex protection, and delivery-priority displacement flags as
+  `targeted_sendkeys`, but `targeted_sendkeys` remains the normal product mode
+  because it runs the inner wake directly and is the path covered by the
+  low-latency interactive UX tuning.
 - A SendKeys preflight that reads or preserves the composer is not a valid
   project/thread identity check. It only reduces draft damage after the wrong
   target has already been selected.

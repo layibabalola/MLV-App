@@ -33,7 +33,7 @@ Add the server to `%USERPROFILE%\.codex\config.toml`:
 command = "py"
 args = [
   "-3",
-  "<repo>\\tools\\agent-bridge\\server_wrapper.py",
+  "<repo>\\tools\\agent-bridge\\server_wrapper_trampoline.py",
   "--bridge-root",
   "<bridge-root>"
 ]
@@ -59,7 +59,7 @@ Add the server to `claude_desktop_config.json`:
       "command": "py",
       "args": [
         "-3",
-        "<repo>\\tools\\agent-bridge\\server_wrapper.py",
+        "<repo>\\tools\\agent-bridge\\server_wrapper_trampoline.py",
         "--bridge-root",
         "<bridge-root>"
       ]
@@ -194,7 +194,16 @@ protected thread id recorded in the current peer breadcrumb. See
 
 ### Mid-session MCP tool additions
 
-`server.py` now writes `state/tool-manifest.json` on startup, and
+Desktop MCP configs should launch `server_wrapper_trampoline.py`. The
+trampoline keeps the host stdio pipe open while `server_wrapper.py` restarts the
+inner `server.py` child for ordinary bridge-code changes or exits with code 77
+when `server_wrapper.py` itself changed. The trampoline rate-limits repeated
+exit-77 loops and relaunches the wrapper after a handled self-restart.
+The wrapper records the MCP initialization frames in
+`state/mcp-session-replay.json` and replays them into fresh children so ordinary
+tool calls continue after a restart/relaunch.
+
+`server.py` writes `state/tool-manifest.json` on startup, and
 `server_wrapper.py` compares manifests across child self-restarts caused by
 bridge code changes. If the tool signature changes during one live Desktop MCP
 session, the wrapper writes `state/tool-refresh-status.json`, audits
@@ -296,7 +305,7 @@ Historical scan mode remains read-only. It reports stale roots with
 history entries whose source root does not redirect to the active root.
 
 Root migrations use `migrate_root.py`. Dry-run and apply output include
-Claude/Codex Desktop MCP config snippets that point at `server_wrapper.py
+Claude/Codex Desktop MCP config snippets that point at `server_wrapper_trampoline.py
 --bridge-root <target>`. Apply mode also validates the target root with the
 historical scan. After applying a migration, update both Desktop MCP configs and
 restart Claude Desktop and Codex Desktop so their MCP servers start from the new
