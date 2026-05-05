@@ -119,6 +119,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "dropStashesInSweep": False,
         "protectedWorktreeRoots": [".claude/worktrees/**"],
     },
+    "responseHookLifecycle": {
+        "skipSessionWorktreeSignal": "SkipSessionWorktree",
+        "skipAuditField": "session_worktree_bootstrap",
+        "readOnlyHookPhases": ["response", "final"],
+        "managedSessionWorktreeRoots": [".codex-worktrees/**"],
+        "bootstrapAllowedOnlyByExplicitStart": True,
+    },
     "repair": {
         "autoPublishFeatureBranch": True,
         "allowedPublishRemotes": ["fork", "origin"],
@@ -133,10 +140,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo_hygiene/brokered_closeout.py",
             "tools/repo_hygiene/work_block_cli.py",
             "tools/repo_hygiene/test_brokered_closeout.py",
+            "tools/agent-bridge/codex_pre_response.ps1",
+            "tools/agent-bridge/codex_pre_final.ps1",
+            "tools/agent-bridge/codex_bridge_reminder.ps1",
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"],
+        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle"],
         "requiredHighImpactActions": ["clean_integrate", "delete_local_branch", "repo_sweep_prune_merged", "split"],
         "requiredAutoQuorumActions": ["integrated_branch_prune", "repo_sweep_clean_integrate", "dirty_split"],
         "requiredTests": [
@@ -149,6 +159,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
+            {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
+            {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
+            {"path": "tools/agent-bridge/codex_bridge_reminder.ps1", "contains": "session_worktree_bootstrap=skipped"},
         ],
     },
     "evidenceRepair": {
@@ -2878,7 +2891,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum"]
+    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),
