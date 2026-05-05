@@ -304,6 +304,22 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("success", self.audit_types(repo))
         self.assertIn("branch_deletion", self.audit_types(repo))
 
+    def test_other_work_block_claim_takes_precedence_over_branch_delta(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/claimed-delta")
+        start_work_block(repo, work_block_id="wb-current", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("committed\n", encoding="utf-8")
+        git(repo, "add", "owned.txt")
+        git(repo, "commit", "-m", "owned committed")
+        start_work_block(repo, work_block_id="wb-z-other", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("other dirty\n", encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-current")
+
+        self.assertFalse(detection["ownedDirty"], detection)
+        self.assertEqual([item["path"] for item in detection["foreignDirty"]], ["owned.txt"])
+        self.assertEqual(detection["foreignDirty"][0]["ownerWorkBlockId"], "wb-z-other")
+
     def test_no_origin_local_only_closeout_updates_target_and_prunes_branch(self) -> None:
         repo = self.init_repo(remote=False)
         self.make_feature(repo, "wb-local-only")
