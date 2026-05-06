@@ -657,16 +657,39 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
 
-    def test_live_server_process_limit_allows_below_limit(self) -> None:
+    def test_mcp_host_identity_skips_bridge_launcher_layers(self) -> None:
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python server_wrapper.py"},
+            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python server_wrapper_trampoline.py"},
+            80: {"pid": 80, "parent_pid": 70, "name": "py.exe", "command_line": "py -3 server_wrapper_trampoline.py"},
+            70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
+        }
+
+        host = _sw._mcp_host_identity_for_pid(100, process_table=process_table)
+
+        self.assertEqual(host["host_key"], "pid:70")
+        self.assertEqual(host["host_process_name"], "codex.exe")
+        self.assertEqual(host["bridge_launcher_pids"], [100, 90, 80])
+
+    def test_live_server_process_limit_allows_distinct_hosts(self) -> None:
         original_reap = _sw.reap_stale_server_pids
         original_live = _sw._live_mcp_server_markers
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir: [{"pid": 101}]
+        _sw._live_mcp_server_markers = lambda state_dir, process_table=None: [{"pid": 101, "host_key": "pid:70"}]
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python server_wrapper.py"},
+            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python server_wrapper_trampoline.py"},
+            80: {"pid": 80, "parent_pid": 60, "name": "py.exe", "command_line": "py -3 server_wrapper_trampoline.py"},
+            60: {"pid": 60, "parent_pid": 1, "name": "claude.exe", "command_line": "claude.exe --startup"},
+        }
         try:
             result = _sw.enforce_live_server_process_limit(
                 state_dir=self.tempdir / "state",
-                max_live_server_processes=2,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table=process_table,
             )
         finally:
             _sw.reap_stale_server_pids = original_reap
@@ -674,19 +697,32 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
 
         self.assertTrue(result["accepted"])
         self.assertEqual(result["live_server_count"], 1)
+        self.assertEqual(result["matching_host_live_server_count"], 0)
 
-    def test_live_server_process_limit_rejects_and_audits_at_limit(self) -> None:
+    def test_live_server_process_limit_rejects_and_audits_duplicate_host(self) -> None:
         state_dir = self.tempdir / "limit-state"
         state_dir.mkdir()
         original_reap = _sw.reap_stale_server_pids
         original_live = _sw._live_mcp_server_markers
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir_arg: [{"pid": 101}, {"pid": 202}]
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: [
+            {"pid": 101, "host_key": "pid:70"},
+            {"pid": 202, "host_key": "pid:60"},
+        ]
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python server_wrapper.py"},
+            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python server_wrapper_trampoline.py"},
+            80: {"pid": 80, "parent_pid": 70, "name": "py.exe", "command_line": "py -3 server_wrapper_trampoline.py"},
+            70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
+        }
         try:
             result = _sw.enforce_live_server_process_limit(
                 state_dir=state_dir,
-                max_live_server_processes=2,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py", "--bridge-root", "x"],
+                current_pid=100,
+                process_table=process_table,
             )
         finally:
             _sw.reap_stale_server_pids = original_reap
@@ -694,10 +730,12 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
 
         self.assertFalse(result["accepted"])
         self.assertEqual(result["live_server_count"], 2)
+        self.assertEqual(result["host_key"], "pid:70")
+        self.assertEqual(result["matching_host_live_server_pids"], [101])
         events = read_jsonl(state_dir / "messages.jsonl")
-        self.assertEqual(events[-1]["action"], "mcp_server_wrapper_launch_rejected_live_server_limit")
-        self.assertEqual(events[-1]["live_server_pids"], [101, 202])
-        self.assertEqual(events[-1]["max_live_server_processes"], 2)
+        self.assertEqual(events[-1]["action"], "mcp_server_wrapper_launch_rejected_duplicate_host")
+        self.assertEqual(events[-1]["matching_host_live_server_pids"], [101])
+        self.assertEqual(events[-1]["max_live_server_processes_per_host"], 1)
 
 
 class ServerWrapperTrampolineTests(unittest.TestCase):

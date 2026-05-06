@@ -222,10 +222,23 @@ def register_server_pid(state_dir: Path):
     runtime_path = pid_dir / f"server-{os.getpid()}.json"
     pid_dir.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    write_runtime_breadcrumb(
-        runtime_path,
-        build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server", pid=os.getpid()),
-    )
+    breadcrumb = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server", pid=os.getpid())
+    for env_key, field in (
+        ("AGENT_BRIDGE_WRAPPER_PID", "wrapper_pid"),
+        ("AGENT_BRIDGE_HOST_PID", "host_pid"),
+        ("AGENT_BRIDGE_HOST_KEY", "host_key"),
+        ("AGENT_BRIDGE_HOST_PROCESS_NAME", "host_process_name"),
+    ):
+        value = os.environ.get(env_key)
+        if value:
+            if field.endswith("_pid"):
+                try:
+                    breadcrumb[field] = int(value)
+                    continue
+                except ValueError:
+                    pass
+            breadcrumb[field] = value
+    write_runtime_breadcrumb(runtime_path, breadcrumb)
 
     def cleanup() -> None:
         try:
