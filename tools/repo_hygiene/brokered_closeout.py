@@ -341,6 +341,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_hard_clean_final_response_blocks_remaining_stash",
             "test_hard_clean_final_response_passes_after_clean_promotion",
             "test_complete_finalize_enforces_hard_clean_config_without_switch",
+            "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
             "test_hard_clean_blocks_retained_remote_feature_refs",
             "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
             "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
@@ -3944,6 +3945,40 @@ def complete_work_block(
     if freeze["active"]:
         return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     require_repo_closed = bool(require_repo_closed or config.get("hardClean", {}).get("requireForCompletion", False))
+    branch = current_branch(repo_root)
+    if not work_block_id and finalize and branch and is_protected_branch(config, branch):
+        selection = {
+            "selectedWorkBlockId": None,
+            "branch": branch,
+            "worktree": str(repo_root),
+            "state": "none",
+            "selectionReason": "protected_target_no_active_work_block",
+            "candidateCount": 0,
+        }
+        postcondition = verify_repo_closed_postcondition(
+            repo_root,
+            config,
+            work_block_id=None,
+            finalize_result={"status": "success", "reason": "protected_target_noop"},
+        )
+        result = {
+            "status": "success" if postcondition["ok"] else "blocked",
+            "reason": "protected_target_repo_closed" if postcondition["ok"] else "repo_closed_postcondition_failed",
+            "workBlockId": None,
+            "selectedWorkBlockId": None,
+            "workBlockSelection": selection,
+            "repoClosedPostcondition": postcondition,
+            "finalizeStatus": "noop",
+        }
+        write_audit(
+            repo_root,
+            config,
+            "protected_target_closeout_noop",
+            result,
+            work_block_id=None,
+            outcome="success" if postcondition["ok"] else "blocked",
+        )
+        return result
     manifest = ensure_work_block_for_current_branch(repo_root, config, work_block_id)
     block_id = str(manifest["workBlockId"])
     update_manifest(repo_root, config, block_id, {"state": "completed", "completedAt": utc_now()})
