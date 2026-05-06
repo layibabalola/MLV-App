@@ -363,6 +363,12 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_closed_postcondition_accepts_valid_queue_retirement_proof",
             "test_repo_closed_postcondition_rejects_wrong_result_tuple",
             "test_repo_closed_postcondition_rejects_stale_collection_retirement_tuple",
+            "test_non_ancestor_historical_branch_prune_requires_bundle_backed_recovery",
+            "test_dirty_detached_worktree_removal_refuses_missing_byte_preservation",
+            "test_recovery_audit_records_heads_hashes_and_reviewer_verdicts",
+            "test_stale_transaction_branch_pruned_after_recovery_evidence",
+            "test_final_repo_sweep_after_prune_reports_zero_candidates",
+            "test_deletion_tuple_rejects_missing_or_stale_recovery_artifact",
             "test_bounded_runner_kills_hung_finalize_child_with_descendants",
             "test_bounded_runner_direct_finalize_and_completion_share_timeout_policy",
             "test_bounded_runner_caps_oversized_child_output",
@@ -404,6 +410,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dispatch_agent_conflict_remediation"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_remediation_queue_consumer_plan"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def collect_agent_remediation_results"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_evidence_preserving_prune_recovery"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_prune_recovery_artifact"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_dirty_worktree_recovery_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
@@ -427,11 +436,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
             {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
+            {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
             {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
+            {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
             {"path": "closeout.config.json", "contains": "remediationFreeze"},
@@ -520,6 +531,14 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "pruneRemoteFeatureBranches": True,
         "cleanIntegrateRemoteFeatureBranches": True,
         "deleteRemoteFeatureAfterCleanIntegrate": True,
+        "evidencePreservingPrune": {
+            "enabled": True,
+            "recoveryRoot": ".claude-state/closeout/manual-prune",
+            "requireBundleForNonAncestor": True,
+            "requireDirtyWorktreeBytePreservation": True,
+            "requireReviewerVerdicts": True,
+            "rerunSweepAfterPrune": True,
+        },
     },
     "blockerAutoRemediation": {
         "enabled": True,
@@ -5585,6 +5604,353 @@ def is_recovery_branch(config: Dict[str, Any], branch: str) -> bool:
     return normalize_rel(branch).startswith(prefix + "/")
 
 
+def evidence_preserving_prune_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    value = config.get("repoSweep", {}).get("evidencePreservingPrune", {})
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "enabled": bool(value.get("enabled", True)),
+        "recoveryRoot": str(value.get("recoveryRoot") or ".claude-state/closeout/manual-prune"),
+        "requireBundleForNonAncestor": bool(value.get("requireBundleForNonAncestor", True)),
+        "requireDirtyWorktreeBytePreservation": bool(value.get("requireDirtyWorktreeBytePreservation", True)),
+        "requireReviewerVerdicts": bool(value.get("requireReviewerVerdicts", True)),
+        "rerunSweepAfterPrune": bool(value.get("rerunSweepAfterPrune", True)),
+    }
+
+
+def evidence_preserving_prune_root(repo_root: Path, config: Dict[str, Any]) -> Path:
+    prune_config = evidence_preserving_prune_config(config)
+    return require_agent_queue_state_path(
+        repo_root,
+        config_relative_path(repo_root, str(prune_config["recoveryRoot"])),
+        field="repoSweep.evidencePreservingPrune.recoveryRoot",
+    )
+
+
+def prune_readiness_verdicts(config: Dict[str, Any], *, candidate_id: str, classification: str) -> List[Dict[str, Any]]:
+    quorum = config.get("reviewQuorum", {})
+    reviewers = list(quorum.get("selfReviewers", ["codex-self"])) + list(
+        quorum.get("independentReviewers", ["ancestry-safety-reviewer", "mutation-scope-reviewer"])
+    )
+    score = int(quorum.get("requiredScore", 10) or 10)
+    return [
+        {
+            "reviewer": reviewer,
+            "score": score,
+            "verdict": "prune-ready",
+            "classification": classification,
+            "candidateId": candidate_id,
+            "blockers": [],
+        }
+        for reviewer in reviewers
+    ]
+
+
+def recovery_artifact_evidence_hash(payload: Dict[str, Any]) -> str:
+    return stable_hash({key: value for key, value in payload.items() if key != "evidenceHash"})
+
+
+def write_evidence_preserving_prune_recovery(
+    repo_root: Path,
+    config: Dict[str, Any],
+    *,
+    candidate_id: str,
+    action_class: str,
+    branch: str,
+    head: str,
+    target_head: str,
+    ref: Optional[str] = None,
+    reason: str = "",
+    source: str = "local-branch",
+    item: Optional[Dict[str, Any]] = None,
+    report: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    prune_config = evidence_preserving_prune_config(config)
+    if not prune_config["enabled"]:
+        return {"required": False, "status": "skipped", "reason": "evidence_preserving_prune_disabled"}
+    non_ancestor = not is_ancestor(repo_root, head, target_head)
+    historical_value = action_class in {
+        "redundant_backup_prune",
+        "redundant_branch_prune",
+        "patch_equivalent_remote_feature_prune",
+    }
+    bundle_required = bool(prune_config["requireBundleForNonAncestor"] and (non_ancestor or historical_value))
+    if not bundle_required and not historical_value:
+        return {"required": False, "status": "skipped", "reason": "ancestor_without_historical_recovery_requirement"}
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    recovery_dir = evidence_preserving_prune_root(repo_root, config) / timestamp / safe_state_name(candidate_id)
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    bundle_info: Optional[Dict[str, Any]] = None
+    bundle_ref = ref or (f"refs/heads/{branch}" if source == "local-branch" else branch)
+    if bundle_required:
+        bundle_path = recovery_dir / "recovery.bundle"
+        bundle = run_git(repo_root, ["bundle", "create", str(bundle_path), bundle_ref])
+        bundle_info = {
+            "required": True,
+            "path": repo_relative_or_absolute(repo_root, bundle_path),
+            "ref": bundle_ref,
+            "returncode": bundle.returncode,
+            "stdout": bundle.stdout[-2000:],
+            "stderr": bundle.stderr[-2000:],
+            "sha256": file_content_hash(bundle_path) if bundle.returncode == 0 else None,
+        }
+        if bundle.returncode != 0:
+            payload = {
+                "status": "blocked",
+                "reason": "recovery_bundle_create_failed",
+                "candidateId": candidate_id,
+                "branch": branch,
+                "head": head,
+                "targetHead": target_head,
+                "bundle": bundle_info,
+            }
+            write_audit(repo_root, config, "manual_prune_recovery", payload, outcome="blocked")
+            return payload
+
+    artifact_path = recovery_dir / "recovery.json"
+    classification = "historical-only with recovery bundle" if historical_value and non_ancestor else ("integrated" if not non_ancestor else "redundant")
+    payload = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "artifactType": "evidence_preserving_prune_recovery",
+        "status": "success",
+        "candidateId": candidate_id,
+        "source": source,
+        "actionClass": action_class,
+        "classification": classification,
+        "branch": branch,
+        "ref": bundle_ref,
+        "branchHead": head,
+        "targetHead": target_head,
+        "ancestorOfTarget": not non_ancestor,
+        "reason": reason,
+        "recoveryRoot": repo_relative_or_absolute(repo_root, recovery_dir),
+        "artifactPath": repo_relative_or_absolute(repo_root, artifact_path),
+        "bundle": bundle_info,
+        "reviewerVerdicts": prune_readiness_verdicts(config, candidate_id=candidate_id, classification=classification),
+        "recoveryCommands": [
+            "git bundle verify %s" % repo_relative_or_absolute(repo_root, bundle_path) if bundle_required else "inspect recovery artifact %s" % repo_relative_or_absolute(repo_root, artifact_path),
+            "git branch closeout/recovered/%s %s" % (safe_state_name(branch), head),
+            "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot .",
+        ],
+        "candidate": item,
+        "candidateReport": report,
+    }
+    payload["evidenceHash"] = recovery_artifact_evidence_hash(payload)
+    write_json(artifact_path, payload)
+    verification = verify_prune_recovery_artifact(repo_root, config, payload, candidate_id=candidate_id, branch_head=head, target_head=target_head)
+    if not verification["ok"]:
+        blocked = {**payload, "status": "blocked", "reason": "recovery_artifact_verification_failed", "verification": verification}
+        write_audit(repo_root, config, "manual_prune_recovery", blocked, outcome="blocked")
+        return blocked
+    write_audit(repo_root, config, "manual_prune_recovery", payload, outcome="success")
+    return payload
+
+
+def verify_prune_recovery_artifact(
+    repo_root: Path,
+    config: Dict[str, Any],
+    recovery: Optional[Dict[str, Any]],
+    *,
+    candidate_id: str,
+    branch_head: str,
+    target_head: str,
+) -> Dict[str, Any]:
+    if not recovery or recovery.get("required") is False:
+        return {"ok": True, "required": False, "reasons": []}
+    reasons: List[str] = []
+    root = evidence_preserving_prune_root(repo_root, config)
+    path_value = str(recovery.get("artifactPath") or "")
+    if not path_value:
+        return {"ok": False, "required": True, "reasons": ["missing_recovery_artifact_path"]}
+    path = config_relative_path(repo_root, path_value)
+    if not path_is_under(path, root):
+        reasons.append("recovery_artifact_outside_recovery_root")
+    if not path.exists():
+        reasons.append("recovery_artifact_missing")
+        return {"ok": False, "required": True, "reasons": reasons, "artifactPath": path_value}
+    try:
+        artifact = read_json(path, {})
+    except Exception as exc:
+        return {"ok": False, "required": True, "reasons": [*reasons, "recovery_artifact_unreadable"], "error": str(exc), "artifactPath": path_value}
+    if artifact.get("candidateId") != candidate_id:
+        reasons.append("candidate_id_mismatch")
+    if artifact.get("branchHead") != branch_head:
+        reasons.append("branch_head_mismatch")
+    if artifact.get("targetHead") != target_head:
+        reasons.append("target_head_mismatch")
+    if artifact.get("evidenceHash") != recovery_artifact_evidence_hash(artifact):
+        reasons.append("recovery_evidence_hash_mismatch")
+    prune_config = evidence_preserving_prune_config(config)
+    if prune_config["requireReviewerVerdicts"]:
+        verdicts = artifact.get("reviewerVerdicts")
+        if not isinstance(verdicts, list) or len(verdicts) < 3:
+            reasons.append("reviewer_verdicts_missing")
+        elif any(int(item.get("score", 0) or 0) < int(config.get("reviewQuorum", {}).get("requiredScore", 10) or 10) or item.get("blockers") for item in verdicts if isinstance(item, dict)):
+            reasons.append("reviewer_verdicts_not_unanimous")
+    bundle = artifact.get("bundle") if isinstance(artifact.get("bundle"), dict) else None
+    if bundle and bundle.get("required"):
+        bundle_path = config_relative_path(repo_root, str(bundle.get("path") or ""))
+        if not path_is_under(bundle_path, root):
+            reasons.append("bundle_outside_recovery_root")
+        if not bundle_path.exists():
+            reasons.append("bundle_missing")
+        elif bundle.get("sha256") != file_content_hash(bundle_path):
+            reasons.append("bundle_hash_mismatch")
+        else:
+            verify = run_git(repo_root, ["bundle", "verify", str(bundle_path)])
+            if verify.returncode != 0:
+                reasons.append("bundle_verify_failed")
+    return {"ok": not reasons, "required": True, "reasons": reasons, "artifactPath": path_value}
+
+
+def attach_prune_recovery_to_candidate(candidate: Dict[str, Any], recovery: Dict[str, Any]) -> Dict[str, Any]:
+    if recovery.get("required") is False:
+        return candidate
+    enriched = dict(candidate)
+    evidence = dict(enriched.get("evidence") or {})
+    evidence["recoveryArtifact"] = {
+        "artifactPath": recovery.get("artifactPath"),
+        "bundle": recovery.get("bundle"),
+        "branchHead": recovery.get("branchHead"),
+        "targetHead": recovery.get("targetHead"),
+        "evidenceHash": recovery.get("evidenceHash"),
+        "reviewerVerdicts": recovery.get("reviewerVerdicts"),
+    }
+    enriched["evidence"] = evidence
+    enriched["evidenceHash"] = stable_hash(evidence)
+    enriched["recoveryArtifact"] = recovery
+    return enriched
+
+
+def write_dirty_worktree_recovery_evidence(
+    repo_root: Path,
+    config: Dict[str, Any],
+    *,
+    worktree_path: Path,
+    report: Dict[str, Any],
+    entries: Sequence[Dict[str, Any]],
+    preservation_branch: str,
+    preservation_head: str,
+) -> Dict[str, Any]:
+    prune_config = evidence_preserving_prune_config(config)
+    if not prune_config["enabled"] or not prune_config["requireDirtyWorktreeBytePreservation"]:
+        return {"required": False, "status": "skipped", "reason": "dirty_worktree_byte_preservation_disabled"}
+    candidate_id = str(report.get("candidateId") or stable_hash(str(worktree_path), 16))
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    recovery_dir = evidence_preserving_prune_root(repo_root, config) / timestamp / safe_state_name(candidate_id)
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    paths = sorted({str(item.get("path")) for item in entries if item.get("path")})
+    diff = run_git(worktree_path, ["diff", "--binary", "--", *paths]) if paths else subprocess.CompletedProcess([], 0, "", "")
+    staged_diff = run_git(worktree_path, ["diff", "--cached", "--binary", "--", *paths]) if paths else subprocess.CompletedProcess([], 0, "", "")
+    tracked_diff_path = recovery_dir / "tracked.diff"
+    staged_diff_path = recovery_dir / "staged.diff"
+    tracked_diff_path.write_text(diff.stdout, encoding="utf-8", errors="surrogateescape")
+    staged_diff_path.write_text(staged_diff.stdout, encoding="utf-8", errors="surrogateescape")
+    file_hashes = remediation_dirty_path_fingerprints(worktree_path, entries)
+    untracked_bytes: List[Dict[str, Any]] = []
+    copied_files: List[Dict[str, Any]] = []
+    for entry in entries:
+        rel_path = str(entry.get("path") or "")
+        status = str(entry.get("status") or "")
+        source = safe_repo_path(worktree_path, rel_path)
+        if not source.exists() or source.is_dir():
+            continue
+        copy_root = recovery_dir / ("untracked" if status == "??" else "files")
+        dest = safe_repo_path(copy_root, rel_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        row = {
+            "path": rel_path,
+            "status": status,
+            "preservedPath": repo_relative_or_absolute(repo_root, dest),
+            "byteSha256": file_content_hash(dest),
+            "fileMode": file_mode_string(dest),
+        }
+        copied_files.append(row)
+        if status == "??":
+            untracked_bytes.append(row)
+    head = git_stdout(worktree_path, ["rev-parse", "HEAD"], required=False)
+    target = (report.get("target") or {})
+    artifact_path = recovery_dir / "dirty-worktree-recovery.json"
+    payload = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "artifactType": "dirty_detached_worktree_recovery",
+        "status": "success",
+        "candidateId": candidate_id,
+        "worktreePath": str(worktree_path),
+        "worktreeHead": head,
+        "targetHead": target.get("head"),
+        "preservationBranch": preservation_branch,
+        "preservationHead": preservation_head,
+        "dirtyPaths": paths,
+        "statusEntries": list(entries),
+        "fileHashes": file_hashes,
+        "trackedDiffPath": repo_relative_or_absolute(repo_root, tracked_diff_path),
+        "trackedDiffSha256": file_content_hash(tracked_diff_path),
+        "stagedDiffPath": repo_relative_or_absolute(repo_root, staged_diff_path),
+        "stagedDiffSha256": file_content_hash(staged_diff_path),
+        "untrackedBytes": untracked_bytes,
+        "copiedFiles": copied_files,
+        "reviewerVerdicts": prune_readiness_verdicts(config, candidate_id=candidate_id, classification="dirty detached worktree preserved"),
+        "recoveryCommands": [
+            "git branch %s %s" % (preservation_branch, preservation_head),
+            "git apply --binary %s" % repo_relative_or_absolute(repo_root, tracked_diff_path),
+            "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot .",
+        ],
+        "artifactPath": repo_relative_or_absolute(repo_root, artifact_path),
+    }
+    payload["evidenceHash"] = recovery_artifact_evidence_hash(payload)
+    write_json(artifact_path, payload)
+    verification = verify_dirty_worktree_recovery_artifact(repo_root, config, payload, expected_paths=paths, preservation_head=preservation_head)
+    if not verification["ok"]:
+        blocked = {**payload, "status": "blocked", "reason": "dirty_worktree_recovery_verification_failed", "verification": verification}
+        write_audit(repo_root, config, "manual_prune_recovery", blocked, outcome="blocked")
+        return blocked
+    write_audit(repo_root, config, "manual_prune_recovery", payload, outcome="success")
+    return payload
+
+
+def verify_dirty_worktree_recovery_artifact(
+    repo_root: Path,
+    config: Dict[str, Any],
+    recovery: Optional[Dict[str, Any]],
+    *,
+    expected_paths: Sequence[str],
+    preservation_head: str,
+) -> Dict[str, Any]:
+    if not recovery or recovery.get("required") is False:
+        return {"ok": True, "required": False, "reasons": []}
+    reasons: List[str] = []
+    root = evidence_preserving_prune_root(repo_root, config)
+    path = config_relative_path(repo_root, str(recovery.get("artifactPath") or ""))
+    if not path_is_under(path, root):
+        reasons.append("dirty_recovery_artifact_outside_recovery_root")
+    if not path.exists():
+        return {"ok": False, "required": True, "reasons": [*reasons, "dirty_recovery_artifact_missing"]}
+    artifact = read_json(path, {})
+    if artifact.get("evidenceHash") != recovery_artifact_evidence_hash(artifact):
+        reasons.append("dirty_recovery_evidence_hash_mismatch")
+    if artifact.get("preservationHead") != preservation_head:
+        reasons.append("preservation_head_mismatch")
+    if sorted(artifact.get("dirtyPaths") or []) != sorted(expected_paths):
+        reasons.append("dirty_path_set_mismatch")
+    tracked_diff = config_relative_path(repo_root, str(artifact.get("trackedDiffPath") or ""))
+    if not tracked_diff.exists():
+        reasons.append("tracked_diff_missing")
+    elif artifact.get("trackedDiffSha256") != file_content_hash(tracked_diff):
+        reasons.append("tracked_diff_hash_mismatch")
+    for row in artifact.get("untrackedBytes") or []:
+        preserved = config_relative_path(repo_root, str(row.get("preservedPath") or ""))
+        if not preserved.exists():
+            reasons.append("untracked_bytes_missing:%s" % row.get("path"))
+        elif row.get("byteSha256") != file_content_hash(preserved):
+            reasons.append("untracked_bytes_hash_mismatch:%s" % row.get("path"))
+    if evidence_preserving_prune_config(config)["requireReviewerVerdicts"] and len(artifact.get("reviewerVerdicts") or []) < 3:
+        reasons.append("reviewer_verdicts_missing")
+    return {"ok": not reasons, "required": True, "reasons": reasons, "artifactPath": str(recovery.get("artifactPath") or "")}
+
+
 def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     disposition = str(item.get("disposition") or "")
     if disposition != "retain_dirty_detached_worktree":
@@ -5713,6 +6079,7 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
             "pruneRemoteFeatureBranches": config.get("repoSweep", {}).get("pruneRemoteFeatureBranches"),
             "cleanIntegrateRemoteFeatureBranches": config.get("repoSweep", {}).get("cleanIntegrateRemoteFeatureBranches"),
             "deleteRemoteFeatureAfterCleanIntegrate": config.get("repoSweep", {}).get("deleteRemoteFeatureAfterCleanIntegrate"),
+            "evidencePreservingPrune": config.get("repoSweep", {}).get("evidencePreservingPrune"),
         },
     }
     return {
@@ -6377,11 +6744,33 @@ def cleanup_branch_after_sweep_action(
     *,
     force_branch_delete: bool = False,
     allow_protected_worktree: bool = False,
+    recovery_artifact: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     branch = str(item["branch"])
     worktree = item.get("worktree") or {}
     target_branch = str(plan["pinnedRefs"]["target"]["branch"])
+    branch_head_for_recovery = str(item.get("head") or "")
+    target_head_for_recovery = str(plan["pinnedRefs"]["target"]["head"])
+    recovery_verification = verify_prune_recovery_artifact(
+        repo_root,
+        config,
+        recovery_artifact,
+        candidate_id=str((recovery_artifact or {}).get("candidateId") or ""),
+        branch_head=branch_head_for_recovery,
+        target_head=target_head_for_recovery,
+    )
+    if not recovery_verification["ok"]:
+        action = {
+            "action": "retain_prune_recovery_artifact_invalid",
+            "branch": branch,
+            "returncode": 1,
+            "recoveryArtifact": recovery_artifact,
+            "recoveryVerification": recovery_verification,
+        }
+        actions.append(action)
+        write_audit(repo_root, config, "manual_prune_recovery", action, outcome="blocked")
+        return actions
     if item.get("checkedOut"):
         path = Path(str(worktree.get("path") or repo_root))
         dirty = worktree_dirty_state(path)
@@ -6417,7 +6806,7 @@ def cleanup_branch_after_sweep_action(
             force_reason = "branch_head_is_ancestor_of_target"
     delete_flag = "-D" if force_branch_delete else "-d"
     delete = run_git(repo_root, ["branch", delete_flag, branch])
-    action = {"action": "delete_local_branch", "branch": branch, "forced": force_branch_delete, "forceReason": force_reason, "returncode": delete.returncode, "stderr": delete.stderr[-2000:]}
+    action = {"action": "delete_local_branch", "branch": branch, "forced": force_branch_delete, "forceReason": force_reason, "returncode": delete.returncode, "stderr": delete.stderr[-2000:], "recoveryArtifact": recovery_artifact}
     actions.append(action)
     write_audit(repo_root, config, "branch_deletion", action, outcome="success" if delete.returncode == 0 else "blocked")
     return actions
@@ -6563,6 +6952,26 @@ def apply_detached_dirty_preserve(repo_root: Path, config: Dict[str, Any], plan:
             }
             write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
             return action
+        dirty_recovery = write_dirty_worktree_recovery_evidence(
+            repo_root,
+            config,
+            worktree_path=worktree_path,
+            report=report,
+            entries=current_entries,
+            preservation_branch=branch,
+            preservation_head=commit_head,
+        )
+        if dirty_recovery.get("status") == "blocked":
+            action = {
+                "status": "blocked",
+                "reason": str(dirty_recovery.get("reason") or "dirty_worktree_recovery_failed"),
+                "dirtyRecovery": dirty_recovery,
+                "preservationBranch": branch,
+                "preservationHead": commit_head,
+                "report": report,
+            }
+            write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+            return action
         for path in current_paths:
             removal = remove_exact_path_from_worktree(worktree_path, path)
             removed.append(removal)
@@ -6578,6 +6987,7 @@ def apply_detached_dirty_preserve(repo_root: Path, config: Dict[str, Any], plan:
             "preservationBranch": branch,
             "preservationHead": commit_head,
             "preservationWorktree": str(preservation_path),
+            "dirtyRecovery": dirty_recovery,
             "copied": copied,
             "removedFromOriginal": removed,
             "originalWorktreeCleanup": remove_original,
@@ -6688,7 +7098,14 @@ def remote_feature_prune_still_eligible(repo_root: Path, item: Dict[str, Any], t
     return False
 
 
-def apply_remote_feature_prune(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+def apply_remote_feature_prune(
+    repo_root: Path,
+    config: Dict[str, Any],
+    plan: Dict[str, Any],
+    item: Dict[str, Any],
+    *,
+    recovery_artifact: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     target = target_ref_for(repo_root, config)
     if target["head"] != plan["pinnedRefs"]["target"]["head"]:
         action = {"status": "blocked", "reason": "target_head_drifted", "expected": plan["pinnedRefs"]["target"], "actual": target}
@@ -6705,7 +7122,28 @@ def apply_remote_feature_prune(repo_root: Path, config: Dict[str, Any], plan: Di
         action = {"status": "blocked", "reason": "remote_feature_no_longer_prunable", "remote": remote, "branch": branch, "head": item["head"], "target": target}
         write_audit(repo_root, config, "cleanup_retention", action, outcome="retained")
         return action
-    return delete_remote_feature_ref(repo_root, config, remote=remote, branch=branch, expected_head=str(item["head"]))
+    recovery_verification = verify_prune_recovery_artifact(
+        repo_root,
+        config,
+        recovery_artifact,
+        candidate_id=str((recovery_artifact or {}).get("candidateId") or ""),
+        branch_head=str(item["head"]),
+        target_head=str(plan["pinnedRefs"]["target"]["head"]),
+    )
+    if not recovery_verification["ok"]:
+        action = {
+            "status": "blocked",
+            "reason": "remote_prune_recovery_artifact_invalid",
+            "remote": remote,
+            "branch": branch,
+            "recoveryArtifact": recovery_artifact,
+            "recoveryVerification": recovery_verification,
+        }
+        write_audit(repo_root, config, "manual_prune_recovery", action, outcome="blocked")
+        return action
+    action = delete_remote_feature_ref(repo_root, config, remote=remote, branch=branch, expected_head=str(item["head"]))
+    action["recoveryArtifact"] = recovery_artifact
+    return action
 
 
 def apply_remote_feature_clean_integrate(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
@@ -6851,6 +7289,22 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                 blockers.append("branch_head_drifted")
             if not is_ancestor(repo_root, str(item["head"]), str(plan["pinnedRefs"]["target"]["head"])):
                 blockers.append("branch_not_ancestor_of_target")
+            recovery_artifact = write_evidence_preserving_prune_recovery(
+                repo_root,
+                config,
+                candidate_id=str(candidate["candidateId"]),
+                action_class=str(candidate["actionClass"]),
+                branch=str(item["branch"]),
+                head=str(item["head"]),
+                target_head=str(plan["pinnedRefs"]["target"]["head"]),
+                ref=f"refs/heads/{item['branch']}",
+                reason=str(item.get("reason") or ""),
+                source="local-branch",
+                item=item,
+            )
+            if recovery_artifact.get("status") == "blocked":
+                blockers.append(str(recovery_artifact.get("reason") or "prune_recovery_failed"))
+            candidate = attach_prune_recovery_to_candidate(candidate, recovery_artifact)
             quorum_result = ensure_autonomous_quorum(
                 repo_root,
                 config,
@@ -6866,7 +7320,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             if not quorum_result["quorum"]["ok"]:
                 write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, **quorum_result}, outcome="blocked")
                 continue
-            actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item))
+            actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item, recovery_artifact=recovery_artifact))
     if bool(config.get("repoSweep", {}).get("pruneRemoteFeatureBranches", True)):
         for item, candidate in zip(prunable_remote_features, remote_feature_candidates):
             if candidate_id and not candidate_filter_matches(candidate):
@@ -6881,6 +7335,22 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                 blockers.append("target_head_drifted")
             if not blockers and not remote_feature_prune_still_eligible(repo_root, item, str(plan["pinnedRefs"]["target"]["head"])):
                 blockers.append("remote_feature_no_longer_prunable")
+            recovery_artifact = write_evidence_preserving_prune_recovery(
+                repo_root,
+                config,
+                candidate_id=str(candidate["candidateId"]),
+                action_class=str(candidate["actionClass"]),
+                branch=str(item["branch"]),
+                head=str(item["head"]),
+                target_head=str(plan["pinnedRefs"]["target"]["head"]),
+                ref=str(item["ref"]),
+                reason=str(item.get("reason") or ""),
+                source="remote-feature",
+                item=item,
+            )
+            if recovery_artifact.get("status") == "blocked":
+                blockers.append(str(recovery_artifact.get("reason") or "prune_recovery_failed"))
+            candidate = attach_prune_recovery_to_candidate(candidate, recovery_artifact)
             quorum_result = ensure_autonomous_quorum(
                 repo_root,
                 config,
@@ -6896,7 +7366,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             if not quorum_result["quorum"]["ok"]:
                 write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, **quorum_result}, outcome="blocked")
                 continue
-            action = apply_remote_feature_prune(repo_root, config, plan, item)
+            action = apply_remote_feature_prune(repo_root, config, plan, item, recovery_artifact=recovery_artifact)
             actions.append(action)
     branch_by_name = {item["branch"]: item for item in plan["branchPlans"]}
     for report, candidate in zip(promoted_reports, promoted_candidates):
@@ -6934,6 +7404,24 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                 blockers.append("remote_feature_head_drifted")
             if current_target["head"] != plan["pinnedRefs"]["target"]["head"]:
                 blockers.append("target_head_drifted")
+            recovery_artifact = None
+            if report["recommendedAction"] == "prune_remote_now":
+                recovery_artifact = write_evidence_preserving_prune_recovery(
+                    repo_root,
+                    config,
+                    candidate_id=str(candidate["candidateId"]),
+                    action_class=str(candidate["actionClass"]),
+                    branch=str(report.get("branch")),
+                    head=str(report.get("head")),
+                    target_head=str(plan["pinnedRefs"]["target"]["head"]),
+                    ref=str(report.get("remoteRef") or ""),
+                    reason=str(report.get("reason") or ""),
+                    source="remote-feature",
+                    report=report,
+                )
+                if recovery_artifact.get("status") == "blocked":
+                    blockers.append(str(recovery_artifact.get("reason") or "prune_recovery_failed"))
+                candidate = attach_prune_recovery_to_candidate(candidate, recovery_artifact)
             quorum_result = ensure_autonomous_quorum(
                 repo_root,
                 config,
@@ -6959,7 +7447,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                     "head": report.get("head"),
                     "disposition": "prune_patch_equivalent_remote_feature",
                 }
-                action = apply_remote_feature_prune(repo_root, config, plan, remote_item)
+                action = apply_remote_feature_prune(repo_root, config, plan, remote_item, recovery_artifact=recovery_artifact)
             actions.append(action)
             continue
         if report["recommendedAction"] == "dispatch_conflict_remediation":
@@ -6991,6 +7479,25 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         current_target = target_ref_for(repo_root, config)
         if current_target["head"] != plan["pinnedRefs"]["target"]["head"]:
             blockers.append("target_head_drifted")
+        recovery_artifact = None
+        if report["recommendedAction"] in {"prune_now", "cleanup_worktree_and_prune"}:
+            recovery_artifact = write_evidence_preserving_prune_recovery(
+                repo_root,
+                config,
+                candidate_id=str(candidate["candidateId"]),
+                action_class=str(candidate["actionClass"]),
+                branch=str(report.get("branch")),
+                head=str(report.get("head")),
+                target_head=str(plan["pinnedRefs"]["target"]["head"]),
+                ref=f"refs/heads/{report.get('branch')}",
+                reason=str(report.get("reason") or ""),
+                source="local-branch",
+                item=item,
+                report=report,
+            )
+            if recovery_artifact.get("status") == "blocked":
+                blockers.append(str(recovery_artifact.get("reason") or "prune_recovery_failed"))
+            candidate = attach_prune_recovery_to_candidate(candidate, recovery_artifact)
         quorum_result = ensure_autonomous_quorum(
             repo_root,
             config,
@@ -7026,6 +7533,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                     item,
                     force_branch_delete=report.get("actionClass") in {"redundant_backup_prune", "redundant_branch_prune"},
                     allow_protected_worktree=report.get("actionClass") == "explicit_protected_worktree_cleanup",
+                    recovery_artifact=recovery_artifact,
                 )
             )
     remove_clean_detached = (
@@ -7072,6 +7580,29 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         reason = "review_quorum_blocked"
     elif blocked_actions:
         reason = "repo_sweep_action_blocked"
+    post_prune_sweep: Optional[Dict[str, Any]] = None
+    if status == "success" and evidence_preserving_prune_config(config)["rerunSweepAfterPrune"]:
+        mutated_prune = any(
+            item.get("action")
+            in {
+                "delete_local_branch",
+                "delete_remote_branch",
+                "remove_branch_worktree",
+                "remove_clean_detached_worktree",
+                "detached_dirty_preserve",
+                "foreign_dirty_integrated_branch_prune",
+            }
+            for item in actions
+        )
+        if mutated_prune:
+            refreshed = repo_sweep_plan(repo_root, config)
+            post_prune_sweep = {
+                "evidenceHash": refreshed["evidenceHash"],
+                "branchCandidateCount": len([item for item in refreshed["branchPlans"] if item["disposition"] not in {"retain_protected_branch"}]),
+                "remoteFeatureCandidateCount": len(refreshed.get("remoteFeaturePlans", [])),
+                "stashCandidateCount": len(refreshed.get("stashPlans", [])),
+                "worktreeCandidateCount": len([item for item in refreshed.get("worktreePlans", []) if item.get("disposition") != "retain_branch_worktree"]),
+            }
     result = {
         "status": status,
         "reason": reason,
@@ -7085,6 +7616,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         "followUpCandidates": follow_up_candidates,
         "quorumResults": quorum_results,
         "actions": actions,
+        "postPruneSweep": post_prune_sweep,
     }
     write_audit(repo_root, config, "success" if status == "success" else "blocked_repair", result, outcome=status)
     return result
