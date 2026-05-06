@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/closeout-ledger-schema",
+  "createdAt": "2026-05-06T21:28:07+00:00",
+  "detectorHash": "fdb37e1ed56e473cbfabaa542d6dcc7c",
+  "featureHead": "a0d1bd4085cd8d764287190ef7379f8343a566f6",
+  "schemaVersion": "1.0",
+  "targetHead": "9d2e60f1345b4a3ed72128bafd4bc9651bdca6b9",
+  "workBlockId": "wb-e19fdd1f65da4aff",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}

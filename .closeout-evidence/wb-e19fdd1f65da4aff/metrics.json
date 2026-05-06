@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/closeout-ledger-schema",
+  "committedDeltaPathCount": 1,
+  "createdAt": "2026-05-06T21:28:07+00:00",
+  "detectorHash": "fdb37e1ed56e473cbfabaa542d6dcc7c",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "a0d1bd4085cd8d764287190ef7379f8343a566f6",
+  "schemaVersion": "1.0",
+  "targetHead": "9d2e60f1345b4a3ed72128bafd4bc9651bdca6b9",
+  "workBlockId": "wb-e19fdd1f65da4aff"
+}
