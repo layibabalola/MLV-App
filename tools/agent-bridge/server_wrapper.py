@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Set
 
-from compact import reap_stale_server_pids
+from compact import process_runtime_identity_status, reap_stale_server_pids
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
 from core.storage import append_jsonl, read_json, write_json
@@ -27,6 +27,7 @@ DEFAULT_LOOP_SLEEP_SECONDS = 0.05
 DEFAULT_GRACEFUL_RESTART_TIMEOUT_SECONDS = 5.0
 DEFAULT_STALE_MARKER_REAP_INTERVAL_SECONDS = 10 * 60.0
 DEFAULT_STALE_MARKER_MAX_AGE_HOURS = 0
+DEFAULT_MAX_LIVE_SERVER_PROCESSES = 16
 TOOL_MANIFEST_FILENAME = "tool-manifest.json"
 TOOL_REFRESH_STATUS_FILENAME = "tool-refresh-status.json"
 TOOL_REFRESH_STATUS_SCHEMA_VERSION = 1
@@ -38,6 +39,16 @@ MCP_SESSION_REPLAY_SCHEMA_VERSION = 1
 SERVER_WRAPPER_FILENAME = "server_wrapper.py"
 SERVER_WRAPPER_SELF_RESTART_EXIT_CODE = 77
 SERVER_WRAPPER_SELF_RESTART_REASON = "server_wrapper_code_changed_during_wrapper_session"
+
+
+def _default_max_live_server_processes() -> int:
+    raw = os.environ.get("AGENT_BRIDGE_MAX_LIVE_MCP_SERVERS")
+    if raw is None or raw == "":
+        return DEFAULT_MAX_LIVE_SERVER_PROCESSES
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_MAX_LIVE_SERVER_PROCESSES
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--watch-code-dir", help=argparse.SUPPRESS)
     parser.add_argument("--max-hops", type=int, default=8, help="Maximum accepted relays per session")
     parser.add_argument(
+        "--max-live-server-processes",
+        type=int,
+        default=_default_max_live_server_processes(),
+        help=(
+            "Maximum live agent-bridge server.py processes allowed for this state dir before this wrapper "
+            "exits without launching another child. Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--print-command",
         action="store_true",
         help="Print the resolved server.py command and exit. Do not use in Desktop MCP config.",
@@ -89,6 +109,94 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     args, passthrough = parser.parse_known_args(argv)
     args.passthrough = passthrough
     return args
+
+
+def _live_mcp_server_markers(
+    state_dir: Path,
+    *,
+    identity_fn=process_runtime_identity_status,
+) -> List[Dict[str, Any]]:
+    """Return live, identity-verified server.py marker entries for one state dir."""
+    server_dir = Path(state_dir) / "server-pids"
+    live: List[Dict[str, Any]] = []
+    if not server_dir.exists():
+        return live
+    for marker in sorted(server_dir.glob("server-*.pid")):
+        runtime_path = marker.with_suffix(".json")
+        try:
+            pid = int(marker.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        runtime: Dict[str, Any] = {}
+        if runtime_path.exists():
+            try:
+                runtime = read_json(runtime_path, {})
+            except Exception:
+                runtime = {}
+        identity = identity_fn(pid, runtime, expected_role="mcp_server")
+        if not identity.get("running") or identity.get("identity_mismatch"):
+            continue
+        live.append(
+            {
+                "pid": pid,
+                "parent_pid": (runtime or {}).get("parent_pid"),
+                "timestamp": (runtime or {}).get("timestamp"),
+                "path": str(marker),
+                "runtime_path": str(runtime_path),
+            }
+        )
+    return live
+
+
+def enforce_live_server_process_limit(
+    *,
+    state_dir: Path,
+    max_live_server_processes: int,
+    audit_command: Sequence[str],
+) -> Dict[str, Any]:
+    """Bound accidental MCP process fan-out while preserving normal multi-client use.
+
+    MCP stdio is intentionally per-client, so this is not a singleton lock. It is
+    a circuit breaker for pathological host relaunch loops: once enough live
+    server.py children already exist for the same state dir, the newest wrapper
+    exits before spawning another child process.
+    """
+    max_live = int(max_live_server_processes)
+    if max_live <= 0:
+        return {"accepted": True, "disabled": True, "live_server_count": 0, "max_live_server_processes": max_live}
+
+    try:
+        reap_stale_server_pids(Path(state_dir), max_age_hours=0, dry_run=False)
+    except Exception:
+        # Marker cleanup is best-effort. The guard below still uses identity
+        # checks, so stale markers should not produce false rejections.
+        pass
+
+    live = _live_mcp_server_markers(Path(state_dir))
+    result: Dict[str, Any] = {
+        "accepted": len(live) < max_live,
+        "live_server_count": len(live),
+        "max_live_server_processes": max_live,
+        "live_server_pids": [entry["pid"] for entry in live],
+    }
+    if result["accepted"]:
+        return result
+
+    try:
+        event = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server_wrapper", command=list(audit_command))
+        event.update(
+            {
+                "action": "mcp_server_wrapper_launch_rejected_live_server_limit",
+                "accepted": False,
+                "live_server_count": len(live),
+                "max_live_server_processes": max_live,
+                "live_server_pids": [entry["pid"] for entry in live],
+            }
+        )
+        append_jsonl(Path(state_dir) / "messages.jsonl", event)
+    except Exception:
+        pass
+    return result
 
 
 def _binary_reader(stream: object) -> BinaryIO:
@@ -1152,6 +1260,26 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     if args.print_command:
         print(" ".join(command))
+        return
+
+    guard = enforce_live_server_process_limit(
+        state_dir=paths.state_dir,
+        max_live_server_processes=args.max_live_server_processes,
+        audit_command=sys.argv,
+    )
+    if not guard.get("accepted"):
+        print(
+            "agent-bridge server wrapper refused to launch another child: "
+            "%s live server.py process(es) already exist for %s "
+            "(limit %s; pass --max-live-server-processes 0 to disable)"
+            % (
+                guard.get("live_server_count"),
+                paths.state_dir,
+                guard.get("max_live_server_processes"),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
         return
 
     try:

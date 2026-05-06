@@ -1584,7 +1584,9 @@ $result | ConvertTo-Json -Compress
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "dry_run")
         self.assertFalse(target.exists())
-        self.assertIn("server_wrapper.py", " ".join(result["plan"]["mcp_config_snippets"]["codex_toml"]["mcp_servers.agent_bridge"]["args"]))
+        snippet_args = " ".join(result["plan"]["mcp_config_snippets"]["codex_toml"]["mcp_servers.agent_bridge"]["args"])
+        self.assertIn("server_wrapper_trampoline.py", snippet_args)
+        self.assertNotIn("server_wrapper.py", snippet_args)
 
     def test_migrate_root_refuses_live_markers_without_force(self) -> None:
         source = self.tempdir / "source-root"
