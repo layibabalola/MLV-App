@@ -145,6 +145,17 @@ Minimum fields:
 - `auditArtifactPath`
 - `recoveryCommand`
 
+Valid report outcomes:
+
+- `approve_symbolic_action`
+- `request_more_evidence`
+- `block_ambiguous`
+- `block_policy`
+- `block_surface_unavailable`
+- `block_insufficient_review`
+- `preserve_and_retain`
+- `escalate_to_human`
+
 `blockersAbsent` MUST be explicit when no blockers are found. Silent omission is
 not approval.
 
@@ -178,18 +189,23 @@ Required statuses:
 - `insufficient_review_quorum`
 - `review_tuple_stale`
 - `review_blocked`
+- `agent_remediation_surface_unavailable`
 
 Each status artifact MUST include:
 
 - `candidateId`
 - `requiredReview`
 - `availableSurfaces`
+- `missingSurfaces`
 - `attemptedSurface`
 - `reason`
 - `recoveryCommand`
 - `packetPath`
+- `candidatePacketHash`
 - `policyHash`
 - `evidenceHash`
+- `currentRefs`
+- `dirtyStateSummary`
 
 Unavailable subagent dispatch does not make adjudication optional. It only means
 the repo must route to another declared review surface or block.
@@ -293,7 +309,8 @@ is historical, non-ancestor, dirty, protected, or otherwise ambiguous.
 
 ## Broad Planning And Single-Candidate Mutation
 
-Read-only planning may be broad. Mutation is single-candidate by default.
+Read-only planning may be broad. Mutation is single-candidate by default. Raw
+broad mutation is forbidden by default.
 
 A mutating sweep actor MUST require one of:
 
@@ -344,22 +361,17 @@ Chat done is not repo closed.
 
 These example mappings come from the three repo incident maps:
 
-- conflicting remote ref: candidate packet plus adjudication report, then
-  repo-owned conflict remediation or retain-with-blocker;
-- foreign dirty closeout: deterministic dirty classification, retain/audit
-  foreign paths, never mutate them;
-- dirty detached worktree: preserve bytes and hashes before cleanup, with
-  adjudication when ownership or sensitivity is ambiguous;
-- target push race: fetch, re-pin, rerun or block, never force-push target;
-- protected target closeout: no-op only when protected target is clean and
-  repo-closed postcondition passes;
-- response hook artifact: write only generated/exempt state and never resurrect
-  managed worktrees;
-- retained candidate: investigate or remediate one candidate at a time before
-  terminal retention;
-- original closeout standard addendum: map the rule to capability, profile,
-  config, actor, test, audit, or explicit non-goal before finalizing the clean
-  standard.
+| Incident Pattern | Protocol Requirement |
+|---|---|
+| Conflicting remote ref | Candidate packet plus adjudication report before repo-owned conflict remediation or retain-with-blocker. |
+| Foreign dirty closeout | Deterministic dirty classification, retain/audit foreign paths, and never mutate them. |
+| Dirty detached worktree | Preserve bytes and hashes before cleanup; adjudicate when ownership or sensitivity is ambiguous. |
+| Target push race | Fetch, re-pin, rerun or block, and never force-push target. |
+| Protected target closeout | No-op only when protected target is clean and repo-closed postcondition passes. |
+| Response hook artifact | Write only generated/exempt state and never resurrect managed worktrees. |
+| Retained candidate | Investigate or remediate one candidate at a time before terminal retention. |
+| Raw broad sweep mutation | Require `candidateId`, promoted one-candidate remediation packet, or explicit audited bulk override. |
+| Original closeout standard addendum | Map the rule to capability, profile, config, actor, test, audit, or explicit non-goal before finalizing the clean standard. |
 
 ## Non-Goals
 

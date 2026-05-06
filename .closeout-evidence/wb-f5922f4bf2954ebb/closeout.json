@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/closeout-protocol-convergence",
+  "createdAt": "2026-05-06T19:53:09+00:00",
+  "detectorHash": "70c8331505669838ea96a9fae55f7310",
+  "eligible": true,
+  "featureHead": "be40e8e3dedc69c46657346f52b7e071ec19227a",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/closeout-protocol-convergence",
+      "head": "be40e8e3dedc69c46657346f52b7e071ec19227a"
+    },
+    "target": {
+      "branch": "master",
+      "head": "8a95756060e4b5b144476975db3ac4ab1bb75f52",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "8a95756060e4b5b144476975db3ac4ab1bb75f52",
+  "workBlockId": "wb-f5922f4bf2954ebb"
+}
