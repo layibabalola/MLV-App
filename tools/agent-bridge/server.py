@@ -11,13 +11,14 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlencode
 import urllib.error
 import urllib.request
 
 from agent_bridge import AgentBridge, add_common_args
 from compact import reap_stale_server_pids
+from core.processes import is_process_alive
 from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
 from dashboard_server import DEFAULT_DASHBOARD_PORT, DashboardServerHandle, start_dashboard_server
 
@@ -225,9 +226,15 @@ def register_server_pid(state_dir: Path):
     breadcrumb = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server", pid=os.getpid())
     for env_key, field in (
         ("AGENT_BRIDGE_WRAPPER_PID", "wrapper_pid"),
+        ("AGENT_BRIDGE_WRAPPER_CREATION_DATE", "wrapper_creation_date"),
+        ("AGENT_BRIDGE_WRAPPER_EXECUTABLE_PATH", "wrapper_executable_path"),
+        ("AGENT_BRIDGE_WRAPPER_COMMAND_HASH", "wrapper_command_hash"),
         ("AGENT_BRIDGE_HOST_PID", "host_pid"),
         ("AGENT_BRIDGE_HOST_KEY", "host_key"),
         ("AGENT_BRIDGE_HOST_PROCESS_NAME", "host_process_name"),
+        ("AGENT_BRIDGE_HOST_CREATION_DATE", "host_creation_date"),
+        ("AGENT_BRIDGE_HOST_EXECUTABLE_PATH", "host_executable_path"),
+        ("AGENT_BRIDGE_HOST_COMMAND_HASH", "host_command_hash"),
     ):
         value = os.environ.get(env_key)
         if value:
@@ -248,6 +255,111 @@ def register_server_pid(state_dir: Path):
             pass
 
     return cleanup
+
+
+def _short_hash(value: object) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.casefold().encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _wrapper_pid_from_env() -> Optional[int]:
+    raw = os.environ.get("AGENT_BRIDGE_WRAPPER_PID")
+    try:
+        pid = int(raw or 0)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _wrapper_process_entry(pid: int) -> Optional[dict]:
+    if sys.platform == "win32":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
+                "ConvertTo-Json -Compress"
+            )
+            % int(pid),
+        ]
+        kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+            "text": True,
+            "timeout": 5,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            proc = subprocess.run(command, **kwargs)
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return None
+            row = json.loads(proc.stdout)
+            if not isinstance(row, dict):
+                return None
+            return {
+                "pid": int(row.get("ProcessId") or 0),
+                "name": row.get("Name") or "",
+                "command_line": row.get("CommandLine") or "",
+                "executable_path": row.get("ExecutablePath") or "",
+                "creation_date": str(row.get("CreationDate") or ""),
+            }
+        except Exception:
+            return None
+    return None
+
+
+def _wrapper_process_matches_env(wrapper_pid: int) -> bool:
+    expected_creation_date = os.environ.get("AGENT_BRIDGE_WRAPPER_CREATION_DATE") or ""
+    expected_executable_path = os.environ.get("AGENT_BRIDGE_WRAPPER_EXECUTABLE_PATH") or ""
+    expected_command_hash = os.environ.get("AGENT_BRIDGE_WRAPPER_COMMAND_HASH") or ""
+    if not expected_creation_date and not expected_executable_path and not expected_command_hash:
+        return True
+    entry = _wrapper_process_entry(wrapper_pid)
+    if entry is None:
+        return True
+    if expected_creation_date and str(entry.get("creation_date") or "") != expected_creation_date:
+        return False
+    current_executable_path = str(entry.get("executable_path") or "")
+    if (
+        expected_executable_path
+        and current_executable_path
+        and current_executable_path.casefold() != expected_executable_path.casefold()
+    ):
+        return False
+    current_command_hash = _short_hash(entry.get("command_line"))
+    if expected_command_hash and current_command_hash and current_command_hash != expected_command_hash:
+        return False
+    return True
+
+
+def start_wrapper_lifetime_watchdog(
+    cleanup_pid,
+    *,
+    poll_seconds: float = 2.0,
+    exit_fn: Callable[[int], object] = os._exit,
+    stop_event: Optional[threading.Event] = None,
+) -> Optional[threading.Thread]:
+    wrapper_pid = _wrapper_pid_from_env()
+    if wrapper_pid is None or wrapper_pid == os.getpid():
+        return None
+    stopper = stop_event or threading.Event()
+
+    def _watch() -> None:
+        while not stopper.is_set():
+            if not is_process_alive(wrapper_pid) or not _wrapper_process_matches_env(wrapper_pid):
+                cleanup_pid()
+                exit_fn(0)
+                return
+            stopper.wait(poll_seconds)
+
+    thread = threading.Thread(target=_watch, name="agent-bridge-wrapper-lifetime", daemon=True)
+    thread.start()
+    return thread
 
 
 def _jsonable(obj):
@@ -1242,6 +1354,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     write_tool_manifest(state_dir=Path(args.state_dir), mcp=mcp)
     cleanup_pid = register_server_pid(Path(args.state_dir))
     atexit.register(cleanup_pid)
+    start_wrapper_lifetime_watchdog(cleanup_pid)
 
     def handle_sigterm(signum, frame):  # noqa: ANN001
         cleanup_pid()
