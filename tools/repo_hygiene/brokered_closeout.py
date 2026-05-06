@@ -7,8 +7,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +59,22 @@ REQUIRED_SCRIPT_NAMES = [
     "audit-closeout.ps1",
     "repo-sweep-closeout.ps1",
     "remediate-retained-closeout.ps1",
+]
+KNOWN_CLOSEOUT_FAILURE_TEXT = [
+    "closeout gate failure",
+    "review quorum failure",
+    "review_quorum_failure",
+    "review_quorum_missing",
+    "review_quorum_blocked",
+    "validation failure",
+    "validation_failed",
+    "baseline-dirty overlap",
+    "baseline-dirty-overlaps-candidate",
+    "stale refs",
+    "stale_refs",
+    "dirty ownership blocker",
+    "owned_dirty_blocked",
+    "unowned_dirty",
 ]
 
 
@@ -130,10 +149,40 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "managedSessionWorktreeRoots": [".codex-worktrees/**"],
         "bootstrapAllowedOnlyByExplicitStart": True,
     },
+    "hardClean": {
+        "requireForCompletion": True,
+        "allowRetainedForeignDirtyAtCompletion": False,
+        "requireNoStash": True,
+        "exemptStatusPatterns": [
+            ".claude-state/**",
+            "**/__pycache__/**",
+            "**/*.pyc",
+        ],
+    },
+    "runtimeServices": {
+        "mlvapp-preview": {
+            "enabled": False,
+            "stopBeforePromotion": True,
+            "restartAfterCleanPromotion": False,
+            "statusCommand": [],
+            "stopCommand": [],
+            "startCommand": [],
+        },
+    },
     "repair": {
         "autoPublishFeatureBranch": True,
         "allowedPublishRemotes": ["fork", "origin"],
         "setUpstreamOnPublish": True,
+    },
+    "locking": {
+        "detectTimeoutMs": 120000,
+        "finalizeTimeoutMs": 600000,
+        "repoSweepTimeoutMs": 600000,
+        "maxProcessOutputBytes": 1048576,
+        "failureTextPatterns": KNOWN_CLOSEOUT_FAILURE_TEXT,
+    },
+    "autoEligibilityRepair": {
+        "timeoutMs": 300000,
     },
     "closeoutAddendumPersistence": {
         "enabled": True,
@@ -172,17 +221,21 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "baselineRef": None,
         "autoUpdate": True,
         "paths": [
+            "AGENTS.md",
+            "CLAUDE.md",
             "closeout.config.json",
             "tools/repo_hygiene/brokered_closeout.py",
             "tools/repo_hygiene/work_block_cli.py",
             "tools/repo_hygiene/test_brokered_closeout.py",
+            "tools/closeout/Invoke-CloseoutCli.ps1",
+            "tools/closeout/work-block-complete.ps1",
             "tools/agent-bridge/codex_pre_response.ps1",
             "tools/agent-bridge/codex_pre_final.ps1",
             "tools/agent-bridge/codex_bridge_reminder.ps1",
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation"],
+        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation", "locking", "autoEligibilityRepair"],
         "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
@@ -233,6 +286,21 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_merge_failed_promotes_agent_conflict_dispatch",
             "test_repo_sweep_agent_conflict_dispatch_writes_queue_packet",
             "test_agent_conflict_dispatch_shards_large_conflict_sets",
+            "test_bounded_runner_kills_hung_finalize_child_with_descendants",
+            "test_bounded_runner_direct_finalize_and_completion_share_timeout_policy",
+            "test_bounded_runner_caps_oversized_child_output",
+            "test_bounded_runner_normalizes_known_failure_text_with_zero_exit",
+            "test_bounded_runner_closeout_gate_failure_cannot_report_finalized",
+            "test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun",
+            "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
+            "test_timeout_and_output_cap_settings_are_contract_required",
+            "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
+            "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
+            "test_hard_clean_final_response_blocks_remaining_stash",
+            "test_hard_clean_final_response_passes_after_clean_promotion",
+            "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
+            "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
+            "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -244,14 +312,32 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def run_bounded_closeout_process"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def finalize_retry_decision"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediate_retained_candidates"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dispatch_agent_conflict_remediation"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
+            {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "bounded_closeout_cli_main"},
+            {"path": "tools/closeout/work-block-complete.ps1", "contains": "RequireRepoClosed"},
             {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
+            {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
+            {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+            {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
+            {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
+            {"path": "closeout.config.json", "contains": "hardClean"},
+            {"path": "closeout.config.json", "contains": "runtimeServices"},
+            {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
+            {"path": "closeout.config.json", "contains": "failureTextPatterns"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
             {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
@@ -707,6 +793,392 @@ def write_audit(
     return row
 
 
+def positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def closeout_failure_text_patterns(config: Dict[str, Any]) -> List[str]:
+    raw = config.get("locking", {}).get("failureTextPatterns", KNOWN_CLOSEOUT_FAILURE_TEXT)
+    if not isinstance(raw, list):
+        raw = KNOWN_CLOSEOUT_FAILURE_TEXT
+    return [str(item).strip().lower() for item in raw if str(item).strip()]
+
+
+def closeout_command_timeout_ms(config: Dict[str, Any], closeout_args: Sequence[str]) -> int:
+    command = str(closeout_args[0]) if closeout_args else ""
+    locking = config.get("locking", {})
+    repair = config.get("autoEligibilityRepair", {})
+    detect_timeout = positive_int(locking.get("detectTimeoutMs"), 120000)
+    finalize_timeout = positive_int(locking.get("finalizeTimeoutMs"), 600000)
+    repair_timeout = positive_int(repair.get("timeoutMs"), 300000)
+    sweep_timeout = positive_int(locking.get("repoSweepTimeoutMs"), finalize_timeout)
+    if command == "finalize" or (command == "complete" and "--finalize" in closeout_args):
+        return finalize_timeout
+    if command in {"repair", "checkpoint", "dirty-split"}:
+        return repair_timeout
+    if command in {"sweep", "orphan-quarantine", "remediate-retained"}:
+        return sweep_timeout
+    return detect_timeout
+
+
+def closeout_max_process_output_bytes(config: Dict[str, Any]) -> int:
+    return positive_int(config.get("locking", {}).get("maxProcessOutputBytes"), 1048576)
+
+
+def closeout_recovery_command(closeout_args: Sequence[str]) -> str:
+    command = str(closeout_args[0]) if closeout_args else "complete"
+    script_by_command = {
+        "start": "start-work-block.ps1",
+        "bootstrap-response": "start-work-block.ps1",
+        "complete": "work-block-complete.ps1",
+        "detect": "detect-closeout.ps1",
+        "repair": "repair-closeout.ps1",
+        "checkpoint": "publish-checkpoint.ps1",
+        "dirty-split": "repair-closeout.ps1",
+        "finalize": "finalize-closeout.ps1",
+        "review-quorum": "review-quorum.ps1",
+        "orphan-quarantine": "orphan-quarantine.ps1",
+        "audit": "audit-closeout.ps1",
+        "sweep": "repo-sweep-closeout.ps1",
+        "remediate-retained": "remediate-retained-closeout.ps1",
+    }
+    script = script_by_command.get(command, "work-block-complete.ps1")
+    return "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\%s -RepoRoot ." % script
+
+
+def parse_child_json(stdout: str) -> Optional[Dict[str, Any]]:
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def audit_entries(repo_root: Path, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    path = audit_root(repo_root, config) / "audits.jsonl"
+    if not path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            with contextlib.suppress(json.JSONDecodeError):
+                rows.append(json.loads(line))
+    return rows
+
+
+def closeout_success_artifact_exists(repo_root: Path, config: Dict[str, Any]) -> bool:
+    return any(row.get("outcome") == "success" for row in audit_entries(repo_root, config))
+
+
+def closeout_blocker_artifact_exists(repo_root: Path, config: Dict[str, Any]) -> bool:
+    return any(row.get("outcome") in {"blocked", "retained"} for row in audit_entries(repo_root, config))
+
+
+def closeout_command_requires_success_artifact(closeout_args: Sequence[str], child_json: Optional[Dict[str, Any]]) -> bool:
+    command = str(closeout_args[0]) if closeout_args else ""
+    status = str((child_json or {}).get("status") or "")
+    if child_json and child_json.get("eligible") is False:
+        return False
+    if command == "finalize" or (command == "complete" and "--finalize" in closeout_args):
+        return status == "success"
+    if command in {"detect", "repair", "checkpoint", "dirty-split", "sweep", "orphan-quarantine", "remediate-retained"}:
+        return status in {"", "success"}
+    return False
+
+
+def closeout_command_requires_blocker_artifact(closeout_args: Sequence[str], child_json: Optional[Dict[str, Any]]) -> bool:
+    if not child_json:
+        return False
+    status = str(child_json.get("status") or "")
+    if status in {"blocked", "failed", "error"}:
+        return True
+    command = str(closeout_args[0]) if closeout_args else ""
+    return command == "detect" and child_json.get("eligible") is False
+
+
+def normalize_closeout_child_status(
+    repo_root: Path,
+    config: Dict[str, Any],
+    result: Dict[str, Any],
+    *,
+    closeout_args: Optional[Sequence[str]] = None,
+    expected_success_artifact: Optional[Path] = None,
+    expected_blocker_artifact: Optional[Path] = None,
+) -> Dict[str, Any]:
+    stdout = str(result.get("stdout") or "")
+    stderr = str(result.get("stderr") or "")
+    combined = ("%s\n%s" % (stdout, stderr)).lower()
+    matched = [pattern for pattern in closeout_failure_text_patterns(config) if pattern in combined]
+    child_json = parse_child_json(stdout)
+    status_value = str((child_json or {}).get("status") or "")
+    json_blocked = status_value in {"blocked", "failed", "error"}
+    if child_json and child_json.get("eligible") is False:
+        json_blocked = True
+    original_returncode = int(result.get("returncode") or 0)
+    normalized_reasons: List[str] = []
+    if matched:
+        normalized_reasons.append("known_failure_text")
+    if json_blocked:
+        normalized_reasons.append("json_status_failure")
+    args = list(closeout_args or [])
+    if expected_success_artifact is not None and original_returncode == 0 and not expected_success_artifact.exists():
+        normalized_reasons.append("missing_success_artifact")
+    if expected_blocker_artifact is not None and json_blocked and not expected_blocker_artifact.exists():
+        normalized_reasons.append("missing_blocker_artifact")
+    if args and original_returncode == 0:
+        if closeout_command_requires_success_artifact(args, child_json) and not closeout_success_artifact_exists(repo_root, config):
+            normalized_reasons.append("missing_success_artifact")
+        if closeout_command_requires_blocker_artifact(args, child_json) and not closeout_blocker_artifact_exists(repo_root, config):
+            normalized_reasons.append("missing_blocker_artifact")
+    if result.get("timedOut"):
+        return {"status": "timeout", "returncode": 124, "matchedFailurePatterns": matched, "normalizedFailure": False, "normalizedReasons": []}
+    if result.get("outputCapped"):
+        return {"status": "output_cap", "returncode": 125, "matchedFailurePatterns": matched, "normalizedFailure": False, "normalizedReasons": []}
+    if original_returncode == 0 and normalized_reasons:
+        return {
+            "status": "normalized_failure",
+            "returncode": 20,
+            "matchedFailurePatterns": matched,
+            "normalizedFailure": True,
+            "normalizedReasons": sorted(set(normalized_reasons)),
+            "childStatus": status_value or None,
+        }
+    return {
+        "status": "success" if original_returncode == 0 else "failed",
+        "returncode": original_returncode,
+        "matchedFailurePatterns": matched,
+        "normalizedFailure": False,
+        "normalizedReasons": [],
+        "childStatus": status_value or None,
+    }
+
+
+def kill_process_tree(pid: int) -> Dict[str, Any]:
+    if pid <= 0:
+        return {"processTreeKillAttempted": False, "killedDescendants": [], "reason": "invalid_pid"}
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+        )
+        text = "%s\n%s" % (completed.stdout or "", completed.stderr or "")
+        killed = sorted({int(value) for value in re.findall(r"PID\s+(\d+)", text) if int(value) != pid})
+        return {
+            "processTreeKillAttempted": True,
+            "method": "taskkill",
+            "returncode": completed.returncode,
+            "killedDescendants": killed,
+            "stdout": (completed.stdout or "")[-2000:],
+            "stderr": (completed.stderr or "")[-2000:],
+        }
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGKILL)
+        return {"processTreeKillAttempted": True, "method": "killpg", "returncode": 0, "killedDescendants": [], "processGroup": pgid}
+    except ProcessLookupError:
+        return {"processTreeKillAttempted": True, "method": "killpg", "returncode": 0, "killedDescendants": [], "alreadyExited": True}
+    except Exception as exc:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        return {"processTreeKillAttempted": True, "method": "kill", "returncode": 1, "killedDescendants": [], "error": str(exc)}
+
+
+def _bounded_stream_reader(stream: Any, label: str, state: Dict[str, Any], lock: threading.Lock, stop_event: threading.Event, max_bytes: int) -> None:
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                break
+            with lock:
+                state[label + "Bytes"] += len(chunk)
+                remaining = max(0, max_bytes - state["storedBytes"])
+                if remaining:
+                    state[label].extend(chunk[:remaining])
+                    state["storedBytes"] += min(len(chunk), remaining)
+                if state["stdoutBytes"] + state["stderrBytes"] > max_bytes:
+                    state["outputCapped"] = True
+                    stop_event.set()
+                    break
+    finally:
+        with contextlib.suppress(Exception):
+            stream.close()
+
+
+def run_bounded_closeout_process(
+    repo_root_arg: Path,
+    config: Dict[str, Any],
+    command: Sequence[str],
+    *,
+    timeout_ms: int,
+    max_output_bytes: int,
+    recovery_command: str,
+    closeout_args: Optional[Sequence[str]] = None,
+    work_block_id: Optional[str] = None,
+    expected_success_artifact: Optional[Path] = None,
+    expected_blocker_artifact: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[Path] = None,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    process_cwd = cwd or repo_root
+    timeout_ms = positive_int(timeout_ms, 120000)
+    max_output_bytes = positive_int(max_output_bytes, 1048576)
+    started_at = utc_now()
+    process = subprocess.Popen(
+        list(command),
+        cwd=str(process_cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=(os.name != "nt"),
+    )
+    state: Dict[str, Any] = {
+        "stdout": bytearray(),
+        "stderr": bytearray(),
+        "stdoutBytes": 0,
+        "stderrBytes": 0,
+        "storedBytes": 0,
+        "outputCapped": False,
+    }
+    lock = threading.Lock()
+    stop_event = threading.Event()
+    threads = [
+        threading.Thread(target=_bounded_stream_reader, args=(process.stdout, "stdout", state, lock, stop_event, max_output_bytes), daemon=True),
+        threading.Thread(target=_bounded_stream_reader, args=(process.stderr, "stderr", state, lock, stop_event, max_output_bytes), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    reason: Optional[str] = None
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while process.poll() is None:
+        if stop_event.is_set():
+            reason = "output_cap"
+            break
+        if time.monotonic() >= deadline:
+            reason = "timeout"
+            break
+        time.sleep(0.02)
+    kill_info: Dict[str, Any] = {"processTreeKillAttempted": False, "killedDescendants": []}
+    if reason:
+        kill_info = kill_process_tree(process.pid)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+        if process.poll() is None:
+            with contextlib.suppress(Exception):
+                process.kill()
+            with contextlib.suppress(Exception):
+                process.wait(timeout=2)
+    else:
+        process.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+    stdout = bytes(state["stdout"]).decode("utf-8", errors="replace")
+    stderr = bytes(state["stderr"]).decode("utf-8", errors="replace")
+    raw_returncode = process.returncode
+    if raw_returncode is None:
+        raw_returncode = 124 if reason == "timeout" else 125 if reason == "output_cap" else 1
+    base_result: Dict[str, Any] = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "status": "pending",
+        "args": list(command),
+        "cwd": str(process_cwd),
+        "pid": process.pid,
+        "returncode": int(raw_returncode),
+        "startedAt": started_at,
+        "completedAt": utc_now(),
+        "timeoutMs": timeout_ms,
+        "maxOutputBytes": max_output_bytes,
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdoutBytes": int(state["stdoutBytes"]),
+        "stderrBytes": int(state["stderrBytes"]),
+        "timedOut": reason == "timeout",
+        "outputCapped": bool(state["outputCapped"] or reason == "output_cap"),
+        "killedProcessTree": bool(kill_info.get("processTreeKillAttempted")),
+        "killedDescendants": kill_info.get("killedDescendants", []),
+        "kill": kill_info,
+        "recoveryCommand": recovery_command,
+    }
+    normalized = normalize_closeout_child_status(
+        repo_root,
+        config,
+        base_result,
+        closeout_args=closeout_args,
+        expected_success_artifact=expected_success_artifact,
+        expected_blocker_artifact=expected_blocker_artifact,
+    )
+    base_result.update(normalized)
+    audit_payload = {k: v for k, v in base_result.items() if k not in {"stdout", "stderr"}}
+    audit_payload["stdoutTail"] = stdout[-4000:]
+    audit_payload["stderrTail"] = stderr[-4000:]
+    if base_result["timedOut"]:
+        write_audit(repo_root, config, "bounded_runner_timeout", audit_payload, work_block_id=work_block_id, outcome="blocked")
+    if base_result["outputCapped"]:
+        write_audit(repo_root, config, "bounded_runner_output_cap", audit_payload, work_block_id=work_block_id, outcome="blocked")
+    if base_result["killedProcessTree"]:
+        write_audit(repo_root, config, "bounded_runner_process_tree_killed", audit_payload, work_block_id=work_block_id, outcome="blocked")
+    if base_result["normalizedFailure"]:
+        write_audit(repo_root, config, "bounded_runner_normalized_failure", audit_payload, work_block_id=work_block_id, outcome="blocked")
+    return base_result
+
+
+def bounded_closeout_run(repo_root_arg: Path, closeout_args: Sequence[str]) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    args = list(closeout_args)
+    command = [sys.executable, "-m", "tools.repo_hygiene.work_block_cli", "--repo-root", ".", *args]
+    return run_bounded_closeout_process(
+        repo_root,
+        config,
+        command,
+        timeout_ms=closeout_command_timeout_ms(config, args),
+        max_output_bytes=closeout_max_process_output_bytes(config),
+        recovery_command=closeout_recovery_command(args),
+        closeout_args=args,
+    )
+
+
+def bounded_closeout_cli_main(argv: Optional[Sequence[str]] = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    repo_root = "."
+    if "--repo-root" in args:
+        index = args.index("--repo-root")
+        if index + 1 >= len(args):
+            print("bounded closeout runner error: --repo-root requires a value", file=sys.stderr)
+            return 64
+        repo_root = args[index + 1]
+        del args[index : index + 2]
+    if "--" in args:
+        args = args[args.index("--") + 1 :]
+    if not args:
+        print("bounded closeout runner error: missing closeout command", file=sys.stderr)
+        return 64
+    result = bounded_closeout_run(Path(repo_root), args)
+    if result.get("stdout"):
+        sys.stdout.write(str(result["stdout"]))
+        if not str(result["stdout"]).endswith("\n"):
+            sys.stdout.write("\n")
+    if result.get("stderr"):
+        sys.stderr.write(str(result["stderr"]))
+        if not str(result["stderr"]).endswith("\n"):
+            sys.stderr.write("\n")
+    if result["status"] != "success":
+        summary = {k: v for k, v in result.items() if k not in {"stdout", "stderr"}}
+        print(json.dumps({"boundedRunner": summary}, indent=2, sort_keys=True), file=sys.stderr)
+    return int(result["returncode"])
+
+
 def start_work_block(
     repo_root_arg: Path,
     *,
@@ -816,13 +1288,14 @@ def can_update_tooling_path(repo_root: Path, config: Dict[str, Any], path: str, 
 def verify_closeout_tooling_current(repo_root_arg: Path, config: Optional[Dict[str, Any]] = None, *, attempt_update: bool = True) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = config or load_closeout_config(repo_root)
+    raw_config = read_json(repo_root / CONFIG_PATH, {}) if (repo_root / CONFIG_PATH).exists() else {}
     baseline = config.get("toolingBaseline", {})
     if not bool(baseline.get("enabled", False)):
         return {"ok": True, "status": "disabled", "missing": [], "updated": []}
 
     missing: List[Dict[str, Any]] = []
     for key in baseline.get("requiredConfigKeys", []):
-        if config_path_value(config, str(key)) is None:
+        if config_path_value(raw_config, str(key)) is None:
             missing.append({"kind": "config_key", "key": str(key)})
     high_impact = set(config.get("reviewQuorum", {}).get("highImpactActions", []))
     for action in baseline.get("requiredHighImpactActions", []):
@@ -2198,6 +2671,360 @@ def cleanup_after_success(
     return cleanup
 
 
+def runtime_command_argv(command: Any) -> List[str]:
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        return []
+    argv = list(command)
+    if argv[0] == "python":
+        argv[0] = sys.executable
+    return argv
+
+
+def enabled_runtime_services(config: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    services = config.get("runtimeServices", {})
+    if not isinstance(services, dict):
+        return []
+    rows: List[Tuple[str, Dict[str, Any]]] = []
+    for name, service in sorted(services.items()):
+        if isinstance(service, dict) and bool(service.get("enabled", False)):
+            rows.append((str(name), service))
+    return rows
+
+
+def runtime_service_recovery_command(service_name: str, command_name: str) -> str:
+    return "fix runtimeServices.%s.%s or stop/restart the service manually, then rerun work-block-complete -Finalize -RequireRepoClosed" % (service_name, command_name)
+
+
+def run_runtime_service_command(repo_root: Path, config: Dict[str, Any], service_name: str, service: Dict[str, Any], command_name: str) -> Dict[str, Any]:
+    argv = runtime_command_argv(service.get(command_name))
+    if not argv:
+        return {
+            "service": service_name,
+            "command": command_name,
+            "configured": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "runtime service command is not configured",
+        }
+    completed = run_bounded_closeout_process(
+        repo_root,
+        config,
+        argv,
+        timeout_ms=positive_int(service.get("timeoutMs"), closeout_command_timeout_ms(config, ["repair"])),
+        max_output_bytes=closeout_max_process_output_bytes(config),
+        recovery_command=runtime_service_recovery_command(service_name, command_name),
+        closeout_args=["runtime-service"],
+    )
+    return {
+        "service": service_name,
+        "command": command_name,
+        "configured": True,
+        "argv": argv,
+        "returncode": completed["returncode"],
+        "status": completed["status"],
+        "stdout": completed["stdout"][-2000:],
+        "stderr": completed["stderr"][-2000:],
+        "timedOut": completed["timedOut"],
+        "outputCapped": completed["outputCapped"],
+    }
+
+
+def stop_runtime_services_before_promotion(repo_root: Path, config: Dict[str, Any], *, work_block_id: Optional[str] = None) -> Dict[str, Any]:
+    services: List[Dict[str, Any]] = []
+    blockers: List[Dict[str, Any]] = []
+    for service_name, service in enabled_runtime_services(config):
+        if not bool(service.get("stopBeforePromotion", False)):
+            continue
+        row: Dict[str, Any] = {"service": service_name, "phase": "stopBeforePromotion"}
+        status_before = run_runtime_service_command(repo_root, config, service_name, service, "statusCommand")
+        row["statusBefore"] = status_before
+        if not status_before["configured"]:
+            row["status"] = "blocked"
+            row["reason"] = "runtime_service_status_command_missing"
+            row["recoveryCommand"] = runtime_service_recovery_command(service_name, "statusCommand")
+            blockers.append(row)
+            services.append(row)
+            continue
+        if status_before["returncode"] != 0:
+            row["status"] = "success"
+            row["alreadyStopped"] = True
+            row["stoppedByCloseout"] = False
+            services.append(row)
+            continue
+        stop = run_runtime_service_command(repo_root, config, service_name, service, "stopCommand")
+        row["stop"] = stop
+        if not stop["configured"] or stop["returncode"] != 0:
+            row["status"] = "blocked"
+            row["reason"] = "runtime_service_stop_failed" if stop["configured"] else "runtime_service_stop_command_missing"
+            row["recoveryCommand"] = runtime_service_recovery_command(service_name, "stopCommand")
+            blockers.append(row)
+            services.append(row)
+            continue
+        status_after = run_runtime_service_command(repo_root, config, service_name, service, "statusCommand")
+        row["statusAfter"] = status_after
+        if status_after["returncode"] == 0:
+            row["status"] = "blocked"
+            row["reason"] = "runtime_service_still_running_after_stop"
+            row["recoveryCommand"] = runtime_service_recovery_command(service_name, "stopCommand")
+            blockers.append(row)
+            services.append(row)
+            continue
+        row["status"] = "success"
+        row["alreadyStopped"] = False
+        row["stoppedByCloseout"] = True
+        services.append(row)
+    result = {
+        "status": "blocked" if blockers else "success",
+        "reason": "runtime_service_stop_failed" if blockers else None,
+        "phase": "stopBeforePromotion",
+        "services": services,
+        "blockers": blockers,
+    }
+    if services or blockers:
+        write_audit(repo_root, config, "runtime_service_stop", result, work_block_id=work_block_id, outcome="blocked" if blockers else "success")
+    return result
+
+
+def restart_runtime_services_after_clean_promotion(
+    repo_root: Path,
+    config: Dict[str, Any],
+    stop_result: Optional[Dict[str, Any]],
+    *,
+    work_block_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    stopped_by_closeout = {
+        str(item.get("service"))
+        for item in (stop_result or {}).get("services", [])
+        if item.get("stoppedByCloseout")
+    }
+    services: List[Dict[str, Any]] = []
+    blockers: List[Dict[str, Any]] = []
+    for service_name, service in enabled_runtime_services(config):
+        if not bool(service.get("restartAfterCleanPromotion", False)):
+            continue
+        row: Dict[str, Any] = {"service": service_name, "phase": "restartAfterCleanPromotion"}
+        if service_name not in stopped_by_closeout:
+            row["status"] = "skipped"
+            row["reason"] = "service_was_not_stopped_by_closeout"
+            services.append(row)
+            continue
+        start = run_runtime_service_command(repo_root, config, service_name, service, "startCommand")
+        row["start"] = start
+        if not start["configured"] or start["returncode"] != 0:
+            row["status"] = "blocked"
+            row["reason"] = "runtime_service_restart_failed" if start["configured"] else "runtime_service_start_command_missing"
+            row["recoveryCommand"] = runtime_service_recovery_command(service_name, "startCommand")
+            blockers.append(row)
+            services.append(row)
+            continue
+        status_after = run_runtime_service_command(repo_root, config, service_name, service, "statusCommand")
+        row["statusAfter"] = status_after
+        if not status_after["configured"] or status_after["returncode"] != 0:
+            row["status"] = "blocked"
+            row["reason"] = "runtime_service_not_running_after_restart"
+            row["recoveryCommand"] = runtime_service_recovery_command(service_name, "statusCommand")
+            blockers.append(row)
+            services.append(row)
+            continue
+        row["status"] = "success"
+        services.append(row)
+    result = {
+        "status": "blocked" if blockers else "success",
+        "reason": "runtime_service_restart_failed" if blockers else None,
+        "phase": "restartAfterCleanPromotion",
+        "services": services,
+        "blockers": blockers,
+    }
+    if services or blockers:
+        write_audit(repo_root, config, "runtime_service_restart", result, work_block_id=work_block_id, outcome="blocked" if blockers else "success")
+    return result
+
+
+def audit_type_exists(repo_root: Path, config: Dict[str, Any], audit_types: Sequence[str], *, work_block_id: Optional[str] = None) -> bool:
+    path = audit_root(repo_root, config) / "audits.jsonl"
+    if not path.exists():
+        return False
+    wanted = set(audit_types)
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("auditType") not in wanted:
+            continue
+        if work_block_id is not None and str(row.get("workBlockId")) != str(work_block_id):
+            continue
+        return True
+    return False
+
+
+def repo_relative_or_absolute(repo_root: Path, path: Path) -> str:
+    try:
+        return normalize_rel(str(path.resolve().relative_to(repo_root.resolve())))
+    except ValueError:
+        return normalize_rel(str(path))
+
+
+def hard_clean_stale_transaction_branches(repo_root: Path, config: Dict[str, Any], target_branch: str) -> List[Dict[str, Any]]:
+    stale: List[Dict[str, Any]] = []
+    for row in local_branch_rows(repo_root):
+        branch = str(row["branch"])
+        if branch == target_branch or is_protected_branch(config, branch):
+            continue
+        if branch_allowed_by_policy(config, branch) or branch.startswith("closeout/"):
+            stale.append(row)
+    return stale
+
+
+def hard_clean_stale_worktrees(repo_root: Path, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    patterns = list(config.get("responseHookLifecycle", {}).get("managedSessionWorktreeRoots", []))
+    state_root = normalize_rel(str(config.get("stateRoot") or ".claude-state/closeout")).strip("/")
+    patterns.extend(
+        [
+            f"{state_root}/integration-worktrees/**",
+            f"{state_root}/rs-iw/**",
+            f"{state_root}/runtime-services/**",
+            normalize_rel(str(config.get("dirtySplit", {}).get("worktreeRoot") or ".claude-state/closeout/dirty-splits/worktrees")).strip("/") + "/**",
+        ]
+    )
+    stale: List[Dict[str, Any]] = []
+    repo_resolved = repo_root.resolve()
+    for item in parse_worktree_list(repo_root):
+        path = Path(str(item.get("path") or ""))
+        if not path:
+            continue
+        try:
+            if path.resolve() == repo_resolved:
+                continue
+        except OSError:
+            pass
+        rel = repo_relative_or_absolute(repo_root, path)
+        managed = path_matches_any(rel, patterns) or path_matches_any(str(path), patterns)
+        detached = bool(item.get("detached") or not item.get("branch"))
+        if detached or managed:
+            stale.append({**item, "repoRelativePath": rel, "managed": managed, "detached": detached})
+    return stale
+
+
+def orphaned_closeout_runtime_artifacts(repo_root: Path, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    root = closeout_state_root(repo_root, config)
+    candidates = [
+        root / "integration-worktrees",
+        root / "rs-iw",
+        root / "runtime-services",
+    ]
+    artifacts: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        if not candidate.exists() or not candidate.is_dir():
+            continue
+        children = sorted(candidate.iterdir(), key=lambda item: item.name)
+        if children:
+            artifacts.append(
+                {
+                    "path": repo_relative_or_absolute(repo_root, candidate),
+                    "children": [repo_relative_or_absolute(repo_root, child) for child in children[:50]],
+                    "childCount": len(children),
+                }
+            )
+    return artifacts
+
+
+def repo_closed_artifact_path(repo_root: Path, config: Dict[str, Any], work_block_id: Optional[str]) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(work_block_id or "repo")).strip("-") or "repo"
+    return closeout_state_root(repo_root, config) / "repo-closed" / ("%s.json" % safe_id)
+
+
+def verify_repo_closed_postcondition(
+    repo_root_arg: Path,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    work_block_id: Optional[str] = None,
+    finalize_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = config or load_closeout_config(repo_root)
+    hard_clean = config.get("hardClean", {})
+    target = target_ref_for(repo_root, config)
+    status_entries = parse_status_paths(repo_root)
+    exempt_patterns = hard_clean.get("exemptStatusPatterns", [])
+    non_exempt_status = [entry for entry in status_entries if not path_matches_any(str(entry["path"]), exempt_patterns)]
+    untracked = [entry for entry in non_exempt_status if str(entry.get("status") or "").strip() == "??"]
+    foreign_retention_allowed = bool(hard_clean.get("allowRetainedForeignDirtyAtCompletion", False))
+    foreign_dirty_paths: set[str] = set()
+    retention_audited = False
+    detection_error: Optional[str] = None
+    if work_block_id:
+        try:
+            detection = detect_work_block(repo_root, work_block_id=work_block_id)
+            foreign_dirty_paths = {str(item.get("path")) for item in detection.get("foreignDirty", [])}
+            retention_audited = audit_type_exists(repo_root, config, ["cleanup_retention", "retained_foreign_dirty"], work_block_id=work_block_id)
+        except Exception as exc:
+            if (finalize_result or {}).get("status") == "success" and "git ref is missing" in str(exc):
+                foreign_dirty_paths = {str(item.get("path")) for item in (finalize_result or {}).get("foreignDirtyRetained", [])}
+            else:
+                detection_error = str(exc)
+    status_paths = {str(item["path"]) for item in non_exempt_status}
+    retained_foreign_status_allowed = bool(
+        status_paths
+        and foreign_retention_allowed
+        and retention_audited
+        and status_paths.issubset(foreign_dirty_paths)
+    )
+    stashes = stash_rows(repo_root)
+    stale_branches = hard_clean_stale_transaction_branches(repo_root, config, str(target["targetBranch"]))
+    stale_worktrees = hard_clean_stale_worktrees(repo_root, config)
+    orphan_artifacts = orphaned_closeout_runtime_artifacts(repo_root, config)
+    blockers: List[Dict[str, Any]] = []
+    if non_exempt_status and not retained_foreign_status_allowed:
+        blockers.append({"kind": "non_exempt_dirty_files", "entries": non_exempt_status})
+    if untracked and not retained_foreign_status_allowed:
+        blockers.append({"kind": "non_exempt_untracked_files", "entries": untracked})
+    if bool(hard_clean.get("requireNoStash", True)) and stashes:
+        blockers.append({"kind": "disallowed_stashes", "stashes": stashes})
+    elif stashes and not audit_type_exists(repo_root, config, ["cleanup_retention", "snapshot_pruning", "stash_retention"]):
+        blockers.append({"kind": "stash_retention_audit_missing", "stashes": stashes})
+    if stale_branches:
+        blockers.append({"kind": "stale_transaction_branches", "branches": stale_branches})
+    if stale_worktrees:
+        blockers.append({"kind": "stale_managed_worktrees", "worktrees": stale_worktrees})
+    if orphan_artifacts:
+        blockers.append({"kind": "orphaned_closeout_runtime_artifacts", "artifacts": orphan_artifacts})
+    if detection_error:
+        blockers.append({"kind": "repo_closed_detection_error", "error": detection_error})
+    ok = not blockers
+    result = {
+        "status": "success" if ok else "blocked",
+        "ok": ok,
+        "reason": None if ok else "repo_closed_postcondition_failed",
+        "selectedWorkBlockId": work_block_id,
+        "targetRef": target,
+        "dirtyState": {
+            "entries": status_entries,
+            "nonExempt": non_exempt_status,
+            "untrackedNonExempt": untracked,
+            "exemptStatusPatterns": exempt_patterns,
+            "retainedForeignDirtyAllowed": retained_foreign_status_allowed,
+            "foreignDirtyPaths": sorted(foreign_dirty_paths),
+            "retentionAudited": retention_audited,
+        },
+        "stashState": {"stashes": stashes, "requireNoStash": bool(hard_clean.get("requireNoStash", True))},
+        "branchState": {"staleTransactionBranches": stale_branches},
+        "worktreeState": {"staleManagedWorktrees": stale_worktrees},
+        "runtimeArtifactState": {"orphanedArtifacts": orphan_artifacts},
+        "cleanupAudit": {
+            "retentionAudited": retention_audited,
+            "artifactPath": normalize_rel(str(repo_closed_artifact_path(repo_root, config, work_block_id).relative_to(repo_root))),
+        },
+        "blockers": blockers,
+        "finalizeResultStatus": (finalize_result or {}).get("status"),
+    }
+    write_json(repo_closed_artifact_path(repo_root, config, work_block_id), result)
+    write_audit(repo_root, config, "repo_closed_postcondition", result, work_block_id=work_block_id, outcome="success" if ok else "blocked")
+    return result
+
+
 def finalize_retry_decision(
     config: Dict[str, Any],
     *,
@@ -2355,6 +3182,14 @@ def _finalize_work_block_once(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "stale_refs"})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "stale_refs"})
         return {"status": "blocked", "reason": "stale_refs", **payload}
+    runtime_lifecycle = {
+        "stopBeforePromotion": stop_runtime_services_before_promotion(repo_root, config, work_block_id=block_id),
+        "restartAfterCleanPromotion": None,
+    }
+    if runtime_lifecycle["stopBeforePromotion"]["status"] != "success":
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": runtime_lifecycle["stopBeforePromotion"]["reason"]})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": runtime_lifecycle["stopBeforePromotion"]["reason"]})
+        return {"status": "blocked", "reason": runtime_lifecycle["stopBeforePromotion"]["reason"], "runtimeLifecycle": runtime_lifecycle}
     already_integrated = is_ancestor(repo_root, feature_head, target["head"])
     integration_path: Optional[Path] = None
     new_target_head = target["head"]
@@ -2368,7 +3203,7 @@ def _finalize_work_block_once(
             write_audit(repo_root, config, "partial_push_recovery", recovery, work_block_id=block_id, outcome="success" if recovery["returncode"] == 0 else "blocked")
             if recovery["returncode"] != 0:
                 update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "partial_push_recovery_failed"})
-                return {"status": "blocked", "reason": "partial_push_recovery_failed", "recovery": recovery}
+                return {"status": "blocked", "reason": "partial_push_recovery_failed", "recovery": recovery, "runtimeLifecycle": runtime_lifecycle}
     else:
         integration_path = closeout_state_root(repo_root, config) / "integration-worktrees" / ("%s-%s" % (block_id, uuid.uuid4().hex[:8]))
         integration_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2377,21 +3212,21 @@ def _finalize_work_block_once(
             payload = {"operation": "worktree_add", "returncode": add.returncode, "stderr": add.stderr[-4000:]}
             write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "integration_worktree_failed"})
-            return {"status": "blocked", "reason": "integration_worktree_failed", "detail": payload}
+            return {"status": "blocked", "reason": "integration_worktree_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
         merge = run_git(integration_path, ["merge", "--no-ff", "--no-edit", feature_head])
         if merge.returncode != 0:
             payload = {"operation": "merge", "returncode": merge.returncode, "stdout": merge.stdout[-4000:], "stderr": merge.stderr[-4000:]}
             write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "merge_failed"})
-            return {"status": "blocked", "reason": "merge_failed", "detail": payload}
+            return {"status": "blocked", "reason": "merge_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
         diff_check = run_git(integration_path, ["diff", "--check"])
         if diff_check.returncode != 0:
             payload = {"operation": "git_diff_check", "returncode": diff_check.returncode, "stdout": diff_check.stdout[-4000:], "stderr": diff_check.stderr[-4000:]}
             write_audit(repo_root, config, "validation_failure", payload, work_block_id=block_id, outcome="blocked")
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "diff_check_failed"})
-            return {"status": "blocked", "reason": "diff_check_failed", "detail": payload}
+            return {"status": "blocked", "reason": "diff_check_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
         validations = run_validations(repo_root, config, integration_path)
         failed_validation = next((item for item in validations if item["returncode"] != 0), None)
         if failed_validation:
@@ -2400,7 +3235,7 @@ def _finalize_work_block_once(
             if bool(config.get("cleanupPolicy", {}).get("removeIntegrationWorktreeAfterFailure", True)):
                 remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "validation_failed"})
-            return {"status": "blocked", "reason": "validation_failed", "validations": validations}
+            return {"status": "blocked", "reason": "validation_failed", "validations": validations, "runtimeLifecycle": runtime_lifecycle}
         new_target_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
         if target["mode"] == "remote":
             push = run_git(integration_path, ["push", str(target.get("remote")), f"HEAD:{target_branch}"])
@@ -2419,7 +3254,7 @@ def _finalize_work_block_once(
                     remove_worktree(repo_root, integration_path)
                     append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": recovery["reason"]})
                     update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": recovery["reason"]})
-                    return {"status": "blocked", "reason": recovery["reason"], "push": push_result, "recovery": recovery}
+                    return {"status": "blocked", "reason": recovery["reason"], "push": push_result, "recovery": recovery, "runtimeLifecycle": runtime_lifecycle}
                 new_target_head = str(recovery["targetHeadAfter"])
                 local_update = recovery.get("localTargetUpdate")
         if local_update is None:
@@ -2428,9 +3263,10 @@ def _finalize_work_block_once(
             write_audit(repo_root, config, "partial_push_recovery", local_update, work_block_id=block_id, outcome="blocked")
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "local_target_update_failed"})
-            return {"status": "blocked", "reason": "local_target_update_failed", "localUpdate": local_update, "push": push_result}
+            return {"status": "blocked", "reason": "local_target_update_failed", "localUpdate": local_update, "push": push_result, "runtimeLifecycle": runtime_lifecycle}
     cleanup = cleanup_after_success(repo_root, config, detection, new_target_head=new_target_head, integration_path=integration_path)
     success_payload = {
+        "selectedWorkBlockId": block_id,
         "candidateId": candidate_id,
         "actionId": action_id,
         "evidenceHash": evidence_hash,
@@ -2442,6 +3278,7 @@ def _finalize_work_block_once(
         "push": push_result,
         "recovery": recovery,
         "cleanup": cleanup,
+        "runtimeLifecycle": runtime_lifecycle,
         "foreignDirtyRetained": detection["foreignDirty"],
         "workBlockSelection": detection.get("workBlockSelection"),
     }
@@ -2456,11 +3293,30 @@ def finalize_work_block(
     *,
     work_block_id: Optional[str] = None,
     expected_pinned_refs: Optional[Dict[str, Any]] = None,
+    auto_approve: bool = False,
+    require_repo_closed: bool = False,
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     if not bool(config.get("finalizeLoop", {}).get("enabled", True)):
-        return _finalize_work_block_once(repo_root, work_block_id=work_block_id, expected_pinned_refs=expected_pinned_refs)
+        result = _finalize_work_block_once(repo_root, work_block_id=work_block_id, expected_pinned_refs=expected_pinned_refs)
+        if auto_approve:
+            result["autoApproveRequested"] = True
+        if require_repo_closed and result.get("status") == "success":
+            block_id = str(work_block_id or result.get("selectedWorkBlockId") or "")
+            postcondition = verify_repo_closed_postcondition(repo_root, config, work_block_id=block_id or None, finalize_result=result)
+            result["repoClosedPostcondition"] = postcondition
+            if not postcondition["ok"]:
+                if block_id:
+                    update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "repo_closed_postcondition_failed"})
+                return {**result, "status": "blocked", "reason": "repo_closed_postcondition_failed", "finalizeStatus": "success"}
+            restart = restart_runtime_services_after_clean_promotion(repo_root, config, result.get("runtimeLifecycle", {}).get("stopBeforePromotion"), work_block_id=block_id or None)
+            result.setdefault("runtimeLifecycle", {})["restartAfterCleanPromotion"] = restart
+            if restart["status"] != "success":
+                if block_id:
+                    update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": restart["reason"]})
+                return {**result, "status": "blocked", "reason": restart["reason"], "finalizeStatus": "success"}
+        return result
     seen_tuples: set[str] = set()
     ledger: List[Dict[str, Any]] = []
     retry_number = 0
@@ -2476,6 +3332,24 @@ def finalize_work_block(
         if result.get("status") == "success":
             if ledger:
                 result["finalizeRetryLedger"] = ledger
+            if auto_approve:
+                result["autoApproveRequested"] = True
+            if require_repo_closed:
+                postcondition = verify_repo_closed_postcondition(repo_root, config, work_block_id=selected_work_block_id, finalize_result=result)
+                result["repoClosedPostcondition"] = postcondition
+                if not postcondition["ok"]:
+                    update_manifest(repo_root, config, selected_work_block_id, {"state": "blocked", "blockedReason": "repo_closed_postcondition_failed"})
+                    return {**result, "status": "blocked", "reason": "repo_closed_postcondition_failed", "finalizeStatus": "success"}
+                restart = restart_runtime_services_after_clean_promotion(
+                    repo_root,
+                    config,
+                    result.get("runtimeLifecycle", {}).get("stopBeforePromotion"),
+                    work_block_id=selected_work_block_id,
+                )
+                result.setdefault("runtimeLifecycle", {})["restartAfterCleanPromotion"] = restart
+                if restart["status"] != "success":
+                    update_manifest(repo_root, config, selected_work_block_id, {"state": "blocked", "blockedReason": restart["reason"]})
+                    return {**result, "status": "blocked", "reason": restart["reason"], "finalizeStatus": "success"}
             return result
         blocker_kind = str(result.get("reason") or "blocked")
         try:
@@ -2509,7 +3383,14 @@ def finalize_work_block(
         retry_number += 1
 
 
-def complete_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = None, finalize: bool = False) -> Dict[str, Any]:
+def complete_work_block(
+    repo_root_arg: Path,
+    *,
+    work_block_id: Optional[str] = None,
+    finalize: bool = False,
+    auto_approve: bool = False,
+    require_repo_closed: bool = False,
+) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     manifest = ensure_work_block_for_current_branch(repo_root, config, work_block_id)
@@ -2519,7 +3400,7 @@ def complete_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = N
     detection = detect_work_block(repo_root, work_block_id=block_id)
     if not finalize:
         return {"status": "completed", "workBlockId": block_id, "workBlockSelection": manifest.get("workBlockSelection"), "detector": detection}
-    result = finalize_work_block(repo_root, work_block_id=block_id)
+    result = finalize_work_block(repo_root, work_block_id=block_id, auto_approve=auto_approve, require_repo_closed=require_repo_closed)
     result["workBlockSelection"] = manifest.get("workBlockSelection")
     return result
 
@@ -4789,7 +5670,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation"]
+    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation", "locking", "autoEligibilityRepair"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),

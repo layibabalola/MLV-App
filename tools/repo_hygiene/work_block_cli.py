@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     complete = sub.add_parser("complete", help="Mark a work block complete; optionally finalize.")
     complete.add_argument("--work-block-id")
     complete.add_argument("--finalize", action="store_true")
+    complete.add_argument("--auto-approve", action="store_true")
+    complete.add_argument("--require-repo-closed", action="store_true")
 
     detect = sub.add_parser("detect", help="Classify dirty state against the completed branch delta.")
     detect.add_argument("--work-block-id")
@@ -132,7 +134,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "bootstrap-response":
             result = bootstrap_response_broker_manifest(repo_root, hook_phase=args.hook_phase, actor=args.actor, path_claims=args.claim)
         elif args.command == "complete":
-            result = complete_work_block(repo_root, work_block_id=args.work_block_id, finalize=args.finalize)
+            result = complete_work_block(
+                repo_root,
+                work_block_id=args.work_block_id,
+                finalize=args.finalize,
+                auto_approve=args.auto_approve,
+                require_repo_closed=args.require_repo_closed,
+            )
         elif args.command == "detect":
             result = detect_work_block(repo_root, work_block_id=args.work_block_id)
         elif args.command == "repair":

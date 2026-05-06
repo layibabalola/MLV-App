@@ -69,27 +69,76 @@
     "managedSessionWorktreeRoots": [".codex-worktrees/**"],
     "bootstrapAllowedOnlyByExplicitStart": true
   },
+  "hardClean": {
+    "requireForCompletion": true,
+    "allowRetainedForeignDirtyAtCompletion": false,
+    "requireNoStash": true,
+    "exemptStatusPatterns": [
+      ".claude-state/**",
+      "**/__pycache__/**",
+      "**/*.pyc"
+    ]
+  },
+  "runtimeServices": {
+    "mlvapp-preview": {
+      "enabled": false,
+      "stopBeforePromotion": true,
+      "restartAfterCleanPromotion": false,
+      "statusCommand": [],
+      "stopCommand": [],
+      "startCommand": []
+    }
+  },
   "repair": {
     "autoPublishFeatureBranch": true,
     "allowedPublishRemotes": ["fork", "origin"],
     "setUpstreamOnPublish": true
+  },
+  "locking": {
+    "detectTimeoutMs": 120000,
+    "finalizeTimeoutMs": 600000,
+    "repoSweepTimeoutMs": 600000,
+    "maxProcessOutputBytes": 1048576,
+    "failureTextPatterns": [
+      "closeout gate failure",
+      "review quorum failure",
+      "review_quorum_failure",
+      "review_quorum_missing",
+      "review_quorum_blocked",
+      "validation failure",
+      "validation_failed",
+      "baseline-dirty overlap",
+      "baseline-dirty-overlaps-candidate",
+      "stale refs",
+      "stale_refs",
+      "dirty ownership blocker",
+      "owned_dirty_blocked",
+      "unowned_dirty"
+    ]
+  },
+  "autoEligibilityRepair": {
+    "timeoutMs": 300000
   },
   "toolingBaseline": {
     "enabled": true,
     "baselineRef": null,
     "autoUpdate": true,
     "paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
       "closeout.config.json",
       "tools/repo_hygiene/brokered_closeout.py",
       "tools/repo_hygiene/work_block_cli.py",
       "tools/repo_hygiene/test_brokered_closeout.py",
+      "tools/closeout/Invoke-CloseoutCli.ps1",
+      "tools/closeout/work-block-complete.ps1",
       "tools/agent-bridge/codex_pre_response.ps1",
       "tools/agent-bridge/codex_pre_final.ps1",
       "tools/agent-bridge/codex_bridge_reminder.ps1",
       "tools/repo-hygiene/closeout.contract.json",
       "tools/repo-hygiene/hygiene.config.json"
     ],
-    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation"],
+    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation", "locking", "autoEligibilityRepair"],
     "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent"],
     "requiredAutoQuorumActions": [
       "integrated_branch_prune",
@@ -139,7 +188,22 @@
       "test_repo_sweep_remote_conflicting_feature_branch_writes_investigation_packet",
       "test_repo_sweep_merge_failed_promotes_agent_conflict_dispatch",
       "test_repo_sweep_agent_conflict_dispatch_writes_queue_packet",
-      "test_agent_conflict_dispatch_shards_large_conflict_sets"
+      "test_agent_conflict_dispatch_shards_large_conflict_sets",
+      "test_bounded_runner_kills_hung_finalize_child_with_descendants",
+      "test_bounded_runner_direct_finalize_and_completion_share_timeout_policy",
+      "test_bounded_runner_caps_oversized_child_output",
+      "test_bounded_runner_normalizes_known_failure_text_with_zero_exit",
+      "test_bounded_runner_closeout_gate_failure_cannot_report_finalized",
+      "test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun",
+      "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
+      "test_timeout_and_output_cap_settings_are_contract_required",
+      "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
+      "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
+      "test_hard_clean_final_response_blocks_remaining_stash",
+      "test_hard_clean_final_response_passes_after_clean_promotion",
+      "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
+      "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
+      "test_closeout_tooling_stale_reports_missing_hard_clean_gate"
     ],
     "requiredSymbols": [
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -151,14 +215,32 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def run_bounded_closeout_process"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def finalize_retry_decision"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediate_retained_candidates"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dispatch_agent_conflict_remediation"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
+      {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
+      {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "bounded_closeout_cli_main"},
+      {"path": "tools/closeout/work-block-complete.ps1", "contains": "RequireRepoClosed"},
       {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
+      {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
+      {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+      {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
+      {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
       {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
       {"path": "closeout.config.json", "contains": "finalizeLoop"},
+      {"path": "closeout.config.json", "contains": "hardClean"},
+      {"path": "closeout.config.json", "contains": "runtimeServices"},
+      {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
+      {"path": "closeout.config.json", "contains": "failureTextPatterns"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
       {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},

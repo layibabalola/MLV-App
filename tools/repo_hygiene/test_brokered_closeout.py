@@ -9,9 +9,12 @@ from unittest import mock
 from pathlib import Path
 
 from .brokered_closeout import (
+    bounded_closeout_run,
     bootstrap_response_broker_manifest,
     broker_contract,
     checkpoint_owned_work,
+    closeout_command_timeout_ms,
+    closeout_max_process_output_bytes,
     complete_work_block,
     detect_work_block,
     finalize_action_id,
@@ -29,8 +32,12 @@ from .brokered_closeout import (
     remediate_retained_candidates,
     repo_sweep,
     repo_sweep_tuple,
+    restart_runtime_services_after_clean_promotion,
+    run_bounded_closeout_process,
     stable_hash,
     start_work_block,
+    stop_runtime_services_before_promotion,
+    verify_repo_closed_postcondition,
 )
 
 
@@ -52,6 +59,25 @@ def deep_update(base: dict, updates: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            text=True,
+            capture_output=True,
+        )
+        return str(pid) in result.stdout
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 class BrokeredCloseoutTests(unittest.TestCase):
@@ -84,7 +110,38 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "maxCandidatesPerRun": 1,
                 "registerBrokerOwnership": True,
             },
+            "responseHookLifecycle": {
+                "skipSessionWorktreeSignal": "SkipSessionWorktree",
+                "skipAuditField": "session_worktree_bootstrap",
+                "readOnlyHookPhases": ["response", "final"],
+                "managedSessionWorktreeRoots": [".codex-worktrees/**"],
+                "bootstrapAllowedOnlyByExplicitStart": True,
+            },
+            "hardClean": {
+                "requireForCompletion": True,
+                "allowRetainedForeignDirtyAtCompletion": False,
+                "requireNoStash": True,
+                "exemptStatusPatterns": [".claude-state/**", "**/__pycache__/**", "**/*.pyc"],
+            },
+            "runtimeServices": {
+                "mlvapp-preview": {
+                    "enabled": False,
+                    "stopBeforePromotion": True,
+                    "restartAfterCleanPromotion": False,
+                    "statusCommand": [],
+                    "stopCommand": [],
+                    "startCommand": [],
+                }
+            },
             "toolingBaseline": {"enabled": False},
+            "locking": {
+                "detectTimeoutMs": 120000,
+                "finalizeTimeoutMs": 600000,
+                "repoSweepTimeoutMs": 600000,
+                "maxProcessOutputBytes": 1048576,
+                "failureTextPatterns": ["closeout gate failure", "review quorum failure", "review_quorum_missing"],
+            },
+            "autoEligibilityRepair": {"timeoutMs": 300000},
             "evidenceRepair": {
                 "enabled": False,
                 "evidenceRoot": ".closeout-evidence",
@@ -225,6 +282,40 @@ class BrokeredCloseoutTests(unittest.TestCase):
             return []
         return [json.loads(line)["auditType"] for line in audit_log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
+    def runtime_service_updates(self, marker: Path, log: Path, *, validation_rc: int = 0) -> dict:
+        marker_text = repr(str(marker))
+        log_text = repr(str(log))
+        status_code = f"from pathlib import Path; import sys; sys.exit(0 if Path({marker_text}).exists() else 1)"
+        stop_code = (
+            f"from pathlib import Path; "
+            f"Path({log_text}).open('a', encoding='utf-8').write('stop\\n'); "
+            f"Path({marker_text}).unlink(missing_ok=True)"
+        )
+        start_code = (
+            f"from pathlib import Path; "
+            f"Path({log_text}).open('a', encoding='utf-8').write('start\\n'); "
+            f"Path({marker_text}).write_text('running\\n', encoding='utf-8')"
+        )
+        validation_code = (
+            f"from pathlib import Path; import sys; "
+            f"running = Path({marker_text}).exists(); "
+            f"Path({log_text}).open('a', encoding='utf-8').write('validate:' + ('running' if running else 'stopped') + '\\n'); "
+            f"sys.exit({validation_rc} if not running else 17)"
+        )
+        return {
+            "validation": {"commands": [{"name": "runtime-stopped-check", "argv": [sys.executable, "-c", validation_code]}]},
+            "runtimeServices": {
+                "test-service": {
+                    "enabled": True,
+                    "stopBeforePromotion": True,
+                    "restartAfterCleanPromotion": True,
+                    "statusCommand": [sys.executable, "-c", status_code],
+                    "stopCommand": [sys.executable, "-c", stop_code],
+                    "startCommand": [sys.executable, "-c", start_code],
+                }
+            },
+        }
+
     def test_contract_parity_for_config_scripts_and_cli_surface(self) -> None:
         contract = broker_contract(ROOT)
         self.assertFalse(contract["missingConfigKeys"], contract)
@@ -243,10 +334,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
         self.assertIn("evidenceRepair", contract["requiredConfigKeys"])
         self.assertIn("responseHookLifecycle", contract["requiredConfigKeys"])
+        self.assertIn("hardClean", contract["requiredConfigKeys"])
+        self.assertIn("runtimeServices", contract["requiredConfigKeys"])
         self.assertIn("blockerAutoRemediation", contract["requiredConfigKeys"])
         self.assertIn("closeoutAddendumPersistence", contract["requiredConfigKeys"])
         self.assertIn("finalizeLoop", contract["requiredConfigKeys"])
         self.assertIn("agentRemediation", contract["requiredConfigKeys"])
+        self.assertIn("locking", contract["requiredConfigKeys"])
+        self.assertIn("autoEligibilityRepair", contract["requiredConfigKeys"])
         self.assertIn("foreign_dirty_integrated_branch_prune", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("owned_dirty_checkpoint", config["autoQuorum"]["autonomousActionClasses"])
@@ -266,6 +361,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("agent_conflict_remediation", config["autoQuorum"]["autonomousActionClasses"])
         self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
         self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
+        self.assertTrue(config["hardClean"]["requireForCompletion"])
+        self.assertFalse(config["hardClean"]["allowRetainedForeignDirtyAtCompletion"])
+        self.assertTrue(config["hardClean"]["requireNoStash"])
+        self.assertIn(".claude-state/**", config["hardClean"]["exemptStatusPatterns"])
+        self.assertFalse(config["runtimeServices"]["mlvapp-preview"]["enabled"])
+        self.assertGreater(config["locking"]["detectTimeoutMs"], 0)
+        self.assertGreater(config["locking"]["finalizeTimeoutMs"], 0)
+        self.assertGreater(config["locking"]["maxProcessOutputBytes"], 0)
+        self.assertIn("review_quorum_missing", config["locking"]["failureTextPatterns"])
+        self.assertGreater(config["autoEligibilityRepair"]["timeoutMs"], 0)
 
     def test_contract_records_closeout_addendum_persistence_rule(self) -> None:
         config = load_closeout_config(ROOT)
@@ -280,6 +385,32 @@ class BrokeredCloseoutTests(unittest.TestCase):
         baseline = config["toolingBaseline"]
         self.assertIn("closeoutAddendumPersistence", baseline["requiredConfigKeys"])
         self.assertIn("finalizeLoop", baseline["requiredConfigKeys"])
+        self.assertIn("agentRemediation", baseline["requiredConfigKeys"])
+        self.assertIn("hardClean", baseline["requiredConfigKeys"])
+        self.assertIn("runtimeServices", baseline["requiredConfigKeys"])
+        self.assertIn("locking", baseline["requiredConfigKeys"])
+        self.assertIn("autoEligibilityRepair", baseline["requiredConfigKeys"])
+        self.assertIn("test_bounded_runner_kills_hung_finalize_child_with_descendants", baseline["requiredTests"])
+        self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
+        self.assertIn("test_bounded_runner_normalizes_known_failure_text_with_zero_exit", baseline["requiredTests"])
+        self.assertIn("test_hard_clean_final_response_blocks_non_exempt_dirty_files", baseline["requiredTests"])
+        self.assertIn("test_hard_clean_final_response_blocks_remaining_stash", baseline["requiredTests"])
+        self.assertIn("test_hard_clean_final_response_passes_after_clean_promotion", baseline["requiredTests"])
+        self.assertIn("test_runtime_service_stops_before_validation_and_restarts_after_repo_closed", baseline["requiredTests"])
+        self.assertIn("test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure", baseline["requiredTests"])
+        self.assertIn("test_closeout_tooling_stale_reports_missing_hard_clean_gate", baseline["requiredTests"])
+        required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
+        self.assertIn(("AGENTS.md", "Closeout actors must be bounded at the process boundary"), required_symbols)
+        self.assertIn(("AGENTS.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
+        self.assertIn(("CLAUDE.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def run_bounded_closeout_process"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def bounded_closeout_cli_main"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def verify_repo_closed_postcondition"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def stop_runtime_services_before_promotion"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def restart_runtime_services_after_clean_promotion"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/work_block_cli.py", "--require-repo-closed"), required_symbols)
+        self.assertIn(("tools/closeout/Invoke-CloseoutCli.ps1", "bounded_closeout_cli_main"), required_symbols)
+        self.assertIn(("tools/closeout/work-block-complete.ps1", "RequireRepoClosed"), required_symbols)
 
     def test_clean_integration_worktree_add_uses_longpaths_config(self) -> None:
         text = (ROOT / "tools" / "repo_hygiene" / "brokered_closeout.py").read_text(encoding="utf-8")
@@ -292,6 +423,296 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn('run_git_longpaths(repo_root, ["worktree", "prune"', text)
         self.assertNotIn('run_git(repo_root, ["worktree", "add"', text)
         self.assertNotIn('run_git(repo_root, ["worktree", "remove"', text)
+
+    def test_bounded_runner_kills_hung_finalize_child_with_descendants(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        pid_path = repo / ".claude-state" / "closeout" / "descendant.pid"
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        child_code = (
+            "import subprocess, sys, time\n"
+            f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(pid_path)!r}, 'w', encoding='utf-8').write(str(child.pid))\n"
+            "time.sleep(60)\n"
+        )
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", child_code],
+            timeout_ms=500,
+            max_output_bytes=8192,
+            recovery_command="rerun finalize",
+            closeout_args=["finalize"],
+        )
+
+        self.assertEqual(result["status"], "timeout", result)
+        self.assertTrue(result["killedProcessTree"], result)
+        descendant_pid = int(pid_path.read_text(encoding="utf-8"))
+        for _ in range(30):
+            if not process_is_running(descendant_pid):
+                break
+            time.sleep(0.1)
+        self.assertFalse(process_is_running(descendant_pid), result)
+        self.assertIn("bounded_runner_timeout", self.audit_types(repo))
+        self.assertIn("bounded_runner_process_tree_killed", self.audit_types(repo))
+
+    def test_bounded_runner_direct_finalize_and_completion_share_timeout_policy(self) -> None:
+        repo = self.init_repo(config_updates={"locking": {"finalizeTimeoutMs": 1234}})
+        config = load_closeout_config(repo)
+        self.assertEqual(closeout_command_timeout_ms(config, ["finalize"]), 1234)
+        self.assertEqual(closeout_command_timeout_ms(config, ["complete", "--finalize"]), 1234)
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            timeout_ms=200,
+            max_output_bytes=8192,
+            recovery_command="rerun work-block-complete -Finalize",
+            closeout_args=["complete", "--finalize"],
+        )
+
+        self.assertEqual(result["status"], "timeout", result)
+        self.assertNotEqual(result["returncode"], 0)
+
+    def test_bounded_runner_caps_oversized_child_output(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        code = "import sys, time; sys.stdout.write('x' * 131072); sys.stdout.flush(); time.sleep(60)"
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", code],
+            timeout_ms=5000,
+            max_output_bytes=4096,
+            recovery_command="rerun capped child",
+            closeout_args=["finalize"],
+        )
+
+        self.assertEqual(result["status"], "output_cap", result)
+        self.assertNotEqual(result["returncode"], 0)
+        self.assertGreater(result["stdoutBytes"], 4096)
+        self.assertLessEqual(len(result["stdout"].encode("utf-8")), 4096)
+        self.assertIn("bounded_runner_output_cap", self.audit_types(repo))
+
+    def test_bounded_runner_normalizes_known_failure_text_with_zero_exit(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", "print('review quorum failure')"],
+            timeout_ms=5000,
+            max_output_bytes=8192,
+            recovery_command="rerun after quorum approval",
+            closeout_args=["finalize"],
+        )
+
+        self.assertEqual(result["status"], "normalized_failure", result)
+        self.assertNotEqual(result["returncode"], 0)
+        self.assertIn("review quorum failure", result["matchedFailurePatterns"])
+        self.assertIn("known_failure_text", result["normalizedReasons"])
+        self.assertIn("bounded_runner_normalized_failure", self.audit_types(repo))
+
+    def test_bounded_runner_closeout_gate_failure_cannot_report_finalized(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        code = "import json; print(json.dumps({'status': 'success', 'message': 'closeout gate failure after finalize'}))"
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", code],
+            timeout_ms=5000,
+            max_output_bytes=8192,
+            recovery_command="rerun closeout gate",
+            closeout_args=["finalize"],
+        )
+
+        self.assertEqual(result["status"], "normalized_failure", result)
+        self.assertIn("closeout gate failure", result["matchedFailurePatterns"])
+        self.assertIn("known_failure_text", result["normalizedReasons"])
+
+    def test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        approval_path = repo / ".claude-state" / "closeout" / "reviews" / "approval.json"
+        failing_code = "import json; print(json.dumps({'status': 'success', 'message': 'review quorum failure'}))"
+
+        first = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", failing_code],
+            timeout_ms=5000,
+            max_output_bytes=8192,
+            recovery_command="write approval and rerun validation",
+            closeout_args=["review-quorum"],
+            expected_success_artifact=approval_path,
+        )
+        self.assertEqual(first["status"], "normalized_failure", first)
+
+        approval_path.parent.mkdir(parents=True, exist_ok=True)
+        approval_path.write_text("{}", encoding="utf-8")
+        second = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", "import json; print(json.dumps({'status': 'success'}))"],
+            timeout_ms=5000,
+            max_output_bytes=8192,
+            recovery_command="write approval and rerun validation",
+            closeout_args=["review-quorum"],
+            expected_success_artifact=approval_path,
+        )
+        self.assertEqual(second["status"], "success", second)
+
+    def test_bounded_runner_timeout_leaves_no_orphan_child_processes(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            timeout_ms=200,
+            max_output_bytes=8192,
+            recovery_command="rerun timeout child",
+            closeout_args=["repair"],
+        )
+
+        self.assertEqual(result["status"], "timeout", result)
+        for _ in range(20):
+            if not process_is_running(int(result["pid"])):
+                break
+            time.sleep(0.1)
+        self.assertFalse(process_is_running(int(result["pid"])), result)
+
+    def test_timeout_and_output_cap_settings_are_contract_required(self) -> None:
+        contract = broker_contract(ROOT)
+        config = load_closeout_config(ROOT)
+        baseline = config["toolingBaseline"]
+        self.assertIn("locking", contract["requiredConfigKeys"])
+        self.assertIn("autoEligibilityRepair", contract["requiredConfigKeys"])
+        self.assertIn("locking", baseline["requiredConfigKeys"])
+        self.assertIn("autoEligibilityRepair", baseline["requiredConfigKeys"])
+        self.assertGreater(closeout_command_timeout_ms(config, ["detect"]), 0)
+        self.assertGreater(closeout_command_timeout_ms(config, ["repair"]), 0)
+        self.assertGreater(closeout_command_timeout_ms(config, ["finalize"]), 0)
+        self.assertGreater(closeout_max_process_output_bytes(config), 0)
+        self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
+
+    def test_stale_tooling_without_bounded_runner_reports_tooling_drift(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "toolingBaseline": {
+                    "enabled": True,
+                    "autoUpdate": False,
+                    "requiredTests": [],
+                    "requiredSymbols": [
+                        {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def run_bounded_closeout_process"}
+                    ],
+                }
+            }
+        )
+        self.make_feature(repo, "wb-bounded-runner-drift")
+        (repo / "work.txt").write_text("dirty blocker should not hide stale runner\n", encoding="utf-8")
+
+        result = finalize_work_block(repo, work_block_id="wb-bounded-runner-drift")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "closeout_tooling_stale")
+        self.assertIn("symbol", {item["kind"] for item in result["tooling"]["missing"]})
+        self.assertIn("closeout_tooling_stale", self.audit_types(repo))
+
+    def test_hard_clean_final_response_blocks_non_exempt_dirty_files(self) -> None:
+        repo = self.init_repo()
+        (repo / "scratch.txt").write_text("not closed\n", encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("non_exempt_dirty_files", {item["kind"] for item in result["blockers"]})
+        self.assertIn("non_exempt_untracked_files", {item["kind"] for item in result["blockers"]})
+        self.assertIn("repo_closed_postcondition", self.audit_types(repo))
+
+    def test_hard_clean_final_response_blocks_remaining_stash(self) -> None:
+        repo = self.init_repo()
+        (repo / "README.md").write_text("stashed\n", encoding="utf-8")
+        git(repo, "stash", "push", "-m", "leftover work")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("disallowed_stashes", {item["kind"] for item in result["blockers"]})
+
+    def test_hard_clean_final_response_passes_after_clean_promotion(self) -> None:
+        repo = self.init_repo()
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["blockers"])
+
+    def test_runtime_service_stops_before_validation_and_restarts_after_repo_closed(self) -> None:
+        marker = self.tempdir / "runtime-running.marker"
+        log = self.tempdir / "runtime.log"
+        marker.write_text("running\n", encoding="utf-8")
+        repo = self.init_repo(config_updates=self.runtime_service_updates(marker, log))
+        self.make_feature(repo, "wb-runtime-service")
+        self.approve_current_tuple(repo, "wb-runtime-service")
+
+        result = finalize_work_block(repo, work_block_id="wb-runtime-service", require_repo_closed=True)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertTrue(marker.exists(), result)
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["stop", "validate:stopped", "start"])
+        self.assertEqual(result["runtimeLifecycle"]["stopBeforePromotion"]["status"], "success")
+        self.assertEqual(result["runtimeLifecycle"]["restartAfterCleanPromotion"]["status"], "success")
+
+    def test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure(self) -> None:
+        marker = self.tempdir / "runtime-running-fail.marker"
+        log = self.tempdir / "runtime-fail.log"
+        marker.write_text("running\n", encoding="utf-8")
+        repo = self.init_repo(config_updates=self.runtime_service_updates(marker, log, validation_rc=9))
+        self.make_feature(repo, "wb-runtime-service-validation-failure")
+        self.approve_current_tuple(repo, "wb-runtime-service-validation-failure")
+
+        result = finalize_work_block(repo, work_block_id="wb-runtime-service-validation-failure", require_repo_closed=True)
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "validation_failed")
+        self.assertFalse(marker.exists(), result)
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["stop", "validate:stopped"])
+        self.assertIsNone(result["runtimeLifecycle"]["restartAfterCleanPromotion"])
+
+    def test_closeout_tooling_stale_reports_missing_hard_clean_gate(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "toolingBaseline": {
+                    "enabled": True,
+                    "autoUpdate": False,
+                    "requiredConfigKeys": ["hardClean"],
+                    "requiredTests": [],
+                    "requiredSymbols": [],
+                }
+            }
+        )
+        config_path = repo / "closeout.config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config.pop("hardClean", None)
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        git(repo, "add", "closeout.config.json")
+        git(repo, "commit", "-m", "remove hard clean gate")
+        self.make_feature(repo, "wb-missing-hard-clean")
+
+        result = finalize_work_block(repo, work_block_id="wb-missing-hard-clean")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "closeout_tooling_stale")
+        self.assertIn({"kind": "config_key", "key": "hardClean"}, result["tooling"]["missing"])
 
     def test_finalize_loop_stops_on_repeated_identical_blocker_evidence_tuple(self) -> None:
         config = load_closeout_config(ROOT)
