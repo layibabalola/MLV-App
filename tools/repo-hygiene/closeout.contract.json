@@ -8,6 +8,8 @@
     "approval-anchor.json",
     "apply-validation.json",
     "executor-handoff.json",
+    "agent-remediation-queue/*.json",
+    "agent-remediation-results/*.json",
     "state.json",
     "events.jsonl",
     "trusted-approval-nonce.public.json",
@@ -60,7 +62,9 @@
     "foreign_dirty_integrated_branch_prune",
     "detached_dirty_preserve",
     "explicit_protected_worktree_cleanup",
-    "resolve_conflicts_with_agent"
+    "resolve_conflicts_with_agent",
+    "agent_remediation_surface_unavailable",
+    "protected-target-noop-closeout"
   ],
   "publish_modes": [
     "pr_only",
@@ -73,7 +77,9 @@
     "dirty_generated_only",
     "clean_feature_branch_ready_to_publish",
     "hygiene_cleanup_recommendations",
-    "retained_blocker_auto_remediation"
+    "retained_blocker_auto_remediation",
+    "agent_remediation_queue_consumer",
+    "protected_target_noop_closeout"
   ],
   "review_sources": [
     "codex_background_agent",

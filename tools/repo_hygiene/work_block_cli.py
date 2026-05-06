@@ -7,9 +7,11 @@ from pathlib import Path
 
 from .brokered_closeout import (
     audit_summary,
+    agent_remediation_queue_consumer_plan,
     bootstrap_response_broker_manifest,
     broker_contract,
     checkpoint_owned_work,
+    collect_agent_remediation_results,
     complete_work_block,
     detect_work_block,
     finalize_action_id,
@@ -95,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
     remediate = sub.add_parser("remediate-retained", help="Run the bounded retained-candidate remediation queue.")
     remediate.add_argument("--apply", action="store_true")
     remediate.add_argument("--candidate-id")
+
+    agent_queue = sub.add_parser("agent-queue", help="Plan or mark unavailable Codex agent-remediation queue shards.")
+    agent_queue.add_argument("--surface", default="codex-desktop")
+    agent_queue.add_argument("--mark-unavailable", action="store_true")
+
+    sub.add_parser("agent-results", help="Collect and validate agent-remediation result packets.")
 
     freeze = sub.add_parser("remediation-freeze-status", help="Inspect the closeout remediation freeze guard.")
     freeze.add_argument("--action", default="status")
@@ -192,6 +200,14 @@ def main(argv: list[str] | None = None) -> int:
                 result = repo_sweep(repo_root, apply=args.apply, candidate_id=args.candidate_id)
         elif args.command == "remediate-retained":
             result = remediate_retained_candidates(repo_root, apply=args.apply, candidate_id=args.candidate_id)
+        elif args.command == "agent-queue":
+            result = agent_remediation_queue_consumer_plan(
+                repo_root,
+                surface=args.surface,
+                mark_unavailable=args.mark_unavailable,
+            )
+        elif args.command == "agent-results":
+            result = collect_agent_remediation_results(repo_root)
         elif args.command == "remediation-freeze-status":
             config = load_closeout_config(repo_root)
             result = remediation_freeze_status(repo_root, config, action=args.action, write_audit_packet=args.audit)
