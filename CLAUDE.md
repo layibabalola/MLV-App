@@ -179,13 +179,13 @@ durable audit for timeout, output-cap breach, killed process tree, and known
 failure text. A closeout result is authoritative only after the child exits,
 descendants are gone or intentionally retained with audit, exit/status and
 failure text agree, and expected success or blocker artifacts exist.
-Hard-clean final responses are blocked unless the repo-closed postcondition
-passes after finalize. The postcondition must prove from repo-owned artifacts
-that the selected work block, target ref, dirty state, stash state, branch state,
-worktree state, and cleanup audit are inspectable, with no non-exempt
-dirty/untracked files, disallowed stashes, stale transaction branches, stale
-managed worktrees, or orphaned closeout/runtime artifacts left behind. Failures
-report `repo_closed_postcondition_failed`, not success with deferred cleanup.
+Hard-clean final responses are blocked unless the repo-closed postcondition passes after finalize.
+The postcondition must prove from repo-owned artifacts that the selected work
+block, target ref, dirty state, stash state, branch state, worktree state, and
+cleanup audit are inspectable, with no non-exempt dirty/untracked files,
+disallowed stashes, stale transaction branches, stale managed worktrees, or
+orphaned closeout/runtime artifacts left behind. Failures report
+`repo_closed_postcondition_failed`, not success with deferred cleanup.
 Runtime services that execute repo code follow configured lifecycle actors. When
 `runtimeServices.<service>.stopBeforePromotion=true`, closeout stops and verifies
 the service before promotion/finalize; when `restartAfterCleanPromotion=true`,

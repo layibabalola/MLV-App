@@ -382,6 +382,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("CLAUDE.md", persistence["repoWideSurfaces"])
         self.assertIn("closeout.config.json", persistence["repoWideSurfaces"])
         self.assertIn("test_or_tooling_baseline_guard", persistence["minimumDurableArtifacts"])
+        claude_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("Hard-clean final responses are blocked unless the repo-closed postcondition passes", claude_text)
         baseline = config["toolingBaseline"]
         self.assertIn("closeoutAddendumPersistence", baseline["requiredConfigKeys"])
         self.assertIn("finalizeLoop", baseline["requiredConfigKeys"])
