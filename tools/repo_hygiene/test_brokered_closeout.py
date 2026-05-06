@@ -10,10 +10,13 @@ from pathlib import Path
 
 from .brokered_closeout import (
     bounded_closeout_run,
+    agent_remediation_queue_consumer_plan,
+    agent_remediation_dirty_state_hash,
     bootstrap_response_broker_manifest,
     broker_contract,
     check_review_quorum,
     checkpoint_owned_work,
+    collect_agent_remediation_results,
     closeout_command_timeout_ms,
     closeout_max_process_output_bytes,
     complete_work_block,
@@ -130,6 +133,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "requireForCompletion": True,
                 "allowRetainedForeignDirtyAtCompletion": True,
                 "requireNoStash": True,
+                "protectedTargetNoopCloseout": {"enabled": True},
                 "exemptStatusPatterns": [".claude-state/**", "**/__pycache__/**", "**/*.pyc"],
             },
             "runtimeServices": {
@@ -198,6 +202,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
                     "batch-debug": ["src/batch/**", "src/debug/**"],
                     "tests": ["tests/**", ".github/**"],
                 },
+            },
+            "agentRemediationQueue": {
+                "enabled": True,
+                "queueRoots": [".claude-state/closeout/agent-remediation"],
+                "resultRoot": ".claude-state/closeout/agent-remediation/results",
+                "maxParallelAgents": 3,
+                "perAgentTimeoutMs": 600000,
+                "maxAgentOutputBytes": 1048576,
+                "requireExactTuple": True,
+                "surfaceUnavailableStatus": "agent_remediation_surface_unavailable",
             },
             "autoQuorum": {
                 "enabled": True,
@@ -348,6 +362,58 @@ class BrokeredCloseoutTests(unittest.TestCase):
             },
         }
 
+    def write_agent_queue_packet(self, repo: Path, *, candidate_id: str = "candidate:manual-agent-queue", shards: list[dict] | None = None, updates: dict | None = None) -> Path:
+        config = load_closeout_config(repo)
+        queue_root = repo / ".claude-state" / "closeout" / "agent-remediation"
+        queue_dir = queue_root / "queue"
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        pinned_refs: dict = {}
+        exact_tuple = {
+            "candidateId": candidate_id,
+            "actionId": "resolve_conflicts_with_agent",
+            "evidenceHash": "manual-evidence",
+            "policyHash": config["policyHash"],
+            "pinnedRefs": pinned_refs,
+        }
+        if shards is None:
+            shards = [
+                {
+                    "shardId": "manual-01",
+                    "candidateId": candidate_id,
+                    "workBlockId": None,
+                    "actionId": "resolve_conflicts_with_agent",
+                    "evidenceHash": "manual-evidence",
+                    "policyHash": config["policyHash"],
+                    "pinnedRefs": pinned_refs,
+                    "allowedReadScope": ["conflict.txt"],
+                    "allowedWriteScope": ["conflict.txt"],
+                    "resultPath": ".claude-state/closeout/agent-remediation/results/manual/manual-01.json",
+                    "expectedOutputSchema": {"requiredFields": ["status", "changedPaths"]},
+                    "validationRequirements": [],
+                }
+            ]
+        packet = {
+            "schemaVersion": "1.0",
+            "status": "queued",
+            "candidateId": candidate_id,
+            "workBlockId": None,
+            "actionId": "resolve_conflicts_with_agent",
+            "actionClass": "agent_conflict_remediation",
+            "evidenceHash": "manual-evidence",
+            "policyHash": config["policyHash"],
+            "pinnedRefs": pinned_refs,
+            "exactTuple": exact_tuple,
+            "requireExactTuple": True,
+            "dirtyStateHash": agent_remediation_dirty_state_hash(repo),
+            "shards": shards,
+            "recoveryCommand": "recover manually",
+        }
+        if updates:
+            packet = deep_update(packet, updates)
+        path = queue_dir / f"{candidate_id.replace(':', '-')}.json"
+        path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+        return path
+
     def test_contract_parity_for_config_scripts_and_cli_surface(self) -> None:
         contract = broker_contract(ROOT)
         self.assertFalse(contract["missingConfigKeys"], contract)
@@ -372,6 +438,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("closeoutAddendumPersistence", contract["requiredConfigKeys"])
         self.assertIn("finalizeLoop", contract["requiredConfigKeys"])
         self.assertIn("agentRemediation", contract["requiredConfigKeys"])
+        self.assertIn("agentRemediationQueue", contract["requiredConfigKeys"])
         self.assertIn("locking", contract["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", contract["requiredConfigKeys"])
         self.assertIn("foreign_dirty_integrated_branch_prune", config["autoQuorum"]["autonomousActionClasses"])
@@ -390,12 +457,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["target_push_rerun_required"], "target_push_recovery")
         self.assertTrue(config["agentRemediation"]["enabled"])
         self.assertIn("codex-desktop", config["agentRemediation"]["surfaceAdapters"])
+        self.assertTrue(config["agentRemediationQueue"]["enabled"])
+        self.assertIn(".claude-state/closeout/agent-remediation", config["agentRemediationQueue"]["queueRoots"])
+        self.assertEqual(config["agentRemediationQueue"]["surfaceUnavailableStatus"], "agent_remediation_surface_unavailable")
         self.assertIn("agent_conflict_remediation", config["autoQuorum"]["autonomousActionClasses"])
         self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
         self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
         self.assertTrue(config["hardClean"]["requireForCompletion"])
         self.assertTrue(config["hardClean"]["allowRetainedForeignDirtyAtCompletion"])
         self.assertTrue(config["hardClean"]["requireNoStash"])
+        self.assertTrue(config["hardClean"]["protectedTargetNoopCloseout"]["enabled"])
         self.assertIn(".claude-state/**", config["hardClean"]["exemptStatusPatterns"])
         self.assertFalse(config["runtimeServices"]["mlvapp-preview"]["enabled"])
         self.assertGreater(config["locking"]["detectTimeoutMs"], 0)
@@ -420,6 +491,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("closeoutAddendumPersistence", baseline["requiredConfigKeys"])
         self.assertIn("finalizeLoop", baseline["requiredConfigKeys"])
         self.assertIn("agentRemediation", baseline["requiredConfigKeys"])
+        self.assertIn("agentRemediationQueue", baseline["requiredConfigKeys"])
         self.assertIn("hardClean", baseline["requiredConfigKeys"])
         self.assertIn("runtimeServices", baseline["requiredConfigKeys"])
         self.assertIn("locking", baseline["requiredConfigKeys"])
@@ -433,18 +505,46 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_runtime_service_stops_before_validation_and_restarts_after_repo_closed", baseline["requiredTests"])
         self.assertIn("test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure", baseline["requiredTests"])
         self.assertIn("test_closeout_tooling_stale_reports_missing_hard_clean_gate", baseline["requiredTests"])
+        self.assertIn("test_agent_remediation_queue_policy_fields_are_contract_required", baseline["requiredTests"])
+        self.assertIn("test_codex_agent_queue_consumer_plans_one_background_agent_per_eligible_shard", baseline["requiredTests"])
+        self.assertIn("test_agent_queue_dirty_hash_detects_same_status_byte_change", baseline["requiredTests"])
+        self.assertIn("test_agent_queue_stale_packet_blocks_even_when_valid_shard_can_spawn", baseline["requiredTests"])
+        self.assertIn("test_agent_queue_remote_fetch_failure_blocks_stale_check", baseline["requiredTests"])
+        self.assertIn("test_agent_queue_result_path_outside_result_root_is_stale", baseline["requiredTests"])
+        self.assertIn("test_agent_result_collection_rejects_out_of_scope_changed_paths", baseline["requiredTests"])
+        self.assertIn("test_agent_result_collection_returns_symbolic_next_action_without_mutation", baseline["requiredTests"])
+        self.assertIn("test_agent_result_collection_blocks_agent_reported_blockers_and_failed_validation", baseline["requiredTests"])
+        self.assertIn("test_agent_result_collection_rejects_missing_required_result_fields", baseline["requiredTests"])
+        self.assertIn("test_agent_result_collection_rejects_wrong_shard_identity", baseline["requiredTests"])
+        self.assertIn("test_repo_closed_postcondition_blocks_pending_agent_remediation_queue", baseline["requiredTests"])
+        self.assertIn("test_repo_closed_postcondition_blocks_unreadable_or_unretired_queue_artifacts", baseline["requiredTests"])
+        self.assertIn("test_repo_closed_postcondition_blocks_invalid_queue_retirement_proof", baseline["requiredTests"])
+        self.assertIn("test_repo_closed_postcondition_accepts_valid_queue_retirement_proof", baseline["requiredTests"])
+        self.assertIn("test_repo_closed_postcondition_rejects_wrong_result_tuple", baseline["requiredTests"])
+        self.assertIn("test_repo_closed_postcondition_rejects_stale_collection_retirement_tuple", baseline["requiredTests"])
+        self.assertIn("test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed", baseline["requiredTests"])
         required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
         self.assertIn(("AGENTS.md", "Closeout actors must be bounded at the process boundary"), required_symbols)
         self.assertIn(("AGENTS.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
+        self.assertIn(("AGENTS.md", "agentRemediationQueue.queueRoots"), required_symbols)
+        self.assertIn(("AGENTS.md", "protected-target-noop-closeout"), required_symbols)
         self.assertIn(("CLAUDE.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
+        self.assertIn(("CLAUDE.md", "agentRemediationQueue.queueRoots"), required_symbols)
+        self.assertIn(("CLAUDE.md", "protected-target-noop-closeout"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def run_bounded_closeout_process"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def bounded_closeout_cli_main"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def verify_repo_closed_postcondition"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def stop_runtime_services_before_promotion"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def restart_runtime_services_after_clean_promotion"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def agent_remediation_queue_consumer_plan"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def collect_agent_remediation_results"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "--require-repo-closed"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/work_block_cli.py", "agent-queue"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/work_block_cli.py", "agent-results"), required_symbols)
         self.assertIn(("tools/closeout/Invoke-CloseoutCli.ps1", "bounded_closeout_cli_main"), required_symbols)
         self.assertIn(("tools/closeout/work-block-complete.ps1", "RequireRepoClosed"), required_symbols)
+        self.assertIn(("tools/closeout/agent-remediation-queue.ps1", "agent-queue"), required_symbols)
+        self.assertIn(("tools/closeout/agent-remediation-queue.ps1", "CollectResults"), required_symbols)
 
     def test_clean_integration_worktree_add_uses_longpaths_config(self) -> None:
         text = (ROOT / "tools" / "repo_hygiene" / "brokered_closeout.py").read_text(encoding="utf-8")
@@ -716,7 +816,21 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["workBlockSelection"]["selectionReason"], "protected_target_no_active_work_block")
         self.assertTrue(result["repoClosedPostcondition"]["ok"])
         self.assertEqual(list((repo / ".claude-state" / "closeout" / "work-blocks").glob("*/manifest.json")), [])
-        self.assertIn("protected_target_closeout_noop", self.audit_types(repo))
+        self.assertIn("protected-target-noop-closeout", self.audit_types(repo))
+
+    def test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed(self) -> None:
+        repo = self.init_repo(remote=True)
+        (repo / "dirty.txt").write_text("target dirty\n", encoding="utf-8")
+
+        result = complete_work_block(repo, finalize=True)
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "repo_closed_postcondition_failed")
+        self.assertEqual(result["finalizeStatus"], "noop")
+        blocker_kinds = {item["kind"] for item in result["repoClosedPostcondition"]["blockers"]}
+        self.assertIn("non_exempt_dirty_files", blocker_kinds)
+        self.assertEqual(list((repo / ".claude-state" / "closeout" / "work-blocks").glob("*/manifest.json")), [])
+        self.assertIn("protected-target-noop-closeout", self.audit_types(repo))
 
     def test_hard_clean_blocks_retained_remote_feature_refs(self) -> None:
         repo = self.init_repo(remote=True)
@@ -2049,7 +2163,697 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(packet["actionId"], "resolve_conflicts_with_agent")
         self.assertEqual(packet["branch"], "codex/conflict-dispatch")
         self.assertEqual(packet["conflictPaths"], ["conflict.txt"])
+        self.assertIn("workBlockId", packet)
+        self.assertTrue(packet["requireExactTuple"])
+        self.assertEqual(packet["exactTuple"]["candidateId"], packet["candidateId"])
+        self.assertEqual(packet["exactTuple"]["actionId"], packet["actionId"])
+        self.assertEqual(packet["exactTuple"]["evidenceHash"], packet["evidenceHash"])
+        self.assertEqual(packet["exactTuple"]["policyHash"], packet["policyHash"])
+        self.assertEqual(packet["exactTuple"]["pinnedRefs"], packet["pinnedRefs"])
+        self.assertIn("dirtyStateHash", packet)
+        self.assertIn("resultRoot", packet)
+        self.assertIn("validationRequirements", packet)
+        self.assertIn("expectedOutputSchema", packet)
+        self.assertEqual(packet["surfaceUnavailableStatus"], "agent_remediation_surface_unavailable")
+        self.assertEqual(len(packet["shards"]), 1)
+        shard = packet["shards"][0]
+        self.assertEqual(shard["candidateId"], packet["candidateId"])
+        self.assertEqual(shard["actionId"], packet["actionId"])
+        self.assertEqual(shard["evidenceHash"], packet["evidenceHash"])
+        self.assertEqual(shard["policyHash"], packet["policyHash"])
+        self.assertEqual(shard["pinnedRefs"], packet["pinnedRefs"])
+        self.assertEqual(shard["allowedWriteScope"], ["conflict.txt"])
+        self.assertIn("conflict.txt", shard["allowedReadScope"])
+        self.assertTrue(shard["resultPath"].endswith(".json"))
+        self.assertEqual(shard["perAgentTimeoutMs"], 600000)
+        self.assertEqual(shard["maxAgentOutputBytes"], 1048576)
         self.assertIn("agent_remediation_dispatch", self.audit_types(repo))
+
+    def test_agent_remediation_queue_policy_fields_are_contract_required(self) -> None:
+        config = load_closeout_config(ROOT)
+        contract = broker_contract(ROOT)
+
+        self.assertIn("agentRemediationQueue", contract["requiredConfigKeys"])
+        self.assertIn("agentRemediationQueue", config["toolingBaseline"]["requiredConfigKeys"])
+        queue = config["agentRemediationQueue"]
+        for key in [
+            "enabled",
+            "queueRoots",
+            "resultRoot",
+            "maxParallelAgents",
+            "perAgentTimeoutMs",
+            "maxAgentOutputBytes",
+            "requireExactTuple",
+            "surfaceUnavailableStatus",
+        ]:
+            self.assertIn(key, queue)
+        self.assertIn("protectedTargetNoopCloseout", config["hardClean"])
+        self.assertTrue(config["hardClean"]["protectedTargetNoopCloseout"]["enabled"])
+
+    def test_codex_agent_queue_consumer_plans_one_background_agent_per_eligible_shard(self) -> None:
+        repo = self.init_repo(config_updates={"agentRemediation": {"maxConflictFilesPerAgent": 1}, "agentRemediationQueue": {"maxParallelAgents": 2}})
+        for path in ["src/a.cpp", "src/b.cpp", "src/c.cpp"]:
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("base\n", encoding="utf-8")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/queue-consume")
+        for path in ["src/a.cpp", "src/b.cpp", "src/c.cpp"]:
+            (repo / path).write_text("branch\n", encoding="utf-8")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "branch conflicts")
+        git(repo, "checkout", "master")
+        for path in ["src/a.cpp", "src/b.cpp", "src/c.cpp"]:
+            (repo / path).write_text("target\n", encoding="utf-8")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "target conflicts")
+        plan = repo_sweep(repo)
+        report = next(item for item in plan["retainedCandidateReports"] if item["branch"] == "codex/queue-consume")
+        repo_sweep(repo, apply=True, candidate_id=report["candidateId"])
+
+        result = agent_remediation_queue_consumer_plan(repo, surface="codex-desktop")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["maxParallelAgents"], 2)
+        self.assertEqual(len(result["spawnPlan"]), 2)
+        for item in result["spawnPlan"]:
+            self.assertEqual(item["surface"], "codex-desktop")
+            self.assertEqual(item["actionId"], "resolve_conflicts_with_agent")
+            self.assertEqual(item["mutationBoundary"], "repo-owned symbolic actors only")
+            self.assertTrue(item["allowedWriteScope"])
+            self.assertTrue(item["resultPath"].endswith(".json"))
+
+    def test_agent_queue_surface_unavailable_writes_result_packets(self) -> None:
+        repo = self.init_repo()
+        (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/unavailable")
+        (repo / "conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "branch conflict")
+        git(repo, "checkout", "master")
+        (repo / "conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "target conflict")
+        plan = repo_sweep(repo)
+        report = next(item for item in plan["retainedCandidateReports"] if item["branch"] == "codex/unavailable")
+        repo_sweep(repo, apply=True, candidate_id=report["candidateId"])
+
+        result = agent_remediation_queue_consumer_plan(repo, surface="no-agent-surface", mark_unavailable=True)
+
+        self.assertEqual(result["status"], "agent_remediation_surface_unavailable", result)
+        self.assertEqual(len(result["unavailableResults"]), 1)
+        result_path = Path(result["unavailableResults"][0]["resultPath"])
+        self.assertTrue(result_path.exists())
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "agent_remediation_surface_unavailable")
+        self.assertEqual(payload["allowedWriteScope"], ["conflict.txt"])
+        self.assertIn("agent_remediation_surface_unavailable", self.audit_types(repo))
+
+    def test_agent_queue_stale_packets_rejected_on_policy_hash_or_dirty_state_change(self) -> None:
+        repo = self.init_repo()
+        (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/stale-queue")
+        (repo / "conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "branch conflict")
+        git(repo, "checkout", "master")
+        (repo / "conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "target conflict")
+        plan = repo_sweep(repo)
+        report = next(item for item in plan["retainedCandidateReports"] if item["branch"] == "codex/stale-queue")
+        repo_sweep(repo, apply=True, candidate_id=report["candidateId"])
+        (repo / "new-dirty.txt").write_text("dirty after packet\n", encoding="utf-8")
+
+        result = agent_remediation_queue_consumer_plan(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["spawnPlan"], [])
+        stale_reasons = {reason["kind"] for packet in result["stalePackets"] for reason in packet["staleReasons"]}
+        self.assertIn("dirty_state_changed", stale_reasons)
+        self.assertIn("agent_remediation_queue_stale", self.audit_types(repo))
+
+    def test_agent_queue_dirty_hash_detects_same_status_byte_change(self) -> None:
+        repo = self.init_repo()
+        dirty = repo / "dirty.txt"
+        dirty.write_text("one\n", encoding="utf-8")
+        before = agent_remediation_dirty_state_hash(repo)
+        dirty.write_text("two\n", encoding="utf-8")
+        after = agent_remediation_dirty_state_hash(repo)
+
+        self.assertNotEqual(before, after)
+
+    def test_agent_queue_stale_packet_blocks_even_when_valid_shard_can_spawn(self) -> None:
+        repo = self.init_repo()
+        self.write_agent_queue_packet(repo, candidate_id="candidate:valid")
+        stale_path = self.write_agent_queue_packet(repo, candidate_id="candidate:stale")
+        packet = json.loads(stale_path.read_text(encoding="utf-8"))
+        packet["policyHash"] = "stale-policy"
+        packet["exactTuple"]["policyHash"] = "stale-policy"
+        stale_path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+
+        result = agent_remediation_queue_consumer_plan(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(len(result["spawnPlan"]), 1)
+        self.assertEqual(result["spawnPlan"][0]["candidateId"], "candidate:valid")
+        stale_reasons = {reason["kind"] for packet in result["stalePackets"] for reason in packet["staleReasons"]}
+        self.assertIn("policy_hash_mismatch", stale_reasons)
+
+    def test_agent_queue_remote_fetch_failure_blocks_stale_check(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        pinned_refs = {"target": {"remote": "missing-remote", "branch": "master", "ref": "refs/remotes/missing-remote/master", "head": "0" * 40}}
+        exact_tuple = {
+            "candidateId": "candidate:missing-remote",
+            "actionId": "resolve_conflicts_with_agent",
+            "evidenceHash": "manual-evidence",
+            "policyHash": config["policyHash"],
+            "pinnedRefs": pinned_refs,
+        }
+        self.write_agent_queue_packet(
+            repo,
+            candidate_id="candidate:missing-remote",
+            updates={
+                "pinnedRefs": pinned_refs,
+                "exactTuple": exact_tuple,
+                "shards": [
+                    {
+                        "shardId": "remote-01",
+                        "candidateId": "candidate:missing-remote",
+                        "workBlockId": None,
+                        "actionId": "resolve_conflicts_with_agent",
+                        "evidenceHash": "manual-evidence",
+                        "policyHash": config["policyHash"],
+                        "pinnedRefs": pinned_refs,
+                        "allowedReadScope": ["conflict.txt"],
+                        "allowedWriteScope": ["conflict.txt"],
+                        "resultPath": ".claude-state/closeout/agent-remediation/results/missing-remote/remote-01.json",
+                        "expectedOutputSchema": {},
+                        "validationRequirements": [],
+                    }
+                ],
+            },
+        )
+
+        result = agent_remediation_queue_consumer_plan(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        stale_reasons = {reason["kind"] for packet in result["stalePackets"] for reason in packet["staleReasons"]}
+        self.assertIn("remote_fetch_failed", stale_reasons)
+
+    def test_agent_queue_result_path_outside_result_root_is_stale(self) -> None:
+        repo = self.init_repo()
+        self.write_agent_queue_packet(
+            repo,
+            shards=[
+                {
+                    "shardId": "bad-01",
+                    "candidateId": "candidate:bad-path",
+                    "workBlockId": None,
+                    "actionId": "resolve_conflicts_with_agent",
+                    "evidenceHash": "manual-evidence",
+                    "policyHash": load_closeout_config(repo)["policyHash"],
+                    "pinnedRefs": {},
+                    "allowedReadScope": ["conflict.txt"],
+                    "allowedWriteScope": ["conflict.txt"],
+                    "resultPath": "../outside-result.json",
+                    "expectedOutputSchema": {},
+                    "validationRequirements": [],
+                }
+            ],
+            candidate_id="candidate:bad-path",
+        )
+
+        result = agent_remediation_queue_consumer_plan(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        stale_reasons = {reason["kind"] for packet in result["stalePackets"] for reason in packet["staleReasons"]}
+        self.assertIn("result_path_outside_result_root", stale_reasons)
+
+    def test_agent_queue_skips_completed_result_paths_before_planning_more_shards(self) -> None:
+        repo = self.init_repo(config_updates={"agentRemediationQueue": {"maxParallelAgents": 2}})
+        config = load_closeout_config(repo)
+        shards = []
+        for index in range(1, 4):
+            shards.append(
+                {
+                    "shardId": f"manual-{index:02d}",
+                    "candidateId": "candidate:three-shards",
+                    "workBlockId": None,
+                    "actionId": "resolve_conflicts_with_agent",
+                    "evidenceHash": "manual-evidence",
+                    "policyHash": config["policyHash"],
+                    "pinnedRefs": {},
+                    "allowedReadScope": [f"conflict{index}.txt"],
+                    "allowedWriteScope": [f"conflict{index}.txt"],
+                    "resultPath": f".claude-state/closeout/agent-remediation/results/three/manual-{index:02d}.json",
+                    "expectedOutputSchema": {},
+                    "validationRequirements": [],
+                }
+            )
+        self.write_agent_queue_packet(repo, candidate_id="candidate:three-shards", shards=shards)
+        completed = repo / shards[0]["resultPath"]
+        completed.parent.mkdir(parents=True, exist_ok=True)
+        completed.write_text("{}", encoding="utf-8")
+
+        result = agent_remediation_queue_consumer_plan(repo)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual([item["shardId"] for item in result["spawnPlan"]], ["manual-02", "manual-03"])
+
+    def test_agent_result_collection_blocks_agent_reported_blockers_and_failed_validation(self) -> None:
+        repo = self.init_repo()
+        self.write_agent_queue_packet(repo, candidate_id="candidate:blocking-result")
+        spawn = agent_remediation_queue_consumer_plan(repo)["spawnPlan"][0]
+        result_path = repo / spawn["resultPath"]
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "1.0",
+                    "status": "blocked",
+                    "candidateId": spawn["candidateId"],
+                    "shardId": spawn["shardId"],
+                    "workBlockId": spawn["workBlockId"],
+                    "actionId": spawn["actionId"],
+                    "evidenceHash": spawn["exactTuple"]["evidenceHash"],
+                    "policyHash": spawn["exactTuple"]["policyHash"],
+                    "pinnedRefs": spawn["exactTuple"]["pinnedRefs"],
+                    "exactTuple": spawn["exactTuple"],
+                    "summary": "cannot resolve",
+                    "changedPaths": [],
+                    "blockers": [{"kind": "semantic_conflict"}],
+                    "validation": [{"name": "unit", "returncode": 1}],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        result = collect_agent_remediation_results(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        blocker_kinds = {item["kind"] for item in result["blockers"]}
+        self.assertIn("agent_result_not_resolved", blocker_kinds)
+        self.assertIn("agent_result_blocked", blocker_kinds)
+        self.assertIn("agent_result_validation_failed", blocker_kinds)
+
+    def test_agent_result_collection_rejects_missing_required_result_fields(self) -> None:
+        repo = self.init_repo()
+        self.write_agent_queue_packet(repo, candidate_id="candidate:missing-fields")
+        spawn = agent_remediation_queue_consumer_plan(repo)["spawnPlan"][0]
+        result_path = repo / spawn["resultPath"]
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "1.0",
+                    "status": "resolved",
+                    "candidateId": spawn["candidateId"],
+                    "shardId": spawn["shardId"],
+                    "workBlockId": spawn["workBlockId"],
+                    "actionId": spawn["actionId"],
+                    "evidenceHash": spawn["exactTuple"]["evidenceHash"],
+                    "policyHash": spawn["exactTuple"]["policyHash"],
+                    "pinnedRefs": spawn["exactTuple"]["pinnedRefs"],
+                    "exactTuple": spawn["exactTuple"],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        result = collect_agent_remediation_results(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        blocker_kinds = {item["kind"] for item in result["blockers"]}
+        self.assertIn("agent_result_schema_invalid", blocker_kinds)
+
+    def test_agent_result_collection_rejects_wrong_shard_identity(self) -> None:
+        repo = self.init_repo()
+        self.write_agent_queue_packet(repo, candidate_id="candidate:wrong-shard")
+        spawn = agent_remediation_queue_consumer_plan(repo)["spawnPlan"][0]
+        result_path = repo / spawn["resultPath"]
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "1.0",
+                    "status": "resolved",
+                    "candidateId": spawn["candidateId"],
+                    "shardId": "different-shard",
+                    "workBlockId": spawn["workBlockId"],
+                    "actionId": spawn["actionId"],
+                    "evidenceHash": spawn["exactTuple"]["evidenceHash"],
+                    "policyHash": spawn["exactTuple"]["policyHash"],
+                    "pinnedRefs": spawn["exactTuple"]["pinnedRefs"],
+                    "exactTuple": spawn["exactTuple"],
+                    "summary": "wrong shard id",
+                    "changedPaths": ["conflict.txt"],
+                    "blockers": [],
+                    "validation": [],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        result = collect_agent_remediation_results(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        blocker_kinds = {item["kind"] for item in result["blockers"]}
+        self.assertIn("agent_result_identity_mismatch", blocker_kinds)
+
+    def test_repo_closed_postcondition_blocks_pending_agent_remediation_queue(self) -> None:
+        repo = self.init_repo()
+        self.write_agent_queue_packet(repo, candidate_id="candidate:pending-result")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked", result)
+        blocker_kinds = {item["kind"] for item in result["blockers"]}
+        self.assertIn("agent_remediation_queue_not_closed", blocker_kinds)
+
+    def test_repo_closed_postcondition_blocks_unreadable_or_unretired_queue_artifacts(self) -> None:
+        repo = self.init_repo()
+        done_path = self.write_agent_queue_packet(repo, candidate_id="candidate:done-without-proof")
+        packet = json.loads(done_path.read_text(encoding="utf-8"))
+        packet["status"] = "done"
+        done_path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+        corrupt_path = done_path.parent / "corrupt.json"
+        corrupt_path.write_text("{not-json", encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked", result)
+        agent_blocker = next(item for item in result["blockers"] if item["kind"] == "agent_remediation_queue_not_closed")
+        stale_reasons = {
+            reason["kind"]
+            for packet in agent_blocker["agentRemediationState"]["packets"]
+            for reason in packet["staleReasons"]
+        }
+        self.assertIn("queue_packet_not_pending_without_retirement", stale_reasons)
+
+    def test_repo_closed_postcondition_blocks_invalid_queue_retirement_proof(self) -> None:
+        repo = self.init_repo()
+        path = self.write_agent_queue_packet(repo, candidate_id="candidate:invalid-retirement")
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        packet["status"] = "retired"
+        packet["retirementProof"] = {
+            "candidateId": packet["candidateId"],
+            "actionId": packet["actionId"],
+            "evidenceHash": packet["evidenceHash"],
+            "policyHash": load_closeout_config(repo)["policyHash"],
+            "pinnedRefs": packet["pinnedRefs"],
+            "exactTuple": packet["exactTuple"],
+            "resultCollectionStatus": "success",
+            "resultCollectionHash": "forged-collection-hash",
+            "resultCollectionPath": ".claude-state/closeout/agent-remediation/results/collections/forged.json",
+            "retiredPacketStatus": "retired",
+        }
+        path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked", result)
+        agent_blocker = next(item for item in result["blockers"] if item["kind"] == "agent_remediation_queue_not_closed")
+        stale_reasons = {
+            reason["kind"]
+            for packet in agent_blocker["agentRemediationState"]["packets"]
+            for reason in packet["staleReasons"]
+        }
+        self.assertIn("queue_packet_not_pending_without_retirement", stale_reasons)
+
+    def test_repo_closed_postcondition_accepts_valid_queue_retirement_proof(self) -> None:
+        repo = self.init_repo()
+        path = self.write_agent_queue_packet(repo, candidate_id="candidate:valid-retirement")
+        spawn = agent_remediation_queue_consumer_plan(repo)["spawnPlan"][0]
+        result_path = repo / spawn["resultPath"]
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "1.0",
+                    "status": "resolved",
+                    "candidateId": spawn["candidateId"],
+                    "shardId": spawn["shardId"],
+                    "workBlockId": spawn["workBlockId"],
+                    "actionId": spawn["actionId"],
+                    "evidenceHash": spawn["exactTuple"]["evidenceHash"],
+                    "policyHash": spawn["exactTuple"]["policyHash"],
+                    "pinnedRefs": spawn["exactTuple"]["pinnedRefs"],
+                    "exactTuple": spawn["exactTuple"],
+                    "summary": "resolved",
+                    "changedPaths": ["conflict.txt"],
+                    "blockers": [],
+                    "validation": [],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        collection = collect_agent_remediation_results(repo)
+        self.assertEqual(collection["status"], "success", collection)
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        packet["status"] = "retired"
+        packet["retirementProof"] = {
+            "candidateId": packet["candidateId"],
+            "actionId": packet["actionId"],
+            "evidenceHash": packet["evidenceHash"],
+            "policyHash": load_closeout_config(repo)["policyHash"],
+            "pinnedRefs": packet["pinnedRefs"],
+            "exactTuple": packet["exactTuple"],
+            "resultCollectionStatus": "success",
+            "resultCollectionHash": collection["resultCollectionHash"],
+            "resultCollectionPath": collection["resultCollectionPath"],
+            "retiredPacketStatus": "retired",
+        }
+        path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["agentRemediationState"]["packetCount"], 0)
+
+    def test_repo_closed_postcondition_rejects_wrong_result_tuple(self) -> None:
+        repo = self.init_repo()
+        path = self.write_agent_queue_packet(repo, candidate_id="candidate:wrong-active-tuple")
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        shard = packet["shards"][0]
+        result_path = repo / shard["resultPath"]
+        wrong_tuple = dict(packet["exactTuple"])
+        wrong_tuple["evidenceHash"] = "stale-evidence"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "1.0",
+                    "status": "resolved",
+                    "candidateId": packet["candidateId"],
+                    "shardId": shard["shardId"],
+                    "workBlockId": packet["workBlockId"],
+                    "actionId": packet["actionId"],
+                    "evidenceHash": wrong_tuple["evidenceHash"],
+                    "policyHash": packet["policyHash"],
+                    "pinnedRefs": packet["pinnedRefs"],
+                    "exactTuple": wrong_tuple,
+                    "summary": "resolved from a stale tuple",
+                    "changedPaths": [],
+                    "blockers": [],
+                    "validation": [],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked", result)
+        agent_blocker = next(item for item in result["blockers"] if item["kind"] == "agent_remediation_queue_not_closed")
+        blocker_kinds = {item["kind"] for item in agent_blocker["agentRemediationState"]["blockers"]}
+        self.assertIn("agent_remediation_result_tuple_mismatch", blocker_kinds)
+
+    def test_repo_closed_postcondition_rejects_stale_collection_retirement_tuple(self) -> None:
+        repo = self.init_repo()
+        path = self.write_agent_queue_packet(repo, candidate_id="candidate:stale-collection")
+        config = load_closeout_config(repo)
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        wrong_tuple = dict(packet["exactTuple"])
+        wrong_tuple["evidenceHash"] = "stale-evidence"
+        payload = {
+            "status": "success",
+            "packetCount": 1,
+            "collectedResults": [
+                {
+                    "candidateId": packet["candidateId"],
+                    "shardId": packet["shards"][0]["shardId"],
+                    "workBlockId": packet["workBlockId"],
+                    "actionId": packet["actionId"],
+                    "evidenceHash": wrong_tuple["evidenceHash"],
+                    "policyHash": packet["policyHash"],
+                    "pinnedRefs": packet["pinnedRefs"],
+                    "exactTuple": wrong_tuple,
+                    "resultPath": packet["shards"][0]["resultPath"],
+                    "status": "resolved",
+                    "changedPaths": [],
+                    "blockers": [],
+                }
+            ],
+            "blockers": [],
+            "nextSymbolicAction": {
+                "action": "repo_owned_coordinator_revalidate_and_finalize",
+                "allowedActors": ["repo-sweep", "finalize-closeout", "remediate-retained"],
+                "mutationBoundary": "repo-owned symbolic actors only",
+            },
+        }
+        collection_hash = stable_hash(payload)
+        collection_path = repo / ".claude-state" / "closeout" / "agent-remediation" / "results" / "collections" / f"{collection_hash}.json"
+        collection_path.parent.mkdir(parents=True, exist_ok=True)
+        collection_path.write_text(
+            json.dumps(
+                {
+                    **payload,
+                    "resultCollectionHash": collection_hash,
+                    "resultCollectionPath": ".claude-state/closeout/agent-remediation/results/collections/%s.json" % collection_hash,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        packet["status"] = "retired"
+        packet["retirementProof"] = {
+            "candidateId": packet["candidateId"],
+            "actionId": packet["actionId"],
+            "evidenceHash": packet["evidenceHash"],
+            "policyHash": config["policyHash"],
+            "pinnedRefs": packet["pinnedRefs"],
+            "exactTuple": packet["exactTuple"],
+            "resultCollectionStatus": "success",
+            "resultCollectionHash": collection_hash,
+            "resultCollectionPath": ".claude-state/closeout/agent-remediation/results/collections/%s.json" % collection_hash,
+            "retiredPacketStatus": "retired",
+        }
+        path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked", result)
+        agent_blocker = next(item for item in result["blockers"] if item["kind"] == "agent_remediation_queue_not_closed")
+        stale_reasons = {
+            reason["kind"]
+            for packet_row in agent_blocker["agentRemediationState"]["packets"]
+            for reason in packet_row["staleReasons"]
+        }
+        self.assertIn("queue_packet_not_pending_without_retirement", stale_reasons)
+
+    def test_agent_result_collection_rejects_out_of_scope_changed_paths(self) -> None:
+        repo = self.init_repo()
+        (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/result-scope")
+        (repo / "conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "branch conflict")
+        git(repo, "checkout", "master")
+        (repo / "conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "target conflict")
+        plan = repo_sweep(repo)
+        report = next(item for item in plan["retainedCandidateReports"] if item["branch"] == "codex/result-scope")
+        repo_sweep(repo, apply=True, candidate_id=report["candidateId"])
+        spawn = agent_remediation_queue_consumer_plan(repo)["spawnPlan"][0]
+        result_path = Path(spawn["resultPath"])
+        if not result_path.is_absolute():
+            result_path = repo / result_path
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "1.0",
+                    "status": "resolved",
+                    "candidateId": spawn["candidateId"],
+                    "shardId": spawn["shardId"],
+                    "workBlockId": spawn["workBlockId"],
+                    "actionId": spawn["actionId"],
+                    "evidenceHash": spawn["exactTuple"]["evidenceHash"],
+                    "policyHash": spawn["exactTuple"]["policyHash"],
+                    "pinnedRefs": spawn["exactTuple"]["pinnedRefs"],
+                    "exactTuple": spawn["exactTuple"],
+                    "summary": "attempted out-of-scope change",
+                    "changedPaths": ["foreign.txt"],
+                    "blockers": [],
+                    "validation": [],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        result = collect_agent_remediation_results(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        blocker_kinds = {item["kind"] for item in result["blockers"]}
+        self.assertIn("agent_scope_violation", blocker_kinds)
+        self.assertIn("agent_remediation_result_collection", self.audit_types(repo))
+
+    def test_agent_result_collection_returns_symbolic_next_action_without_mutation(self) -> None:
+        repo = self.init_repo()
+        (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/result-symbolic")
+        (repo / "conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "branch conflict")
+        git(repo, "checkout", "master")
+        (repo / "conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "target conflict")
+        plan = repo_sweep(repo)
+        report = next(item for item in plan["retainedCandidateReports"] if item["branch"] == "codex/result-symbolic")
+        repo_sweep(repo, apply=True, candidate_id=report["candidateId"])
+        spawn = agent_remediation_queue_consumer_plan(repo)["spawnPlan"][0]
+        result_path = Path(spawn["resultPath"])
+        if not result_path.is_absolute():
+            result_path = repo / result_path
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "1.0",
+                    "status": "resolved",
+                    "candidateId": spawn["candidateId"],
+                    "shardId": spawn["shardId"],
+                    "workBlockId": spawn["workBlockId"],
+                    "actionId": spawn["actionId"],
+                    "evidenceHash": spawn["exactTuple"]["evidenceHash"],
+                    "policyHash": spawn["exactTuple"]["policyHash"],
+                    "pinnedRefs": spawn["exactTuple"]["pinnedRefs"],
+                    "exactTuple": spawn["exactTuple"],
+                    "summary": "conflict path resolved in assigned scope",
+                    "changedPaths": ["conflict.txt"],
+                    "blockers": [],
+                    "validation": [{"name": "unit", "returncode": 0}],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        result = collect_agent_remediation_results(repo)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["nextSymbolicAction"]["mutationBoundary"], "repo-owned symbolic actors only")
+        self.assertEqual((repo / "conflict.txt").read_text(encoding="utf-8"), "target\n")
+        self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "master")
 
     def test_agent_conflict_dispatch_shards_large_conflict_sets(self) -> None:
         repo = self.init_repo(config_updates={"agentRemediation": {"maxConflictFilesPerAgent": 2}})

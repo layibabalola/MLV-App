@@ -186,6 +186,13 @@ cleanup audit are inspectable, with no non-exempt dirty/untracked files,
 disallowed stashes, stale transaction branches, stale managed worktrees, or
 orphaned closeout/runtime artifacts left behind. Failures report
 `repo_closed_postcondition_failed`, not success with deferred cleanup.
+Protected target closeout is a no-op only when
+`hardClean.protectedTargetNoopCloseout.enabled=true`, the current branch is
+protected, no explicit workBlockId was supplied, and hard-clean passes. It writes
+`protected-target-noop-closeout`; dirty protected targets, unresolved stashes,
+stale branches/worktrees, runtime blockers, or missing remediation results still
+block as `repo_closed_postcondition_failed` and must not create a synthetic work
+block.
 Runtime services that execute repo code follow configured lifecycle actors. When
 `runtimeServices.<service>.stopBeforePromotion=true`, closeout stops and verifies
 the service before promotion/finalize; when `restartAfterCleanPromotion=true`,
@@ -257,10 +264,19 @@ command.
 Merge-failed retained candidates are not terminal by default. Repo sweep promotes
 policy-eligible conflicts to symbolic action `resolve_conflicts_with_agent`,
 writes an exact-tuple agent remediation queue packet under
-`.claude-state/closeout/agent-remediation/`, and expects Codex/Claude surface
-adapters to spawn one background agent per shard where available. Source mutation
-still happens only through repo-owned clean integration/finalize after agents
-report resolved patches or blockers.
+`agentRemediationQueue.queueRoots`, and expects Codex/Claude surface adapters to
+run `tools\closeout\agent-remediation-queue.ps1 -RepoRoot .` before declaring
+the candidate blocked. Codex Desktop should spawn one bounded background agent
+per eligible shard up to `agentRemediationQueue.maxParallelAgents`, require each
+agent to stay within its packet read/write scope, and write durable result
+packets under `agentRemediationQueue.resultRoot`; if the current surface cannot
+spawn agents, run the consumer with `-MarkUnavailable` or report
+`agent_remediation_surface_unavailable` with the queue path and recovery command.
+After result packets exist, run
+`tools\closeout\agent-remediation-queue.ps1 -RepoRoot . -CollectResults`;
+out-of-scope changed paths or stale tuples block. Source mutation still happens
+only through repo-owned clean integration/finalize after the coordinator
+revalidates the exact tuple and consumes resolved results or blockers.
 
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 

@@ -129,7 +129,9 @@
       "foreign_dirty_integrated_branch_prune",
       "detached_dirty_preserve",
       "explicit_protected_worktree_cleanup",
-      "resolve_conflicts_with_agent"
+      "resolve_conflicts_with_agent",
+      "agent_remediation_surface_unavailable",
+      "protected-target-noop-closeout"
     ],
     "closeout_publish_modes": ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"],
     "closeout_trigger_signal_ids": [
@@ -137,7 +139,9 @@
       "dirty_generated_only",
       "clean_feature_branch_ready_to_publish",
       "hygiene_cleanup_recommendations",
-      "retained_blocker_auto_remediation"
+      "retained_blocker_auto_remediation",
+      "agent_remediation_queue_consumer",
+      "protected_target_noop_closeout"
     ],
     "closeout_contract": "tools/repo-hygiene/closeout.contract.json",
     "policy_doc": "tools/repo-hygiene/POLICY.md",
@@ -190,7 +194,9 @@
         "dirty_generated_only",
         "clean_feature_branch_ready_to_publish",
         "hygiene_cleanup_recommendations",
-        "retained_blocker_auto_remediation"
+        "retained_blocker_auto_remediation",
+        "agent_remediation_queue_consumer",
+        "protected_target_noop_closeout"
       ]
     }
   }
