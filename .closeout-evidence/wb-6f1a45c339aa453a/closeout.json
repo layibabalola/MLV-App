@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/harden-agent-bridge-singleton",
+  "createdAt": "2026-05-06T12:33:15+00:00",
+  "detectorHash": "ecf699c0f7a4bcfa3eba3c4d835581d1",
+  "eligible": true,
+  "featureHead": "2a15b0259f9173650c16a50e22f9c536d4908342",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/harden-agent-bridge-singleton",
+      "head": "2a15b0259f9173650c16a50e22f9c536d4908342"
+    },
+    "target": {
+      "branch": "master",
+      "head": "045d8ee558faf6d43d3cdb7f860f74d05f561b39",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "045d8ee558faf6d43d3cdb7f860f74d05f561b39",
+  "workBlockId": "wb-6f1a45c339aa453a"
+}
