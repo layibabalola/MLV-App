@@ -131,7 +131,8 @@
       "explicit_protected_worktree_cleanup",
       "resolve_conflicts_with_agent",
       "agent_remediation_surface_unavailable",
-      "protected-target-noop-closeout"
+      "protected-target-noop-closeout",
+      "evidence_preserving_prune_recovery"
     ],
     "closeout_publish_modes": ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"],
     "closeout_trigger_signal_ids": [
