@@ -704,6 +704,20 @@ class BrokeredCloseoutTests(unittest.TestCase):
         blocker_kinds = {item["kind"] for item in result["repoClosedPostcondition"]["blockers"]}
         self.assertIn("disallowed_stashes", blocker_kinds)
 
+    def test_complete_finalize_on_clean_protected_target_is_noop_repo_closed(self) -> None:
+        repo = self.init_repo(remote=True)
+
+        result = complete_work_block(repo, finalize=True)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["reason"], "protected_target_repo_closed")
+        self.assertEqual(result["finalizeStatus"], "noop")
+        self.assertIsNone(result["selectedWorkBlockId"])
+        self.assertEqual(result["workBlockSelection"]["selectionReason"], "protected_target_no_active_work_block")
+        self.assertTrue(result["repoClosedPostcondition"]["ok"])
+        self.assertEqual(list((repo / ".claude-state" / "closeout" / "work-blocks").glob("*/manifest.json")), [])
+        self.assertIn("protected_target_closeout_noop", self.audit_types(repo))
+
     def test_hard_clean_blocks_retained_remote_feature_refs(self) -> None:
         repo = self.init_repo(remote=True)
         git(repo, "checkout", "-b", "codex/remote-left-open")

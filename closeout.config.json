@@ -229,6 +229,7 @@
       "test_hard_clean_final_response_blocks_remaining_stash",
       "test_hard_clean_final_response_passes_after_clean_promotion",
       "test_complete_finalize_enforces_hard_clean_config_without_switch",
+      "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
       "test_hard_clean_blocks_retained_remote_feature_refs",
       "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
       "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
