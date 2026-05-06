@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/closeout-incident-map",
+  "createdAt": "2026-05-06T15:54:38+00:00",
+  "detectorHash": "2390c0e18f47a7de185d2ddf8391386f",
+  "eligible": true,
+  "featureHead": "00df03ad6a39faf56104547713ff23032fa8ddc3",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/closeout-incident-map",
+      "head": "00df03ad6a39faf56104547713ff23032fa8ddc3"
+    },
+    "target": {
+      "branch": "master",
+      "head": "0cb8557dd8cbb1737285c251c84b3c07377fd932",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "0cb8557dd8cbb1737285c251c84b3c07377fd932",
+  "workBlockId": "wb-9aa554277a96479b"
+}
