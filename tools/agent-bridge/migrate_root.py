@@ -141,7 +141,7 @@ def _write_moved_to(source_root: Path, target_root: Path, target_manifest: Dict[
 
 
 def _mcp_config_snippets(target_root: Path) -> Dict[str, Any]:
-    wrapper = Path(__file__).with_name("server_wrapper.py")
+    wrapper = Path(__file__).with_name("server_wrapper_trampoline.py")
     args = ["-3", str(wrapper), "--bridge-root", str(target_root)]
     return {
         "codex_toml": {

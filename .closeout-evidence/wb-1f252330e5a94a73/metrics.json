@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/fix-agent-bridge-singleton",
+  "committedDeltaPathCount": 5,
+  "createdAt": "2026-05-06T07:13:42+00:00",
+  "detectorHash": "7d49d3a956258101ddb57fcddef2f968",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "47d986b170704347c2d987c1554300e6b0cc4078",
+  "schemaVersion": "1.0",
+  "targetHead": "19a899d4e3e684165d3ef7a4138b10d48cdfd11c",
+  "workBlockId": "wb-1f252330e5a94a73"
+}
