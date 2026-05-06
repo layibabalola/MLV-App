@@ -16,11 +16,14 @@ from .brokered_closeout import (
     finalize_candidate_id,
     finalize_evidence,
     finalize_work_block,
+    guard_closeout_hook,
     load_closeout_config,
     preserve_owned_dirty_split,
     quarantine_orphans,
     record_review_approval,
     remediate_retained_candidates,
+    remediation_freeze_status,
+    remediation_packet_template,
     repair_eligibility,
     repo_sweep,
     repo_sweep_tuple,
@@ -92,6 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
     remediate = sub.add_parser("remediate-retained", help="Run the bounded retained-candidate remediation queue.")
     remediate.add_argument("--apply", action="store_true")
     remediate.add_argument("--candidate-id")
+
+    freeze = sub.add_parser("remediation-freeze-status", help="Inspect the closeout remediation freeze guard.")
+    freeze.add_argument("--action", default="status")
+    freeze.add_argument("--audit", action="store_true")
+
+    hook_guard = sub.add_parser("hook-guard", help="Fail closed when a lifecycle hook runs during remediation freeze.")
+    hook_guard.add_argument("--hook-name", required=True)
+
+    packet = sub.add_parser("remediation-packet-template", help="Print the remediation packet template for the current worktree.")
+    packet.add_argument("--reason", default="manual_remediation_packet")
 
     sub.add_parser("contract", help="Print broker/config/script parity information.")
     return parser
@@ -179,6 +192,14 @@ def main(argv: list[str] | None = None) -> int:
                 result = repo_sweep(repo_root, apply=args.apply, candidate_id=args.candidate_id)
         elif args.command == "remediate-retained":
             result = remediate_retained_candidates(repo_root, apply=args.apply, candidate_id=args.candidate_id)
+        elif args.command == "remediation-freeze-status":
+            config = load_closeout_config(repo_root)
+            result = remediation_freeze_status(repo_root, config, action=args.action, write_audit_packet=args.audit)
+        elif args.command == "hook-guard":
+            result = guard_closeout_hook(repo_root, hook_name=args.hook_name)
+        elif args.command == "remediation-packet-template":
+            config = load_closeout_config(repo_root)
+            result = remediation_packet_template(repo_root, config, reason=args.reason)
         elif args.command == "contract":
             result = broker_contract(repo_root)
         else:

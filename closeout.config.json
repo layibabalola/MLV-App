@@ -71,7 +71,7 @@
   },
   "hardClean": {
     "requireForCompletion": true,
-    "allowRetainedForeignDirtyAtCompletion": false,
+    "allowRetainedForeignDirtyAtCompletion": true,
     "requireNoStash": true,
     "exemptStatusPatterns": [
       ".claude-state/**",
@@ -119,6 +119,30 @@
   "autoEligibilityRepair": {
     "timeoutMs": 300000
   },
+  "remediationFreeze": {
+    "enabled": true,
+    "markerPath": ".claude-state/closeout-remediation.freeze",
+    "envVar": "CLOSEOUT_REMEDIATION_FREEZE",
+    "generatedAuditRoot": ".claude-state/closeout-log/remediation-freeze",
+    "clusterLedgerRoot": ".claude-state/closeout-log/remediation-clusters",
+    "requireCoordinatorLock": true,
+    "requireExactAllowlist": true,
+    "requireRecoveryBundle": true,
+    "requireRemoteAdvertisedPins": true,
+    "requireHookGuardProof": true,
+    "requiredReviewerScore": 10,
+    "requiredReviewers": ["codex-self", "stranger-reviewer-1", "stranger-reviewer-2"],
+    "blockedLifecycleActions": [
+      "broker-bootstrap",
+      "start-work-block",
+      "publish",
+      "finalize",
+      "pre-commit",
+      "pre-push",
+      "response-hook",
+      "final-hook"
+    ]
+  },
   "toolingBaseline": {
     "enabled": true,
     "baselineRef": null,
@@ -138,8 +162,8 @@
       "tools/repo-hygiene/closeout.contract.json",
       "tools/repo-hygiene/hygiene.config.json"
     ],
-    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation", "locking", "autoEligibilityRepair"],
-    "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent"],
+    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "locking", "autoEligibilityRepair"],
+    "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
     "requiredAutoQuorumActions": [
       "integrated_branch_prune",
       "integrated_remote_feature_prune",
@@ -151,7 +175,10 @@
       "foreign_dirty_integrated_branch_prune",
       "detached_dirty_preserve",
       "redundant_branch_prune",
-      "explicit_protected_worktree_cleanup"
+      "explicit_protected_worktree_cleanup",
+      "dirty_cluster_preservation",
+      "stale_claim_remediation",
+      "remediation_freeze_removal"
     ],
     "requiredTests": [
       "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
@@ -201,9 +228,20 @@
       "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
       "test_hard_clean_final_response_blocks_remaining_stash",
       "test_hard_clean_final_response_passes_after_clean_promotion",
+      "test_complete_finalize_enforces_hard_clean_config_without_switch",
+      "test_hard_clean_blocks_retained_remote_feature_refs",
+      "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
       "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
       "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
-      "test_closeout_tooling_stale_reports_missing_hard_clean_gate"
+      "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
+      "test_remediation_freeze_blocks_broker_bootstrap_lease_refresh_start_publish_finalize_and_hooks",
+      "test_remediation_freeze_environment_is_process_scoped_and_fresh_preservation_worktree_is_exempt",
+      "test_remediation_freeze_audit_packets_are_generated_exempt_and_content_addressed",
+      "test_already_integrated_dirty_baseline_overlap_enters_remediation_triage",
+      "test_remediation_packet_requires_stale_claim_proof_not_gone_upstream_only",
+      "test_remediation_preservation_requires_exact_allowlist_and_ref_or_bundle_backing",
+      "test_remediation_freeze_removal_requires_coordinator_lock_quorum_and_revalidation",
+      "test_remediation_hard_clean_blocks_remaining_freeze_marker"
     ],
     "requiredSymbols": [
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -227,7 +265,12 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_status"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def assert_remediation_freeze_not_active"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_packet_template"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
+      {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
+      {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
       {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "bounded_closeout_cli_main"},
       {"path": "tools/closeout/work-block-complete.ps1", "contains": "RequireRepoClosed"},
       {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
@@ -239,11 +282,14 @@
       {"path": "closeout.config.json", "contains": "finalizeLoop"},
       {"path": "closeout.config.json", "contains": "hardClean"},
       {"path": "closeout.config.json", "contains": "runtimeServices"},
+      {"path": "closeout.config.json", "contains": "remediationFreeze"},
       {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
       {"path": "closeout.config.json", "contains": "failureTextPatterns"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
+      {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "remediation-freeze-status"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
       {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
+      {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "remediation-freeze-status"},
       {"path": "tools/agent-bridge/codex_bridge_reminder.ps1", "contains": "session_worktree_bootstrap=skipped"}
     ]
   },
@@ -287,8 +333,13 @@
     }
   },
   "reviewQuorum": {
-    "requiredApprovals": 1,
-    "allowedReviewers": ["codex", "claude", "human", "local-test"],
+    "requiredApprovals": 3,
+    "requiredScore": 10,
+    "requiredSelfApprovals": 1,
+    "requiredIndependentApprovals": 2,
+    "selfReviewers": ["codex-self"],
+    "independentReviewers": ["ancestry-safety-reviewer", "mutation-scope-reviewer"],
+    "allowedReviewers": ["codex", "claude", "human", "local-test", "codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
     "highImpactActions": [
       "clean_integrate",
       "checkpoint-owned-dirty",
@@ -301,7 +352,10 @@
         "stash_promote",
         "repo_sweep_prune_merged",
         "split",
-        "resolve_conflicts_with_agent"
+        "resolve_conflicts_with_agent",
+        "preserve_dirty_cluster",
+        "release_stale_claim",
+        "remove_remediation_freeze"
     ],
     "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"]
   },
@@ -324,7 +378,10 @@
         "detached_dirty_preserve",
         "redundant_branch_prune",
         "explicit_protected_worktree_cleanup",
-        "agent_conflict_remediation"
+        "agent_conflict_remediation",
+        "dirty_cluster_preservation",
+        "stale_claim_remediation",
+        "remediation_freeze_removal"
     ],
     "manualOnlyActionClasses": [
       "protected_branch",
