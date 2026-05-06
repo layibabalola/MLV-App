@@ -18,6 +18,7 @@
   - `Needs runtime profiling`
 - Prefer code references in `path:line` form.
 - Keep next-step recommendations ranked by impact and effort.
+- When the user asks for "repo status" or an equivalent overall repository state, report the current branch/tracking and dirty state, plus local branches, registered worktrees, and stashes. If you intentionally omit any of those, say why.
 
 ## Active Investigation Notes
 - `.claude/analysis/mlv-playback-investigation.md`
