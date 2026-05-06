@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/repo-status-report-rule",
+  "createdAt": "2026-05-06T10:46:30+00:00",
+  "detectorHash": "fb834f769fc00a6431ee3f2faf83d7d4",
+  "eligible": true,
+  "featureHead": "4882e0d55e0fb38152cb9289ab5f6f6ff482cbee",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/repo-status-report-rule",
+      "head": "4882e0d55e0fb38152cb9289ab5f6f6ff482cbee"
+    },
+    "target": {
+      "branch": "master",
+      "head": "bbe3d80b6a25456d5b4419df20559dbe2c87a301",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "bbe3d80b6a25456d5b4419df20559dbe2c87a301",
+  "workBlockId": "wb-102365d23e344a88"
+}
