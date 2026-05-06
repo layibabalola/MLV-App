@@ -53,7 +53,7 @@ from project_identity import derive_project_identity, normalize_rendezvous
 from recover_bridge_session import inspect_bridge_runtime, recover_bridge_session
 from recover_state import recover_state
 from routing_policy import evaluate_message
-from server import register_server_pid
+from server import register_server_pid, start_wrapper_lifetime_watchdog
 from server_wrapper import ServerSupervisor, SupervisorConfig
 import watcher
 
@@ -5562,6 +5562,111 @@ for index in range(count):
             self.assertTrue(current_runtime.exists())
         finally:
             cleanup()
+
+    def test_mcp_server_watchdog_exits_when_wrapper_pid_is_gone(self) -> None:
+        cleanup_calls: List[bool] = []
+        exit_codes: List[int] = []
+        stop = threading.Event()
+
+        def cleanup() -> None:
+            cleanup_calls.append(True)
+
+        def fake_exit(code: int) -> None:
+            exit_codes.append(code)
+            stop.set()
+
+        with patch.dict(os.environ, {"AGENT_BRIDGE_WRAPPER_PID": "424242"}), patch(
+            "server.is_process_alive",
+            return_value=False,
+        ):
+            thread = start_wrapper_lifetime_watchdog(
+                cleanup,
+                poll_seconds=0.01,
+                exit_fn=fake_exit,
+                stop_event=stop,
+            )
+            self.assertIsNotNone(thread)
+            thread.join(timeout=1.0)
+
+        self.assertEqual(cleanup_calls, [True])
+        self.assertEqual(exit_codes, [0])
+
+    def test_mcp_server_watchdog_exits_when_wrapper_pid_is_reused(self) -> None:
+        cleanup_calls: List[bool] = []
+        exit_codes: List[int] = []
+        stop = threading.Event()
+
+        def cleanup() -> None:
+            cleanup_calls.append(True)
+
+        def fake_exit(code: int) -> None:
+            exit_codes.append(code)
+            stop.set()
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENT_BRIDGE_WRAPPER_PID": "424242",
+                "AGENT_BRIDGE_WRAPPER_CREATION_DATE": "old-wrapper-start",
+                "AGENT_BRIDGE_WRAPPER_COMMAND_HASH": "old-command",
+            },
+        ), patch("server.is_process_alive", return_value=True), patch(
+            "server._wrapper_process_entry",
+            return_value={"creation_date": "new-reused-wrapper-start", "command_line": "python other.py"},
+        ):
+            thread = start_wrapper_lifetime_watchdog(
+                cleanup,
+                poll_seconds=0.01,
+                exit_fn=fake_exit,
+                stop_event=stop,
+            )
+            self.assertIsNotNone(thread)
+            thread.join(timeout=1.0)
+
+        self.assertEqual(cleanup_calls, [True])
+        self.assertEqual(exit_codes, [0])
+
+    def test_mcp_server_watchdog_treats_blank_wrapper_command_line_as_unknown(self) -> None:
+        cleanup_calls: List[bool] = []
+        exit_codes: List[int] = []
+        stop = threading.Event()
+
+        def cleanup() -> None:
+            cleanup_calls.append(True)
+
+        def fake_exit(code: int) -> None:
+            exit_codes.append(code)
+            stop.set()
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENT_BRIDGE_WRAPPER_PID": "424242",
+                "AGENT_BRIDGE_WRAPPER_CREATION_DATE": "same-wrapper-start",
+                "AGENT_BRIDGE_WRAPPER_EXECUTABLE_PATH": "C:/Python/python.exe",
+                "AGENT_BRIDGE_WRAPPER_COMMAND_HASH": "old-command",
+            },
+        ), patch("server.is_process_alive", return_value=True), patch(
+            "server._wrapper_process_entry",
+            return_value={
+                "creation_date": "same-wrapper-start",
+                "executable_path": "C:/Python/python.exe",
+                "command_line": "",
+            },
+        ):
+            thread = start_wrapper_lifetime_watchdog(
+                cleanup,
+                poll_seconds=0.01,
+                exit_fn=fake_exit,
+                stop_event=stop,
+            )
+            self.assertIsNotNone(thread)
+            time.sleep(0.05)
+            stop.set()
+            thread.join(timeout=1.0)
+
+        self.assertEqual(cleanup_calls, [])
+        self.assertEqual(exit_codes, [])
 
     def test_bridge_process_status_flags_pid_reuse_server_marker(self) -> None:
         self.state_dir.mkdir(parents=True)
