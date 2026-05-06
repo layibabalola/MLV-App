@@ -278,6 +278,17 @@ out-of-scope changed paths or stale tuples block. Source mutation still happens
 only through repo-owned clean integration/finalize after the coordinator
 revalidates the exact tuple and consumes resolved results or blockers.
 
+Evidence-preserving transaction prune: branches are transactions, not archives.
+Before pruning a stale, redundant, patch-equivalent, historical-only, or
+non-ancestor branch/worktree, repo sweep must write recovery evidence under
+`repoSweep.evidencePreservingPrune.recoveryRoot`, for example
+`.claude-state/closeout/manual-prune/`. Non-ancestor or historical branch
+deletion requires bundle-backed recovery evidence plus reviewer prune-readiness
+verdicts in the exact tuple. Dirty detached worktree removal requires tracked
+binary diff, untracked byte copies, file modes, HEAD/target heads, SHA256
+hashes, preservation ref, reviewer verdicts, and recovery commands. Missing,
+stale, hash-mismatched, or out-of-root recovery artifacts block prune.
+
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 
 The pre-final hook (`codex_pre_final.ps1`) is advisory and may not fire on
