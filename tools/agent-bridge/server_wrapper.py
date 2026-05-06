@@ -27,7 +27,8 @@ DEFAULT_LOOP_SLEEP_SECONDS = 0.05
 DEFAULT_GRACEFUL_RESTART_TIMEOUT_SECONDS = 5.0
 DEFAULT_STALE_MARKER_REAP_INTERVAL_SECONDS = 10 * 60.0
 DEFAULT_STALE_MARKER_MAX_AGE_HOURS = 0
-DEFAULT_MAX_LIVE_SERVER_PROCESSES = 16
+DEFAULT_MAX_LIVE_SERVER_PROCESSES = 0
+DEFAULT_MAX_LIVE_SERVER_PROCESSES_PER_HOST = 1
 TOOL_MANIFEST_FILENAME = "tool-manifest.json"
 TOOL_REFRESH_STATUS_FILENAME = "tool-refresh-status.json"
 TOOL_REFRESH_STATUS_SCHEMA_VERSION = 1
@@ -41,14 +42,25 @@ SERVER_WRAPPER_SELF_RESTART_EXIT_CODE = 77
 SERVER_WRAPPER_SELF_RESTART_REASON = "server_wrapper_code_changed_during_wrapper_session"
 
 
-def _default_max_live_server_processes() -> int:
-    raw = os.environ.get("AGENT_BRIDGE_MAX_LIVE_MCP_SERVERS")
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
     if raw is None or raw == "":
-        return DEFAULT_MAX_LIVE_SERVER_PROCESSES
+        return default
     try:
         return int(raw)
     except ValueError:
-        return DEFAULT_MAX_LIVE_SERVER_PROCESSES
+        return default
+
+
+def _default_max_live_server_processes() -> int:
+    return _int_env("AGENT_BRIDGE_MAX_LIVE_MCP_SERVERS", DEFAULT_MAX_LIVE_SERVER_PROCESSES)
+
+
+def _default_max_live_server_processes_per_host() -> int:
+    return _int_env(
+        "AGENT_BRIDGE_MAX_LIVE_MCP_SERVERS_PER_HOST",
+        DEFAULT_MAX_LIVE_SERVER_PROCESSES_PER_HOST,
+    )
 
 
 @dataclass(frozen=True)
@@ -97,8 +109,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=int,
         default=_default_max_live_server_processes(),
         help=(
-            "Maximum live agent-bridge server.py processes allowed for this state dir before this wrapper "
-            "exits without launching another child. Use 0 to disable."
+            "Optional total maximum live agent-bridge server.py processes allowed for this state dir before "
+            "this wrapper exits without launching another child. Defaults to 0 (disabled)."
+        ),
+    )
+    parser.add_argument(
+        "--max-live-server-processes-per-host",
+        type=int,
+        default=_default_max_live_server_processes_per_host(),
+        help=(
+            "Maximum live agent-bridge server.py processes allowed from the same MCP host process for this "
+            "state dir before this wrapper exits without launching another child. Defaults to 1; use 0 to disable."
         ),
     )
     parser.add_argument(
@@ -111,10 +132,144 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return args
 
 
+_BRIDGE_LAUNCHER_SCRIPT_NAMES = {SERVER_WRAPPER_FILENAME, "server_wrapper_trampoline.py"}
+_PYTHON_LAUNCHER_PROCESS_NAMES = {"py", "py.exe"}
+
+
+def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
+    """Best-effort process table used only to attribute bridge children to a host."""
+    if sys.platform == "win32":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                "Get-CimInstance Win32_Process | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+                "ConvertTo-Json -Compress"
+            ),
+        ]
+        kwargs: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+            "text": True,
+            "timeout": 5,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            proc = subprocess.run(command, **kwargs)
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return {}
+            rows = json.loads(proc.stdout)
+            if isinstance(rows, dict):
+                rows = [rows]
+            result: Dict[int, Dict[str, Any]] = {}
+            iterable_rows = rows if isinstance(rows, list) else []
+            for row in iterable_rows:
+                try:
+                    pid = int(row.get("ProcessId") or 0)
+                except (TypeError, ValueError):
+                    continue
+                result[pid] = {
+                    "pid": pid,
+                    "parent_pid": int(row.get("ParentProcessId") or 0),
+                    "name": row.get("Name") or "",
+                    "command_line": row.get("CommandLine") or "",
+                }
+            return result
+        except Exception:
+            return {}
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,comm=,args="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    result = {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            parent_pid = int(parts[1])
+        except ValueError:
+            continue
+        result[pid] = {
+            "pid": pid,
+            "parent_pid": parent_pid,
+            "name": parts[2],
+            "command_line": parts[3] if len(parts) > 3 else parts[2],
+        }
+    return result
+
+
+def _is_bridge_launcher_process(process: Dict[str, Any]) -> bool:
+    name = str(process.get("name") or "").lower()
+    command_line = str(process.get("command_line") or "").lower()
+    if name in _PYTHON_LAUNCHER_PROCESS_NAMES:
+        return True
+    return any(script_name.lower() in command_line for script_name in _BRIDGE_LAUNCHER_SCRIPT_NAMES)
+
+
+def _mcp_host_identity_for_pid(
+    pid: int,
+    *,
+    process_table: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Resolve the non-bridge process that owns a wrapper process."""
+    table = process_table if process_table is not None else _process_table_from_system()
+    current = table.get(int(pid))
+    cursor = int((current or {}).get("parent_pid") or 0)
+    skipped: List[int] = [int(pid)]
+    for _ in range(12):
+        if cursor <= 0:
+            break
+        process = table.get(cursor)
+        if not process:
+            return {
+                "host_pid": cursor,
+                "host_key": "pid:%s" % cursor,
+                "host_process_name": None,
+                "host_command_line": None,
+                "host_resolution": "missing_process_table_entry",
+                "bridge_launcher_pids": skipped,
+            }
+        if _is_bridge_launcher_process(process):
+            skipped.append(cursor)
+            cursor = int(process.get("parent_pid") or 0)
+            continue
+        return {
+            "host_pid": cursor,
+            "host_key": "pid:%s" % cursor,
+            "host_process_name": process.get("name"),
+            "host_command_line": process.get("command_line"),
+            "host_resolution": "process_tree",
+            "bridge_launcher_pids": skipped,
+        }
+    return {
+        "host_pid": None,
+        "host_key": "unknown:%s" % int(pid),
+        "host_process_name": None,
+        "host_command_line": None,
+        "host_resolution": "unresolved",
+        "bridge_launcher_pids": skipped,
+    }
+
+
 def _live_mcp_server_markers(
     state_dir: Path,
     *,
     identity_fn=process_runtime_identity_status,
+    process_table: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Return live, identity-verified server.py marker entries for one state dir."""
     server_dir = Path(state_dir) / "server-pids"
@@ -136,15 +291,20 @@ def _live_mcp_server_markers(
         identity = identity_fn(pid, runtime, expected_role="mcp_server")
         if not identity.get("running") or identity.get("identity_mismatch"):
             continue
-        live.append(
-            {
-                "pid": pid,
-                "parent_pid": (runtime or {}).get("parent_pid"),
-                "timestamp": (runtime or {}).get("timestamp"),
-                "path": str(marker),
-                "runtime_path": str(runtime_path),
-            }
-        )
+        entry = {
+            "pid": pid,
+            "parent_pid": (runtime or {}).get("parent_pid"),
+            "timestamp": (runtime or {}).get("timestamp"),
+            "path": str(marker),
+            "runtime_path": str(runtime_path),
+            "host_key": (runtime or {}).get("host_key"),
+            "host_pid": (runtime or {}).get("host_pid"),
+            "host_process_name": (runtime or {}).get("host_process_name"),
+        }
+        if not entry["host_key"] and entry["parent_pid"]:
+            host = _mcp_host_identity_for_pid(int(entry["parent_pid"]), process_table=process_table)
+            entry.update({k: v for k, v in host.items() if k.startswith("host_")})
+        live.append(entry)
     return live
 
 
@@ -152,18 +312,28 @@ def enforce_live_server_process_limit(
     *,
     state_dir: Path,
     max_live_server_processes: int,
+    max_live_server_processes_per_host: int,
     audit_command: Sequence[str],
+    current_pid: Optional[int] = None,
+    process_table: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Bound accidental MCP process fan-out while preserving normal multi-client use.
 
     MCP stdio is intentionally per-client, so this is not a singleton lock. It is
-    a circuit breaker for pathological host relaunch loops: once enough live
-    server.py children already exist for the same state dir, the newest wrapper
-    exits before spawning another child process.
+    a host-scoped duplicate guard: once one live server.py child already exists
+    for the same MCP host process and state dir, the newest wrapper exits before
+    spawning another child process.
     """
     max_live = int(max_live_server_processes)
-    if max_live <= 0:
-        return {"accepted": True, "disabled": True, "live_server_count": 0, "max_live_server_processes": max_live}
+    max_per_host = int(max_live_server_processes_per_host)
+    if max_live <= 0 and max_per_host <= 0:
+        return {
+            "accepted": True,
+            "disabled": True,
+            "live_server_count": 0,
+            "max_live_server_processes": max_live,
+            "max_live_server_processes_per_host": max_per_host,
+        }
 
     try:
         reap_stale_server_pids(Path(state_dir), max_age_hours=0, dry_run=False)
@@ -172,13 +342,30 @@ def enforce_live_server_process_limit(
         # checks, so stale markers should not produce false rejections.
         pass
 
-    live = _live_mcp_server_markers(Path(state_dir))
+    table = process_table if process_table is not None else _process_table_from_system()
+    wrapper_pid = int(current_pid if current_pid is not None else os.getpid())
+    current_host = _mcp_host_identity_for_pid(wrapper_pid, process_table=table)
+    live = _live_mcp_server_markers(Path(state_dir), process_table=table)
+    matching_host = [entry for entry in live if entry.get("host_key") == current_host.get("host_key")]
     result: Dict[str, Any] = {
-        "accepted": len(live) < max_live,
+        "accepted": True,
         "live_server_count": len(live),
         "max_live_server_processes": max_live,
+        "max_live_server_processes_per_host": max_per_host,
         "live_server_pids": [entry["pid"] for entry in live],
+        "host_key": current_host.get("host_key"),
+        "host_pid": current_host.get("host_pid"),
+        "host_process_name": current_host.get("host_process_name"),
+        "matching_host_live_server_count": len(matching_host),
+        "matching_host_live_server_pids": [entry["pid"] for entry in matching_host],
     }
+    reject_action: Optional[str] = None
+    if max_per_host > 0 and len(matching_host) >= max_per_host:
+        result["accepted"] = False
+        reject_action = "mcp_server_wrapper_launch_rejected_duplicate_host"
+    elif max_live > 0 and len(live) >= max_live:
+        result["accepted"] = False
+        reject_action = "mcp_server_wrapper_launch_rejected_live_server_limit"
     if result["accepted"]:
         return result
 
@@ -186,11 +373,17 @@ def enforce_live_server_process_limit(
         event = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server_wrapper", command=list(audit_command))
         event.update(
             {
-                "action": "mcp_server_wrapper_launch_rejected_live_server_limit",
+                "action": reject_action,
                 "accepted": False,
                 "live_server_count": len(live),
                 "max_live_server_processes": max_live,
+                "max_live_server_processes_per_host": max_per_host,
                 "live_server_pids": [entry["pid"] for entry in live],
+                "host_key": current_host.get("host_key"),
+                "host_pid": current_host.get("host_pid"),
+                "host_process_name": current_host.get("host_process_name"),
+                "matching_host_live_server_count": len(matching_host),
+                "matching_host_live_server_pids": [entry["pid"] for entry in matching_host],
             }
         )
         append_jsonl(Path(state_dir) / "messages.jsonl", event)
@@ -295,6 +488,7 @@ class ServerSupervisor:
         stdin_stream: Optional[BinaryIO] = None,
         stdout_stream: Optional[BinaryIO] = None,
         stderr_target: Optional[int] = None,
+        host_identity: Optional[Dict[str, Any]] = None,
         now_fn=time.monotonic,
     ) -> None:
         self.command = list(command)
@@ -304,6 +498,7 @@ class ServerSupervisor:
         self.stdin_stream = stdin_stream or _binary_reader(sys.stdin)
         self.stdout_stream = stdout_stream or _binary_writer(sys.stdout)
         self.stderr_target = stderr_target
+        self.host_identity = dict(host_identity or {})
         self.now_fn = now_fn
 
         self._state_lock = threading.Lock()
@@ -459,11 +654,18 @@ class ServerSupervisor:
             self._join_all_stdout_threads()
 
     def _spawn_child(self) -> subprocess.Popen[bytes]:
+        child_env = os.environ.copy()
+        child_env["AGENT_BRIDGE_WRAPPER_PID"] = str(os.getpid())
+        for key in ("host_key", "host_pid", "host_process_name"):
+            value = self.host_identity.get(key)
+            if value is not None:
+                child_env["AGENT_BRIDGE_%s" % key.upper()] = str(value)
         child = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr_target,
+            env=child_env,
             bufsize=0,
         )
         try:
@@ -1218,6 +1420,7 @@ def run_supervisor(
     stdin_stream: Optional[BinaryIO] = None,
     stdout_stream: Optional[BinaryIO] = None,
     stderr_target: Optional[int] = None,
+    host_identity: Optional[Dict[str, Any]] = None,
 ) -> int:
     return ServerSupervisor(
         command=command,
@@ -1227,6 +1430,7 @@ def run_supervisor(
         stdin_stream=stdin_stream,
         stdout_stream=stdout_stream,
         stderr_target=stderr_target,
+        host_identity=host_identity,
     ).run()
 
 
@@ -1265,16 +1469,24 @@ def main(argv: Optional[List[str]] = None) -> None:
     guard = enforce_live_server_process_limit(
         state_dir=paths.state_dir,
         max_live_server_processes=args.max_live_server_processes,
+        max_live_server_processes_per_host=args.max_live_server_processes_per_host,
         audit_command=sys.argv,
     )
     if not guard.get("accepted"):
+        reason = (
+            "same MCP host already has %s live server.py process(es)"
+            % guard.get("matching_host_live_server_count")
+            if guard.get("matching_host_live_server_count")
+            else "%s live server.py process(es) already exist" % guard.get("live_server_count")
+        )
         print(
             "agent-bridge server wrapper refused to launch another child: "
-            "%s live server.py process(es) already exist for %s "
-            "(limit %s; pass --max-live-server-processes 0 to disable)"
+            "%s for %s "
+            "(per-host limit %s, total limit %s; pass --max-live-server-processes-per-host 0 only for diagnostics)"
             % (
-                guard.get("live_server_count"),
+                reason,
                 paths.state_dir,
+                guard.get("max_live_server_processes_per_host"),
                 guard.get("max_live_server_processes"),
             ),
             file=sys.stderr,
@@ -1292,6 +1504,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         command=command,
         state_dir=paths.state_dir,
         watch_paths=_watch_bridge_code_files(Path(watch_code_dir)),
+        host_identity={
+            "host_key": guard.get("host_key"),
+            "host_pid": guard.get("host_pid"),
+            "host_process_name": guard.get("host_process_name"),
+        },
     )
     raise SystemExit(exit_code)
 
