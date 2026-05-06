@@ -17,6 +17,7 @@ from .brokered_closeout import (
     finalize_action_id,
     finalize_candidate_id,
     finalize_evidence,
+    finalize_retry_decision,
     finalize_work_block,
     load_closeout_config,
     plan_dirty_split_candidates,
@@ -94,8 +95,23 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "reviewQuorum": {
                 "requiredApprovals": 1,
                 "allowedReviewers": ["local-test"],
-                "highImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split"],
+                "highImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent"],
                 "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"],
+            },
+            "agentRemediation": {
+                "enabled": True,
+                "queueRoot": ".claude-state/closeout/agent-remediation",
+                "maxConflictFilesPerAgent": 12,
+                "maxChangedPathsPerAgent": 250,
+                "requireSurfaceExecution": True,
+                "surfaceAdapters": ["codex-desktop", "claude-desktop-command-bridge"],
+                "conflictPathGroups": {
+                    "agent-policy": ["AGENTS.md", "CLAUDE.md", ".claude/**", "docs/**"],
+                    "qt-playback": ["platform/qt/**"],
+                    "mlv-core": ["src/mlv/**", "src/processing/**", "src/debayer/**"],
+                    "batch-debug": ["src/batch/**", "src/debug/**"],
+                    "tests": ["tests/**", ".github/**"],
+                },
             },
             "autoQuorum": {
                 "enabled": True,
@@ -116,6 +132,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                     "detached_dirty_preserve",
                     "redundant_branch_prune",
                     "explicit_protected_worktree_cleanup",
+                    "agent_conflict_remediation",
                 ],
                 "manualOnlyActionClasses": ["protected_branch", "dirty_worktree", "locked_worktree", "ambiguous_merge_required", "active_locked_worktree", "unowned_dirty_triage"],
             },
@@ -220,12 +237,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("pinnedRefs", config["reviewQuorum"]["tupleFields"])
         self.assertIn("repo_sweep_prune_merged", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("split", config["reviewQuorum"]["highImpactActions"])
+        self.assertIn("resolve_conflicts_with_agent", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("checkpoint-owned-dirty", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("dirtySplit", contract["requiredConfigKeys"])
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
         self.assertIn("evidenceRepair", contract["requiredConfigKeys"])
         self.assertIn("responseHookLifecycle", contract["requiredConfigKeys"])
         self.assertIn("blockerAutoRemediation", contract["requiredConfigKeys"])
+        self.assertIn("closeoutAddendumPersistence", contract["requiredConfigKeys"])
+        self.assertIn("finalizeLoop", contract["requiredConfigKeys"])
+        self.assertIn("agentRemediation", contract["requiredConfigKeys"])
         self.assertIn("foreign_dirty_integrated_branch_prune", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("owned_dirty_checkpoint", config["autoQuorum"]["autonomousActionClasses"])
@@ -235,8 +256,30 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["repoSweep"]["allowForeignDirtyIntegratedBranchPrune"])
         self.assertTrue(config["repoSweep"]["allowPatchEquivalentPrune"])
         self.assertEqual(config["repoSweep"]["protectedLockedWorktreeExactPolicy"], [])
+        self.assertTrue(config["closeoutAddendumPersistence"]["enabled"])
+        self.assertTrue(config["closeoutAddendumPersistence"]["sameTurnRequired"])
+        self.assertTrue(config["finalizeLoop"]["enabled"])
+        self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["final_push_evidence_repaired"], "evidence_repair")
+        self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["target_push_rerun_required"], "target_push_recovery")
+        self.assertTrue(config["agentRemediation"]["enabled"])
+        self.assertIn("codex-desktop", config["agentRemediation"]["surfaceAdapters"])
+        self.assertIn("agent_conflict_remediation", config["autoQuorum"]["autonomousActionClasses"])
         self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
         self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
+
+    def test_contract_records_closeout_addendum_persistence_rule(self) -> None:
+        config = load_closeout_config(ROOT)
+        persistence = config["closeoutAddendumPersistence"]
+        self.assertTrue(persistence["enabled"])
+        self.assertTrue(persistence["sameTurnRequired"])
+        self.assertIn("closeout addendum", persistence["incomingLabels"])
+        self.assertIn("AGENTS.md", persistence["repoWideSurfaces"])
+        self.assertIn("CLAUDE.md", persistence["repoWideSurfaces"])
+        self.assertIn("closeout.config.json", persistence["repoWideSurfaces"])
+        self.assertIn("test_or_tooling_baseline_guard", persistence["minimumDurableArtifacts"])
+        baseline = config["toolingBaseline"]
+        self.assertIn("closeoutAddendumPersistence", baseline["requiredConfigKeys"])
+        self.assertIn("finalizeLoop", baseline["requiredConfigKeys"])
 
     def test_clean_integration_worktree_add_uses_longpaths_config(self) -> None:
         text = (ROOT / "tools" / "repo_hygiene" / "brokered_closeout.py").read_text(encoding="utf-8")
@@ -249,6 +292,49 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn('run_git_longpaths(repo_root, ["worktree", "prune"', text)
         self.assertNotIn('run_git(repo_root, ["worktree", "add"', text)
         self.assertNotIn('run_git(repo_root, ["worktree", "remove"', text)
+
+    def test_finalize_loop_stops_on_repeated_identical_blocker_evidence_tuple(self) -> None:
+        config = load_closeout_config(ROOT)
+        pinned_refs = {"feature": {"head": "a"}, "target": {"head": "b"}}
+        first = finalize_retry_decision(
+            config,
+            blocker_kind="target_push_rerun_required",
+            evidence_hash_before="evidence-a",
+            evidence_hash_after="evidence-b",
+            pinned_refs_before_retry=pinned_refs,
+            pins_match=True,
+            retry_number=0,
+            seen_tuples=[],
+        )
+        self.assertTrue(first["shouldRetry"], first)
+        second = finalize_retry_decision(
+            config,
+            blocker_kind="target_push_rerun_required",
+            evidence_hash_before="evidence-a",
+            evidence_hash_after="evidence-c",
+            pinned_refs_before_retry=pinned_refs,
+            pins_match=True,
+            retry_number=1,
+            seen_tuples=[first["blockerEvidenceTuple"]],
+        )
+        self.assertFalse(second["shouldRetry"], second)
+        self.assertEqual(second["terminalReason"], "repeated_identical_blocker_evidence_tuple")
+
+    def test_finalize_loop_continues_when_evidence_repair_changes_tuple_and_pins_match(self) -> None:
+        config = load_closeout_config(ROOT)
+        decision = finalize_retry_decision(
+            config,
+            blocker_kind="final_push_evidence_repaired",
+            evidence_hash_before="evidence-before",
+            evidence_hash_after="evidence-after",
+            pinned_refs_before_retry={"feature": {"head": "same"}, "target": {"head": "same"}},
+            pins_match=True,
+            retry_number=0,
+            seen_tuples=[],
+        )
+        self.assertTrue(decision["shouldRetry"], decision)
+        self.assertEqual(decision["symbolicRepairAttempted"], "evidence_repair")
+        self.assertIsNone(decision["terminalReason"])
 
     def test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason(self) -> None:
         repo = self.init_repo(remote=False)
@@ -307,6 +393,26 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "show", "master:new-owned.txt").stdout, "owned after baseline\n")
         self.assertIn("checkpoint_owned_dirty", self.audit_types(repo))
         self.assertIn("auto_quorum", self.audit_types(repo))
+
+    def test_generated_closeout_conflict_packets_are_not_owned_dirty(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/generated-packet")
+        packet = ".claude-state/closeout/repo-sweep/conflicts/runtime-packet.json"
+        start_work_block(repo, work_block_id="wb-generated-packet", actor="local-test", path_claims=[packet])
+        packet_path = repo / packet
+        packet_path.parent.mkdir(parents=True, exist_ok=True)
+        packet_path.write_text('{"state":"tracked"}\n', encoding="utf-8")
+        git(repo, "add", "-f", packet)
+        git(repo, "commit", "-m", "track generated conflict packet")
+        packet_path.write_text('{"state":"runtime update"}\n', encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-generated-packet")
+
+        self.assertFalse(detection["ownedDirty"], detection)
+        self.assertFalse(detection["mixedDirty"], detection)
+        self.assertFalse(detection["unownedDirty"], detection)
+        self.assertEqual([item["path"] for item in detection["foreignDirty"]], [packet])
+        self.assertTrue(detection["eligible"], detection)
 
     def test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed(self) -> None:
         repo = self.init_repo(remote=False)
@@ -901,7 +1007,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
         report = next(item for item in result["retainedCandidateReports"] if item.get("remoteRef") == "origin/codex/remote-conflict")
         self.assertEqual(report["reportType"], "repo_sweep_remote_feature_investigation")
-        self.assertEqual(report["recommendedAction"], "retain_with_proven_blocker")
+        self.assertEqual(report["recommendedAction"], "dispatch_conflict_remediation")
+        self.assertEqual(report["actionClass"], "agent_conflict_remediation")
         self.assertEqual(report["scope"]["mergeProbe"]["reason"], "merge_failed")
         self.assertEqual(report["scope"]["agentResolutionPacket"]["symbolicAction"], "resolve-conflicts-with-agent")
 
@@ -1177,13 +1284,90 @@ class BrokeredCloseoutTests(unittest.TestCase):
         result = repo_sweep(repo)
 
         report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/conflict")
-        self.assertEqual(report["recommendedAction"], "retain_with_proven_blocker")
+        self.assertEqual(report["recommendedAction"], "dispatch_conflict_remediation")
+        self.assertEqual(report["actionClass"], "agent_conflict_remediation")
         self.assertEqual(report["scope"]["mergeProbe"]["reason"], "merge_failed")
         self.assertEqual(report["scope"]["mergeProbe"]["conflicts"], ["conflict.txt"])
         self.assertEqual(report["scope"]["agentResolutionPacket"]["symbolicAction"], "resolve-conflicts-with-agent")
 
-    def test_repo_sweep_retained_terminal_outcomes_prove_remediation_attempted_or_excluded(self) -> None:
+    def test_repo_sweep_merge_failed_promotes_agent_conflict_dispatch(self) -> None:
         repo = self.init_repo()
+        (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/conflict-promote")
+        (repo / "conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "branch conflict")
+        git(repo, "checkout", "master")
+        (repo / "conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "target conflict")
+
+        result = repo_sweep(repo)
+
+        self.assertTrue(any(item["actionId"] == "resolve_conflicts_with_agent" for item in result["promotedCandidates"]))
+        promoted = next(item for item in result["promotedCandidates"] if item["pinnedRefs"]["branch"]["branch"] == "codex/conflict-promote")
+        self.assertEqual(promoted["actionClass"], "agent_conflict_remediation")
+        self.assertEqual(promoted["actionId"], "resolve_conflicts_with_agent")
+
+    def test_repo_sweep_agent_conflict_dispatch_writes_queue_packet(self) -> None:
+        repo = self.init_repo()
+        (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/conflict-dispatch")
+        (repo / "conflict.txt").write_text("branch\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "branch conflict")
+        git(repo, "checkout", "master")
+        (repo / "conflict.txt").write_text("target\n", encoding="utf-8")
+        git(repo, "add", "conflict.txt")
+        git(repo, "commit", "-m", "target conflict")
+        plan = repo_sweep(repo)
+        report = next(item for item in plan["retainedCandidateReports"] if item["branch"] == "codex/conflict-dispatch")
+
+        result = repo_sweep(repo, apply=True, candidate_id=report["candidateId"])
+
+        action = next(item for item in result["actions"] if item.get("action") == "agent_conflict_remediation_dispatch")
+        self.assertEqual(action["status"], "queued", action)
+        queue_path = Path(action["queuePath"])
+        self.assertTrue(queue_path.exists())
+        packet = json.loads(queue_path.read_text(encoding="utf-8"))
+        self.assertEqual(packet["actionId"], "resolve_conflicts_with_agent")
+        self.assertEqual(packet["branch"], "codex/conflict-dispatch")
+        self.assertEqual(packet["conflictPaths"], ["conflict.txt"])
+        self.assertIn("agent_remediation_dispatch", self.audit_types(repo))
+
+    def test_agent_conflict_dispatch_shards_large_conflict_sets(self) -> None:
+        repo = self.init_repo(config_updates={"agentRemediation": {"maxConflictFilesPerAgent": 2}})
+        for path in ["src/a.cpp", "src/b.cpp", "src/c.cpp", "tests/a.cpp", "tests/b.cpp"]:
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("base\n", encoding="utf-8")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "conflict base")
+        git(repo, "checkout", "-b", "codex/many-conflicts")
+        for path in ["src/a.cpp", "src/b.cpp", "src/c.cpp", "tests/a.cpp", "tests/b.cpp"]:
+            (repo / path).write_text("branch\n", encoding="utf-8")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "branch conflicts")
+        git(repo, "checkout", "master")
+        for path in ["src/a.cpp", "src/b.cpp", "src/c.cpp", "tests/a.cpp", "tests/b.cpp"]:
+            (repo / path).write_text("target\n", encoding="utf-8")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "target conflicts")
+
+        result = repo_sweep(repo)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/many-conflicts")
+        shards = report["scope"]["agentResolutionPacket"]["shards"]
+        self.assertGreaterEqual(len(shards), 3)
+        self.assertTrue(all(len(shard["conflictPaths"]) <= 2 for shard in shards))
+        self.assertEqual(report["recommendedAction"], "dispatch_conflict_remediation")
+
+    def test_repo_sweep_retained_terminal_outcomes_prove_remediation_attempted_or_excluded(self) -> None:
+        repo = self.init_repo(config_updates={"agentRemediation": {"enabled": False}})
         (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
         git(repo, "add", "conflict.txt")
         git(repo, "commit", "-m", "conflict base")
