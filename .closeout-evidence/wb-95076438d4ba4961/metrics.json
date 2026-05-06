@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/bridge-host-scoped-process-guard",
+  "committedDeltaPathCount": 4,
+  "createdAt": "2026-05-06T10:24:08+00:00",
+  "detectorHash": "62c586f34bd854e460b682ccc8950278",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "c9a9075d381bafc23d021f0ec54916c46d27c628",
+  "schemaVersion": "1.0",
+  "targetHead": "d077ab1a856f90c3b22abc8fbe1d6fb4aa9696f6",
+  "workBlockId": "wb-95076438d4ba4961"
+}
