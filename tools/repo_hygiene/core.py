@@ -72,6 +72,8 @@ IMPLEMENTED_CLOSEOUT_ACTION_IDS = [
     "detached_dirty_preserve",
     "explicit_protected_worktree_cleanup",
     "resolve_conflicts_with_agent",
+    "agent_remediation_surface_unavailable",
+    "protected-target-noop-closeout",
 ]
 IMPLEMENTED_CLOSEOUT_PUBLISH_MODES = ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"]
 IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS = [
@@ -80,6 +82,8 @@ IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS = [
     "clean_feature_branch_ready_to_publish",
     "hygiene_cleanup_recommendations",
     "retained_blocker_auto_remediation",
+    "agent_remediation_queue_consumer",
+    "protected_target_noop_closeout",
 ]
 IMPLEMENTED_CLOSEOUT_ARTIFACT_NAMES = [
     "decision-packet.json",
@@ -89,6 +93,8 @@ IMPLEMENTED_CLOSEOUT_ARTIFACT_NAMES = [
     "approval-anchor.json",
     "apply-validation.json",
     "executor-handoff.json",
+    "agent-remediation-queue/*.json",
+    "agent-remediation-results/*.json",
     "state.json",
     "events.jsonl",
     "trusted-approval-nonce.public.json",

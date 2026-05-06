@@ -62,6 +62,7 @@ REQUIRED_SCRIPT_NAMES = [
     "audit-closeout.ps1",
     "repo-sweep-closeout.ps1",
     "remediate-retained-closeout.ps1",
+    "agent-remediation-queue.ps1",
 ]
 KNOWN_CLOSEOUT_FAILURE_TEXT = [
     "closeout gate failure",
@@ -157,6 +158,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requireForCompletion": True,
         "allowRetainedForeignDirtyAtCompletion": True,
         "requireNoStash": True,
+        "protectedTargetNoopCloseout": {
+            "enabled": True,
+        },
         "exemptStatusPatterns": [
             ".claude-state/**",
             "**/__pycache__/**",
@@ -247,6 +251,16 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tests": ["tests/**", ".github/**"],
         },
     },
+    "agentRemediationQueue": {
+        "enabled": True,
+        "queueRoots": [".claude-state/closeout/agent-remediation"],
+        "resultRoot": ".claude-state/closeout/agent-remediation/results",
+        "maxParallelAgents": 3,
+        "perAgentTimeoutMs": 600000,
+        "maxAgentOutputBytes": 1048576,
+        "requireExactTuple": True,
+        "surfaceUnavailableStatus": "agent_remediation_surface_unavailable",
+    },
     "toolingBaseline": {
         "enabled": False,
         "baselineRef": None,
@@ -260,13 +274,14 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo_hygiene/test_brokered_closeout.py",
             "tools/closeout/Invoke-CloseoutCli.ps1",
             "tools/closeout/work-block-complete.ps1",
+            "tools/closeout/agent-remediation-queue.ps1",
             "tools/agent-bridge/codex_pre_response.ps1",
             "tools/agent-bridge/codex_pre_final.ps1",
             "tools/agent-bridge/codex_bridge_reminder.ps1",
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "locking", "autoEligibilityRepair"],
+        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
         "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
@@ -328,6 +343,26 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_merge_failed_promotes_agent_conflict_dispatch",
             "test_repo_sweep_agent_conflict_dispatch_writes_queue_packet",
             "test_agent_conflict_dispatch_shards_large_conflict_sets",
+            "test_agent_remediation_queue_policy_fields_are_contract_required",
+            "test_codex_agent_queue_consumer_plans_one_background_agent_per_eligible_shard",
+            "test_agent_queue_surface_unavailable_writes_result_packets",
+            "test_agent_queue_stale_packets_rejected_on_policy_hash_or_dirty_state_change",
+            "test_agent_queue_dirty_hash_detects_same_status_byte_change",
+            "test_agent_queue_stale_packet_blocks_even_when_valid_shard_can_spawn",
+            "test_agent_queue_remote_fetch_failure_blocks_stale_check",
+            "test_agent_queue_result_path_outside_result_root_is_stale",
+            "test_agent_queue_skips_completed_result_paths_before_planning_more_shards",
+            "test_agent_result_collection_rejects_out_of_scope_changed_paths",
+            "test_agent_result_collection_returns_symbolic_next_action_without_mutation",
+            "test_agent_result_collection_blocks_agent_reported_blockers_and_failed_validation",
+            "test_agent_result_collection_rejects_missing_required_result_fields",
+            "test_agent_result_collection_rejects_wrong_shard_identity",
+            "test_repo_closed_postcondition_blocks_pending_agent_remediation_queue",
+            "test_repo_closed_postcondition_blocks_unreadable_or_unretired_queue_artifacts",
+            "test_repo_closed_postcondition_blocks_invalid_queue_retirement_proof",
+            "test_repo_closed_postcondition_accepts_valid_queue_retirement_proof",
+            "test_repo_closed_postcondition_rejects_wrong_result_tuple",
+            "test_repo_closed_postcondition_rejects_stale_collection_retirement_tuple",
             "test_bounded_runner_kills_hung_finalize_child_with_descendants",
             "test_bounded_runner_direct_finalize_and_completion_share_timeout_policy",
             "test_bounded_runner_caps_oversized_child_output",
@@ -342,6 +377,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_hard_clean_final_response_passes_after_clean_promotion",
             "test_complete_finalize_enforces_hard_clean_config_without_switch",
             "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
+            "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
             "test_hard_clean_blocks_retained_remote_feature_refs",
             "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
             "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
@@ -366,6 +402,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def finalize_retry_decision"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediate_retained_candidates"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dispatch_agent_conflict_remediation"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_remediation_queue_consumer_plan"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def collect_agent_remediation_results"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
@@ -377,15 +415,23 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-queue"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-results"},
             {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "bounded_closeout_cli_main"},
             {"path": "tools/closeout/work-block-complete.ps1", "contains": "RequireRepoClosed"},
+            {"path": "tools/closeout/agent-remediation-queue.ps1", "contains": "agent-queue"},
+            {"path": "tools/closeout/agent-remediation-queue.ps1", "contains": "CollectResults"},
             {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
             {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
+            {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
+            {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
+            {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
+            {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
             {"path": "closeout.config.json", "contains": "remediationFreeze"},
@@ -3446,6 +3492,123 @@ def orphaned_closeout_runtime_artifacts(repo_root: Path, config: Dict[str, Any])
     return artifacts
 
 
+def agent_remediation_repo_closed_state(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    packets = pending_agent_remediation_queue_packets(repo_root, config)
+    remote_failures: List[Dict[str, Any]] = []
+    if packets:
+        remote_failures = refresh_agent_queue_remote_refs(repo_root, config, packets)
+    blockers: List[Dict[str, Any]] = []
+    packet_rows: List[Dict[str, Any]] = []
+    for packet in packets:
+        stale_reasons = [*remote_failures, *agent_remediation_packet_stale_reasons(repo_root, config, packet)]
+        row = {
+            "candidateId": packet.get("candidateId"),
+            "workBlockId": packet.get("workBlockId"),
+            "actionId": packet.get("actionId"),
+            "queuePath": packet.get("queuePath"),
+            "staleReasons": stale_reasons,
+            "shardCount": len(packet.get("shards", [])) if isinstance(packet.get("shards"), list) else 0,
+        }
+        packet_rows.append(row)
+        if stale_reasons:
+            blockers.append({"kind": "stale_agent_remediation_queue_packet", **row})
+            continue
+        for shard in packet.get("shards", []) if isinstance(packet.get("shards"), list) else []:
+            try:
+                result_path = resolve_agent_result_path(repo_root, config, str(shard.get("resultPath") or ""))
+            except HygieneError as exc:
+                blockers.append({"kind": "agent_result_path_invalid", "candidateId": packet.get("candidateId"), "shardId": shard.get("shardId"), "error": str(exc)})
+                continue
+            if not result_path.exists():
+                blockers.append({"kind": "missing_agent_remediation_result", "candidateId": packet.get("candidateId"), "shardId": shard.get("shardId"), "resultPath": str(result_path)})
+                continue
+            try:
+                payload = read_json(result_path, {})
+            except Exception as exc:
+                blockers.append({"kind": "unreadable_agent_remediation_result", "candidateId": packet.get("candidateId"), "shardId": shard.get("shardId"), "resultPath": str(result_path), "error": str(exc)})
+                continue
+            schema = shard.get("expectedOutputSchema") if isinstance(shard.get("expectedOutputSchema"), dict) else packet.get("expectedOutputSchema")
+            required_fields = list((schema or agent_result_packet_schema()).get("requiredFields", agent_result_packet_schema()["requiredFields"]))
+            missing_fields = [field for field in required_fields if field not in payload]
+            invalid_list_fields = [
+                field
+                for field in ["changedPaths", "blockers", "validation"]
+                if field in payload and not isinstance(payload.get(field), list)
+            ]
+            if missing_fields or invalid_list_fields:
+                blockers.append(
+                    {
+                        "kind": "agent_remediation_result_schema_invalid",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "missingFields": missing_fields,
+                        "invalidListFields": invalid_list_fields,
+                        "resultPath": str(result_path),
+                    }
+                )
+            expected_identity = {
+                "candidateId": packet.get("candidateId"),
+                "shardId": shard.get("shardId"),
+                "workBlockId": shard.get("workBlockId") or packet.get("workBlockId"),
+                "actionId": packet.get("actionId"),
+            }
+            actual_identity = {
+                "candidateId": payload.get("candidateId"),
+                "shardId": payload.get("shardId"),
+                "workBlockId": payload.get("workBlockId"),
+                "actionId": payload.get("actionId"),
+            }
+            if actual_identity != expected_identity:
+                blockers.append(
+                    {
+                        "kind": "agent_remediation_result_identity_mismatch",
+                        "expected": expected_identity,
+                        "actual": actual_identity,
+                        "resultPath": str(result_path),
+                    }
+                )
+            expected_tuple = packet.get("exactTuple")
+            actual_tuple = payload.get("exactTuple") or {
+                "candidateId": payload.get("candidateId"),
+                "actionId": payload.get("actionId"),
+                "evidenceHash": payload.get("evidenceHash"),
+                "policyHash": payload.get("policyHash"),
+                "pinnedRefs": payload.get("pinnedRefs"),
+            }
+            if actual_tuple != expected_tuple:
+                blockers.append(
+                    {
+                        "kind": "agent_remediation_result_tuple_mismatch",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "expected": expected_tuple,
+                        "actual": actual_tuple,
+                        "resultPath": str(result_path),
+                    }
+                )
+            status = str(payload.get("status") or "")
+            payload_blockers = payload.get("blockers", [])
+            failed_validation = [item for item in payload.get("validation", []) if isinstance(item, dict) and int(item.get("returncode", 0) or 0) != 0]
+            if status != "resolved" or payload_blockers or failed_validation:
+                blockers.append(
+                    {
+                        "kind": "blocked_agent_remediation_result",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "status": status,
+                        "blockers": payload_blockers,
+                        "validation": failed_validation,
+                        "resultPath": str(result_path),
+                    }
+                )
+    return {
+        "status": "blocked" if blockers else "success",
+        "packetCount": len(packets),
+        "packets": packet_rows,
+        "blockers": blockers,
+    }
+
+
 def repo_closed_artifact_path(repo_root: Path, config: Dict[str, Any], work_block_id: Optional[str]) -> Path:
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(work_block_id or "repo")).strip("-") or "repo"
     return closeout_state_root(repo_root, config) / "repo-closed" / ("%s.json" % safe_id)
@@ -3492,6 +3655,7 @@ def verify_repo_closed_postcondition(
     stale_branches = hard_clean_stale_transaction_branches(repo_root, config, str(target["targetBranch"]))
     stale_worktrees = hard_clean_stale_worktrees(repo_root, config)
     orphan_artifacts = orphaned_closeout_runtime_artifacts(repo_root, config)
+    agent_remediation_state = agent_remediation_repo_closed_state(repo_root, config)
     freeze = remediation_freeze_status(repo_root, config, action="repo-closed-postcondition")
     remote_feature_plans: List[Dict[str, Any]] = []
     repo_sweep_error: Optional[str] = None
@@ -3518,6 +3682,8 @@ def verify_repo_closed_postcondition(
         blockers.append({"kind": "stale_managed_worktrees", "worktrees": stale_worktrees})
     if orphan_artifacts:
         blockers.append({"kind": "orphaned_closeout_runtime_artifacts", "artifacts": orphan_artifacts})
+    if agent_remediation_state["blockers"]:
+        blockers.append({"kind": "agent_remediation_queue_not_closed", "agentRemediationState": agent_remediation_state})
     if freeze["active"]:
         blockers.append({"kind": "remediation_freeze_active", "freeze": freeze})
     if remote_feature_plans:
@@ -3546,6 +3712,7 @@ def verify_repo_closed_postcondition(
         "branchState": {"staleTransactionBranches": stale_branches},
         "worktreeState": {"staleManagedWorktrees": stale_worktrees},
         "runtimeArtifactState": {"orphanedArtifacts": orphan_artifacts},
+        "agentRemediationState": agent_remediation_state,
         "remediationFreezeState": freeze,
         "remoteFeatureState": {"retainedRemoteFeatureRefs": remote_feature_plans},
         "cleanupAudit": {
@@ -3946,7 +4113,8 @@ def complete_work_block(
         return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     require_repo_closed = bool(require_repo_closed or config.get("hardClean", {}).get("requireForCompletion", False))
     branch = current_branch(repo_root)
-    if not work_block_id and finalize and branch and is_protected_branch(config, branch):
+    protected_target_noop_enabled = bool(config.get("hardClean", {}).get("protectedTargetNoopCloseout", {}).get("enabled", True))
+    if protected_target_noop_enabled and not work_block_id and finalize and branch and is_protected_branch(config, branch):
         selection = {
             "selectedWorkBlockId": None,
             "branch": branch,
@@ -3973,7 +4141,7 @@ def complete_work_block(
         write_audit(
             repo_root,
             config,
-            "protected_target_closeout_noop",
+            "protected-target-noop-closeout",
             result,
             work_block_id=None,
             outcome="success" if postcondition["ok"] else "blocked",
@@ -4437,6 +4605,115 @@ def agent_remediation_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(value, dict) or not bool(value.get("enabled", True)):
         return {}
     return value
+
+
+def agent_remediation_queue_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    legacy = agent_remediation_config(config)
+    value = config.get("agentRemediationQueue", {})
+    if not isinstance(value, dict):
+        value = {}
+    if not bool(value.get("enabled", bool(legacy.get("enabled", True)))):
+        return {}
+    legacy_root = legacy.get("queueRoot") or ".claude-state/closeout/agent-remediation"
+    roots = value.get("queueRoots")
+    if isinstance(roots, str):
+        roots = [roots]
+    if not isinstance(roots, list) or not roots:
+        roots = [legacy_root]
+    roots = [normalize_rel(str(root)) for root in roots if normalize_rel(str(root))]
+    if not roots:
+        roots = [".claude-state/closeout/agent-remediation"]
+    return {
+        "enabled": True,
+        "queueRoots": roots,
+        "resultRoot": normalize_rel(str(value.get("resultRoot") or ".claude-state/closeout/agent-remediation/results")),
+        "maxParallelAgents": int(value.get("maxParallelAgents", 3) or 3),
+        "perAgentTimeoutMs": int(value.get("perAgentTimeoutMs", 600000) or 600000),
+        "maxAgentOutputBytes": int(value.get("maxAgentOutputBytes", 1048576) or 1048576),
+        "requireExactTuple": bool(value.get("requireExactTuple", True)),
+        "surfaceUnavailableStatus": str(value.get("surfaceUnavailableStatus") or "agent_remediation_surface_unavailable"),
+    }
+
+
+def config_relative_path(repo_root: Path, value: str) -> Path:
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = repo_root / path
+    return path.resolve()
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def require_agent_queue_state_path(repo_root: Path, path: Path, *, field: str) -> Path:
+    resolved = path.resolve()
+    if not path_is_under(resolved, repo_root):
+        raise HygieneError("%s must stay under repo root: %s" % (field, resolved))
+    rel = normalize_rel(str(resolved.relative_to(repo_root.resolve()).as_posix()))
+    if not (rel == ".claude-state" or rel.startswith(".claude-state/") or rel == ".codex-state" or rel.startswith(".codex-state/")):
+        raise HygieneError("%s must stay under .claude-state or .codex-state: %s" % (field, rel))
+    return resolved
+
+
+def agent_remediation_queue_roots(repo_root: Path, config: Dict[str, Any]) -> List[Path]:
+    queue_config = agent_remediation_queue_config(config)
+    roots = queue_config.get("queueRoots") or [".claude-state/closeout/agent-remediation"]
+    return [require_agent_queue_state_path(repo_root, config_relative_path(repo_root, str(root)), field="agentRemediationQueue.queueRoots") for root in roots]
+
+
+def agent_remediation_result_root(repo_root: Path, config: Dict[str, Any]) -> Path:
+    queue_config = agent_remediation_queue_config(config)
+    return require_agent_queue_state_path(
+        repo_root,
+        config_relative_path(repo_root, str(queue_config.get("resultRoot") or ".claude-state/closeout/agent-remediation/results")),
+        field="agentRemediationQueue.resultRoot",
+    )
+
+
+def agent_result_packet_schema() -> Dict[str, Any]:
+    return {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "requiredFields": [
+            "status",
+            "candidateId",
+            "shardId",
+            "workBlockId",
+            "actionId",
+            "evidenceHash",
+            "policyHash",
+            "pinnedRefs",
+            "summary",
+            "changedPaths",
+            "blockers",
+            "validation",
+        ],
+        "allowedStatuses": ["resolved", "blocked", "findings_only", "agent_remediation_surface_unavailable"],
+        "mutationBoundary": "final mutation is applied only by repo-owned symbolic actors after coordinator revalidation",
+    }
+
+
+def agent_remediation_dirty_state_hash(repo_root: Path) -> str:
+    rows: List[Dict[str, Any]] = []
+    for item in parse_status_paths(repo_root):
+        path = normalize_rel(str(item.get("path") or ""))
+        full_path = repo_root / path
+        deleted = not full_path.exists()
+        rows.append(
+            {
+                "status": item.get("status"),
+                "path": path,
+                "originalPath": item.get("originalPath"),
+                "deleted": deleted,
+                "isDir": full_path.is_dir() if full_path.exists() else False,
+                "byteSha256": None if deleted or full_path.is_dir() else file_content_hash(full_path),
+            }
+        )
+    return stable_hash(sorted(rows, key=lambda entry: (str(entry.get("path")), str(entry.get("status")))))
 
 
 def remediation_proof(config: Dict[str, Any], *, recommended_action: str, action_class: str, blockers: Sequence[str]) -> Dict[str, Any]:
@@ -5450,10 +5727,8 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
 
 
 def agent_remediation_root(repo_root: Path, config: Dict[str, Any]) -> Path:
-    root = Path(str(agent_remediation_config(config).get("queueRoot") or ".claude-state/closeout/agent-remediation"))
-    if not root.is_absolute():
-        root = repo_root / root
-    return root
+    roots = agent_remediation_queue_roots(repo_root, config)
+    return roots[0] if roots else config_relative_path(repo_root, ".claude-state/closeout/agent-remediation")
 
 
 def dispatch_agent_conflict_remediation(
@@ -5466,28 +5741,92 @@ def dispatch_agent_conflict_remediation(
     packet = dict(report.get("scope", {}).get("agentResolutionPacket") or {})
     if not packet:
         return {"action": "agent_conflict_remediation_dispatch", "status": "blocked", "reason": "missing_agent_resolution_packet", "branch": report.get("branch")}
+    queue_config = agent_remediation_queue_config(config)
+    if not queue_config:
+        return {"action": "agent_conflict_remediation_dispatch", "status": "blocked", "reason": "agent_remediation_queue_disabled", "branch": report.get("branch")}
     queue_root = agent_remediation_root(repo_root, config)
+    result_root = agent_remediation_result_root(repo_root, config)
     queue_dir = queue_root / "queue"
     queue_dir.mkdir(parents=True, exist_ok=True)
     queue_path = queue_dir / ("%s.json" % safe_state_name(str(candidate["candidateId"])))
+    work_block_id = report.get("workBlockId") or report.get("scope", {}).get("workBlockId")
+    candidate_report_hash = stable_hash({key: value for key, value in report.items() if key != "reportPath"})
+    manifest_hash = current_manifest_hash(repo_root, config, work_block_id)
+    exact_tuple = {
+        "candidateId": candidate["candidateId"],
+        "actionId": candidate["actionId"],
+        "evidenceHash": candidate["evidenceHash"],
+        "policyHash": config.get("policyHash"),
+        "pinnedRefs": candidate["pinnedRefs"],
+    }
+    expected_schema = agent_result_packet_schema()
+    validation_requirements = config.get("validation", {}).get("commands", [])
+    enriched_shards: List[Dict[str, Any]] = []
+    for raw_shard in packet.get("shards", []):
+        shard = dict(raw_shard)
+        shard_id = str(shard.get("shardId") or "shard")
+        result_path = result_root / safe_state_name(str(candidate["candidateId"])) / ("%s.json" % safe_state_name(shard_id))
+        allowed_read = sorted(
+            {
+                normalize_rel(str(path))
+                for path in [*(shard.get("relatedChangedPaths") or []), *(shard.get("conflictPaths") or []), str(report.get("reportPath") or "")]
+                if normalize_rel(str(path))
+            }
+        )
+        allowed_write = sorted({normalize_rel(str(path)) for path in shard.get("conflictPaths", []) if normalize_rel(str(path))})
+        shard.update(
+            {
+                "candidateId": candidate["candidateId"],
+                "workBlockId": work_block_id,
+                "actionId": candidate["actionId"],
+                "evidenceHash": candidate["evidenceHash"],
+                "policyHash": config.get("policyHash"),
+                "pinnedRefs": candidate["pinnedRefs"],
+                "allowedReadScope": allowed_read,
+                "allowedWriteScope": allowed_write,
+                "expectedOutputSchema": expected_schema,
+                "validationRequirements": validation_requirements,
+                "resultPath": repo_relative_or_absolute(repo_root, result_path),
+                "recoveryCommand": packet.get("recoveryCommand"),
+                "perAgentTimeoutMs": queue_config["perAgentTimeoutMs"],
+                "maxAgentOutputBytes": queue_config["maxAgentOutputBytes"],
+                "mutationBoundary": "repo-owned symbolic actors only",
+            }
+        )
+        enriched_shards.append(shard)
     payload = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "status": "queued",
         "createdAt": utc_now(),
         "candidateId": candidate["candidateId"],
+        "workBlockId": work_block_id,
         "actionId": candidate["actionId"],
         "actionClass": candidate["actionClass"],
         "evidenceHash": candidate["evidenceHash"],
         "policyHash": config.get("policyHash"),
         "pinnedRefs": candidate["pinnedRefs"],
+        "exactTuple": exact_tuple,
+        "requireExactTuple": queue_config["requireExactTuple"],
+        "dirtyStateHash": agent_remediation_dirty_state_hash(repo_root),
+        "candidateReportHash": candidate_report_hash,
+        "manifestSelectionHash": manifest_hash,
+        "queueRoot": repo_relative_or_absolute(repo_root, queue_root),
+        "resultRoot": repo_relative_or_absolute(repo_root, result_root),
+        "surfaceUnavailableStatus": queue_config["surfaceUnavailableStatus"],
+        "maxParallelAgents": queue_config["maxParallelAgents"],
+        "perAgentTimeoutMs": queue_config["perAgentTimeoutMs"],
+        "maxAgentOutputBytes": queue_config["maxAgentOutputBytes"],
         "reportPath": report.get("reportPath"),
         "branch": report.get("branch"),
         "head": report.get("head"),
         "target": plan.get("pinnedRefs", {}).get("target"),
         "conflictPaths": packet.get("conflictPaths", []),
         "changedPathCount": packet.get("changedPathCount"),
-        "shards": packet.get("shards", []),
+        "shards": enriched_shards,
         "surfaceAdapters": packet.get("surfaceAdapters", []),
+        "validationRequirements": validation_requirements,
+        "expectedOutputSchema": expected_schema,
+        "recoveryCommand": packet.get("recoveryCommand"),
         "instructions": {
             "coordinator": "Spawn one background agent per shard where available. Each agent must work in a temporary integration worktree, resolve only its assigned paths, avoid broad cleanup, report blockers with hunks, and leave mutation to repo-owned finalize actors.",
             "afterAgents": "Coordinator applies resolved shard patches one at a time in a clean target worktree, runs diff-check and configured validation, then reruns repo sweep/finalize.",
@@ -5507,6 +5846,527 @@ def dispatch_agent_conflict_remediation(
     }
     write_audit(repo_root, config, "agent_remediation_dispatch", {"queuePacket": payload, "action": action}, outcome="success")
     return action
+
+
+def pending_agent_remediation_queue_packets(repo_root: Path, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    packets: List[Dict[str, Any]] = []
+    for root in agent_remediation_queue_roots(repo_root, config):
+        queue_dir = root / "queue"
+        if not queue_dir.exists():
+            continue
+        for path in sorted(queue_dir.glob("*.json")):
+            try:
+                packet = read_json(path, {})
+            except Exception as exc:
+                packet = {"status": "unreadable", "error": str(exc), "schemaVersion": BROKER_SCHEMA_VERSION}
+            status = str(packet.get("status", "queued"))
+            if status in {"consumed", "retired", "superseded"} and agent_queue_retirement_proof_valid(repo_root, config, packet):
+                continue
+            packet["queuePath"] = str(path)
+            packets.append(packet)
+    return packets
+
+
+def agent_queue_retirement_proof_valid(repo_root: Path, config: Dict[str, Any], packet: Dict[str, Any]) -> bool:
+    proof = packet.get("retirementProof")
+    if not isinstance(proof, dict):
+        return False
+    exact_tuple = packet.get("exactTuple")
+    if not isinstance(exact_tuple, dict):
+        return False
+    required_equal = {
+        "candidateId": packet.get("candidateId"),
+        "actionId": packet.get("actionId"),
+        "evidenceHash": packet.get("evidenceHash"),
+        "policyHash": config.get("policyHash"),
+    }
+    for key, expected in required_equal.items():
+        if proof.get(key) != expected:
+            return False
+    if proof.get("exactTuple") != exact_tuple:
+        return False
+    if proof.get("pinnedRefs") != packet.get("pinnedRefs"):
+        return False
+    if proof.get("resultCollectionStatus") != "success":
+        return False
+    if not proof.get("resultCollectionHash"):
+        return False
+    path_value = proof.get("resultCollectionPath")
+    if not path_value:
+        return False
+    try:
+        path = resolve_agent_result_path(repo_root, config, str(path_value))
+    except HygieneError:
+        return False
+    if not path.exists():
+        return False
+    try:
+        artifact = read_json(path, {})
+    except Exception:
+        return False
+    if artifact.get("resultCollectionHash") != proof.get("resultCollectionHash"):
+        return False
+    actual_hash = stable_hash({key: value for key, value in artifact.items() if key not in {"resultCollectionHash", "resultCollectionPath"}})
+    if actual_hash != proof.get("resultCollectionHash"):
+        return False
+    if artifact.get("status") != "success":
+        return False
+    collected_for_packet = [
+        item
+        for item in artifact.get("collectedResults", [])
+        if isinstance(item, dict) and str(item.get("candidateId")) == str(packet.get("candidateId"))
+    ]
+    if not collected_for_packet:
+        return False
+    for item in collected_for_packet:
+        if item.get("actionId") != packet.get("actionId"):
+            return False
+        if item.get("evidenceHash") != packet.get("evidenceHash"):
+            return False
+        if item.get("policyHash") != config.get("policyHash"):
+            return False
+        if item.get("pinnedRefs") != packet.get("pinnedRefs"):
+            return False
+        if item.get("exactTuple") != exact_tuple:
+            return False
+    if proof.get("retiredPacketStatus") not in {"consumed", "retired", "superseded"}:
+        return False
+    return True
+
+
+def refresh_agent_queue_remote_refs(repo_root: Path, config: Dict[str, Any], packets: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    remotes: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            remote = value.get("remote")
+            if remote:
+                remotes.add(str(remote))
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for packet in packets:
+        visit(packet.get("pinnedRefs"))
+    failures: List[Dict[str, Any]] = []
+    for remote in sorted(remotes):
+        if not remote_exists(repo_root, remote):
+            failures.append({"kind": "remote_fetch_failed", "remote": remote, "reason": "remote_missing"})
+            continue
+        result = run_git(repo_root, ["fetch", "--prune", remote])
+        if result.returncode != 0:
+            failures.append({"kind": "remote_fetch_failed", "remote": remote, "returncode": result.returncode, "stderr": result.stderr[-2000:]})
+    return failures
+
+
+def pinned_ref_expected_actual(repo_root: Path, label: str, value: Any) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if isinstance(value, dict):
+        expected = value.get("head")
+        ref = value.get("ref")
+        if not ref:
+            branch = value.get("branch") or value.get("targetBranch")
+            remote = value.get("remote")
+            if remote and branch and label in {"remoteFeature", "target"}:
+                ref = "refs/remotes/%s/%s" % (remote, branch)
+            elif branch:
+                ref = "refs/heads/%s" % branch
+        if expected and ref:
+            actual = rev_parse(repo_root, str(ref), required=False)
+            rows.append({"label": label, "ref": str(ref), "expected": str(expected), "actual": actual})
+        for child_label, child_value in value.items():
+            if isinstance(child_value, (dict, list)):
+                rows.extend(pinned_ref_expected_actual(repo_root, "%s.%s" % (label, child_label), child_value))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            rows.extend(pinned_ref_expected_actual(repo_root, "%s[%d]" % (label, index), item))
+    return rows
+
+
+def current_manifest_hash(repo_root: Path, config: Dict[str, Any], work_block_id: Optional[str]) -> Optional[str]:
+    if not work_block_id:
+        return None
+    try:
+        return stable_hash(load_manifest(repo_root, config, str(work_block_id)))
+    except Exception:
+        return None
+
+
+def packet_report_hash(repo_root: Path, packet: Dict[str, Any]) -> Optional[str]:
+    raw_path = packet.get("reportPath")
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = repo_root / path
+    if not path.exists():
+        return None
+    try:
+        report = read_json(path, {})
+    except Exception:
+        return None
+    if not isinstance(report, dict):
+        return None
+    return stable_hash({key: value for key, value in report.items() if key != "reportPath"})
+
+
+def recompute_agent_dispatch_hash(packet: Dict[str, Any]) -> str:
+    return stable_hash({key: value for key, value in packet.items() if key not in {"dispatchHash", "queuePath"}})
+
+
+def agent_remediation_packet_stale_reasons(repo_root: Path, config: Dict[str, Any], packet: Dict[str, Any]) -> List[Dict[str, Any]]:
+    queue_config = agent_remediation_queue_config(config)
+    reasons: List[Dict[str, Any]] = []
+    status = str(packet.get("status", "queued"))
+    if status not in {"queued", "pending"}:
+        reasons.append({"kind": "queue_packet_not_pending_without_retirement", "status": status, "retirementProof": packet.get("retirementProof"), "validRetirementProof": agent_queue_retirement_proof_valid(repo_root, config, packet)})
+    required = ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs", "shards"]
+    for field in required:
+        if field not in packet:
+            reasons.append({"kind": "missing_field", "field": field})
+    if packet.get("policyHash") != config.get("policyHash"):
+        reasons.append({"kind": "policy_hash_mismatch", "expected": packet.get("policyHash"), "actual": config.get("policyHash")})
+    if packet.get("dirtyStateHash") and packet.get("dirtyStateHash") != agent_remediation_dirty_state_hash(repo_root):
+        reasons.append({"kind": "dirty_state_changed", "expected": packet.get("dirtyStateHash"), "actual": agent_remediation_dirty_state_hash(repo_root)})
+    if packet.get("dispatchHash") and packet.get("dispatchHash") != recompute_agent_dispatch_hash(packet):
+        reasons.append({"kind": "dispatch_hash_mismatch", "expected": packet.get("dispatchHash"), "actual": recompute_agent_dispatch_hash(packet)})
+    if packet.get("candidateReportHash"):
+        current_report = packet_report_hash(repo_root, packet)
+        if current_report != packet.get("candidateReportHash"):
+            reasons.append({"kind": "candidate_report_hash_mismatch", "expected": packet.get("candidateReportHash"), "actual": current_report})
+    if packet.get("manifestSelectionHash"):
+        current_hash = current_manifest_hash(repo_root, config, packet.get("workBlockId"))
+        if current_hash != packet.get("manifestSelectionHash"):
+            reasons.append({"kind": "manifest_selection_hash_mismatch", "expected": packet.get("manifestSelectionHash"), "actual": current_hash})
+    exact_tuple = packet.get("exactTuple")
+    if bool(queue_config.get("requireExactTuple", True)):
+        expected_tuple = {
+            "candidateId": packet.get("candidateId"),
+            "actionId": packet.get("actionId"),
+            "evidenceHash": packet.get("evidenceHash"),
+            "policyHash": packet.get("policyHash"),
+            "pinnedRefs": packet.get("pinnedRefs"),
+        }
+        if not isinstance(exact_tuple, dict):
+            reasons.append({"kind": "missing_exact_tuple"})
+        elif exact_tuple != expected_tuple:
+            reasons.append({"kind": "exact_tuple_mismatch", "expected": expected_tuple, "actual": exact_tuple})
+    for row in pinned_ref_expected_actual(repo_root, "pinnedRefs", packet.get("pinnedRefs")):
+        if row["expected"] != row["actual"]:
+            reasons.append({"kind": "pinned_ref_drifted", **row})
+    result_root = agent_remediation_result_root(repo_root, config)
+    for shard in packet.get("shards", []) if isinstance(packet.get("shards"), list) else []:
+        result_path = shard.get("resultPath") if isinstance(shard, dict) else None
+        if not result_path:
+            reasons.append({"kind": "missing_shard_result_path", "shardId": shard.get("shardId") if isinstance(shard, dict) else None})
+            continue
+        path = config_relative_path(repo_root, str(result_path))
+        if not path_is_under(path, result_root):
+            reasons.append({"kind": "result_path_outside_result_root", "shardId": shard.get("shardId"), "resultPath": str(path), "resultRoot": str(result_root)})
+    return reasons
+
+
+def resolve_agent_result_path(repo_root: Path, config: Dict[str, Any], result_path: str) -> Path:
+    path = config_relative_path(repo_root, str(result_path))
+    result_root = agent_remediation_result_root(repo_root, config)
+    if not path_is_under(path, result_root):
+        raise HygieneError("agent result path must stay under resultRoot: %s" % path)
+    return path
+
+
+def write_agent_surface_unavailable_result(
+    repo_root: Path,
+    config: Dict[str, Any],
+    packet: Dict[str, Any],
+    shard: Dict[str, Any],
+    *,
+    surface: str,
+) -> Dict[str, Any]:
+    queue_config = agent_remediation_queue_config(config)
+    status = str(queue_config.get("surfaceUnavailableStatus") or "agent_remediation_surface_unavailable")
+    result_path = resolve_agent_result_path(repo_root, config, str(shard.get("resultPath") or ""))
+    payload = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "status": status,
+        "createdAt": utc_now(),
+        "surface": surface,
+        "candidateId": packet.get("candidateId"),
+        "shardId": shard.get("shardId"),
+        "workBlockId": shard.get("workBlockId") or packet.get("workBlockId"),
+        "actionId": packet.get("actionId"),
+        "evidenceHash": packet.get("evidenceHash"),
+        "policyHash": packet.get("policyHash"),
+        "pinnedRefs": packet.get("pinnedRefs"),
+        "exactTuple": packet.get("exactTuple"),
+        "queuePath": packet.get("queuePath"),
+        "allowedReadScope": shard.get("allowedReadScope", []),
+        "allowedWriteScope": shard.get("allowedWriteScope", []),
+        "summary": "The current surface reported that it cannot spawn background agents for this remediation shard.",
+        "changedPaths": [],
+        "blockers": [{"kind": status, "recoveryCommand": packet.get("recoveryCommand")}],
+        "validation": [],
+        "recoveryCommand": packet.get("recoveryCommand"),
+    }
+    write_json(result_path, payload)
+    write_audit(repo_root, config, status, payload, work_block_id=payload.get("workBlockId"), outcome="blocked")
+    return {"status": status, "resultPath": str(result_path), "candidateId": payload["candidateId"], "shardId": payload["shardId"]}
+
+
+def write_agent_result_collection_artifact(repo_root: Path, config: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {key: value for key, value in result.items() if key not in {"resultCollectionHash", "resultCollectionPath"}}
+    collection_hash = stable_hash(payload)
+    path = agent_remediation_result_root(repo_root, config) / "collections" / ("%s.json" % collection_hash)
+    artifact = {**payload, "resultCollectionHash": collection_hash, "resultCollectionPath": repo_relative_or_absolute(repo_root, path)}
+    write_json(path, artifact)
+    return {"resultCollectionHash": collection_hash, "resultCollectionPath": repo_relative_or_absolute(repo_root, path)}
+
+
+def agent_remediation_queue_consumer_plan(
+    repo_root_arg: Path,
+    *,
+    surface: str = "codex-desktop",
+    mark_unavailable: bool = False,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    queue_config = agent_remediation_queue_config(config)
+    if not queue_config:
+        return {"status": "disabled", "reason": "agent_remediation_queue_disabled", "spawnPlan": [], "packets": []}
+    packets = pending_agent_remediation_queue_packets(repo_root, config)
+    remote_failures = refresh_agent_queue_remote_refs(repo_root, config, packets)
+    max_parallel = max(1, int(queue_config.get("maxParallelAgents", 1) or 1))
+    spawn_plan: List[Dict[str, Any]] = []
+    stale_packets: List[Dict[str, Any]] = []
+    unavailable_results: List[Dict[str, Any]] = []
+    packet_summaries: List[Dict[str, Any]] = []
+    for packet in packets:
+        stale_reasons = [*remote_failures, *agent_remediation_packet_stale_reasons(repo_root, config, packet)]
+        summary = {
+            "queuePath": packet.get("queuePath"),
+            "candidateId": packet.get("candidateId"),
+            "workBlockId": packet.get("workBlockId"),
+            "actionId": packet.get("actionId"),
+            "staleReasons": stale_reasons,
+        }
+        packet_summaries.append(summary)
+        if stale_reasons:
+            stale_packets.append(summary)
+            write_audit(repo_root, config, "agent_remediation_queue_stale", summary, work_block_id=packet.get("workBlockId"), outcome="blocked")
+            continue
+        for shard in packet.get("shards", []):
+            result_path = shard.get("resultPath")
+            result_exists = False
+            if result_path:
+                try:
+                    result_exists = resolve_agent_result_path(repo_root, config, str(result_path)).exists()
+                except HygieneError:
+                    result_exists = False
+            if result_exists:
+                continue
+            if mark_unavailable:
+                unavailable_results.append(write_agent_surface_unavailable_result(repo_root, config, packet, shard, surface=surface))
+                continue
+            if len(spawn_plan) >= max_parallel:
+                continue
+            spawn_plan.append(
+                {
+                    "surface": surface,
+                    "candidateId": packet.get("candidateId"),
+                    "shardId": shard.get("shardId"),
+                    "workBlockId": shard.get("workBlockId") or packet.get("workBlockId"),
+                    "actionId": packet.get("actionId"),
+                    "exactTuple": packet.get("exactTuple"),
+                    "queuePath": packet.get("queuePath"),
+                    "allowedReadScope": shard.get("allowedReadScope", []),
+                    "allowedWriteScope": shard.get("allowedWriteScope", []),
+                    "expectedOutputSchema": shard.get("expectedOutputSchema") or packet.get("expectedOutputSchema"),
+                    "validationRequirements": shard.get("validationRequirements") or packet.get("validationRequirements", []),
+                    "resultPath": shard.get("resultPath"),
+                    "recoveryCommand": shard.get("recoveryCommand") or packet.get("recoveryCommand"),
+                    "perAgentTimeoutMs": queue_config["perAgentTimeoutMs"],
+                    "maxAgentOutputBytes": queue_config["maxAgentOutputBytes"],
+                    "mutationBoundary": "repo-owned symbolic actors only",
+                }
+            )
+    status = "blocked" if stale_packets else "success"
+    if mark_unavailable and unavailable_results:
+        status = "blocked" if stale_packets else str(queue_config.get("surfaceUnavailableStatus") or "agent_remediation_surface_unavailable")
+    result = {
+        "status": status,
+        "surface": surface,
+        "queueRoots": [str(path) for path in agent_remediation_queue_roots(repo_root, config)],
+        "resultRoot": str(agent_remediation_result_root(repo_root, config)),
+        "maxParallelAgents": max_parallel,
+        "packetCount": len(packets),
+        "packets": packet_summaries,
+        "spawnPlan": spawn_plan,
+        "stalePackets": stale_packets,
+        "unavailableResults": unavailable_results,
+    }
+    write_audit(repo_root, config, "agent_remediation_queue_consumer", result, outcome="success" if status == "success" else "blocked")
+    return result
+
+
+def collect_agent_remediation_results(repo_root_arg: Path) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    packets = pending_agent_remediation_queue_packets(repo_root, config)
+    remote_failures = refresh_agent_queue_remote_refs(repo_root, config, packets)
+    collected: List[Dict[str, Any]] = []
+    blockers: List[Dict[str, Any]] = []
+    for packet in packets:
+        stale_reasons = [*remote_failures, *agent_remediation_packet_stale_reasons(repo_root, config, packet)]
+        if stale_reasons:
+            blockers.append({"kind": "stale_queue_packet", "candidateId": packet.get("candidateId"), "queuePath": packet.get("queuePath"), "staleReasons": stale_reasons})
+            continue
+        for shard in packet.get("shards", []):
+            try:
+                result_path = resolve_agent_result_path(repo_root, config, str(shard.get("resultPath") or ""))
+            except HygieneError as exc:
+                blockers.append({"kind": "agent_result_path_invalid", "candidateId": packet.get("candidateId"), "shardId": shard.get("shardId"), "error": str(exc)})
+                continue
+            if not result_path.exists():
+                blockers.append({"kind": "missing_agent_result", "candidateId": packet.get("candidateId"), "shardId": shard.get("shardId"), "resultPath": str(result_path)})
+                continue
+            try:
+                payload = read_json(result_path, {})
+            except Exception as exc:
+                blockers.append({"kind": "unreadable_agent_result", "candidateId": packet.get("candidateId"), "shardId": shard.get("shardId"), "resultPath": str(result_path), "error": str(exc)})
+                continue
+            schema = shard.get("expectedOutputSchema") if isinstance(shard.get("expectedOutputSchema"), dict) else packet.get("expectedOutputSchema")
+            required_fields = list((schema or agent_result_packet_schema()).get("requiredFields", agent_result_packet_schema()["requiredFields"]))
+            missing_fields = [field for field in required_fields if field not in payload]
+            invalid_list_fields = [
+                field
+                for field in ["changedPaths", "blockers", "validation"]
+                if field in payload and not isinstance(payload.get(field), list)
+            ]
+            if missing_fields or invalid_list_fields:
+                blockers.append(
+                    {
+                        "kind": "agent_result_schema_invalid",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "missingFields": missing_fields,
+                        "invalidListFields": invalid_list_fields,
+                        "resultPath": str(result_path),
+                    }
+                )
+            expected_identity = {
+                "candidateId": packet.get("candidateId"),
+                "shardId": shard.get("shardId"),
+                "workBlockId": shard.get("workBlockId") or packet.get("workBlockId"),
+                "actionId": packet.get("actionId"),
+            }
+            actual_identity = {
+                "candidateId": payload.get("candidateId"),
+                "shardId": payload.get("shardId"),
+                "workBlockId": payload.get("workBlockId"),
+                "actionId": payload.get("actionId"),
+            }
+            if actual_identity != expected_identity:
+                blockers.append(
+                    {
+                        "kind": "agent_result_identity_mismatch",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "expected": expected_identity,
+                        "actual": actual_identity,
+                        "resultPath": str(result_path),
+                    }
+                )
+            expected_tuple = packet.get("exactTuple")
+            actual_tuple = payload.get("exactTuple") or {
+                "candidateId": payload.get("candidateId"),
+                "actionId": payload.get("actionId"),
+                "evidenceHash": payload.get("evidenceHash"),
+                "policyHash": payload.get("policyHash"),
+                "pinnedRefs": payload.get("pinnedRefs"),
+            }
+            if actual_tuple != expected_tuple:
+                blockers.append({"kind": "agent_result_tuple_mismatch", "candidateId": packet.get("candidateId"), "shardId": shard.get("shardId"), "expected": expected_tuple, "actual": actual_tuple})
+            payload_status = str(payload.get("status") or "")
+            payload_blockers = payload.get("blockers", [])
+            if payload_status != "resolved":
+                blockers.append(
+                    {
+                        "kind": "agent_result_not_resolved",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "status": payload_status,
+                        "resultPath": str(result_path),
+                    }
+                )
+            if payload_status in {"blocked", "agent_remediation_surface_unavailable"} or payload_blockers:
+                blockers.append(
+                    {
+                        "kind": "agent_result_blocked",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "status": payload_status,
+                        "blockers": payload_blockers,
+                        "resultPath": str(result_path),
+                    }
+                )
+            failed_validation = [item for item in payload.get("validation", []) if isinstance(item, dict) and int(item.get("returncode", 0) or 0) != 0]
+            if failed_validation:
+                blockers.append(
+                    {
+                        "kind": "agent_result_validation_failed",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "validation": failed_validation,
+                        "resultPath": str(result_path),
+                    }
+                )
+            allowed_write = {normalize_rel(str(path)) for path in shard.get("allowedWriteScope", []) if normalize_rel(str(path))}
+            changed = {normalize_rel(str(path)) for path in payload.get("changedPaths", []) if normalize_rel(str(path))}
+            outside = sorted(changed - allowed_write)
+            if outside:
+                blockers.append(
+                    {
+                        "kind": "agent_scope_violation",
+                        "candidateId": packet.get("candidateId"),
+                        "shardId": shard.get("shardId"),
+                        "outsideWriteScope": outside,
+                        "allowedWriteScope": sorted(allowed_write),
+                        "resultPath": str(result_path),
+                    }
+                )
+            collected.append(
+                {
+                    "candidateId": packet.get("candidateId"),
+                    "shardId": shard.get("shardId"),
+                    "workBlockId": shard.get("workBlockId") or packet.get("workBlockId"),
+                    "actionId": packet.get("actionId"),
+                    "evidenceHash": packet.get("evidenceHash"),
+                    "policyHash": packet.get("policyHash"),
+                    "pinnedRefs": packet.get("pinnedRefs"),
+                    "exactTuple": packet.get("exactTuple"),
+                    "resultPath": str(result_path),
+                    "status": payload.get("status"),
+                    "changedPaths": sorted(changed),
+                    "blockers": payload.get("blockers", []),
+                }
+            )
+    status = "blocked" if blockers else ("success" if collected else "pending")
+    result = {
+        "status": status,
+        "packetCount": len(packets),
+        "collectedResults": collected,
+        "blockers": blockers,
+        "nextSymbolicAction": None if blockers else {
+            "action": "repo_owned_coordinator_revalidate_and_finalize",
+            "allowedActors": ["repo-sweep", "finalize-closeout", "remediate-retained"],
+            "mutationBoundary": "repo-owned symbolic actors only",
+        },
+    }
+    result.update(write_agent_result_collection_artifact(repo_root, config, result))
+    write_audit(repo_root, config, "agent_remediation_result_collection", result, outcome="success" if status == "success" else "blocked")
+    return result
 
 
 def cleanup_branch_after_sweep_action(
@@ -6284,7 +7144,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "locking", "autoEligibilityRepair"]
+    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),
