@@ -657,6 +657,48 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness.stdin_stream.close()
         self.assertEqual(harness.wait_for_exit(), 0)
 
+    def test_live_server_process_limit_allows_below_limit(self) -> None:
+        original_reap = _sw.reap_stale_server_pids
+        original_live = _sw._live_mcp_server_markers
+        _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
+        _sw._live_mcp_server_markers = lambda state_dir: [{"pid": 101}]
+        try:
+            result = _sw.enforce_live_server_process_limit(
+                state_dir=self.tempdir / "state",
+                max_live_server_processes=2,
+                audit_command=["server_wrapper.py"],
+            )
+        finally:
+            _sw.reap_stale_server_pids = original_reap
+            _sw._live_mcp_server_markers = original_live
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["live_server_count"], 1)
+
+    def test_live_server_process_limit_rejects_and_audits_at_limit(self) -> None:
+        state_dir = self.tempdir / "limit-state"
+        state_dir.mkdir()
+        original_reap = _sw.reap_stale_server_pids
+        original_live = _sw._live_mcp_server_markers
+        _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
+        _sw._live_mcp_server_markers = lambda state_dir_arg: [{"pid": 101}, {"pid": 202}]
+        try:
+            result = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=2,
+                audit_command=["server_wrapper.py", "--bridge-root", "x"],
+            )
+        finally:
+            _sw.reap_stale_server_pids = original_reap
+            _sw._live_mcp_server_markers = original_live
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["live_server_count"], 2)
+        events = read_jsonl(state_dir / "messages.jsonl")
+        self.assertEqual(events[-1]["action"], "mcp_server_wrapper_launch_rejected_live_server_limit")
+        self.assertEqual(events[-1]["live_server_pids"], [101, 202])
+        self.assertEqual(events[-1]["max_live_server_processes"], 2)
+
 
 class ServerWrapperTrampolineTests(unittest.TestCase):
     def test_trampoline_relaunches_on_exit_77_and_returns_final_code(self) -> None:
