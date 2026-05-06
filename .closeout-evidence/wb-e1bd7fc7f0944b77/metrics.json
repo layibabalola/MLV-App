@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/evidence-preserving-prune-policy",
+  "committedDeltaPathCount": 9,
+  "createdAt": "2026-05-06T06:46:36+00:00",
+  "detectorHash": "7ad548d4a1e445eea5f55ed963535380",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "be627cbcc352b5359b5c6ae0a1ea005217b55c2e",
+  "schemaVersion": "1.0",
+  "targetHead": "aa924ed8ee5c8d74a8d1a2cd31775c78265c73b0",
+  "workBlockId": "wb-e1bd7fc7f0944b77"
+}
