@@ -45,6 +45,7 @@ from .brokered_closeout import (
     start_work_block,
     stop_runtime_services_before_promotion,
     verify_repo_closed_postcondition,
+    verify_prune_recovery_artifact,
 )
 
 
@@ -261,6 +262,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "pruneRemoteFeatureBranches": True,
                 "cleanIntegrateRemoteFeatureBranches": True,
                 "deleteRemoteFeatureAfterCleanIntegrate": True,
+                "evidencePreservingPrune": {
+                    "enabled": True,
+                    "recoveryRoot": ".claude-state/closeout/manual-prune",
+                    "requireBundleForNonAncestor": True,
+                    "requireDirtyWorktreeBytePreservation": True,
+                    "requireReviewerVerdicts": True,
+                    "rerunSweepAfterPrune": True,
+                },
             },
             "blockerAutoRemediation": {
                 "enabled": True,
@@ -450,6 +459,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["repoSweep"]["allowForeignDirtyIntegratedBranchPrune"])
         self.assertTrue(config["repoSweep"]["allowPatchEquivalentPrune"])
         self.assertEqual(config["repoSweep"]["protectedLockedWorktreeExactPolicy"], [])
+        self.assertTrue(config["repoSweep"]["evidencePreservingPrune"]["enabled"])
+        self.assertEqual(config["repoSweep"]["evidencePreservingPrune"]["recoveryRoot"], ".claude-state/closeout/manual-prune")
+        self.assertTrue(config["repoSweep"]["evidencePreservingPrune"]["requireBundleForNonAncestor"])
+        self.assertTrue(config["repoSweep"]["evidencePreservingPrune"]["requireDirtyWorktreeBytePreservation"])
+        self.assertTrue(config["repoSweep"]["evidencePreservingPrune"]["requireReviewerVerdicts"])
+        self.assertTrue(config["repoSweep"]["evidencePreservingPrune"]["rerunSweepAfterPrune"])
         self.assertTrue(config["closeoutAddendumPersistence"]["enabled"])
         self.assertTrue(config["closeoutAddendumPersistence"]["sameTurnRequired"])
         self.assertTrue(config["finalizeLoop"]["enabled"])
@@ -522,6 +537,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_repo_closed_postcondition_accepts_valid_queue_retirement_proof", baseline["requiredTests"])
         self.assertIn("test_repo_closed_postcondition_rejects_wrong_result_tuple", baseline["requiredTests"])
         self.assertIn("test_repo_closed_postcondition_rejects_stale_collection_retirement_tuple", baseline["requiredTests"])
+        self.assertIn("test_non_ancestor_historical_branch_prune_requires_bundle_backed_recovery", baseline["requiredTests"])
+        self.assertIn("test_dirty_detached_worktree_removal_refuses_missing_byte_preservation", baseline["requiredTests"])
+        self.assertIn("test_recovery_audit_records_heads_hashes_and_reviewer_verdicts", baseline["requiredTests"])
+        self.assertIn("test_stale_transaction_branch_pruned_after_recovery_evidence", baseline["requiredTests"])
+        self.assertIn("test_final_repo_sweep_after_prune_reports_zero_candidates", baseline["requiredTests"])
+        self.assertIn("test_deletion_tuple_rejects_missing_or_stale_recovery_artifact", baseline["requiredTests"])
         self.assertIn("test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed", baseline["requiredTests"])
         required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
         self.assertIn(("AGENTS.md", "Closeout actors must be bounded at the process boundary"), required_symbols)
@@ -538,6 +559,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def restart_runtime_services_after_clean_promotion"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def agent_remediation_queue_consumer_plan"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def collect_agent_remediation_results"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def write_evidence_preserving_prune_recovery"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def verify_prune_recovery_artifact"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def write_dirty_worktree_recovery_evidence"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "--require-repo-closed"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "agent-queue"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "agent-results"), required_symbols)
@@ -1727,6 +1751,136 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(quorum["quorum"]["ok"])
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/topic-copy", check=False).returncode, 0)
 
+    def test_non_ancestor_historical_branch_prune_requires_bundle_backed_recovery(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/historical-copy")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "historical duplicate work")
+        branch_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "checkout", "master")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "integrated duplicate work")
+        (repo / "target-only.txt").write_text("target-only\n", encoding="utf-8")
+        git(repo, "add", "target-only.txt")
+        git(repo, "commit", "-m", "target-only follow-up")
+        target_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        result = repo_sweep(repo, apply=True)
+
+        deletion = next(item for item in result["actions"] if item.get("branch") == "codex/historical-copy" and item.get("action") == "delete_local_branch")
+        recovery = deletion["recoveryArtifact"]
+        bundle = recovery["bundle"]
+        self.assertEqual(recovery["branchHead"], branch_head)
+        self.assertEqual(recovery["targetHead"], target_head)
+        self.assertTrue(bundle["required"])
+        bundle_path = repo / bundle["path"]
+        self.assertTrue(bundle_path.exists(), recovery)
+        self.assertEqual(bundle["sha256"], __import__("tools.repo_hygiene.brokered_closeout", fromlist=["file_content_hash"]).file_content_hash(bundle_path))
+        self.assertEqual(git(repo, "bundle", "verify", str(bundle_path)).returncode, 0)
+        quorum = next(item for item in result["quorumResults"] if item["report"]["branch"] == "codex/historical-copy")
+        self.assertEqual(quorum["candidate"]["evidence"]["recoveryArtifact"]["artifactPath"], recovery["artifactPath"])
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/historical-copy", check=False).returncode, 0)
+
+    def test_recovery_audit_records_heads_hashes_and_reviewer_verdicts(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "dirty-detached-recovery-audit"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+        worktree_head = git(detached, "rev-parse", "HEAD").stdout.strip()
+        (detached / "README.md").write_text("tracked dirty bytes\n", encoding="utf-8")
+        (detached / "untracked.bin").write_bytes(b"\x00dirty-bytes\n")
+
+        result = repo_sweep(repo, apply=True)
+
+        action = next(item for item in result["actions"] if item.get("action") == "detached_dirty_preserve")
+        recovery = action["dirtyRecovery"]
+        artifact = json.loads((repo / recovery["artifactPath"]).read_text(encoding="utf-8"))
+        self.assertEqual(artifact["worktreeHead"], worktree_head)
+        self.assertEqual(artifact["preservationHead"], action["preservationHead"])
+        self.assertEqual(artifact["targetHead"], result["plan"]["pinnedRefs"]["target"]["head"])
+        self.assertTrue(artifact["fileHashes"])
+        self.assertGreaterEqual(len(artifact["reviewerVerdicts"]), 3)
+        untracked = next(item for item in artifact["untrackedBytes"] if item["path"] == "untracked.bin")
+        self.assertEqual(untracked["byteSha256"], __import__("tools.repo_hygiene.brokered_closeout", fromlist=["file_content_hash"]).file_content_hash(repo / untracked["preservedPath"]))
+        self.assertIn("manual_prune_recovery", self.audit_types(repo))
+
+    def test_stale_transaction_branch_pruned_after_recovery_evidence(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/archive-only")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "archive only duplicate")
+        git(repo, "checkout", "master")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "target carries duplicate")
+        (repo / "followup.txt").write_text("target followup\n", encoding="utf-8")
+        git(repo, "add", "followup.txt")
+        git(repo, "commit", "-m", "target followup")
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["branch"] == "codex/archive-only")
+        self.assertEqual(report["recommendedAction"], "prune_now")
+        deletion = next(item for item in result["actions"] if item.get("branch") == "codex/archive-only" and item.get("action") == "delete_local_branch")
+        self.assertTrue((repo / deletion["recoveryArtifact"]["artifactPath"]).exists())
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/archive-only", check=False).returncode, 0)
+
+    def test_final_repo_sweep_after_prune_reports_zero_candidates(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/prune-fixed-point")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "duplicate")
+        git(repo, "checkout", "master")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "duplicate integrated")
+        (repo / "target-only.txt").write_text("target-only\n", encoding="utf-8")
+        git(repo, "add", "target-only.txt")
+        git(repo, "commit", "-m", "target-only")
+
+        result = repo_sweep(repo, apply=True)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["postPruneSweep"]["branchCandidateCount"], 0)
+        self.assertEqual(result["postPruneSweep"]["remoteFeatureCandidateCount"], 0)
+        self.assertEqual(result["postPruneSweep"]["stashCandidateCount"], 0)
+
+    def test_deletion_tuple_rejects_missing_or_stale_recovery_artifact(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/missing-recovery")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "duplicate")
+        git(repo, "checkout", "master")
+        (repo / "dup.txt").write_text("same patch\n", encoding="utf-8")
+        git(repo, "add", "dup.txt")
+        git(repo, "commit", "-m", "duplicate integrated")
+        (repo / "target-only.txt").write_text("target-only\n", encoding="utf-8")
+        git(repo, "add", "target-only.txt")
+        git(repo, "commit", "-m", "target-only")
+
+        def fake_recovery(*args: object, **kwargs: object) -> dict:
+            return {
+                "status": "success",
+                "candidateId": kwargs["candidate_id"],
+                "artifactPath": ".claude-state/closeout/manual-prune/missing/recovery.json",
+                "branchHead": kwargs["head"],
+                "targetHead": kwargs["target_head"],
+                "evidenceHash": "missing-artifact",
+                "bundle": {"required": True, "path": ".claude-state/closeout/manual-prune/missing/recovery.bundle", "sha256": "missing"},
+                "reviewerVerdicts": [{"reviewer": "codex-self", "score": 10, "blockers": []}],
+            }
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.write_evidence_preserving_prune_recovery", side_effect=fake_recovery):
+            result = repo_sweep(repo, apply=True)
+
+        action = next(item for item in result["actions"] if item.get("action") == "retain_prune_recovery_artifact_invalid")
+        self.assertIn("recovery_artifact_missing", action["recoveryVerification"]["reasons"])
+        self.assertEqual(git(repo, "rev-parse", "--verify", "codex/missing-recovery").returncode, 0)
+
     def test_repo_sweep_apply_candidate_id_mutates_only_that_candidate(self) -> None:
         repo = self.init_repo()
         git(repo, "branch", "codex/first-backup", "master")
@@ -1962,10 +2116,32 @@ class BrokeredCloseoutTests(unittest.TestCase):
         action = next(item for item in result["actions"] if item.get("action") == "detached_dirty_preserve")
         self.assertEqual(action["status"], "success", action)
         self.assertFalse(detached.exists())
+        self.assertEqual(action["dirtyRecovery"]["status"], "success")
+        dirty_artifact = json.loads((repo / action["dirtyRecovery"]["artifactPath"]).read_text(encoding="utf-8"))
+        self.assertIn("trackedDiffPath", dirty_artifact)
+        self.assertTrue(dirty_artifact["fileHashes"])
         self.assertEqual(sorted(item["path"] for item in action["copied"]), ["README.md", "detached-only.txt"])
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:README.md").stdout, "detached dirty readme\n")
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:detached-only.txt").stdout, "another exact dirty path\n")
         self.assertIn("orphan_quarantine", self.audit_types(repo))
+
+    def test_dirty_detached_worktree_removal_refuses_missing_byte_preservation(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "dirty-detached-byte-preservation-block"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+        (detached / "README.md").write_text("detached dirty readme\n", encoding="utf-8")
+        (detached / "detached-only.txt").write_text("untracked bytes\n", encoding="utf-8")
+
+        with mock.patch(
+            "tools.repo_hygiene.brokered_closeout.write_dirty_worktree_recovery_evidence",
+            return_value={"status": "blocked", "reason": "tracked_diff_missing", "artifactPath": ".claude-state/closeout/manual-prune/missing.json"},
+        ):
+            result = repo_sweep(repo, apply=True)
+
+        action = next(item for item in result["actions"] if item.get("reason") == "tracked_diff_missing")
+        self.assertEqual(action["status"], "blocked")
+        self.assertTrue(detached.exists())
+        self.assertEqual((detached / "detached-only.txt").read_text(encoding="utf-8"), "untracked bytes\n")
 
     def test_repo_sweep_detached_dirty_preservation_refuses_stale_or_missing_commit_before_cleanup(self) -> None:
         repo = self.init_repo()

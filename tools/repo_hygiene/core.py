@@ -74,6 +74,7 @@ IMPLEMENTED_CLOSEOUT_ACTION_IDS = [
     "resolve_conflicts_with_agent",
     "agent_remediation_surface_unavailable",
     "protected-target-noop-closeout",
+    "evidence_preserving_prune_recovery",
 ]
 IMPLEMENTED_CLOSEOUT_PUBLISH_MODES = ["pr_only", "direct_push_branch", "local_merge_only", "no_publish"]
 IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS = [
@@ -95,6 +96,8 @@ IMPLEMENTED_CLOSEOUT_ARTIFACT_NAMES = [
     "executor-handoff.json",
     "agent-remediation-queue/*.json",
     "agent-remediation-results/*.json",
+    "manual-prune/*.json",
+    "manual-prune/*.bundle",
     "state.json",
     "events.jsonl",
     "trusted-approval-nonce.public.json",
