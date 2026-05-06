@@ -171,6 +171,28 @@ selected `workBlockId`, blocker kind, symbolic repair attempted, evidence hash
 before repair, evidence hash after repair, pinned refs before retry, retry
 number, and terminal reason when retry stops. The same blocker/evidence tuple
 must not be retried more than once unless policy explicitly permits renewal.
+Closeout actors must be bounded at the process boundary. Detector, repair,
+review-unblock, finalize, cleanup, and repo-sweep subprocesses must run through
+the config-driven bounded runner with wall-clock timeout, process-tree
+termination, stdout/stderr output caps, fail-closed status normalization, and
+durable audit for timeout, output-cap breach, killed process tree, and known
+failure text. A closeout result is authoritative only after the child exits,
+descendants are gone or intentionally retained with audit, exit/status and
+failure text agree, and expected success or blocker artifacts exist.
+Hard-clean final responses are blocked unless the repo-closed postcondition
+passes after finalize. The postcondition must prove from repo-owned artifacts
+that the selected work block, target ref, dirty state, stash state, branch state,
+worktree state, and cleanup audit are inspectable, with no non-exempt
+dirty/untracked files, disallowed stashes, stale transaction branches, stale
+managed worktrees, or orphaned closeout/runtime artifacts left behind. Failures
+report `repo_closed_postcondition_failed`, not success with deferred cleanup.
+Runtime services that execute repo code follow configured lifecycle actors. When
+`runtimeServices.<service>.stopBeforePromotion=true`, closeout stops and verifies
+the service before promotion/finalize; when `restartAfterCleanPromotion=true`,
+restart occurs only after target promotion, validation, repo-closed verification,
+and cleanup/prune succeed. Stop/start/status must come from configured commands,
+and failed stop, verification, or restart blocks or retains with exact process
+evidence and a recovery command.
 Response, metrics, timestamp, and final-completion hooks are read-only with
 respect to managed session worktree lifecycle. Codex response/final adapters pass
 `-SkipSessionWorktree` and record `session_worktree_bootstrap=skipped`; such
