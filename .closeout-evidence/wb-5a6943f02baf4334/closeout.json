@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/closeout-ledger-schema-convergence",
+  "createdAt": "2026-05-06T22:45:00+00:00",
+  "detectorHash": "d6cf4d2a23c73d53c7e826d87991c70b",
+  "eligible": true,
+  "featureHead": "dff8f6659f47ca0110425d2715377caeeec9cf0d",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/closeout-ledger-schema-convergence",
+      "head": "dff8f6659f47ca0110425d2715377caeeec9cf0d"
+    },
+    "target": {
+      "branch": "master",
+      "head": "f7aebd5447bd3ef69daec14448d516805cedbd77",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "f7aebd5447bd3ef69daec14448d516805cedbd77",
+  "workBlockId": "wb-5a6943f02baf4334"
+}

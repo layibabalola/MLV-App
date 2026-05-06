@@ -2,16 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://portable-closeout-framework.local/CLOSEOUT-CAPABILITY-LEDGER.schema.json",
   "title": "Closeout Capability Ledger",
-  "description": "Machine-readable ledger for portable repo-owned closeout framework capability evidence.",
+  "description": "Machine-readable ledger for portable repo-owned closeout framework capability evidence. Prose-only and reported-only claims are not sufficient for YES status.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaVersion",
     "repo",
     "generatedAt",
+    "frameworkArtifacts",
     "capabilities"
   ],
   "properties": {
+    "$schema": {
+      "type": "string"
+    },
     "schemaVersion": {
       "const": "closeout-capability-ledger.v1"
     },
@@ -22,11 +26,25 @@
       "type": "string",
       "format": "date-time"
     },
+    "lastVerifiedAt": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "ledgerProfile": {
       "$ref": "#/$defs/profile"
     },
     "frameworkArtifacts": {
       "$ref": "#/$defs/frameworkArtifacts"
+    },
+    "statusDefinitions": {
+      "$ref": "#/$defs/statusDefinitions"
     },
     "statusSummary": {
       "$ref": "#/$defs/statusSummary"
@@ -52,7 +70,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "name"
+        "name",
+        "root",
+        "defaultBranch"
       ],
       "properties": {
         "name": {
@@ -62,6 +82,10 @@
         "root": {
           "$ref": "#/$defs/pathString"
         },
+        "defaultBranch": {
+          "type": "string",
+          "minLength": 1
+        },
         "targetBranch": {
           "type": "string",
           "minLength": 1
@@ -70,8 +94,19 @@
           "type": "string",
           "minLength": 1
         },
+        "remote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "currentHead": {
+          "type": "string",
+          "minLength": 7
+        },
         "policyPath": {
           "$ref": "#/$defs/pathString"
+        },
+        "sourceProfile": {
+          "$ref": "#/$defs/profile"
         },
         "profileAdopted": {
           "$ref": "#/$defs/profile"
@@ -85,6 +120,11 @@
     "frameworkArtifacts": {
       "type": "object",
       "additionalProperties": false,
+      "required": [
+        "adjudicationProtocol",
+        "frameworkProfiles",
+        "capabilityLedgerSchema"
+      ],
       "properties": {
         "historicalIncidentMap": {
           "$ref": "#/$defs/pathString"
@@ -101,11 +141,46 @@
         "frameworkProfiles": {
           "$ref": "#/$defs/pathString"
         },
+        "capabilityLedgerSchema": {
+          "$ref": "#/$defs/pathString"
+        },
+        "capabilityLedger": {
+          "$ref": "#/$defs/pathString"
+        },
         "requirementsTrace": {
+          "$ref": "#/$defs/pathString"
+        },
+        "standard": {
           "$ref": "#/$defs/pathString"
         },
         "implementationPrompt": {
           "$ref": "#/$defs/pathString"
+        }
+      }
+    },
+    "statusDefinitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "YES": {
+          "type": "string",
+          "minLength": 1
+        },
+        "PARTIAL": {
+          "type": "string",
+          "minLength": 1
+        },
+        "NO": {
+          "type": "string",
+          "minLength": 1
+        },
+        "UNAVAILABLE": {
+          "type": "string",
+          "minLength": 1
+        },
+        "UNKNOWN": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
@@ -144,6 +219,7 @@
         "status",
         "profile",
         "decision",
+        "verification",
         "evidencePaths",
         "testPaths",
         "actorPaths",
@@ -192,6 +268,9 @@
         "configPaths": {
           "$ref": "#/$defs/pathArray"
         },
+        "loaderPaths": {
+          "$ref": "#/$defs/pathArray"
+        },
         "contractPaths": {
           "$ref": "#/$defs/pathArray"
         },
@@ -199,6 +278,9 @@
           "$ref": "#/$defs/pathArray"
         },
         "auditArtifactPaths": {
+          "$ref": "#/$defs/pathArray"
+        },
+        "sourceRequirementPaths": {
           "$ref": "#/$defs/pathArray"
         },
         "blockers": {
@@ -234,6 +316,9 @@
           "type": "string",
           "minLength": 1
         },
+        "verification": {
+          "$ref": "#/$defs/verification"
+        },
         "yesRequires": {
           "$ref": "#/$defs/yesRequires"
         },
@@ -258,6 +343,10 @@
         },
         "relatedArtifacts": {
           "$ref": "#/$defs/pathArray"
+        },
+        "strongestReferenceRepo": {
+          "type": "string",
+          "minLength": 1
         },
         "relatedCapabilities": {
           "type": "array",
@@ -290,6 +379,9 @@
                 "type": "string",
                 "format": "date-time"
               },
+              "evidencePaths": {
+                "minItems": 1
+              },
               "yesRequires": {
                 "properties": {
                   "documentationOnlyIsSufficient": {
@@ -297,6 +389,29 @@
                   },
                   "executableBehaviorOrScopedException": {
                     "const": true
+                  }
+                }
+              },
+              "verification": {
+                "properties": {
+                  "claimBasis": {
+                    "not": {
+                      "enum": [
+                        "documentation-only",
+                        "reported-only",
+                        "not-implemented",
+                        "unknown"
+                      ]
+                    }
+                  },
+                  "verificationLevel": {
+                    "not": {
+                      "enum": [
+                        "unverified",
+                        "docs-only",
+                        "config-only"
+                      ]
+                    }
                   }
                 }
               }
@@ -316,6 +431,24 @@
                   "yesEvidenceBasis": {
                     "contains": {
                       "const": "behavioral-test"
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "yesEvidenceBasis": {
+                    "contains": {
+                      "const": "contract"
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "yesEvidenceBasis": {
+                    "contains": {
+                      "const": "drift-check"
                     }
                   }
                 }
@@ -364,6 +497,9 @@
             "properties": {
               "blockers": {
                 "minItems": 1
+              },
+              "smallestNextStep": {
+                "minLength": 1
               }
             }
           }
@@ -386,6 +522,41 @@
           }
         }
       ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimBasis",
+        "summary"
+      ],
+      "properties": {
+        "claimBasis": {
+          "type": "string",
+          "enum": [
+            "executable-behavior",
+            "behavioral-test",
+            "contract-drift-check",
+            "audit-artifact",
+            "explicit-scoped-exception",
+            "documentation-only",
+            "reported-only",
+            "not-implemented",
+            "unknown"
+          ]
+        },
+        "verificationLevel": {
+          "$ref": "#/$defs/verificationLevel"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     },
     "yesRequires": {
       "type": "object",
@@ -467,6 +638,9 @@
         "recoveryCommand": {
           "type": "string",
           "minLength": 1
+        },
+        "evidencePaths": {
+          "$ref": "#/$defs/pathArray"
         }
       }
     },
@@ -479,9 +653,21 @@
         "recoveryCommand"
       ],
       "properties": {
+        "blockerId": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
         "kind": {
           "type": "string",
           "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "blocking"
+          ]
         },
         "description": {
           "type": "string",
@@ -513,7 +699,8 @@
         "Conditional",
         "Surface Plugin",
         "Repo Policy",
-        "Reference Only"
+        "Reference Only",
+        "Non-Goal"
       ]
     },
     "decision": {
@@ -525,7 +712,23 @@
         "Surface Plugin",
         "Repo Policy",
         "Reference Only",
-        "Non-Goal"
+        "Non-Goal",
+        "Explicit Non-Goal"
+      ]
+    },
+    "verificationLevel": {
+      "type": "string",
+      "enum": [
+        "unverified",
+        "docs-only",
+        "config-only",
+        "config-and-docs",
+        "actor-present",
+        "contract-verified",
+        "behavior-tested",
+        "audit-evidenced",
+        "closed-through-repo-gate",
+        "explicit-scoped-exception"
       ]
     },
     "pathArray": {
@@ -538,7 +741,8 @@
     },
     "pathString": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Repository-relative path using forward slashes where practical. Commands may be included only in recoveryCommand or verificationCommand fields."
     }
   }
 }
