@@ -12,6 +12,7 @@ from .brokered_closeout import (
     bounded_closeout_run,
     bootstrap_response_broker_manifest,
     broker_contract,
+    check_review_quorum,
     checkpoint_owned_work,
     closeout_command_timeout_ms,
     closeout_max_process_output_bytes,
@@ -22,6 +23,7 @@ from .brokered_closeout import (
     finalize_evidence,
     finalize_retry_decision,
     finalize_work_block,
+    guard_closeout_hook,
     load_closeout_config,
     plan_dirty_split_candidates,
     apply_dirty_split_candidate,
@@ -34,6 +36,8 @@ from .brokered_closeout import (
     repo_sweep_tuple,
     restart_runtime_services_after_clean_promotion,
     run_bounded_closeout_process,
+    remediation_freeze_status,
+    remediation_packet_template,
     stable_hash,
     start_work_block,
     stop_runtime_services_before_promotion,
@@ -100,6 +104,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "fetchBeforeEvidence": True,
             },
             "validation": {"commands": []},
+            "paths": {
+                "generated": [".claude-state/**", "**/__pycache__/**", "**/*.pyc"],
+                "sensitive": [".claude/**", ".claude", ".git/**", ".git"],
+                "state": ".claude-state/closeout",
+            },
             "dirty": {"unclaimedOutsideDelta": "foreign", "sensitiveUnownedBlocks": True, "autoClaimCleanAtStart": True},
             "dirtySplit": {
                 "enabled": True,
@@ -119,7 +128,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             },
             "hardClean": {
                 "requireForCompletion": True,
-                "allowRetainedForeignDirtyAtCompletion": False,
+                "allowRetainedForeignDirtyAtCompletion": True,
                 "requireNoStash": True,
                 "exemptStatusPatterns": [".claude-state/**", "**/__pycache__/**", "**/*.pyc"],
             },
@@ -142,6 +151,21 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "failureTextPatterns": ["closeout gate failure", "review quorum failure", "review_quorum_missing"],
             },
             "autoEligibilityRepair": {"timeoutMs": 300000},
+            "remediationFreeze": {
+                "enabled": True,
+                "markerPath": ".claude-state/closeout-remediation.freeze",
+                "envVar": "CLOSEOUT_REMEDIATION_FREEZE",
+                "generatedAuditRoot": ".claude-state/closeout-log/remediation-freeze",
+                "clusterLedgerRoot": ".claude-state/closeout-log/remediation-clusters",
+                "requireCoordinatorLock": True,
+                "requireExactAllowlist": True,
+                "requireRecoveryBundle": True,
+                "requireRemoteAdvertisedPins": True,
+                "requireHookGuardProof": True,
+                "requiredReviewerScore": 10,
+                "requiredReviewers": ["codex-self", "stranger-reviewer-1", "stranger-reviewer-2"],
+                "blockedLifecycleActions": ["broker-bootstrap", "start-work-block", "publish", "finalize", "pre-commit", "pre-push", "response-hook", "final-hook"],
+            },
             "evidenceRepair": {
                 "enabled": False,
                 "evidenceRoot": ".closeout-evidence",
@@ -150,9 +174,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "commitMessage": "brokered closeout evidence repair",
             },
             "reviewQuorum": {
-                "requiredApprovals": 1,
-                "allowedReviewers": ["local-test"],
-                "highImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent"],
+                "requiredApprovals": 3,
+                "requiredScore": 10,
+                "requiredSelfApprovals": 1,
+                "requiredIndependentApprovals": 2,
+                "selfReviewers": ["codex-self"],
+                "independentReviewers": ["ancestry-safety-reviewer", "mutation-scope-reviewer"],
+                "allowedReviewers": ["local-test", "codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
+                "highImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
                 "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"],
             },
             "agentRemediation": {
@@ -190,6 +219,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
                     "redundant_branch_prune",
                     "explicit_protected_worktree_cleanup",
                     "agent_conflict_remediation",
+                    "dirty_cluster_preservation",
+                    "stale_claim_remediation",
+                    "remediation_freeze_removal",
                 ],
                 "manualOnlyActionClasses": ["protected_branch", "dirty_worktree", "locked_worktree", "ambiguous_merge_required", "active_locked_worktree", "unowned_dirty_triage"],
             },
@@ -362,7 +394,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
         self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
         self.assertTrue(config["hardClean"]["requireForCompletion"])
-        self.assertFalse(config["hardClean"]["allowRetainedForeignDirtyAtCompletion"])
+        self.assertTrue(config["hardClean"]["allowRetainedForeignDirtyAtCompletion"])
         self.assertTrue(config["hardClean"]["requireNoStash"])
         self.assertIn(".claude-state/**", config["hardClean"]["exemptStatusPatterns"])
         self.assertFalse(config["runtimeServices"]["mlvapp-preview"]["enabled"])
@@ -658,6 +690,119 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["blockers"])
 
+    def test_complete_finalize_enforces_hard_clean_config_without_switch(self) -> None:
+        repo = self.init_repo()
+        self.make_feature(repo, "wb-hard-clean-default")
+        (repo / "README.md").write_text("stash keeps repo open\n", encoding="utf-8")
+        git(repo, "stash", "push", "-m", "hard clean blocker")
+
+        result = complete_work_block(repo, work_block_id="wb-hard-clean-default", finalize=True)
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "repo_closed_postcondition_failed")
+        self.assertIn("repoClosedPostcondition", result)
+        blocker_kinds = {item["kind"] for item in result["repoClosedPostcondition"]["blockers"]}
+        self.assertIn("disallowed_stashes", blocker_kinds)
+
+    def test_hard_clean_blocks_retained_remote_feature_refs(self) -> None:
+        repo = self.init_repo(remote=True)
+        git(repo, "checkout", "-b", "codex/remote-left-open")
+        (repo / "left-open.txt").write_text("remote open\n", encoding="utf-8")
+        git(repo, "add", "left-open.txt")
+        git(repo, "commit", "-m", "remote left open")
+        git(repo, "push", "origin", "codex/remote-left-open")
+        git(repo, "checkout", "master")
+        git(repo, "branch", "-D", "codex/remote-left-open")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked", result)
+        blocker_kinds = {item["kind"] for item in result["blockers"]}
+        self.assertIn("retained_remote_feature_refs", blocker_kinds)
+
+    def test_review_quorum_requires_allowed_ten_score_self_plus_two_independent(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        pinned_refs = {"target": {"branch": "master", "head": git(repo, "rev-parse", "HEAD").stdout.strip()}}
+        candidate_id = "candidate:quorum-shape"
+        action_id = "clean_integrate"
+        evidence_hash = "evidence-shape"
+        record_review_approval(
+            repo,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+            reviewer="local-test",
+            approved=True,
+            details={"score": 10},
+        )
+        record_review_approval(
+            repo,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+            reviewer="codex-self",
+            approved=True,
+            details={"score": 9},
+        )
+        record_review_approval(
+            repo,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+            reviewer="ancestry-safety-reviewer",
+            approved=True,
+            details={"score": 10},
+        )
+        record_review_approval(
+            repo,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+            reviewer="mutation-scope-reviewer",
+            approved=True,
+            details={"score": 10},
+        )
+
+        low_score = check_review_quorum(
+            repo,
+            config,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+        )
+        self.assertFalse(low_score["ok"])
+        self.assertEqual(low_score["selfApprovalCount"], 0)
+        self.assertEqual(low_score["lowScoreApprovalCount"], 1)
+
+        record_review_approval(
+            repo,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+            reviewer="codex-self",
+            approved=True,
+            details={"score": 10},
+        )
+        quorum = check_review_quorum(
+            repo,
+            config,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+        )
+        self.assertTrue(quorum["ok"], quorum)
+        self.assertGreaterEqual(quorum["matchingApprovals"], 3)
+        self.assertEqual(quorum["selfApprovalCount"], 1)
+        self.assertEqual(quorum["independentApprovalCount"], 2)
+
     def test_runtime_service_stops_before_validation_and_restarts_after_repo_closed(self) -> None:
         marker = self.tempdir / "runtime-running.marker"
         log = self.tempdir / "runtime.log"
@@ -666,7 +811,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.make_feature(repo, "wb-runtime-service")
         self.approve_current_tuple(repo, "wb-runtime-service")
 
-        result = finalize_work_block(repo, work_block_id="wb-runtime-service", require_repo_closed=True)
+        result = finalize_work_block(repo, work_block_id="wb-runtime-service")
 
         self.assertEqual(result["status"], "success", result)
         self.assertTrue(marker.exists(), result)
@@ -799,6 +944,135 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("lease", manifest)
         self.assertEqual(manifest["pathClaims"], [])
         self.assertEqual(worktrees_after, worktrees_before)
+
+    def test_remediation_freeze_blocks_broker_bootstrap_lease_refresh_start_publish_finalize_and_hooks(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/freeze-guard")
+        start_work_block(repo, work_block_id="wb-freeze", actor="local-test")
+        manifest_path = repo / ".claude-state" / "closeout" / "work-blocks" / "wb-freeze" / "manifest.json"
+        lease_before = json.loads(manifest_path.read_text(encoding="utf-8"))["lease"]
+        marker = repo / ".claude-state" / "closeout-remediation.freeze"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}\n", encoding="utf-8")
+
+        with self.assertRaises(Exception):
+            start_work_block(repo, work_block_id="wb-blocked", actor="local-test")
+        bootstrap = bootstrap_response_broker_manifest(repo, hook_phase="response", actor="local-test-hook")
+        self.assertEqual(bootstrap["status"], "skipped")
+        self.assertEqual(bootstrap["reason"], "remediation_freeze")
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["lease"], lease_before)
+        self.assertEqual(repair_eligibility(repo, work_block_id="wb-freeze")["reason"], "remediation_freeze")
+        self.assertEqual(finalize_work_block(repo, work_block_id="wb-freeze")["reason"], "remediation_freeze")
+        for hook_name in ("pre-commit", "pre-push", "auto-closeout-hook"):
+            with self.assertRaises(Exception):
+                guard_closeout_hook(repo, hook_name=hook_name)
+
+    def test_remediation_freeze_environment_is_process_scoped_and_fresh_preservation_worktree_is_exempt(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/freeze-env")
+        config = load_closeout_config(repo)
+        with mock.patch.dict(os.environ, {"CLOSEOUT_REMEDIATION_FREEZE": "1"}):
+            self.assertTrue(remediation_freeze_status(repo, config)["active"])
+        self.assertFalse(remediation_freeze_status(repo, config)["active"])
+
+        marker = repo / ".claude-state" / "closeout-remediation.freeze"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}\n", encoding="utf-8")
+        fresh = self.tempdir / "target-preservation"
+        git(repo, "worktree", "add", str(fresh), "master")
+        self.write_config(fresh)
+        self.assertTrue(remediation_freeze_status(repo, load_closeout_config(repo))["active"])
+        self.assertFalse(remediation_freeze_status(fresh, load_closeout_config(fresh))["active"])
+
+    def test_remediation_freeze_audit_packets_are_generated_exempt_and_content_addressed(self) -> None:
+        repo = self.init_repo(remote=False)
+        marker = repo / ".claude-state" / "closeout-remediation.freeze"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}\n", encoding="utf-8")
+
+        status = remediation_freeze_status(repo, load_closeout_config(repo), action="response-hook", write_audit_packet=True)
+
+        packet = status["auditPacket"]
+        self.assertTrue(packet["path"].startswith(".claude-state/closeout-log/remediation-freeze/sha256-"))
+        self.assertTrue((repo / packet["path"]).exists())
+        self.assertIn(".claude-state/**", load_closeout_config(repo)["paths"]["generated"])
+
+    def test_already_integrated_dirty_baseline_overlap_enters_remediation_triage(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/already-integrated-dirty")
+        (repo / "overlap.txt").write_text("dirty before broker\n", encoding="utf-8")
+        start_work_block(repo, work_block_id="wb-integrated-dirty", actor="local-test", path_claims=["overlap.txt"])
+
+        result = repair_eligibility(repo, work_block_id="wb-integrated-dirty")
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["blockers"], ["dirty_state_remediation_required"])
+        self.assertTrue((repo / ".claude-state" / "closeout-remediation.freeze").exists())
+        packet_path = repo / result["freeze"]["packet"]["path"]
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        self.assertEqual(packet["reason"], "dirty_state_remediation_required")
+        self.assertEqual(packet["detection"]["workBlockId"], "wb-integrated-dirty")
+        self.assertTrue(result["triage"]["ancestorOfTarget"])
+
+    def test_remediation_packet_requires_stale_claim_proof_not_gone_upstream_only(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/stale-claim-packet")
+        start_work_block(repo, work_block_id="wb-claim", actor="local-test", path_claims=["claimed.txt"])
+
+        packet = remediation_packet_template(repo, load_closeout_config(repo), reason="stale_claim_remediation")
+        policy = load_closeout_config(repo)["remediationFreeze"]
+
+        self.assertEqual(packet["staleClaims"]["claimed.txt"], "wb-claim")
+        self.assertTrue(policy["requireCoordinatorLock"])
+        self.assertTrue(policy["requireHookGuardProof"])
+        self.assertTrue(policy["requireRemoteAdvertisedPins"])
+        self.assertIn("processQuiescence", packet)
+        self.assertIn("hookGuardProof", packet)
+
+    def test_remediation_preservation_requires_exact_allowlist_and_ref_or_bundle_backing(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/preservation-packet")
+        (repo / "dirty.bin").write_bytes(b"\x00dirty bytes\n")
+
+        packet = remediation_packet_template(
+            repo,
+            load_closeout_config(repo),
+            reason="dirty_cluster_preservation",
+            action_list=[{"actionId": "preserve_dirty_cluster", "paths": ["dirty.bin"]}],
+        )
+        policy = load_closeout_config(repo)["remediationFreeze"]
+        dirty = {item["path"]: item for item in packet["dirtyPaths"]}
+
+        self.assertTrue(policy["requireExactAllowlist"])
+        self.assertTrue(policy["requireRecoveryBundle"])
+        self.assertIn("dirty.bin", dirty)
+        self.assertIsNotNone(dirty["dirty.bin"]["byteSha256"])
+        self.assertIsNotNone(dirty["dirty.bin"]["gitObjectId"])
+        self.assertIn("remoteAdvertisedTargetHead", packet["pinnedRefs"])
+        self.assertEqual(packet["actionList"][0]["paths"], ["dirty.bin"])
+
+    def test_remediation_freeze_removal_requires_coordinator_lock_quorum_and_revalidation(self) -> None:
+        repo = self.init_repo(remote=False)
+        config = load_closeout_config(repo)
+        packet = remediation_packet_template(repo, config, reason="remove_remediation_freeze")
+
+        self.assertTrue(config["remediationFreeze"]["requireCoordinatorLock"])
+        self.assertIn("remove_remediation_freeze", config["reviewQuorum"]["highImpactActions"])
+        self.assertIn("remediation_freeze_removal", config["autoQuorum"]["autonomousActionClasses"])
+        self.assertEqual(packet["quorum"]["requiredReviewerScore"], 10)
+        self.assertEqual(packet["quorum"]["requiredReviewers"], ["codex-self", "stranger-reviewer-1", "stranger-reviewer-2"])
+        self.assertIn("remediationPacketHash", packet["quorum"]["tupleFields"])
+
+    def test_remediation_hard_clean_blocks_remaining_freeze_marker(self) -> None:
+        repo = self.init_repo(remote=False)
+        marker = repo / ".claude-state" / "closeout-remediation.freeze"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}\n", encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, load_closeout_config(repo), work_block_id=None)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("remediation_freeze_active", [item["kind"] for item in result["blockers"]])
 
     def test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum(self) -> None:
         repo = self.init_repo(remote=False)
@@ -1189,7 +1463,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         git(repo, "checkout", "master")
         git(repo, "merge", "--no-ff", "codex/merged", "-m", "merge codex merged")
         result = repo_sweep(repo, apply=True)
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "review_quorum_blocked")
         self.assertEqual(git(repo, "rev-parse", "--verify", "codex/merged").returncode, 0)
         quorum_result = result["quorumResults"][0]
         self.assertFalse(quorum_result["autoGenerated"])
