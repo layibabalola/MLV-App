@@ -1,19 +1,22 @@
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Set
 
 from compact import process_runtime_identity_status, reap_stale_server_pids
+from core.processes import is_process_alive
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
-from core.storage import append_jsonl, read_json, write_json
+from core.storage import append_jsonl, atomic_replace, file_lock, read_json, write_json
 
 
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
@@ -40,6 +43,7 @@ MCP_SESSION_REPLAY_SCHEMA_VERSION = 1
 SERVER_WRAPPER_FILENAME = "server_wrapper.py"
 SERVER_WRAPPER_SELF_RESTART_EXIT_CODE = 77
 SERVER_WRAPPER_SELF_RESTART_REASON = "server_wrapper_code_changed_during_wrapper_session"
+HOST_SLOT_SCHEMA_VERSION = 1
 
 
 def _int_env(name: str, default: int) -> int:
@@ -133,7 +137,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 _BRIDGE_LAUNCHER_SCRIPT_NAMES = {SERVER_WRAPPER_FILENAME, "server_wrapper_trampoline.py"}
-_PYTHON_LAUNCHER_PROCESS_NAMES = {"py", "py.exe"}
+_BRIDGE_LAUNCHER_SCRIPT_PATHS = {
+    str(Path(__file__).with_name(script_name)).casefold().replace("/", "\\")
+    for script_name in _BRIDGE_LAUNCHER_SCRIPT_NAMES
+}
 
 
 def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
@@ -145,7 +152,7 @@ def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
             "-Command",
             (
                 "Get-CimInstance Win32_Process | "
-                "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
                 "ConvertTo-Json -Compress"
             ),
         ]
@@ -176,6 +183,8 @@ def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
                     "parent_pid": int(row.get("ParentProcessId") or 0),
                     "name": row.get("Name") or "",
                     "command_line": row.get("CommandLine") or "",
+                    "executable_path": row.get("ExecutablePath") or "",
+                    "creation_date": str(row.get("CreationDate") or ""),
                 }
             return result
         except Exception:
@@ -208,33 +217,142 @@ def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
             "parent_pid": parent_pid,
             "name": parts[2],
             "command_line": parts[3] if len(parts) > 3 else parts[2],
+            "executable_path": "",
+            "creation_date": "",
         }
     return result
 
 
 def _is_bridge_launcher_process(process: Dict[str, Any]) -> bool:
-    name = str(process.get("name") or "").lower()
-    command_line = str(process.get("command_line") or "").lower()
-    if name in _PYTHON_LAUNCHER_PROCESS_NAMES:
-        return True
-    return any(script_name.lower() in command_line for script_name in _BRIDGE_LAUNCHER_SCRIPT_NAMES)
+    command_line = str(process.get("command_line") or "").casefold().replace("/", "\\")
+    return any(script_path in command_line for script_path in _BRIDGE_LAUNCHER_SCRIPT_PATHS)
+
+
+def _short_hash(value: object) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.casefold().encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _host_identity_from_process(
+    process: Dict[str, Any],
+    *,
+    skipped: List[int],
+    resolution: str,
+) -> Dict[str, Any]:
+    pid = int(process.get("pid") or 0)
+    creation_date = str(process.get("creation_date") or "")
+    executable_path = str(process.get("executable_path") or "")
+    command_line = str(process.get("command_line") or "")
+    key_parts = ["pid:%s" % pid]
+    creation_hash = _short_hash(creation_date)
+    executable_hash = _short_hash(executable_path)
+    command_hash = _short_hash(command_line)
+    if creation_hash:
+        key_parts.append("start:%s" % creation_hash)
+    if executable_hash:
+        key_parts.append("exe:%s" % executable_hash)
+    if command_hash and (creation_hash or executable_hash):
+        key_parts.append("cmd:%s" % command_hash)
+    return {
+        "host_pid": pid,
+        "host_key": "|".join(key_parts),
+        "host_process_name": process.get("name"),
+        "host_command_line": command_line or None,
+        "host_executable_path": executable_path or None,
+        "host_creation_date": creation_date or None,
+        "host_command_hash": command_hash,
+        "host_resolution": resolution,
+        "bridge_launcher_pids": skipped,
+    }
+
+
+def _wrapper_identity_for_pid(
+    pid: int,
+    *,
+    process_table: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    table = process_table if process_table is not None else _process_table_from_system()
+    process = table.get(int(pid)) or {}
+    command_line = str(process.get("command_line") or "")
+    executable_path = str(process.get("executable_path") or "")
+    creation_date = str(process.get("creation_date") or "")
+    return {
+        "wrapper_pid": int(pid),
+        "wrapper_process_name": process.get("name"),
+        "wrapper_creation_date": creation_date or None,
+        "wrapper_executable_path": executable_path or None,
+        "wrapper_command_hash": _short_hash(command_line),
+    }
+
+
+def _host_identity_from_env(*, skipped: List[int]) -> Optional[Dict[str, Any]]:
+    host_pid = _int_or_none(
+        os.environ.get("AGENT_BRIDGE_MCP_HOST_PID")
+        or os.environ.get("AGENT_BRIDGE_TRAMPOLINE_PARENT_PID")
+        or os.environ.get("AGENT_BRIDGE_HOST_PID")
+    )
+    if host_pid is None:
+        return None
+    host_process_name = os.environ.get("AGENT_BRIDGE_MCP_HOST_PROCESS_NAME") or os.environ.get(
+        "AGENT_BRIDGE_HOST_PROCESS_NAME"
+    )
+    host_creation_date = os.environ.get("AGENT_BRIDGE_MCP_HOST_CREATION_DATE") or os.environ.get(
+        "AGENT_BRIDGE_HOST_CREATION_DATE"
+    )
+    host_executable_path = os.environ.get("AGENT_BRIDGE_MCP_HOST_EXECUTABLE_PATH") or os.environ.get(
+        "AGENT_BRIDGE_HOST_EXECUTABLE_PATH"
+    )
+    host_command_hash = os.environ.get("AGENT_BRIDGE_MCP_HOST_COMMAND_HASH") or os.environ.get(
+        "AGENT_BRIDGE_HOST_COMMAND_HASH"
+    )
+    key_parts = ["pid:%s" % host_pid]
+    creation_hash = _short_hash(host_creation_date)
+    executable_hash = _short_hash(host_executable_path)
+    if creation_hash:
+        key_parts.append("start:%s" % creation_hash)
+    if executable_hash:
+        key_parts.append("exe:%s" % executable_hash)
+    if host_command_hash and (creation_hash or executable_hash):
+        key_parts.append("cmd:%s" % host_command_hash)
+    return {
+        "host_pid": host_pid,
+        "host_key": "|".join(key_parts),
+        "host_process_name": host_process_name,
+        "host_command_line": None,
+        "host_executable_path": host_executable_path or None,
+        "host_creation_date": host_creation_date or None,
+        "host_command_hash": host_command_hash,
+        "host_resolution": "environment",
+        "bridge_launcher_pids": skipped,
+    }
 
 
 def _mcp_host_identity_for_pid(
     pid: int,
     *,
     process_table: Optional[Dict[int, Dict[str, Any]]] = None,
+    allow_env_fallback: bool = True,
 ) -> Dict[str, Any]:
     """Resolve the non-bridge process that owns a wrapper process."""
     table = process_table if process_table is not None else _process_table_from_system()
     current = table.get(int(pid))
     cursor = int((current or {}).get("parent_pid") or 0)
     skipped: List[int] = [int(pid)]
+    if current is None and allow_env_fallback:
+        env_host = _host_identity_from_env(skipped=skipped)
+        if env_host is not None:
+            return env_host
     for _ in range(12):
         if cursor <= 0:
             break
         process = table.get(cursor)
         if not process:
+            if allow_env_fallback:
+                env_host = _host_identity_from_env(skipped=skipped)
+                if env_host is not None:
+                    return env_host
             return {
                 "host_pid": cursor,
                 "host_key": "pid:%s" % cursor,
@@ -243,18 +361,22 @@ def _mcp_host_identity_for_pid(
                 "host_resolution": "missing_process_table_entry",
                 "bridge_launcher_pids": skipped,
             }
+        if allow_env_fallback and not str(process.get("command_line") or "").strip():
+            env_host = _host_identity_from_env(skipped=skipped)
+            if env_host is not None and _int_or_none(env_host.get("host_pid")) == _int_or_none(
+                process.get("parent_pid")
+            ):
+                skipped.append(cursor)
+                return env_host
         if _is_bridge_launcher_process(process):
             skipped.append(cursor)
             cursor = int(process.get("parent_pid") or 0)
             continue
-        return {
-            "host_pid": cursor,
-            "host_key": "pid:%s" % cursor,
-            "host_process_name": process.get("name"),
-            "host_command_line": process.get("command_line"),
-            "host_resolution": "process_tree",
-            "bridge_launcher_pids": skipped,
-        }
+        return _host_identity_from_process(process, skipped=skipped, resolution="process_tree")
+    if allow_env_fallback:
+        env_host = _host_identity_from_env(skipped=skipped)
+        if env_host is not None:
+            return env_host
     return {
         "host_pid": None,
         "host_key": "unknown:%s" % int(pid),
@@ -297,15 +419,344 @@ def _live_mcp_server_markers(
             "timestamp": (runtime or {}).get("timestamp"),
             "path": str(marker),
             "runtime_path": str(runtime_path),
+            "recorded_host_key": (runtime or {}).get("host_key"),
             "host_key": (runtime or {}).get("host_key"),
             "host_pid": (runtime or {}).get("host_pid"),
             "host_process_name": (runtime or {}).get("host_process_name"),
+            "host_creation_date": (runtime or {}).get("host_creation_date"),
+            "host_executable_path": (runtime or {}).get("host_executable_path"),
+            "host_command_hash": (runtime or {}).get("host_command_hash"),
         }
-        if not entry["host_key"] and entry["parent_pid"]:
-            host = _mcp_host_identity_for_pid(int(entry["parent_pid"]), process_table=process_table)
-            entry.update({k: v for k, v in host.items() if k.startswith("host_")})
+        if entry["parent_pid"]:
+            host = _mcp_host_identity_for_pid(
+                int(entry["parent_pid"]),
+                process_table=process_table,
+                allow_env_fallback=False,
+            )
+            if host.get("host_resolution") == "process_tree":
+                entry.update({k: v for k, v in host.items() if k.startswith("host_")})
         live.append(entry)
     return live
+
+
+def _host_slot_path(state_dir: Path, host_key: str) -> Path:
+    digest = hashlib.sha256(host_key.encode("utf-8")).hexdigest()[:32]
+    return Path(state_dir) / "server-pids" / "host-slots" / ("host-%s.json" % digest)
+
+
+def _read_json_unlocked(path: Path) -> Dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json_unlocked(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name("%s.%s.%s.tmp" % (path.name, os.getpid(), uuid.uuid4().hex))
+    try:
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        atomic_replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _int_or_none(value: object) -> Optional[int]:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _host_pid_from_host_key(host_key: str) -> Optional[int]:
+    prefix = str(host_key or "").split("|", 1)[0]
+    if not prefix.startswith("pid:"):
+        return None
+    return _int_or_none(prefix[4:])
+
+
+def _host_slot_key_for_identity(identity: Dict[str, Any]) -> str:
+    host_pid = _int_or_none(identity.get("host_pid"))
+    if host_pid is None:
+        host_pid = _host_pid_from_host_key(str(identity.get("host_key") or ""))
+    if host_pid is not None:
+        return "host-pid:%s" % host_pid
+    host_key = str(identity.get("host_key") or "")
+    return "host-key:%s" % host_key if host_key else ""
+
+
+def _host_slot_lease_is_live(
+    lease: Dict[str, Any],
+    *,
+    process_table: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> bool:
+    wrapper_pid = _int_or_none(lease.get("wrapper_pid"))
+    if wrapper_pid is None or not is_process_alive(wrapper_pid):
+        return False
+    expected_wrapper_creation_date = str(lease.get("wrapper_creation_date") or "")
+    if expected_wrapper_creation_date and process_table:
+        wrapper_process = process_table.get(wrapper_pid)
+        if wrapper_process and str(wrapper_process.get("creation_date") or "") != expected_wrapper_creation_date:
+            return False
+    if process_table:
+        wrapper_process = process_table.get(wrapper_pid)
+        if wrapper_process:
+            expected_wrapper_executable_path = str(lease.get("wrapper_executable_path") or "")
+            current_wrapper_executable_path = str(wrapper_process.get("executable_path") or "")
+            if (
+                expected_wrapper_executable_path
+                and current_wrapper_executable_path
+                and current_wrapper_executable_path.casefold() != expected_wrapper_executable_path.casefold()
+            ):
+                return False
+            expected_wrapper_command_hash = str(lease.get("wrapper_command_hash") or "")
+            current_wrapper_command_hash = _short_hash(wrapper_process.get("command_line"))
+            if (
+                expected_wrapper_command_hash
+                and current_wrapper_command_hash
+                and current_wrapper_command_hash != expected_wrapper_command_hash
+            ):
+                return False
+    host_pid = _int_or_none(lease.get("host_pid"))
+    if host_pid is not None and not is_process_alive(host_pid):
+        return False
+    expected_creation_date = str(lease.get("host_creation_date") or "")
+    if host_pid is not None and expected_creation_date and process_table:
+        current = process_table.get(host_pid)
+        if current and str(current.get("creation_date") or "") != expected_creation_date:
+            return False
+    if host_pid is not None and process_table:
+        current = process_table.get(host_pid)
+        if current:
+            expected_executable_path = str(lease.get("host_executable_path") or "")
+            current_executable_path = str(current.get("executable_path") or "")
+            if (
+                expected_executable_path
+                and current_executable_path
+                and current_executable_path.casefold() != expected_executable_path.casefold()
+            ):
+                return False
+            expected_command_hash = str(lease.get("host_command_hash") or "")
+            current_command_hash = _short_hash(current.get("command_line"))
+            if expected_command_hash and current_command_hash and current_command_hash != expected_command_hash:
+                return False
+    return True
+
+
+def _audit_wrapper_guard_event(*, state_dir: Path, command: Sequence[str], action: str, **extra: object) -> None:
+    try:
+        event = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server_wrapper", command=list(command))
+        event.update({"action": action, **extra})
+        append_jsonl(Path(state_dir) / "messages.jsonl", event)
+    except Exception:
+        pass
+
+
+def acquire_mcp_host_slot(
+    *,
+    state_dir: Path,
+    host_identity: Dict[str, Any],
+    audit_command: Sequence[str],
+    current_pid: Optional[int] = None,
+    process_table: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Acquire the pre-launch slot for one MCP host before server.py markers exist."""
+    host_key = str(host_identity.get("host_key") or "")
+    host_slot_key = _host_slot_key_for_identity(host_identity)
+    if not host_slot_key:
+        return {"accepted": True, "host_slot_disabled": True}
+
+    wrapper_pid = int(current_pid if current_pid is not None else os.getpid())
+    wrapper_identity = _wrapper_identity_for_pid(wrapper_pid, process_table=process_table)
+    generation = uuid.uuid4().hex
+    slot_path = _host_slot_path(Path(state_dir), host_slot_key)
+    host_pid = _int_or_none(host_identity.get("host_pid"))
+    host_process_name = host_identity.get("host_process_name")
+    host_creation_date = host_identity.get("host_creation_date")
+    host_executable_path = host_identity.get("host_executable_path")
+    host_command_hash = host_identity.get("host_command_hash")
+    stale_slot_replaced = False
+    stale_lease: Dict[str, Any] = {}
+
+    with file_lock(slot_path):
+        existing = _read_json_unlocked(slot_path)
+        if existing and _host_slot_lease_is_live(existing, process_table=process_table):
+            result = {
+                "accepted": False,
+                "host_slot_path": str(slot_path),
+                "host_slot_key": host_slot_key,
+                "host_slot_holder_wrapper_pid": existing.get("wrapper_pid"),
+                "host_slot_holder_host_pid": existing.get("host_pid"),
+                "host_slot_generation": existing.get("generation"),
+                "host_key": host_key,
+                "host_pid": host_pid,
+                "host_process_name": host_process_name,
+                "host_creation_date": host_creation_date,
+                "host_executable_path": host_executable_path,
+                "host_command_hash": host_command_hash,
+                "wrapper_creation_date": existing.get("wrapper_creation_date"),
+                "wrapper_command_hash": existing.get("wrapper_command_hash"),
+            }
+            _audit_wrapper_guard_event(
+                state_dir=Path(state_dir),
+                command=audit_command,
+                action="mcp_server_wrapper_launch_rejected_duplicate_host_slot",
+                **result,
+            )
+            return result
+
+        if existing:
+            stale_slot_replaced = True
+            stale_lease = {
+                "wrapper_pid": existing.get("wrapper_pid"),
+                "host_pid": existing.get("host_pid"),
+                "host_creation_date": existing.get("host_creation_date"),
+                "wrapper_creation_date": existing.get("wrapper_creation_date"),
+                "wrapper_command_hash": existing.get("wrapper_command_hash"),
+                "generation": existing.get("generation"),
+            }
+
+        acquired_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        lease = {
+            "schema_version": HOST_SLOT_SCHEMA_VERSION,
+            "role": "mcp_server_wrapper_host_slot",
+            "generation": generation,
+            "acquired_at": acquired_at,
+            "state_dir": str(state_dir),
+            "host_slot_key": host_slot_key,
+            "host_key": host_key,
+            "host_pid": host_pid,
+            "host_process_name": host_process_name,
+            "host_creation_date": host_creation_date,
+            "host_executable_path": host_executable_path,
+            "host_command_hash": host_command_hash,
+            "wrapper_pid": wrapper_pid,
+            "wrapper_process_name": wrapper_identity.get("wrapper_process_name"),
+            "wrapper_creation_date": wrapper_identity.get("wrapper_creation_date"),
+            "wrapper_executable_path": wrapper_identity.get("wrapper_executable_path"),
+            "wrapper_command_hash": wrapper_identity.get("wrapper_command_hash"),
+        }
+        _write_json_unlocked(slot_path, lease)
+
+    if stale_slot_replaced:
+        _audit_wrapper_guard_event(
+            state_dir=Path(state_dir),
+            command=audit_command,
+            action="mcp_server_wrapper_stale_host_slot_replaced",
+            accepted=True,
+            host_key=host_key,
+            host_pid=host_pid,
+            host_process_name=host_process_name,
+            host_creation_date=host_creation_date,
+            host_executable_path=host_executable_path,
+            host_command_hash=host_command_hash,
+            host_slot_path=str(slot_path),
+            host_slot_key=host_slot_key,
+            stale_lease=stale_lease,
+            replacement_wrapper_pid=wrapper_pid,
+            replacement_wrapper_creation_date=wrapper_identity.get("wrapper_creation_date"),
+            replacement_wrapper_command_hash=wrapper_identity.get("wrapper_command_hash"),
+        )
+
+    return {
+        "accepted": True,
+        "host_slot_path": str(slot_path),
+        "host_slot_key": host_slot_key,
+        "host_slot_generation": generation,
+        "host_key": host_key,
+        "host_pid": host_pid,
+        "host_process_name": host_process_name,
+        "host_creation_date": host_creation_date,
+        "host_executable_path": host_executable_path,
+        "host_command_hash": host_command_hash,
+        "wrapper_creation_date": wrapper_identity.get("wrapper_creation_date"),
+        "wrapper_executable_path": wrapper_identity.get("wrapper_executable_path"),
+        "wrapper_command_hash": wrapper_identity.get("wrapper_command_hash"),
+        "stale_host_slot_replaced": stale_slot_replaced,
+    }
+
+
+def release_mcp_host_slot(
+    *,
+    state_dir: Path,
+    host_key: Optional[str],
+    generation: Optional[str],
+    wrapper_pid: Optional[int] = None,
+    host_pid: Optional[int] = None,
+    host_slot_key: Optional[str] = None,
+) -> bool:
+    resolved_slot_key = str(host_slot_key or "") or _host_slot_key_for_identity(
+        {"host_key": host_key, "host_pid": host_pid}
+    )
+    if not resolved_slot_key or not generation:
+        return False
+    slot_path = _host_slot_path(Path(state_dir), resolved_slot_key)
+    expected_wrapper_pid = int(wrapper_pid if wrapper_pid is not None else os.getpid())
+    with file_lock(slot_path):
+        lease = _read_json_unlocked(slot_path)
+        if (
+            str(lease.get("generation") or "") != str(generation)
+            or int(lease.get("wrapper_pid") or 0) != expected_wrapper_pid
+        ):
+            return False
+        try:
+            slot_path.unlink(missing_ok=True)
+        except OSError:
+            return False
+    return True
+
+
+def _host_key_aliases(identity: Dict[str, Any]) -> Set[str]:
+    aliases: Set[str] = set()
+    for key_name in ("host_key", "recorded_host_key"):
+        value = identity.get(key_name)
+        if value:
+            aliases.add(str(value))
+    return aliases
+
+
+def _host_pid_from_identity(identity: Dict[str, Any]) -> Optional[int]:
+    host_pid = _int_or_none(identity.get("host_pid"))
+    if host_pid is not None:
+        return host_pid
+    for key in _host_key_aliases(identity):
+        host_pid = _host_pid_from_host_key(key)
+        if host_pid is not None:
+            return host_pid
+    return None
+
+
+def _legacy_pid_key(identity: Dict[str, Any]) -> Optional[str]:
+    host_pid = _host_pid_from_identity(identity)
+    if host_pid is None:
+        return None
+    expected = "pid:%s" % host_pid
+    keys = _host_key_aliases(identity)
+    return expected if expected in keys else None
+
+
+def _same_host_identity(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    if _host_key_aliases(left) & _host_key_aliases(right):
+        return True
+    left_pid = _host_pid_from_identity(left)
+    right_pid = _host_pid_from_identity(right)
+    if left_pid is None or right_pid is None or left_pid != right_pid:
+        return False
+    if _legacy_pid_key(left) or _legacy_pid_key(right):
+        return True
+    left_creation = str(left.get("host_creation_date") or "")
+    right_creation = str(right.get("host_creation_date") or "")
+    return bool(left_creation and right_creation and left_creation == right_creation)
 
 
 def enforce_live_server_process_limit(
@@ -317,12 +768,12 @@ def enforce_live_server_process_limit(
     current_pid: Optional[int] = None,
     process_table: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Bound accidental MCP process fan-out while preserving normal multi-client use.
+    """Bound accidental Agent Bridge MCP fan-out while preserving normal multi-client use.
 
-    MCP stdio is intentionally per-client, so this is not a singleton lock. It is
-    a host-scoped duplicate guard: once one live server.py child already exists
-    for the same MCP host process and state dir, the newest wrapper exits before
-    spawning another child process.
+    MCP stdio is intentionally per-client, so this is not a global singleton. It
+    is a host-scoped duplicate guard: once one live server.py child or pre-launch
+    wrapper slot already exists for the same MCP host process and state dir, the
+    newest wrapper exits before spawning another child process.
     """
     max_live = int(max_live_server_processes)
     max_per_host = int(max_live_server_processes_per_host)
@@ -346,7 +797,7 @@ def enforce_live_server_process_limit(
     wrapper_pid = int(current_pid if current_pid is not None else os.getpid())
     current_host = _mcp_host_identity_for_pid(wrapper_pid, process_table=table)
     live = _live_mcp_server_markers(Path(state_dir), process_table=table)
-    matching_host = [entry for entry in live if entry.get("host_key") == current_host.get("host_key")]
+    matching_host = [entry for entry in live if _same_host_identity(entry, current_host)]
     result: Dict[str, Any] = {
         "accepted": True,
         "live_server_count": len(live),
@@ -356,6 +807,9 @@ def enforce_live_server_process_limit(
         "host_key": current_host.get("host_key"),
         "host_pid": current_host.get("host_pid"),
         "host_process_name": current_host.get("host_process_name"),
+        "host_creation_date": current_host.get("host_creation_date"),
+        "host_executable_path": current_host.get("host_executable_path"),
+        "host_command_hash": current_host.get("host_command_hash"),
         "matching_host_live_server_count": len(matching_host),
         "matching_host_live_server_pids": [entry["pid"] for entry in matching_host],
     }
@@ -367,28 +821,37 @@ def enforce_live_server_process_limit(
         result["accepted"] = False
         reject_action = "mcp_server_wrapper_launch_rejected_live_server_limit"
     if result["accepted"]:
+        if max_per_host > 0:
+            slot = acquire_mcp_host_slot(
+                state_dir=Path(state_dir),
+                host_identity=current_host,
+                audit_command=audit_command,
+                current_pid=wrapper_pid,
+                process_table=table,
+            )
+            result.update(slot)
+            if not slot.get("accepted"):
+                result["accepted"] = False
         return result
 
-    try:
-        event = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server_wrapper", command=list(audit_command))
-        event.update(
-            {
-                "action": reject_action,
-                "accepted": False,
-                "live_server_count": len(live),
-                "max_live_server_processes": max_live,
-                "max_live_server_processes_per_host": max_per_host,
-                "live_server_pids": [entry["pid"] for entry in live],
-                "host_key": current_host.get("host_key"),
-                "host_pid": current_host.get("host_pid"),
-                "host_process_name": current_host.get("host_process_name"),
-                "matching_host_live_server_count": len(matching_host),
-                "matching_host_live_server_pids": [entry["pid"] for entry in matching_host],
-            }
-        )
-        append_jsonl(Path(state_dir) / "messages.jsonl", event)
-    except Exception:
-        pass
+    _audit_wrapper_guard_event(
+        state_dir=Path(state_dir),
+        command=audit_command,
+        action=str(reject_action),
+        accepted=False,
+        live_server_count=len(live),
+        max_live_server_processes=max_live,
+        max_live_server_processes_per_host=max_per_host,
+        live_server_pids=[entry["pid"] for entry in live],
+        host_key=current_host.get("host_key"),
+        host_pid=current_host.get("host_pid"),
+        host_process_name=current_host.get("host_process_name"),
+        host_creation_date=current_host.get("host_creation_date"),
+        host_executable_path=current_host.get("host_executable_path"),
+        host_command_hash=current_host.get("host_command_hash"),
+        matching_host_live_server_count=len(matching_host),
+        matching_host_live_server_pids=[entry["pid"] for entry in matching_host],
+    )
     return result
 
 
@@ -499,6 +962,7 @@ class ServerSupervisor:
         self.stdout_stream = stdout_stream or _binary_writer(sys.stdout)
         self.stderr_target = stderr_target
         self.host_identity = dict(host_identity or {})
+        self.wrapper_identity = _wrapper_identity_for_pid(os.getpid())
         self.now_fn = now_fn
 
         self._state_lock = threading.Lock()
@@ -525,6 +989,7 @@ class ServerSupervisor:
         self._last_initialize_message: Optional[dict] = None
         self._last_initialized_message: Optional[dict] = None
         self._last_stale_marker_reap = 0.0
+        self._host_exit_reported = False
         # In-flight JSON-RPC request IDs — cleared when the corresponding response
         # is observed on stdout. Restart is deferred until this set drains (or the
         # graceful-restart timeout expires) to avoid cutting off active requests.
@@ -620,6 +1085,9 @@ class ServerSupervisor:
                     self._report_error("agent-bridge server wrapper worker failed: %s" % self._thread_error)
                     return 1
 
+                if self._owning_host_exited():
+                    return 0
+
                 if self._restart_is_due():
                     if not self._restart_child():
                         return 1
@@ -656,7 +1124,22 @@ class ServerSupervisor:
     def _spawn_child(self) -> subprocess.Popen[bytes]:
         child_env = os.environ.copy()
         child_env["AGENT_BRIDGE_WRAPPER_PID"] = str(os.getpid())
-        for key in ("host_key", "host_pid", "host_process_name"):
+        for key in (
+            "wrapper_creation_date",
+            "wrapper_executable_path",
+            "wrapper_command_hash",
+        ):
+            value = self.wrapper_identity.get(key)
+            if value is not None:
+                child_env["AGENT_BRIDGE_%s" % key.upper()] = str(value)
+        for key in (
+            "host_key",
+            "host_pid",
+            "host_process_name",
+            "host_creation_date",
+            "host_executable_path",
+            "host_command_hash",
+        ):
             value = self.host_identity.get(key)
             if value is not None:
                 child_env["AGENT_BRIDGE_%s" % key.upper()] = str(value)
@@ -688,6 +1171,36 @@ class ServerSupervisor:
         stdout_thread.start()
         return child
 
+    def _owning_host_exited(self) -> bool:
+        host_pid = _int_or_none(self.host_identity.get("host_pid"))
+        if host_pid is None or host_pid == os.getpid():
+            return False
+        expected_creation_date = str(self.host_identity.get("host_creation_date") or "")
+        reason = "host_pid_not_running"
+        if is_process_alive(host_pid):
+            if expected_creation_date:
+                current = _process_table_from_system().get(host_pid)
+                if current and str(current.get("creation_date") or "") != expected_creation_date:
+                    reason = "host_pid_reused"
+                else:
+                    return False
+            else:
+                return False
+        if reason == "host_pid_not_running" and is_process_alive(host_pid):
+            return False
+        if not self._host_exit_reported:
+            self._host_exit_reported = True
+            self._append_audit_event(
+                action="mcp_server_wrapper_host_exited",
+                host_key=self.host_identity.get("host_key"),
+                host_pid=host_pid,
+                host_process_name=self.host_identity.get("host_process_name"),
+                host_creation_date=self.host_identity.get("host_creation_date"),
+                reason=reason,
+            )
+            self._report_error("agent-bridge server wrapper exiting because MCP host pid %s is gone" % host_pid)
+        return True
+
     def _read_json_file(self, path: Path) -> Optional[dict]:
         try:
             if not path.exists():
@@ -697,20 +1210,7 @@ class ServerSupervisor:
             return None
 
     def _write_json_file(self, path: Path, payload: dict) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        # On Windows, replace() fails with WinError 32 if another process briefly holds
-        # the destination open. Retry a few times before propagating.
-        for attempt in range(4):
-            try:
-                tmp.replace(path)
-                return
-            except OSError:
-                if attempt < 3:
-                    time.sleep(0.05)
-                else:
-                    raise
+        write_json(path, payload)
 
     def _load_mcp_session_replay(self) -> None:
         raw = self._read_json_file(self._session_replay_path)
@@ -1473,12 +1973,17 @@ def main(argv: Optional[List[str]] = None) -> None:
         audit_command=sys.argv,
     )
     if not guard.get("accepted"):
-        reason = (
-            "same MCP host already has %s live server.py process(es)"
-            % guard.get("matching_host_live_server_count")
-            if guard.get("matching_host_live_server_count")
-            else "%s live server.py process(es) already exist" % guard.get("live_server_count")
-        )
+        if guard.get("host_slot_holder_wrapper_pid"):
+            reason = "same MCP host already has wrapper pid %s in its pre-launch slot" % (
+                guard.get("host_slot_holder_wrapper_pid"),
+            )
+        else:
+            reason = (
+                "same MCP host already has %s live server.py process(es)"
+                % guard.get("matching_host_live_server_count")
+                if guard.get("matching_host_live_server_count")
+                else "%s live server.py process(es) already exist" % guard.get("live_server_count")
+            )
         print(
             "agent-bridge server wrapper refused to launch another child: "
             "%s for %s "
@@ -1500,16 +2005,29 @@ def main(argv: Optional[List[str]] = None) -> None:
         print("agent-bridge server wrapper audit failed: %s" % exc, file=sys.stderr, flush=True)
 
     watch_code_dir = expand_path_arg(args.watch_code_dir) if args.watch_code_dir else server_path.parent
-    exit_code = run_supervisor(
-        command=command,
-        state_dir=paths.state_dir,
-        watch_paths=_watch_bridge_code_files(Path(watch_code_dir)),
-        host_identity={
-            "host_key": guard.get("host_key"),
-            "host_pid": guard.get("host_pid"),
-            "host_process_name": guard.get("host_process_name"),
-        },
-    )
+    try:
+        exit_code = run_supervisor(
+            command=command,
+            state_dir=paths.state_dir,
+            watch_paths=_watch_bridge_code_files(Path(watch_code_dir)),
+            host_identity={
+                "host_key": guard.get("host_key"),
+                "host_pid": guard.get("host_pid"),
+                "host_process_name": guard.get("host_process_name"),
+                "host_creation_date": guard.get("host_creation_date"),
+                "host_executable_path": guard.get("host_executable_path"),
+                "host_command_hash": guard.get("host_command_hash"),
+            },
+        )
+    finally:
+        release_mcp_host_slot(
+            state_dir=paths.state_dir,
+            host_key=str(guard.get("host_key") or ""),
+            generation=str(guard.get("host_slot_generation") or ""),
+            wrapper_pid=os.getpid(),
+            host_pid=_int_or_none(guard.get("host_pid")),
+            host_slot_key=str(guard.get("host_slot_key") or ""),
+        )
     raise SystemExit(exit_code)
 
 

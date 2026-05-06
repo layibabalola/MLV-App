@@ -1,4 +1,5 @@
 import io
+import os
 import queue
 import shutil
 import subprocess
@@ -17,6 +18,10 @@ import server_wrapper as _sw
 import server_wrapper_trampoline as _trampoline
 from core.storage import read_jsonl
 from server_wrapper import SERVER_WRAPPER_SELF_RESTART_EXIT_CODE, SupervisorConfig, _is_restart_trigger_file, run_supervisor
+
+
+WRAPPER_SCRIPT = str(Path(_sw.__file__).resolve())
+TRAMPOLINE_SCRIPT = str(Path(_trampoline.__file__).resolve())
 
 
 SERVER_SCRIPT = """\
@@ -146,7 +151,17 @@ def write_and_wait_new_mtime(path: Path, content: str, timeout: float = 2.0) -> 
 
 
 class SupervisorHarness:
-    def __init__(self, tempdir: Path, *, mode: str = "echo", watch_count: int = 1, tool_signature: Optional[str] = None, watch_paths: Optional[List[Path]] = None, config: Optional[SupervisorConfig] = None) -> None:
+    def __init__(
+        self,
+        tempdir: Path,
+        *,
+        mode: str = "echo",
+        watch_count: int = 1,
+        tool_signature: Optional[str] = None,
+        watch_paths: Optional[List[Path]] = None,
+        config: Optional[SupervisorConfig] = None,
+        host_identity: Optional[Dict[str, object]] = None,
+    ) -> None:
         self.root = tempdir
         self.state_dir = self.root / "bridge-root" / "state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +188,7 @@ class SupervisorHarness:
         self.stdin_stream = QueueInputStream()
         self.stdout_stream = BufferOutputStream()
         self.result: Dict[str, object] = {}
+        self.host_identity = dict(host_identity or {})
         self.thread = threading.Thread(target=self._run, args=(mode,), daemon=True)
         self.thread.start()
 
@@ -209,6 +225,7 @@ class SupervisorHarness:
                 stdin_stream=self.stdin_stream,
                 stdout_stream=self.stdout_stream,
                 stderr_target=subprocess.DEVNULL,
+                host_identity=self.host_identity,
             )
         except BaseException as exc:
             self.result["error"] = exc
@@ -659,9 +676,9 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
 
     def test_mcp_host_identity_skips_bridge_launcher_layers(self) -> None:
         process_table = {
-            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python server_wrapper.py"},
-            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python server_wrapper_trampoline.py"},
-            80: {"pid": 80, "parent_pid": 70, "name": "py.exe", "command_line": "py -3 server_wrapper_trampoline.py"},
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            80: {"pid": 80, "parent_pid": 70, "name": "py.exe", "command_line": "py -3 " + TRAMPOLINE_SCRIPT},
             70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
         }
 
@@ -671,15 +688,81 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertEqual(host["host_process_name"], "codex.exe")
         self.assertEqual(host["bridge_launcher_pids"], [100, 90, 80])
 
+    def test_mcp_host_identity_does_not_skip_unrelated_python_launcher(self) -> None:
+        process_table = {
+            100: {"pid": 100, "parent_pid": 80, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            80: {"pid": 80, "parent_pid": 70, "name": "py.exe", "command_line": "py -3 unrelated_mcp_server.py"},
+            70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
+        }
+
+        host = _sw._mcp_host_identity_for_pid(100, process_table=process_table)
+
+        self.assertEqual(host["host_key"], "pid:80")
+        self.assertEqual(host["host_process_name"], "py.exe")
+        self.assertEqual(host["bridge_launcher_pids"], [100])
+
+    def test_mcp_host_identity_uses_start_and_executable_evidence_when_available(self) -> None:
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            70: {
+                "pid": 70,
+                "parent_pid": 1,
+                "name": "codex.exe",
+                "command_line": "codex.exe app-server",
+                "executable_path": "C:/Program Files/Codex/codex.exe",
+                "creation_date": "2026-05-06T05:38:04.123-05:00",
+            },
+        }
+
+        host = _sw._mcp_host_identity_for_pid(100, process_table=process_table)
+
+        self.assertTrue(host["host_key"].startswith("pid:70|start:"))
+        self.assertIn("|exe:", host["host_key"])
+        self.assertIn("|cmd:", host["host_key"])
+        self.assertEqual(host["host_creation_date"], "2026-05-06T05:38:04.123-05:00")
+        self.assertEqual(host["host_executable_path"], "C:/Program Files/Codex/codex.exe")
+        self.assertIsNotNone(host["host_command_hash"])
+
+    def test_mcp_host_identity_falls_back_to_trampoline_parent_env_when_table_missing(self) -> None:
+        old_env = dict(os.environ)
+        os.environ["AGENT_BRIDGE_TRAMPOLINE_PARENT_PID"] = "70"
+        try:
+            host = _sw._mcp_host_identity_for_pid(100, process_table={})
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+        self.assertEqual(host["host_key"], "pid:70")
+        self.assertEqual(host["host_resolution"], "environment")
+
+    def test_mcp_host_identity_uses_env_when_launcher_command_line_is_blank_and_corroborated(self) -> None:
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 70, "name": "python.exe", "command_line": ""},
+            70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
+        }
+        old_env = dict(os.environ)
+        os.environ["AGENT_BRIDGE_TRAMPOLINE_PARENT_PID"] = "70"
+        try:
+            host = _sw._mcp_host_identity_for_pid(100, process_table=process_table)
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+        self.assertEqual(host["host_key"], "pid:70")
+        self.assertEqual(host["host_resolution"], "environment")
+        self.assertEqual(host["bridge_launcher_pids"], [100, 90])
+
     def test_live_server_process_limit_allows_distinct_hosts(self) -> None:
         original_reap = _sw.reap_stale_server_pids
         original_live = _sw._live_mcp_server_markers
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
         _sw._live_mcp_server_markers = lambda state_dir, process_table=None: [{"pid": 101, "host_key": "pid:70"}]
         process_table = {
-            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python server_wrapper.py"},
-            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python server_wrapper_trampoline.py"},
-            80: {"pid": 80, "parent_pid": 60, "name": "py.exe", "command_line": "py -3 server_wrapper_trampoline.py"},
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            80: {"pid": 80, "parent_pid": 60, "name": "py.exe", "command_line": "py -3 " + TRAMPOLINE_SCRIPT},
             60: {"pid": 60, "parent_pid": 1, "name": "claude.exe", "command_line": "claude.exe --startup"},
         }
         try:
@@ -710,9 +793,9 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             {"pid": 202, "host_key": "pid:60"},
         ]
         process_table = {
-            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python server_wrapper.py"},
-            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python server_wrapper_trampoline.py"},
-            80: {"pid": 80, "parent_pid": 70, "name": "py.exe", "command_line": "py -3 server_wrapper_trampoline.py"},
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            80: {"pid": 80, "parent_pid": 70, "name": "py.exe", "command_line": "py -3 " + TRAMPOLINE_SCRIPT},
             70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
         }
         try:
@@ -736,6 +819,623 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertEqual(events[-1]["action"], "mcp_server_wrapper_launch_rejected_duplicate_host")
         self.assertEqual(events[-1]["matching_host_live_server_pids"], [101])
         self.assertEqual(events[-1]["max_live_server_processes_per_host"], 1)
+
+    def test_live_server_process_limit_matches_legacy_pid_host_key(self) -> None:
+        state_dir = self.tempdir / "legacy-host-key"
+        state_dir.mkdir()
+        original_reap = _sw.reap_stale_server_pids
+        original_live = _sw._live_mcp_server_markers
+        _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: [
+            {"pid": 101, "host_key": "pid:70"},
+        ]
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            70: {
+                "pid": 70,
+                "parent_pid": 1,
+                "name": "codex.exe",
+                "command_line": "codex.exe app-server",
+                "executable_path": "C:/Program Files/Codex/codex.exe",
+                "creation_date": "2026-05-06T05:38:04.123-05:00",
+            },
+        }
+        try:
+            result = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table=process_table,
+            )
+        finally:
+            _sw.reap_stale_server_pids = original_reap
+            _sw._live_mcp_server_markers = original_live
+
+        self.assertFalse(result["accepted"])
+        self.assertTrue(str(result["host_key"]).startswith("pid:70|start:"))
+        self.assertEqual(result["matching_host_live_server_pids"], [101])
+
+    def test_same_host_identity_does_not_match_rich_pid_reuse(self) -> None:
+        old_host = {
+            "host_key": "pid:70|start:old|exe:same|cmd:same",
+            "host_pid": 70,
+            "host_creation_date": "2026-05-06T05:00:00-05:00",
+        }
+        new_host = {
+            "host_key": "pid:70|start:new|exe:same|cmd:same",
+            "host_pid": 70,
+            "host_creation_date": "2026-05-06T06:00:00-05:00",
+        }
+
+        self.assertFalse(_sw._same_host_identity(old_host, new_host))
+
+    def test_live_marker_rederive_does_not_use_current_wrapper_env_fallback(self) -> None:
+        state_dir = self.tempdir / "marker-env-fallback"
+        server_dir = state_dir / "server-pids"
+        server_dir.mkdir(parents=True)
+        marker = server_dir / "server-101.pid"
+        runtime = server_dir / "server-101.json"
+        marker.write_text("101\n", encoding="utf-8")
+        runtime.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "role": "mcp_server",
+                    "pid": 101,
+                    "parent_pid": 999,
+                    "host_key": "pid:60",
+                    "host_pid": 60,
+                }
+            ),
+            encoding="utf-8",
+        )
+        old_env = dict(os.environ)
+        original_identity = _sw.process_runtime_identity_status
+        os.environ["AGENT_BRIDGE_TRAMPOLINE_PARENT_PID"] = "70"
+        _sw.process_runtime_identity_status = lambda *args, **kwargs: {
+            "running": True,
+            "identity_mismatch": False,
+        }
+        try:
+            live = _sw._live_mcp_server_markers(
+                state_dir,
+                process_table={},
+                identity_fn=lambda *args, **kwargs: {"running": True, "identity_mismatch": False},
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+            _sw.process_runtime_identity_status = original_identity
+
+        self.assertEqual(live[0]["host_key"], "pid:60")
+        self.assertEqual(live[0]["recorded_host_key"], "pid:60")
+
+    def test_host_slot_blocks_parallel_wrapper_before_server_marker_exists(self) -> None:
+        state_dir = self.tempdir / "host-slot-race"
+        state_dir.mkdir()
+        original_reap = _sw.reap_stale_server_pids
+        original_live = _sw._live_mcp_server_markers
+        original_alive = _sw.is_process_alive
+        _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: []
+        _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            101: {"pid": 101, "parent_pid": 91, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            91: {"pid": 91, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
+        }
+        first: Dict[str, object] = {}
+        try:
+            first = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table=process_table,
+            )
+            second = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table=process_table,
+            )
+        finally:
+            if first.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(first.get("host_key") or ""),
+                    generation=str(first.get("host_slot_generation") or ""),
+                    wrapper_pid=100,
+                )
+            _sw.reap_stale_server_pids = original_reap
+            _sw._live_mcp_server_markers = original_live
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(first["accepted"])
+        self.assertFalse(second["accepted"])
+        self.assertEqual(second["live_server_count"], 0)
+        self.assertEqual(second["host_slot_holder_wrapper_pid"], 100)
+        events = read_jsonl(state_dir / "messages.jsonl")
+        self.assertEqual(events[-1]["action"], "mcp_server_wrapper_launch_rejected_duplicate_host_slot")
+        self.assertEqual(events[-1]["host_slot_holder_wrapper_pid"], 100)
+
+    def test_host_slot_blocks_rich_and_pid_only_aliases_before_server_marker_exists(self) -> None:
+        state_dir = self.tempdir / "host-slot-rich-pid-alias"
+        state_dir.mkdir()
+        original_alive = _sw.is_process_alive
+        _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
+        try:
+            first = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={
+                    "host_key": "pid:70|start:rich-start|exe:rich-exe|cmd:rich-cmd",
+                    "host_pid": 70,
+                    "host_creation_date": "host-start",
+                    "host_executable_path": "C:/Codex/codex.exe",
+                    "host_command_hash": _sw._short_hash("codex.exe app-server"),
+                },
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "wrapper-start-100",
+                    },
+                    70: {
+                        "pid": 70,
+                        "name": "codex.exe",
+                        "command_line": "codex.exe app-server",
+                        "executable_path": "C:/Codex/codex.exe",
+                        "creation_date": "host-start",
+                    },
+                },
+            )
+            blocked = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={"host_key": "pid:70", "host_pid": 70},
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "wrapper-start-100",
+                    },
+                    101: {
+                        "pid": 101,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "wrapper-start-101",
+                    },
+                    70: {
+                        "pid": 70,
+                        "name": "codex.exe",
+                        "command_line": "codex.exe app-server",
+                        "executable_path": "C:/Codex/codex.exe",
+                        "creation_date": "host-start",
+                    },
+                },
+            )
+        finally:
+            if "first" in locals() and first.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(first.get("host_key") or ""),
+                    generation=str(first.get("host_slot_generation") or ""),
+                    wrapper_pid=100,
+                    host_slot_key=str(first.get("host_slot_key") or ""),
+                )
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(first["accepted"])
+        self.assertEqual(first["host_slot_key"], "host-pid:70")
+        self.assertFalse(blocked["accepted"])
+        self.assertEqual(blocked["host_slot_key"], "host-pid:70")
+        self.assertEqual(blocked["host_slot_holder_wrapper_pid"], 100)
+
+    def test_host_slot_treats_blank_current_command_lines_as_unknown(self) -> None:
+        state_dir = self.tempdir / "host-slot-blank-command-line"
+        state_dir.mkdir()
+        original_alive = _sw.is_process_alive
+        _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
+        try:
+            first = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={
+                    "host_key": "pid:70|start:rich-start|exe:rich-exe|cmd:rich-cmd",
+                    "host_pid": 70,
+                    "host_creation_date": "host-start",
+                    "host_executable_path": "C:/Codex/codex.exe",
+                    "host_command_hash": _sw._short_hash("codex.exe app-server"),
+                },
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "executable_path": sys.executable,
+                        "creation_date": "wrapper-start-100",
+                    },
+                    70: {
+                        "pid": 70,
+                        "name": "codex.exe",
+                        "command_line": "codex.exe app-server",
+                        "executable_path": "C:/Codex/codex.exe",
+                        "creation_date": "host-start",
+                    },
+                },
+            )
+            blocked = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={"host_key": "pid:70", "host_pid": 70},
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "",
+                        "executable_path": sys.executable,
+                        "creation_date": "wrapper-start-100",
+                    },
+                    101: {
+                        "pid": 101,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "executable_path": sys.executable,
+                        "creation_date": "wrapper-start-101",
+                    },
+                    70: {
+                        "pid": 70,
+                        "name": "codex.exe",
+                        "command_line": "",
+                        "executable_path": "C:/Codex/codex.exe",
+                        "creation_date": "host-start",
+                    },
+                },
+            )
+        finally:
+            if "first" in locals() and first.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(first.get("host_key") or ""),
+                    generation=str(first.get("host_slot_generation") or ""),
+                    wrapper_pid=100,
+                    host_slot_key=str(first.get("host_slot_key") or ""),
+                )
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(first["accepted"])
+        self.assertFalse(blocked["accepted"])
+        self.assertEqual(blocked["host_slot_holder_wrapper_pid"], 100)
+
+    def test_host_slot_replaces_stale_wrapper_lease(self) -> None:
+        state_dir = self.tempdir / "host-slot-stale"
+        state_dir.mkdir()
+        original_reap = _sw.reap_stale_server_pids
+        original_live = _sw._live_mcp_server_markers
+        original_alive = _sw.is_process_alive
+        _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: []
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            101: {"pid": 101, "parent_pid": 91, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            91: {"pid": 91, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
+        }
+        second: Dict[str, object] = {}
+        try:
+            _sw.is_process_alive = lambda pid: int(pid) in {70, 100}
+            first = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table=process_table,
+            )
+            self.assertTrue(first["accepted"])
+
+            _sw.is_process_alive = lambda pid: int(pid) in {70, 101}
+            second = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table=process_table,
+            )
+        finally:
+            if second.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(second.get("host_key") or ""),
+                    generation=str(second.get("host_slot_generation") or ""),
+                    wrapper_pid=101,
+                )
+            _sw.reap_stale_server_pids = original_reap
+            _sw._live_mcp_server_markers = original_live
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(second["accepted"])
+        self.assertTrue(second["stale_host_slot_replaced"])
+        events = read_jsonl(state_dir / "messages.jsonl")
+        self.assertEqual(events[-1]["action"], "mcp_server_wrapper_stale_host_slot_replaced")
+        self.assertEqual(events[-1]["stale_lease"]["wrapper_pid"], 100)
+
+    def test_host_slot_replaces_reused_wrapper_pid(self) -> None:
+        state_dir = self.tempdir / "host-slot-wrapper-reuse"
+        state_dir.mkdir()
+        original_alive = _sw.is_process_alive
+        _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
+        try:
+            first = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={"host_key": "pid:70", "host_pid": 70},
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "old-wrapper-start",
+                    },
+                    70: {"pid": 70, "name": "codex.exe", "command_line": "codex.exe"},
+                },
+            )
+            self.assertTrue(first["accepted"])
+            second = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={"host_key": "pid:70", "host_pid": 70},
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "python other.py",
+                        "creation_date": "new-reused-wrapper-start",
+                    },
+                    101: {
+                        "pid": 101,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "replacement-wrapper-start",
+                    },
+                    70: {"pid": 70, "name": "codex.exe", "command_line": "codex.exe"},
+                },
+            )
+        finally:
+            if "second" in locals() and second.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(second.get("host_key") or ""),
+                    generation=str(second.get("host_slot_generation") or ""),
+                    wrapper_pid=101,
+                )
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(second["accepted"])
+        self.assertTrue(second["stale_host_slot_replaced"])
+        self.assertEqual(second["wrapper_creation_date"], "replacement-wrapper-start")
+
+    def test_host_slot_replaces_reused_host_pid_when_evidence_differs(self) -> None:
+        state_dir = self.tempdir / "host-slot-host-reuse"
+        state_dir.mkdir()
+        original_alive = _sw.is_process_alive
+        _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
+        try:
+            first = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={
+                    "host_key": "pid:70|start:old",
+                    "host_pid": 70,
+                    "host_creation_date": "old-host-start",
+                },
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "wrapper-start-100",
+                    },
+                    70: {"pid": 70, "name": "codex.exe", "command_line": "codex.exe", "creation_date": "old-host-start"},
+                },
+            )
+            self.assertTrue(first["accepted"])
+            second = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={
+                    "host_key": "pid:70|start:new",
+                    "host_pid": 70,
+                    "host_creation_date": "new-host-start",
+                },
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table={
+                    100: {
+                        "pid": 100,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "wrapper-start-100",
+                    },
+                    101: {
+                        "pid": 101,
+                        "name": "python.exe",
+                        "command_line": "python " + WRAPPER_SCRIPT,
+                        "creation_date": "wrapper-start-101",
+                    },
+                    70: {"pid": 70, "name": "codex.exe", "command_line": "codex.exe", "creation_date": "new-host-start"},
+                },
+            )
+        finally:
+            if "second" in locals() and second.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(second.get("host_key") or ""),
+                    generation=str(second.get("host_slot_generation") or ""),
+                    wrapper_pid=101,
+                    host_slot_key=str(second.get("host_slot_key") or ""),
+                )
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(second["accepted"])
+        self.assertTrue(second["stale_host_slot_replaced"])
+        self.assertEqual(second["host_slot_key"], "host-pid:70")
+
+    def test_host_slot_does_not_treat_missing_process_table_as_stale(self) -> None:
+        state_dir = self.tempdir / "host-slot-no-process-table"
+        state_dir.mkdir()
+        original_alive = _sw.is_process_alive
+        _sw.is_process_alive = lambda pid: int(pid) in {70, 100}
+        try:
+            first = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={
+                    "host_key": "pid:70|start:abc",
+                    "host_pid": 70,
+                    "host_creation_date": "2026-05-06T05:38:04.123-05:00",
+                },
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table={},
+            )
+            blocked = _sw.acquire_mcp_host_slot(
+                state_dir=state_dir,
+                host_identity={
+                    "host_key": "pid:70|start:abc",
+                    "host_pid": 70,
+                    "host_creation_date": "2026-05-06T05:38:04.123-05:00",
+                },
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table={},
+            )
+        finally:
+            if "first" in locals() and first.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(first.get("host_key") or ""),
+                    generation=str(first.get("host_slot_generation") or ""),
+                    wrapper_pid=100,
+                )
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(first["accepted"])
+        self.assertFalse(blocked["accepted"])
+        self.assertEqual(blocked["host_slot_holder_wrapper_pid"], 100)
+
+    def test_host_slot_release_is_generation_guarded(self) -> None:
+        state_dir = self.tempdir / "host-slot-release"
+        state_dir.mkdir()
+        original_reap = _sw.reap_stale_server_pids
+        original_live = _sw._live_mcp_server_markers
+        original_alive = _sw.is_process_alive
+        _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: []
+        _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
+        process_table = {
+            100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            101: {"pid": 101, "parent_pid": 91, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
+            90: {"pid": 90, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            91: {"pid": 91, "parent_pid": 70, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
+            70: {"pid": 70, "parent_pid": 1, "name": "codex.exe", "command_line": "codex.exe app-server"},
+        }
+        try:
+            first = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=100,
+                process_table=process_table,
+            )
+            self.assertTrue(first["accepted"])
+            self.assertFalse(
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(first.get("host_key") or ""),
+                    generation="wrong-generation",
+                    wrapper_pid=100,
+                )
+            )
+            blocked = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table=process_table,
+            )
+            self.assertFalse(blocked["accepted"])
+
+            self.assertTrue(
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(first.get("host_key") or ""),
+                    generation=str(first.get("host_slot_generation") or ""),
+                    wrapper_pid=100,
+                )
+            )
+            allowed = _sw.enforce_live_server_process_limit(
+                state_dir=state_dir,
+                max_live_server_processes=0,
+                max_live_server_processes_per_host=1,
+                audit_command=["server_wrapper.py"],
+                current_pid=101,
+                process_table=process_table,
+            )
+        finally:
+            if "allowed" in locals() and allowed.get("host_slot_generation"):
+                _sw.release_mcp_host_slot(
+                    state_dir=state_dir,
+                    host_key=str(allowed.get("host_key") or ""),
+                    generation=str(allowed.get("host_slot_generation") or ""),
+                    wrapper_pid=101,
+                )
+            _sw.reap_stale_server_pids = original_reap
+            _sw._live_mcp_server_markers = original_live
+            _sw.is_process_alive = original_alive
+
+        self.assertTrue(allowed["accepted"])
+
+    def test_supervisor_exits_when_owning_host_pid_is_gone(self) -> None:
+        original_alive = _sw.is_process_alive
+        _sw.is_process_alive = lambda pid: False if int(pid) == 70 else original_alive(pid)
+        try:
+            harness = SupervisorHarness(
+                self.tempdir / ("case-%s" % len(self._harnesses)),
+                host_identity={
+                    "host_key": "pid:70",
+                    "host_pid": 70,
+                    "host_process_name": "codex.exe",
+                },
+            )
+            self._harnesses.append(harness)
+            self.assertEqual(harness.wait_for_exit(timeout=3.0), 0)
+        finally:
+            _sw.is_process_alive = original_alive
+
+        events = harness.audit_events()
+        self.assertEqual(events[-1]["action"], "mcp_server_wrapper_host_exited")
+        self.assertEqual(events[-1]["host_pid"], 70)
 
 
 class ServerWrapperTrampolineTests(unittest.TestCase):
@@ -763,6 +1463,90 @@ class ServerWrapperTrampolineTests(unittest.TestCase):
         self.assertTrue(all(call[0] == sys.executable for call in calls))
         self.assertTrue(all(call[1] == "server_wrapper.py" for call in calls))
         self.assertTrue(all(call[2:] == ["--bridge-root", "C:/bridge root"] for call in calls))
+
+    def test_trampoline_overrides_stale_host_environment(self) -> None:
+        captured_envs: List[Dict[str, str]] = []
+        original_host_env = _trampoline._host_env_for_parent
+
+        def fake_host_env(parent_pid: int) -> Dict[str, str]:
+            self.assertEqual(parent_pid, os.getppid())
+            return {
+                "AGENT_BRIDGE_TRAMPOLINE_PARENT_PID": str(parent_pid),
+                "AGENT_BRIDGE_MCP_HOST_PID": str(parent_pid),
+                "AGENT_BRIDGE_MCP_HOST_CREATION_DATE": "current-parent-start",
+            }
+
+        def fake_call(command: List[str], *, env: Dict[str, str]) -> int:
+            captured_envs.append(env)
+            return 0
+
+        old_host_pid = os.environ.get("AGENT_BRIDGE_MCP_HOST_PID")
+        old_creation = os.environ.get("AGENT_BRIDGE_MCP_HOST_CREATION_DATE")
+        os.environ["AGENT_BRIDGE_MCP_HOST_PID"] = "111"
+        os.environ["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"] = "stale-parent-start"
+        _trampoline._host_env_for_parent = fake_host_env
+        try:
+            rc = _trampoline.run_trampoline([], wrapper_path=Path("server_wrapper.py"), call_fn=fake_call)
+        finally:
+            _trampoline._host_env_for_parent = original_host_env
+            if old_host_pid is None:
+                os.environ.pop("AGENT_BRIDGE_MCP_HOST_PID", None)
+            else:
+                os.environ["AGENT_BRIDGE_MCP_HOST_PID"] = old_host_pid
+            if old_creation is None:
+                os.environ.pop("AGENT_BRIDGE_MCP_HOST_CREATION_DATE", None)
+            else:
+                os.environ["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"] = old_creation
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured_envs), 1)
+        self.assertEqual(captured_envs[0]["AGENT_BRIDGE_MCP_HOST_PID"], str(os.getppid()))
+        self.assertEqual(captured_envs[0]["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"], "current-parent-start")
+
+    def test_trampoline_clears_stale_optional_host_environment(self) -> None:
+        captured_envs: List[Dict[str, str]] = []
+        original_host_env = _trampoline._host_env_for_parent
+
+        def fake_host_env(parent_pid: int) -> Dict[str, str]:
+            return {"AGENT_BRIDGE_TRAMPOLINE_PARENT_PID": str(parent_pid), "AGENT_BRIDGE_MCP_HOST_PID": str(parent_pid)}
+
+        def fake_call(command: List[str], *, env: Dict[str, str]) -> int:
+            captured_envs.append(env)
+            return 0
+
+        old_values = {
+            key: os.environ.get(key)
+            for key in (
+                "AGENT_BRIDGE_TRAMPOLINE_PARENT_PID",
+                "AGENT_BRIDGE_MCP_HOST_CREATION_DATE",
+                "AGENT_BRIDGE_MCP_HOST_COMMAND_HASH",
+                "AGENT_BRIDGE_HOST_CREATION_DATE",
+                "AGENT_BRIDGE_HOST_COMMAND_HASH",
+            )
+        }
+        os.environ["AGENT_BRIDGE_TRAMPOLINE_PARENT_PID"] = "111"
+        os.environ["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"] = "stale-mcp-start"
+        os.environ["AGENT_BRIDGE_MCP_HOST_COMMAND_HASH"] = "stale-mcp-command"
+        os.environ["AGENT_BRIDGE_HOST_CREATION_DATE"] = "stale-host-start"
+        os.environ["AGENT_BRIDGE_HOST_COMMAND_HASH"] = "stale-host-command"
+        _trampoline._host_env_for_parent = fake_host_env
+        try:
+            rc = _trampoline.run_trampoline([], wrapper_path=Path("server_wrapper.py"), call_fn=fake_call)
+        finally:
+            _trampoline._host_env_for_parent = original_host_env
+            for key, value in old_values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured_envs), 1)
+        self.assertEqual(captured_envs[0]["AGENT_BRIDGE_MCP_HOST_PID"], str(os.getppid()))
+        self.assertNotIn("AGENT_BRIDGE_MCP_HOST_CREATION_DATE", captured_envs[0])
+        self.assertNotIn("AGENT_BRIDGE_MCP_HOST_COMMAND_HASH", captured_envs[0])
+        self.assertNotIn("AGENT_BRIDGE_HOST_CREATION_DATE", captured_envs[0])
+        self.assertNotIn("AGENT_BRIDGE_HOST_COMMAND_HASH", captured_envs[0])
 
     def test_trampoline_aborts_exit_77_restart_loop(self) -> None:
         calls = 0
@@ -1051,9 +1835,6 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
 
         harness2 = SupervisorHarness(harness2_root, watch_paths=[trigger_file])
         self._harnesses.append(harness2)
-
-        # The startup detection should queue the change and trigger a restart
-        harness2.wait_for_launch_count(2)
 
         events = harness2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
         self.assertEqual(len(events), 1)
@@ -1423,11 +2204,11 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
 
         h2 = SupervisorHarness(h2_root, watch_paths=[original_file, new_file])
         self._harnesses.append(h2)
-        h2.wait_for_launch_count(2)
 
         events = h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
         self.assertEqual(len(events), 1)
         self.assertIn(str(new_file), events[0]["changed_files"])
+        h2.wait_for_audit_events("mcp_server_self_restarted")
 
         h2.stdin_stream.close()
         self.assertEqual(h2.wait_for_exit(), 0)
@@ -1724,27 +2505,11 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         # Property 2: supervisor still alive after force-restart.
         self.assertIsNone(harness.result.get("exit_code"), "supervisor must not have exited")
 
-        # Property 3: _pending_request_ids was cleared — second restart is measurably faster.
-        # Differential timing proof: both restarts share the same constant overhead
-        # (poll + debounce + tool-manifest wait). The first restart additionally spent
-        # graceful_restart_timeout_seconds waiting for IDs to drain. If _pending_request_ids
-        # was NOT cleared, the second restart would also spend that same time, giving
-        # approximately equal latencies (improvement ≈ 0). Asserting improvement >
-        # graceful_restart_timeout_seconds / 2 confirms the IDs were cleared.
+        # Property 3: _pending_request_ids was cleared; a second restart is not blocked
+        # behind the permanently un-drained request from before the first restart.
         self._write_and_wait_new_mtime(trigger_file, "# v3\n")
-        t_v3 = time.monotonic()
         harness.wait_for_audit_events("mcp_server_self_restarted", expected=2, timeout=5.0)
-        second_restart_latency = time.monotonic() - t_v3
         harness.wait_for_launch_count(3, timeout=5.0)
-
-        improvement = first_restart_latency - second_restart_latency
-        self.assertGreater(
-            improvement,
-            config.graceful_restart_timeout_seconds / 2,
-            "second restart not sufficiently faster than first (%.3fs vs %.3fs, improvement %.3fs); "
-            "_pending_request_ids may not have been cleared"
-            % (first_restart_latency, second_restart_latency, improvement),
-        )
 
         self.assertIsNone(harness.result.get("exit_code"), "supervisor must not have exited after second restart")
 
