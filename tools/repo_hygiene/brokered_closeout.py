@@ -42,6 +42,7 @@ HIGH_IMPACT_ACTIONS = [
     "stash_promote",
     "repo_sweep_prune_merged",
     "split",
+    "resolve_conflicts_with_agent",
 ]
 REQUIRED_SCRIPT_NAMES = [
     "start-work-block.ps1",
@@ -134,6 +135,38 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "allowedPublishRemotes": ["fork", "origin"],
         "setUpstreamOnPublish": True,
     },
+    "closeoutAddendumPersistence": {
+        "enabled": True,
+        "sameTurnRequired": True,
+        "incomingLabels": ["incoming addendum", "closeout addendum", "closeout rule", "closeout blocker addendum"],
+        "repoWideSurfaces": ["AGENTS.md", "CLAUDE.md", "closeout.config.json", "tools/repo_hygiene/brokered_closeout.py", "tools/repo_hygiene/test_brokered_closeout.py"],
+        "minimumDurableArtifacts": ["agent_rule", "broker_policy", "test_or_tooling_baseline_guard"],
+    },
+    "finalizeLoop": {
+        "enabled": True,
+        "maxRetries": 3,
+        "allowRepeatedBlockerEvidenceTupleRenewal": False,
+        "safeSecondOrderRepairs": {
+            "final_push_evidence_repaired": "evidence_repair",
+            "target_push_rerun_required": "target_push_recovery",
+        },
+        "retryAuditType": "finalize_retry",
+    },
+    "agentRemediation": {
+        "enabled": True,
+        "queueRoot": ".claude-state/closeout/agent-remediation",
+        "maxConflictFilesPerAgent": 12,
+        "maxChangedPathsPerAgent": 250,
+        "requireSurfaceExecution": True,
+        "surfaceAdapters": ["codex-desktop", "claude-desktop-command-bridge"],
+        "conflictPathGroups": {
+            "agent-policy": ["AGENTS.md", "CLAUDE.md", ".claude/**", "docs/**"],
+            "qt-playback": ["platform/qt/**"],
+            "mlv-core": ["src/mlv/**", "src/processing/**", "src/debayer/**"],
+            "batch-debug": ["src/batch/**", "src/debug/**"],
+            "tests": ["tests/**", ".github/**"],
+        },
+    },
     "toolingBaseline": {
         "enabled": False,
         "baselineRef": None,
@@ -149,8 +182,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation"],
-        "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split"],
+        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation"],
+        "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
             "integrated_remote_feature_prune",
@@ -189,11 +222,17 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
             "test_missing_evidence_is_generated_and_committed_before_publish",
             "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun",
+            "test_finalize_loop_stops_on_repeated_identical_blocker_evidence_tuple",
+            "test_finalize_loop_continues_when_evidence_repair_changes_tuple_and_pins_match",
+            "test_generated_closeout_conflict_packets_are_not_owned_dirty",
             "test_remediate_retained_actor_applies_one_candidate_per_run",
             "test_repo_sweep_remote_integrated_feature_branch_is_pruned",
             "test_repo_sweep_remote_patch_equivalent_feature_branch_is_pruned",
             "test_repo_sweep_remote_unique_feature_branch_clean_integrates_and_prunes",
             "test_repo_sweep_remote_conflicting_feature_branch_writes_investigation_packet",
+            "test_repo_sweep_merge_failed_promotes_agent_conflict_dispatch",
+            "test_repo_sweep_agent_conflict_dispatch_writes_queue_packet",
+            "test_agent_conflict_dispatch_shards_large_conflict_sets",
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -206,7 +245,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def finalize_retry_decision"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediate_retained_candidates"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dispatch_agent_conflict_remediation"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
+            {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
+            {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
+            {"path": "closeout.config.json", "contains": "finalizeLoop"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
             {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
@@ -245,6 +290,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "detached_dirty_preserve",
             "redundant_branch_prune",
             "explicit_protected_worktree_cleanup",
+            "agent_conflict_remediation",
         ],
         "manualOnlyActionClasses": [
             "protected_branch",
@@ -997,6 +1043,9 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
         }
         if owner and owner != block_id:
             enriched["classificationReason"] = "path is claimed by another work block"
+            foreign_dirty.append(enriched)
+        elif generated:
+            enriched["classificationReason"] = "generated closeout/runtime path is not owned source work"
             foreign_dirty.append(enriched)
         elif dirty_at_baseline and (in_delta or claimed_by_self):
             enriched["classificationReason"] = "baseline dirty path overlaps candidate delta or claim"
@@ -2149,7 +2198,96 @@ def cleanup_after_success(
     return cleanup
 
 
-def finalize_work_block(
+def finalize_retry_decision(
+    config: Dict[str, Any],
+    *,
+    blocker_kind: str,
+    evidence_hash_before: str,
+    evidence_hash_after: str,
+    pinned_refs_before_retry: Dict[str, Any],
+    pins_match: bool,
+    retry_number: int,
+    seen_tuples: Iterable[str],
+) -> Dict[str, Any]:
+    loop = config.get("finalizeLoop", {})
+    tuple_key = stable_hash({"blockerKind": blocker_kind, "evidenceHash": evidence_hash_before}, 16)
+    symbolic = dict(loop.get("safeSecondOrderRepairs", {})).get(blocker_kind)
+    max_retries = int(loop.get("maxRetries", 0) or 0)
+    renewal_allowed = bool(loop.get("allowRepeatedBlockerEvidenceTupleRenewal", False))
+    seen = set(seen_tuples)
+    terminal_reason: Optional[str] = None
+    should_retry = False
+    if tuple_key in seen and not renewal_allowed:
+        terminal_reason = "repeated_identical_blocker_evidence_tuple"
+    elif not symbolic:
+        terminal_reason = "no_safe_second_order_repair"
+    elif retry_number >= max_retries:
+        terminal_reason = "max_retries_exhausted"
+    elif evidence_hash_before == evidence_hash_after:
+        terminal_reason = "unchanged_evidence_after_repair"
+    elif not pins_match:
+        terminal_reason = "pinned_refs_changed_after_repair"
+    else:
+        should_retry = True
+    return {
+        "selectedWorkBlockId": None,
+        "blockerKind": blocker_kind,
+        "symbolicRepairAttempted": symbolic,
+        "evidenceHashBeforeRepair": evidence_hash_before,
+        "evidenceHashAfterRepair": evidence_hash_after,
+        "pinnedRefsBeforeRetry": pinned_refs_before_retry,
+        "retryNumber": retry_number,
+        "blockerEvidenceTuple": tuple_key,
+        "shouldRetry": should_retry,
+        "terminalReason": terminal_reason,
+    }
+
+
+def finalize_attempt_snapshot(repo_root: Path, config: Dict[str, Any], work_block_id: Optional[str]) -> Dict[str, Any]:
+    detection = detect_work_block(repo_root, work_block_id=work_block_id)
+    evidence = finalize_evidence(config, detection)
+    return {
+        "workBlockId": detection["workBlockId"],
+        "detection": detection,
+        "evidenceHash": stable_hash(evidence),
+        "pinnedRefs": detection["pinnedRefs"],
+    }
+
+
+def finalize_retry_ledger_path(repo_root: Path, config: Dict[str, Any], work_block_id: str) -> Path:
+    return work_block_dir(repo_root, config, work_block_id) / "finalize-retry-ledger.json"
+
+
+def load_finalize_retry_ledger(repo_root: Path, config: Dict[str, Any], work_block_id: str) -> List[Dict[str, Any]]:
+    path = finalize_retry_ledger_path(repo_root, config, work_block_id)
+    rows = read_json(path, [])
+    return rows if isinstance(rows, list) else []
+
+
+def save_finalize_retry_ledger(repo_root: Path, config: Dict[str, Any], work_block_id: str, ledger: List[Dict[str, Any]]) -> None:
+    write_json(finalize_retry_ledger_path(repo_root, config, work_block_id), ledger)
+
+
+def write_finalize_retry_audit(repo_root: Path, config: Dict[str, Any], work_block_id: str, decision: Dict[str, Any]) -> Dict[str, Any]:
+    audit_type = str(config.get("finalizeLoop", {}).get("retryAuditType") or "finalize_retry")
+    payload = {**decision, "selectedWorkBlockId": work_block_id}
+    row = write_audit(repo_root, config, audit_type, payload, work_block_id=work_block_id, outcome="recorded" if decision["shouldRetry"] else "blocked")
+    append_event(
+        repo_root,
+        config,
+        work_block_id,
+        {
+            "event": "finalize_retry",
+            "retryNumber": decision["retryNumber"],
+            "blockerKind": decision["blockerKind"],
+            "shouldRetry": decision["shouldRetry"],
+            "terminalReason": decision["terminalReason"],
+        },
+    )
+    return row
+
+
+def _finalize_work_block_once(
     repo_root_arg: Path,
     *,
     work_block_id: Optional[str] = None,
@@ -2311,6 +2449,64 @@ def finalize_work_block(
     append_event(repo_root, config, block_id, {"event": "finalize_success", "targetHeadAfter": new_target_head})
     update_manifest(repo_root, config, block_id, {"state": "finalized", "finalizedAt": utc_now(), "targetHeadAfter": new_target_head})
     return {"status": "success", **success_payload}
+
+
+def finalize_work_block(
+    repo_root_arg: Path,
+    *,
+    work_block_id: Optional[str] = None,
+    expected_pinned_refs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    if not bool(config.get("finalizeLoop", {}).get("enabled", True)):
+        return _finalize_work_block_once(repo_root, work_block_id=work_block_id, expected_pinned_refs=expected_pinned_refs)
+    seen_tuples: set[str] = set()
+    ledger: List[Dict[str, Any]] = []
+    retry_number = 0
+    selected_work_block_id = work_block_id
+    while True:
+        before = finalize_attempt_snapshot(repo_root, config, selected_work_block_id)
+        selected_work_block_id = str(before["workBlockId"])
+        if not ledger:
+            ledger = load_finalize_retry_ledger(repo_root, config, selected_work_block_id)
+            seen_tuples = {str(item.get("blockerEvidenceTuple")) for item in ledger if item.get("blockerEvidenceTuple")}
+            retry_number = len(ledger)
+        result = _finalize_work_block_once(repo_root, work_block_id=selected_work_block_id, expected_pinned_refs=expected_pinned_refs)
+        if result.get("status") == "success":
+            if ledger:
+                result["finalizeRetryLedger"] = ledger
+            return result
+        blocker_kind = str(result.get("reason") or "blocked")
+        try:
+            after = finalize_attempt_snapshot(repo_root, config, selected_work_block_id)
+            evidence_hash_after = str(after["evidenceHash"])
+            pins_after = after["pinnedRefs"]
+        except Exception as exc:
+            evidence_hash_after = str(before["evidenceHash"])
+            pins_after = before["pinnedRefs"]
+            result["retrySnapshotError"] = str(exc)
+        pins_match = expected_pinned_refs is None or expected_pinned_refs == pins_after
+        decision = finalize_retry_decision(
+            config,
+            blocker_kind=blocker_kind,
+            evidence_hash_before=str(before["evidenceHash"]),
+            evidence_hash_after=evidence_hash_after,
+            pinned_refs_before_retry=before["pinnedRefs"],
+            pins_match=pins_match,
+            retry_number=retry_number,
+            seen_tuples=seen_tuples,
+        )
+        decision["selectedWorkBlockId"] = selected_work_block_id
+        write_finalize_retry_audit(repo_root, config, selected_work_block_id, decision)
+        ledger.append(decision)
+        save_finalize_retry_ledger(repo_root, config, selected_work_block_id, ledger)
+        if not decision["shouldRetry"]:
+            result["finalizeRetryLedger"] = ledger
+            result["terminalReason"] = decision["terminalReason"]
+            return result
+        seen_tuples.add(str(decision["blockerEvidenceTuple"]))
+        retry_number += 1
 
 
 def complete_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = None, finalize: bool = False) -> Dict[str, Any]:
@@ -2629,10 +2825,12 @@ def classify_dirty_entries_for_branch(
     unowned_dirty: List[Dict[str, Any]] = []
     foreign_dirty: List[Dict[str, Any]] = []
     unclaimed_default = str(config.get("dirty", {}).get("unclaimedOutsideDelta", "foreign"))
+    generated_patterns = config.get("paths", {}).get("generated", [])
     for entry in entries:
         path = str(entry["path"])
         owner = claims.get(path)
         sensitive = path_matches_any(path, config.get("paths", {}).get("sensitive", []))
+        generated = path_matches_any(path, generated_patterns)
         in_delta = path in committed_delta
         claimed_by_self = bool(block_id and (path in own_claims or owner == block_id))
         enriched = {
@@ -2640,9 +2838,13 @@ def classify_dirty_entries_for_branch(
             "ownerWorkBlockId": owner,
             "inCompletedBranchDelta": in_delta,
             "sensitive": sensitive,
+            "generated": generated,
             "branch": branch,
         }
-        if in_delta or claimed_by_self:
+        if generated:
+            enriched["classificationReason"] = "generated closeout/runtime path is not owned source work"
+            foreign_dirty.append(enriched)
+        elif in_delta or claimed_by_self:
             enriched["classificationReason"] = "path overlaps branch delta or branch work-block claim"
             owned_dirty.append(enriched)
         elif sensitive and bool(config.get("dirty", {}).get("sensitiveUnownedBlocks", True)):
@@ -2756,6 +2958,13 @@ def blocker_auto_remediation_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
+def agent_remediation_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    value = config.get("agentRemediation", {})
+    if not isinstance(value, dict) or not bool(value.get("enabled", True)):
+        return {}
+    return value
+
+
 def remediation_proof(config: Dict[str, Any], *, recommended_action: str, action_class: str, blockers: Sequence[str]) -> Dict[str, Any]:
     auto = blocker_auto_remediation_config(config)
     attempted = recommended_action in {
@@ -2767,6 +2976,7 @@ def remediation_proof(config: Dict[str, Any], *, recommended_action: str, action
         "split_now",
         "switch_target_and_prune",
         "preserve_detached_dirty_now",
+        "dispatch_conflict_remediation",
     }
     excluded: List[str] = []
     if not auto:
@@ -2799,19 +3009,75 @@ def merge_conflict_paths(stdout: str, stderr: str) -> List[str]:
     return sorted({path for path in paths if path})
 
 
+def chunked(values: Sequence[str], size: int) -> List[List[str]]:
+    if size <= 0:
+        return [list(values)]
+    return [list(values[index : index + size]) for index in range(0, len(values), size)]
+
+
+def conflict_group_for_path(agent_config: Dict[str, Any], path: str) -> str:
+    groups = agent_config.get("conflictPathGroups", {})
+    if isinstance(groups, dict):
+        for name, patterns in groups.items():
+            if path_matches_any(path, list(patterns or [])):
+                return str(name)
+    first, _, _ = normalize_rel(path).partition("/")
+    return first or "root"
+
+
+def agent_conflict_shards(agent_config: Dict[str, Any], conflicts: Sequence[str], changed_paths: Sequence[str]) -> List[Dict[str, Any]]:
+    max_conflicts = int(agent_config.get("maxConflictFilesPerAgent", 12) or 12)
+    max_changed = int(agent_config.get("maxChangedPathsPerAgent", 250) or 250)
+    by_group: Dict[str, List[str]] = {}
+    for path in conflicts:
+        by_group.setdefault(conflict_group_for_path(agent_config, path), []).append(path)
+    changed_by_group: Dict[str, List[str]] = {}
+    for path in changed_paths:
+        changed_by_group.setdefault(conflict_group_for_path(agent_config, path), []).append(path)
+    shards: List[Dict[str, Any]] = []
+    for group in sorted(by_group):
+        paths = sorted(by_group[group])
+        for index, path_chunk in enumerate(chunked(paths, max_conflicts), start=1):
+            related = sorted(
+                {
+                    path
+                    for path in changed_by_group.get(group, [])
+                    if path in path_chunk or len(changed_by_group.get(group, [])) <= max_changed
+                }
+            )
+            if not related:
+                related = path_chunk
+            shards.append(
+                {
+                    "shardId": "%s-%02d" % (safe_state_name(group), index),
+                    "group": group,
+                    "conflictPaths": path_chunk,
+                    "relatedChangedPaths": related[:max_changed],
+                    "instructions": "Resolve only these conflict paths in a temporary integration worktree; preserve target-side work, port feature intent, run configured validation, and report exact blockers if semantic resolution is unsafe.",
+                }
+            )
+    return shards
+
+
 def agent_conflict_resolution_packet(config: Dict[str, Any], *, candidate_id: str, branch: str, merge_probe: Dict[str, Any], changed_paths: Sequence[str]) -> Optional[Dict[str, Any]]:
+    agent_config = agent_remediation_config(config)
     auto = blocker_auto_remediation_config(config)
     conflicts = list(merge_probe.get("conflicts") or [])
-    max_conflicts = int(auto.get("maxConflictFilesForAgent", 0) or 0)
-    if merge_probe.get("reason") != "merge_failed" or not conflicts or not max_conflicts or len(conflicts) > max_conflicts:
+    legacy_max = int(auto.get("maxConflictFilesForAgent", 0) or 0)
+    if merge_probe.get("reason") != "merge_failed" or not conflicts or not agent_config:
         return None
+    shards = agent_conflict_shards(agent_config, conflicts, changed_paths)
     return {
         "symbolicAction": "resolve-conflicts-with-agent",
         "agentDispatch": investigation_agent_payload(config, candidate_id, "repo-sweep-conflict-remediator"),
         "branch": branch,
         "conflictPaths": conflicts,
         "changedPathCount": len(changed_paths),
-        "recoveryCommand": "spawn one background agent for this report, resolve only listed conflict paths in a temp integration worktree, then rerun repo sweep for this candidate",
+        "legacyMaxConflictFilesForAgent": legacy_max,
+        "shards": shards,
+        "surfaceAdapters": agent_config.get("surfaceAdapters", []),
+        "queueRequired": bool(agent_config.get("requireSurfaceExecution", True)),
+        "recoveryCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\remediate-retained-closeout.ps1 -RepoRoot . -Apply",
     }
 
 
@@ -3437,6 +3703,10 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
         resolution_packet = agent_conflict_resolution_packet(config, candidate_id=candidate_id, branch=branch, merge_probe=merge_probe, changed_paths=scope["changedPaths"])
         if resolution_packet:
             scope["agentResolutionPacket"] = resolution_packet
+            scope["agentDispatchReason"] = list(blockers)
+            blockers = []
+            recommended_action = "dispatch_conflict_remediation"
+            action_class = "agent_conflict_remediation"
     elif item.get("checkedOut"):
         recommended_action = "cleanup_worktree_and_prune"
         action_class = "integrated_branch_prune"
@@ -3515,6 +3785,10 @@ def investigate_remote_feature_candidate(repo_root: Path, config: Dict[str, Any]
             resolution_packet = agent_conflict_resolution_packet(config, candidate_id=candidate_id, branch=branch, merge_probe=merge_probe, changed_paths=scope["changedPaths"])
             if resolution_packet:
                 scope["agentResolutionPacket"] = resolution_packet
+                scope["agentDispatchReason"] = list(blockers)
+                blockers = []
+                recommended_action = "dispatch_conflict_remediation"
+                action_class = "agent_conflict_remediation"
     else:
         blockers.append("remote_feature_clean_integrate_disabled")
     report = {
@@ -3665,6 +3939,8 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
         action_id = "orphan_quarantine"
     elif action == "prune_remote_now":
         action_id = "delete_remote_branch"
+    elif action == "dispatch_conflict_remediation":
+        action_id = "resolve_conflicts_with_agent"
     else:
         action_id = "delete_local_branch"
     pinned_refs = {
@@ -3697,6 +3973,66 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
         "pinnedRefs": pinned_refs,
         "reportPath": report.get("reportPath"),
     }
+
+
+def agent_remediation_root(repo_root: Path, config: Dict[str, Any]) -> Path:
+    root = Path(str(agent_remediation_config(config).get("queueRoot") or ".claude-state/closeout/agent-remediation"))
+    if not root.is_absolute():
+        root = repo_root / root
+    return root
+
+
+def dispatch_agent_conflict_remediation(
+    repo_root: Path,
+    config: Dict[str, Any],
+    plan: Dict[str, Any],
+    report: Dict[str, Any],
+    candidate: Dict[str, Any],
+) -> Dict[str, Any]:
+    packet = dict(report.get("scope", {}).get("agentResolutionPacket") or {})
+    if not packet:
+        return {"action": "agent_conflict_remediation_dispatch", "status": "blocked", "reason": "missing_agent_resolution_packet", "branch": report.get("branch")}
+    queue_root = agent_remediation_root(repo_root, config)
+    queue_dir = queue_root / "queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    queue_path = queue_dir / ("%s.json" % safe_state_name(str(candidate["candidateId"])))
+    payload = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "status": "queued",
+        "createdAt": utc_now(),
+        "candidateId": candidate["candidateId"],
+        "actionId": candidate["actionId"],
+        "actionClass": candidate["actionClass"],
+        "evidenceHash": candidate["evidenceHash"],
+        "policyHash": config.get("policyHash"),
+        "pinnedRefs": candidate["pinnedRefs"],
+        "reportPath": report.get("reportPath"),
+        "branch": report.get("branch"),
+        "head": report.get("head"),
+        "target": plan.get("pinnedRefs", {}).get("target"),
+        "conflictPaths": packet.get("conflictPaths", []),
+        "changedPathCount": packet.get("changedPathCount"),
+        "shards": packet.get("shards", []),
+        "surfaceAdapters": packet.get("surfaceAdapters", []),
+        "instructions": {
+            "coordinator": "Spawn one background agent per shard where available. Each agent must work in a temporary integration worktree, resolve only its assigned paths, avoid broad cleanup, report blockers with hunks, and leave mutation to repo-owned finalize actors.",
+            "afterAgents": "Coordinator applies resolved shard patches one at a time in a clean target worktree, runs diff-check and configured validation, then reruns repo sweep/finalize.",
+            "manualFallback": "If no surface adapter can spawn agents, use this packet as the exact recovery brief and retain the candidate with this queue artifact.",
+        },
+    }
+    payload["dispatchHash"] = stable_hash(payload)
+    write_json(queue_path, payload)
+    action = {
+        "action": "agent_conflict_remediation_dispatch",
+        "status": "queued",
+        "queuePath": str(queue_path),
+        "candidateId": candidate["candidateId"],
+        "branch": report.get("branch"),
+        "shardCount": len(payload["shards"]),
+        "conflictPathCount": len(payload["conflictPaths"]),
+    }
+    write_audit(repo_root, config, "agent_remediation_dispatch", {"queuePacket": payload, "action": action}, outcome="success")
+    return action
 
 
 def cleanup_branch_after_sweep_action(
@@ -4130,10 +4466,28 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         report
         for report in retained_reports
         if report.get("recommendedAction")
-        in {"clean_integrate_now", "clean_integrate_remote_now", "prune_now", "prune_remote_now", "cleanup_worktree_and_prune", "split_now", "switch_target_and_prune", "preserve_detached_dirty_now"}
+        in {"clean_integrate_now", "clean_integrate_remote_now", "dispatch_conflict_remediation", "prune_now", "prune_remote_now", "cleanup_worktree_and_prune", "split_now", "switch_target_and_prune", "preserve_detached_dirty_now"}
     ]
     promoted_candidates = [candidate_from_report(config, plan, report) for report in promoted_reports]
     follow_up_candidates = retained_reports
+    def candidate_filter_matches(candidate: Dict[str, Any], report: Optional[Dict[str, Any]] = None) -> bool:
+        if not candidate_id:
+            return True
+        values = {str(candidate.get("candidateId") or "")}
+        pinned_branch = ((candidate.get("pinnedRefs") or {}).get("branch") or {}).get("branch")
+        if pinned_branch:
+            values.add(str(pinned_branch))
+        remote_feature = (candidate.get("pinnedRefs") or {}).get("remoteFeature") or {}
+        if remote_feature.get("ref"):
+            values.add(str(remote_feature.get("ref")))
+        if report:
+            values.add(str(report.get("candidateId") or ""))
+            if report.get("branch"):
+                values.add(str(report.get("branch")))
+            if report.get("remoteRef"):
+                values.add(str(report.get("remoteRef")))
+        return str(candidate_id) in values
+
     if not apply:
         payload = {
             "plan": plan,
@@ -4151,7 +4505,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
     matched_candidate = candidate_id is None
     if bool(config.get("repoSweep", {}).get("pruneMergedLocalBranches", True)):
         for item, candidate in zip(prunable_branches, branch_candidates):
-            if candidate_id and candidate["candidateId"] != candidate_id:
+            if candidate_id and not candidate_filter_matches(candidate):
                 continue
             matched_candidate = True
             current_head = rev_parse(repo_root, f"refs/heads/{item['branch']}", required=False)
@@ -4178,7 +4532,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             actions.extend(cleanup_branch_after_sweep_action(repo_root, config, plan, item))
     if bool(config.get("repoSweep", {}).get("pruneRemoteFeatureBranches", True)):
         for item, candidate in zip(prunable_remote_features, remote_feature_candidates):
-            if candidate_id and candidate["candidateId"] != candidate_id:
+            if candidate_id and not candidate_filter_matches(candidate):
                 continue
             matched_candidate = True
             blockers: List[str] = []
@@ -4209,7 +4563,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             actions.append(action)
     branch_by_name = {item["branch"]: item for item in plan["branchPlans"]}
     for report, candidate in zip(promoted_reports, promoted_candidates):
-        if candidate_id and candidate["candidateId"] != candidate_id:
+        if candidate_id and not candidate_filter_matches(candidate, report):
             continue
         matched_candidate = True
         if report["recommendedAction"] == "preserve_detached_dirty_now":
@@ -4269,6 +4623,25 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                     "disposition": "prune_patch_equivalent_remote_feature",
                 }
                 action = apply_remote_feature_prune(repo_root, config, plan, remote_item)
+            actions.append(action)
+            continue
+        if report["recommendedAction"] == "dispatch_conflict_remediation":
+            quorum_result = ensure_autonomous_quorum(
+                repo_root,
+                config,
+                candidate_id=candidate["candidateId"],
+                action_id=candidate["actionId"],
+                evidence_hash=candidate["evidenceHash"],
+                pinned_refs=candidate["pinnedRefs"],
+                evidence=candidate["evidence"],
+                action_class=candidate["actionClass"],
+                blockers=list(report.get("blockers") or []),
+            )
+            quorum_results.append({"candidate": candidate, "report": report, **quorum_result})
+            if not quorum_result["quorum"]["ok"]:
+                write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, "report": report, **quorum_result}, outcome="blocked")
+                continue
+            action = dispatch_agent_conflict_remediation(repo_root, config, plan, report, candidate)
             actions.append(action)
             continue
         item = branch_by_name.get(report["branch"])
@@ -4416,7 +4789,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation"]
+    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),

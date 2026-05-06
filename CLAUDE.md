@@ -89,6 +89,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\remediate-ret
 The trigger must run even when mutation is not eligible. The detector classifies
 dirty paths as `ownedDirty`, `unownedDirty`, or `foreignDirty`; foreign dirty
 work is retained and audited, never stashed or deleted by this workflow.
+Incoming closeout addenda are repo-wide closeout framework changes, not
+chat-only notes. When a user or bridge message labels an item as an
+incoming/addendum/closeout rule, persist the smallest durable same-turn update
+whenever feasible: update `AGENTS.md`/`CLAUDE.md` for agent policy,
+`closeout.config.json`/`DEFAULT_CLOSEOUT_CONFIG` for broker policy, and
+`tools/repo_hygiene/test_brokered_closeout.py` or tooling-baseline required
+symbols/tests for executable coverage. If implementation is not feasible,
+record an explicit closeout blocker or roadmap item before final response.
 High-impact mutation, including repo-sweep pruning, requires the exact review
 tuple recorded by the broker: candidate id, action id, evidence hash, policy
 hash, and pinned refs.
@@ -158,6 +166,11 @@ When publish/upstream/final-push repair is blocked only by missing metrics,
 handoff, session, or closeout evidence, generate the configured evidence bundle,
 claim and commit only those evidence files, retain unrelated dirty work, and
 rerun safe publish repair before stopping.
+The finalize loop must be bounded and auditable. Each retry must write the
+selected `workBlockId`, blocker kind, symbolic repair attempted, evidence hash
+before repair, evidence hash after repair, pinned refs before retry, retry
+number, and terminal reason when retry stops. The same blocker/evidence tuple
+must not be retried more than once unless policy explicitly permits renewal.
 Response, metrics, timestamp, and final-completion hooks are read-only with
 respect to managed session worktree lifecycle. Codex response/final adapters pass
 `-SkipSessionWorktree` and record `session_worktree_bootstrap=skipped`; such
@@ -202,6 +215,13 @@ worktrees with sensitive paths must be preserved by exact path to a recovery
 branch only when policy proves the sensitive paths are safe to copy; otherwise
 retain with the sensitive path list, owner/age evidence, and a manual recovery
 command.
+Merge-failed retained candidates are not terminal by default. Repo sweep promotes
+policy-eligible conflicts to symbolic action `resolve_conflicts_with_agent`,
+writes an exact-tuple agent remediation queue packet under
+`.claude-state/closeout/agent-remediation/`, and expects Codex/Claude surface
+adapters to spawn one background agent per shard where available. Source mutation
+still happens only through repo-owned clean integration/finalize after agents
+report resolved patches or blockers.
 
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 
