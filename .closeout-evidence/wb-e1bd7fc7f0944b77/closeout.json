@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/evidence-preserving-prune-policy",
+  "createdAt": "2026-05-06T06:46:36+00:00",
+  "detectorHash": "7ad548d4a1e445eea5f55ed963535380",
+  "eligible": true,
+  "featureHead": "be627cbcc352b5359b5c6ae0a1ea005217b55c2e",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/evidence-preserving-prune-policy",
+      "head": "be627cbcc352b5359b5c6ae0a1ea005217b55c2e"
+    },
+    "target": {
+      "branch": "master",
+      "head": "aa924ed8ee5c8d74a8d1a2cd31775c78265c73b0",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "aa924ed8ee5c8d74a8d1a2cd31775c78265c73b0",
+  "workBlockId": "wb-e1bd7fc7f0944b77"
+}
