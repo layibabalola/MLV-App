@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/closeout-requirements-trace",
+  "committedDeltaPathCount": 1,
+  "createdAt": "2026-05-06T21:44:21+00:00",
+  "detectorHash": "159d50b6ee4c0854a8c9eca547440218",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "0ae96e72050612952c2a075f3b978693c227b1fa",
+  "schemaVersion": "1.0",
+  "targetHead": "6c3bee2fa3189e6225de4052c9a19fdbee0beb22",
+  "workBlockId": "wb-41807bba5d064d61"
+}
