@@ -11,11 +11,16 @@ Changes to `server_wrapper.py` itself are handled by saving the code-watcher
 snapshot and exiting with code 77; the trampoline relaunches the wrapper unless
 its restart-loop guard trips.
 
-`server_wrapper.py` also has a live-process circuit breaker. MCP stdio remains
-multi-instance by design, but the wrapper refuses to spawn another `server.py`
-child when the same bridge state dir already has at least 16 live MCP server
-markers. Override this with `--max-live-server-processes <n>` or set
-`AGENT_BRIDGE_MAX_LIVE_MCP_SERVERS`; use `0` only for targeted diagnostics.
+`server_wrapper.py` also has a host-scoped live-process guard. MCP stdio remains
+multi-instance by design, but one MCP host process should not own multiple live
+Agent Bridge `server.py` children for the same bridge state dir. The wrapper
+therefore counts only Agent Bridge's own live server markers, resolves them back
+to their MCP host process, and refuses duplicate launches from the same host.
+Override this with `--max-live-server-processes-per-host <n>` or set
+`AGENT_BRIDGE_MAX_LIVE_MCP_SERVERS_PER_HOST`; use `0` only for targeted
+diagnostics. The legacy total-process guard is disabled by default and can be
+enabled explicitly with `--max-live-server-processes <n>` if an operator wants an
+additional global circuit breaker.
 
 The wrapper persists the host's MCP `initialize` / `notifications/initialized`
 frames in `state/mcp-session-replay.json` and replays them into each fresh child
@@ -70,9 +75,8 @@ Stale MCP server processes can make a fixed bug look unfixed. Examples:
    its MCP session before debugging the bridge code.
 3. Use `bridge_process_status()` to inspect server markers, but remember MCP
    servers are intentionally multi-instance. A marker is observability, not a
-   singleton lock. If marker count reaches the wrapper live-process limit,
-   restart or reconnect the MCP host and clean up stale client sessions before
-   raising the limit.
+   singleton lock. If the duplicate-host guard trips, restart or reconnect the
+   specific MCP host that still owns the older Agent Bridge connection.
 4. After restart, rerun the same MCP tool call from the client before declaring
    a defect.
 
