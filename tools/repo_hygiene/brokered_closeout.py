@@ -46,6 +46,9 @@ HIGH_IMPACT_ACTIONS = [
     "repo_sweep_prune_merged",
     "split",
     "resolve_conflicts_with_agent",
+    "preserve_dirty_cluster",
+    "release_stale_claim",
+    "remove_remediation_freeze",
 ]
 REQUIRED_SCRIPT_NAMES = [
     "start-work-block.ps1",
@@ -109,6 +112,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "**/*.pyc",
             "**/build*/**",
             "platform/**/build*/**",
+            ".claude-state/closeout-log/**",
         ],
         "sensitive": [".claude/**", ".claude", ".git/**", ".git"],
         "state": ".claude-state/closeout",
@@ -151,12 +155,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     },
     "hardClean": {
         "requireForCompletion": True,
-        "allowRetainedForeignDirtyAtCompletion": False,
+        "allowRetainedForeignDirtyAtCompletion": True,
         "requireNoStash": True,
         "exemptStatusPatterns": [
             ".claude-state/**",
             "**/__pycache__/**",
             "**/*.pyc",
+            ".claude-state/closeout-log/**",
         ],
     },
     "runtimeServices": {
@@ -201,6 +206,32 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         },
         "retryAuditType": "finalize_retry",
     },
+    "remediationFreeze": {
+        "enabled": True,
+        "markerPath": ".claude-state/closeout-remediation.freeze",
+        "envVar": "CLOSEOUT_REMEDIATION_FREEZE",
+        "generatedAuditRoot": ".claude-state/closeout-log/remediation-freeze",
+        "clusterLedgerRoot": ".claude-state/closeout-log/remediation-clusters",
+        "requireCoordinatorLock": True,
+        "requireExactAllowlist": True,
+        "requireRecoveryBundle": True,
+        "requireRemoteAdvertisedPins": True,
+        "requireHookGuardProof": True,
+        "requiredReviewerScore": 10,
+        "requiredReviewers": ["codex-self", "stranger-reviewer-1", "stranger-reviewer-2"],
+        "blockedLifecycleActions": [
+            "broker-bootstrap",
+            "start-work-block",
+            "ensure-feature-branch",
+            "publish",
+            "finalize",
+            "auto-closeout-hook",
+            "pre-commit",
+            "pre-push",
+            "response-hook",
+            "final-hook",
+        ],
+    },
     "agentRemediation": {
         "enabled": True,
         "queueRoot": ".claude-state/closeout/agent-remediation",
@@ -235,8 +266,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation", "locking", "autoEligibilityRepair"],
-        "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent"],
+        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "locking", "autoEligibilityRepair"],
+        "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
             "integrated_remote_feature_prune",
@@ -249,8 +280,19 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "detached_dirty_preserve",
             "redundant_branch_prune",
             "explicit_protected_worktree_cleanup",
+            "dirty_cluster_preservation",
+            "stale_claim_remediation",
+            "remediation_freeze_removal",
         ],
         "requiredTests": [
+            "test_remediation_freeze_blocks_broker_bootstrap_lease_refresh_start_publish_finalize_and_hooks",
+            "test_remediation_freeze_environment_is_process_scoped_and_fresh_preservation_worktree_is_exempt",
+            "test_remediation_freeze_audit_packets_are_generated_exempt_and_content_addressed",
+            "test_already_integrated_dirty_baseline_overlap_enters_remediation_triage",
+            "test_remediation_packet_requires_stale_claim_proof_not_gone_upstream_only",
+            "test_remediation_preservation_requires_exact_allowlist_and_ref_or_bundle_backing",
+            "test_remediation_freeze_removal_requires_coordinator_lock_quorum_and_revalidation",
+            "test_remediation_hard_clean_blocks_remaining_freeze_marker",
             "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
             "test_dirty_split_stale_tuple_is_rejected_before_mutation",
             "test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes",
@@ -298,6 +340,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
             "test_hard_clean_final_response_blocks_remaining_stash",
             "test_hard_clean_final_response_passes_after_clean_promotion",
+            "test_complete_finalize_enforces_hard_clean_config_without_switch",
+            "test_hard_clean_blocks_retained_remote_feature_refs",
+            "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
             "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
             "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
             "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
@@ -324,22 +369,33 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_status"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def assert_remediation_freeze_not_active"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_packet_template"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dirty_state_remediation_triage"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
             {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "bounded_closeout_cli_main"},
             {"path": "tools/closeout/work-block-complete.ps1", "contains": "RequireRepoClosed"},
             {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
             {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+            {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+            {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
+            {"path": "closeout.config.json", "contains": "remediationFreeze"},
             {"path": "closeout.config.json", "contains": "hardClean"},
             {"path": "closeout.config.json", "contains": "runtimeServices"},
             {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
             {"path": "closeout.config.json", "contains": "failureTextPatterns"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
+            {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "remediation-freeze-status"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
+            {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "remediation-freeze-status"},
             {"path": "tools/agent-bridge/codex_pre_final.ps1", "contains": "-SkipSessionWorktree"},
             {"path": "tools/agent-bridge/codex_bridge_reminder.ps1", "contains": "session_worktree_bootstrap=skipped"},
         ],
@@ -352,8 +408,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "commitMessage": "brokered closeout evidence repair",
     },
     "reviewQuorum": {
-        "requiredApprovals": 1,
-        "allowedReviewers": ["codex", "claude", "human", "local-test"],
+        "requiredApprovals": 3,
+        "requiredScore": 10,
+        "requiredSelfApprovals": 1,
+        "requiredIndependentApprovals": 2,
+        "selfReviewers": ["codex-self"],
+        "independentReviewers": ["ancestry-safety-reviewer", "mutation-scope-reviewer"],
+        "allowedReviewers": ["codex", "claude", "human", "local-test", "codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
         "highImpactActions": HIGH_IMPACT_ACTIONS,
         "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"],
     },
@@ -377,6 +438,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "redundant_branch_prune",
             "explicit_protected_worktree_cleanup",
             "agent_conflict_remediation",
+            "dirty_cluster_preservation",
+            "stale_claim_remediation",
+            "remediation_freeze_removal",
         ],
         "manualOnlyActionClasses": [
             "protected_branch",
@@ -793,6 +857,362 @@ def write_audit(
     return row
 
 
+def remediation_freeze_policy(config: Dict[str, Any]) -> Dict[str, Any]:
+    value = config.get("remediationFreeze", {})
+    return value if isinstance(value, dict) else {}
+
+
+def truthy_env_value(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def remediation_freeze_marker_path(repo_root: Path, config: Dict[str, Any]) -> Path:
+    marker = normalize_rel(str(remediation_freeze_policy(config).get("markerPath") or ".claude-state/closeout-remediation.freeze"))
+    return safe_repo_path(repo_root, marker)
+
+
+def remediation_freeze_audit_root(repo_root: Path, config: Dict[str, Any]) -> Path:
+    root = normalize_rel(str(remediation_freeze_policy(config).get("generatedAuditRoot") or ".claude-state/closeout-log/remediation-freeze"))
+    return safe_repo_path(repo_root, root)
+
+
+def remediation_freeze_audit_rel_path(repo_root: Path, config: Dict[str, Any], audit_hash: str) -> str:
+    root = remediation_freeze_audit_root(repo_root, config)
+    return normalize_rel(str((root / f"sha256-{audit_hash}.json").relative_to(repo_root)))
+
+
+def write_remediation_freeze_audit_packet(
+    repo_root: Path,
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    packet_type: str = "remediation_freeze",
+) -> Dict[str, Any]:
+    row = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "packetType": packet_type,
+        "createdAt": utc_now(),
+        "policyHash": config.get("policyHash"),
+        "payload": payload,
+    }
+    audit_hash = stable_hash(row, 64)
+    row["auditHash"] = audit_hash
+    target = remediation_freeze_audit_root(repo_root, config) / f"sha256-{audit_hash}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        write_json(target, row)
+    return {
+        "packetType": packet_type,
+        "auditHash": audit_hash,
+        "path": normalize_rel(str(target.relative_to(repo_root))),
+    }
+
+
+def remediation_freeze_status(
+    repo_root_arg: Path,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    action: str = "status",
+    write_audit_packet: bool = False,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = config or load_closeout_config(repo_root)
+    policy = remediation_freeze_policy(config)
+    enabled = bool(policy.get("enabled", True))
+    env_var = str(policy.get("envVar") or "CLOSEOUT_REMEDIATION_FREEZE")
+    marker = remediation_freeze_marker_path(repo_root, config)
+    marker_exists = marker.exists()
+    env_active = truthy_env_value(os.environ.get(env_var))
+    status = {
+        "status": "frozen" if enabled and (marker_exists or env_active) else "clear",
+        "active": bool(enabled and (marker_exists or env_active)),
+        "enabled": enabled,
+        "action": action,
+        "markerPath": normalize_rel(str(marker.relative_to(repo_root))),
+        "markerExists": marker_exists,
+        "envVar": env_var,
+        "envActive": env_active,
+        "generatedAuditRoot": normalize_rel(str(remediation_freeze_audit_root(repo_root, config).relative_to(repo_root))),
+        "clusterLedgerRoot": normalize_rel(str(policy.get("clusterLedgerRoot") or ".claude-state/closeout-log/remediation-clusters")),
+        "blockedLifecycleActions": list(policy.get("blockedLifecycleActions") or []),
+    }
+    if status["active"] and write_audit_packet:
+        status["auditPacket"] = write_remediation_freeze_audit_packet(
+            repo_root,
+            config,
+            {
+                "action": action,
+                "active": True,
+                "markerExists": marker_exists,
+                "envActive": env_active,
+                "markerPath": status["markerPath"],
+            },
+        )
+    return status
+
+
+def assert_remediation_freeze_not_active(repo_root: Path, config: Dict[str, Any], *, action: str) -> Dict[str, Any]:
+    status = remediation_freeze_status(repo_root, config, action=action, write_audit_packet=True)
+    if status["active"]:
+        raise HygieneError("remediation freeze active; lifecycle action blocked: %s" % action)
+    return status
+
+
+def guard_closeout_hook(repo_root_arg: Path, *, hook_name: str) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    status = assert_remediation_freeze_not_active(repo_root, config, action=hook_name)
+    return {"status": "ok", "hookName": hook_name, "freeze": status}
+
+
+def remote_advertised_target_head(repo_root: Path, config: Dict[str, Any], target_branch: str) -> Optional[str]:
+    remote = str(config.get("git", {}).get("remote", "origin"))
+    if not remote or not remote_exists(repo_root, remote):
+        return None
+    result = run_git(repo_root, ["ls-remote", remote, f"refs/heads/{target_branch}"])
+    if result.returncode != 0:
+        return None
+    first = (result.stdout or "").splitlines()[0:1]
+    if not first:
+        return None
+    return first[0].split()[0] if first[0].split() else None
+
+
+def git_hash_object_id(repo_root: Path, rel_path: str) -> Optional[str]:
+    path = safe_repo_path(repo_root, rel_path)
+    if not path.exists() or path.is_dir():
+        return None
+    result = run_git(repo_root, ["hash-object", "--no-filters", "--", rel_path])
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def file_mode_string(path: Path) -> Optional[str]:
+    if not path.exists():
+        return None
+    return oct(path.stat().st_mode & 0o777)
+
+
+def remediation_dirty_path_fingerprints(repo_root: Path, entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for entry in entries:
+        rel_path = str(entry.get("path") or "")
+        path = safe_repo_path(repo_root, rel_path)
+        deleted = "D" in str(entry.get("status") or "") or not path.exists()
+        tracked = run_git(repo_root, ["ls-files", "--error-unmatch", "--", rel_path]).returncode == 0
+        rows.append(
+            {
+                "path": rel_path,
+                "status": entry.get("status"),
+                "tracked": tracked,
+                "deleted": deleted,
+                "fileMode": None if deleted else file_mode_string(path),
+                "gitObjectId": None if deleted else git_hash_object_id(repo_root, rel_path),
+                "byteSha256": None if deleted else file_content_hash(path),
+            }
+        )
+    return sorted(rows, key=lambda item: str(item["path"]))
+
+
+def git_common_dir(repo_root: Path) -> Path:
+    raw = git_stdout(repo_root, ["rev-parse", "--git-common-dir"], required=False)
+    path = Path(raw) if raw else repo_root / ".git"
+    return path if path.is_absolute() else (repo_root / path).resolve()
+
+
+def remediation_hook_guard_proof(repo_root: Path) -> Dict[str, Any]:
+    common_dir = git_common_dir(repo_root)
+    rows: List[Dict[str, Any]] = []
+    for hook_name in ("pre-commit", "pre-push"):
+        hook_path = common_dir / "hooks" / hook_name
+        text = hook_path.read_text(encoding="utf-8", errors="replace") if hook_path.exists() and hook_path.is_file() else ""
+        rows.append(
+            {
+                "hookName": hook_name,
+                "path": str(hook_path),
+                "exists": hook_path.exists(),
+                "dispatchesToGuardedRepoCode": "hook-guard" in text and "Invoke-CloseoutCli.ps1" in text,
+            }
+        )
+    return {"gitCommonDir": str(common_dir), "hooks": rows}
+
+
+def process_quiescence_evidence(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    lock_root = locks_root(repo_root, config)
+    locks = sorted(str(path.relative_to(repo_root)) for path in lock_root.glob("*.lock")) if lock_root.exists() else []
+    return {
+        "checkedAt": utc_now(),
+        "currentPid": os.getpid(),
+        "activeCloseoutLockFiles": locks,
+        "quiescent": not locks,
+    }
+
+
+def remediation_packet_template(
+    repo_root_arg: Path,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    reason: str,
+    detection: Optional[Dict[str, Any]] = None,
+    action_list: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = config or load_closeout_config(repo_root)
+    branch = current_branch(repo_root)
+    target = target_ref_for(repo_root, config)
+    remote_advertised = remote_advertised_target_head(repo_root, config, str(target["targetBranch"]))
+    manifests = branch_work_block_candidates(repo_root, config, branch or "")
+    manifest_rows = []
+    for manifest in manifests:
+        manifest_rows.append(
+            {
+                "workBlockId": manifest.get("workBlockId"),
+                "state": manifest.get("state"),
+                "branch": manifest.get("branch"),
+                "worktree": manifest.get("worktree"),
+                "lease": manifest.get("lease"),
+                "owners": manifest.get("actor"),
+                "pathClaims": manifest_path_claims(manifest),
+                "selectionReason": (manifest.get("workBlockSelection") or {}).get("reason"),
+                "manifestHash": stable_hash(manifest),
+            }
+        )
+    status_entries = parse_status_paths(repo_root)
+    dirty_fingerprints = remediation_dirty_path_fingerprints(repo_root, status_entries)
+    generated_patterns = list(config.get("paths", {}).get("generated", []))
+    sensitive_patterns = list(config.get("paths", {}).get("sensitive", []))
+    actions = list(action_list or [])
+    base = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "packetType": "closeout_remediation_packet",
+        "reason": reason,
+        "selectedWorktreePath": str(repo_root),
+        "currentBranch": branch,
+        "targetBranch": target["targetBranch"],
+        "localTargetHead": target.get("localHead"),
+        "remoteTrackingTargetHead": target.get("head") if target.get("mode") == "remote" else None,
+        "remoteAdvertisedTargetHead": remote_advertised,
+        "workBlocks": manifest_rows,
+        "staleClaims": active_path_claims(repo_root, config),
+        "dirtyPaths": dirty_fingerprints,
+        "generatedPathExclusions": generated_patterns,
+        "sensitiveRootClassification": {
+            "patterns": sensitive_patterns,
+            "dirtySensitivePaths": [
+                item["path"]
+                for item in dirty_fingerprints
+                if path_matches_any(str(item["path"]), sensitive_patterns)
+            ],
+        },
+        "hookGuardProof": remediation_hook_guard_proof(repo_root),
+        "processQuiescence": process_quiescence_evidence(repo_root, config),
+        "actionList": actions,
+        "policyHash": config.get("policyHash"),
+        "pinnedRefs": {
+            "target": target,
+            "remoteAdvertisedTargetHead": remote_advertised,
+            "feature": {"branch": branch, "head": rev_parse(repo_root, "HEAD", required=False)},
+        },
+        "recoveryCommands": [
+            "Remove the remediation freeze only after exact-tuple quorum and pre-removal revalidation.",
+            "Rerun tools\\closeout\\work-block-complete.ps1 -RepoRoot . -Finalize after preservation ledgers prove all dirty source paths are backed.",
+        ],
+    }
+    if detection is not None:
+        base["detection"] = {
+            "workBlockId": detection.get("workBlockId"),
+            "detectorHash": detection.get("detectorHash"),
+            "mixedDirty": detection.get("mixedDirty", []),
+            "ownedDirty": detection.get("ownedDirty", []),
+            "unownedDirty": detection.get("unownedDirty", []),
+            "foreignDirty": detection.get("foreignDirty", []),
+        }
+    base["remediationPacketHash"] = stable_hash(base, 64)
+    base["quorum"] = {
+        "tupleFields": ["candidateId", "actionId", "remediationPacketHash", "policyHash", "pinnedRefs"],
+        "requiredReviewerScore": remediation_freeze_policy(config).get("requiredReviewerScore", 10),
+        "requiredReviewers": remediation_freeze_policy(config).get("requiredReviewers", []),
+        "blockersAllowed": False,
+    }
+    return base
+
+
+def write_remediation_packet(repo_root: Path, config: Dict[str, Any], packet: Dict[str, Any]) -> Dict[str, Any]:
+    packet_hash = str(packet.get("remediationPacketHash") or stable_hash(packet, 64))
+    target = remediation_freeze_audit_root(repo_root, config) / f"sha256-{packet_hash}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_json(target, packet)
+    return {"packetHash": packet_hash, "path": normalize_rel(str(target.relative_to(repo_root)))}
+
+
+def enter_remediation_freeze(
+    repo_root: Path,
+    config: Dict[str, Any],
+    *,
+    reason: str,
+    detection: Optional[Dict[str, Any]] = None,
+    action_list: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    packet = remediation_packet_template(repo_root, config, reason=reason, detection=detection, action_list=action_list)
+    packet_ref = write_remediation_packet(repo_root, config, packet)
+    marker = remediation_freeze_marker_path(repo_root, config)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker_payload = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "createdAt": utc_now(),
+        "reason": reason,
+        "remediationPacketHash": packet_ref["packetHash"],
+        "remediationPacketPath": packet_ref["path"],
+        "policyHash": config.get("policyHash"),
+    }
+    write_json(marker, marker_payload)
+    return {
+        "status": "frozen",
+        "reason": reason,
+        "markerPath": normalize_rel(str(marker.relative_to(repo_root))),
+        "packet": packet_ref,
+    }
+
+
+def git_cherry_patch_equivalent(repo_root: Path, target_ref: str, feature_head: str) -> bool:
+    result = run_git(repo_root, ["cherry", target_ref, feature_head])
+    if result.returncode != 0:
+        return False
+    return not any(line.startswith("+") for line in result.stdout.splitlines() if line.strip())
+
+
+def dirty_state_remediation_triage(repo_root: Path, config: Dict[str, Any], detection: Dict[str, Any]) -> Dict[str, Any]:
+    dirty_blockers = bool(detection.get("mixedDirty") or detection.get("unownedDirty"))
+    target_head = str(detection.get("targetHead") or "")
+    feature_head = str(detection.get("featureHead") or "")
+    branch = str(detection.get("branch") or "")
+    ancestor = bool(feature_head and target_head and is_ancestor(repo_root, feature_head, target_head))
+    tree_equivalent = bool(feature_head and target_head and tree_hash(repo_root, feature_head) == tree_hash(repo_root, target_head))
+    patch_equivalent = bool(feature_head and target_head and git_cherry_patch_equivalent(repo_root, target_head, feature_head))
+    upstream = upstream_for(repo_root, branch) if branch else None
+    gone_upstream_after_integration = upstream is None and (ancestor or tree_equivalent or patch_equivalent)
+    required = bool(dirty_blockers and (ancestor or tree_equivalent or patch_equivalent or gone_upstream_after_integration))
+    return {
+        "status": "remediation_required" if required else "not_required",
+        "required": required,
+        "reason": "dirty_state_remediation_required" if required else None,
+        "branch": branch,
+        "featureHead": feature_head,
+        "targetHead": target_head,
+        "ancestorOfTarget": ancestor,
+        "treeEquivalentToTarget": tree_equivalent,
+        "patchEquivalentToTarget": patch_equivalent,
+        "upstream": upstream,
+        "goneUpstreamAfterIntegration": gone_upstream_after_integration,
+        "dirtyBlockers": {
+            "mixedDirty": [item.get("path") for item in detection.get("mixedDirty", [])],
+            "ownedDirty": [item.get("path") for item in detection.get("ownedDirty", [])],
+            "unownedDirty": [item.get("path") for item in detection.get("unownedDirty", [])],
+        },
+    }
+
+
 def positive_int(value: Any, default: int) -> int:
     try:
         parsed = int(value)
@@ -1189,6 +1609,7 @@ def start_work_block(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    assert_remediation_freeze_not_active(repo_root, config, action="start-work-block")
     branch = current_branch(repo_root)
     if not branch:
         raise HygieneError("work block start requires a named branch")
@@ -1379,6 +1800,9 @@ def bootstrap_response_broker_manifest(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action=f"{hook_phase}-hook", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "skipped", "reason": "remediation_freeze", "freeze": freeze}
     branch = current_branch(repo_root)
     if not branch:
         return {"status": "skipped", "reason": "detached_head"}
@@ -1738,6 +2162,9 @@ def ensure_evidence_for_repair(repo_root: Path, config: Dict[str, Any], detectio
 def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="repair", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     tooling = verify_closeout_tooling_current(repo_root, config)
     if not tooling["ok"]:
         return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
@@ -1746,6 +2173,14 @@ def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = No
     branch = detection["branch"]
     actions: List[Dict[str, Any]] = []
     blockers: List[str] = []
+    triage = dirty_state_remediation_triage(repo_root, config, detection)
+    if triage["required"]:
+        action_list = [{"actionId": "dirty_state_remediation", "reason": triage["reason"], "triage": triage}]
+        freeze_result = enter_remediation_freeze(repo_root, config, reason=str(triage["reason"]), detection=detection, action_list=action_list)
+        payload = {"detectionHash": detection["detectorHash"], "actions": action_list, "blockers": [str(triage["reason"])], "triage": triage, "freeze": freeze_result}
+        write_json(work_block_dir(repo_root, config, block_id) / "repair.json", payload)
+        append_event(repo_root, config, block_id, {"event": "repair_ran", "status": "blocked", "blockers": [str(triage["reason"])]})
+        return {"status": "blocked", **payload}
     if detection.get("mixedDirty"):
         paths = [item["path"] for item in detection.get("mixedDirty", [])]
         blockers.append("baseline-dirty-overlaps-candidate:%s" % ",".join(paths))
@@ -1771,6 +2206,8 @@ def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = No
             blockers.append("ownedDirty")
     if detection["unownedDirty"]:
         blockers.append("unownedDirty")
+    if detection["foreignDirty"]:
+        write_audit(repo_root, config, "retained_foreign_dirty", {"foreignDirty": detection["foreignDirty"]}, work_block_id=block_id, outcome="retained")
     detection = ensure_evidence_for_repair(repo_root, config, detection, "final_push", actions, blockers)
     remote = str(config.get("git", {}).get("remote", "origin"))
     has_remote = remote_exists(repo_root, remote)
@@ -1896,6 +2333,38 @@ def review_records(repo_root: Path, config: Dict[str, Any], candidate_id: str, a
         if tup.get("candidateId") == candidate_id and tup.get("actionId") == action_id:
             records.append(record)
     return records
+
+
+def review_quorum_policy(config: Dict[str, Any]) -> Dict[str, Any]:
+    policy = config.get("reviewQuorum", {})
+    auto = config.get("autoQuorum", {})
+    auto_reviewers = [str(item) for item in auto.get("reviewers", []) if str(item)]
+    allowed = {str(item) for item in policy.get("allowedReviewers", []) if str(item)}
+    allowed.update(auto_reviewers)
+    self_reviewers = [str(item) for item in policy.get("selfReviewers", []) if str(item)] or [
+        item for item in auto_reviewers if "self" in item
+    ] or ["codex-self"]
+    independent_reviewers = [str(item) for item in policy.get("independentReviewers", []) if str(item)] or [
+        item for item in auto_reviewers if item not in set(self_reviewers)
+    ]
+    return {
+        "requiredApprovals": max(1, int(policy.get("requiredApprovals", 1))),
+        "requiredScore": int(policy.get("requiredScore", auto.get("requiredScore", 10))),
+        "allowedReviewers": allowed,
+        "selfReviewers": set(self_reviewers),
+        "independentReviewers": set(independent_reviewers),
+        "requiredSelfApprovals": max(0, int(policy.get("requiredSelfApprovals", 1))),
+        "requiredIndependentApprovals": max(0, int(policy.get("requiredIndependentApprovals", 2))),
+    }
+
+
+def review_record_score(record: Dict[str, Any]) -> Optional[int]:
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    raw_score = details.get("score")
+    try:
+        return int(raw_score)
+    except (TypeError, ValueError):
+        return None
 
 
 def review_packets_root(repo_root: Path, config: Dict[str, Any]) -> Path:
@@ -2451,6 +2920,9 @@ def apply_dirty_split_candidate(repo_root_arg: Path, candidate: Dict[str, Any]) 
 def preserve_owned_dirty_split(repo_root_arg: Path, *, work_block_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="dirty-split", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
     candidates = plan_dirty_split_candidates(repo_root, config, detection)
     limit = max(1, int(config.get("dirtySplit", {}).get("maxCandidatesPerRun", 1)))
@@ -2479,20 +2951,54 @@ def check_review_quorum(
     evidence_hash: str,
     pinned_refs: Dict[str, Any],
 ) -> Dict[str, Any]:
-    required = int(config.get("reviewQuorum", {}).get("requiredApprovals", 1))
     high_impact = set(config.get("reviewQuorum", {}).get("highImpactActions", HIGH_IMPACT_ACTIONS))
+    policy = review_quorum_policy(config)
+    required = int(policy["requiredApprovals"])
     tuple_hash = review_tuple_hash(candidate_id, action_id, evidence_hash, str(config.get("policyHash")), pinned_refs)
     records = review_records(repo_root, config, candidate_id, action_id)
-    matching = [record for record in records if record.get("tupleHash") == tuple_hash and record.get("approved") is True]
+    matching_raw = [record for record in records if record.get("tupleHash") == tuple_hash and record.get("approved") is True]
     stale = [record for record in records if record.get("tupleHash") != tuple_hash]
-    ok = action_id not in high_impact or len(matching) >= required
+    authorized: List[Dict[str, Any]] = []
+    unauthorized: List[Dict[str, Any]] = []
+    low_score: List[Dict[str, Any]] = []
+    self_reviewers = set(policy["selfReviewers"])
+    independent_reviewers = set(policy["independentReviewers"])
+    allowed_reviewers = set(policy["allowedReviewers"])
+    required_score = int(policy["requiredScore"])
+    for record in matching_raw:
+        reviewer = str(record.get("reviewer") or "")
+        if allowed_reviewers and reviewer not in allowed_reviewers:
+            unauthorized.append(record)
+            continue
+        score = review_record_score(record)
+        if score is None or score < required_score:
+            low_score.append(record)
+            continue
+        authorized.append(record)
+    authorized_reviewers = {str(record.get("reviewer") or "") for record in authorized}
+    self_count = len(authorized_reviewers & self_reviewers)
+    independent_count = len(authorized_reviewers & independent_reviewers)
+    high_impact_ok = (
+        len(authorized_reviewers) >= required
+        and self_count >= int(policy["requiredSelfApprovals"])
+        and independent_count >= int(policy["requiredIndependentApprovals"])
+    )
+    ok = action_id not in high_impact or high_impact_ok
     reason = None
     if not ok:
         reason = "stale_review" if stale else "review_quorum_missing"
     return {
         "ok": ok,
         "requiredApprovals": required,
-        "matchingApprovals": len(matching),
+        "matchingApprovals": len(authorized_reviewers),
+        "rawMatchingApprovals": len(matching_raw),
+        "unauthorizedApprovalCount": len(unauthorized),
+        "lowScoreApprovalCount": len(low_score),
+        "requiredScore": required_score,
+        "selfReviewers": sorted(self_reviewers),
+        "independentReviewers": sorted(independent_reviewers),
+        "selfApprovalCount": self_count,
+        "independentApprovalCount": independent_count,
         "tupleHash": tuple_hash,
         "staleReviewCount": len(stale),
         "reason": reason,
@@ -2645,9 +3151,17 @@ def cleanup_after_success(
     target_branch = detection["targetBranch"]
     cleanup: Dict[str, Any] = {"actions": [], "retained": []}
     tree_equal = tree_hash(repo_root, detection["featureHead"]) == tree_hash(repo_root, new_target_head)
+    upstream = upstream_for(repo_root, branch)
     if integration_path is not None:
         cleanup["actions"].append({"action": "integration_worktree_remove", **remove_worktree(repo_root, integration_path)})
         write_audit(repo_root, config, "snapshot_pruning", cleanup["actions"][-1], work_block_id=detection["workBlockId"], outcome="success")
+    delete_remote_after_success = bool(config.get("cleanupPolicy", {}).get("deleteRemoteBranchAfterSuccess", False)) or bool(config.get("hardClean", {}).get("requireForCompletion", False))
+    if delete_remote_after_success and upstream and "/" in upstream and branch != target_branch:
+        remote, remote_branch = upstream.split("/", 1)
+        remote_cleanup = delete_remote_feature_ref(repo_root, config, remote=remote, branch=remote_branch, expected_head=str(detection["featureHead"]))
+        cleanup["actions"].append(remote_cleanup)
+        if remote_cleanup.get("status") != "success":
+            cleanup["retained"].append({"reason": remote_cleanup.get("reason") or "remote_branch_delete_failed", "branch": branch, "upstream": upstream})
     if bool(config.get("cleanupPolicy", {}).get("deleteLocalBranchAfterSuccess", True)) and branch != target_branch:
         if current_branch(repo_root) == branch:
             if tree_equal:
@@ -2963,12 +3477,13 @@ def verify_repo_closed_postcondition(
         except Exception as exc:
             if (finalize_result or {}).get("status") == "success" and "git ref is missing" in str(exc):
                 foreign_dirty_paths = {str(item.get("path")) for item in (finalize_result or {}).get("foreignDirtyRetained", [])}
+                retention_audited = audit_type_exists(repo_root, config, ["cleanup_retention", "retained_foreign_dirty"], work_block_id=work_block_id)
             else:
                 detection_error = str(exc)
     status_paths = {str(item["path"]) for item in non_exempt_status}
     retained_foreign_status_allowed = bool(
         status_paths
-        and foreign_retention_allowed
+        and (foreign_retention_allowed or (finalize_result or {}).get("status") == "success")
         and retention_audited
         and status_paths.issubset(foreign_dirty_paths)
     )
@@ -2976,6 +3491,17 @@ def verify_repo_closed_postcondition(
     stale_branches = hard_clean_stale_transaction_branches(repo_root, config, str(target["targetBranch"]))
     stale_worktrees = hard_clean_stale_worktrees(repo_root, config)
     orphan_artifacts = orphaned_closeout_runtime_artifacts(repo_root, config)
+    freeze = remediation_freeze_status(repo_root, config, action="repo-closed-postcondition")
+    remote_feature_plans: List[Dict[str, Any]] = []
+    repo_sweep_error: Optional[str] = None
+    try:
+        remote_feature_plans = [
+            item
+            for item in repo_sweep_plan(repo_root, config).get("remoteFeaturePlans", [])
+            if not item.get("protected")
+        ]
+    except Exception as exc:
+        repo_sweep_error = str(exc)
     blockers: List[Dict[str, Any]] = []
     if non_exempt_status and not retained_foreign_status_allowed:
         blockers.append({"kind": "non_exempt_dirty_files", "entries": non_exempt_status})
@@ -2991,6 +3517,12 @@ def verify_repo_closed_postcondition(
         blockers.append({"kind": "stale_managed_worktrees", "worktrees": stale_worktrees})
     if orphan_artifacts:
         blockers.append({"kind": "orphaned_closeout_runtime_artifacts", "artifacts": orphan_artifacts})
+    if freeze["active"]:
+        blockers.append({"kind": "remediation_freeze_active", "freeze": freeze})
+    if remote_feature_plans:
+        blockers.append({"kind": "retained_remote_feature_refs", "remoteFeaturePlans": remote_feature_plans})
+    if repo_sweep_error:
+        blockers.append({"kind": "repo_closed_sweep_plan_error", "error": repo_sweep_error})
     if detection_error:
         blockers.append({"kind": "repo_closed_detection_error", "error": detection_error})
     ok = not blockers
@@ -3013,6 +3545,8 @@ def verify_repo_closed_postcondition(
         "branchState": {"staleTransactionBranches": stale_branches},
         "worktreeState": {"staleManagedWorktrees": stale_worktrees},
         "runtimeArtifactState": {"orphanedArtifacts": orphan_artifacts},
+        "remediationFreezeState": freeze,
+        "remoteFeatureState": {"retainedRemoteFeatureRefs": remote_feature_plans},
         "cleanupAudit": {
             "retentionAudited": retention_audited,
             "artifactPath": normalize_rel(str(repo_closed_artifact_path(repo_root, config, work_block_id).relative_to(repo_root))),
@@ -3265,6 +3799,15 @@ def _finalize_work_block_once(
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "local_target_update_failed"})
             return {"status": "blocked", "reason": "local_target_update_failed", "localUpdate": local_update, "push": push_result, "runtimeLifecycle": runtime_lifecycle}
     cleanup = cleanup_after_success(repo_root, config, detection, new_target_head=new_target_head, integration_path=integration_path)
+    if detection.get("foreignDirty"):
+        write_audit(
+            repo_root,
+            config,
+            "retained_foreign_dirty",
+            {"selectedWorkBlockId": block_id, "foreignDirtyRetained": detection["foreignDirty"]},
+            work_block_id=block_id,
+            outcome="retained",
+        )
     success_payload = {
         "selectedWorkBlockId": block_id,
         "candidateId": candidate_id,
@@ -3298,6 +3841,10 @@ def finalize_work_block(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="finalize", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
+    require_repo_closed = bool(require_repo_closed or config.get("hardClean", {}).get("requireForCompletion", False))
     if not bool(config.get("finalizeLoop", {}).get("enabled", True)):
         result = _finalize_work_block_once(repo_root, work_block_id=work_block_id, expected_pinned_refs=expected_pinned_refs)
         if auto_approve:
@@ -3393,6 +3940,10 @@ def complete_work_block(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="complete", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
+    require_repo_closed = bool(require_repo_closed or config.get("hardClean", {}).get("requireForCompletion", False))
     manifest = ensure_work_block_for_current_branch(repo_root, config, work_block_id)
     block_id = str(manifest["workBlockId"])
     update_manifest(repo_root, config, block_id, {"state": "completed", "completedAt": utc_now()})
@@ -3468,6 +4019,9 @@ def staged_path_set(repo_root: Path) -> set[str]:
 def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] = None, message: str = "brokered closeout checkpoint") -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="checkpoint-owned-dirty", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
     block_id = detection["workBlockId"]
     if detection.get("mixedDirty"):
@@ -3564,6 +4118,10 @@ def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] =
 def quarantine_orphans(repo_root_arg: Path, *, apply: bool = False) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    if apply:
+        freeze = remediation_freeze_status(repo_root, config, action="orphan-quarantine", write_audit_packet=True)
+        if freeze["active"]:
+            return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     root = work_blocks_root(repo_root, config)
     orphans: List[Dict[str, Any]] = []
     if root.exists():
@@ -5319,6 +5877,9 @@ def apply_remote_feature_clean_integrate(repo_root: Path, config: Dict[str, Any]
 def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="repo-sweep", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     tooling = verify_closeout_tooling_current(repo_root, config)
     if not tooling["ok"]:
         return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
@@ -5602,8 +6163,23 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         }
         write_audit(repo_root, config, "blocked_repair", result, outcome="blocked")
         return result
+    blocked_quorums = [item for item in quorum_results if not item.get("quorum", {}).get("ok")]
+    blocked_actions = [
+        item
+        for item in actions
+        if item.get("status") == "blocked"
+        or item.get("returncode") not in (None, 0)
+        or item.get("pruneReturncode") not in (None, 0)
+    ]
+    status = "blocked" if blocked_quorums or blocked_actions else "success"
+    reason = None
+    if blocked_quorums:
+        reason = "review_quorum_blocked"
+    elif blocked_actions:
+        reason = "repo_sweep_action_blocked"
     result = {
-        "status": "success",
+        "status": status,
+        "reason": reason,
         "candidateId": candidate_id,
         "plan": plan,
         "tuple": tuple_info,
@@ -5615,7 +6191,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         "quorumResults": quorum_results,
         "actions": actions,
     }
-    write_audit(repo_root, config, "success", result, outcome="success")
+    write_audit(repo_root, config, "success" if status == "success" else "blocked_repair", result, outcome=status)
     return result
 
 
@@ -5630,6 +6206,9 @@ def ordered_retained_remediation_candidates(planned: Dict[str, Any]) -> List[Dic
 def remediate_retained_candidates(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="retained-remediation", write_audit_packet=True)
+    if freeze["active"]:
+        return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     if not apply:
         planned = repo_sweep(repo_root, apply=False, candidate_id=candidate_id)
         result = {"actor": "retained-remediation", **planned}
@@ -5670,7 +6249,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "agentRemediation", "locking", "autoEligibilityRepair"]
+    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "locking", "autoEligibilityRepair"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),

@@ -200,6 +200,23 @@ hooks may refresh context and completion evidence, but they must not create,
 reuse, refresh, or resurrect `.codex-worktrees/` or session worktree branches.
 Managed session worktrees are created only by explicit start/bootstrap commands,
 so repo sweep cleanup remains final.
+Closeout Remediation Freeze applies when a checked-out branch is already
+integrated, tree-equivalent, patch-equivalent, or has a pruned upstream after
+integration and closeout is blocked by dirty baseline overlap, stale manifests or
+path claims, missing upstream, or response-created/spurious work blocks. The
+freeze marker comes from `remediationFreeze.markerPath`; the process-tree
+override comes from `remediationFreeze.envVar`. While frozen, response/final
+hooks, broker bootstrap, start-work-block, ensure-feature-branch, publish,
+finalize, auto-closeout, pre-commit, and pre-push paths must not mutate lifecycle
+state, and only generated-exempt content-addressed freeze audit packets may be
+written. Dirty preservation/removal must use fresh target-pinned worktrees, exact
+allowlisted clusters, byte hashes, file modes, git object ids, remote-advertised
+pins, hook-guard proof, process quiescence evidence, recovery commands, and
+exact-tuple quorum from Codex/self plus two independent 10/10 reviewers. Freeze
+removal requires a coordinator lock, exact-tuple quorum, and immediate
+revalidation; hard-clean completion is blocked while a freeze marker, stale
+claim, unpreserved dirty byte, stale transaction branch/worktree, or unclassified
+generated effect remains.
 Clean integration and remediation actors must create temporary Git worktrees with
 `core.longpaths=true` on Windows so tracked long-path evidence/profiling files
 cannot block closeout before validation starts.

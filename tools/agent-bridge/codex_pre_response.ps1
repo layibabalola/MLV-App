@@ -11,6 +11,23 @@ if (-not (Test-Path $script)) {
     throw "Bridge reminder script not found: $script"
 }
 
+$closeoutCli = Join-Path $root "tools\closeout\Invoke-CloseoutCli.ps1"
+if (Test-Path $closeoutCli) {
+    try {
+        $freezeJson = & $closeoutCli -RepoRoot $root -Arguments @("remediation-freeze-status", "--action", "response-hook", "--audit") 2>$null
+        $freezeText = ($freezeJson | Out-String).Trim()
+        if ($freezeText) {
+            $freeze = $freezeText | ConvertFrom-Json
+            if ($freeze.active) {
+                Write-Warning ("Response hook skipped during closeout remediation freeze: " + $freeze.markerPath)
+                return
+            }
+        }
+    } catch {
+        Write-Warning ("Remediation freeze status check failed: " + $_.Exception.Message)
+    }
+}
+
 function Assert-BridgeCliContract {
     param([Parameter(Mandatory=$true)][string]$Root)
 
@@ -29,7 +46,6 @@ function Assert-BridgeCliContract {
 
 Assert-BridgeCliContract -Root $root
 
-$closeoutCli = Join-Path $root "tools\closeout\Invoke-CloseoutCli.ps1"
 if (Test-Path $closeoutCli) {
     try {
         & $closeoutCli -RepoRoot $root -Arguments @("bootstrap-response", "--hook-phase", "response", "--actor", "codex-response-hook") | Out-Null
