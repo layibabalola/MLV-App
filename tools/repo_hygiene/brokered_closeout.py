@@ -531,6 +531,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "pruneRemoteFeatureBranches": True,
         "cleanIntegrateRemoteFeatureBranches": True,
         "deleteRemoteFeatureAfterCleanIntegrate": True,
+        "auditedBulkOverride": {
+            "enabled": False,
+        },
         "evidencePreservingPrune": {
             "enabled": True,
             "recoveryRoot": ".claude-state/closeout/manual-prune",
@@ -7207,7 +7210,173 @@ def apply_remote_feature_clean_integrate(repo_root: Path, config: Dict[str, Any]
         write_audit(repo_root, config, "snapshot_pruning", {"action": "integration_worktree_remove", **removal}, outcome="success" if removal["returncode"] == 0 else "blocked")
 
 
-def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None) -> Dict[str, Any]:
+def repo_sweep_clean_detached_worktree_candidate(config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+    evidence = {
+        "candidate": {
+            "path": item.get("path"),
+            "head": item.get("head"),
+            "disposition": item.get("disposition"),
+            "reason": item.get("reason"),
+            "dirtyState": item.get("dirtyState"),
+        },
+        "target": plan["pinnedRefs"]["target"],
+        "policy": {
+            "pruneWorktrees": config.get("repoSweep", {}).get("pruneWorktrees"),
+            "removeCleanDetachedWorktreesInSweep": config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep"),
+        },
+    }
+    return {
+        "candidateId": "candidate:clean-detached-worktree:%s" % stable_hash(evidence, 16),
+        "actionId": "remove_clean_detached_worktree",
+        "actionClass": "clean_detached_worktree_prune",
+        "evidence": evidence,
+        "evidenceHash": stable_hash(evidence),
+        "pinnedRefs": {
+            "target": plan["pinnedRefs"]["target"],
+            "worktree": {
+                "path": item.get("path"),
+                "head": item.get("head"),
+            },
+        },
+    }
+
+
+def repo_sweep_stash_drop_candidate(config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+    evidence = {
+        "candidate": {
+            "ref": item.get("ref"),
+            "head": item.get("head"),
+            "message": item.get("message"),
+            "disposition": item.get("disposition"),
+            "reason": item.get("reason"),
+        },
+        "target": plan["pinnedRefs"]["target"],
+        "policy": {
+            "stashMode": config.get("repoSweep", {}).get("stashMode"),
+        },
+    }
+    return {
+        "candidateId": "candidate:stash-drop:%s" % stable_hash(evidence, 16),
+        "actionId": "drop_stash",
+        "actionClass": "stash_drop",
+        "evidence": evidence,
+        "evidenceHash": stable_hash(evidence),
+        "pinnedRefs": {
+            "target": plan["pinnedRefs"]["target"],
+            "stash": {
+                "ref": item.get("ref"),
+                "head": item.get("head"),
+            },
+        },
+    }
+
+
+def repo_sweep_apply_tuple(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "candidateId": str(candidate.get("candidateId") or ""),
+        "actionId": str(candidate.get("actionId") or ""),
+        "evidenceHash": str(candidate.get("evidenceHash") or ""),
+    }
+
+
+def repo_sweep_apply_scope(
+    config: Dict[str, Any],
+    plan: Dict[str, Any],
+    *,
+    branch_candidates: Sequence[Dict[str, Any]],
+    remote_feature_candidates: Sequence[Dict[str, Any]],
+    promoted_candidates: Sequence[Dict[str, Any]],
+    candidate_worktrees: Sequence[Dict[str, Any]],
+    candidate_stashes: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    remove_clean_detached = (
+        bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False))
+        or str(config.get("repoSweep", {}).get("pruneWorktrees") or "") == "clean_detached_only"
+    )
+    drop_stashes = bool(config.get("cleanupPolicy", {}).get("dropStashesInSweep", False))
+    worktree_candidates = [
+        repo_sweep_clean_detached_worktree_candidate(config, plan, item)
+        for item in candidate_worktrees
+    ] if remove_clean_detached else []
+    stash_candidates = [
+        repo_sweep_stash_drop_candidate(config, plan, item)
+        for item in candidate_stashes
+    ] if drop_stashes else []
+    candidates = [*branch_candidates, *remote_feature_candidates, *promoted_candidates, *worktree_candidates, *stash_candidates]
+    return {
+        "candidateCount": len(candidates),
+        "candidateIds": [str(candidate.get("candidateId")) for candidate in candidates],
+        "candidateTuples": [repo_sweep_apply_tuple(candidate) for candidate in candidates],
+        "worktreeCandidates": worktree_candidates,
+        "stashCandidates": stash_candidates,
+    }
+
+
+def validate_repo_sweep_bulk_override(
+    config: Dict[str, Any],
+    apply_scope: Dict[str, Any],
+    bulk_override: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    candidate_tuples = list(apply_scope.get("candidateTuples") or [])
+    if len(candidate_tuples) <= 1:
+        return {"ok": True, "required": False, "reason": "single_or_zero_candidate", "candidateCount": len(candidate_tuples)}
+    if not bulk_override:
+        return {
+            "ok": False,
+            "required": True,
+            "reason": "repo_sweep_bulk_override_required",
+            "candidateCount": len(candidate_tuples),
+            "candidateIds": apply_scope.get("candidateIds") or [],
+            "expectedTuples": candidate_tuples,
+            "recoveryCommand": "Rerun repo sweep with --candidate-id for one candidate, run retained remediation, or provide an audited bulk override file.",
+        }
+    reasons: List[str] = []
+    bulk_config = config.get("repoSweep", {}).get("auditedBulkOverride", {})
+    if not bool(bulk_config.get("enabled", False)):
+        reasons.append("repoSweep.auditedBulkOverride.enabled_false")
+    if bulk_override.get("enabled") is not True:
+        reasons.append("override.enabled_not_true")
+    for field in ["reason", "approvedBy", "recoveryCommand"]:
+        if not str(bulk_override.get(field) or "").strip():
+            reasons.append(f"override.{field}_missing")
+    reviewer_approval = bulk_override.get("reviewerApproval") or {}
+    if reviewer_approval.get("approved") is not True:
+        reasons.append("override.reviewerApproval.approved_not_true")
+    if not str(reviewer_approval.get("reviewer") or "").strip():
+        reasons.append("override.reviewerApproval.reviewer_missing")
+    expected_ids = sorted(str(item.get("candidateId") or "") for item in candidate_tuples)
+    provided_ids = sorted(str(item) for item in (bulk_override.get("candidateIds") or []))
+    if provided_ids != expected_ids:
+        reasons.append("override.candidateIds_mismatch")
+    expected_tuples = sorted(candidate_tuples, key=lambda item: (item["candidateId"], item["actionId"], item["evidenceHash"]))
+    provided_tuples = sorted(
+        [repo_sweep_apply_tuple(item) for item in (bulk_override.get("perCandidateTuples") or [])],
+        key=lambda item: (item["candidateId"], item["actionId"], item["evidenceHash"]),
+    )
+    if provided_tuples != expected_tuples:
+        reasons.append("override.perCandidateTuples_mismatch")
+    result = {
+        "ok": not reasons,
+        "required": True,
+        "reason": "audited_bulk_override_accepted" if not reasons else "audited_bulk_override_invalid",
+        "reasons": reasons,
+        "candidateCount": len(candidate_tuples),
+        "candidateIds": expected_ids,
+        "expectedTuples": expected_tuples,
+        "providedTuples": provided_tuples,
+        "override": {
+            "reason": bulk_override.get("reason"),
+            "approvedBy": bulk_override.get("approvedBy"),
+            "reviewerApproval": reviewer_approval,
+            "recoveryCommand": bulk_override.get("recoveryCommand"),
+        },
+    }
+    if reasons:
+        result["recoveryCommand"] = "Fix the audited bulk override file or rerun with --candidate-id for one candidate."
+    return result
+
+
+def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Optional[str] = None, bulk_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     freeze = remediation_freeze_status(repo_root, config, action="repo-sweep", write_audit_packet=True)
@@ -7245,6 +7414,20 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
     ]
     promoted_candidates = [candidate_from_report(config, plan, report) for report in promoted_reports]
     follow_up_candidates = retained_reports
+    remove_clean_detached = (
+        bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False))
+        or str(config.get("repoSweep", {}).get("pruneWorktrees") or "") == "clean_detached_only"
+    )
+    drop_stashes = bool(config.get("cleanupPolicy", {}).get("dropStashesInSweep", False))
+    apply_scope = repo_sweep_apply_scope(
+        config,
+        plan,
+        branch_candidates=branch_candidates,
+        remote_feature_candidates=remote_feature_candidates,
+        promoted_candidates=promoted_candidates,
+        candidate_worktrees=candidate_worktrees,
+        candidate_stashes=candidate_stashes,
+    )
     def candidate_filter_matches(candidate: Dict[str, Any], report: Optional[Dict[str, Any]] = None) -> bool:
         if not candidate_id:
             return True
@@ -7272,9 +7455,30 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             "retainedCandidateReports": retained_reports,
             "promotedCandidates": promoted_candidates,
             "followUpCandidates": follow_up_candidates,
+            "applyScope": apply_scope,
         }
         write_audit(repo_root, config, "cleanup_retention", payload, outcome="recorded")
         return {"status": "planned", **payload}
+    if not candidate_id:
+        bulk_check = validate_repo_sweep_bulk_override(config, apply_scope, bulk_override)
+        if not bulk_check["ok"]:
+            result = {
+                "status": "blocked",
+                "reason": bulk_check["reason"],
+                "bulkOverride": bulk_check,
+                "plan": plan,
+                "tuple": tuple_info,
+                "branchCandidates": branch_candidates,
+                "remoteFeatureCandidates": remote_feature_candidates,
+                "retainedCandidateReports": retained_reports,
+                "promotedCandidates": promoted_candidates,
+                "followUpCandidates": follow_up_candidates,
+                "applyScope": apply_scope,
+            }
+            write_audit(repo_root, config, "repo_sweep_bulk_override_required", result, outcome="blocked")
+            return result
+        if bulk_check.get("required"):
+            write_audit(repo_root, config, "repo_sweep_audited_bulk_override", bulk_check, outcome="recorded")
     actions: List[Dict[str, Any]] = []
     quorum_results: List[Dict[str, Any]] = []
     matched_candidate = candidate_id is None
@@ -7536,21 +7740,19 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                     recovery_artifact=recovery_artifact,
                 )
             )
-    remove_clean_detached = (
-        bool(config.get("cleanupPolicy", {}).get("removeCleanDetachedWorktreesInSweep", False))
-        or str(config.get("repoSweep", {}).get("pruneWorktrees") or "") == "clean_detached_only"
-    )
     if remove_clean_detached:
-        if candidate_id:
-            candidate_worktrees = []
-        for item in candidate_worktrees:
+        for item, candidate in zip(candidate_worktrees, apply_scope["worktreeCandidates"]):
+            if candidate_id and not candidate_filter_matches(candidate):
+                continue
+            matched_candidate = True
             action = {"action": "remove_clean_detached_worktree", **remove_worktree(repo_root, Path(str(item["path"])))}
             actions.append(action)
             write_audit(repo_root, config, "snapshot_pruning", action, outcome="success" if action["returncode"] == 0 else "blocked")
-    if bool(config.get("cleanupPolicy", {}).get("dropStashesInSweep", False)):
-        if candidate_id:
-            candidate_stashes = []
-        for item in candidate_stashes:
+    if drop_stashes:
+        for item, candidate in zip(candidate_stashes, apply_scope["stashCandidates"]):
+            if candidate_id and not candidate_filter_matches(candidate):
+                continue
+            matched_candidate = True
             drop = run_git(repo_root, ["stash", "drop", item["ref"]])
             action = {"action": "drop_stash", "stash": item["ref"], "returncode": drop.returncode, "stderr": drop.stderr[-2000:]}
             actions.append(action)
@@ -7614,6 +7816,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         "retainedCandidateReports": retained_reports,
         "promotedCandidates": promoted_candidates,
         "followUpCandidates": follow_up_candidates,
+        "applyScope": apply_scope,
         "quorumResults": quorum_results,
         "actions": actions,
         "postPruneSweep": post_prune_sweep,
