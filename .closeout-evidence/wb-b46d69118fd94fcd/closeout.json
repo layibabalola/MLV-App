@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/closeout-implementation-prompt",
+  "createdAt": "2026-05-07T00:26:44+00:00",
+  "detectorHash": "693d09224cae90b197943c890bf03dde",
+  "eligible": true,
+  "featureHead": "72caf682df45aa1057c64464e196aeada4ab1403",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/closeout-implementation-prompt",
+      "head": "72caf682df45aa1057c64464e196aeada4ab1403"
+    },
+    "target": {
+      "branch": "master",
+      "head": "29942491eaf08e01f010507053cb0ba8b7d6f546",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "29942491eaf08e01f010507053cb0ba8b7d6f546",
+  "workBlockId": "wb-b46d69118fd94fcd"
+}
