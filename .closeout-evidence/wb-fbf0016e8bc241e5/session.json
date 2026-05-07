@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/closeout-matrix-dng-surface-sync",
+  "createdAt": "2026-05-07T15:50:32+00:00",
+  "detectorHash": "bc0008d09dd589863e1e2a5d1f6adb30",
+  "featureHead": "c55059c063dcea56719b0ef626d79b31e1c7429c",
+  "schemaVersion": "1.0",
+  "targetHead": "a649d0774d76e4d9b28f4c30926d0076708dcdf3",
+  "workBlockId": "wb-fbf0016e8bc241e5",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
