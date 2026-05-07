@@ -8,14 +8,14 @@
     "targetBranch": "master",
     "targetRemote": "fork",
     "remote": "fork",
-    "currentHead": "638352ab20625519fee9a58c4c950124ba954151",
+    "currentHead": "e02515fa7bb1811535c068a7bc7e3b7480830397",
     "policyPath": "AGENTS.md",
     "sourceProfile": "Standard",
     "profileAdopted": "Standard",
     "ledgerOwner": "Codex"
   },
-  "generatedAt": "2026-05-06T23:37:06-05:00",
-  "lastVerifiedAt": "2026-05-06T23:37:06-05:00",
+  "generatedAt": "2026-05-07T02:27:24-05:00",
+  "lastVerifiedAt": "2026-05-07T02:27:24-05:00",
   "ledgerProfile": "Standard",
   "frameworkArtifacts": {
     "historicalIncidentMap": "CLOSEOUT-HISTORICAL-INCIDENT-MAP.md",
@@ -37,8 +37,8 @@
     "UNKNOWN": "The capability has not yet been assessed against local evidence."
   },
   "statusSummary": {
-    "YES": 37,
-    "PARTIAL": 3,
+    "YES": 38,
+    "PARTIAL": 2,
     "NO": 0,
     "UNAVAILABLE": 0,
     "UNKNOWN": 0
@@ -1099,13 +1099,13 @@
     {
       "capabilityId": "surface-unavailable-or-insufficient-reviewer-block",
       "title": "Unavailable or insufficient review surface blocker",
-      "status": "PARTIAL",
+      "status": "YES",
       "profile": "Standard",
       "decision": "Standard SHOULD",
       "verification": {
         "claimBasis": "behavioral-test",
         "verificationLevel": "behavior-tested",
-        "summary": "Agent-queue unavailable packets and review-quorum blockers exist, but every declared surface still needs uniform durable unavailable proof."
+        "summary": "Agent-queue unavailable packets, review-quorum insufficient blockers, and every declared review surface now have durable unavailable report proof."
       },
       "evidencePaths": ["CLOSEOUT-ADJUDICATION-PROTOCOL.md", "tools/repo_hygiene/brokered_closeout.py"],
       "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
@@ -1119,26 +1119,18 @@
       "sourceRequirements": ["REQ-026"],
       "relatedArtifacts": ["CLOSEOUT-STANDARD.md"],
       "relatedCapabilities": ["declared-review-surface", "automated-subagent-dispatch"],
-      "blockers": [
-        {
-          "blockerId": "uniform-review-surface-unavailable-proof-needed",
-          "kind": "coverage-gap",
-          "severity": "warning",
-          "description": "Codex agent queue unavailable behavior is tested, but the ledger does not yet prove every declared review surface emits equivalent durable unavailable or insufficient-review evidence.",
-          "recoveryCommand": "Add per-surface unavailable/insufficient-review tests or narrow declared surfaces in policy, then update this ledger row."
-        }
-      ],
-      "smallestNextStep": "Add a table-driven unavailable-surface test for all declared review surfaces.",
-      "repoSpecificNotes": "This stays PARTIAL to avoid overclaiming beyond Codex queue and review-quorum surfaces.",
-      "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
+      "blockers": [],
+      "smallestNextStep": "Keep declared review surfaces synchronized with reviewQuorum.declaredSurfaces and require unavailable reports for any new surface.",
+      "repoSpecificNotes": "The table-driven regression test writes review_surface_unavailable reports for every declared surface; check_review_quorum exposes insufficient_review_quorum and declared surface details.",
+      "lastVerifiedAt": "2026-05-07T02:27:24-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
         "documentationOnlyIsSufficient": false,
-        "executableBehaviorOrScopedException": false,
-        "behavioralTestOrScopedException": false,
-        "auditArtifactOrScopedException": false
+        "executableBehaviorOrScopedException": true,
+        "behavioralTestOrScopedException": true,
+        "auditArtifactOrScopedException": true
       },
-      "yesEvidenceBasis": []
+      "yesEvidenceBasis": ["behavioral-test", "actor", "config", "audit-artifact"]
     },
     {
       "capabilityId": "checked-out-and-locked-worktree-handling",
@@ -1510,7 +1502,7 @@
     }
   ],
   "notes": [
-    "This ledger intentionally leaves target race full retry, review-surface unavailable coverage, and automated subagent dispatch as PARTIAL rather than documentation-only YES.",
+    "This ledger intentionally leaves target race full retry and automated subagent dispatch as PARTIAL rather than documentation-only YES.",
     "Generated .claude-state audit paths are cited as local evidence roots; they remain generated/exempt and are not source work."
   ]
 }

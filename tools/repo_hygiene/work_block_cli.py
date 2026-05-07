@@ -31,6 +31,7 @@ from .brokered_closeout import (
     repo_sweep_tuple,
     review_tuple_hash,
     start_work_block,
+    write_review_surface_unavailable_report,
 )
 from .core import HygieneError, resolve_repo_root, stable_id
 
@@ -82,6 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--reviewer", default="codex")
     review.add_argument("--approve", action="store_true")
     review.add_argument("--print-tuple", action="store_true")
+    review.add_argument("--surface")
+    review.add_argument("--mark-surface-unavailable", action="store_true")
+    review.add_argument("--unavailable-reason", default="surface could not perform required review")
+    review.add_argument("--recovery-command")
 
     quarantine = sub.add_parser("orphan-quarantine", help="Audit or quarantine orphaned work blocks.")
     quarantine.add_argument("--apply", action="store_true")
@@ -179,6 +184,18 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "review-quorum":
             if args.print_tuple:
                 result = current_finalize_tuple(repo_root, args.work_block_id)
+            elif args.mark_surface_unavailable:
+                pinned_refs = json.loads(Path(args.pinned_refs_file).read_text(encoding="utf-8"))
+                result = write_review_surface_unavailable_report(
+                    repo_root,
+                    surface=args.surface,
+                    candidate_id=args.candidate_id,
+                    action_id=args.action_id,
+                    evidence_hash=args.evidence_hash,
+                    pinned_refs=pinned_refs,
+                    unavailable_reason=args.unavailable_reason,
+                    recovery_command=args.recovery_command,
+                )
             else:
                 pinned_refs = json.loads(Path(args.pinned_refs_file).read_text(encoding="utf-8"))
                 result = record_review_approval(

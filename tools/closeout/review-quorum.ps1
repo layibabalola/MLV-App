@@ -7,7 +7,11 @@ param(
     [string]$PinnedRefsFile,
     [string]$Reviewer = "codex",
     [switch]$Approve,
-    [switch]$PrintTuple
+    [switch]$PrintTuple,
+    [string]$Surface,
+    [switch]$MarkSurfaceUnavailable,
+    [string]$UnavailableReason = "surface could not perform required review",
+    [string]$RecoveryCommand
 )
 
 $argsList = @("review-quorum", "--reviewer", $Reviewer)
@@ -25,6 +29,18 @@ if ($PrintTuple) {
     )
     if ($Approve) {
         $argsList += "--approve"
+    }
+    if ($MarkSurfaceUnavailable) {
+        $argsList += "--mark-surface-unavailable"
+        if ($Surface) {
+            $argsList += @("--surface", $Surface)
+        }
+        if ($UnavailableReason) {
+            $argsList += @("--unavailable-reason", $UnavailableReason)
+        }
+        if ($RecoveryCommand) {
+            $argsList += @("--recovery-command", $RecoveryCommand)
+        }
     }
 }
 & (Join-Path $PSScriptRoot "Invoke-CloseoutCli.ps1") -RepoRoot $RepoRoot -Arguments $argsList

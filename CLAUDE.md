@@ -104,6 +104,11 @@ For eligible symbolic actions, the repo auto-quorum actor may write Codex/self
 plus independent policy-review artifacts and continue without user intervention.
 Manual-only, dirty, locked, protected, stale, or ambiguous candidates must print
 recoverable unblock detail instead of silently stopping.
+Declared review surfaces that cannot run must write a durable
+`review_surface_unavailable` report for the exact tuple, including surface id,
+candidate/action ids, evidence hash, policy hash, pinned refs, blocker, and
+recovery command. Missing or insufficient quorum remains
+`insufficient_review_quorum`/`review_quorum_missing`, not mutation authority.
 Response/final hooks remain read-only for managed session worktrees: they must
 not checkout, create worktrees, pull, reset, stash, or clean. The pre-response
 hook may create or refresh the lightweight broker manifest for the current
