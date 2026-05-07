@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/review-surface-unavailable-proof",
+  "createdAt": "2026-05-07T07:39:25+00:00",
+  "detectorHash": "976e67a7c6bfac64b93090d48db600b7",
+  "eligible": true,
+  "featureHead": "96da2e74ff9a4d938419f177530ed485a79bb990",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/review-surface-unavailable-proof",
+      "head": "96da2e74ff9a4d938419f177530ed485a79bb990"
+    },
+    "target": {
+      "branch": "master",
+      "head": "e02515fa7bb1811535c068a7bc7e3b7480830397",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "e02515fa7bb1811535c068a7bc7e3b7480830397",
+  "workBlockId": "wb-2bb1bced30d44bd2"
+}
