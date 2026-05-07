@@ -93,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--apply", action="store_true")
     sweep.add_argument("--print-tuple", action="store_true")
     sweep.add_argument("--candidate-id")
+    sweep.add_argument("--bulk-override-file")
 
     remediate = sub.add_parser("remediate-retained", help="Run the bounded retained-candidate remediation queue.")
     remediate.add_argument("--apply", action="store_true")
@@ -197,7 +198,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.print_tuple:
                 result = repo_sweep_tuple(repo_root)
             else:
-                result = repo_sweep(repo_root, apply=args.apply, candidate_id=args.candidate_id)
+                bulk_override = None
+                if args.bulk_override_file:
+                    bulk_override = json.loads(Path(args.bulk_override_file).read_text(encoding="utf-8"))
+                result = repo_sweep(repo_root, apply=args.apply, candidate_id=args.candidate_id, bulk_override=bulk_override)
         elif args.command == "remediate-retained":
             result = remediate_retained_candidates(repo_root, apply=args.apply, candidate_id=args.candidate_id)
         elif args.command == "agent-queue":

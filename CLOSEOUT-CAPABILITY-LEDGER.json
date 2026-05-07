@@ -8,14 +8,14 @@
     "targetBranch": "master",
     "targetRemote": "fork",
     "remote": "fork",
-    "currentHead": "118bc1cbf4934ccd2861fca7985d24958d82312a",
+    "currentHead": "638352ab20625519fee9a58c4c950124ba954151",
     "policyPath": "AGENTS.md",
     "sourceProfile": "Standard",
     "profileAdopted": "Standard",
     "ledgerOwner": "Codex"
   },
-  "generatedAt": "2026-05-06T20:35:12-05:00",
-  "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
+  "generatedAt": "2026-05-06T23:37:06-05:00",
+  "lastVerifiedAt": "2026-05-06T23:37:06-05:00",
   "ledgerProfile": "Standard",
   "frameworkArtifacts": {
     "historicalIncidentMap": "CLOSEOUT-HISTORICAL-INCIDENT-MAP.md",
@@ -37,8 +37,8 @@
     "UNKNOWN": "The capability has not yet been assessed against local evidence."
   },
   "statusSummary": {
-    "YES": 35,
-    "PARTIAL": 5,
+    "YES": 37,
+    "PARTIAL": 3,
     "NO": 0,
     "UNAVAILABLE": 0,
     "UNKNOWN": 0
@@ -875,15 +875,15 @@
     {
       "capabilityId": "repo-sweep-single-candidate-mutation",
       "title": "Repo sweep single-candidate mutation default",
-      "status": "PARTIAL",
+      "status": "YES",
       "profile": "Core",
       "decision": "Core MUST",
       "verification": {
         "claimBasis": "behavioral-test",
         "verificationLevel": "behavior-tested",
-        "summary": "Candidate-id apply and retained remediation are single-candidate, but raw repo sweep apply still needs a stricter default/bulk-override proof."
+        "summary": "Repo sweep apply now mutates a single explicit candidate by default, blocks multi-candidate broad apply, and requires an audited bulk override for exact multi-candidate mutation."
       },
-      "evidencePaths": ["CLOSEOUT-REFERENCE-MATRIX.md", "tools/repo_hygiene/brokered_closeout.py"],
+      "evidencePaths": ["CLOSEOUT-REFERENCE-MATRIX.md", "tools/repo_hygiene/brokered_closeout.py", "tools/repo_hygiene/work_block_cli.py"],
       "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
       "actorPaths": ["tools/repo_hygiene/brokered_closeout.py"],
       "adapterPaths": ["tools/closeout/repo-sweep-closeout.ps1", "tools/closeout/remediate-retained-closeout.ps1"],
@@ -895,70 +895,54 @@
       "sourceRequirements": ["REQ-023", "REQ-024"],
       "relatedArtifacts": ["CLOSEOUT-STANDARD.md"],
       "relatedCapabilities": ["repo-sweep-read-only-planning", "audited-bulk-override"],
-      "blockers": [
-        {
-          "blockerId": "raw-sweep-apply-needs-single-candidate-default-proof",
-          "kind": "implementation-gap",
-          "severity": "blocking",
-          "description": "The repo has candidate-id and retained remediation single-candidate tests, but the broad repo sweep apply path still needs an enforced default or audited bulk override proof before Core YES.",
-          "recoveryCommand": "Update repo_sweep apply policy to require candidate id/promoted packet/bulk override by default, add a regression test, then rerun ledger validation."
-        }
-      ],
-      "smallestNextStep": "Add a regression test that raw broad repo sweep apply blocks without candidate id or audited bulk override.",
-      "repoSpecificNotes": "This row is intentionally not YES because the reference matrix preserved this as a known MLV gap.",
-      "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
+      "blockers": [],
+      "smallestNextStep": "Keep every new mutating repo sweep candidate kind represented in applyScope and the broad-apply blocker test.",
+      "repoSpecificNotes": "Regression tests cover candidate-id-only mutation, multi-candidate broad apply blocking, and audited exact bulk override.",
+      "lastVerifiedAt": "2026-05-06T23:37:06-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
         "documentationOnlyIsSufficient": false,
-        "executableBehaviorOrScopedException": false,
-        "behavioralTestOrScopedException": false,
-        "auditArtifactOrScopedException": false
+        "executableBehaviorOrScopedException": true,
+        "behavioralTestOrScopedException": true,
+        "auditArtifactOrScopedException": true
       },
-      "yesEvidenceBasis": []
+      "yesEvidenceBasis": ["behavioral-test", "actor", "audit-artifact"]
     },
     {
       "capabilityId": "audited-bulk-override",
       "title": "Audited bulk mutation override",
-      "status": "PARTIAL",
+      "status": "YES",
       "profile": "Core",
       "decision": "Core MUST",
       "verification": {
-        "claimBasis": "reported-only",
-        "verificationLevel": "config-and-docs",
-        "summary": "The standard and protocol define the override contract, but repo-local enforcement and regression tests are incomplete."
+        "claimBasis": "behavioral-test",
+        "verificationLevel": "behavior-tested",
+        "summary": "Repo sweep bulk mutation is disabled by default and only proceeds when policy enables it and the supplied override exactly matches the planned candidate ids and per-candidate tuples."
       },
-      "evidencePaths": ["CLOSEOUT-ADJUDICATION-PROTOCOL.md", "CLOSEOUT-STANDARD.md", "CLOSEOUT-REFERENCE-MATRIX.md"],
-      "testPaths": [],
+      "evidencePaths": ["CLOSEOUT-ADJUDICATION-PROTOCOL.md", "CLOSEOUT-STANDARD.md", "CLOSEOUT-REFERENCE-MATRIX.md", "tools/repo_hygiene/brokered_closeout.py", "tools/repo_hygiene/work_block_cli.py"],
+      "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
       "actorPaths": ["tools/repo_hygiene/brokered_closeout.py"],
       "adapterPaths": ["tools/closeout/repo-sweep-closeout.ps1"],
       "configPaths": ["closeout.config.json"],
       "contractPaths": ["tools/repo-hygiene/closeout.contract.json"],
       "driftCheckPaths": ["tools/repo_hygiene/test_repo_hygiene.py"],
-      "auditArtifactPaths": [],
+      "auditArtifactPaths": [".claude-state/closeout/audits/audits.jsonl"],
       "sourceRequirementPaths": ["CLOSEOUT-REQUIREMENTS-TRACE.md"],
       "sourceRequirements": ["REQ-024"],
       "relatedArtifacts": ["CLOSEOUT-STANDARD.md"],
       "relatedCapabilities": ["repo-sweep-single-candidate-mutation"],
-      "blockers": [
-        {
-          "blockerId": "bulk-override-enforcement-missing",
-          "kind": "implementation-gap",
-          "severity": "blocking",
-          "description": "Bulk override is specified but lacks full repo-owned enforcement for configured permission, per-candidate tuple, serialized mutation, audit reason, and recovery commands.",
-          "recoveryCommand": "Implement audited bulk override gating in repo_sweep, add behavioral tests for allowed and disallowed bulk mutation, then mark the row based on local evidence."
-        }
-      ],
-      "smallestNextStep": "Add an explicit bulk override config flag and a failing test for unapproved broad mutation.",
-      "repoSpecificNotes": "Prose is deliberately not enough for YES on this Core safety row.",
-      "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
+      "blockers": [],
+      "smallestNextStep": "Keep override tuple fields synchronized with any new repo sweep symbolic action.",
+      "repoSpecificNotes": "The CLI and PowerShell wrapper accept an override file, but repo-owned validation remains the authority for permission, reviewer approval, candidate set, tuple match, audit reason, and recovery command.",
+      "lastVerifiedAt": "2026-05-06T23:37:06-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
         "documentationOnlyIsSufficient": false,
-        "executableBehaviorOrScopedException": false,
-        "behavioralTestOrScopedException": false,
-        "auditArtifactOrScopedException": false
+        "executableBehaviorOrScopedException": true,
+        "behavioralTestOrScopedException": true,
+        "auditArtifactOrScopedException": true
       },
-      "yesEvidenceBasis": []
+      "yesEvidenceBasis": ["behavioral-test", "actor", "config", "audit-artifact"]
     },
     {
       "capabilityId": "no-force-push-target-recovery",
@@ -1526,7 +1510,7 @@
     }
   ],
   "notes": [
-    "This first MLV-App ledger intentionally leaves repo-sweep single-candidate default, audited bulk override, target race full retry, review-surface unavailable coverage, and automated subagent dispatch as PARTIAL rather than documentation-only YES.",
+    "This ledger intentionally leaves target race full retry, review-surface unavailable coverage, and automated subagent dispatch as PARTIAL rather than documentation-only YES.",
     "Generated .claude-state audit paths are cited as local evidence roots; they remain generated/exempt and are not source work."
   ]
 }
