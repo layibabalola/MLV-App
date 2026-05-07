@@ -459,6 +459,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["repoSweep"]["allowForeignDirtyIntegratedBranchPrune"])
         self.assertTrue(config["repoSweep"]["allowPatchEquivalentPrune"])
         self.assertEqual(config["repoSweep"]["protectedLockedWorktreeExactPolicy"], [])
+        self.assertFalse(config["repoSweep"]["auditedBulkOverride"]["enabled"])
         self.assertTrue(config["repoSweep"]["evidencePreservingPrune"]["enabled"])
         self.assertEqual(config["repoSweep"]["evidencePreservingPrune"]["recoveryRoot"], ".claude-state/closeout/manual-prune")
         self.assertTrue(config["repoSweep"]["evidencePreservingPrune"]["requireBundleForNonAncestor"])
@@ -1880,6 +1881,46 @@ class BrokeredCloseoutTests(unittest.TestCase):
         action = next(item for item in result["actions"] if item.get("action") == "retain_prune_recovery_artifact_invalid")
         self.assertIn("recovery_artifact_missing", action["recoveryVerification"]["reasons"])
         self.assertEqual(git(repo, "rev-parse", "--verify", "codex/missing-recovery").returncode, 0)
+
+    def test_repo_sweep_apply_without_candidate_blocks_multiple_candidates(self) -> None:
+        repo = self.init_repo()
+        git(repo, "branch", "codex/first-backup", "master")
+        git(repo, "branch", "codex/second-backup", "master")
+
+        result = repo_sweep(repo, apply=True)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "repo_sweep_bulk_override_required")
+        self.assertEqual(result["applyScope"]["candidateCount"], 2)
+        self.assertEqual(git(repo, "rev-parse", "--verify", "codex/first-backup").returncode, 0)
+        self.assertEqual(git(repo, "rev-parse", "--verify", "codex/second-backup").returncode, 0)
+        self.assertIn("repo_sweep_bulk_override_required", self.audit_types(repo))
+
+    def test_repo_sweep_audited_bulk_override_allows_exact_candidate_set(self) -> None:
+        repo = self.init_repo(config_updates={"repoSweep": {"auditedBulkOverride": {"enabled": True}}})
+        git(repo, "branch", "codex/first-backup", "master")
+        git(repo, "branch", "codex/second-backup", "master")
+        plan = repo_sweep(repo)
+        override = {
+            "enabled": True,
+            "reason": "test bulk override for exact redundant backup branches",
+            "approvedBy": "codex-test",
+            "candidateIds": plan["applyScope"]["candidateIds"],
+            "perCandidateTuples": plan["applyScope"]["candidateTuples"],
+            "reviewerApproval": {
+                "approved": True,
+                "reviewer": "codex-test-reviewer",
+            },
+            "recoveryCommand": "Restore the backup branches from the evidence-preserving prune artifacts.",
+        }
+
+        result = repo_sweep(repo, apply=True, bulk_override=override)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["applyScope"]["candidateCount"], 2)
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/first-backup", check=False).returncode, 0)
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/second-backup", check=False).returncode, 0)
+        self.assertIn("repo_sweep_audited_bulk_override", self.audit_types(repo))
 
     def test_repo_sweep_apply_candidate_id_mutates_only_that_candidate(self) -> None:
         repo = self.init_repo()

@@ -471,6 +471,9 @@
     "pruneRemoteFeatureBranches": true,
     "cleanIntegrateRemoteFeatureBranches": true,
     "deleteRemoteFeatureAfterCleanIntegrate": true,
+    "auditedBulkOverride": {
+      "enabled": false
+    },
     "evidencePreservingPrune": {
       "enabled": true,
       "recoveryRoot": ".claude-state/closeout/manual-prune",
