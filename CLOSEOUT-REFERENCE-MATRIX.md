@@ -46,11 +46,21 @@ Status legend:
   into remediation freeze, and terminating repeated finalize blocker/evidence
   tuples. Its remediation-freeze row remains `PARTIAL` until unfreeze quorum,
   exact allowlists, and all hook surfaces have table-driven proof.
+- DngAutoProcessor later reported commit `f8f507bc` on `master`, adding
+  tuple-bound `review_surface_unavailable` reports, declared review surfaces,
+  quorum output for those surfaces, fail-closed unknown surface ids, focused
+  test selection, and ledger promotion of
+  `surface-unavailable-or-insufficient-reviewer-block` to `YES`
+  (`33 YES / 7 PARTIAL`).
 - AdversarialLLM reported pushed commit `04d7cdd` on
   `codex/closeout-cross-repo-improvements`, adding focused local-only and
   ahead-only dirty repair regressions. Its `local-only-repo-closeout` row remains
   `PARTIAL` because the broader `CompleteRepairsMissingUpstreamThenFinalizes`
   suite path still hangs.
+- AdversarialLLM later reported an uncommitted draft matrix/profile/standard
+  reconciliation, but publish/closeout was blocked by an exclusive ledger path
+  claim and hygiene review classification. Those draft rows remain planning
+  input here, not landed compliance evidence.
 
 ## Matrix
 
@@ -83,7 +93,7 @@ Status legend:
 | `target-push-race-recovery` | PARTIAL: fetch/update/rerun blocker; full retry is future. | PARTIAL: contract/tests, runtime completeness to verify. | YES: strongest fetch/re-pin/retry ledger. | Full retry/reintegrate is high-value automation. | Standard SHOULD | AdversarialLLM | Decide Core blocker versus Standard retry loop. |
 | `protected-target-noop` | YES: clean protected target no-op and dirty blocker tests. | YES: no-op and dirty blocker reported. | NO: reported gap. | Clean protected target may no-op only when repo-closed passes. | Standard SHOULD; Core candidate | MLV-App | AdversarialLLM: implement clean protected-target no-op. |
 | `retained-candidate-remediation` | YES: one-candidate actor and retained terminal evidence tests. | YES/PARTIAL: retained actor and queue reported; docs WIP. | YES/PARTIAL: strong remote remediation; broader local parity gap. | Retained candidates are a remediation queue, not passive retain. | Standard SHOULD | MLV-App | Define uniform retained blocker packet/recovery schema. |
-| `surface-unavailable-or-insufficient-reviewer-block` | YES: declared surfaces, exact-tuple unavailable reports, CLI/wrapper support, and table-driven regression proof are in the local ledger. | YES/PARTIAL: `surface-unavailable` mode reported. | NO: unavailable artifact gap reported. | Missing review surface must block durably. | Standard SHOULD; Core when review required | MLV-App / DngAutoProcessor | Port exact status schema, recovery command requirements, and table-driven surface coverage. |
+| `surface-unavailable-or-insufficient-reviewer-block` | YES: declared surfaces, exact-tuple unavailable reports, CLI/wrapper support, and table-driven regression proof are in the local ledger. | YES: commit `f8f507bc` reports tuple-bound unavailable reports, declared surfaces, fail-closed unknown ids, focused tests, and ledger promotion to YES. | NO/PARTIAL: unavailable artifact gap remains; later draft reconciliation was blocked before commit. | Missing review surface must block durably. | Standard SHOULD; Core when review required | MLV-App / DngAutoProcessor | AdversarialLLM: land durable unavailable reports or preserve a scoped unavailable blocker before promoting. |
 | `automated-subagent-dispatch` | PARTIAL: queue/dispatch tests exist; transport still surface-specific. | PARTIAL: instructions support subagents; transport dependent. | PARTIAL/NO: optional transport, unavailable artifact gap. | Subagents accelerate adjudication but are not required. | Surface Plugin / Standard SHOULD | MLV-App | Later adapter docs for Codex Desktop, Codex CLI, Claude, CI, manual. |
 | `agent-remediation-queue` | YES/PARTIAL: queue packets, dispatch, collection, scope checks. | YES/PARTIAL: queue packet/status/result modes and unavailable handling reported. | NO/PARTIAL: gap for durable unavailable artifact. | Agent queues are adapters around the core adjudication protocol. | Surface Plugin / Standard SHOULD | MLV-App / DngAutoProcessor | Split queue protocol from subagent execution in profiles. |
 | `checked-out-and-locked-worktree-handling` | YES: stale locked clean cleanup and protected inspect-only tests. | PARTIAL: checked-out/locked handling reported. | PARTIAL: protected locked policy needs fixture tests. | Active/protected/dirty worktrees require evidence before cleanup. | Standard SHOULD | MLV-App | Keep Core invariant: ambiguous worktree mutation blocks. |
@@ -94,7 +104,7 @@ Status legend:
 | `remote-feature-clean-integration` | YES: remote/retained remediation support in reference behavior. | PARTIAL/YES: retained remote feature remediation actor supports clean integration/prune decisions. | YES/PARTIAL: strong remote refs, local parity gap. | Remote feature cleanup is powerful but not minimal core. | Max SHOULD | MLV-App / AdversarialLLM | Keep as Max/reference until portability is proven. |
 | `historical-incident-traceability` | YES: Round -1 map committed locally. | YES: Round -1 map exists in DNG planning evidence. | YES: incident map report complete. | Framework capabilities must trace to historical scenarios. | Core MUST | Shared | Require this artifact in every repo adoption. |
 | `requirements-trace-to-original-standard` | YES: `CLOSEOUT-REQUIREMENTS-TRACE.md` is present and mapped into the local ledger. | PARTIAL: recognized as Core, trace not final. | PARTIAL: trace explicitly requested before standard. | Old standard/addenda must map to capabilities or non-goals. | Core MUST | MLV-App | Port requirements trace artifacts before claiming local ledger completeness. |
-| `capability-ledger-schema` | YES: local schema and ledger exist; ledger validates at `38 YES / 2 PARTIAL`. | NO: not drafted yet. | NO: not drafted yet. | Compliance must be machine-readable. | Core MUST | MLV-App | Other repos: draft schema after profiles so status/profile rules are encoded. |
+| `capability-ledger-schema` | YES: local schema and ledger exist; ledger validates at `38 YES / 2 PARTIAL`. | PARTIAL: a populated ledger is reported at `33 YES / 7 PARTIAL`, but schema-validation parity was not reported. | PARTIAL: draft/local ledger-schema claims were reported, but the reconciliation patch was blocked before commit. | Compliance must be machine-readable. | Core MUST | MLV-App | Other repos: close the schema/ledger rows through committed, repo-owned validation evidence. |
 
 ## Draft Core MUST Rows
 
