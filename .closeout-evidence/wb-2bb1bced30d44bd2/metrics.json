@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/review-surface-unavailable-proof",
+  "committedDeltaPathCount": 8,
+  "createdAt": "2026-05-07T07:39:25+00:00",
+  "detectorHash": "976e67a7c6bfac64b93090d48db600b7",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "96da2e74ff9a4d938419f177530ed485a79bb990",
+  "schemaVersion": "1.0",
+  "targetHead": "e02515fa7bb1811535c068a7bc7e3b7480830397",
+  "workBlockId": "wb-2bb1bced30d44bd2"
+}
