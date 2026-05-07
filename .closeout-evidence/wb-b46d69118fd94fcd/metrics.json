@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/closeout-implementation-prompt",
+  "committedDeltaPathCount": 1,
+  "createdAt": "2026-05-07T00:26:44+00:00",
+  "detectorHash": "693d09224cae90b197943c890bf03dde",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "72caf682df45aa1057c64464e196aeada4ab1403",
+  "schemaVersion": "1.0",
+  "targetHead": "29942491eaf08e01f010507053cb0ba8b7d6f546",
+  "workBlockId": "wb-b46d69118fd94fcd"
+}
