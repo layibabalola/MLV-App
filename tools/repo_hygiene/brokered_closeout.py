@@ -386,6 +386,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
             "test_hard_clean_blocks_retained_remote_feature_refs",
             "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
+            "test_declared_review_surfaces_write_unavailable_reports",
             "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
             "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
             "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
@@ -421,8 +422,10 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def assert_remediation_freeze_not_active"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_packet_template"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dirty_state_remediation_triage"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_review_surface_unavailable_report"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--mark-surface-unavailable"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-queue"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-results"},
@@ -430,6 +433,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/closeout/work-block-complete.ps1", "contains": "RequireRepoClosed"},
             {"path": "tools/closeout/agent-remediation-queue.ps1", "contains": "agent-queue"},
             {"path": "tools/closeout/agent-remediation-queue.ps1", "contains": "CollectResults"},
+            {"path": "tools/closeout/review-quorum.ps1", "contains": "MarkSurfaceUnavailable"},
             {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
             {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
@@ -473,6 +477,30 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "selfReviewers": ["codex-self"],
         "independentReviewers": ["ancestry-safety-reviewer", "mutation-scope-reviewer"],
         "allowedReviewers": ["codex", "claude", "human", "local-test", "codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
+        "unavailableStatus": "review_surface_unavailable",
+        "insufficientReviewStatus": "insufficient_review_quorum",
+        "declaredSurfaces": [
+            {
+                "surface": "codex-primary-agent",
+                "reviewers": ["codex", "codex-self"],
+                "recoveryCommand": "Run tools\\closeout\\review-quorum.ps1 with an allowed Codex reviewer or record a review-surface-unavailable report.",
+            },
+            {
+                "surface": "claude-primary-agent",
+                "reviewers": ["claude"],
+                "recoveryCommand": "Route the packet to Claude review or record a review-surface-unavailable report.",
+            },
+            {
+                "surface": "human-reviewer",
+                "reviewers": ["human"],
+                "recoveryCommand": "Route the packet to a human reviewer or record a review-surface-unavailable report.",
+            },
+            {
+                "surface": "deterministic-reviewer",
+                "reviewers": ["local-test", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
+                "recoveryCommand": "Run deterministic policy review or record a review-surface-unavailable report.",
+            },
+        ],
         "highImpactActions": HIGH_IMPACT_ACTIONS,
         "tupleFields": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"],
     },
@@ -2427,6 +2455,106 @@ def review_quorum_policy(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def declared_review_surfaces(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    policy = config.get("reviewQuorum", {})
+    status = str(policy.get("unavailableStatus") or "review_surface_unavailable")
+    raw_surfaces = policy.get("declaredSurfaces")
+    surfaces: List[Dict[str, Any]] = []
+    if isinstance(raw_surfaces, list):
+        for item in raw_surfaces:
+            if not isinstance(item, dict):
+                continue
+            surface = str(item.get("surface") or "").strip()
+            if not surface:
+                continue
+            recovery_command = str(
+                item.get("recoveryCommand")
+                or "Route this tuple to another declared review surface or rerun review-quorum after the surface is available."
+            )
+            surfaces.append(
+                {
+                    "surface": surface,
+                    "reviewers": [str(reviewer) for reviewer in item.get("reviewers", []) if str(reviewer)],
+                    "unavailableStatus": str(item.get("unavailableStatus") or status),
+                    "recoveryCommand": recovery_command,
+                }
+            )
+    if surfaces:
+        return surfaces
+    return [
+        {
+            "surface": "reviewer:%s" % reviewer,
+            "reviewers": [reviewer],
+            "unavailableStatus": status,
+            "recoveryCommand": "Route this tuple to another declared review surface or rerun review-quorum after the surface is available.",
+        }
+        for reviewer in sorted(review_quorum_policy(config)["allowedReviewers"])
+    ]
+
+
+def declared_review_surface(config: Dict[str, Any], surface: str) -> Optional[Dict[str, Any]]:
+    wanted = str(surface).strip()
+    return next((item for item in declared_review_surfaces(config) if item["surface"] == wanted), None)
+
+
+def safe_review_surface_name(surface: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(surface)).strip("-")
+    return safe or sha256_text(str(surface), 12)
+
+
+def write_review_surface_unavailable_report(
+    repo_root_arg: Path,
+    *,
+    surface: str,
+    candidate_id: str,
+    action_id: str,
+    evidence_hash: str,
+    pinned_refs: Dict[str, Any],
+    unavailable_reason: str = "surface could not perform required review",
+    recovery_command: Optional[str] = None,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    surface_policy = declared_review_surface(config, surface)
+    if surface_policy is None:
+        raise HygieneError("review surface is not declared in reviewQuorum.declaredSurfaces: %s" % surface)
+    status = str(surface_policy.get("unavailableStatus") or config.get("reviewQuorum", {}).get("unavailableStatus") or "review_surface_unavailable")
+    tuple_hash = review_tuple_hash(candidate_id, action_id, evidence_hash, str(config.get("policyHash")), pinned_refs)
+    path = reviews_root(repo_root, config) / "surface-unavailable" / tuple_hash / ("%s.json" % safe_review_surface_name(surface))
+    recovery = recovery_command or str(surface_policy.get("recoveryCommand") or "")
+    payload = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "reportType": "review_surface_unavailable",
+        "status": status,
+        "createdAt": utc_now(),
+        "surface": surface_policy["surface"],
+        "declaredReviewSurface": True,
+        "reviewers": list(surface_policy.get("reviewers", [])),
+        "candidateId": candidate_id,
+        "actionId": action_id,
+        "evidenceHash": evidence_hash,
+        "policyHash": config.get("policyHash"),
+        "pinnedRefs": pinned_refs,
+        "tupleHash": tuple_hash,
+        "unavailableReason": unavailable_reason,
+        "recoveryCommand": recovery,
+        "blockers": [{"kind": status, "surface": surface_policy["surface"], "recoveryCommand": recovery}],
+    }
+    payload["reportHash"] = stable_hash(payload)
+    write_json(path, payload)
+    write_audit(repo_root, config, status, payload, outcome="blocked")
+    return {
+        "status": status,
+        "surface": surface_policy["surface"],
+        "candidateId": candidate_id,
+        "actionId": action_id,
+        "tupleHash": tuple_hash,
+        "reportHash": payload["reportHash"],
+        "reportPath": normalize_rel(str(path.relative_to(repo_root))),
+        "recoveryCommand": recovery,
+    }
+
+
 def review_record_score(record: Dict[str, Any]) -> Optional[int]:
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     raw_score = details.get("score")
@@ -3071,6 +3199,8 @@ def check_review_quorum(
         "tupleHash": tuple_hash,
         "staleReviewCount": len(stale),
         "reason": reason,
+        "insufficientReviewStatus": None if ok else str(config.get("reviewQuorum", {}).get("insufficientReviewStatus") or "insufficient_review_quorum"),
+        "declaredReviewSurfaces": [item["surface"] for item in declared_review_surfaces(config)],
     }
 
 

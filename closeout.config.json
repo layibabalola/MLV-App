@@ -263,6 +263,7 @@
       "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
       "test_hard_clean_blocks_retained_remote_feature_refs",
       "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
+      "test_declared_review_surfaces_write_unavailable_reports",
       "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
       "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
       "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
@@ -306,6 +307,8 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def assert_remediation_freeze_not_active"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_packet_template"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_review_surface_unavailable_report"},
+      {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--mark-surface-unavailable"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-queue"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-results"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
@@ -315,6 +318,7 @@
       {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
       {"path": "tools/closeout/agent-remediation-queue.ps1", "contains": "agent-queue"},
       {"path": "tools/closeout/agent-remediation-queue.ps1", "contains": "CollectResults"},
+      {"path": "tools/closeout/review-quorum.ps1", "contains": "MarkSurfaceUnavailable"},
       {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
       {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
       {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
@@ -397,6 +401,30 @@
     "selfReviewers": ["codex-self"],
     "independentReviewers": ["ancestry-safety-reviewer", "mutation-scope-reviewer"],
     "allowedReviewers": ["codex", "claude", "human", "local-test", "codex-self", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
+    "unavailableStatus": "review_surface_unavailable",
+    "insufficientReviewStatus": "insufficient_review_quorum",
+    "declaredSurfaces": [
+      {
+        "surface": "codex-primary-agent",
+        "reviewers": ["codex", "codex-self"],
+        "recoveryCommand": "Run tools\\closeout\\review-quorum.ps1 with an allowed Codex reviewer or record a review-surface-unavailable report."
+      },
+      {
+        "surface": "claude-primary-agent",
+        "reviewers": ["claude"],
+        "recoveryCommand": "Route the packet to Claude review or record a review-surface-unavailable report."
+      },
+      {
+        "surface": "human-reviewer",
+        "reviewers": ["human"],
+        "recoveryCommand": "Route the packet to a human reviewer or record a review-surface-unavailable report."
+      },
+      {
+        "surface": "deterministic-reviewer",
+        "reviewers": ["local-test", "ancestry-safety-reviewer", "mutation-scope-reviewer"],
+        "recoveryCommand": "Run deterministic policy review or record a review-surface-unavailable report."
+      }
+    ],
     "highImpactActions": [
       "clean_integrate",
       "checkpoint-owned-dirty",
