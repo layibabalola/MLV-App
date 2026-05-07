@@ -46,6 +46,7 @@ from .brokered_closeout import (
     stop_runtime_services_before_promotion,
     verify_repo_closed_postcondition,
     verify_prune_recovery_artifact,
+    write_review_surface_unavailable_report,
 )
 
 
@@ -955,6 +956,50 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreaterEqual(quorum["matchingApprovals"], 3)
         self.assertEqual(quorum["selfApprovalCount"], 1)
         self.assertEqual(quorum["independentApprovalCount"], 2)
+
+    def test_declared_review_surfaces_write_unavailable_reports(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        surfaces = config["reviewQuorum"]["declaredSurfaces"]
+        pinned_refs = {"target": {"branch": "master", "head": git(repo, "rev-parse", "HEAD").stdout.strip()}}
+        candidate_id = "candidate:review-surface"
+        action_id = "clean_integrate"
+        evidence_hash = "evidence-review-surface"
+
+        reports = [
+            write_review_surface_unavailable_report(
+                repo,
+                surface=surface["surface"],
+                candidate_id=candidate_id,
+                action_id=action_id,
+                evidence_hash=evidence_hash,
+                pinned_refs=pinned_refs,
+                unavailable_reason="surface unavailable in focused test",
+            )
+            for surface in surfaces
+        ]
+        quorum = check_review_quorum(
+            repo,
+            config,
+            candidate_id=candidate_id,
+            action_id=action_id,
+            evidence_hash=evidence_hash,
+            pinned_refs=pinned_refs,
+        )
+
+        self.assertEqual({item["surface"] for item in reports}, {item["surface"] for item in surfaces})
+        self.assertEqual({item["status"] for item in reports}, {"review_surface_unavailable"})
+        self.assertEqual(quorum["insufficientReviewStatus"], "insufficient_review_quorum")
+        self.assertEqual(set(quorum["declaredReviewSurfaces"]), {item["surface"] for item in surfaces})
+        for report in reports:
+            path = repo / report["reportPath"]
+            self.assertTrue(path.exists(), report)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["declaredReviewSurface"])
+            self.assertEqual(payload["tupleHash"], report["tupleHash"])
+            self.assertEqual(payload["status"], "review_surface_unavailable")
+            self.assertTrue(payload["recoveryCommand"])
+        self.assertIn("review_surface_unavailable", self.audit_types(repo))
 
     def test_runtime_service_stops_before_validation_and_restarts_after_repo_closed(self) -> None:
         marker = self.tempdir / "runtime-running.marker"
