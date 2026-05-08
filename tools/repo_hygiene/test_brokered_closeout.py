@@ -52,6 +52,53 @@ from .brokered_closeout import (
 
 ROOT = Path(__file__).resolve().parents[2]
 
+FROZEN_CLOSEOUT_CAPABILITY_ROWS = [
+    "historical-incident-traceability",
+    "requirements-trace-to-original-standard",
+    "capability-ledger-schema",
+    "capability-ledger-populated",
+    "structured-adjudication-protocol",
+    "declared-review-surface",
+    "candidate-evidence-packet",
+    "adjudication-report",
+    "adjudication-to-symbolic-action-boundary",
+    "repo-owned-mutation-after-adjudication",
+    "exact-mutation-tuple",
+    "bounded-wrapper-authority",
+    "broker-manifest-dirty-baseline",
+    "deterministic-work-block-selection",
+    "dirty-classification",
+    "foreign-dirty-preservation",
+    "baseline-dirty-mixed-path-protection",
+    "hard-clean-final-gate",
+    "repo-closed-for-final-response",
+    "advisory-hooks-non-authoritative",
+    "response-hook-no-worktree-resurrection",
+    "final-utility-generated-or-preclean",
+    "tooling-drift-detection",
+    "repo-sweep-read-only-planning",
+    "repo-sweep-single-candidate-mutation",
+    "audited-bulk-override",
+    "no-force-push-target-recovery",
+    "local-only-repo-closeout",
+    "clean-standard-non-smuggling",
+    "protected-target-noop",
+    "target-push-race-recovery",
+    "retained-candidate-remediation",
+    "surface-unavailable-or-insufficient-reviewer-block",
+    "checked-out-and-locked-worktree-handling",
+    "independent-review-quorum",
+    "git-hook-gates",
+    "agent-remediation-queue",
+    "automated-subagent-dispatch",
+    "evidence-preserving-prune",
+    "remediation-freeze",
+    "dirty-split-automation",
+    "runtime-service-lifecycle",
+    "remote-feature-clean-integration",
+    "retained-candidate-auto-closeout-remediation",
+]
+
 
 def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(["git", *args], cwd=str(cwd), text=True, capture_output=True)
@@ -491,6 +538,31 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(config["locking"]["maxProcessOutputBytes"], 0)
         self.assertIn("review_quorum_missing", config["locking"]["failureTextPatterns"])
         self.assertGreater(config["autoEligibilityRepair"]["timeoutMs"], 0)
+
+    def test_capability_ledger_contains_frozen_row_inventory(self) -> None:
+        ledger = json.loads((ROOT / "CLOSEOUT-CAPABILITY-LEDGER.json").read_text(encoding="utf-8"))
+        rows = ledger["capabilities"]
+        capability_ids = [row["capabilityId"] for row in rows]
+        self.assertEqual(sorted(capability_ids), sorted(FROZEN_CLOSEOUT_CAPABILITY_ROWS))
+        self.assertEqual(len(capability_ids), len(set(capability_ids)))
+        status_summary = {key: 0 for key in ("YES", "PARTIAL", "NO", "UNAVAILABLE", "UNKNOWN")}
+        for row in rows:
+            status_summary[row["status"]] += 1
+            if row["status"] != "YES":
+                self.assertTrue(row["blockers"], row["capabilityId"])
+                continue
+            self.assertNotIn(row["verification"]["claimBasis"], {"documentation-only", "reported-only", "not-implemented", "unknown"})
+            proof_paths = []
+            for key in ("testPaths", "actorPaths", "adapterPaths", "configPaths", "contractPaths", "driftCheckPaths"):
+                proof_paths.extend(row.get(key, []))
+            self.assertTrue(proof_paths, row["capabilityId"])
+            committed_proof = [
+                path
+                for path in proof_paths
+                if git(ROOT, "ls-files", "--error-unmatch", path, check=False).returncode == 0
+            ]
+            self.assertTrue(committed_proof, row["capabilityId"])
+        self.assertEqual(ledger["statusSummary"], status_summary)
 
     def test_contract_records_closeout_addendum_persistence_rule(self) -> None:
         config = load_closeout_config(ROOT)
