@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/closeout-capability-report",
+  "createdAt": "2026-05-08T09:16:11+00:00",
+  "detectorHash": "ca840e2fe36456844cd5c704bf05c6ff",
+  "featureHead": "e3257f8041c1adf84071f9c4a9d512235d3fd27c",
+  "schemaVersion": "1.0",
+  "targetHead": "494079734dfd680d295cb85e13545c51e0a2a83e",
+  "workBlockId": "wb-1e742021a1d84bfa",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
