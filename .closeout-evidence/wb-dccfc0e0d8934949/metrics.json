@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/closeout-capability-report-finalize",
+  "committedDeltaPathCount": 2,
+  "createdAt": "2026-05-08T09:28:22+00:00",
+  "detectorHash": "3f490444eb79bd3db27d0aadb4276d25",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "452b6f0299dd72e77035ce485cf79d28c515c397",
+  "schemaVersion": "1.0",
+  "targetHead": "132b74bc246222c23111530cade9e283a7e8e20f",
+  "workBlockId": "wb-dccfc0e0d8934949"
+}
