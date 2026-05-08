@@ -8,14 +8,14 @@
     "targetBranch": "master",
     "targetRemote": "fork",
     "remote": "fork",
-    "currentHead": "494079734dfd680d295cb85e13545c51e0a2a83e",
+    "currentHead": "132b74bc246222c23111530cade9e283a7e8e20f",
     "policyPath": "AGENTS.md",
     "sourceProfile": "Standard",
     "profileAdopted": "Standard",
     "ledgerOwner": "Codex"
   },
-  "generatedAt": "2026-05-08T04:12:26-05:00",
-  "lastVerifiedAt": "2026-05-08T04:12:26-05:00",
+  "generatedAt": "2026-05-08T04:24:37-05:00",
+  "lastVerifiedAt": "2026-05-08T04:25:56-05:00",
   "ledgerProfile": "Standard",
   "frameworkArtifacts": {
     "historicalIncidentMap": "CLOSEOUT-HISTORICAL-INCIDENT-MAP.md",
@@ -37,8 +37,8 @@
     "UNKNOWN": "The capability has not yet been assessed against local evidence."
   },
   "statusSummary": {
-    "YES": 38,
-    "PARTIAL": 6,
+    "YES": 39,
+    "PARTIAL": 5,
     "NO": 0,
     "UNAVAILABLE": 0,
     "UNKNOWN": 0
@@ -173,13 +173,13 @@
     {
       "capabilityId": "capability-ledger-populated",
       "title": "Capability ledger populated with frozen row inventory",
-      "status": "PARTIAL",
+      "status": "YES",
       "profile": "Core",
       "decision": "Core MUST",
       "verification": {
         "claimBasis": "contract-drift-check",
         "verificationLevel": "contract-verified",
-        "summary": "This working-tree update populates the frozen row inventory and adds a regression test, but the new inventory proof is not committed yet."
+        "summary": "The committed ledger contains the frozen row inventory and a committed regression test verifies row presence, uniqueness, status summary parity, and YES proof guardrails."
       },
       "evidencePaths": ["CLOSEOUT-CAPABILITY-LEDGER.json"],
       "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
@@ -193,27 +193,18 @@
       "sourceRequirements": ["REQ-031", "REQ-032"],
       "relatedArtifacts": ["CLOSEOUT-CAPABILITY-LEDGER.schema.json"],
       "relatedCapabilities": ["capability-ledger-schema", "clean-standard-non-smuggling"],
-      "blockers": [
-        {
-          "blockerId": "working-tree-inventory-proof",
-          "kind": "proof-basis",
-          "severity": "blocking",
-          "description": "The frozen inventory row and regression test are present only in this working tree until committed.",
-          "evidencePaths": ["CLOSEOUT-CAPABILITY-LEDGER.json", "tools/repo_hygiene/test_brokered_closeout.py"],
-          "recoveryCommand": "Commit the ledger inventory update and rerun py -3 -m unittest tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_capability_ledger_contains_frozen_row_inventory -v."
-        }
-      ],
-      "smallestNextStep": "Commit this ledger inventory update after review.",
-      "repoSpecificNotes": "The current committed ledger predates the packet's added frozen rows, so this row cannot honestly be YES before commit.",
-      "lastVerifiedAt": "2026-05-08T04:00:37-05:00",
+      "blockers": [],
+      "smallestNextStep": "Keep FROZEN_CLOSEOUT_CAPABILITY_ROWS synchronized with any future shared row inventory change.",
+      "repoSpecificNotes": "YES is supported by committed ledger content plus the committed row-inventory regression test.",
+      "lastVerifiedAt": "2026-05-08T04:24:37-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
         "documentationOnlyIsSufficient": false,
-        "executableBehaviorOrScopedException": false,
-        "behavioralTestOrScopedException": false,
-        "auditArtifactOrScopedException": false
+        "executableBehaviorOrScopedException": true,
+        "behavioralTestOrScopedException": true,
+        "auditArtifactOrScopedException": true
       },
-      "yesEvidenceBasis": []
+      "yesEvidenceBasis": ["contract", "drift-check", "behavioral-test"]
     },
     {
       "capabilityId": "structured-adjudication-protocol",
@@ -1700,7 +1691,7 @@
     }
   ],
   "notes": [
-    "This ledger intentionally leaves historical traceability, requirements trace, capability-ledger population, target race full retry, git hook gates, and automated subagent dispatch as PARTIAL rather than documentation-only, working-tree-only, or local-hook-only YES.",
+    "This ledger intentionally leaves historical traceability, requirements trace, target race full retry, git hook gates, and automated subagent dispatch as PARTIAL rather than documentation-only, incomplete, local-hook-only, or surface-only YES.",
     "Generated .claude-state audit paths are cited as local evidence roots; they remain generated/exempt and are not source work, and do not alone support YES."
   ]
 }
