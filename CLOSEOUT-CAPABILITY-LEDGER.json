@@ -8,14 +8,14 @@
     "targetBranch": "master",
     "targetRemote": "fork",
     "remote": "fork",
-    "currentHead": "e02515fa7bb1811535c068a7bc7e3b7480830397",
+    "currentHead": "494079734dfd680d295cb85e13545c51e0a2a83e",
     "policyPath": "AGENTS.md",
     "sourceProfile": "Standard",
     "profileAdopted": "Standard",
     "ledgerOwner": "Codex"
   },
-  "generatedAt": "2026-05-07T02:27:24-05:00",
-  "lastVerifiedAt": "2026-05-07T02:27:24-05:00",
+  "generatedAt": "2026-05-08T04:12:26-05:00",
+  "lastVerifiedAt": "2026-05-08T04:12:26-05:00",
   "ledgerProfile": "Standard",
   "frameworkArtifacts": {
     "historicalIncidentMap": "CLOSEOUT-HISTORICAL-INCIDENT-MAP.md",
@@ -38,7 +38,7 @@
   },
   "statusSummary": {
     "YES": 38,
-    "PARTIAL": 2,
+    "PARTIAL": 6,
     "NO": 0,
     "UNAVAILABLE": 0,
     "UNKNOWN": 0
@@ -47,13 +47,13 @@
     {
       "capabilityId": "historical-incident-traceability",
       "title": "Historical incident traceability",
-      "status": "YES",
+      "status": "PARTIAL",
       "profile": "Core",
       "decision": "Core MUST",
       "verification": {
-        "claimBasis": "audit-artifact",
-        "verificationLevel": "closed-through-repo-gate",
-        "summary": "Round incident evidence is committed as a framework artifact and was closed through repo-owned closeout audits."
+        "claimBasis": "documentation-only",
+        "verificationLevel": "docs-only",
+        "summary": "Committed incident trace documents exist, but this packet forbids docs-only or generated-audit-only proof from supporting YES."
       },
       "evidencePaths": ["CLOSEOUT-HISTORICAL-INCIDENT-MAP.md", "CLOSEOUT-CROSS-MAP-COMPARISON.md"],
       "testPaths": [],
@@ -67,29 +67,38 @@
       "sourceRequirements": ["REQ-001", "REQ-002"],
       "relatedArtifacts": ["CLOSEOUT-REFERENCE-MATRIX.md"],
       "relatedCapabilities": ["requirements-trace-to-original-standard"],
-      "blockers": [],
-      "smallestNextStep": "Keep incident trace references current when new closeout scar tissue changes the framework.",
-      "repoSpecificNotes": "This is a governance artifact; YES is backed by committed artifact plus closeout audit, not prose alone.",
-      "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
+      "blockers": [
+        {
+          "blockerId": "docs-only-proof",
+          "kind": "proof-basis",
+          "severity": "blocking",
+          "description": "The row currently depends on committed prose and generated closeout audit paths rather than committed executable, test, contract, or scoped-exception proof.",
+          "evidencePaths": ["CLOSEOUT-HISTORICAL-INCIDENT-MAP.md", "CLOSEOUT-CROSS-MAP-COMPARISON.md"],
+          "recoveryCommand": "Add a committed contract or drift check that validates incident ids referenced by the trace artifacts."
+        }
+      ],
+      "smallestNextStep": "Add a committed incident-trace validator that checks required incident ids and source links.",
+      "repoSpecificNotes": "The trace artifacts are useful and committed, but they are prose evidence; this packet requires stronger proof before YES.",
+      "lastVerifiedAt": "2026-05-08T04:00:37-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
         "documentationOnlyIsSufficient": false,
-        "executableBehaviorOrScopedException": true,
-        "behavioralTestOrScopedException": true,
-        "auditArtifactOrScopedException": true
+        "executableBehaviorOrScopedException": false,
+        "behavioralTestOrScopedException": false,
+        "auditArtifactOrScopedException": false
       },
-      "yesEvidenceBasis": ["audit-artifact"]
+      "yesEvidenceBasis": []
     },
     {
       "capabilityId": "requirements-trace-to-original-standard",
       "title": "Requirements trace to original closeout rules",
-      "status": "YES",
+      "status": "PARTIAL",
       "profile": "Core",
       "decision": "Core MUST",
       "verification": {
-        "claimBasis": "audit-artifact",
-        "verificationLevel": "closed-through-repo-gate",
-        "summary": "The requirements trace maps source rules into capability rows, profile decisions, ledger expectations, and clean-standard disposition."
+        "claimBasis": "documentation-only",
+        "verificationLevel": "docs-only",
+        "summary": "Committed requirements trace documents exist, but this packet forbids docs-only or generated-audit-only proof from supporting YES."
       },
       "evidencePaths": ["CLOSEOUT-REQUIREMENTS-TRACE.md", "CLOSEOUT-STANDARD.md"],
       "testPaths": [],
@@ -103,18 +112,27 @@
       "sourceRequirements": ["REQ-001", "REQ-031", "REQ-032"],
       "relatedArtifacts": ["CLOSEOUT-IMPLEMENTATION-PROMPT.md"],
       "relatedCapabilities": ["capability-ledger-schema", "clean-standard-non-smuggling"],
-      "blockers": [],
-      "smallestNextStep": "Update this trace when incoming closeout addenda alter durable repo policy.",
-      "repoSpecificNotes": "Trace is accepted as a source-evidence artifact only because it has been closed through repo-owned workflow.",
-      "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
+      "blockers": [
+        {
+          "blockerId": "docs-only-proof",
+          "kind": "proof-basis",
+          "severity": "blocking",
+          "description": "The row currently depends on committed prose and generated closeout audit paths rather than committed executable, test, contract, or scoped-exception proof.",
+          "evidencePaths": ["CLOSEOUT-REQUIREMENTS-TRACE.md", "CLOSEOUT-STANDARD.md"],
+          "recoveryCommand": "Add a committed trace validator that checks requirement ids, row links, and profile mappings against the ledger."
+        }
+      ],
+      "smallestNextStep": "Add a committed requirement-trace validator and wire it into the closeout test or drift-check suite.",
+      "repoSpecificNotes": "The trace remains valuable as source material, but this packet treats it as prose until a committed validator exists.",
+      "lastVerifiedAt": "2026-05-08T04:00:37-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
         "documentationOnlyIsSufficient": false,
-        "executableBehaviorOrScopedException": true,
-        "behavioralTestOrScopedException": true,
-        "auditArtifactOrScopedException": true
+        "executableBehaviorOrScopedException": false,
+        "behavioralTestOrScopedException": false,
+        "auditArtifactOrScopedException": false
       },
-      "yesEvidenceBasis": ["audit-artifact"]
+      "yesEvidenceBasis": []
     },
     {
       "capabilityId": "capability-ledger-schema",
@@ -151,6 +169,51 @@
         "auditArtifactOrScopedException": true
       },
       "yesEvidenceBasis": ["contract", "drift-check"]
+    },
+    {
+      "capabilityId": "capability-ledger-populated",
+      "title": "Capability ledger populated with frozen row inventory",
+      "status": "PARTIAL",
+      "profile": "Core",
+      "decision": "Core MUST",
+      "verification": {
+        "claimBasis": "contract-drift-check",
+        "verificationLevel": "contract-verified",
+        "summary": "This working-tree update populates the frozen row inventory and adds a regression test, but the new inventory proof is not committed yet."
+      },
+      "evidencePaths": ["CLOSEOUT-CAPABILITY-LEDGER.json"],
+      "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
+      "actorPaths": [],
+      "adapterPaths": [],
+      "configPaths": [],
+      "contractPaths": ["CLOSEOUT-CAPABILITY-LEDGER.schema.json"],
+      "driftCheckPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
+      "auditArtifactPaths": [],
+      "sourceRequirementPaths": ["CLOSEOUT-REQUIREMENTS-TRACE.md"],
+      "sourceRequirements": ["REQ-031", "REQ-032"],
+      "relatedArtifacts": ["CLOSEOUT-CAPABILITY-LEDGER.schema.json"],
+      "relatedCapabilities": ["capability-ledger-schema", "clean-standard-non-smuggling"],
+      "blockers": [
+        {
+          "blockerId": "working-tree-inventory-proof",
+          "kind": "proof-basis",
+          "severity": "blocking",
+          "description": "The frozen inventory row and regression test are present only in this working tree until committed.",
+          "evidencePaths": ["CLOSEOUT-CAPABILITY-LEDGER.json", "tools/repo_hygiene/test_brokered_closeout.py"],
+          "recoveryCommand": "Commit the ledger inventory update and rerun py -3 -m unittest tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_capability_ledger_contains_frozen_row_inventory -v."
+        }
+      ],
+      "smallestNextStep": "Commit this ledger inventory update after review.",
+      "repoSpecificNotes": "The current committed ledger predates the packet's added frozen rows, so this row cannot honestly be YES before commit.",
+      "lastVerifiedAt": "2026-05-08T04:00:37-05:00",
+      "lastVerifiedBy": "Codex",
+      "yesRequires": {
+        "documentationOnlyIsSufficient": false,
+        "executableBehaviorOrScopedException": false,
+        "behavioralTestOrScopedException": false,
+        "auditArtifactOrScopedException": false
+      },
+      "yesEvidenceBasis": []
     },
     {
       "capabilityId": "structured-adjudication-protocol",
@@ -1169,6 +1232,87 @@
       "yesEvidenceBasis": ["behavioral-test", "audit-artifact", "actor"]
     },
     {
+      "capabilityId": "independent-review-quorum",
+      "title": "Independent review quorum",
+      "status": "YES",
+      "profile": "Standard",
+      "decision": "Standard SHOULD",
+      "verification": {
+        "claimBasis": "behavioral-test",
+        "verificationLevel": "behavior-tested",
+        "summary": "High-impact actions require a self reviewer plus two independent 10/10 reviewers; insufficient or undeclared review surfaces fail closed."
+      },
+      "evidencePaths": ["closeout.config.json", "tools/repo_hygiene/brokered_closeout.py"],
+      "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
+      "actorPaths": ["tools/repo_hygiene/brokered_closeout.py"],
+      "adapterPaths": ["tools/closeout/review-quorum.ps1"],
+      "configPaths": ["closeout.config.json"],
+      "contractPaths": ["tools/repo-hygiene/closeout.contract.json"],
+      "driftCheckPaths": ["tools/repo_hygiene/test_repo_hygiene.py"],
+      "auditArtifactPaths": [".claude-state/closeout/audits/audits.jsonl"],
+      "sourceRequirementPaths": ["CLOSEOUT-REQUIREMENTS-TRACE.md"],
+      "sourceRequirements": ["REQ-004", "REQ-006", "REQ-026"],
+      "relatedArtifacts": ["CLOSEOUT-ADJUDICATION-PROTOCOL.md"],
+      "relatedCapabilities": ["declared-review-surface", "surface-unavailable-or-insufficient-reviewer-block", "exact-mutation-tuple"],
+      "blockers": [],
+      "smallestNextStep": "Keep reviewer identities and required scores in reviewQuorum and autoQuorum covered by tests when policy changes.",
+      "repoSpecificNotes": "Validated by test_review_quorum_requires_allowed_ten_score_self_plus_two_independent and auto-quorum exact tuple tests.",
+      "lastVerifiedAt": "2026-05-08T04:00:37-05:00",
+      "lastVerifiedBy": "Codex",
+      "yesRequires": {
+        "documentationOnlyIsSufficient": false,
+        "executableBehaviorOrScopedException": true,
+        "behavioralTestOrScopedException": true,
+        "auditArtifactOrScopedException": true
+      },
+      "yesEvidenceBasis": ["behavioral-test", "config", "actor"]
+    },
+    {
+      "capabilityId": "git-hook-gates",
+      "title": "Git hook gates",
+      "status": "PARTIAL",
+      "profile": "Standard",
+      "decision": "Standard SHOULD",
+      "verification": {
+        "claimBasis": "behavioral-test",
+        "verificationLevel": "behavior-tested",
+        "summary": "The repo has a hook-guard CLI and remediation-freeze hook tests, but no committed hook installer or tracked Git hook adapter proves local pre-commit/pre-push enforcement."
+      },
+      "evidencePaths": ["tools/repo_hygiene/work_block_cli.py", "tools/repo_hygiene/brokered_closeout.py"],
+      "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
+      "actorPaths": ["tools/repo_hygiene/brokered_closeout.py", "tools/repo_hygiene/work_block_cli.py"],
+      "adapterPaths": ["tools/closeout/Invoke-CloseoutCli.ps1"],
+      "configPaths": ["closeout.config.json"],
+      "contractPaths": ["tools/repo-hygiene/closeout.contract.json"],
+      "driftCheckPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
+      "auditArtifactPaths": [],
+      "sourceRequirementPaths": ["CLOSEOUT-REQUIREMENTS-TRACE.md"],
+      "sourceRequirements": ["REQ-028"],
+      "relatedArtifacts": ["CLOSEOUT-STANDARD.md"],
+      "relatedCapabilities": ["remediation-freeze", "tooling-drift-detection"],
+      "blockers": [
+        {
+          "blockerId": "no-committed-hook-installer",
+          "kind": "proof-basis",
+          "severity": "blocking",
+          "description": "Hook-guard behavior is tested, but actual Git hooks live under .git/hooks and are not committed local proof.",
+          "evidencePaths": ["tools/repo_hygiene/work_block_cli.py", "tools/repo_hygiene/test_brokered_closeout.py"],
+          "recoveryCommand": "Add a committed hook installer or tracked hook template plus a validation test proving pre-commit and pre-push route through hook-guard."
+        }
+      ],
+      "smallestNextStep": "Add tracked hook templates or an installer and test that installed hooks call hook-guard through Invoke-CloseoutCli.ps1.",
+      "repoSpecificNotes": "This does not block Core adoption, but it blocks Standard maturity for hook-level enforcement.",
+      "lastVerifiedAt": "2026-05-08T04:00:37-05:00",
+      "lastVerifiedBy": "Codex",
+      "yesRequires": {
+        "documentationOnlyIsSufficient": false,
+        "executableBehaviorOrScopedException": false,
+        "behavioralTestOrScopedException": false,
+        "auditArtifactOrScopedException": false
+      },
+      "yesEvidenceBasis": []
+    },
+    {
       "capabilityId": "agent-remediation-queue",
       "title": "Agent remediation queue",
       "status": "YES",
@@ -1429,6 +1573,60 @@
       "yesEvidenceBasis": ["behavioral-test", "actor", "audit-artifact"]
     },
     {
+      "capabilityId": "retained-candidate-auto-closeout-remediation",
+      "title": "Retained candidate auto-closeout remediation bundle",
+      "status": "YES",
+      "profile": "Standard",
+      "decision": "Standard SHOULD",
+      "verification": {
+        "claimBasis": "behavioral-test",
+        "verificationLevel": "behavior-tested",
+        "summary": "The retained-candidate remediation actor can auto-decide exact tuples, preserve before prune, clean-integrate or prune policy-eligible refs, and fail closed with durable blockers for ambiguity."
+      },
+      "evidencePaths": ["AGENTS.md", "closeout.config.json", "tools/repo_hygiene/brokered_closeout.py"],
+      "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
+      "actorPaths": ["tools/repo_hygiene/brokered_closeout.py", "tools/repo_hygiene/work_block_cli.py"],
+      "adapterPaths": ["tools/closeout/repo-sweep-closeout.ps1", "tools/closeout/remediate-retained-closeout.ps1", "tools/closeout/agent-remediation-queue.ps1"],
+      "configPaths": ["closeout.config.json"],
+      "contractPaths": ["tools/repo-hygiene/closeout.contract.json"],
+      "driftCheckPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
+      "auditArtifactPaths": [".claude-state/closeout/audits/audits.jsonl"],
+      "sourceRequirementPaths": ["CLOSEOUT-REQUIREMENTS-TRACE.md"],
+      "sourceRequirements": ["REQ-021", "REQ-022", "REQ-024", "REQ-025", "REQ-027", "REQ-030"],
+      "relatedArtifacts": ["CLOSEOUT-STANDARD.md"],
+      "relatedCapabilities": [
+        "retained-candidate-remediation",
+        "agent-remediation-queue",
+        "independent-review-quorum",
+        "surface-unavailable-or-insufficient-reviewer-block",
+        "exact-mutation-tuple",
+        "repo-owned-mutation-after-adjudication",
+        "evidence-preserving-prune",
+        "remote-feature-clean-integration",
+        "checked-out-and-locked-worktree-handling",
+        "repo-sweep-single-candidate-mutation",
+        "audited-bulk-override",
+        "dirty-classification",
+        "foreign-dirty-preservation",
+        "baseline-dirty-mixed-path-protection",
+        "remediation-freeze",
+        "hard-clean-final-gate",
+        "repo-closed-for-final-response"
+      ],
+      "blockers": [],
+      "smallestNextStep": "Keep bundle coverage tied to retained remediation, remote feature, prune recovery, and repo-closed tests as policy changes.",
+      "repoSpecificNotes": "Bundle classifications: auto-decide-with-proof, auto-preserve-then-prune, auto-merge-then-prune, and fail-closed-with-durable-blocker. Manual disposition remains expected only for policy-excluded or data-loss-ambiguous candidates.",
+      "lastVerifiedAt": "2026-05-08T04:00:37-05:00",
+      "lastVerifiedBy": "Codex",
+      "yesRequires": {
+        "documentationOnlyIsSufficient": false,
+        "executableBehaviorOrScopedException": true,
+        "behavioralTestOrScopedException": true,
+        "auditArtifactOrScopedException": true
+      },
+      "yesEvidenceBasis": ["behavioral-test", "actor", "config"]
+    },
+    {
       "capabilityId": "local-only-repo-closeout",
       "title": "Local-only repository closeout",
       "status": "YES",
@@ -1502,7 +1700,7 @@
     }
   ],
   "notes": [
-    "This ledger intentionally leaves target race full retry and automated subagent dispatch as PARTIAL rather than documentation-only YES.",
-    "Generated .claude-state audit paths are cited as local evidence roots; they remain generated/exempt and are not source work."
+    "This ledger intentionally leaves historical traceability, requirements trace, capability-ledger population, target race full retry, git hook gates, and automated subagent dispatch as PARTIAL rather than documentation-only, working-tree-only, or local-hook-only YES.",
+    "Generated .claude-state audit paths are cited as local evidence roots; they remain generated/exempt and are not source work, and do not alone support YES."
   ]
 }
