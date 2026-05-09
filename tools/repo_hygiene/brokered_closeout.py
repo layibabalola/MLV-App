@@ -99,12 +99,33 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "branchPrefix": "codex/work-block",
     },
     "validation": {
-        "timeoutMs": 600000,
+        "timeoutMs": 120000,
         "maxOutputBytes": 524288,
+        "fullSuiteEnvVar": "CLOSEOUT_RUN_FULL_VALIDATION",
+        "runFullSuiteByDefault": False,
         "commands": [
             {
-                "name": "brokered-closeout-tests",
+                "name": "brokered-closeout-smoke",
+                "argv": [
+                    "py",
+                    "-3",
+                    "-m",
+                    "unittest",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_timeout_and_output_cap_settings_are_contract_required",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_resource_policy_sets_below_normal_priority_and_affinity",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_bounded_runner_cpu_watchdog_terminates_hot_silent_child",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_full_validation_suite_is_skipped_without_explicit_request",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_path_scoped_validation_skips_unmatched_commands",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_commands_ignore_failure_words_in_successful_test_names",
+                    "-v",
+                ],
+                "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
+            },
+            {
+                "name": "brokered-closeout-full",
                 "argv": ["py", "-3", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"],
+                "runMode": "full",
+                "timeoutMs": 600000,
                 "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
             },
             {
@@ -124,6 +145,18 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                 "argv": ["py", "-3", "tools/repo-hygiene/hygiene.py", "--repo-root", ".", "verify-policy"],
             },
         ]
+    },
+    "processResources": {
+        "defaultPriority": "below_normal",
+        "validationPriority": "below_normal",
+        "validationAffinityCores": 2,
+        "cpuWatchdog": {
+            "enabled": True,
+            "thresholdPercent": 80,
+            "sustainedSeconds": 30,
+            "sampleIntervalSeconds": 2,
+            "requireNoOutputProgress": True,
+        },
     },
     "paths": {
         "generated": [
@@ -302,7 +335,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
+        "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
         "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
@@ -401,6 +434,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun",
             "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
             "test_validation_commands_are_bounded_and_kill_descendants",
+            "test_validation_resource_policy_sets_below_normal_priority_and_affinity",
+            "test_bounded_runner_cpu_watchdog_terminates_hot_silent_child",
+            "test_full_validation_suite_is_skipped_without_explicit_request",
             "test_path_scoped_validation_skips_unmatched_commands",
             "test_validation_commands_ignore_failure_words_in_successful_test_names",
             "test_timeout_and_output_cap_settings_are_contract_required",
@@ -430,7 +466,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def run_bounded_closeout_process"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_process_resource_policy"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_windows_process_tree_affinity"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def process_tree_cpu_sample"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_timeout_ms"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_full_suite_requested"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_applies"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
@@ -1402,6 +1442,14 @@ def positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def closeout_failure_text_patterns(config: Dict[str, Any]) -> List[str]:
     raw = config.get("locking", {}).get("failureTextPatterns", KNOWN_CLOSEOUT_FAILURE_TEXT)
     if not isinstance(raw, list):
@@ -1428,6 +1476,258 @@ def closeout_command_timeout_ms(config: Dict[str, Any], closeout_args: Sequence[
 
 def closeout_max_process_output_bytes(config: Dict[str, Any]) -> int:
     return positive_int(config.get("locking", {}).get("maxProcessOutputBytes"), 1048576)
+
+
+def process_affinity_mask(cores: Any) -> Optional[int]:
+    requested = positive_int(cores, 0)
+    if requested <= 0:
+        return None
+    available = max(1, int(os.cpu_count() or 1))
+    capped = min(requested, available)
+    return (1 << capped) - 1
+
+
+def _normalize_priority_name(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _windows_priority_creationflags(priority: Any) -> int:
+    if os.name != "nt":
+        return 0
+    normalized = _normalize_priority_name(priority)
+    mapping = {
+        "idle": getattr(subprocess, "IDLE_PRIORITY_CLASS", 0),
+        "below_normal": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0),
+        "normal": getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0),
+        "above_normal": getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0),
+    }
+    return int(mapping.get(normalized, 0) or 0)
+
+
+def closeout_process_resource_policy(
+    config: Dict[str, Any],
+    closeout_args: Optional[Sequence[str]] = None,
+    command_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    resources = config.get("processResources", {})
+    if not isinstance(resources, dict):
+        resources = {}
+    command_config = command_config or {}
+    profile = "validation" if closeout_args and str(closeout_args[0]) == "validation" else "default"
+    priority = command_config.get("priority")
+    if priority is None and profile == "validation":
+        priority = resources.get("validationPriority")
+    if priority is None:
+        priority = resources.get("defaultPriority", "below_normal")
+    affinity_default = positive_int(resources.get("validationAffinityCores"), 0) if profile == "validation" else positive_int(resources.get("defaultAffinityCores"), 0)
+    affinity_cores = positive_int(command_config.get("affinityCores"), affinity_default)
+    watchdog = resources.get("cpuWatchdog", {})
+    if not isinstance(watchdog, dict):
+        watchdog = {}
+    command_watchdog = command_config.get("cpuWatchdog")
+    if isinstance(command_watchdog, dict):
+        watchdog = deep_merge(watchdog, command_watchdog)
+    threshold = positive_float(watchdog.get("thresholdPercent"), 80.0)
+    sustained = positive_float(watchdog.get("sustainedSeconds"), 30.0)
+    sample_interval = positive_float(watchdog.get("sampleIntervalSeconds"), 2.0)
+    return {
+        "profile": profile,
+        "priority": _normalize_priority_name(priority) or "below_normal",
+        "priorityCreationFlags": _windows_priority_creationflags(priority),
+        "affinityCores": affinity_cores,
+        "affinityMask": process_affinity_mask(affinity_cores),
+        "cpuWatchdog": {
+            "enabled": bool(watchdog.get("enabled", False)),
+            "thresholdPercent": threshold,
+            "sustainedSeconds": sustained,
+            "sampleIntervalSeconds": sample_interval,
+            "requireNoOutputProgress": bool(watchdog.get("requireNoOutputProgress", True)),
+        },
+    }
+
+
+def apply_windows_process_affinity(process: subprocess.Popen, affinity_mask: Optional[int]) -> Dict[str, Any]:
+    if os.name != "nt" or not affinity_mask:
+        return {"applied": False, "reason": "not_requested" if not affinity_mask else "non_windows"}
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        kernel32.SetProcessAffinityMask.restype = ctypes.c_int
+        ok = bool(kernel32.SetProcessAffinityMask(int(process._handle), ctypes.c_size_t(int(affinity_mask))))  # type: ignore[attr-defined]
+        result: Dict[str, Any] = {"applied": ok, "affinityMask": int(affinity_mask)}
+        if not ok:
+            result["error"] = ctypes.get_last_error()
+        return result
+    except Exception as exc:
+        return {"applied": False, "affinityMask": int(affinity_mask), "error": str(exc)}
+
+
+def apply_windows_pid_affinity(pid: int, affinity_mask: Optional[int]) -> Dict[str, Any]:
+    if os.name != "nt" or not affinity_mask:
+        return {"pid": int(pid), "applied": False, "reason": "not_requested" if not affinity_mask else "non_windows"}
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+        kernel32.SetProcessAffinityMask.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x0200, False, int(pid))
+        if not handle:
+            return {"pid": int(pid), "applied": False, "affinityMask": int(affinity_mask), "error": ctypes.get_last_error()}
+        try:
+            ok = bool(kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(int(affinity_mask))))
+            result: Dict[str, Any] = {"pid": int(pid), "applied": ok, "affinityMask": int(affinity_mask)}
+            if not ok:
+                result["error"] = ctypes.get_last_error()
+            return result
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception as exc:
+        return {"pid": int(pid), "applied": False, "affinityMask": int(affinity_mask), "error": str(exc)}
+
+
+def apply_windows_process_tree_affinity(root_pid: int, affinity_mask: Optional[int]) -> Dict[str, Any]:
+    if os.name != "nt" or not affinity_mask:
+        return {"applied": False, "reason": "not_requested" if not affinity_mask else "non_windows", "pids": []}
+    pids = _windows_process_tree_pids(int(root_pid))
+    results = [apply_windows_pid_affinity(pid, affinity_mask) for pid in pids]
+    return {
+        "applied": any(bool(item.get("applied")) for item in results),
+        "affinityMask": int(affinity_mask),
+        "pids": pids,
+        "results": results,
+    }
+
+
+def _windows_parent_process_map() -> Dict[int, int]:
+    if os.name != "nt":
+        return {}
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        invalid = ctypes.c_void_p(-1).value
+        if not snapshot or snapshot == invalid:
+            return {}
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            parent_by_pid: Dict[int, int] = {}
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return {}
+            while True:
+                parent_by_pid[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+            return parent_by_pid
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return {}
+
+
+def _windows_process_tree_pids(root_pid: int) -> List[int]:
+    root = int(root_pid)
+    parent_by_pid = _windows_parent_process_map()
+    if not parent_by_pid:
+        return [root]
+    tree = {root}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent in parent_by_pid.items():
+            if parent in tree and pid not in tree:
+                tree.add(pid)
+                changed = True
+    return sorted(tree)
+
+
+def _windows_process_cpu_seconds(pid: int) -> Optional[float]:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            handle = kernel32.OpenProcess(0x0400, False, int(pid))
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exit_time), ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            kernel_ticks = (int(kernel.dwHighDateTime) << 32) + int(kernel.dwLowDateTime)
+            user_ticks = (int(user.dwHighDateTime) << 32) + int(user.dwLowDateTime)
+            return (kernel_ticks + user_ticks) / 10_000_000.0
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def process_tree_cpu_sample(pid: int) -> Optional[Dict[str, Any]]:
+    if os.name != "nt":
+        return None
+    pids = _windows_process_tree_pids(int(pid))
+    total = 0.0
+    observed: List[int] = []
+    for tree_pid in pids:
+        seconds = _windows_process_cpu_seconds(tree_pid)
+        if seconds is not None:
+            observed.append(tree_pid)
+            total += seconds
+    if not observed:
+        return None
+    return {"seconds": total, "pids": observed}
 
 
 def closeout_recovery_command(closeout_args: Sequence[str]) -> str:
@@ -1559,6 +1859,8 @@ def normalize_closeout_child_status(
         return {"status": "timeout", "returncode": 124, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
     if result.get("outputCapped"):
         return {"status": "output_cap", "returncode": 125, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
+    if result.get("cpuStalled"):
+        return {"status": "cpu_stall", "returncode": 126, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
     if original_returncode == 0 and normalized_reasons:
         return {
             "status": "normalized_failure",
@@ -1649,21 +1951,27 @@ def run_bounded_closeout_process(
     normalize_failure_text: bool = True,
     env: Optional[Dict[str, str]] = None,
     cwd: Optional[Path] = None,
+    resource_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     process_cwd = cwd or repo_root
     timeout_ms = positive_int(timeout_ms, 120000)
     max_output_bytes = positive_int(max_output_bytes, 1048576)
     started_at = utc_now()
-    process = subprocess.Popen(
-        list(command),
-        cwd=str(process_cwd),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        start_new_session=(os.name != "nt"),
-    )
+    resource_policy = closeout_process_resource_policy(config, closeout_args=closeout_args, command_config=resource_overrides)
+    popen_kwargs: Dict[str, Any] = {
+        "cwd": str(process_cwd),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "env": env,
+        "start_new_session": (os.name != "nt"),
+    }
+    if os.name == "nt" and int(resource_policy.get("priorityCreationFlags") or 0):
+        popen_kwargs["creationflags"] = int(resource_policy["priorityCreationFlags"])
+    process = subprocess.Popen(list(command), **popen_kwargs)
+    affinity_result = apply_windows_process_affinity(process, resource_policy.get("affinityMask"))
+    tree_affinity_result = apply_windows_process_tree_affinity(process.pid, resource_policy.get("affinityMask"))
     state: Dict[str, Any] = {
         "stdout": bytearray(),
         "stderr": bytearray(),
@@ -1682,10 +1990,68 @@ def run_bounded_closeout_process(
         thread.start()
     reason: Optional[str] = None
     deadline = time.monotonic() + (timeout_ms / 1000.0)
+    watchdog_policy = dict(resource_policy.get("cpuWatchdog") or {})
+    cpu_watchdog_state: Dict[str, Any] = {
+        "enabled": bool(watchdog_policy.get("enabled", False)),
+        "thresholdPercent": watchdog_policy.get("thresholdPercent"),
+        "sustainedSeconds": watchdog_policy.get("sustainedSeconds"),
+        "sampleIntervalSeconds": watchdog_policy.get("sampleIntervalSeconds"),
+        "requireNoOutputProgress": watchdog_policy.get("requireNoOutputProgress"),
+        "supported": os.name == "nt",
+        "lastCpuPercent": None,
+        "lastObservedPids": [],
+        "lastOutputBytes": 0,
+        "sustainedHighCpuSeconds": 0.0,
+    }
+    last_cpu_sample = process_tree_cpu_sample(process.pid) if cpu_watchdog_state["enabled"] else None
+    last_cpu_sample_at = time.monotonic()
+    last_output_sample = 0
+    high_cpu_since: Optional[float] = None
+    next_cpu_sample_at = last_cpu_sample_at + positive_float(watchdog_policy.get("sampleIntervalSeconds"), 2.0)
     while process.poll() is None:
         if stop_event.is_set():
             reason = "output_cap"
             break
+        now = time.monotonic()
+        if cpu_watchdog_state["enabled"] and now >= next_cpu_sample_at:
+            current_cpu_sample = process_tree_cpu_sample(process.pid)
+            with lock:
+                output_bytes = int(state["stdoutBytes"] + state["stderrBytes"])
+            if current_cpu_sample is None:
+                cpu_watchdog_state["sampleUnavailable"] = True
+                high_cpu_since = None
+            elif last_cpu_sample is not None:
+                if resource_policy.get("affinityMask"):
+                    tree_affinity_result = apply_windows_process_tree_affinity(process.pid, resource_policy.get("affinityMask"))
+                delta_cpu = max(0.0, float(current_cpu_sample["seconds"]) - float(last_cpu_sample["seconds"]))
+                delta_wall = max(0.001, now - last_cpu_sample_at)
+                cpu_percent = (delta_cpu / delta_wall) * 100.0
+                output_progress = output_bytes > last_output_sample
+                require_no_output = bool(watchdog_policy.get("requireNoOutputProgress", True))
+                threshold = positive_float(watchdog_policy.get("thresholdPercent"), 80.0)
+                cpu_watchdog_state.update(
+                    {
+                        "lastCpuPercent": round(cpu_percent, 2),
+                        "lastObservedPids": list(current_cpu_sample.get("pids", [])),
+                        "lastOutputBytes": output_bytes,
+                        "outputProgress": output_progress,
+                    }
+                )
+                if cpu_percent >= threshold and (not require_no_output or not output_progress):
+                    if high_cpu_since is None:
+                        high_cpu_since = now
+                    sustained = now - high_cpu_since
+                    cpu_watchdog_state["sustainedHighCpuSeconds"] = round(sustained, 3)
+                    if sustained >= positive_float(watchdog_policy.get("sustainedSeconds"), 30.0):
+                        reason = "cpu_stall"
+                        break
+                else:
+                    high_cpu_since = None
+                    cpu_watchdog_state["sustainedHighCpuSeconds"] = 0.0
+            last_cpu_sample = current_cpu_sample
+            last_cpu_sample_at = now
+            last_output_sample = output_bytes
+            next_cpu_sample_at = now + positive_float(watchdog_policy.get("sampleIntervalSeconds"), 2.0)
         if time.monotonic() >= deadline:
             reason = "timeout"
             break
@@ -1707,8 +2073,14 @@ def run_bounded_closeout_process(
     stdout = bytes(state["stdout"]).decode("utf-8", errors="replace")
     stderr = bytes(state["stderr"]).decode("utf-8", errors="replace")
     raw_returncode = process.returncode
-    if raw_returncode is None:
-        raw_returncode = 124 if reason == "timeout" else 125 if reason == "output_cap" else 1
+    if reason == "timeout":
+        raw_returncode = 124
+    elif reason == "output_cap":
+        raw_returncode = 125
+    elif reason == "cpu_stall":
+        raw_returncode = 126
+    elif raw_returncode is None:
+        raw_returncode = 1
     base_result: Dict[str, Any] = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "status": "pending",
@@ -1726,6 +2098,10 @@ def run_bounded_closeout_process(
         "stderrBytes": int(state["stderrBytes"]),
         "timedOut": reason == "timeout",
         "outputCapped": bool(state["outputCapped"] or reason == "output_cap"),
+        "cpuStalled": reason == "cpu_stall",
+        "cpuWatchdog": cpu_watchdog_state,
+        "resourcePolicy": resource_policy,
+        "resourceApply": {"affinity": affinity_result, "treeAffinity": tree_affinity_result},
         "killedProcessTree": bool(kill_info.get("processTreeKillAttempted")),
         "killedDescendants": kill_info.get("killedDescendants", []),
         "kill": kill_info,
@@ -1748,6 +2124,8 @@ def run_bounded_closeout_process(
         write_audit(repo_root, config, "bounded_runner_timeout", audit_payload, work_block_id=work_block_id, outcome="blocked")
     if base_result["outputCapped"]:
         write_audit(repo_root, config, "bounded_runner_output_cap", audit_payload, work_block_id=work_block_id, outcome="blocked")
+    if base_result["cpuStalled"]:
+        write_audit(repo_root, config, "bounded_runner_cpu_stall", audit_payload, work_block_id=work_block_id, outcome="blocked")
     if base_result["killedProcessTree"]:
         write_audit(repo_root, config, "bounded_runner_process_tree_killed", audit_payload, work_block_id=work_block_id, outcome="blocked")
     if base_result["normalizedFailure"]:
@@ -3324,16 +3702,39 @@ def validation_command_max_output_bytes(config: Dict[str, Any], command: Dict[st
     return positive_int(command.get("maxOutputBytes"), positive_int(validation.get("maxOutputBytes"), closeout_max_process_output_bytes(config)))
 
 
-def validation_command_applies(command: Dict[str, Any], changed_paths: Optional[Sequence[str]]) -> bool:
+def validation_full_suite_requested(config: Dict[str, Any], env: Optional[Dict[str, str]] = None) -> bool:
+    validation = config.get("validation", {})
+    if bool(validation.get("runFullSuiteByDefault", False)):
+        return True
+    env_var = str(validation.get("fullSuiteEnvVar") or "CLOSEOUT_RUN_FULL_VALIDATION")
+    value = (env or os.environ).get(env_var, "")
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "full"}
+
+
+def validation_command_skip_reason(
+    command: Dict[str, Any],
+    changed_paths: Optional[Sequence[str]],
+    *,
+    include_full: bool = True,
+) -> Optional[str]:
+    run_mode = str(command.get("runMode") or "smoke").strip().lower()
+    if run_mode == "full" and not include_full:
+        return "full_validation_not_requested"
     patterns = command.get("pathPatterns")
     if not isinstance(patterns, list) or not patterns:
-        return True
+        return None
     if changed_paths is None:
-        return True
+        return None
     normalized_paths = [normalize_rel(str(path)) for path in changed_paths if normalize_rel(str(path))]
     if not normalized_paths:
-        return False
-    return any(path_matches_any(path, patterns) for path in normalized_paths)
+        return "path_patterns_not_matched"
+    if not any(path_matches_any(path, patterns) for path in normalized_paths):
+        return "path_patterns_not_matched"
+    return None
+
+
+def validation_command_applies(command: Dict[str, Any], changed_paths: Optional[Sequence[str]], *, include_full: bool = True) -> bool:
+    return validation_command_skip_reason(command, changed_paths, include_full=include_full) is None
 
 
 def run_validations(
@@ -3345,6 +3746,7 @@ def run_validations(
     work_block_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    include_full = validation_full_suite_requested(config)
     for command in config.get("validation", {}).get("commands", []):
         argv = command.get("argv")
         if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv):
@@ -3353,7 +3755,8 @@ def run_validations(
         if argv[0] == "python":
             argv[0] = sys.executable
         name = str(command.get("name") or argv[0])
-        if not validation_command_applies(command, changed_paths):
+        skip_reason = validation_command_skip_reason(command, changed_paths, include_full=include_full)
+        if skip_reason:
             results.append(
                 {
                     "name": name,
@@ -3362,7 +3765,8 @@ def run_validations(
                     "stdout": "",
                     "stderr": "",
                     "skipped": True,
-                    "skipReason": "path_patterns_not_matched",
+                    "skipReason": skip_reason,
+                    "runMode": str(command.get("runMode") or "smoke"),
                     "pathPatterns": list(command.get("pathPatterns") or []),
                     "changedPaths": sorted({normalize_rel(str(path)) for path in changed_paths or [] if normalize_rel(str(path))}),
                 }
@@ -3379,6 +3783,7 @@ def run_validations(
             work_block_id=work_block_id,
             normalize_failure_text=False,
             cwd=integration_path,
+            resource_overrides=command,
         )
         results.append(
             {
@@ -3390,6 +3795,10 @@ def run_validations(
                 "status": completed.get("status"),
                 "timedOut": bool(completed.get("timedOut")),
                 "outputCapped": bool(completed.get("outputCapped")),
+                "cpuStalled": bool(completed.get("cpuStalled")),
+                "cpuWatchdog": completed.get("cpuWatchdog"),
+                "resourcePolicy": completed.get("resourcePolicy"),
+                "resourceApply": completed.get("resourceApply"),
                 "killedProcessTree": bool(completed.get("killedProcessTree")),
                 "killedDescendants": completed.get("killedDescendants", []),
                 "timeoutMs": completed.get("timeoutMs"),
@@ -8188,7 +8597,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "workBlockBootstrap", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"]
+    required_config_keys = ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),

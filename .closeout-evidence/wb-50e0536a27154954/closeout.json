@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/work-block/wb-cd5b9708fa2b4d94",
+  "createdAt": "2026-05-09T21:51:44+00:00",
+  "detectorHash": "62d89d4d835747e9d09b0ec66ca99ebc",
+  "eligible": true,
+  "featureHead": "cbd8d7699728e5b4a8983905ef73cbe1f8f9a929",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/work-block/wb-cd5b9708fa2b4d94",
+      "head": "cbd8d7699728e5b4a8983905ef73cbe1f8f9a929"
+    },
+    "target": {
+      "branch": "master",
+      "head": "0370176077911abe71cd3052e10e28b1b175eb92",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "0370176077911abe71cd3052e10e28b1b175eb92",
+  "workBlockId": "wb-50e0536a27154954"
+}
