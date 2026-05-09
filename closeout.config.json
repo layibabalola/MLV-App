@@ -10,6 +10,10 @@
     "featureBranchPatterns": ["codex/*", "claude/*", "hygiene/*", "work/*", "feature/*"],
     "fetchBeforeEvidence": true
   },
+  "workBlockBootstrap": {
+    "autoBranchFromProtectedTarget": true,
+    "branchPrefix": "codex/work-block"
+  },
   "validation": {
     "timeoutMs": 600000,
     "maxOutputBytes": 524288,
@@ -183,7 +187,7 @@
       "tools/repo-hygiene/closeout.contract.json",
       "tools/repo-hygiene/hygiene.config.json"
     ],
-    "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
+    "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
     "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
     "requiredAutoQuorumActions": [
       "integrated_branch_prune",
@@ -202,6 +206,8 @@
       "remediation_freeze_removal"
     ],
     "requiredTests": [
+      "test_start_work_block_auto_branches_from_clean_protected_target",
+      "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
       "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
       "test_dirty_split_stale_tuple_is_rejected_before_mutation",
       "test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes",
@@ -303,6 +309,7 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_target_push_failure"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -345,13 +352,16 @@
       {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
       {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
       {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
+      {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
       {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
       {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
       {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
       {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
       {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
+      {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
       {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
       {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
+      {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
       {"path": "closeout.config.json", "contains": "finalizeLoop"},
       {"path": "closeout.config.json", "contains": "hardClean"},
       {"path": "closeout.config.json", "contains": "runtimeServices"},

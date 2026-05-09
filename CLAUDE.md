@@ -68,6 +68,12 @@ For non-trivial work, start a brokered block with:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .
 ```
 
+If the start command begins on a clean protected target branch and
+`workBlockBootstrap.autoBranchFromProtectedTarget=true`, the broker creates an
+allowed `workBlockBootstrap.branchPrefix/<workBlockId>` branch, records
+`protectedBranchBootstrap` in the manifest, and continues there. Dirty protected
+targets block before branch creation and must list the dirty paths.
+
 Before declaring the work complete, always run:
 
 ```powershell
