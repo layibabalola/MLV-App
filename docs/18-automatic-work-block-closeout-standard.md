@@ -153,6 +153,11 @@ Final integration runs from a clean temporary target worktree. The actor must:
 - prune only after success
 - preserve recovery artifacts on failure
 
+Surface adapters that launch the bounded closeout child should emit a configurable
+stderr heartbeat during long quiet runs. The heartbeat is liveness evidence only:
+it must not alter stdout JSON, bypass timeouts or CPU-stall detection, or weaken
+the repo-closed postcondition.
+
 Target push non-fast-forward is a recoverable race: fetch, re-pin, rebuild the
 integration candidate, regenerate quorum if the tuple changed, and retry within
 the configured bounded limit. Never force-push the target automatically.
@@ -299,4 +304,3 @@ A work block is done only when:
 - agent remediation was dispatched for eligible conflicts
 - remaining dirty state is classified
 - final state is inspectable through durable logs/artifacts
-
