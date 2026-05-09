@@ -190,6 +190,12 @@ durable audit for timeout, output-cap breach, killed process tree, and known
 failure text. A closeout result is authoritative only after the child exits,
 descendants are gone or intentionally retained with audit, exit/status and
 failure text agree, and expected success or blocker artifacts exist.
+Finalize and `complete --finalize` have semantic success authority only when the
+child exits `0`, emits machine-readable `status: success`, and expected success
+artifacts exist. Validation stdout/stderr inside that success payload are
+evidence, so configured known-failure vocabulary is recorded as ignored text
+rather than promoted to a blocker; children without trusted success JSON still
+fail closed on known-failure text.
 Hard-clean final responses are blocked unless the repo-closed postcondition passes after finalize.
 The postcondition must prove from repo-owned artifacts that the selected work
 block, target ref, dirty state, stash state, branch state, worktree state, and

@@ -396,6 +396,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_bounded_runner_direct_finalize_and_completion_share_timeout_policy",
             "test_bounded_runner_caps_oversized_child_output",
             "test_bounded_runner_normalizes_known_failure_text_with_zero_exit",
+            "test_bounded_runner_trusts_finalize_semantic_success_over_validation_text",
             "test_bounded_runner_closeout_gate_failure_cannot_report_finalized",
             "test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun",
             "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
@@ -433,6 +434,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_applies"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def finalize_retry_decision"},
@@ -465,6 +467,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/closeout/review-quorum.ps1", "contains": "MarkSurfaceUnavailable"},
             {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
             {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
+            {"path": "AGENTS.md", "contains": "semantic success authority"},
             {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
             {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
@@ -472,6 +475,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
+            {"path": "CLAUDE.md", "contains": "semantic success authority"},
             {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
             {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
@@ -1500,6 +1504,15 @@ def closeout_command_requires_blocker_artifact(closeout_args: Sequence[str], chi
     return command == "detect" and child_json.get("eligible") is False
 
 
+def closeout_command_has_semantic_success_authority(closeout_args: Sequence[str], child_json: Optional[Dict[str, Any]]) -> bool:
+    if not child_json:
+        return False
+    if str(child_json.get("status") or "") != "success":
+        return False
+    command = str(closeout_args[0]) if closeout_args else ""
+    return command == "finalize" or (command == "complete" and "--finalize" in closeout_args)
+
+
 def normalize_closeout_child_status(
     repo_root: Path,
     config: Dict[str, Any],
@@ -1513,19 +1526,26 @@ def normalize_closeout_child_status(
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
     combined = ("%s\n%s" % (stdout, stderr)).lower()
-    matched = [pattern for pattern in closeout_failure_text_patterns(config) if pattern in combined] if normalize_failure_text else []
     child_json = parse_child_json(stdout)
     status_value = str((child_json or {}).get("status") or "")
     json_blocked = status_value in {"blocked", "failed", "error"}
     if child_json and child_json.get("eligible") is False:
         json_blocked = True
     original_returncode = int(result.get("returncode") or 0)
+    args = list(closeout_args or [])
+    raw_matched = [pattern for pattern in closeout_failure_text_patterns(config) if pattern in combined] if normalize_failure_text else []
+    semantic_success_authority = (
+        original_returncode == 0
+        and normalize_failure_text
+        and closeout_command_has_semantic_success_authority(args, child_json)
+    )
+    matched = [] if semantic_success_authority else raw_matched
+    ignored_matched = raw_matched if semantic_success_authority else []
     normalized_reasons: List[str] = []
     if matched:
         normalized_reasons.append("known_failure_text")
     if json_blocked:
         normalized_reasons.append("json_status_failure")
-    args = list(closeout_args or [])
     if expected_success_artifact is not None and original_returncode == 0 and not expected_success_artifact.exists():
         normalized_reasons.append("missing_success_artifact")
     if expected_blocker_artifact is not None and json_blocked and not expected_blocker_artifact.exists():
@@ -1536,14 +1556,15 @@ def normalize_closeout_child_status(
         if closeout_command_requires_blocker_artifact(args, child_json) and not closeout_blocker_artifact_exists(repo_root, config):
             normalized_reasons.append("missing_blocker_artifact")
     if result.get("timedOut"):
-        return {"status": "timeout", "returncode": 124, "matchedFailurePatterns": matched, "normalizedFailure": False, "normalizedReasons": []}
+        return {"status": "timeout", "returncode": 124, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
     if result.get("outputCapped"):
-        return {"status": "output_cap", "returncode": 125, "matchedFailurePatterns": matched, "normalizedFailure": False, "normalizedReasons": []}
+        return {"status": "output_cap", "returncode": 125, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
     if original_returncode == 0 and normalized_reasons:
         return {
             "status": "normalized_failure",
             "returncode": 20,
             "matchedFailurePatterns": matched,
+            "ignoredFailurePatterns": ignored_matched,
             "normalizedFailure": True,
             "normalizedReasons": sorted(set(normalized_reasons)),
             "childStatus": status_value or None,
@@ -1552,6 +1573,7 @@ def normalize_closeout_child_status(
         "status": "success" if original_returncode == 0 else "failed",
         "returncode": original_returncode,
         "matchedFailurePatterns": matched,
+        "ignoredFailurePatterns": ignored_matched,
         "normalizedFailure": False,
         "normalizedReasons": [],
         "childStatus": status_value or None,
