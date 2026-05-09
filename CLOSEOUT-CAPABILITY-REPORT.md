@@ -330,10 +330,10 @@ Clean-checkout validation command set V1, applied to every row unless a row expl
 - Drift checks: tools/repo_hygiene/test_brokered_closeout.py
 - Behavioral tests: tools/repo_hygiene/test_brokered_closeout.py
 - Audit/generated artifacts: .claude-state/closeout/audits/audits.jsonl
-- Recovery artifacts/commands: Keep any new closeout PowerShell adapter behind Invoke-CloseoutCli.
+- Recovery artifacts/commands: Keep any new closeout PowerShell adapter behind Invoke-CloseoutCli and its stderr heartbeat contract.
 - Clean-checkout validation: V1; last full result PASS at 2026-05-08T04:12:26-05:00; ledger row inventory PASS at 2026-05-08T04:25:56-05:00
 - Blockers preventing YES: none
-- Smallest next step: Keep any new closeout PowerShell adapter behind Invoke-CloseoutCli.
+- Smallest next step: Keep any new closeout PowerShell adapter behind Invoke-CloseoutCli and its stderr heartbeat contract.
 - Unavailable/scoped exception: none
 - Strengths: Committed proof basis: behavioral-test; validation anchored by tools/repo_hygiene/test_brokered_closeout.py, tools/repo_hygiene/brokered_closeout.py, tools/repo-hygiene/closeout.contract.json.
 - Weaknesses and repo-specific risks: Risk: keep generated audit artifacts supplemental and do not let them replace committed tests/contracts.
