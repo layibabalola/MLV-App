@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlencode
@@ -341,17 +342,31 @@ def start_wrapper_lifetime_watchdog(
     cleanup_pid,
     *,
     poll_seconds: float = 2.0,
+    identity_check_seconds: float = 5.0,
     exit_fn: Callable[[int], object] = os._exit,
     stop_event: Optional[threading.Event] = None,
+    now_fn: Callable[[], float] = time.monotonic,
 ) -> Optional[threading.Thread]:
     wrapper_pid = _wrapper_pid_from_env()
     if wrapper_pid is None or wrapper_pid == os.getpid():
         return None
     stopper = stop_event or threading.Event()
+    last_identity_check: Optional[float] = None
+
+    def _identity_check_due() -> bool:
+        nonlocal last_identity_check
+        interval = max(0.0, float(identity_check_seconds))
+        now = now_fn()
+        if last_identity_check is not None and now - last_identity_check < interval:
+            return False
+        last_identity_check = now
+        return True
 
     def _watch() -> None:
         while not stopper.is_set():
-            if not is_process_alive(wrapper_pid) or not _wrapper_process_matches_env(wrapper_pid):
+            if not is_process_alive(wrapper_pid) or (
+                _identity_check_due() and not _wrapper_process_matches_env(wrapper_pid)
+            ):
                 cleanup_pid()
                 exit_fn(0)
                 return

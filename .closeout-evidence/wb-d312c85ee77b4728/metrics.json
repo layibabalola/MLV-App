@@ -1,0 +1,17 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/high-cpu-bridge-wmi",
+  "committedDeltaPathCount": 15,
+  "createdAt": "2026-05-09T17:29:43+00:00",
+  "detectorHash": "a1b1c6973c436d5143e8a564d25d638e",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "8bd14e335591de246463f63b8a35c34dce6b787f",
+  "schemaVersion": "1.0",
+  "targetHead": "69c039a2080446e8005eefe6eac6b9e267a2f183",
+  "workBlockId": "wb-d312c85ee77b4728"
+}
