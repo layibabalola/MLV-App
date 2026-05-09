@@ -632,6 +632,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_start_work_block_blocks_dirty_protected_target_before_auto_branch", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_normalizes_known_failure_text_with_zero_exit", baseline["requiredTests"])
+        self.assertIn("test_bounded_runner_trusts_finalize_semantic_success_over_validation_text", baseline["requiredTests"])
         self.assertIn("test_hard_clean_final_response_blocks_non_exempt_dirty_files", baseline["requiredTests"])
         self.assertIn("test_hard_clean_final_response_blocks_remaining_stash", baseline["requiredTests"])
         self.assertIn("test_hard_clean_final_response_passes_after_clean_promotion", baseline["requiredTests"])
@@ -797,10 +798,42 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("known_failure_text", result["normalizedReasons"])
         self.assertIn("bounded_runner_normalized_failure", self.audit_types(repo))
 
+    def test_bounded_runner_trusts_finalize_semantic_success_over_validation_text(self) -> None:
+        repo = self.init_repo(config_updates={"locking": {"failureTextPatterns": ["stale_refs", "validation_failed"]}})
+        config = load_closeout_config(repo)
+        audit_path = repo / ".claude-state" / "closeout" / "audits" / "audits.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(json.dumps({"outcome": "success"}) + "\n", encoding="utf-8")
+        payload = {
+            "status": "success",
+            "validations": [
+                {
+                    "returncode": 0,
+                    "stdout": "test_stale_refs_block_finalize_before_mutation ... ok\nvalidation_failed vocabulary stayed in a passing test name",
+                }
+            ],
+        }
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", "import json; print(json.dumps(%r))" % payload],
+            timeout_ms=5000,
+            max_output_bytes=8192,
+            recovery_command="rerun finalize",
+            closeout_args=["finalize"],
+        )
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["returncode"], 0, result)
+        self.assertEqual(result["childStatus"], "success", result)
+        self.assertIn("validation_failed", result["ignoredFailurePatterns"])
+        self.assertEqual([], result["matchedFailurePatterns"])
+
     def test_bounded_runner_closeout_gate_failure_cannot_report_finalized(self) -> None:
         repo = self.init_repo()
         config = load_closeout_config(repo)
-        code = "import json; print(json.dumps({'status': 'success', 'message': 'closeout gate failure after finalize'}))"
+        code = "print('closeout gate failure after finalize')"
 
         result = run_bounded_closeout_process(
             repo,
@@ -1007,6 +1040,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_path_scoped_validation_skips_unmatched_commands", baseline["requiredTests"])
         self.assertIn("test_validation_commands_ignore_failure_words_in_successful_test_names", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
+        self.assertIn("test_bounded_runner_trusts_finalize_semantic_success_over_validation_text", baseline["requiredTests"])
         self.assertGreaterEqual(config["validation"]["timeoutMs"], 600000)
 
     def test_stale_tooling_without_bounded_runner_reports_tooling_drift(self) -> None:
