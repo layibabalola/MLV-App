@@ -49,6 +49,7 @@ from .brokered_closeout import (
     verify_prune_recovery_artifact,
     write_review_surface_unavailable_report,
 )
+from .core import HygieneError
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -155,6 +156,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "protectedBranches": ["master", "main"],
                 "featureBranchPatterns": ["codex/*", "feature/*"],
                 "fetchBeforeEvidence": True,
+            },
+            "workBlockBootstrap": {
+                "autoBranchFromProtectedTarget": True,
+                "branchPrefix": "codex/work-block",
             },
             "validation": {"commands": []},
             "paths": {
@@ -365,6 +370,36 @@ class BrokeredCloseoutTests(unittest.TestCase):
         git(repo, "commit", "-m", "feature work")
         return block
 
+    def test_start_work_block_auto_branches_from_clean_protected_target(self) -> None:
+        repo = self.init_repo()
+
+        result = start_work_block(repo, work_block_id="wb-protected-start", actor="local-test")
+
+        branch = "codex/work-block/wb-protected-start"
+        self.assertEqual(result["status"], "started", result)
+        self.assertEqual(git(repo, "branch", "--show-current").stdout.strip(), branch)
+        manifest = result["manifest"]
+        self.assertEqual(manifest["branch"], branch)
+        self.assertEqual(manifest["workBlockId"], "wb-protected-start")
+        self.assertEqual(manifest["dirtyBaseline"]["paths"], [])
+        self.assertEqual(manifest["protectedBranchBootstrap"]["fromProtectedBranch"], "master")
+        self.assertEqual(manifest["protectedBranchBootstrap"]["createdBranch"], branch)
+        self.assertEqual(manifest["protectedBranchBootstrap"]["reason"], "protected_branch_auto_branch")
+        self.assertEqual(manifest["startHead"], manifest["protectedBranchBootstrap"]["startHead"])
+        manifest_path = repo / ".claude-state" / "closeout" / "work-blocks" / "wb-protected-start" / "manifest.json"
+        self.assertTrue(manifest_path.exists())
+
+    def test_start_work_block_blocks_dirty_protected_target_before_auto_branch(self) -> None:
+        repo = self.init_repo()
+        (repo / "dirty.txt").write_text("dirty target state\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(HygieneError, "cannot auto-branch from protected branch master"):
+            start_work_block(repo, work_block_id="wb-dirty-protected-start", actor="local-test")
+
+        self.assertEqual(git(repo, "branch", "--show-current").stdout.strip(), "master")
+        manifest_path = repo / ".claude-state" / "closeout" / "work-blocks" / "wb-dirty-protected-start" / "manifest.json"
+        self.assertFalse(manifest_path.exists())
+
     def approve_current_tuple(self, repo: Path, work_block_id: str) -> dict:
         config = load_closeout_config(repo)
         detection = detect_work_block(repo, work_block_id=work_block_id)
@@ -480,6 +515,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         config = load_closeout_config(ROOT)
         self.assertEqual(config["git"]["targetBranch"], "master")
         self.assertEqual(config["git"]["remote"], "fork")
+        self.assertTrue(config["workBlockBootstrap"]["autoBranchFromProtectedTarget"])
+        self.assertEqual(config["workBlockBootstrap"]["branchPrefix"], "codex/work-block")
         self.assertFalse(config["stashPolicy"]["allowForeignDirtyStash"])
         self.assertIn("pinnedRefs", config["reviewQuorum"]["tupleFields"])
         self.assertIn("repo_sweep_prune_merged", config["reviewQuorum"]["highImpactActions"])
@@ -487,6 +524,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("resolve_conflicts_with_agent", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("checkpoint-owned-dirty", config["reviewQuorum"]["highImpactActions"])
         self.assertIn("dirtySplit", contract["requiredConfigKeys"])
+        self.assertIn("workBlockBootstrap", contract["requiredConfigKeys"])
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
         self.assertIn("evidenceRepair", contract["requiredConfigKeys"])
         self.assertIn("responseHookLifecycle", contract["requiredConfigKeys"])
@@ -580,6 +618,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         claude_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn("Hard-clean final responses are blocked unless the repo-closed postcondition passes", claude_text)
         baseline = config["toolingBaseline"]
+        self.assertIn("workBlockBootstrap", baseline["requiredConfigKeys"])
         self.assertIn("closeoutAddendumPersistence", baseline["requiredConfigKeys"])
         self.assertIn("finalizeLoop", baseline["requiredConfigKeys"])
         self.assertIn("agentRemediation", baseline["requiredConfigKeys"])
@@ -589,6 +628,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("locking", baseline["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", baseline["requiredConfigKeys"])
         self.assertIn("test_bounded_runner_kills_hung_finalize_child_with_descendants", baseline["requiredTests"])
+        self.assertIn("test_start_work_block_auto_branches_from_clean_protected_target", baseline["requiredTests"])
+        self.assertIn("test_start_work_block_blocks_dirty_protected_target_before_auto_branch", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_normalizes_known_failure_text_with_zero_exit", baseline["requiredTests"])
         self.assertIn("test_hard_clean_final_response_blocks_non_exempt_dirty_files", baseline["requiredTests"])
@@ -626,11 +667,15 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("AGENTS.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
         self.assertIn(("AGENTS.md", "agentRemediationQueue.queueRoots"), required_symbols)
         self.assertIn(("AGENTS.md", "protected-target-noop-closeout"), required_symbols)
+        self.assertIn(("AGENTS.md", "workBlockBootstrap.autoBranchFromProtectedTarget"), required_symbols)
         self.assertIn(("CLAUDE.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
         self.assertIn(("CLAUDE.md", "agentRemediationQueue.queueRoots"), required_symbols)
         self.assertIn(("CLAUDE.md", "protected-target-noop-closeout"), required_symbols)
+        self.assertIn(("CLAUDE.md", "workBlockBootstrap.autoBranchFromProtectedTarget"), required_symbols)
+        self.assertIn(("closeout.config.json", "workBlockBootstrap"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def run_bounded_closeout_process"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def bounded_closeout_cli_main"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def auto_branch_from_protected_target"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def verify_repo_closed_postcondition"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def stop_runtime_services_before_promotion"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def restart_runtime_services_after_clean_promotion"), required_symbols)

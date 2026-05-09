@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/protected-start-bootstrap-router",
+  "createdAt": "2026-05-09T18:17:43+00:00",
+  "detectorHash": "7ee824990aa1a40abb79e2d09ded2ad8",
+  "featureHead": "80df039c98766bbc3bcd62d8107253bfb6aab1a0",
+  "schemaVersion": "1.0",
+  "targetHead": "b3cbe094965a2a24381c4876ad18e7430403e351",
+  "workBlockId": "wb-bebca97e482c4e62",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}

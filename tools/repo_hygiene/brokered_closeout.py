@@ -94,6 +94,10 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "featureBranchPatterns": ["codex/*", "claude/*", "hygiene/*", "work/*", "feature/*"],
         "fetchBeforeEvidence": True,
     },
+    "workBlockBootstrap": {
+        "autoBranchFromProtectedTarget": True,
+        "branchPrefix": "codex/work-block",
+    },
     "validation": {
         "timeoutMs": 600000,
         "maxOutputBytes": 524288,
@@ -298,7 +302,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
+        "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
         "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
@@ -318,6 +322,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         ],
         "requiredTests": [
             "test_remediation_freeze_blocks_broker_bootstrap_lease_refresh_start_publish_finalize_and_hooks",
+            "test_start_work_block_auto_branches_from_clean_protected_target",
+            "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
             "test_remediation_freeze_environment_is_process_scoped_and_fresh_preservation_worktree_is_exempt",
             "test_remediation_freeze_audit_packets_are_generated_exempt_and_content_addressed",
             "test_already_integrated_dirty_baseline_overlap_enters_remediation_triage",
@@ -418,6 +424,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_target_push_failure"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -462,14 +469,17 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
             {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
+            {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
             {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
+            {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
+            {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
             {"path": "closeout.config.json", "contains": "remediationFreeze"},
             {"path": "closeout.config.json", "contains": "hardClean"},
@@ -731,6 +741,54 @@ def is_protected_branch(config: Dict[str, Any], branch: Optional[str]) -> bool:
 
 def branch_allowed_by_policy(config: Dict[str, Any], branch: str) -> bool:
     return path_matches_any(branch, config.get("git", {}).get("featureBranchPatterns", []))
+
+
+def safe_branch_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9._/-]+", "-", str(value).strip())
+    token = re.sub(r"/+", "/", token).strip("./-")
+    return token or ("wb-%s" % uuid.uuid4().hex[:8])
+
+
+def work_block_bootstrap_branch(config: Dict[str, Any], work_block_id: str) -> str:
+    bootstrap = config.get("workBlockBootstrap", {})
+    prefix = safe_branch_token(str(bootstrap.get("branchPrefix") or "codex/work-block")).strip("/")
+    block_token = safe_branch_token(work_block_id).strip("/")
+    if block_token.startswith(prefix + "/") or block_token == prefix:
+        branch = block_token
+    else:
+        branch = f"{prefix}/{block_token}"
+    if not branch_allowed_by_policy(config, branch):
+        raise HygieneError("work block bootstrap branch is not allowed by featureBranchPatterns: %s" % branch)
+    return branch
+
+
+def auto_branch_from_protected_target(repo_root: Path, config: Dict[str, Any], protected_branch: str, work_block_id: str) -> Dict[str, Any]:
+    bootstrap = config.get("workBlockBootstrap", {})
+    if not bool(bootstrap.get("autoBranchFromProtectedTarget", False)):
+        raise HygieneError("work block cannot start on protected branch %s" % protected_branch)
+    dirty = dirty_baseline_snapshot(repo_root)
+    if dirty["paths"]:
+        preview = ", ".join(dirty["paths"][:8])
+        if len(dirty["paths"]) > 8:
+            preview += ", ..."
+        raise HygieneError(
+            "work block cannot auto-branch from protected branch %s with dirty paths: %s"
+            % (protected_branch, preview)
+        )
+    branch = work_block_bootstrap_branch(config, work_block_id)
+    if rev_parse(repo_root, f"refs/heads/{branch}", required=False):
+        raise HygieneError("work block bootstrap branch already exists: %s" % branch)
+    start_head = rev_parse(repo_root, "HEAD")
+    result = run_git(repo_root, ["checkout", "-b", branch])
+    if result.returncode != 0:
+        raise HygieneError("failed to create work block bootstrap branch %s: %s" % (branch, result.stderr.strip()))
+    return {
+        "enabled": True,
+        "fromProtectedBranch": protected_branch,
+        "createdBranch": branch,
+        "startHead": start_head,
+        "reason": "protected_branch_auto_branch",
+    }
 
 
 def target_ref_for(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -1732,17 +1790,19 @@ def start_work_block(
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     assert_remediation_freeze_not_active(repo_root, config, action="start-work-block")
+    block_id = work_block_id or ("wb-%s" % uuid.uuid4().hex[:16])
     branch = current_branch(repo_root)
     if not branch:
         raise HygieneError("work block start requires a named branch")
-    if is_protected_branch(config, branch):
-        raise HygieneError("work block cannot start on protected branch %s" % branch)
-    block_id = work_block_id or ("wb-%s" % uuid.uuid4().hex[:16])
     claims = sorted({normalize_rel(path) for path in path_claims or [] if normalize_rel(str(path))})
     with broker_lease(repo_root, config, "broker", lease_seconds=30):
         block_dir = work_block_dir(repo_root, config, block_id)
         if (block_dir / "manifest.json").exists():
             raise HygieneError("work block already exists: %s" % block_id)
+        protected_bootstrap = None
+        if is_protected_branch(config, branch):
+            protected_bootstrap = auto_branch_from_protected_target(repo_root, config, branch, block_id)
+            branch = protected_bootstrap["createdBranch"]
         head = rev_parse(repo_root, "HEAD")
         dirty_baseline = dirty_baseline_snapshot(repo_root)
         manifest = {
@@ -1765,6 +1825,8 @@ def start_work_block(
             "startHead": head,
             "dirtyBaseline": dirty_baseline,
         }
+        if protected_bootstrap:
+            manifest["protectedBranchBootstrap"] = protected_bootstrap
         write_json(block_dir / "manifest.json", manifest)
         append_event(
             repo_root,
@@ -1776,6 +1838,7 @@ def start_work_block(
                 "head": head,
                 "pathClaims": claims,
                 "dirtyBaselinePaths": dirty_baseline["paths"],
+                "protectedBranchBootstrap": protected_bootstrap,
             },
         )
     return {"status": "started", "workBlockId": block_id, "manifest": manifest}
@@ -8103,7 +8166,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"]
+    required_config_keys = ["git", "workBlockBootstrap", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),
