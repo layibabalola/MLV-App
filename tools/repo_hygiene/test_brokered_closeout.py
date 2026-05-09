@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -19,6 +20,7 @@ from .brokered_closeout import (
     collect_agent_remediation_results,
     closeout_command_timeout_ms,
     closeout_max_process_output_bytes,
+    closeout_process_resource_policy,
     complete_work_block,
     detect_work_block,
     finalize_action_id,
@@ -40,6 +42,7 @@ from .brokered_closeout import (
     restart_runtime_services_after_clean_promotion,
     run_bounded_closeout_process,
     run_validations,
+    validation_full_suite_requested,
     remediation_freeze_status,
     remediation_packet_template,
     stable_hash,
@@ -627,6 +630,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("runtimeServices", baseline["requiredConfigKeys"])
         self.assertIn("locking", baseline["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", baseline["requiredConfigKeys"])
+        self.assertIn("processResources", baseline["requiredConfigKeys"])
         self.assertIn("test_bounded_runner_kills_hung_finalize_child_with_descendants", baseline["requiredTests"])
         self.assertIn("test_start_work_block_auto_branches_from_clean_protected_target", baseline["requiredTests"])
         self.assertIn("test_start_work_block_blocks_dirty_protected_target_before_auto_branch", baseline["requiredTests"])
@@ -664,6 +668,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_deletion_tuple_rejects_missing_or_stale_recovery_artifact", baseline["requiredTests"])
         self.assertIn("test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed", baseline["requiredTests"])
         required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def closeout_process_resource_policy"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def apply_windows_process_tree_affinity"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def process_tree_cpu_sample"), required_symbols)
         self.assertIn(("AGENTS.md", "Closeout actors must be bounded at the process boundary"), required_symbols)
         self.assertIn(("AGENTS.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
         self.assertIn(("AGENTS.md", "agentRemediationQueue.queueRoots"), required_symbols)
@@ -952,6 +959,110 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("bounded_runner_timeout", self.audit_types(repo))
         self.assertIn("bounded_runner_process_tree_killed", self.audit_types(repo))
 
+    def test_validation_resource_policy_sets_below_normal_priority_and_affinity(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "processResources": {
+                    "defaultPriority": "below_normal",
+                    "validationPriority": "below_normal",
+                    "validationAffinityCores": 2,
+                    "cpuWatchdog": {
+                        "enabled": True,
+                        "thresholdPercent": 80,
+                        "sustainedSeconds": 30,
+                        "sampleIntervalSeconds": 2,
+                        "requireNoOutputProgress": True,
+                    },
+                },
+                "validation": {
+                    "commands": [
+                        {
+                            "name": "resource-check",
+                            "argv": [sys.executable, "-c", "print('ok')"],
+                            "affinityCores": 1,
+                            "cpuWatchdog": {"enabled": False},
+                        }
+                    ]
+                },
+            }
+        )
+        config = load_closeout_config(repo)
+
+        policy = closeout_process_resource_policy(config, ["validation", "resource-check"], config["validation"]["commands"][0])
+        self.assertEqual(policy["priority"], "below_normal")
+        self.assertEqual(policy["affinityCores"], 1)
+        self.assertFalse(policy["cpuWatchdog"]["enabled"])
+
+        results = run_validations(repo, config, repo, changed_paths=["tools/repo_hygiene/brokered_closeout.py"])
+
+        self.assertEqual(results[0]["returncode"], 0, results)
+        self.assertEqual(results[0]["resourcePolicy"]["priority"], "below_normal")
+        self.assertEqual(results[0]["resourcePolicy"]["affinityCores"], 1)
+        self.assertIn("affinity", results[0]["resourceApply"])
+        self.assertIn("treeAffinity", results[0]["resourceApply"])
+
+    @unittest.skipUnless(os.name == "nt", "CPU watchdog currently samples Windows process trees")
+    def test_bounded_runner_cpu_watchdog_terminates_hot_silent_child(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "processResources": {
+                    "defaultPriority": "below_normal",
+                    "cpuWatchdog": {
+                        "enabled": True,
+                        "thresholdPercent": 1,
+                        "sustainedSeconds": 0.2,
+                        "sampleIntervalSeconds": 0.1,
+                        "requireNoOutputProgress": True,
+                    },
+                }
+            }
+        )
+        config = load_closeout_config(repo)
+
+        result = run_bounded_closeout_process(
+            repo,
+            config,
+            [sys.executable, "-c", "while True:\n    pass\n"],
+            timeout_ms=5000,
+            max_output_bytes=8192,
+            recovery_command="rerun cpu watchdog child",
+            closeout_args=["repair"],
+            work_block_id="wb-cpu-watchdog",
+        )
+
+        self.assertEqual(result["status"], "cpu_stall", result)
+        self.assertEqual(result["returncode"], 126, result)
+        self.assertTrue(result["cpuStalled"], result)
+        self.assertGreaterEqual(result["cpuWatchdog"]["lastCpuPercent"], 1, result)
+        self.assertIn("bounded_runner_cpu_stall", self.audit_types(repo))
+        self.assertIn("bounded_runner_process_tree_killed", self.audit_types(repo))
+
+    def test_full_validation_suite_is_skipped_without_explicit_request(self) -> None:
+        env_name = "MLV_TEST_CLOSEOUT_RUN_FULL"
+        repo = self.init_repo(
+            config_updates={
+                "validation": {
+                    "fullSuiteEnvVar": env_name,
+                    "runFullSuiteByDefault": False,
+                    "commands": [
+                        {"name": "smoke", "argv": [sys.executable, "-c", "print('smoke')"]},
+                        {"name": "full", "runMode": "full", "argv": [sys.executable, "-c", "raise SystemExit(7)"]},
+                    ],
+                }
+            }
+        )
+        config = load_closeout_config(repo)
+
+        with mock.patch.dict(os.environ, {env_name: ""}, clear=False):
+            results = run_validations(repo, config, repo, changed_paths=["tools/repo_hygiene/brokered_closeout.py"])
+
+        self.assertFalse(validation_full_suite_requested(config, env={}))
+        self.assertTrue(validation_full_suite_requested(config, env={env_name: "1"}))
+        self.assertEqual(len(results), 2, results)
+        self.assertEqual(results[0]["returncode"], 0, results)
+        self.assertTrue(results[1]["skipped"], results)
+        self.assertEqual(results[1]["skipReason"], "full_validation_not_requested")
+
     def test_path_scoped_validation_skips_unmatched_commands(self) -> None:
         repo = self.init_repo(
             config_updates={
@@ -1027,8 +1138,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         baseline = config["toolingBaseline"]
         self.assertIn("locking", contract["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", contract["requiredConfigKeys"])
+        self.assertIn("processResources", contract["requiredConfigKeys"])
         self.assertIn("locking", baseline["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", baseline["requiredConfigKeys"])
+        self.assertIn("processResources", baseline["requiredConfigKeys"])
         self.assertGreater(closeout_command_timeout_ms(config, ["detect"]), 0)
         self.assertGreater(closeout_command_timeout_ms(config, ["repair"]), 0)
         self.assertGreater(closeout_command_timeout_ms(config, ["finalize"]), 0)
@@ -1036,12 +1149,22 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(config["validation"]["timeoutMs"], 0)
         self.assertGreater(config["validation"]["maxOutputBytes"], 0)
         self.assertIn("pathPatterns", config["validation"]["commands"][0])
+        self.assertEqual(config["processResources"]["defaultPriority"], "below_normal")
+        self.assertEqual(config["processResources"]["validationPriority"], "below_normal")
+        self.assertEqual(config["processResources"]["validationAffinityCores"], 2)
+        self.assertTrue(config["processResources"]["cpuWatchdog"]["enabled"])
         self.assertIn("test_validation_commands_are_bounded_and_kill_descendants", baseline["requiredTests"])
+        self.assertIn("test_validation_resource_policy_sets_below_normal_priority_and_affinity", baseline["requiredTests"])
+        self.assertIn("test_bounded_runner_cpu_watchdog_terminates_hot_silent_child", baseline["requiredTests"])
+        self.assertIn("test_full_validation_suite_is_skipped_without_explicit_request", baseline["requiredTests"])
         self.assertIn("test_path_scoped_validation_skips_unmatched_commands", baseline["requiredTests"])
         self.assertIn("test_validation_commands_ignore_failure_words_in_successful_test_names", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_trusts_finalize_semantic_success_over_validation_text", baseline["requiredTests"])
-        self.assertGreaterEqual(config["validation"]["timeoutMs"], 600000)
+        self.assertLessEqual(config["validation"]["timeoutMs"], 120000)
+        full_commands = [command for command in config["validation"]["commands"] if command.get("runMode") == "full"]
+        self.assertTrue(full_commands)
+        self.assertGreaterEqual(full_commands[0]["timeoutMs"], 600000)
 
     def test_stale_tooling_without_bounded_runner_reports_tooling_drift(self) -> None:
         repo = self.init_repo(
