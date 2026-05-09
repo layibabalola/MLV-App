@@ -395,6 +395,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
             "test_validation_commands_are_bounded_and_kill_descendants",
             "test_path_scoped_validation_skips_unmatched_commands",
+            "test_validation_commands_ignore_failure_words_in_successful_test_names",
             "test_timeout_and_output_cap_settings_are_contract_required",
             "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
@@ -1449,11 +1450,12 @@ def normalize_closeout_child_status(
     closeout_args: Optional[Sequence[str]] = None,
     expected_success_artifact: Optional[Path] = None,
     expected_blocker_artifact: Optional[Path] = None,
+    normalize_failure_text: bool = True,
 ) -> Dict[str, Any]:
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
     combined = ("%s\n%s" % (stdout, stderr)).lower()
-    matched = [pattern for pattern in closeout_failure_text_patterns(config) if pattern in combined]
+    matched = [pattern for pattern in closeout_failure_text_patterns(config) if pattern in combined] if normalize_failure_text else []
     child_json = parse_child_json(stdout)
     status_value = str((child_json or {}).get("status") or "")
     json_blocked = status_value in {"blocked", "failed", "error"}
@@ -1564,6 +1566,7 @@ def run_bounded_closeout_process(
     work_block_id: Optional[str] = None,
     expected_success_artifact: Optional[Path] = None,
     expected_blocker_artifact: Optional[Path] = None,
+    normalize_failure_text: bool = True,
     env: Optional[Dict[str, str]] = None,
     cwd: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -1655,6 +1658,7 @@ def run_bounded_closeout_process(
         closeout_args=closeout_args,
         expected_success_artifact=expected_success_artifact,
         expected_blocker_artifact=expected_blocker_artifact,
+        normalize_failure_text=normalize_failure_text,
     )
     base_result.update(normalized)
     audit_payload = {k: v for k, v in base_result.items() if k not in {"stdout", "stderr"}}
@@ -3288,6 +3292,7 @@ def run_validations(
             recovery_command="rerun validation command %s" % name,
             closeout_args=["validation", name],
             work_block_id=work_block_id,
+            normalize_failure_text=False,
             cwd=integration_path,
         )
         results.append(

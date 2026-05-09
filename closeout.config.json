@@ -272,6 +272,7 @@
       "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
       "test_validation_commands_are_bounded_and_kill_descendants",
       "test_path_scoped_validation_skips_unmatched_commands",
+      "test_validation_commands_ignore_failure_words_in_successful_test_names",
       "test_timeout_and_output_cap_settings_are_contract_required",
       "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
       "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
