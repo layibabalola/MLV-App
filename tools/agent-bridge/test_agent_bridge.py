@@ -5668,6 +5668,49 @@ for index in range(count):
         self.assertEqual(cleanup_calls, [])
         self.assertEqual(exit_codes, [])
 
+    def test_mcp_server_watchdog_throttles_wrapper_identity_checks(self) -> None:
+        cleanup_calls: List[bool] = []
+        exit_codes: List[int] = []
+        entry_calls: List[int] = []
+        stop = threading.Event()
+
+        def cleanup() -> None:
+            cleanup_calls.append(True)
+
+        def fake_exit(code: int) -> None:
+            exit_codes.append(code)
+            stop.set()
+
+        def process_entry(pid: int) -> Dict[str, Any]:
+            entry_calls.append(int(pid))
+            return {"creation_date": "same-wrapper-start"}
+
+        with patch.dict(
+            os.environ,
+            {
+                "AGENT_BRIDGE_WRAPPER_PID": "424242",
+                "AGENT_BRIDGE_WRAPPER_CREATION_DATE": "same-wrapper-start",
+            },
+        ), patch("server.is_process_alive", return_value=True), patch(
+            "server._wrapper_process_entry",
+            side_effect=process_entry,
+        ):
+            thread = start_wrapper_lifetime_watchdog(
+                cleanup,
+                poll_seconds=0.01,
+                identity_check_seconds=5.0,
+                exit_fn=fake_exit,
+                stop_event=stop,
+            )
+            self.assertIsNotNone(thread)
+            time.sleep(0.05)
+            stop.set()
+            thread.join(timeout=1.0)
+
+        self.assertEqual(entry_calls, [424242])
+        self.assertEqual(cleanup_calls, [])
+        self.assertEqual(exit_codes, [])
+
     def test_bridge_process_status_flags_pid_reuse_server_marker(self) -> None:
         self.state_dir.mkdir(parents=True)
         bridge_root = self.state_dir.parent
