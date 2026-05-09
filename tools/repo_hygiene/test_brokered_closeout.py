@@ -927,6 +927,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_validation_commands_are_bounded_and_kill_descendants", baseline["requiredTests"])
         self.assertIn("test_path_scoped_validation_skips_unmatched_commands", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
+        self.assertGreaterEqual(config["validation"]["timeoutMs"], 600000)
 
     def test_stale_tooling_without_bounded_runner_reports_tooling_drift(self) -> None:
         repo = self.init_repo(

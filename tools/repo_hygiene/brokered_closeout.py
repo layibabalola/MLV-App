@@ -95,7 +95,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "fetchBeforeEvidence": True,
     },
     "validation": {
-        "timeoutMs": 90000,
+        "timeoutMs": 600000,
         "maxOutputBytes": 524288,
         "commands": [
             {

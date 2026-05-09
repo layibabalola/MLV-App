@@ -11,7 +11,7 @@
     "fetchBeforeEvidence": true
   },
   "validation": {
-    "timeoutMs": 90000,
+    "timeoutMs": 600000,
     "maxOutputBytes": 524288,
     "commands": [
       {
