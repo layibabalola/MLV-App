@@ -184,10 +184,14 @@ number, and terminal reason when retry stops. The same blocker/evidence tuple
 must not be retried more than once unless policy explicitly permits renewal.
 Closeout actors must be bounded at the process boundary. Detector, repair,
 review-unblock, finalize, cleanup, and repo-sweep subprocesses must run through
-the config-driven bounded runner with wall-clock timeout, process-tree
-termination, stdout/stderr output caps, fail-closed status normalization, and
-durable audit for timeout, output-cap breach, killed process tree, and known
-failure text. A closeout result is authoritative only after the child exits,
+the config-driven bounded runner with BelowNormal child priority, optional
+validation/test affinity caps, wall-clock timeout, process-tree termination,
+stdout/stderr output caps, CPU-stall watchdog termination for hot children with
+no output/progress, fail-closed status normalization, and durable audit for
+timeout, output-cap breach, CPU stall, killed process tree, and known failure
+text. Interactive closeout should run a short smoke validation by default; full
+closeout validation suites must be opt-in through the configured full-suite
+switch. A closeout result is authoritative only after the child exits,
 descendants are gone or intentionally retained with audit, exit/status and
 failure text agree, and expected success or blocker artifacts exist.
 Finalize and `complete --finalize` have semantic success authority only when the

@@ -15,12 +15,33 @@
     "branchPrefix": "codex/work-block"
   },
   "validation": {
-    "timeoutMs": 600000,
+    "timeoutMs": 120000,
     "maxOutputBytes": 524288,
+    "fullSuiteEnvVar": "CLOSEOUT_RUN_FULL_VALIDATION",
+    "runFullSuiteByDefault": false,
     "commands": [
       {
-        "name": "brokered-closeout-tests",
+        "name": "brokered-closeout-smoke",
+        "argv": [
+          "py",
+          "-3",
+          "-m",
+          "unittest",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_timeout_and_output_cap_settings_are_contract_required",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_resource_policy_sets_below_normal_priority_and_affinity",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_bounded_runner_cpu_watchdog_terminates_hot_silent_child",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_full_validation_suite_is_skipped_without_explicit_request",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_path_scoped_validation_skips_unmatched_commands",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_commands_ignore_failure_words_in_successful_test_names",
+          "-v"
+        ],
+        "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"]
+      },
+      {
+        "name": "brokered-closeout-full",
         "argv": ["py", "-3", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"],
+        "runMode": "full",
+        "timeoutMs": 600000,
         "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"]
       },
       {
@@ -40,6 +61,18 @@
         "argv": ["py", "-3", "tools/repo-hygiene/hygiene.py", "--repo-root", ".", "verify-policy"]
       }
     ]
+  },
+  "processResources": {
+    "defaultPriority": "below_normal",
+    "validationPriority": "below_normal",
+    "validationAffinityCores": 2,
+    "cpuWatchdog": {
+      "enabled": true,
+      "thresholdPercent": 80,
+      "sustainedSeconds": 30,
+      "sampleIntervalSeconds": 2,
+      "requireNoOutputProgress": true
+    }
   },
   "paths": {
     "generated": [
@@ -187,7 +220,7 @@
       "tools/repo-hygiene/closeout.contract.json",
       "tools/repo-hygiene/hygiene.config.json"
     ],
-    "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
+    "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
     "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
     "requiredAutoQuorumActions": [
       "integrated_branch_prune",
@@ -278,6 +311,9 @@
       "test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun",
       "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
       "test_validation_commands_are_bounded_and_kill_descendants",
+      "test_validation_resource_policy_sets_below_normal_priority_and_affinity",
+      "test_bounded_runner_cpu_watchdog_terminates_hot_silent_child",
+      "test_full_validation_suite_is_skipped_without_explicit_request",
       "test_path_scoped_validation_skips_unmatched_commands",
       "test_validation_commands_ignore_failure_words_in_successful_test_names",
       "test_timeout_and_output_cap_settings_are_contract_required",
@@ -315,7 +351,11 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def run_bounded_closeout_process"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_process_resource_policy"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_windows_process_tree_affinity"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def process_tree_cpu_sample"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_timeout_ms"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_full_suite_requested"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_applies"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
