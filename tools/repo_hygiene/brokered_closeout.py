@@ -95,10 +95,25 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "fetchBeforeEvidence": True,
     },
     "validation": {
+        "timeoutMs": 600000,
+        "maxOutputBytes": 524288,
         "commands": [
             {
                 "name": "brokered-closeout-tests",
                 "argv": ["py", "-3", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"],
+                "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
+            },
+            {
+                "name": "agent-bridge-wmi-regression",
+                "argv": [
+                    "py",
+                    "-3",
+                    "-m",
+                    "unittest",
+                    "tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks",
+                    "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation",
+                ],
+                "pathPatterns": ["tools/agent-bridge/**", "AGENTS.md", "CLAUDE.md", "bridge_trigger_heuristics.md"],
             },
             {
                 "name": "repo-hygiene-policy",
@@ -109,6 +124,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     "paths": {
         "generated": [
             ".claude-state/**",
+            ".codex-state/**",
             "**/__pycache__/**",
             "**/*.pyc",
             "**/build*/**",
@@ -163,6 +179,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         },
         "exemptStatusPatterns": [
             ".claude-state/**",
+            ".codex-state/**",
             "**/__pycache__/**",
             "**/*.pyc",
             ".claude-state/closeout-log/**",
@@ -376,6 +393,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_bounded_runner_closeout_gate_failure_cannot_report_finalized",
             "test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun",
             "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
+            "test_validation_commands_are_bounded_and_kill_descendants",
+            "test_path_scoped_validation_skips_unmatched_commands",
+            "test_validation_commands_ignore_failure_words_in_successful_test_names",
             "test_timeout_and_output_cap_settings_are_contract_required",
             "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
@@ -402,6 +422,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def run_bounded_closeout_process"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_timeout_ms"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_applies"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
@@ -1428,11 +1450,12 @@ def normalize_closeout_child_status(
     closeout_args: Optional[Sequence[str]] = None,
     expected_success_artifact: Optional[Path] = None,
     expected_blocker_artifact: Optional[Path] = None,
+    normalize_failure_text: bool = True,
 ) -> Dict[str, Any]:
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
     combined = ("%s\n%s" % (stdout, stderr)).lower()
-    matched = [pattern for pattern in closeout_failure_text_patterns(config) if pattern in combined]
+    matched = [pattern for pattern in closeout_failure_text_patterns(config) if pattern in combined] if normalize_failure_text else []
     child_json = parse_child_json(stdout)
     status_value = str((child_json or {}).get("status") or "")
     json_blocked = status_value in {"blocked", "failed", "error"}
@@ -1543,6 +1566,7 @@ def run_bounded_closeout_process(
     work_block_id: Optional[str] = None,
     expected_success_artifact: Optional[Path] = None,
     expected_blocker_artifact: Optional[Path] = None,
+    normalize_failure_text: bool = True,
     env: Optional[Dict[str, str]] = None,
     cwd: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -1634,6 +1658,7 @@ def run_bounded_closeout_process(
         closeout_args=closeout_args,
         expected_success_artifact=expected_success_artifact,
         expected_blocker_artifact=expected_blocker_artifact,
+        normalize_failure_text=normalize_failure_text,
     )
     base_result.update(normalized)
     audit_payload = {k: v for k, v in base_result.items() if k not in {"stdout", "stderr"}}
@@ -2227,7 +2252,7 @@ def repair_missing_evidence(repo_root_arg: Path, config: Dict[str, Any], detecti
         return result
     validations: List[Dict[str, Any]] = []
     if bool(config.get("evidenceRepair", {}).get("validateAfterCommit", False)):
-        validations = run_validations(repo_root, config, repo_root)
+        validations = run_validations(repo_root, config, repo_root, changed_paths=paths, work_block_id=work_block_id)
         failed = next((item for item in validations if item["returncode"] != 0), None)
         if failed:
             result = {"status": "blocked", "reason": "evidence_validation_failed", "paths": paths, "validations": validations}
@@ -3204,7 +3229,36 @@ def check_review_quorum(
     }
 
 
-def run_validations(repo_root: Path, config: Dict[str, Any], integration_path: Path) -> List[Dict[str, Any]]:
+def validation_command_timeout_ms(config: Dict[str, Any], command: Dict[str, Any]) -> int:
+    validation = config.get("validation", {})
+    return positive_int(command.get("timeoutMs"), positive_int(validation.get("timeoutMs"), closeout_command_timeout_ms(config, ["finalize"])))
+
+
+def validation_command_max_output_bytes(config: Dict[str, Any], command: Dict[str, Any]) -> int:
+    validation = config.get("validation", {})
+    return positive_int(command.get("maxOutputBytes"), positive_int(validation.get("maxOutputBytes"), closeout_max_process_output_bytes(config)))
+
+
+def validation_command_applies(command: Dict[str, Any], changed_paths: Optional[Sequence[str]]) -> bool:
+    patterns = command.get("pathPatterns")
+    if not isinstance(patterns, list) or not patterns:
+        return True
+    if changed_paths is None:
+        return True
+    normalized_paths = [normalize_rel(str(path)) for path in changed_paths if normalize_rel(str(path))]
+    if not normalized_paths:
+        return False
+    return any(path_matches_any(path, patterns) for path in normalized_paths)
+
+
+def run_validations(
+    repo_root: Path,
+    config: Dict[str, Any],
+    integration_path: Path,
+    *,
+    changed_paths: Optional[Sequence[str]] = None,
+    work_block_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     for command in config.get("validation", {}).get("commands", []):
         argv = command.get("argv")
@@ -3213,17 +3267,51 @@ def run_validations(repo_root: Path, config: Dict[str, Any], integration_path: P
         argv = list(argv)
         if argv[0] == "python":
             argv[0] = sys.executable
-        completed = run_command(argv, cwd=integration_path)
+        name = str(command.get("name") or argv[0])
+        if not validation_command_applies(command, changed_paths):
+            results.append(
+                {
+                    "name": name,
+                    "argv": argv,
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "skipped": True,
+                    "skipReason": "path_patterns_not_matched",
+                    "pathPatterns": list(command.get("pathPatterns") or []),
+                    "changedPaths": sorted({normalize_rel(str(path)) for path in changed_paths or [] if normalize_rel(str(path))}),
+                }
+            )
+            continue
+        completed = run_bounded_closeout_process(
+            repo_root,
+            config,
+            argv,
+            timeout_ms=validation_command_timeout_ms(config, command),
+            max_output_bytes=validation_command_max_output_bytes(config, command),
+            recovery_command="rerun validation command %s" % name,
+            closeout_args=["validation", name],
+            work_block_id=work_block_id,
+            normalize_failure_text=False,
+            cwd=integration_path,
+        )
         results.append(
             {
-                "name": command.get("name") or argv[0],
+                "name": name,
                 "argv": argv,
-                "returncode": completed.returncode,
-                "stdout": completed.stdout[-4000:],
-                "stderr": completed.stderr[-4000:],
+                "returncode": int(completed["returncode"]),
+                "stdout": str(completed.get("stdout") or "")[-4000:],
+                "stderr": str(completed.get("stderr") or "")[-4000:],
+                "status": completed.get("status"),
+                "timedOut": bool(completed.get("timedOut")),
+                "outputCapped": bool(completed.get("outputCapped")),
+                "killedProcessTree": bool(completed.get("killedProcessTree")),
+                "killedDescendants": completed.get("killedDescendants", []),
+                "timeoutMs": completed.get("timeoutMs"),
+                "maxOutputBytes": completed.get("maxOutputBytes"),
             }
         )
-        if completed.returncode != 0:
+        if int(completed["returncode"]) != 0:
             break
     return results
 
@@ -4081,7 +4169,13 @@ def _finalize_work_block_once(
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "diff_check_failed"})
             return {"status": "blocked", "reason": "diff_check_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
-        validations = run_validations(repo_root, config, integration_path)
+        validations = run_validations(
+            repo_root,
+            config,
+            integration_path,
+            changed_paths=detection.get("committedDeltaPaths"),
+            work_block_id=block_id,
+        )
         failed_validation = next((item for item in validations if item["returncode"] != 0), None)
         if failed_validation:
             payload = {"validations": validations}

@@ -1,0 +1,24 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/high-cpu-bridge-wmi",
+  "createdAt": "2026-05-09T17:16:39+00:00",
+  "detectorHash": "ee7d217a08b1f8983b240a850dcc943f",
+  "eligible": true,
+  "featureHead": "035d9b1459fff2608086d84377c5b277538b89e4",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/high-cpu-bridge-wmi",
+      "head": "035d9b1459fff2608086d84377c5b277538b89e4"
+    },
+    "target": {
+      "branch": "master",
+      "head": "69c039a2080446e8005eefe6eac6b9e267a2f183",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "69c039a2080446e8005eefe6eac6b9e267a2f183",
+  "workBlockId": "wb-7e4ec0d765dc4aa7"
+}

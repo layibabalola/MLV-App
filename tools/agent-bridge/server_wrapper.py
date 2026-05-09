@@ -27,6 +27,7 @@ DEFAULT_RESTART_WINDOW_SECONDS = 30.0
 DEFAULT_MAX_RESTARTS_PER_WINDOW = 4
 DEFAULT_CHUNK_SIZE = 65536
 DEFAULT_LOOP_SLEEP_SECONDS = 0.05
+DEFAULT_HOST_EXIT_CHECK_INTERVAL_SECONDS = 2.0
 DEFAULT_GRACEFUL_RESTART_TIMEOUT_SECONDS = 5.0
 DEFAULT_STALE_MARKER_REAP_INTERVAL_SECONDS = 10 * 60.0
 DEFAULT_STALE_MARKER_MAX_AGE_HOURS = 0
@@ -77,6 +78,7 @@ class SupervisorConfig:
     max_restarts_per_window: int = DEFAULT_MAX_RESTARTS_PER_WINDOW
     chunk_size: int = DEFAULT_CHUNK_SIZE
     loop_sleep_seconds: float = DEFAULT_LOOP_SLEEP_SECONDS
+    host_exit_check_interval_seconds: float = DEFAULT_HOST_EXIT_CHECK_INTERVAL_SECONDS
     graceful_restart_timeout_seconds: float = DEFAULT_GRACEFUL_RESTART_TIMEOUT_SECONDS
     stale_marker_reap_interval_seconds: float = DEFAULT_STALE_MARKER_REAP_INTERVAL_SECONDS
     stale_marker_max_age_hours: int = DEFAULT_STALE_MARKER_MAX_AGE_HOURS
@@ -221,6 +223,51 @@ def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
             "creation_date": "",
         }
     return result
+
+
+def _process_entry_from_system(pid: int) -> Optional[Dict[str, Any]]:
+    """Return one process table entry without enumerating every process on Windows."""
+    pid = int(pid)
+    if pid <= 0:
+        return None
+    if sys.platform == "win32":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
+                "ConvertTo-Json -Compress"
+            )
+            % pid,
+        ]
+        kwargs: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+            "text": True,
+            "timeout": 5,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            proc = subprocess.run(command, **kwargs)
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return None
+            row = json.loads(proc.stdout)
+            if not isinstance(row, dict):
+                return None
+            return {
+                "pid": int(row.get("ProcessId") or 0),
+                "parent_pid": int(row.get("ParentProcessId") or 0),
+                "name": row.get("Name") or "",
+                "command_line": row.get("CommandLine") or "",
+                "executable_path": row.get("ExecutablePath") or "",
+                "creation_date": str(row.get("CreationDate") or ""),
+            }
+        except Exception:
+            return None
+    return _process_table_from_system().get(pid)
 
 
 def _is_bridge_launcher_process(process: Dict[str, Any]) -> bool:
@@ -990,6 +1037,7 @@ class ServerSupervisor:
         self._last_initialized_message: Optional[dict] = None
         self._last_stale_marker_reap = 0.0
         self._host_exit_reported = False
+        self._last_host_identity_check: Optional[float] = None
         # In-flight JSON-RPC request IDs — cleared when the corresponding response
         # is observed on stdout. Restart is deferred until this set drains (or the
         # graceful-restart timeout expires) to avoid cutting off active requests.
@@ -1179,7 +1227,15 @@ class ServerSupervisor:
         reason = "host_pid_not_running"
         if is_process_alive(host_pid):
             if expected_creation_date:
-                current = _process_table_from_system().get(host_pid)
+                now = self.now_fn()
+                interval = max(0.0, float(self.config.host_exit_check_interval_seconds))
+                if (
+                    self._last_host_identity_check is not None
+                    and now - self._last_host_identity_check < interval
+                ):
+                    return False
+                self._last_host_identity_check = now
+                current = _process_entry_from_system(host_pid)
                 if current and str(current.get("creation_date") or "") != expected_creation_date:
                     reason = "host_pid_reused"
                 else:
