@@ -1,0 +1,12 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/work-block/wb-92fccf91f81940d3",
+  "createdAt": "2026-05-09T21:31:24+00:00",
+  "detectorHash": "9024f46f405a4d8e8b00d897a041fcdf",
+  "featureHead": "ee3969b2131ba89a80223b207cc42c40e185aea3",
+  "schemaVersion": "1.0",
+  "targetHead": "ef3aead1d4c354443c620744dcd2ee956dda0a34",
+  "workBlockId": "wb-92fccf91f81940d3",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
