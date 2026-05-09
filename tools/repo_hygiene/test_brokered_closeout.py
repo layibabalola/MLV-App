@@ -643,6 +643,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_runtime_service_stops_before_validation_and_restarts_after_repo_closed", baseline["requiredTests"])
         self.assertIn("test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure", baseline["requiredTests"])
         self.assertIn("test_closeout_tooling_stale_reports_missing_hard_clean_gate", baseline["requiredTests"])
+        self.assertIn("test_closeout_adapter_heartbeat_is_contract_required", baseline["requiredTests"])
         self.assertIn("test_agent_remediation_queue_policy_fields_are_contract_required", baseline["requiredTests"])
         self.assertIn("test_codex_agent_queue_consumer_plans_one_background_agent_per_eligible_shard", baseline["requiredTests"])
         self.assertIn("test_agent_queue_dirty_hash_detects_same_status_byte_change", baseline["requiredTests"])
@@ -696,6 +697,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "agent-queue"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "agent-results"), required_symbols)
         self.assertIn(("tools/closeout/Invoke-CloseoutCli.ps1", "bounded_closeout_cli_main"), required_symbols)
+        self.assertIn(("tools/closeout/Invoke-CloseoutCli.ps1", "closeout-heartbeat"), required_symbols)
+        self.assertIn(("tools/closeout/Invoke-CloseoutCli.ps1", "CLOSEOUT_ADAPTER_HEARTBEAT_SECONDS"), required_symbols)
         self.assertIn(("tools/closeout/work-block-complete.ps1", "RequireRepoClosed"), required_symbols)
         self.assertIn(("tools/closeout/agent-remediation-queue.ps1", "agent-queue"), required_symbols)
         self.assertIn(("tools/closeout/agent-remediation-queue.ps1", "CollectResults"), required_symbols)
@@ -1037,6 +1040,22 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("bounded_runner_cpu_stall", self.audit_types(repo))
         self.assertIn("bounded_runner_process_tree_killed", self.audit_types(repo))
 
+    def test_closeout_adapter_heartbeat_is_contract_required(self) -> None:
+        config = load_closeout_config(ROOT)
+        baseline = config["toolingBaseline"]
+        script = (ROOT / "tools" / "closeout" / "Invoke-CloseoutCli.ps1").read_text(encoding="utf-8")
+        required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
+
+        self.assertGreater(config["locking"]["adapterHeartbeatSeconds"], 0)
+        self.assertLessEqual(config["locking"]["adapterHeartbeatSeconds"], 30)
+        self.assertIn("test_closeout_adapter_heartbeat_is_contract_required", baseline["requiredTests"])
+        self.assertIn(("tools/closeout/Invoke-CloseoutCli.ps1", "closeout-heartbeat"), required_symbols)
+        self.assertIn(("tools/closeout/Invoke-CloseoutCli.ps1", "CLOSEOUT_ADAPTER_HEARTBEAT_SECONDS"), required_symbols)
+        self.assertIn("RedirectStandardOutput", script)
+        self.assertIn("RedirectStandardError", script)
+        self.assertIn("GetTempPath", script)
+        self.assertIn("WaitForExit", script)
+
     def test_full_validation_suite_is_skipped_without_explicit_request(self) -> None:
         env_name = "MLV_TEST_CLOSEOUT_RUN_FULL"
         repo = self.init_repo(
@@ -1153,9 +1172,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(config["processResources"]["validationPriority"], "below_normal")
         self.assertEqual(config["processResources"]["validationAffinityCores"], 2)
         self.assertTrue(config["processResources"]["cpuWatchdog"]["enabled"])
+        self.assertGreater(config["locking"]["adapterHeartbeatSeconds"], 0)
+        self.assertLessEqual(config["locking"]["adapterHeartbeatSeconds"], 30)
         self.assertIn("test_validation_commands_are_bounded_and_kill_descendants", baseline["requiredTests"])
         self.assertIn("test_validation_resource_policy_sets_below_normal_priority_and_affinity", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_cpu_watchdog_terminates_hot_silent_child", baseline["requiredTests"])
+        self.assertIn("test_closeout_adapter_heartbeat_is_contract_required", baseline["requiredTests"])
         self.assertIn("test_full_validation_suite_is_skipped_without_explicit_request", baseline["requiredTests"])
         self.assertIn("test_path_scoped_validation_skips_unmatched_commands", baseline["requiredTests"])
         self.assertIn("test_validation_commands_ignore_failure_words_in_successful_test_names", baseline["requiredTests"])
