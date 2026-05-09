@@ -39,6 +39,7 @@ from .brokered_closeout import (
     repo_sweep_tuple,
     restart_runtime_services_after_clean_promotion,
     run_bounded_closeout_process,
+    run_validations,
     remediation_freeze_status,
     remediation_packet_template,
     stable_hash,
@@ -157,7 +158,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             },
             "validation": {"commands": []},
             "paths": {
-                "generated": [".claude-state/**", "**/__pycache__/**", "**/*.pyc"],
+                "generated": [".claude-state/**", ".codex-state/**", "**/__pycache__/**", "**/*.pyc"],
                 "sensitive": [".claude/**", ".claude", ".git/**", ".git"],
                 "state": ".claude-state/closeout",
             },
@@ -183,7 +184,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "allowRetainedForeignDirtyAtCompletion": True,
                 "requireNoStash": True,
                 "protectedTargetNoopCloseout": {"enabled": True},
-                "exemptStatusPatterns": [".claude-state/**", "**/__pycache__/**", "**/*.pyc"],
+                "exemptStatusPatterns": [".claude-state/**", ".codex-state/**", "**/__pycache__/**", "**/*.pyc"],
             },
             "runtimeServices": {
                 "mlvapp-preview": {
@@ -502,6 +503,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("owned_dirty_checkpoint", config["autoQuorum"]["autonomousActionClasses"])
         self.assertTrue(config["dirty"]["autoClaimCleanAtStart"])
+        self.assertIn(".codex-state/**", config["paths"]["generated"])
         self.assertTrue(config["repoSweep"]["retainedBlockerAutoRemediation"]["enabled"])
         self.assertEqual(config["repoSweep"]["recoveryBranchPrefix"], "closeout/recovery/detached")
         self.assertTrue(config["repoSweep"]["allowForeignDirtyIntegratedBranchPrune"])
@@ -532,6 +534,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["hardClean"]["requireNoStash"])
         self.assertTrue(config["hardClean"]["protectedTargetNoopCloseout"]["enabled"])
         self.assertIn(".claude-state/**", config["hardClean"]["exemptStatusPatterns"])
+        self.assertIn(".codex-state/**", config["hardClean"]["exemptStatusPatterns"])
         self.assertFalse(config["runtimeServices"]["mlvapp-preview"]["enabled"])
         self.assertGreater(config["locking"]["detectTimeoutMs"], 0)
         self.assertGreater(config["locking"]["finalizeTimeoutMs"], 0)
@@ -821,6 +824,91 @@ class BrokeredCloseoutTests(unittest.TestCase):
             time.sleep(0.1)
         self.assertFalse(process_is_running(int(result["pid"])), result)
 
+    def test_validation_commands_are_bounded_and_kill_descendants(self) -> None:
+        repo = self.init_repo()
+        pid_path = repo / ".claude-state" / "closeout" / "validation-descendant.pid"
+        child_code = (
+            "import pathlib, subprocess, sys, time\n"
+            f"pid_path = pathlib.Path({str(pid_path)!r})\n"
+            "pid_path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "pid_path.write_text(str(child.pid), encoding='utf-8')\n"
+            "time.sleep(60)\n"
+        )
+        self.write_config(
+            repo,
+            {
+                "validation": {
+                    "timeoutMs": 500,
+                    "maxOutputBytes": 8192,
+                    "commands": [
+                        {
+                            "name": "hung-validation",
+                            "argv": [sys.executable, "-c", child_code],
+                            "pathPatterns": ["tools/repo_hygiene/**"],
+                        }
+                    ],
+                }
+            },
+        )
+        config = load_closeout_config(repo)
+
+        results = run_validations(
+            repo,
+            config,
+            repo,
+            changed_paths=["tools/repo_hygiene/brokered_closeout.py"],
+            work_block_id="wb-bounded-validation",
+        )
+
+        self.assertEqual(len(results), 1, results)
+        self.assertEqual(results[0]["returncode"], 124, results)
+        self.assertTrue(results[0]["timedOut"], results)
+        self.assertTrue(results[0]["killedProcessTree"], results)
+        descendant_pid = int(pid_path.read_text(encoding="utf-8"))
+        for _ in range(30):
+            if not process_is_running(descendant_pid):
+                break
+            time.sleep(0.1)
+        self.assertFalse(process_is_running(descendant_pid), results)
+        self.assertIn("bounded_runner_timeout", self.audit_types(repo))
+        self.assertIn("bounded_runner_process_tree_killed", self.audit_types(repo))
+
+    def test_path_scoped_validation_skips_unmatched_commands(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "validation": {
+                    "commands": [
+                        {
+                            "name": "closeout-only",
+                            "argv": [sys.executable, "-c", "raise SystemExit(7)"],
+                            "pathPatterns": ["tools/repo_hygiene/**"],
+                        },
+                        {
+                            "name": "bridge-only",
+                            "argv": [sys.executable, "-c", "print('bridge-ran')"],
+                            "pathPatterns": ["tools/agent-bridge/**"],
+                        },
+                    ]
+                }
+            }
+        )
+        config = load_closeout_config(repo)
+
+        results = run_validations(
+            repo,
+            config,
+            repo,
+            changed_paths=["tools/agent-bridge/server_wrapper.py"],
+            work_block_id="wb-path-scoped-validation",
+        )
+
+        self.assertEqual(len(results), 2, results)
+        self.assertTrue(results[0]["skipped"], results)
+        self.assertEqual(results[0]["skipReason"], "path_patterns_not_matched")
+        self.assertEqual(results[1]["returncode"], 0, results)
+        self.assertIn("bridge-ran", results[1]["stdout"])
+
     def test_timeout_and_output_cap_settings_are_contract_required(self) -> None:
         contract = broker_contract(ROOT)
         config = load_closeout_config(ROOT)
@@ -833,6 +921,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(closeout_command_timeout_ms(config, ["repair"]), 0)
         self.assertGreater(closeout_command_timeout_ms(config, ["finalize"]), 0)
         self.assertGreater(closeout_max_process_output_bytes(config), 0)
+        self.assertGreater(config["validation"]["timeoutMs"], 0)
+        self.assertGreater(config["validation"]["maxOutputBytes"], 0)
+        self.assertIn("pathPatterns", config["validation"]["commands"][0])
+        self.assertIn("test_validation_commands_are_bounded_and_kill_descendants", baseline["requiredTests"])
+        self.assertIn("test_path_scoped_validation_skips_unmatched_commands", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
 
     def test_stale_tooling_without_bounded_runner_reports_tooling_drift(self) -> None:
@@ -868,6 +961,18 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("non_exempt_dirty_files", {item["kind"] for item in result["blockers"]})
         self.assertIn("non_exempt_untracked_files", {item["kind"] for item in result["blockers"]})
         self.assertIn("repo_closed_postcondition", self.audit_types(repo))
+
+    def test_hard_clean_exempts_generated_codex_state_agent_loop_prompts(self) -> None:
+        repo = self.init_repo()
+        prompt = repo / ".codex-state" / "agent-loop" / "inbox" / "loop-test--to-codex.prompt.md"
+        prompt.parent.mkdir(parents=True, exist_ok=True)
+        prompt.write_text("generated prompt state\n", encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["blockers"], result)
 
     def test_hard_clean_final_response_blocks_remaining_stash(self) -> None:
         repo = self.init_repo()

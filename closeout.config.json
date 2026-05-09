@@ -11,10 +11,25 @@
     "fetchBeforeEvidence": true
   },
   "validation": {
+    "timeoutMs": 90000,
+    "maxOutputBytes": 524288,
     "commands": [
       {
         "name": "brokered-closeout-tests",
-        "argv": ["py", "-3", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"]
+        "argv": ["py", "-3", "-m", "unittest", "tools.repo_hygiene.test_brokered_closeout", "-v"],
+        "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"]
+      },
+      {
+        "name": "agent-bridge-wmi-regression",
+        "argv": [
+          "py",
+          "-3",
+          "-m",
+          "unittest",
+          "tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks",
+          "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation"
+        ],
+        "pathPatterns": ["tools/agent-bridge/**", "AGENTS.md", "CLAUDE.md", "bridge_trigger_heuristics.md"]
       },
       {
         "name": "repo-hygiene-policy",
@@ -25,6 +40,7 @@
   "paths": {
     "generated": [
       ".claude-state/**",
+      ".codex-state/**",
       "**/__pycache__/**",
       "**/*.pyc",
       "**/build*/**",
@@ -78,6 +94,7 @@
     },
     "exemptStatusPatterns": [
       ".claude-state/**",
+      ".codex-state/**",
       "**/__pycache__/**",
       "**/*.pyc"
     ]
@@ -253,6 +270,8 @@
       "test_bounded_runner_closeout_gate_failure_cannot_report_finalized",
       "test_bounded_runner_review_quorum_failure_requires_approval_artifact_and_rerun",
       "test_bounded_runner_timeout_leaves_no_orphan_child_processes",
+      "test_validation_commands_are_bounded_and_kill_descendants",
+      "test_path_scoped_validation_skips_unmatched_commands",
       "test_timeout_and_output_cap_settings_are_contract_required",
       "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
       "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
@@ -287,6 +306,8 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def run_bounded_closeout_process"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_timeout_ms"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_applies"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
