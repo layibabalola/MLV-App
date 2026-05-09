@@ -909,6 +909,40 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(results[1]["returncode"], 0, results)
         self.assertIn("bridge-ran", results[1]["stdout"])
 
+    def test_validation_commands_ignore_failure_words_in_successful_test_names(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "locking": {"failureTextPatterns": ["stale_refs", "validation_failed"]},
+                "validation": {
+                    "commands": [
+                        {
+                            "name": "successful-suite-with-blocker-vocabulary",
+                            "argv": [
+                                sys.executable,
+                                "-c",
+                                "print('test_stale_refs_block_finalize_before_mutation ... ok'); print('test_validation_failure_blocks_after_clean_merge ... ok')",
+                            ],
+                            "pathPatterns": ["tools/repo_hygiene/**"],
+                        }
+                    ],
+                },
+            }
+        )
+        config = load_closeout_config(repo)
+
+        results = run_validations(
+            repo,
+            config,
+            repo,
+            changed_paths=["tools/repo_hygiene/brokered_closeout.py"],
+            work_block_id="wb-validation-vocabulary",
+        )
+
+        self.assertEqual(len(results), 1, results)
+        self.assertEqual(results[0]["returncode"], 0, results)
+        self.assertEqual(results[0]["status"], "success", results)
+        self.assertFalse(results[0]["timedOut"], results)
+
     def test_timeout_and_output_cap_settings_are_contract_required(self) -> None:
         contract = broker_contract(ROOT)
         config = load_closeout_config(ROOT)
@@ -926,6 +960,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("pathPatterns", config["validation"]["commands"][0])
         self.assertIn("test_validation_commands_are_bounded_and_kill_descendants", baseline["requiredTests"])
         self.assertIn("test_path_scoped_validation_skips_unmatched_commands", baseline["requiredTests"])
+        self.assertIn("test_validation_commands_ignore_failure_words_in_successful_test_names", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
         self.assertGreaterEqual(config["validation"]["timeoutMs"], 600000)
 
