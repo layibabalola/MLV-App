@@ -332,6 +332,8 @@ The bounded runner MUST account for:
 
 A closeout result is authoritative only after the child process exits, descendants are gone or intentionally retained with audit, status and failure text agree, and expected artifacts exist.
 
+Closeout surface adapters that launch a bounded child SHOULD emit a configurable liveness heartbeat to stderr while the child is still running. Heartbeats MUST NOT be written to machine-readable stdout and MUST NOT replace bounded-runner timeout, CPU-stall, output-cap, or postcondition authority.
+
 For finalizer children, `exit 0` plus machine-readable `status: success` and expected success artifacts is semantic success authority. Validation stdout/stderr embedded in that success payload are evidence, not blocker authority; configured known-failure vocabulary in that evidence must be recorded as ignored text rather than promoted to a failure. Children that do not return trusted success JSON still fail closed on known-failure text.
 
 ### Tooling Drift
