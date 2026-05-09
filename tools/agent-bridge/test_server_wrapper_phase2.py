@@ -1437,6 +1437,56 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertEqual(events[-1]["action"], "mcp_server_wrapper_host_exited")
         self.assertEqual(events[-1]["host_pid"], 70)
 
+    def test_supervisor_throttles_host_identity_revalidation(self) -> None:
+        state_dir = self.tempdir / "host-identity-throttle" / "state"
+        state_dir.mkdir(parents=True)
+        now = [0.0]
+        entry_calls: List[int] = []
+        original_alive = _sw.is_process_alive
+        original_entry = _sw._process_entry_from_system
+        original_table = _sw._process_table_from_system
+        original_wrapper_identity = _sw._wrapper_identity_for_pid
+
+        def fail_process_table() -> Dict[int, Dict[str, object]]:
+            raise AssertionError("host identity checks must not enumerate the process table")
+
+        def process_entry(pid: int) -> Dict[str, object]:
+            entry_calls.append(int(pid))
+            return {"pid": int(pid), "creation_date": "created"}
+
+        try:
+            _sw.is_process_alive = lambda pid: True
+            _sw._process_entry_from_system = process_entry
+            _sw._process_table_from_system = fail_process_table
+            _sw._wrapper_identity_for_pid = lambda pid: {"wrapper_pid": int(pid)}
+            supervisor = _sw.ServerSupervisor(
+                command=[sys.executable, "-c", "import time; time.sleep(60)"],
+                state_dir=state_dir,
+                watch_paths=[],
+                config=SupervisorConfig(host_exit_check_interval_seconds=5.0),
+                host_identity={
+                    "host_key": "pid:70",
+                    "host_pid": 70,
+                    "host_process_name": "codex.exe",
+                    "host_creation_date": "created",
+                },
+                now_fn=lambda: now[0],
+            )
+
+            self.assertFalse(supervisor._owning_host_exited())
+            self.assertEqual(entry_calls, [70])
+            now[0] = 1.0
+            self.assertFalse(supervisor._owning_host_exited())
+            self.assertEqual(entry_calls, [70])
+            now[0] = 5.0
+            self.assertFalse(supervisor._owning_host_exited())
+            self.assertEqual(entry_calls, [70, 70])
+        finally:
+            _sw.is_process_alive = original_alive
+            _sw._process_entry_from_system = original_entry
+            _sw._process_table_from_system = original_table
+            _sw._wrapper_identity_for_pid = original_wrapper_identity
+
 
 class ServerWrapperTrampolineTests(unittest.TestCase):
     def test_trampoline_relaunches_on_exit_77_and_returns_final_code(self) -> None:
