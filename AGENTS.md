@@ -35,6 +35,7 @@
 - Incoming closeout addenda are repo-wide closeout framework changes, not chat-only notes. When a user or bridge message labels an item as an incoming/addendum/closeout rule, persist the smallest durable same-turn update whenever feasible: update `AGENTS.md`/`CLAUDE.md` for agent policy, `closeout.config.json`/`DEFAULT_CLOSEOUT_CONFIG` for broker policy, and `tools/repo_hygiene/test_brokered_closeout.py` or tooling-baseline required symbols/tests for executable coverage. If implementation is not feasible, record an explicit closeout blocker or roadmap item before final response.
 - At the start of a non-trivial work block, prefer:
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .`
+- If `start-work-block` begins on a clean protected target branch and `workBlockBootstrap.autoBranchFromProtectedTarget=true`, the broker creates an allowed `workBlockBootstrap.branchPrefix/<workBlockId>` branch, records `protectedBranchBootstrap` in the manifest, and continues there. Dirty protected targets must block before branch creation with the dirty paths listed.
 - Before any final response after non-trivial edits, always trigger closeout:
   - `powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`
 - To audit whole-repo branch/worktree/stash cleanup, run:
