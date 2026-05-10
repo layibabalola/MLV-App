@@ -374,7 +374,7 @@ If the repo is not closed, the agent may report WIP or a blocker, but MUST NOT c
 
 ### Repo State, Dashboard, And Rollback
 
-Repos SHOULD expose a dashboard-ready repo state feed through `repoStateLedger`. The feed MUST live under generated state such as `.claude-state/closeout/repo-state/`, SHOULD have a stable latest snapshot plus timestamped history, SHOULD declare a schema such as `repo-state-snapshot.v1`, and SHOULD include branch/tracking, dirty entries, local branches, worktrees, stashes, closeout audit pointers, latest `closeoutCleanTruth`, a bounded closeout-history index, and rollback policy.
+Repos SHOULD expose a dashboard-ready repo state feed through `repoStateLedger`. The feed MUST live under generated state such as `.claude-state/closeout/repo-state/`, SHOULD have a stable latest snapshot plus timestamped history, SHOULD declare a schema such as `repo-state-snapshot.v1`, and SHOULD include branch/tracking, dirty entries, local branches, worktrees, stashes, closeout audit pointers, latest `closeoutCleanTruth`, a bounded closeout-history index, and rollback policy. Live dashboard refresh SHOULD have a repo-owned latest-only command that updates the stable feed without appending history or audit rows on every poll.
 
 Future web dashboards SHOULD follow `webDashboardSpec`: sticky local URL, SSE with polling fallback, read-only by default, preserved client scroll/focus/detail state across refreshes, historical closeout browsing, repo-map/workflow/blocker/audit/rollback views, and no separate mutation authority. Dashboard actions remain symbolic requests until repo-owned actors revalidate exact tuples.
 

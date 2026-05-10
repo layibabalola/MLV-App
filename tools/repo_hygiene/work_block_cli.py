@@ -97,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     repo_state = sub.add_parser("repo-state", help="Print or persist a dashboard-ready repo state snapshot.")
     repo_state.add_argument("--write", action="store_true", help="Write latest/history snapshots and a repo_state_snapshot audit.")
+    repo_state.add_argument("--latest-only", action="store_true", help="With --write, refresh only latest.json for live dashboard polling.")
     repo_state.add_argument("--work-block-id")
 
     sweep = sub.add_parser("sweep", help="Plan or apply whole-repo branch/worktree/stash cleanup.")
@@ -217,7 +218,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "audit":
             result = audit_summary(repo_root, limit=args.limit)
         elif args.command == "repo-state":
-            result = repo_state_snapshot(repo_root, write=args.write, work_block_id=args.work_block_id)
+            if args.latest_only and not args.write:
+                raise HygieneError("--latest-only requires --write")
+            result = repo_state_snapshot(
+                repo_root,
+                write=args.write,
+                latest_only=args.latest_only,
+                work_block_id=args.work_block_id,
+            )
         elif args.command == "sweep":
             if args.print_tuple:
                 result = repo_sweep_tuple(repo_root)
