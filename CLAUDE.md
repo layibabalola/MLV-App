@@ -222,25 +222,29 @@ Repo state for dashboard and audit consumers is recorded through
 history snapshot, and a `repo_state_snapshot` audit. The snapshot uses
 `repo-state-snapshot.v1` and contains branch/tracking, dirty entries, local
 branches, worktrees, stashes, latest closeout audit/truth pointers, a bounded
-closeout-history index, and `rollbackPolicy`. The future `webDashboardSpec`
-surface should auto-refresh `http://127.0.0.1:8765/closeout` from that feed and
-the closeout audits instead of creating a separate state authority.
+`closeout-history-index.v1`, and `rollbackPolicy` plus `rollback-readiness.v1`.
+The future `webDashboardSpec` surface should auto-refresh
+`http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
+of creating a separate state authority.
 For live dashboard polling, use the latest-only repo-state adapter:
 `tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. It
 refreshes `latest.json` without appending history or `repo_state_snapshot` audit
 rows on every poll.
 `webDashboardSpec` is read-only by default and
 `symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
-preserved scroll/focus/detail state across refresh, and repo-map, workflow,
-blocker, audit, rollback, and historical closeout views.
+preserved scroll/focus/selection/expanded/history-filter state across refresh,
+and repo-map, workflow, blocker, audit, rollback, and historical closeout views.
+`latest.json` is a mutable display feed, not rollback evidence.
 Rollback is handled by repo-owned evidence, not by blind cleanup. `rollbackPolicy`
 prefers Git revert, recovery-branch restoration, path restore from snapshot, or
 preservation-ref promotion; requires a new work block, user approval, a
-repo-state snapshot before mutation, a rollback plan, and recovery commands in
+repo-state snapshot before mutation, immutable source snapshot evidence, a
+`closeout-rollback-manifest.v1`, a rollback plan, and recovery commands in
 mutating audits; and forbids `reset --hard` or force push unless the user
-explicitly asks for it. Committed Git changes are usually highly recoverable;
-branch/worktree cleanup depends on preserved evidence; uncommitted foreign dirty
-paths are manual.
+explicitly asks for it. Until a rollback actor validates the manifest, readiness
+must remain `read-only-no-actor`. Committed Git changes are usually highly
+recoverable; branch/worktree cleanup depends on preserved evidence; uncommitted
+foreign dirty paths are manual.
 Protected target closeout is a no-op only when
 `hardClean.protectedTargetNoopCloseout.enabled=true`, the current branch is
 protected, no explicit workBlockId was supplied, and hard-clean passes. It writes

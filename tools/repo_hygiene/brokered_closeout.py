@@ -131,6 +131,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_rollback_readiness_fails_closed_without_actor",
                     "-v",
                 ],
                 "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
@@ -277,8 +278,15 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "historyRoot": ".claude-state/closeout/repo-state/history",
         "historyRetentionDays": 90,
         "closeoutHistoryLimit": 25,
+        "closeoutHistorySchema": "closeout-history-index.v1",
         "liveRefreshWritesHistory": False,
         "liveRefreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
+        "feedPathPolicy": {
+            "generatedRoot": ".claude-state/closeout/repo-state",
+            "latestJsonIsMutableDashboardFeed": True,
+            "latestJsonIsRollbackEvidence": False,
+            "historyJsonIsImmutableRollbackEvidence": True,
+        },
         "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"],
     },
     "webDashboardSpec": {
@@ -290,7 +298,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "refreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
         "readOnlyByDefault": True,
         "preserveClientStateAcrossRefresh": True,
+        "preservedClientStateKeys": ["scrollPosition", "focusedElement", "selectedWorkBlockId", "expandedRows", "activeHistoryFilters"],
         "mutationModel": "symbolic-action-request-only",
+        "feedAuthority": "latest-json-is-display-feed-only",
         "dataSources": [
             "repoStateLedger.latestPath",
             "repoClosedPostcondition.closeoutCleanTruth",
@@ -311,6 +321,21 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requireRepoStateSnapshotBeforeMutation": True,
         "requireRecoveryCommandInMutatingAudits": True,
         "writeRollbackPlanBeforeMutation": True,
+        "readinessSchema": "rollback-readiness.v1",
+        "requiredManifestSchema": "closeout-rollback-manifest.v1",
+        "readinessDefaultActionability": "read-only-no-actor",
+        "latestFeedIsRollbackEvidence": False,
+        "requireImmutableSourceSnapshotForRollback": True,
+        "requiredManifestFields": [
+            "schema",
+            "targetHead",
+            "sourceSnapshotPath",
+            "sourceSnapshotHash",
+            "policyHash",
+            "plannedStrategy",
+            "userApproval",
+            "recoveryCommand",
+        ],
         "disallowedDefaultActions": ["reset-hard", "force-push"],
         "recoveryEvidenceRoots": [
             ".claude-state/closeout/manual-prune",
@@ -518,6 +543,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
             "test_repo_state_dashboard_and_rollback_contract_required",
             "test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
+            "test_repo_state_rollback_readiness_fails_closed_without_actor",
             "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
             "test_hard_clean_final_response_blocks_remaining_stash",
@@ -557,6 +583,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_runner_exit_code"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "closeout-history-index.v1"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "rollback-readiness.v1"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
@@ -6064,7 +6092,7 @@ def latest_closeout_audit_state(rows: Sequence[Dict[str, Any]], *, limit: int = 
     }
 
 
-def closeout_history_state(rows: Sequence[Dict[str, Any]], *, limit: int = 25) -> Dict[str, Any]:
+def closeout_history_state(rows: Sequence[Dict[str, Any]], *, limit: int = 25, schema: str = "closeout-history-index.v1") -> Dict[str, Any]:
     work_blocks: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         work_block_id = row.get("workBlockId")
@@ -6099,10 +6127,46 @@ def closeout_history_state(rows: Sequence[Dict[str, Any]], *, limit: int = 25) -
                 truth = payload.get("closeoutCleanTruth")
                 entry["latestCloseoutCleanTruth"] = truth if isinstance(truth, dict) else None
     recent = list(reversed(list(work_blocks.values())))
+    entries = recent[:limit]
     return {
+        "schema": schema,
         "workBlockCount": len(work_blocks),
-        "recentWorkBlocks": recent[:limit],
+        "entryCount": len(entries),
+        "entries": entries,
+        "recentWorkBlocks": entries,
         "limit": limit,
+        "skippedCount": max(0, len(work_blocks) - len(entries)),
+        "errors": [],
+    }
+
+
+def rollback_readiness_state(policy: Dict[str, Any], ref_state: Dict[str, Any]) -> Dict[str, Any]:
+    required_manifest_fields = list(
+        policy.get("requiredManifestFields")
+        or [
+            "schema",
+            "targetHead",
+            "sourceSnapshotPath",
+            "sourceSnapshotHash",
+            "policyHash",
+            "plannedStrategy",
+            "userApproval",
+            "recoveryCommand",
+        ]
+    )
+    return {
+        "schema": str(policy.get("readinessSchema") or "rollback-readiness.v1"),
+        "actionability": str(policy.get("readinessDefaultActionability") or "read-only-no-actor"),
+        "evidenceFresh": False,
+        "evidenceStatus": "not_evaluated_by_rollback_actor",
+        "currentHead": ref_state.get("head"),
+        "sourceSnapshotPath": None,
+        "sourceSnapshotHash": None,
+        "latestFeedIsRollbackEvidence": bool(policy.get("latestFeedIsRollbackEvidence", False)),
+        "requiresImmutableSourceSnapshot": bool(policy.get("requireImmutableSourceSnapshotForRollback", True)),
+        "requiredManifestSchema": str(policy.get("requiredManifestSchema") or "closeout-rollback-manifest.v1"),
+        "requiredManifestFields": required_manifest_fields,
+        "note": "latest.json is a mutable dashboard feed and cannot make rollback evidence fresh.",
     }
 
 
@@ -6121,10 +6185,15 @@ def repo_state_snapshot(
     audit_log_rel = normalize_rel(str((audit_root(repo_root, config) / "audits.jsonl").relative_to(repo_root)))
     audit_rows = audit_entries(repo_root, config)
     state_audits = latest_closeout_audit_state(audit_rows)
-    closeout_history = closeout_history_state(audit_rows, limit=int(ledger.get("closeoutHistoryLimit") or 25))
+    closeout_history = closeout_history_state(
+        audit_rows,
+        limit=int(ledger.get("closeoutHistoryLimit") or 25),
+        schema=str(ledger.get("closeoutHistorySchema") or "closeout-history-index.v1"),
+    )
     dirty_entries = parse_status_paths(repo_root)
     latest_path = repo_state_path(repo_root, config, "latestPath", ".claude-state/closeout/repo-state/latest.json")
     history_root = repo_state_path(repo_root, config, "historyRoot", ".claude-state/closeout/repo-state/history")
+    ref_state = current_repo_ref_state(repo_root, config)
     snapshot = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "artifactSchema": str(ledger.get("artifactSchema") or "repo-state-snapshot.v1"),
@@ -6136,7 +6205,7 @@ def repo_state_snapshot(
             "stateRoot": normalize_rel(str(closeout_state_root(repo_root, config).relative_to(repo_root))),
             "policyHash": config.get("policyHash"),
         },
-        "branch": current_repo_ref_state(repo_root, config),
+        "branch": ref_state,
         "dirty": {
             "clean": not dirty_entries,
             "entryCount": len(dirty_entries),
@@ -6165,7 +6234,9 @@ def repo_state_snapshot(
             "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
             "readOnlyByDefault": bool(dashboard.get("readOnlyByDefault", True)),
             "preserveClientStateAcrossRefresh": bool(dashboard.get("preserveClientStateAcrossRefresh", True)),
+            "preservedClientStateKeys": list(dashboard.get("preservedClientStateKeys") or []),
             "mutationModel": str(dashboard.get("mutationModel") or "symbolic-action-request-only"),
+            "feedAuthority": str(dashboard.get("feedAuthority") or "latest-json-is-display-feed-only"),
             "dataSources": list(dashboard.get("dataSources") or []),
             "views": list(dashboard.get("views") or []),
             "primaryPanels": list(dashboard.get("primaryPanels") or []),
@@ -6183,14 +6254,17 @@ def repo_state_snapshot(
             "disallowedDefaultActions": list(rollback.get("disallowedDefaultActions") or []),
             "recoveryEvidenceRoots": list(rollback.get("recoveryEvidenceRoots") or []),
             "userFacingFeasibility": str(rollback.get("userFacingFeasibility") or ""),
+            "readiness": rollback_readiness_state(rollback, ref_state),
         },
         "stateLedger": {
             "enabled": bool(ledger.get("enabled", True)),
             "latestPath": normalize_rel(str(latest_path.relative_to(repo_root))),
             "historyRoot": normalize_rel(str(history_root.relative_to(repo_root))),
             "historyRetentionDays": int(ledger.get("historyRetentionDays") or 90),
+            "closeoutHistorySchema": str(ledger.get("closeoutHistorySchema") or "closeout-history-index.v1"),
             "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
             "liveRefreshCommand": str(ledger.get("liveRefreshCommand") or dashboard.get("refreshCommand") or ""),
+            "feedPathPolicy": dict(ledger.get("feedPathPolicy") or {}),
         },
     }
     if write:
