@@ -22,6 +22,7 @@ from compact import reap_stale_server_pids
 from core.processes import is_process_alive
 from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
 from dashboard_server import DEFAULT_DASHBOARD_PORT, DashboardServerHandle, start_dashboard_server
+from powershell_runtime import powershell_cim_command
 
 
 _WINDOWS_PIPE_CHUNK_BYTES = 4096
@@ -276,17 +277,14 @@ def _wrapper_pid_from_env() -> Optional[int]:
 
 def _wrapper_process_entry(pid: int) -> Optional[dict]:
     if sys.platform == "win32":
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
+        command = powershell_cim_command(
             (
                 "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
                 "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
                 "ConvertTo-Json -Compress"
             )
-            % int(pid),
-        ]
+            % int(pid)
+        )
         kwargs = {
             "stdout": subprocess.PIPE,
             "stderr": subprocess.DEVNULL,

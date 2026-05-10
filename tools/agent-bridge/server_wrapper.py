@@ -17,6 +17,7 @@ from core.processes import is_process_alive
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
 from core.storage import append_jsonl, atomic_replace, file_lock, read_json, write_json
+from powershell_runtime import powershell_cim_command
 
 
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
@@ -148,16 +149,13 @@ _BRIDGE_LAUNCHER_SCRIPT_PATHS = {
 def _process_table_from_system() -> Dict[int, Dict[str, Any]]:
     """Best-effort process table used only to attribute bridge children to a host."""
     if sys.platform == "win32":
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
+        command = powershell_cim_command(
             (
                 "Get-CimInstance Win32_Process | "
                 "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
                 "ConvertTo-Json -Compress"
-            ),
-        ]
+            )
+        )
         kwargs: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
             "stderr": subprocess.DEVNULL,
@@ -231,17 +229,14 @@ def _process_entry_from_system(pid: int) -> Optional[Dict[str, Any]]:
     if pid <= 0:
         return None
     if sys.platform == "win32":
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
+        command = powershell_cim_command(
             (
                 "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
                 "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
                 "ConvertTo-Json -Compress"
             )
             % pid,
-        ]
+        )
         kwargs: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
             "stderr": subprocess.DEVNULL,

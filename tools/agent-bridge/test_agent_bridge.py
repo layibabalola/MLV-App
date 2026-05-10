@@ -23,6 +23,8 @@ from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import bootstrap_session
+import powershell_runtime
 from agent_bridge import (
     PROJECT_BACKPRESSURE_LIMIT,
     SESSION_BACKPRESSURE_LIMIT,
@@ -278,6 +280,13 @@ class AgentBridgeTests(unittest.TestCase):
             self.assertIn("-SkipSessionWorktree", text)
             self.assertNotIn("bootstrap_session.py", text)
             self.assertNotIn("git worktree add", text)
+            self.assertIn("& powershell.exe @args", text)
+            self.assertIn("-ExecutionPolicy", text)
+            self.assertNotIn("& pwsh.exe @args", text)
+        reminder_text = (Path(__file__).resolve().parent / "codex_bridge_reminder.ps1").read_text(encoding="utf-8")
+        self.assertIn("Works in PS 5.1", reminder_text)
+        self.assertIn("WinRT ContentType=WindowsRuntime is not", reminder_text)
+        self.assertIn("PS 7.x (pwsh.exe)", reminder_text)
 
     def test_codex_bridge_reminder_log_writes_use_retry_helper(self) -> None:
         text = (Path(__file__).resolve().parent / "codex_bridge_reminder.ps1").read_text(encoding="utf-8")
@@ -1554,6 +1563,9 @@ $result | ConvertTo-Json -Compress
 
     def test_wake_codex_input_size_smoke_runs_under_powershell(self) -> None:
         script = Path(__file__).resolve().parent / "wake_codex.ps1"
+        script_text = script.read_text(encoding="utf-8")
+        self.assertIn('Start-Process -FilePath "powershell.exe"', script_text)
+        self.assertIn("-EncodedCommand", script_text)
 
         result = subprocess.run(
             [
@@ -7724,6 +7736,9 @@ for index in range(count):
                 toast_max_in_tray=3,
             )
         args = popen.call_args.args[0]
+        self.assertEqual(args[0], "powershell")
+        self.assertIn("-NoProfile", args)
+        self.assertNotEqual(args[0], "pwsh")
         encoded = args[args.index("-EncodedCommand") + 1]
         script = base64.b64decode(encoded).decode("utf-16-le")
         self.assertIn("$toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(7)", script)
@@ -7738,6 +7753,9 @@ for index in range(count):
                 [{"id": "bad'\r\nWrite-Host pwned", "body": "TYPE: SMOKE\nSUMMARY: toast tag"}],
             )
         args = popen.call_args.args[0]
+        self.assertEqual(args[0], "powershell")
+        self.assertIn("-NoProfile", args)
+        self.assertNotEqual(args[0], "pwsh")
         encoded = args[args.index("-EncodedCommand") + 1]
         script = base64.b64decode(encoded).decode("utf-16-le")
         tag_line = next(line for line in script.splitlines() if line.startswith("$toast.Tag = "))
@@ -7751,6 +7769,9 @@ for index in range(count):
                 [{"id": "msg-1", "body": "hi'; Start-Process calc; #"}],
             )
         args = popen.call_args.args[0]
+        self.assertEqual(args[0], "powershell")
+        self.assertIn("-NoProfile", args)
+        self.assertNotEqual(args[0], "pwsh")
         self.assertIn("-EncodedCommand", args)
         self.assertNotIn("-Command", args)
         encoded = args[args.index("-EncodedCommand") + 1]
@@ -7986,6 +8007,8 @@ for index in range(count):
         ]
         command_text = "\n".join(" ".join(command) for command in commands)
         self.assertIn("wake_codex.ps1", command_text)
+        self.assertIn("powershell", command_text)
+        self.assertNotIn("pwsh", command_text)
         self.assertIn("-Message Watcher says check bridge inbox", command_text)
         self.assertIn("-ThreadId {desktop_thread_id}", command_text)
         self.assertIn("-RestoreThreadId {restore_thread_id}", command_text)
@@ -8532,6 +8555,32 @@ for index in range(count):
         terminate.assert_called_once_with(424242)
         self.assertFalse((self.tempdir / "watcher.pid").exists())
         self.assertFalse((self.state_dir / "locks" / "watcher.lock").exists())
+
+    def test_bootstrap_watcher_enumeration_prefers_pwsh_for_cim(self) -> None:
+        row = {
+            "ProcessId": 111,
+            "ParentProcessId": 1,
+            "CommandLine": "py watcher.py --config watcher-config.json",
+            "CreationDate": "20260510101010.000000-000",
+        }
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(row), stderr="")
+
+        def pwsh_available(name: str) -> str:
+            return "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else ""
+
+        with patch("bootstrap_session.sys.platform", "win32"), patch.object(
+            powershell_runtime.shutil,
+            "which",
+            side_effect=pwsh_available,
+        ), patch("bootstrap_session.subprocess.run", return_value=completed) as run:
+            processes = bootstrap_session._enumerate_watcher_processes()
+
+        self.assertEqual(processes[0]["pid"], 111)
+        self.assertEqual(processes[0]["parent_pid"], 1)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:6], ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"])
+        self.assertEqual(argv[6], "-Command")
+        self.assertIn("Get-CimInstance Win32_Process", argv[-1])
 
     def test_sweep_orphan_watchers_kills_non_lease_processes(self) -> None:
         bridge = AgentBridge(self.state_dir)

@@ -23,6 +23,7 @@ from core.runtime import (
     write_runtime_breadcrumb,
 )
 from core.settings import load_settings
+from powershell_runtime import powershell_cim_command
 from project_identity import derive_project_identity
 
 SUBAGENT_ENV_MARKERS = {
@@ -170,7 +171,7 @@ def _enumerate_watcher_processes() -> List[Dict[str, Any]]:
         )
         try:
             proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", script],
+                powershell_cim_command(script),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,

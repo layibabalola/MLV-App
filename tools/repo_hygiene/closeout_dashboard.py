@@ -14,6 +14,8 @@ from urllib.parse import unquote, urlparse
 
 from .brokered_closeout import (
     HygieneError,
+    closeout_script_command,
+    effective_closeout_script_command,
     load_closeout_config,
     repo_state_dashboard_spec,
     repo_state_ledger_config,
@@ -55,6 +57,12 @@ def dashboard_actions_payload(
     ledger = repo_state_ledger_config(config)
     rollback = rollback_policy(config)
     endpoints = dashboard_endpoints(config)
+    refresh_command = effective_closeout_script_command(
+        config,
+        "write-repo-state.ps1",
+        ["-Write", "-LatestOnly"],
+        str(ledger.get("liveRefreshCommand") or dashboard.get("refreshCommand") or ""),
+    )
     helper = dashboard.get("helper") if isinstance(dashboard.get("helper"), dict) else {}
     disallowed = list(rollback.get("disallowedDefaultActions") or [])
     for extra in dashboard.get("rollbackForbiddenActions") or []:
@@ -93,7 +101,7 @@ def dashboard_actions_payload(
                 "id": "refresh_repo_state",
                 "label": "Refresh repo state feed",
                 "actionability": "generated-feed-only",
-                "command": str(ledger.get("liveRefreshCommand") or dashboard.get("refreshCommand") or ""),
+                "command": refresh_command,
                 "writesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
             },
             {
@@ -108,7 +116,7 @@ def dashboard_actions_payload(
                 "id": "request_retained_remediation",
                 "label": "Request retained-candidate remediation",
                 "actionability": "symbolic-request-only",
-                "command": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\remediate-retained-closeout.ps1 -RepoRoot . -Apply",
+                "command": closeout_script_command("remediate-retained-closeout.ps1", ["-Apply"], config),
             },
         ],
         "forbiddenActions": disallowed,

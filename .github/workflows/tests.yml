@@ -10,6 +10,7 @@ on:
       - "platform/qt/**"
       - "tools/repo_hygiene/**"
       - "tools/repo-hygiene/**"
+      - "tools/agent-bridge/**"
       - "tools/closeout/**"
       - "closeout.config.json"
       - "AGENTS.md"
@@ -24,6 +25,7 @@ on:
       - "platform/qt/**"
       - "tools/repo_hygiene/**"
       - "tools/repo-hygiene/**"
+      - "tools/agent-bridge/**"
       - "tools/closeout/**"
       - "closeout.config.json"
       - "AGENTS.md"
@@ -58,7 +60,7 @@ jobs:
 
     defaults:
       run:
-        shell: powershell
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
 
     env:
       QT_VERSION: 6.10.2
@@ -77,6 +79,25 @@ jobs:
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python tools\repo-hygiene\hygiene.py --repo-root . verify-policy
+
+      - name: Run agent bridge PowerShell launcher regressions
+        run: |
+          py -3 -m unittest `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_codex_hooks_assert_bridge_cli_contract `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_wake_codex_input_size_smoke_runs_under_powershell `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_configure_watcher_targeted_sendkeys_provider_writes_delivery_priority_helper_template `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_bootstrap_watcher_enumeration_prefers_pwsh_for_cim `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_toast_uses_expiry_and_tray_cap_settings `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_toast_tag_sanitizes_ps_line_breaks `
+            tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_windows_balloon_fallback_uses_encoded_command `
+            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_prefer_pwsh_for_cim `
+            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_uses_pwsh_alias_when_exe_probe_is_absent `
+            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_fall_back_to_windows_powershell `
+            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_trampoline_host_env_queries_prefer_pwsh_for_cim `
+            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_server_wrapper_process_entry_prefers_pwsh_for_cim `
+            tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
+            -v
 
       - name: Install aqtinstall
         run: |

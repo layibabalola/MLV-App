@@ -16,7 +16,7 @@ bounded `closeout-history-index.v1`, dashboard settings, and
 `rollback-readiness.v1`.
 
 Live refresh uses
-`tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That
+`pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That
 command updates only the stable latest feed so a dashboard polling every few
 seconds does not create synthetic closeout history or audit noise. Full closeout
 and explicit audit captures should continue to use the normal history-writing
@@ -34,7 +34,7 @@ source of truth.
 ## Local Helper
 
 Start or reuse the local helper with
-`tools\closeout\start-closeout-dashboard.ps1 -RepoRoot .`. The helper is
+`pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\start-closeout-dashboard.ps1 -RepoRoot .`. The helper is
 localhost-only, binds the sticky dashboard at `http://127.0.0.1:8765/closeout`,
 and refuses to reuse the port when `/api/closeout/actions` reports a different
 `repoRoot`. A healthy same-repo helper is reused rather than launched twice.

@@ -11,9 +11,12 @@ import unittest
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import powershell_runtime as _psrt
+import server as _server
 import server_wrapper as _sw
 import server_wrapper_trampoline as _trampoline
 from core.storage import read_jsonl
@@ -340,6 +343,10 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         for harness in self._harnesses:
             harness.cleanup()
         shutil.rmtree(self.tempdir, ignore_errors=True)
+
+    def assertPowerShellCimCommand(self, argv: List[str], executable: str) -> None:
+        self.assertEqual(argv[:6], [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"])
+        self.assertEqual(argv[6], "-Command")
 
     def _start_harness(
         self,
@@ -687,6 +694,74 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertEqual(host["host_key"], "pid:70")
         self.assertEqual(host["host_process_name"], "codex.exe")
         self.assertEqual(host["bridge_launcher_pids"], [100, 90, 80])
+
+    def test_windows_process_table_queries_prefer_pwsh_for_cim(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr="")
+        with mock.patch.object(_sw.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=lambda name: "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None), mock.patch.object(_sw.subprocess, "run", return_value=completed) as run:
+            table = _sw._process_table_from_system()
+
+        self.assertEqual(table, {})
+        argv = run.call_args.args[0]
+        self.assertPowerShellCimCommand(argv, "pwsh.exe")
+        self.assertIn("Get-CimInstance Win32_Process", argv[-1])
+
+    def test_windows_process_table_queries_fall_back_to_windows_powershell(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        with mock.patch.object(_sw.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", return_value=None), mock.patch.object(_sw.subprocess, "run", return_value=completed) as run:
+            entry = _sw._process_entry_from_system(123)
+
+        self.assertEqual(entry["pid"], 0)
+        argv = run.call_args.args[0]
+        self.assertPowerShellCimCommand(argv, "powershell.exe")
+        self.assertIn('ProcessId = 123', argv[-1])
+
+    def test_windows_process_table_uses_pwsh_alias_when_exe_probe_is_absent(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr="")
+
+        def which(name: str) -> Optional[str]:
+            return "C:/Program Files/PowerShell/7/pwsh" if name == "pwsh" else None
+
+        with mock.patch.object(_sw.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=which), mock.patch.object(_sw.subprocess, "run", return_value=completed) as run:
+            _sw._process_table_from_system()
+
+        argv = run.call_args.args[0]
+        self.assertPowerShellCimCommand(argv, "pwsh")
+
+    def test_trampoline_host_env_queries_prefer_pwsh_for_cim(self) -> None:
+        row = {
+            "ProcessId": 456,
+            "Name": "codex.exe",
+            "CommandLine": "codex desktop",
+            "ExecutablePath": "C:/Codex/codex.exe",
+            "CreationDate": "20260510123456.000000-000",
+        }
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(row), stderr="")
+        with mock.patch.object(_trampoline.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=lambda name: "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None), mock.patch.object(_trampoline.subprocess, "run", return_value=completed) as run:
+            env = _trampoline._host_env_for_parent(456)
+
+        argv = run.call_args.args[0]
+        self.assertPowerShellCimCommand(argv, "pwsh.exe")
+        self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_PROCESS_NAME"], "codex.exe")
+        self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_EXECUTABLE_PATH"], "C:/Codex/codex.exe")
+        self.assertEqual(env["AGENT_BRIDGE_MCP_HOST_CREATION_DATE"], "20260510123456.000000-000")
+
+    def test_server_wrapper_process_entry_prefers_pwsh_for_cim(self) -> None:
+        row = {
+            "ProcessId": 789,
+            "ParentProcessId": 456,
+            "Name": "python.exe",
+            "CommandLine": "py server_wrapper.py",
+            "ExecutablePath": "C:/Python/python.exe",
+            "CreationDate": "20260510111111.000000-000",
+        }
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(row), stderr="")
+        with mock.patch.object(_server.sys, "platform", "win32"), mock.patch.object(_psrt.shutil, "which", side_effect=lambda name: "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None), mock.patch.object(_server.subprocess, "run", return_value=completed) as run:
+            entry = _server._wrapper_process_entry(789)
+
+        argv = run.call_args.args[0]
+        self.assertPowerShellCimCommand(argv, "pwsh.exe")
+        self.assertEqual(entry["pid"], 789)
+        self.assertEqual(entry["command_line"], "py server_wrapper.py")
 
     def test_mcp_host_identity_does_not_skip_unrelated_python_launcher(self) -> None:
         process_table = {
