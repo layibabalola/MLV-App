@@ -20,6 +20,8 @@ from .brokered_closeout import (
     check_review_quorum,
     checkpoint_owned_work,
     closeout_clean_truth_from_postcondition,
+    closeout_script_command,
+    effective_closeout_script_command,
     collect_agent_remediation_results,
     closeout_command_timeout_ms,
     closeout_max_process_output_bytes,
@@ -43,6 +45,8 @@ from .brokered_closeout import (
     repo_sweep,
     repo_sweep_tuple,
     repo_state_snapshot,
+    powershell_policy,
+    powershell_executable_for_policy,
     restart_runtime_services_after_clean_promotion,
     run_bounded_closeout_process,
     run_validations,
@@ -546,6 +550,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("dirtySplit", contract["requiredConfigKeys"])
         self.assertIn("workBlockBootstrap", contract["requiredConfigKeys"])
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
+        self.assertIn("powerShell", contract["requiredConfigKeys"])
+        self.assertIn("powerShell.preferredExecutable", contract["requiredConfigKeys"])
+        self.assertIn("powerShell.requiredArgs", contract["requiredConfigKeys"])
+        self.assertIn("powerShell.windowsPowerShellOnly", contract["requiredConfigKeys"])
         self.assertIn("evidenceRepair", contract["requiredConfigKeys"])
         self.assertIn("responseHookLifecycle", contract["requiredConfigKeys"])
         self.assertIn("hardClean", contract["requiredConfigKeys"])
@@ -564,6 +572,29 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("owned_dirty_checkpoint", config["autoQuorum"]["autonomousActionClasses"])
         self.assertTrue(config["dirty"]["autoClaimCleanAtStart"])
+        self.assertEqual(config["powerShell"]["preferredExecutable"], "pwsh.exe")
+        self.assertEqual(config["powerShell"]["fallbackExecutable"], "powershell.exe")
+        self.assertIn("-NoProfile", config["powerShell"]["requiredArgs"])
+        self.assertIn("-NonInteractive", config["powerShell"]["requiredArgs"])
+        self.assertIn("agent bridge process metadata probes", config["powerShell"]["preferFor"])
+        self.assertIn("PowerShell 7+", config["powerShell"]["justification"])
+        bridge_validation = next(command for command in config["validation"]["commands"] if command["name"] == "agent-bridge-wmi-regression")
+        self.assertIn(
+            "tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_bootstrap_watcher_enumeration_prefers_pwsh_for_cim",
+            bridge_validation["argv"],
+        )
+        self.assertIn(
+            "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_fall_back_to_windows_powershell",
+            bridge_validation["argv"],
+        )
+        self.assertIn(
+            "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_trampoline_host_env_queries_prefer_pwsh_for_cim",
+            bridge_validation["argv"],
+        )
+        self.assertIn(
+            "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_server_wrapper_process_entry_prefers_pwsh_for_cim",
+            bridge_validation["argv"],
+        )
         self.assertIn(".codex-state/**", config["paths"]["generated"])
         self.assertTrue(config["repoSweep"]["retainedBlockerAutoRemediation"]["enabled"])
         self.assertEqual(config["repoSweep"]["recoveryBranchPrefix"], "closeout/recovery/detached")
@@ -646,6 +677,67 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("sourceSnapshotPath", config["rollbackPolicy"]["requiredManifestFields"])
         self.assertIn("reset-hard", config["rollbackPolicy"]["disallowedDefaultActions"])
         self.assertIn("delete-evidence", config["rollbackPolicy"]["disallowedDefaultActions"])
+
+    def test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands(self) -> None:
+        config = load_closeout_config(ROOT)
+        policy = powershell_policy(config)
+        self.assertEqual(policy["preferredExecutable"], "pwsh.exe")
+        self.assertEqual(policy["fallbackExecutable"], "powershell.exe")
+        self.assertTrue(policy["fallbackOnlyWhenPwshUnavailable"])
+        self.assertIn("-NoProfile", policy["requiredArgs"])
+        self.assertIn("-NonInteractive", policy["requiredArgs"])
+        self.assertIn("PowerShell 7+", policy["justification"])
+        self.assertIn("tools/agent-bridge/codex_bridge_reminder.ps1 WinRT toast activation", policy["windowsPowerShellOnly"])
+        self.assertIn("tools/agent-bridge/wake_codex.ps1 Windows shell activation", policy["windowsPowerShellOnly"])
+        self.assertIn("tools/agent-bridge/watcher.py WinRT toast notification activation", policy["windowsPowerShellOnly"])
+        self.assertIn("tools/agent-bridge/watcher.py WinForms balloon fallback", policy["windowsPowerShellOnly"])
+
+        expected_prefix = "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass"
+
+        def pwsh_available(name):
+            return "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.os.name", "nt"), mock.patch("tools.repo_hygiene.brokered_closeout.shutil.which", side_effect=pwsh_available):
+            generated = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
+            self.assertEqual(generated, expected_prefix + " -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot . -Apply")
+            self.assertEqual(
+                effective_closeout_script_command(config, "write-repo-state.ps1", ["-Write", "-LatestOnly"], config["repoStateLedger"]["liveRefreshCommand"]),
+                expected_prefix + " -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
+            )
+            self.assertEqual(
+                effective_closeout_script_command(config, "write-repo-state.ps1", ["-Write", "-LatestOnly"], config["webDashboardSpec"]["refreshCommand"]),
+                expected_prefix + " -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
+            )
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.os.name", "nt"), mock.patch("tools.repo_hygiene.brokered_closeout.shutil.which", return_value=None):
+            self.assertEqual(powershell_executable_for_policy(policy), "powershell.exe")
+            fallback_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
+        self.assertTrue(fallback_command.startswith("powershell.exe -NoLogo -NoProfile -NonInteractive"), fallback_command)
+        custom_command = "custom-refresh --repo ."
+        self.assertEqual(
+            effective_closeout_script_command(config, "write-repo-state.ps1", ["-Write", "-LatestOnly"], custom_command),
+            custom_command,
+        )
+
+        repo = self.init_repo(remote=True)
+        with mock.patch("tools.repo_hygiene.brokered_closeout.os.name", "nt"), mock.patch("tools.repo_hygiene.brokered_closeout.shutil.which", side_effect=pwsh_available):
+            snapshot = repo_state_snapshot(repo, write=False)
+            actions = dashboard_actions_payload(repo)
+        dashboard_commands = [
+            snapshot["dashboard"]["refreshCommand"],
+            snapshot["stateLedger"]["liveRefreshCommand"],
+            actions["symbolicActions"][0]["command"],
+            actions["symbolicActions"][2]["command"],
+        ]
+        for command in dashboard_commands:
+            self.assertTrue(command.startswith(expected_prefix), command)
+            self.assertNotIn("powershell -NoProfile", command)
+        with mock.patch("tools.repo_hygiene.brokered_closeout.os.name", "nt"), mock.patch("tools.repo_hygiene.brokered_closeout.shutil.which", return_value=None):
+            fallback_snapshot = repo_state_snapshot(repo, write=False)
+            fallback_actions = dashboard_actions_payload(repo)
+        self.assertTrue(fallback_snapshot["dashboard"]["refreshCommand"].startswith("powershell.exe -NoLogo -NoProfile -NonInteractive"))
+        self.assertTrue(fallback_snapshot["stateLedger"]["liveRefreshCommand"].startswith("powershell.exe -NoLogo -NoProfile -NonInteractive"))
+        self.assertTrue(fallback_actions["symbolicActions"][0]["command"].startswith("powershell.exe -NoLogo -NoProfile -NonInteractive"))
 
     def test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit(self) -> None:
         repo = self.init_repo(remote=True)
@@ -768,7 +860,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
         latest = latest_repo_state_payload(repo)
         history = history_index_payload(repo)
-        actions = dashboard_actions_payload(repo, server_process_id=1234)
+        def pwsh_available(name):
+            return "C:/Program Files/PowerShell/7/pwsh.exe" if name == "pwsh.exe" else None
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.os.name", "nt"), mock.patch("tools.repo_hygiene.brokered_closeout.shutil.which", side_effect=pwsh_available):
+            actions = dashboard_actions_payload(repo, server_process_id=1234)
 
         self.assertEqual(latest["stateLedger"]["writeMode"], "latest-only")
         self.assertEqual(history["schema"], "closeout-history-index.v1")
@@ -787,6 +883,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         by_id = {item["id"]: item for item in actions["symbolicActions"]}
         self.assertEqual(by_id["refresh_repo_state"]["actionability"], "generated-feed-only")
         self.assertFalse(by_id["refresh_repo_state"]["writesHistory"])
+        self.assertTrue(by_id["refresh_repo_state"]["command"].startswith("pwsh.exe -NoLogo -NoProfile -NonInteractive"))
+        self.assertTrue(by_id["request_retained_remediation"]["command"].startswith("pwsh.exe -NoLogo -NoProfile -NonInteractive"))
         self.assertEqual(by_id["request_rollback"]["actionability"], "read-only-no-actor")
         self.assertEqual(by_id["request_rollback"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
 
@@ -827,8 +925,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("repoStateLedger", baseline["requiredConfigKeys"])
         self.assertIn("webDashboardSpec", baseline["requiredConfigKeys"])
         self.assertIn("rollbackPolicy", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell.preferredExecutable", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell.requiredArgs", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell.windowsPowerShellOnly", baseline["requiredConfigKeys"])
         self.assertIn("test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit", baseline["requiredTests"])
         self.assertIn("test_repo_state_dashboard_and_rollback_contract_required", baseline["requiredTests"])
+        self.assertIn("test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands", baseline["requiredTests"])
+        self.assertIn("test_closeout_tooling_stale_reports_missing_power_shell_policy", baseline["requiredTests"])
         self.assertIn("test_repo_state_latest_only_refresh_updates_feed_without_audit_noise", baseline["requiredTests"])
         self.assertIn("test_repo_state_rollback_readiness_fails_closed_without_actor", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_actions_are_read_only_and_owned", baseline["requiredTests"])
@@ -837,6 +941,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "closeout-history-index.v1"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "rollback-readiness.v1"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def powershell_executable_for_policy"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def closeout_script_command"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def effective_closeout_script_command"), required_symbols)
+        self.assertIn(("tools/agent-bridge/powershell_runtime.py", "def powershell_cim_command"), required_symbols)
+        self.assertIn(("tools/agent-bridge/bootstrap_session.py", "powershell_cim_command"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTIONS_SCHEMA"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_actions_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def history_snapshot_payload"), required_symbols)
@@ -846,7 +955,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/closeout/start-closeout-dashboard.ps1", "serverProcessId"), required_symbols)
         self.assertIn(("tools/closeout/start-closeout-dashboard.ps1", "reuse"), required_symbols)
         self.assertIn(("AGENTS.md", "repoStateLedger"), required_symbols)
+        self.assertIn(("AGENTS.md", "PowerShell 7+"), required_symbols)
         self.assertIn(("CLAUDE.md", "rollbackPolicy"), required_symbols)
+        self.assertIn(("CLAUDE.md", "PowerShell 7+"), required_symbols)
+        self.assertIn(("closeout.config.json", "preferredExecutable"), required_symbols)
         for text in (agents_text, claude_text, standard_text, docs_text):
             self.assertIn("repoStateLedger", text)
             self.assertIn("webDashboardSpec", text)
@@ -859,6 +971,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("symbolic-action-request-only", dashboard_spec_text)
         self.assertIn("write-repo-state.ps1", dashboard_spec_text)
         self.assertIn("start-closeout-dashboard.ps1", dashboard_spec_text)
+        self.assertIn("pwsh.exe -NoLogo -NoProfile -NonInteractive", dashboard_spec_text)
         self.assertIn("/api/closeout/repo-state/latest", dashboard_spec_text)
         self.assertIn("http://127.0.0.1:8765/closeout", dashboard_spec_text)
 
@@ -910,6 +1023,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("locking", baseline["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", baseline["requiredConfigKeys"])
         self.assertIn("processResources", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell.preferredExecutable", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell.requiredArgs", baseline["requiredConfigKeys"])
         self.assertIn("test_bounded_runner_kills_hung_finalize_child_with_descendants", baseline["requiredTests"])
         self.assertIn("test_start_work_block_auto_branches_from_clean_protected_target", baseline["requiredTests"])
         self.assertIn("test_start_work_block_blocks_dirty_protected_target_before_auto_branch", baseline["requiredTests"])
@@ -1463,9 +1579,15 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("locking", contract["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", contract["requiredConfigKeys"])
         self.assertIn("processResources", contract["requiredConfigKeys"])
+        self.assertIn("powerShell", contract["requiredConfigKeys"])
+        self.assertIn("powerShell.preferredExecutable", contract["requiredConfigKeys"])
+        self.assertIn("powerShell.requiredArgs", contract["requiredConfigKeys"])
         self.assertIn("locking", baseline["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", baseline["requiredConfigKeys"])
         self.assertIn("processResources", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell.preferredExecutable", baseline["requiredConfigKeys"])
+        self.assertIn("powerShell.requiredArgs", baseline["requiredConfigKeys"])
         self.assertGreater(closeout_command_timeout_ms(config, ["detect"]), 0)
         self.assertGreater(closeout_command_timeout_ms(config, ["repair"]), 0)
         self.assertGreater(closeout_command_timeout_ms(config, ["finalize"]), 0)
@@ -1847,6 +1969,34 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "closeout_tooling_stale")
         self.assertIn({"kind": "config_key", "key": "hardClean"}, result["tooling"]["missing"])
+
+    def test_closeout_tooling_stale_reports_missing_power_shell_policy(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "powerShell": {"preferredExecutable": "pwsh.exe"},
+                "toolingBaseline": {
+                    "enabled": True,
+                    "autoUpdate": False,
+                    "requiredConfigKeys": [
+                        "powerShell.preferredExecutable",
+                        "powerShell.requiredArgs",
+                        "powerShell.windowsPowerShellOnly",
+                        "powerShell.fallbackOnlyWhenPwshUnavailable",
+                    ],
+                    "requiredTests": [],
+                    "requiredSymbols": [],
+                }
+            }
+        )
+        self.make_feature(repo, "wb-missing-powershell-policy")
+
+        result = finalize_work_block(repo, work_block_id="wb-missing-powershell-policy")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "closeout_tooling_stale")
+        self.assertIn({"kind": "config_key", "key": "powerShell.requiredArgs"}, result["tooling"]["missing"])
+        self.assertIn({"kind": "config_key", "key": "powerShell.windowsPowerShellOnly"}, result["tooling"]["missing"])
+        self.assertIn({"kind": "config_key", "key": "powerShell.fallbackOnlyWhenPwshUnavailable"}, result["tooling"]["missing"])
 
     def test_finalize_loop_stops_on_repeated_identical_blocker_evidence_tuple(self) -> None:
         config = load_closeout_config(ROOT)

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from server_wrapper import SERVER_WRAPPER_SELF_RESTART_EXIT_CODE
+from powershell_runtime import powershell_cim_command
 
 
 DEFAULT_SELF_RESTART_WINDOW_SECONDS = 10.0
@@ -32,17 +33,14 @@ def _host_env_for_parent(parent_pid: int) -> dict[str, str]:
     env = {"AGENT_BRIDGE_TRAMPOLINE_PARENT_PID": str(parent_pid), "AGENT_BRIDGE_MCP_HOST_PID": str(parent_pid)}
     if sys.platform != "win32":
         return env
-    command = [
-        "powershell",
-        "-NoProfile",
-        "-Command",
+    command = powershell_cim_command(
         (
             "Get-CimInstance Win32_Process -Filter \"ProcessId = %s\" | "
             "Select-Object ProcessId,Name,CommandLine,ExecutablePath,CreationDate | "
             "ConvertTo-Json -Compress"
         )
-        % int(parent_pid),
-    ]
+        % int(parent_pid)
+    )
     kwargs = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.DEVNULL,
