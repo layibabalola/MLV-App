@@ -186,6 +186,14 @@ auto-refresh through SSE with polling fallback, read-only default, preserved
 scroll/focus/selection/expanded/history-filter state across refreshes,
 historical closeouts, repo-map/workflow/blocker/audit/rollback views, and
 symbolic actions only. `latest.json` is display state, not rollback evidence.
+The local helper entrypoint is `tools/closeout/start-closeout-dashboard.ps1`.
+It should reuse a healthy same-repo dashboard server, fail closed when the port
+owner is foreign or unknown, and expose `/api/closeout/actions` with
+`serverProcessId`, repo ownership, symbolic actions, and rollback
+non-actionability. Data endpoints should include
+`/api/closeout/repo-state/latest`,
+`/api/closeout/repo-state/history-index`, and
+`/api/closeout/repo-state/history/{snapshotId}`.
 `rollbackPolicy` documents how undo works: prefer Git revert, recovery-branch
 restoration, path restore from snapshot, or preservation-ref promotion; preserve
 evidence before cleanup; require a new work block, user approval, immutable
