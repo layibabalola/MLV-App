@@ -128,6 +128,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_full_validation_suite_is_skipped_without_explicit_request",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_path_scoped_validation_skips_unmatched_commands",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_commands_ignore_failure_words_in_successful_test_names",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
                     "-v",
                 ],
                 "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
@@ -274,6 +277,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "historyRoot": ".claude-state/closeout/repo-state/history",
         "historyRetentionDays": 90,
         "closeoutHistoryLimit": 25,
+        "liveRefreshWritesHistory": False,
+        "liveRefreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
         "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"],
     },
     "webDashboardSpec": {
@@ -282,6 +287,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "stickyUrlPath": "/closeout",
         "refreshTransport": "sse-with-polling-fallback",
         "autoRefreshMs": 5000,
+        "refreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
         "readOnlyByDefault": True,
         "preserveClientStateAcrossRefresh": True,
         "mutationModel": "symbolic-action-request-only",
@@ -393,6 +399,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo_hygiene/work_block_cli.py",
             "tools/repo_hygiene/test_brokered_closeout.py",
             "tools/closeout/Invoke-CloseoutCli.ps1",
+            "tools/closeout/write-repo-state.ps1",
             "tools/closeout/work-block-complete.ps1",
             "tools/closeout/agent-remediation-queue.ps1",
             "tools/agent-bridge/codex_pre_response.ps1",
@@ -510,6 +517,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_bounded_runner_exit_code_taxonomy_is_contract_required",
             "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
             "test_repo_state_dashboard_and_rollback_contract_required",
+            "test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
             "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
             "test_hard_clean_final_response_blocks_remaining_stash",
@@ -572,6 +580,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_review_surface_unavailable_report"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "repo-state"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--latest-only"},
+            {"path": "tools/closeout/write-repo-state.ps1", "contains": "LatestOnly"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--mark-surface-unavailable"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
@@ -6100,6 +6110,7 @@ def repo_state_snapshot(
     repo_root_arg: Path,
     *,
     write: bool = False,
+    latest_only: bool = False,
     work_block_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
@@ -6150,6 +6161,8 @@ def repo_state_snapshot(
             "stickyUrlPath": str(dashboard.get("stickyUrlPath") or "/closeout"),
             "refreshTransport": str(dashboard.get("refreshTransport") or "sse-with-polling-fallback"),
             "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
+            "refreshCommand": str(dashboard.get("refreshCommand") or ledger.get("liveRefreshCommand") or ""),
+            "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
             "readOnlyByDefault": bool(dashboard.get("readOnlyByDefault", True)),
             "preserveClientStateAcrossRefresh": bool(dashboard.get("preserveClientStateAcrossRefresh", True)),
             "mutationModel": str(dashboard.get("mutationModel") or "symbolic-action-request-only"),
@@ -6176,35 +6189,42 @@ def repo_state_snapshot(
             "latestPath": normalize_rel(str(latest_path.relative_to(repo_root))),
             "historyRoot": normalize_rel(str(history_root.relative_to(repo_root))),
             "historyRetentionDays": int(ledger.get("historyRetentionDays") or 90),
+            "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
+            "liveRefreshCommand": str(ledger.get("liveRefreshCommand") or dashboard.get("refreshCommand") or ""),
         },
     }
     if write:
+        snapshot["stateLedger"]["writeMode"] = "latest-only" if latest_only else "latest-and-history"
         snapshot_hash = stable_hash(snapshot)
-        history_name = "%s-repo-state-%s.json" % (
-            str(snapshot["capturedAt"]).replace(":", "").replace("+", "Z"),
-            snapshot_hash[:12],
-        )
-        history_path = history_root / history_name
-        snapshot["stateLedger"]["historyPath"] = normalize_rel(str(history_path.relative_to(repo_root)))
         snapshot["stateLedger"]["snapshotHash"] = snapshot_hash
-        write_json(latest_path, snapshot)
-        write_json(history_path, snapshot)
-        write_audit(
-            repo_root,
-            config,
-            str(ledger.get("auditType") or "repo_state_snapshot"),
-            {
-                "snapshotHash": snapshot_hash,
-                "latestPath": snapshot["stateLedger"]["latestPath"],
-                "historyPath": snapshot["stateLedger"]["historyPath"],
-                "branch": snapshot["branch"],
-                "dirtyEntryCount": snapshot["dirty"]["entryCount"],
-                "stashCount": len(snapshot["stashes"]),
-                "worktreeCount": len(snapshot["worktrees"]),
-            },
-            work_block_id=work_block_id,
-            outcome="success",
-        )
+        if latest_only:
+            write_json(latest_path, snapshot)
+        else:
+            history_name = "%s-repo-state-%s.json" % (
+                str(snapshot["capturedAt"]).replace(":", "").replace("+", "Z"),
+                snapshot_hash[:12],
+            )
+            history_path = history_root / history_name
+            snapshot["stateLedger"]["historyPath"] = normalize_rel(str(history_path.relative_to(repo_root)))
+            write_json(latest_path, snapshot)
+            write_json(history_path, snapshot)
+            write_audit(
+                repo_root,
+                config,
+                str(ledger.get("auditType") or "repo_state_snapshot"),
+                {
+                    "snapshotHash": snapshot_hash,
+                    "latestPath": snapshot["stateLedger"]["latestPath"],
+                    "historyPath": snapshot["stateLedger"]["historyPath"],
+                    "writeMode": snapshot["stateLedger"]["writeMode"],
+                    "branch": snapshot["branch"],
+                    "dirtyEntryCount": snapshot["dirty"]["entryCount"],
+                    "stashCount": len(snapshot["stashes"]),
+                    "worktreeCount": len(snapshot["worktrees"]),
+                },
+                work_block_id=work_block_id,
+                outcome="success",
+            )
     return snapshot
 
 

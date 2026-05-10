@@ -14,6 +14,13 @@ The primary feed is `.claude-state/closeout/repo-state/latest.json`, emitted by
 branches, worktrees, stashes, latest `closeoutCleanTruth`, audit pointers,
 bounded closeout history, dashboard settings, and rollback readiness.
 
+Live refresh uses
+`tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That
+command updates only the stable latest feed so a dashboard polling every few
+seconds does not create synthetic closeout history or audit noise. Full closeout
+and explicit audit captures should continue to use the normal history-writing
+mode.
+
 Historical browsing comes from the repo-state history directory and the durable
 audit log. The UI may summarize those artifacts, but the artifacts remain the
 source of truth.
