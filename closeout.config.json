@@ -192,18 +192,24 @@
   },
   "repoStateLedger": {
     "enabled": true,
+    "artifactSchema": "repo-state-snapshot.v1",
     "artifactKind": "repoStateSnapshot",
     "auditType": "repo_state_snapshot",
     "latestPath": ".claude-state/closeout/repo-state/latest.json",
     "historyRoot": ".claude-state/closeout/repo-state/history",
     "historyRetentionDays": 90,
-    "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "rollback"]
+    "closeoutHistoryLimit": 25,
+    "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"]
   },
   "webDashboardSpec": {
     "enabled": true,
+    "localUrl": "http://127.0.0.1:8765/closeout",
     "stickyUrlPath": "/closeout",
+    "refreshTransport": "sse-with-polling-fallback",
     "autoRefreshMs": 5000,
     "readOnlyByDefault": true,
+    "preserveClientStateAcrossRefresh": true,
+    "mutationModel": "symbolic-action-request-only",
     "dataSources": [
       "repoStateLedger.latestPath",
       "repoClosedPostcondition.closeoutCleanTruth",
@@ -211,14 +217,20 @@
       "workBlockManifests",
       "repoSweepCandidateReports"
     ],
-    "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"]
+    "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"],
+    "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "audit-timeline", "rollback-readiness"]
   },
   "rollbackPolicy": {
     "enabled": true,
     "preferredStrategy": "git-revert-or-recovery-branch",
+    "allowedStrategies": ["git-revert", "recovery-branch-restore", "preservation-ref-promote", "path-restore-from-snapshot"],
+    "startNewWorkBlockForRollback": true,
+    "requireUserApprovalForRollback": true,
     "neverUseResetHardWithoutExplicitUserRequest": true,
     "requireRepoStateSnapshotBeforeMutation": true,
     "requireRecoveryCommandInMutatingAudits": true,
+    "writeRollbackPlanBeforeMutation": true,
+    "disallowedDefaultActions": ["reset-hard", "force-push"],
     "recoveryEvidenceRoots": [
       ".claude-state/closeout/manual-prune",
       ".claude-state/closeout/dirty-splits",

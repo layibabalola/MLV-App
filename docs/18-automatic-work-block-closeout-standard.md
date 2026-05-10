@@ -172,15 +172,19 @@ state is visible without becoming contradictory closeout text.
 Repo state for dashboards and audit review should come from `repoStateLedger`.
 The repo-owned `repo-state --write` command records a stable latest snapshot,
 timestamped history, and `repo_state_snapshot` audit under `.claude-state`.
-Snapshots include files, branches, worktrees, stashes, latest closeout truth,
-audit trail pointers, and `rollbackPolicy`.
+Snapshots use `repo-state-snapshot.v1` and include files, branches, worktrees,
+stashes, latest closeout truth, audit trail pointers, a bounded closeout-history
+index, and `rollbackPolicy`.
 
 `webDashboardSpec` is the iterative dashboard contract: sticky `/closeout` URL,
-auto-refresh, read-only default, historical closeouts, workflow stage/blocker
-views, and symbolic actions only. `rollbackPolicy` documents how undo works:
-prefer Git revert or recovery-branch restoration, preserve evidence before
-cleanup, require recovery commands in mutating audits, and reserve `reset --hard`
-for explicit user requests.
+auto-refresh through SSE with polling fallback, read-only default, preserved
+scroll/focus/detail state across refreshes, historical closeouts,
+repo-map/workflow/blocker/audit/rollback views, and symbolic actions only.
+`rollbackPolicy` documents how undo works: prefer Git revert, recovery-branch
+restoration, path restore from snapshot, or preservation-ref promotion; preserve
+evidence before cleanup; require a new work block, user approval, rollback plan,
+and recovery commands in mutating audits; and reserve `reset --hard` or force
+push for explicit user requests.
 
 Target push non-fast-forward is a recoverable race: fetch, re-pin, rebuild the
 integration candidate, regenerate quorum if the tuple changed, and retry within
