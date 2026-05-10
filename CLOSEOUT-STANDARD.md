@@ -372,6 +372,14 @@ Repo closeout reporting MUST derive its final clean/blocked wording from the sam
 
 If the repo is not closed, the agent may report WIP or a blocker, but MUST NOT claim final closeout completion.
 
+### Repo State, Dashboard, And Rollback
+
+Repos SHOULD expose a dashboard-ready repo state feed through `repoStateLedger`. The feed MUST live under generated state such as `.claude-state/closeout/repo-state/`, SHOULD have a stable latest snapshot plus timestamped history, and SHOULD include branch/tracking, dirty entries, local branches, worktrees, stashes, closeout audit pointers, latest `closeoutCleanTruth`, and rollback policy.
+
+Future web dashboards SHOULD follow `webDashboardSpec`: sticky local URL, auto-refresh, read-only by default, historical closeout browsing, workflow stage/blocker views, and no separate mutation authority. Dashboard actions remain symbolic requests until repo-owned actors revalidate exact tuples.
+
+Repos SHOULD publish `rollbackPolicy`. Rollback SHOULD prefer `git revert`, recovery branches, preserved prune bundles, dirty-split preservation refs, and audited recovery commands. Blind destructive undo such as `reset --hard` MUST require explicit user request and must not be the default rollback strategy.
+
 ### Hooks And Final Utilities
 
 Response, final, advisory, and bridge hooks MUST NOT replace authoritative repo gates.

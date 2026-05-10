@@ -169,6 +169,19 @@ handoff, metrics, or cleanup helpers. That summary records raw Git status,
 policy-clean status, and cleanup-clean status together so generated/exempt dirty
 state is visible without becoming contradictory closeout text.
 
+Repo state for dashboards and audit review should come from `repoStateLedger`.
+The repo-owned `repo-state --write` command records a stable latest snapshot,
+timestamped history, and `repo_state_snapshot` audit under `.claude-state`.
+Snapshots include files, branches, worktrees, stashes, latest closeout truth,
+audit trail pointers, and `rollbackPolicy`.
+
+`webDashboardSpec` is the iterative dashboard contract: sticky `/closeout` URL,
+auto-refresh, read-only default, historical closeouts, workflow stage/blocker
+views, and symbolic actions only. `rollbackPolicy` documents how undo works:
+prefer Git revert or recovery-branch restoration, preserve evidence before
+cleanup, require recovery commands in mutating audits, and reserve `reset --hard`
+for explicit user requests.
+
 Target push non-fast-forward is a recoverable race: fetch, re-pin, rebuild the
 integration candidate, regenerate quorum if the tuple changed, and retry within
 the configured bounded limit. Never force-push the target automatically.

@@ -29,6 +29,7 @@ from .brokered_closeout import (
     repair_eligibility,
     repo_sweep,
     repo_sweep_tuple,
+    repo_state_snapshot,
     review_tuple_hash,
     start_work_block,
     write_review_surface_unavailable_report,
@@ -93,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = sub.add_parser("audit", help="Print recent durable closeout audits.")
     audit.add_argument("--limit", type=int, default=20)
+
+    repo_state = sub.add_parser("repo-state", help="Print or persist a dashboard-ready repo state snapshot.")
+    repo_state.add_argument("--write", action="store_true", help="Write latest/history snapshots and a repo_state_snapshot audit.")
+    repo_state.add_argument("--work-block-id")
 
     sweep = sub.add_parser("sweep", help="Plan or apply whole-repo branch/worktree/stash cleanup.")
     sweep.add_argument("--apply", action="store_true")
@@ -211,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
             result = quarantine_orphans(repo_root, apply=args.apply)
         elif args.command == "audit":
             result = audit_summary(repo_root, limit=args.limit)
+        elif args.command == "repo-state":
+            result = repo_state_snapshot(repo_root, write=args.write, work_block_id=args.work_block_id)
         elif args.command == "sweep":
             if args.print_tuple:
                 result = repo_sweep_tuple(repo_root)

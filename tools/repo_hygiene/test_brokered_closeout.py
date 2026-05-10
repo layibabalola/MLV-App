@@ -42,6 +42,7 @@ from .brokered_closeout import (
     remediate_retained_candidates,
     repo_sweep,
     repo_sweep_tuple,
+    repo_state_snapshot,
     restart_runtime_services_after_clean_promotion,
     run_bounded_closeout_process,
     run_validations,
@@ -548,6 +549,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("agentRemediationQueue", contract["requiredConfigKeys"])
         self.assertIn("locking", contract["requiredConfigKeys"])
         self.assertIn("autoEligibilityRepair", contract["requiredConfigKeys"])
+        self.assertIn("repoStateLedger", contract["requiredConfigKeys"])
+        self.assertIn("webDashboardSpec", contract["requiredConfigKeys"])
+        self.assertIn("rollbackPolicy", contract["requiredConfigKeys"])
         self.assertIn("foreign_dirty_integrated_branch_prune", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("owned_dirty_checkpoint", config["autoQuorum"]["autonomousActionClasses"])
@@ -592,6 +596,61 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(config["locking"]["maxProcessOutputBytes"], 0)
         self.assertIn("review_quorum_missing", config["locking"]["failureTextPatterns"])
         self.assertGreater(config["autoEligibilityRepair"]["timeoutMs"], 0)
+        self.assertTrue(config["repoStateLedger"]["enabled"])
+        self.assertEqual(config["repoStateLedger"]["latestPath"], ".claude-state/closeout/repo-state/latest.json")
+        self.assertEqual(config["repoStateLedger"]["auditType"], "repo_state_snapshot")
+        self.assertTrue(config["webDashboardSpec"]["enabled"])
+        self.assertEqual(config["webDashboardSpec"]["stickyUrlPath"], "/closeout")
+        self.assertGreater(config["webDashboardSpec"]["autoRefreshMs"], 0)
+        self.assertIn("historical-closeouts", config["webDashboardSpec"]["views"])
+        self.assertTrue(config["rollbackPolicy"]["enabled"])
+        self.assertTrue(config["rollbackPolicy"]["neverUseResetHardWithoutExplicitUserRequest"])
+        self.assertTrue(config["rollbackPolicy"]["requireRecoveryCommandInMutatingAudits"])
+
+    def test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit(self) -> None:
+        repo = self.init_repo(remote=True)
+        (repo / "dashboard-dirty.txt").write_text("dashboard dirty\n", encoding="utf-8")
+
+        snapshot = repo_state_snapshot(repo, write=True, work_block_id="wb-dashboard")
+
+        self.assertEqual(snapshot["artifactKind"], "repoStateSnapshot")
+        self.assertEqual(snapshot["branch"]["currentBranch"], "master")
+        self.assertEqual(snapshot["branch"]["tracking"]["upstream"], "origin/master")
+        self.assertEqual(snapshot["dirty"]["entryCount"], 1)
+        self.assertEqual(snapshot["dirty"]["entries"][0]["path"], "dashboard-dirty.txt")
+        self.assertEqual(snapshot["dashboard"]["stickyUrlPath"], "/closeout")
+        self.assertGreater(snapshot["dashboard"]["autoRefreshMs"], 0)
+        self.assertTrue(snapshot["rollback"]["neverUseResetHardWithoutExplicitUserRequest"])
+        self.assertIn(".claude-state/closeout/manual-prune", snapshot["rollback"]["recoveryEvidenceRoots"])
+        self.assertTrue((repo / snapshot["stateLedger"]["latestPath"]).exists())
+        self.assertTrue((repo / snapshot["stateLedger"]["historyPath"]).exists())
+        self.assertIn("repo_state_snapshot", self.audit_types(repo))
+        audit = json.loads((repo / ".claude-state" / "closeout" / "audits" / "audits.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(audit["payload"]["latestPath"], ".claude-state/closeout/repo-state/latest.json")
+        self.assertEqual(audit["payload"]["dirtyEntryCount"], 1)
+
+    def test_repo_state_dashboard_and_rollback_contract_required(self) -> None:
+        config = load_closeout_config(ROOT)
+        baseline = config["toolingBaseline"]
+        required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
+        agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        claude_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        standard_text = (ROOT / "CLOSEOUT-STANDARD.md").read_text(encoding="utf-8")
+        docs_text = (ROOT / "docs" / "18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8")
+
+        self.assertIn("repoStateLedger", baseline["requiredConfigKeys"])
+        self.assertIn("webDashboardSpec", baseline["requiredConfigKeys"])
+        self.assertIn("rollbackPolicy", baseline["requiredConfigKeys"])
+        self.assertIn("test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit", baseline["requiredTests"])
+        self.assertIn("test_repo_state_dashboard_and_rollback_contract_required", baseline["requiredTests"])
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/work_block_cli.py", "repo-state"), required_symbols)
+        self.assertIn(("AGENTS.md", "repoStateLedger"), required_symbols)
+        self.assertIn(("CLAUDE.md", "rollbackPolicy"), required_symbols)
+        for text in (agents_text, claude_text, standard_text, docs_text):
+            self.assertIn("repoStateLedger", text)
+            self.assertIn("webDashboardSpec", text)
+            self.assertIn("rollbackPolicy", text)
 
     def test_capability_ledger_contains_frozen_row_inventory(self) -> None:
         ledger = json.loads((ROOT / "CLOSEOUT-CAPABILITY-LEDGER.json").read_text(encoding="utf-8"))
