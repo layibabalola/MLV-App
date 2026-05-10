@@ -374,11 +374,11 @@ If the repo is not closed, the agent may report WIP or a blocker, but MUST NOT c
 
 ### Repo State, Dashboard, And Rollback
 
-Repos SHOULD expose a dashboard-ready repo state feed through `repoStateLedger`. The feed MUST live under generated state such as `.claude-state/closeout/repo-state/`, SHOULD have a stable latest snapshot plus timestamped history, and SHOULD include branch/tracking, dirty entries, local branches, worktrees, stashes, closeout audit pointers, latest `closeoutCleanTruth`, and rollback policy.
+Repos SHOULD expose a dashboard-ready repo state feed through `repoStateLedger`. The feed MUST live under generated state such as `.claude-state/closeout/repo-state/`, SHOULD have a stable latest snapshot plus timestamped history, SHOULD declare a schema such as `repo-state-snapshot.v1`, and SHOULD include branch/tracking, dirty entries, local branches, worktrees, stashes, closeout audit pointers, latest `closeoutCleanTruth`, a bounded closeout-history index, and rollback policy.
 
-Future web dashboards SHOULD follow `webDashboardSpec`: sticky local URL, auto-refresh, read-only by default, historical closeout browsing, workflow stage/blocker views, and no separate mutation authority. Dashboard actions remain symbolic requests until repo-owned actors revalidate exact tuples.
+Future web dashboards SHOULD follow `webDashboardSpec`: sticky local URL, SSE with polling fallback, read-only by default, preserved client scroll/focus/detail state across refreshes, historical closeout browsing, repo-map/workflow/blocker/audit/rollback views, and no separate mutation authority. Dashboard actions remain symbolic requests until repo-owned actors revalidate exact tuples.
 
-Repos SHOULD publish `rollbackPolicy`. Rollback SHOULD prefer `git revert`, recovery branches, preserved prune bundles, dirty-split preservation refs, and audited recovery commands. Blind destructive undo such as `reset --hard` MUST require explicit user request and must not be the default rollback strategy.
+Repos SHOULD publish `rollbackPolicy`. Rollback SHOULD prefer `git revert`, recovery branches, path restore from snapshots, preserved prune bundles, dirty-split preservation refs, and audited recovery commands. Rollback mutations SHOULD run in a new work block with explicit user approval, a plan, and a pre-mutation state snapshot. Blind destructive undo such as `reset --hard` or force push MUST require explicit user request and must not be the default rollback strategy.
 
 ### Hooks And Final Utilities
 
