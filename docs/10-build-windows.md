@@ -149,7 +149,7 @@ C:\Qt\6.10.2\mingw_64\bin\windeployqt.exe <path-to-MLVApp.exe> --release --no-tr
 For a repeatable launch with less chance of error, use the helper script:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .claude-state\scripts\run-mlvapp.ps1 -ExePath <path-to-MLVApp.exe> -Arguments '--help'
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .claude-state\scripts\run-mlvapp.ps1 -ExePath <path-to-MLVApp.exe> -Arguments '--help'
 ```
 
 If you changed Qt paths, pass `-QtBin ...` and `-MingwBin ...` to the helper.
