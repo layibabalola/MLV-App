@@ -214,6 +214,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "protectedTargetNoopCloseout": {
             "enabled": True,
         },
+        "unifiedTruthReport": {
+            "enabled": True,
+            "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+            "reportFields": ["rawGit", "policy", "cleanup"],
+        },
         "exemptStatusPatterns": [
             ".claude-state/**",
             ".codex-state/**",
@@ -449,6 +454,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_complete_finalize_enforces_hard_clean_config_without_switch",
             "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
             "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
+            "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
+            "test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state",
+            "test_closeout_clean_truth_contract_required",
             "test_hard_clean_blocks_retained_remote_feature_refs",
             "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
             "test_declared_review_surfaces_write_unavailable_reports",
@@ -489,6 +497,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_dirty_worktree_recovery_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_clean_truth_from_postcondition"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_status"},
@@ -513,6 +522,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "AGENTS.md", "contains": "semantic success authority"},
             {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+            {"path": "AGENTS.md", "contains": "closeoutCleanTruth"},
             {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
             {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
@@ -521,6 +531,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "semantic success authority"},
             {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+            {"path": "CLAUDE.md", "contains": "closeoutCleanTruth"},
             {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
             {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
@@ -534,6 +545,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "closeout.config.json", "contains": "runtimeServices"},
             {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
             {"path": "closeout.config.json", "contains": "adapterHeartbeatSeconds"},
+            {"path": "closeout.config.json", "contains": "unifiedTruthReport"},
             {"path": "closeout.config.json", "contains": "failureTextPatterns"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "remediation-freeze-status"},
@@ -2633,6 +2645,7 @@ def evidence_missing_or_dirty(repo_root: Path, config: Dict[str, Any], work_bloc
 
 
 def evidence_payloads(config: Dict[str, Any], detection: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    truth_config = config.get("hardClean", {}).get("unifiedTruthReport", {})
     base = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "createdAt": utc_now(),
@@ -2642,6 +2655,12 @@ def evidence_payloads(config: Dict[str, Any], detection: Dict[str, Any]) -> Dict
         "targetHead": detection["targetHead"],
         "detectorHash": detection["detectorHash"],
     }
+    if bool(truth_config.get("enabled", True)):
+        base["closeoutCleanTruth"] = {
+            "status": "pending",
+            "authoritativeSource": str(truth_config.get("authoritativeSource") or "repoClosedPostcondition.closeoutCleanTruth"),
+            "reason": "evidence_repair_precedes_repo_closed_postcondition",
+        }
     return {
         "metrics.json": {
             **base,
@@ -4353,6 +4372,65 @@ def repo_closed_artifact_path(repo_root: Path, config: Dict[str, Any], work_bloc
     return closeout_state_root(repo_root, config) / "repo-closed" / ("%s.json" % safe_id)
 
 
+def closeout_clean_truth_from_postcondition(postcondition: Dict[str, Any]) -> Dict[str, Any]:
+    dirty_state = postcondition.get("dirtyState") if isinstance(postcondition.get("dirtyState"), dict) else {}
+    stash_state = postcondition.get("stashState") if isinstance(postcondition.get("stashState"), dict) else {}
+    branch_state = postcondition.get("branchState") if isinstance(postcondition.get("branchState"), dict) else {}
+    worktree_state = postcondition.get("worktreeState") if isinstance(postcondition.get("worktreeState"), dict) else {}
+    runtime_state = postcondition.get("runtimeArtifactState") if isinstance(postcondition.get("runtimeArtifactState"), dict) else {}
+    remote_state = postcondition.get("remoteFeatureState") if isinstance(postcondition.get("remoteFeatureState"), dict) else {}
+    agent_state = postcondition.get("agentRemediationState") if isinstance(postcondition.get("agentRemediationState"), dict) else {}
+    freeze_state = postcondition.get("remediationFreezeState") if isinstance(postcondition.get("remediationFreezeState"), dict) else {}
+    blockers = postcondition.get("blockers") if isinstance(postcondition.get("blockers"), list) else []
+    blocker_kinds = [str(item.get("kind")) for item in blockers if isinstance(item, dict) and item.get("kind")]
+    entries = dirty_state.get("entries") if isinstance(dirty_state.get("entries"), list) else []
+    non_exempt = dirty_state.get("nonExempt") if isinstance(dirty_state.get("nonExempt"), list) else []
+    untracked = dirty_state.get("untrackedNonExempt") if isinstance(dirty_state.get("untrackedNonExempt"), list) else []
+    stashes = stash_state.get("stashes") if isinstance(stash_state.get("stashes"), list) else []
+    stale_branches = branch_state.get("staleTransactionBranches") if isinstance(branch_state.get("staleTransactionBranches"), list) else []
+    stale_worktrees = worktree_state.get("staleManagedWorktrees") if isinstance(worktree_state.get("staleManagedWorktrees"), list) else []
+    orphaned_artifacts = runtime_state.get("orphanedArtifacts") if isinstance(runtime_state.get("orphanedArtifacts"), list) else []
+    remote_features = remote_state.get("retainedRemoteFeatureRefs") if isinstance(remote_state.get("retainedRemoteFeatureRefs"), list) else []
+    agent_blockers = agent_state.get("blockers") if isinstance(agent_state.get("blockers"), list) else []
+    repo_closed = bool(postcondition.get("ok"))
+    return {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "artifactKind": "closeoutCleanTruth",
+        "authoritativeSource": "repoClosedPostcondition",
+        "status": "clean" if repo_closed else "blocked",
+        "repoClosed": repo_closed,
+        "selectedWorkBlockId": postcondition.get("selectedWorkBlockId"),
+        "targetRef": postcondition.get("targetRef"),
+        "rawGit": {
+            "clean": not entries,
+            "statusEntryCount": len(entries),
+            "entries": entries,
+        },
+        "policy": {
+            "clean": repo_closed,
+            "nonExemptDirtyCount": len(non_exempt),
+            "untrackedNonExemptCount": len(untracked),
+            "retainedForeignDirtyAllowed": bool(dirty_state.get("retainedForeignDirtyAllowed")),
+            "retentionAudited": bool(dirty_state.get("retentionAudited")),
+            "exemptStatusPatterns": dirty_state.get("exemptStatusPatterns") if isinstance(dirty_state.get("exemptStatusPatterns"), list) else [],
+            "blockerKinds": blocker_kinds,
+        },
+        "cleanup": {
+            "clean": not blockers,
+            "stashClean": not stashes,
+            "branchClean": not stale_branches,
+            "worktreeClean": not stale_worktrees,
+            "runtimeArtifactClean": not orphaned_artifacts,
+            "remoteFeatureClean": not remote_features,
+            "agentQueueClosed": not agent_blockers,
+            "remediationFreezeInactive": not bool(freeze_state.get("active")),
+            "cleanupAudit": postcondition.get("cleanupAudit") if isinstance(postcondition.get("cleanupAudit"), dict) else {},
+        },
+        "blockers": blockers,
+        "reason": postcondition.get("reason"),
+    }
+
+
 def verify_repo_closed_postcondition(
     repo_root_arg: Path,
     config: Optional[Dict[str, Any]] = None,
@@ -4461,6 +4539,8 @@ def verify_repo_closed_postcondition(
         "blockers": blockers,
         "finalizeResultStatus": (finalize_result or {}).get("status"),
     }
+    if bool(hard_clean.get("unifiedTruthReport", {}).get("enabled", True)):
+        result["closeoutCleanTruth"] = closeout_clean_truth_from_postcondition(result)
     write_json(repo_closed_artifact_path(repo_root, config, work_block_id), result)
     write_audit(repo_root, config, "repo_closed_postcondition", result, work_block_id=work_block_id, outcome="success" if ok else "blocked")
     return result

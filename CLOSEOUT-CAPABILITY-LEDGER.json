@@ -683,7 +683,7 @@
       "verification": {
         "claimBasis": "behavioral-test",
         "verificationLevel": "closed-through-repo-gate",
-        "summary": "Final completion is blocked unless dirty state, branch state, worktrees, stashes, queue state, generated artifacts, and blockers are clean or accounted for."
+        "summary": "Final completion is blocked unless dirty state, branch state, worktrees, stashes, queue state, generated artifacts, blockers, and the unified closeout clean truth are clean or accounted for."
       },
       "evidencePaths": ["AGENTS.md", "tools/repo_hygiene/brokered_closeout.py"],
       "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
@@ -699,7 +699,7 @@
       "relatedCapabilities": ["repo-closed-for-final-response", "final-utility-generated-or-preclean"],
       "blockers": [],
       "smallestNextStep": "Keep hard-clean checks synchronized with any new generated/exempt or queue roots.",
-      "repoSpecificNotes": "Tests cover non-exempt dirty files, protected target dirty state, retained remote refs, and pending agent queue blockers.",
+      "repoSpecificNotes": "Tests cover non-exempt dirty files, protected target dirty state, retained remote refs, pending agent queue blockers, and closeoutCleanTruth raw/policy/cleanup reporting.",
       "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
@@ -719,7 +719,7 @@
       "verification": {
         "claimBasis": "audit-artifact",
         "verificationLevel": "closed-through-repo-gate",
-        "summary": "The repo-owned finalizer reports repo_closed_for_final_response only after the hard-clean postcondition succeeds."
+        "summary": "The repo-owned finalizer reports repo_closed_for_final_response only after the hard-clean postcondition succeeds and exposes closeoutCleanTruth as the single final clean/blocked reporting source."
       },
       "evidencePaths": ["AGENTS.md", "tools/repo_hygiene/brokered_closeout.py"],
       "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
@@ -734,8 +734,8 @@
       "relatedArtifacts": ["CLOSEOUT-STANDARD.md", "CLOSEOUT-IMPLEMENTATION-PROMPT.md"],
       "relatedCapabilities": ["hard-clean-final-gate"],
       "blockers": [],
-      "smallestNextStep": "Keep pre-final bridge checks subordinate to this repo-owned postcondition.",
-      "repoSpecificNotes": "The previous implementation-prompt work block closed clean with this postcondition at head 118bc1cb.",
+      "smallestNextStep": "Keep pre-final bridge checks, handoff summaries, metrics, and cleanup text subordinate to closeoutCleanTruth.",
+      "repoSpecificNotes": "closeoutCleanTruth now reports raw Git, policy-clean, and cleanup-clean status together so generated/exempt dirty state remains visible without contradictory closeout claims.",
       "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
