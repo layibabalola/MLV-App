@@ -330,6 +330,10 @@ The bounded runner MUST account for:
 - expected success or blocker artifacts
 - durable audit for timeout, output cap, killed process tree, and normalized failure
 
+Bounded-runner infrastructure failures MUST use the shared exit-code taxonomy:
+timeout=124, output cap=125, and CPU stall=126. These codes describe the
+runner boundary failure, not the child tool's own domain failure.
+
 A closeout result is authoritative only after the child process exits, descendants are gone or intentionally retained with audit, status and failure text agree, and expected artifacts exist.
 
 Closeout surface adapters that launch a bounded child SHOULD emit a configurable liveness heartbeat to stderr while the child is still running. Heartbeats MUST NOT be written to machine-readable stdout and MUST NOT replace bounded-runner timeout, CPU-stall, output-cap, or postcondition authority.
