@@ -11,6 +11,8 @@ from pathlib import Path
 
 from .brokered_closeout import (
     bounded_closeout_run,
+    bounded_runner_exit_code,
+    bounded_runner_exit_codes,
     agent_remediation_queue_consumer_plan,
     agent_remediation_dirty_state_hash,
     bootstrap_response_broker_manifest,
@@ -753,6 +755,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "timeout", result)
+        self.assertEqual(result["returncode"], bounded_runner_exit_code(config, "timeout"), result)
+        self.assertEqual(result["exitCodePolicy"], bounded_runner_exit_codes(config), result)
         self.assertTrue(result["killedProcessTree"], result)
         descendant_pid = int(pid_path.read_text(encoding="utf-8"))
         for _ in range(30):
@@ -780,7 +784,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "timeout", result)
-        self.assertNotEqual(result["returncode"], 0)
+        self.assertEqual(result["returncode"], bounded_runner_exit_code(config, "timeout"), result)
 
     def test_bounded_runner_caps_oversized_child_output(self) -> None:
         repo = self.init_repo()
@@ -798,10 +802,27 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "output_cap", result)
-        self.assertNotEqual(result["returncode"], 0)
+        self.assertEqual(result["returncode"], bounded_runner_exit_code(config, "output_cap"), result)
         self.assertGreater(result["stdoutBytes"], 4096)
         self.assertLessEqual(len(result["stdout"].encode("utf-8")), 4096)
         self.assertIn("bounded_runner_output_cap", self.audit_types(repo))
+
+    def test_bounded_runner_exit_code_taxonomy_is_contract_required(self) -> None:
+        config = load_closeout_config(ROOT)
+        baseline = config["toolingBaseline"]
+        required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
+        expected = {"timeout": 124, "outputCap": 125, "cpuStall": 126}
+
+        self.assertEqual(config["locking"]["boundedRunnerExitCodes"], expected)
+        self.assertEqual(bounded_runner_exit_codes(config), expected)
+        self.assertEqual(bounded_runner_exit_code(config, "timeout"), 124)
+        self.assertEqual(bounded_runner_exit_code(config, "output_cap"), 125)
+        self.assertEqual(bounded_runner_exit_code(config, "cpu_stall"), 126)
+        self.assertIn("test_bounded_runner_exit_code_taxonomy_is_contract_required", baseline["requiredTests"])
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def bounded_runner_exit_code"), required_symbols)
+        self.assertIn(("closeout.config.json", "boundedRunnerExitCodes"), required_symbols)
+        self.assertIn("timeout=124", (ROOT / "CLOSEOUT-STANDARD.md").read_text(encoding="utf-8"))
+        self.assertIn("output cap=125", (ROOT / "docs" / "18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8"))
 
     def test_bounded_runner_normalizes_known_failure_text_with_zero_exit(self) -> None:
         repo = self.init_repo()
@@ -1049,7 +1070,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "cpu_stall", result)
-        self.assertEqual(result["returncode"], 126, result)
+        self.assertEqual(result["returncode"], bounded_runner_exit_code(config, "cpu_stall"), result)
         self.assertTrue(result["cpuStalled"], result)
         self.assertGreaterEqual(result["cpuWatchdog"]["lastCpuPercent"], 1, result)
         self.assertIn("bounded_runner_cpu_stall", self.audit_types(repo))
@@ -1189,6 +1210,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["processResources"]["cpuWatchdog"]["enabled"])
         self.assertGreater(config["locking"]["adapterHeartbeatSeconds"], 0)
         self.assertLessEqual(config["locking"]["adapterHeartbeatSeconds"], 30)
+        self.assertEqual(config["locking"]["boundedRunnerExitCodes"], {"timeout": 124, "outputCap": 125, "cpuStall": 126})
         self.assertIn("test_validation_commands_are_bounded_and_kill_descendants", baseline["requiredTests"])
         self.assertIn("test_validation_resource_policy_sets_below_normal_priority_and_affinity", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_cpu_watchdog_terminates_hot_silent_child", baseline["requiredTests"])
@@ -1197,6 +1219,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_path_scoped_validation_skips_unmatched_commands", baseline["requiredTests"])
         self.assertIn("test_validation_commands_ignore_failure_words_in_successful_test_names", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
+        self.assertIn("test_bounded_runner_exit_code_taxonomy_is_contract_required", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_trusts_finalize_semantic_success_over_validation_text", baseline["requiredTests"])
         self.assertLessEqual(config["validation"]["timeoutMs"], 120000)
         full_commands = [command for command in config["validation"]["commands"] if command.get("runMode") == "full"]

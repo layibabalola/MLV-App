@@ -467,9 +467,9 @@
       "verification": {
         "claimBasis": "behavioral-test",
         "verificationLevel": "behavior-tested",
-        "summary": "Closeout subprocesses run through a bounded runner with timeout, output cap, failure-text normalization, child-process cleanup, resource controls, adapter heartbeats, and audit evidence."
+        "summary": "Closeout subprocesses run through a bounded runner with timeout, output cap, failure-text normalization, child-process cleanup, resource controls, adapter heartbeats, shared failure exit-code taxonomy, and audit evidence."
       },
-      "evidencePaths": ["AGENTS.md", "tools/repo_hygiene/brokered_closeout.py", "tools/closeout/Invoke-CloseoutCli.ps1"],
+      "evidencePaths": ["AGENTS.md", "CLOSEOUT-STANDARD.md", "tools/repo_hygiene/brokered_closeout.py", "tools/closeout/Invoke-CloseoutCli.ps1"],
       "testPaths": ["tools/repo_hygiene/test_brokered_closeout.py"],
       "actorPaths": ["tools/repo_hygiene/brokered_closeout.py"],
       "adapterPaths": ["tools/closeout/Invoke-CloseoutCli.ps1", "tools/closeout/work-block-complete.ps1"],
@@ -482,9 +482,9 @@
       "relatedArtifacts": ["CLOSEOUT-STANDARD.md"],
       "relatedCapabilities": ["repo-closed-for-final-response", "tooling-drift-detection"],
       "blockers": [],
-      "smallestNextStep": "Keep any new closeout PowerShell adapter behind Invoke-CloseoutCli and its stderr heartbeat contract.",
-      "repoSpecificNotes": "Tests cover hung children, output caps, known failure text with zero exit, finalizer semantic success overriding validation vocabulary, resource controls, adapter heartbeat contract, and orphan cleanup.",
-      "lastVerifiedAt": "2026-05-06T20:35:12-05:00",
+      "smallestNextStep": "Keep any new closeout PowerShell adapter behind Invoke-CloseoutCli, its stderr heartbeat contract, and the timeout=124/output cap=125/CPU stall=126 taxonomy.",
+      "repoSpecificNotes": "Tests cover hung children, output caps, known failure text with zero exit, finalizer semantic success overriding validation vocabulary, resource controls, adapter heartbeat contract, shared boundary exit codes, and orphan cleanup.",
+      "lastVerifiedAt": "2026-05-09T23:15:00-05:00",
       "lastVerifiedBy": "Codex",
       "yesRequires": {
         "documentationOnlyIsSufficient": false,

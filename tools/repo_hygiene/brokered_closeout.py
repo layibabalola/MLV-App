@@ -80,6 +80,16 @@ KNOWN_CLOSEOUT_FAILURE_TEXT = [
     "owned_dirty_blocked",
     "unowned_dirty",
 ]
+BOUNDED_RUNNER_EXIT_CODE_DEFAULTS = {
+    "timeout": 124,
+    "outputCap": 125,
+    "cpuStall": 126,
+}
+BOUNDED_RUNNER_STATUS_EXIT_CODE_KEYS = {
+    "timeout": "timeout",
+    "output_cap": "outputCap",
+    "cpu_stall": "cpuStall",
+}
 
 
 DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
@@ -112,6 +122,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "-m",
                     "unittest",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_timeout_and_output_cap_settings_are_contract_required",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_bounded_runner_exit_code_taxonomy_is_contract_required",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_resource_policy_sets_below_normal_priority_and_affinity",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_bounded_runner_cpu_watchdog_terminates_hot_silent_child",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_full_validation_suite_is_skipped_without_explicit_request",
@@ -248,6 +259,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "repoSweepTimeoutMs": 600000,
         "adapterHeartbeatSeconds": 30,
         "maxProcessOutputBytes": 1048576,
+        "boundedRunnerExitCodes": BOUNDED_RUNNER_EXIT_CODE_DEFAULTS,
         "failureTextPatterns": KNOWN_CLOSEOUT_FAILURE_TEXT,
     },
     "autoEligibilityRepair": {
@@ -447,6 +459,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_path_scoped_validation_skips_unmatched_commands",
             "test_validation_commands_ignore_failure_words_in_successful_test_names",
             "test_timeout_and_output_cap_settings_are_contract_required",
+            "test_bounded_runner_exit_code_taxonomy_is_contract_required",
             "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
             "test_hard_clean_final_response_blocks_remaining_stash",
@@ -484,6 +497,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_applies"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_runner_exit_code"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
@@ -521,6 +535,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/closeout/remediate-retained-closeout.ps1", "contains": "remediate-retained"},
             {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "AGENTS.md", "contains": "semantic success authority"},
+            {"path": "AGENTS.md", "contains": "boundedRunnerExitCodes"},
             {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "AGENTS.md", "contains": "closeoutCleanTruth"},
             {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
@@ -530,6 +545,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "semantic success authority"},
+            {"path": "CLAUDE.md", "contains": "boundedRunnerExitCodes"},
             {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
             {"path": "CLAUDE.md", "contains": "closeoutCleanTruth"},
             {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
@@ -545,6 +561,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "closeout.config.json", "contains": "runtimeServices"},
             {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
             {"path": "closeout.config.json", "contains": "adapterHeartbeatSeconds"},
+            {"path": "closeout.config.json", "contains": "boundedRunnerExitCodes"},
             {"path": "closeout.config.json", "contains": "unifiedTruthReport"},
             {"path": "closeout.config.json", "contains": "failureTextPatterns"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
@@ -1495,6 +1512,23 @@ def closeout_max_process_output_bytes(config: Dict[str, Any]) -> int:
     return positive_int(config.get("locking", {}).get("maxProcessOutputBytes"), 1048576)
 
 
+def bounded_runner_exit_codes(config: Dict[str, Any]) -> Dict[str, int]:
+    configured = config.get("locking", {}).get("boundedRunnerExitCodes")
+    if not isinstance(configured, dict):
+        configured = {}
+    return {
+        key: positive_int(configured.get(key), default)
+        for key, default in BOUNDED_RUNNER_EXIT_CODE_DEFAULTS.items()
+    }
+
+
+def bounded_runner_exit_code(config: Dict[str, Any], status: str) -> int:
+    key = BOUNDED_RUNNER_STATUS_EXIT_CODE_KEYS.get(status)
+    if key is None:
+        return 1
+    return bounded_runner_exit_codes(config)[key]
+
+
 def process_affinity_mask(cores: Any) -> Optional[int]:
     requested = positive_int(cores, 0)
     if requested <= 0:
@@ -1873,11 +1907,11 @@ def normalize_closeout_child_status(
         if closeout_command_requires_blocker_artifact(args, child_json) and not closeout_blocker_artifact_exists(repo_root, config):
             normalized_reasons.append("missing_blocker_artifact")
     if result.get("timedOut"):
-        return {"status": "timeout", "returncode": 124, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
+        return {"status": "timeout", "returncode": bounded_runner_exit_code(config, "timeout"), "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
     if result.get("outputCapped"):
-        return {"status": "output_cap", "returncode": 125, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
+        return {"status": "output_cap", "returncode": bounded_runner_exit_code(config, "output_cap"), "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
     if result.get("cpuStalled"):
-        return {"status": "cpu_stall", "returncode": 126, "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
+        return {"status": "cpu_stall", "returncode": bounded_runner_exit_code(config, "cpu_stall"), "matchedFailurePatterns": matched, "ignoredFailurePatterns": ignored_matched, "normalizedFailure": False, "normalizedReasons": []}
     if original_returncode == 0 and normalized_reasons:
         return {
             "status": "normalized_failure",
@@ -2090,12 +2124,8 @@ def run_bounded_closeout_process(
     stdout = bytes(state["stdout"]).decode("utf-8", errors="replace")
     stderr = bytes(state["stderr"]).decode("utf-8", errors="replace")
     raw_returncode = process.returncode
-    if reason == "timeout":
-        raw_returncode = 124
-    elif reason == "output_cap":
-        raw_returncode = 125
-    elif reason == "cpu_stall":
-        raw_returncode = 126
+    if reason in BOUNDED_RUNNER_STATUS_EXIT_CODE_KEYS:
+        raw_returncode = bounded_runner_exit_code(config, reason)
     elif raw_returncode is None:
         raw_returncode = 1
     base_result: Dict[str, Any] = {
@@ -2109,6 +2139,7 @@ def run_bounded_closeout_process(
         "completedAt": utc_now(),
         "timeoutMs": timeout_ms,
         "maxOutputBytes": max_output_bytes,
+        "exitCodePolicy": bounded_runner_exit_codes(config),
         "stdout": stdout,
         "stderr": stderr,
         "stdoutBytes": int(state["stdoutBytes"]),
