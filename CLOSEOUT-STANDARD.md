@@ -364,6 +364,8 @@ The hard-clean final gate MUST run after repo-modifying work and MUST be authori
 - retained blockers
 - cleanup audit
 
+Repo closeout reporting MUST derive its final clean/blocked wording from the same postcondition. The canonical summary field is `repoClosedPostcondition.closeoutCleanTruth`, which MUST show raw Git status, policy-clean status, and cleanup-clean status together when those signals differ.
+
 If the repo is not closed, the agent may report WIP or a blocker, but MUST NOT claim final closeout completion.
 
 ### Hooks And Final Utilities
