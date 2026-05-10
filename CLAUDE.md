@@ -189,10 +189,12 @@ validation/test affinity caps, wall-clock timeout, process-tree termination,
 stdout/stderr output caps, CPU-stall watchdog termination for hot children with
 no output/progress, fail-closed status normalization, and durable audit for
 timeout, output-cap breach, CPU stall, killed process tree, and known failure
-text. PowerShell closeout adapters must emit a configurable stderr heartbeat
-while their bounded child is still running, without polluting machine-readable
-stdout. Interactive closeout should run a short smoke validation by default;
-full closeout validation suites must be opt-in through the configured
+text. Bounded-runner infrastructure failures use the shared
+`boundedRunnerExitCodes` taxonomy: timeout=124, output cap=125, and CPU
+stall=126. PowerShell closeout adapters must emit a configurable stderr
+heartbeat while their bounded child is still running, without polluting
+machine-readable stdout. Interactive closeout should run a short smoke validation
+by default; full closeout validation suites must be opt-in through the configured
 full-suite switch. A closeout result is authoritative only after the child exits,
 descendants are gone or intentionally retained with audit, exit/status and
 failure text agree, and expected success or blocker artifacts exist.
