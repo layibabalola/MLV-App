@@ -54,6 +54,7 @@ from .brokered_closeout import (
     stop_runtime_services_before_promotion,
     verify_repo_closed_postcondition,
     verify_prune_recovery_artifact,
+    write_audit,
     write_review_surface_unavailable_report,
 )
 from .core import HygieneError
@@ -597,29 +598,69 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("review_quorum_missing", config["locking"]["failureTextPatterns"])
         self.assertGreater(config["autoEligibilityRepair"]["timeoutMs"], 0)
         self.assertTrue(config["repoStateLedger"]["enabled"])
+        self.assertEqual(config["repoStateLedger"]["artifactSchema"], "repo-state-snapshot.v1")
         self.assertEqual(config["repoStateLedger"]["latestPath"], ".claude-state/closeout/repo-state/latest.json")
         self.assertEqual(config["repoStateLedger"]["auditType"], "repo_state_snapshot")
+        self.assertIn("closeoutHistory", config["repoStateLedger"]["include"])
+        self.assertGreater(config["repoStateLedger"]["closeoutHistoryLimit"], 0)
         self.assertTrue(config["webDashboardSpec"]["enabled"])
+        self.assertEqual(config["webDashboardSpec"]["localUrl"], "http://127.0.0.1:8765/closeout")
         self.assertEqual(config["webDashboardSpec"]["stickyUrlPath"], "/closeout")
+        self.assertEqual(config["webDashboardSpec"]["refreshTransport"], "sse-with-polling-fallback")
         self.assertGreater(config["webDashboardSpec"]["autoRefreshMs"], 0)
+        self.assertTrue(config["webDashboardSpec"]["preserveClientStateAcrossRefresh"])
+        self.assertEqual(config["webDashboardSpec"]["mutationModel"], "symbolic-action-request-only")
         self.assertIn("historical-closeouts", config["webDashboardSpec"]["views"])
+        self.assertIn("repo-map", config["webDashboardSpec"]["primaryPanels"])
         self.assertTrue(config["rollbackPolicy"]["enabled"])
+        self.assertIn("git-revert", config["rollbackPolicy"]["allowedStrategies"])
+        self.assertTrue(config["rollbackPolicy"]["startNewWorkBlockForRollback"])
+        self.assertTrue(config["rollbackPolicy"]["requireUserApprovalForRollback"])
         self.assertTrue(config["rollbackPolicy"]["neverUseResetHardWithoutExplicitUserRequest"])
         self.assertTrue(config["rollbackPolicy"]["requireRecoveryCommandInMutatingAudits"])
+        self.assertTrue(config["rollbackPolicy"]["writeRollbackPlanBeforeMutation"])
+        self.assertIn("reset-hard", config["rollbackPolicy"]["disallowedDefaultActions"])
 
     def test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit(self) -> None:
         repo = self.init_repo(remote=True)
         (repo / "dashboard-dirty.txt").write_text("dashboard dirty\n", encoding="utf-8")
+        write_audit(
+            repo,
+            load_closeout_config(repo),
+            "repo_closed_postcondition",
+            {
+                "ok": True,
+                "status": "success",
+                "closeoutCleanTruth": {
+                    "artifactKind": "closeoutCleanTruth",
+                    "status": "clean",
+                    "authority": "repoClosedPostcondition",
+                },
+            },
+            work_block_id="wb-dashboard",
+            outcome="success",
+        )
 
         snapshot = repo_state_snapshot(repo, write=True, work_block_id="wb-dashboard")
 
+        self.assertEqual(snapshot["artifactSchema"], "repo-state-snapshot.v1")
         self.assertEqual(snapshot["artifactKind"], "repoStateSnapshot")
         self.assertEqual(snapshot["branch"]["currentBranch"], "master")
         self.assertEqual(snapshot["branch"]["tracking"]["upstream"], "origin/master")
         self.assertEqual(snapshot["dirty"]["entryCount"], 1)
         self.assertEqual(snapshot["dirty"]["entries"][0]["path"], "dashboard-dirty.txt")
+        self.assertEqual(snapshot["closeout"]["history"]["workBlockCount"], 1)
+        self.assertEqual(snapshot["closeout"]["history"]["recentWorkBlocks"][0]["workBlockId"], "wb-dashboard")
+        self.assertTrue(snapshot["closeout"]["history"]["recentWorkBlocks"][0]["repoClosedOk"])
+        self.assertEqual(snapshot["closeout"]["history"]["recentWorkBlocks"][0]["latestCloseoutCleanTruth"]["status"], "clean")
+        self.assertEqual(snapshot["dashboard"]["localUrl"], "http://127.0.0.1:8765/closeout")
         self.assertEqual(snapshot["dashboard"]["stickyUrlPath"], "/closeout")
+        self.assertEqual(snapshot["dashboard"]["refreshTransport"], "sse-with-polling-fallback")
         self.assertGreater(snapshot["dashboard"]["autoRefreshMs"], 0)
+        self.assertEqual(snapshot["dashboard"]["mutationModel"], "symbolic-action-request-only")
+        self.assertIn("audit-timeline", snapshot["dashboard"]["primaryPanels"])
+        self.assertIn("path-restore-from-snapshot", snapshot["rollback"]["allowedStrategies"])
+        self.assertTrue(snapshot["rollback"]["requireUserApprovalForRollback"])
         self.assertTrue(snapshot["rollback"]["neverUseResetHardWithoutExplicitUserRequest"])
         self.assertIn(".claude-state/closeout/manual-prune", snapshot["rollback"]["recoveryEvidenceRoots"])
         self.assertTrue((repo / snapshot["stateLedger"]["latestPath"]).exists())
@@ -637,6 +678,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         claude_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         standard_text = (ROOT / "CLOSEOUT-STANDARD.md").read_text(encoding="utf-8")
         docs_text = (ROOT / "docs" / "18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8")
+        dashboard_spec_text = (ROOT / "docs" / "19-closeout-dashboard-spec.md").read_text(encoding="utf-8")
 
         self.assertIn("repoStateLedger", baseline["requiredConfigKeys"])
         self.assertIn("webDashboardSpec", baseline["requiredConfigKeys"])
@@ -651,6 +693,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
             self.assertIn("repoStateLedger", text)
             self.assertIn("webDashboardSpec", text)
             self.assertIn("rollbackPolicy", text)
+        self.assertIn("repo-state-snapshot.v1", dashboard_spec_text)
+        self.assertIn("symbolic-action-request-only", dashboard_spec_text)
+        self.assertIn("http://127.0.0.1:8765/closeout", dashboard_spec_text)
 
     def test_capability_ledger_contains_frozen_row_inventory(self) -> None:
         ledger = json.loads((ROOT / "CLOSEOUT-CAPABILITY-LEDGER.json").read_text(encoding="utf-8"))

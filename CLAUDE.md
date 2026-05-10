@@ -219,17 +219,24 @@ final claims.
 Repo state for dashboard and audit consumers is recorded through
 `repoStateLedger`. Running `tools\repo_hygiene\work_block_cli.py repo-state
 --write` writes `.claude-state/closeout/repo-state/latest.json`, a timestamped
-history snapshot, and a `repo_state_snapshot` audit containing branch/tracking,
-dirty entries, local branches, worktrees, stashes, latest closeout
-audit/truth pointers, and `rollbackPolicy`. The future `webDashboardSpec`
-surface should auto-refresh a sticky `/closeout` URL from that feed and the
-closeout audits instead of creating a separate state authority.
+history snapshot, and a `repo_state_snapshot` audit. The snapshot uses
+`repo-state-snapshot.v1` and contains branch/tracking, dirty entries, local
+branches, worktrees, stashes, latest closeout audit/truth pointers, a bounded
+closeout-history index, and `rollbackPolicy`. The future `webDashboardSpec`
+surface should auto-refresh `http://127.0.0.1:8765/closeout` from that feed and
+the closeout audits instead of creating a separate state authority.
+`webDashboardSpec` is read-only by default and
+`symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
+preserved scroll/focus/detail state across refresh, and repo-map, workflow,
+blocker, audit, rollback, and historical closeout views.
 Rollback is handled by repo-owned evidence, not by blind cleanup. `rollbackPolicy`
-prefers Git revert or recovery-branch restoration, requires a repo-state
-snapshot before mutation, requires recovery commands in mutating audits, and
-forbids `reset --hard` unless the user explicitly asks for it. Committed Git
-changes are usually highly recoverable; branch/worktree cleanup depends on
-preserved evidence; uncommitted foreign dirty paths are manual.
+prefers Git revert, recovery-branch restoration, path restore from snapshot, or
+preservation-ref promotion; requires a new work block, user approval, a
+repo-state snapshot before mutation, a rollback plan, and recovery commands in
+mutating audits; and forbids `reset --hard` or force push unless the user
+explicitly asks for it. Committed Git changes are usually highly recoverable;
+branch/worktree cleanup depends on preserved evidence; uncommitted foreign dirty
+paths are manual.
 Protected target closeout is a no-op only when
 `hardClean.protectedTargetNoopCloseout.enabled=true`, the current branch is
 protected, no explicit workBlockId was supplied, and hard-clean passes. It writes
