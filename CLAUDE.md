@@ -235,6 +235,14 @@ rows on every poll.
 preserved scroll/focus/selection/expanded/history-filter state across refresh,
 and repo-map, workflow, blocker, audit, rollback, and historical closeout views.
 `latest.json` is a mutable display feed, not rollback evidence.
+The local helper is `tools\closeout\start-closeout-dashboard.ps1`. It serves
+`http://127.0.0.1:8765/closeout`, reuses a healthy same-repo process, and fails
+closed if the port belongs to another repo. Required endpoints are
+`/api/closeout/repo-state/latest`,
+`/api/closeout/repo-state/history-index`,
+`/api/closeout/repo-state/history/{snapshotId}`, and
+`/api/closeout/actions`; `/api/closeout/actions` reports `serverProcessId`,
+repo ownership, symbolic actions, and rollback non-actionability.
 Rollback is handled by repo-owned evidence, not by blind cleanup. `rollbackPolicy`
 prefers Git revert, recovery-branch restoration, path restore from snapshot, or
 preservation-ref promotion; requires a new work block, user approval, a

@@ -57,6 +57,13 @@ from .brokered_closeout import (
     write_audit,
     write_review_surface_unavailable_report,
 )
+from .closeout_dashboard import (
+    dashboard_actions_payload,
+    dashboard_html,
+    history_index_payload,
+    history_snapshot_payload,
+    latest_repo_state_payload,
+)
 from .core import HygieneError
 
 
@@ -617,6 +624,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("selectedWorkBlockId", config["webDashboardSpec"]["preservedClientStateKeys"])
         self.assertEqual(config["webDashboardSpec"]["feedAuthority"], "latest-json-is-display-feed-only")
         self.assertEqual(config["webDashboardSpec"]["mutationModel"], "symbolic-action-request-only")
+        self.assertEqual(config["webDashboardSpec"]["duplicateLaunchPolicy"], "reuse-same-repo-fail-foreign-owner")
+        self.assertEqual(config["webDashboardSpec"]["helper"]["scriptPath"], "tools\\closeout\\start-closeout-dashboard.ps1")
+        self.assertEqual(config["webDashboardSpec"]["helper"]["serverProcessIdSource"], "/api/closeout/actions")
+        self.assertEqual(config["webDashboardSpec"]["endpoints"]["page"], "/closeout")
+        self.assertEqual(config["webDashboardSpec"]["endpoints"]["actions"], "/api/closeout/actions")
         self.assertIn("historical-closeouts", config["webDashboardSpec"]["views"])
         self.assertIn("repo-map", config["webDashboardSpec"]["primaryPanels"])
         self.assertTrue(config["rollbackPolicy"]["enabled"])
@@ -633,6 +645,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["rollbackPolicy"]["requireImmutableSourceSnapshotForRollback"])
         self.assertIn("sourceSnapshotPath", config["rollbackPolicy"]["requiredManifestFields"])
         self.assertIn("reset-hard", config["rollbackPolicy"]["disallowedDefaultActions"])
+        self.assertIn("delete-evidence", config["rollbackPolicy"]["disallowedDefaultActions"])
 
     def test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit(self) -> None:
         repo = self.init_repo(remote=True)
@@ -678,6 +691,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(snapshot["dashboard"]["mutationModel"], "symbolic-action-request-only")
         self.assertIn("selectedWorkBlockId", snapshot["dashboard"]["preservedClientStateKeys"])
         self.assertEqual(snapshot["dashboard"]["feedAuthority"], "latest-json-is-display-feed-only")
+        self.assertEqual(snapshot["dashboard"]["duplicateLaunchPolicy"], "reuse-same-repo-fail-foreign-owner")
+        self.assertEqual(snapshot["dashboard"]["helper"]["scriptPath"], "tools\\closeout\\start-closeout-dashboard.ps1")
+        self.assertEqual(snapshot["dashboard"]["endpoints"]["latest"], "/api/closeout/repo-state/latest")
         self.assertIn("audit-timeline", snapshot["dashboard"]["primaryPanels"])
         self.assertIn("path-restore-from-snapshot", snapshot["rollback"]["allowedStrategies"])
         self.assertTrue(snapshot["rollback"]["requireUserApprovalForRollback"])
@@ -747,6 +763,57 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("sourceSnapshotPath", readiness["requiredManifestFields"])
         self.assertNotEqual(persisted["stateLedger"]["latestPath"], readiness["sourceSnapshotPath"])
 
+    def test_closeout_dashboard_actions_are_read_only_and_owned(self) -> None:
+        repo = self.init_repo(remote=True)
+
+        latest = latest_repo_state_payload(repo)
+        history = history_index_payload(repo)
+        actions = dashboard_actions_payload(repo, server_process_id=1234)
+
+        self.assertEqual(latest["stateLedger"]["writeMode"], "latest-only")
+        self.assertEqual(history["schema"], "closeout-history-index.v1")
+        self.assertEqual(actions["schema"], "closeout-dashboard-actions.v1")
+        self.assertEqual(actions["status"], "ready")
+        self.assertEqual(actions["serverProcessId"], 1234)
+        self.assertTrue(os.path.samefile(actions["repoRoot"], repo))
+        self.assertEqual(actions["dashboard"]["stickyUrlPath"], "/closeout")
+        self.assertEqual(actions["dashboard"]["mutationModel"], "symbolic-action-request-only")
+        self.assertEqual(actions["dashboard"]["duplicateLaunchPolicy"], "reuse-same-repo-fail-foreign-owner")
+        self.assertEqual(actions["helper"]["scriptPath"], "tools\\closeout\\start-closeout-dashboard.ps1")
+        self.assertEqual(actions["helper"]["serverProcessIdSource"], "/api/closeout/actions")
+        self.assertEqual(actions["endpoints"]["page"], "/closeout")
+        self.assertEqual(actions["endpoints"]["latest"], "/api/closeout/repo-state/latest")
+        self.assertIn("delete-evidence", actions["forbiddenActions"])
+        by_id = {item["id"]: item for item in actions["symbolicActions"]}
+        self.assertEqual(by_id["refresh_repo_state"]["actionability"], "generated-feed-only")
+        self.assertFalse(by_id["refresh_repo_state"]["writesHistory"])
+        self.assertEqual(by_id["request_rollback"]["actionability"], "read-only-no-actor")
+        self.assertEqual(by_id["request_rollback"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
+
+    def test_closeout_dashboard_history_snapshot_rejects_path_escape(self) -> None:
+        repo = self.init_repo(remote=True)
+        snapshot = repo_state_snapshot(repo, write=True, work_block_id="wb-dashboard")
+        history_id = Path(snapshot["stateLedger"]["historyPath"]).name
+
+        served = history_snapshot_payload(repo, history_id)
+
+        self.assertEqual(served["stateLedger"]["servedHistorySnapshotId"], history_id)
+        self.assertEqual(served["artifactSchema"], "repo-state-snapshot.v1")
+        with self.assertRaises(HygieneError):
+            history_snapshot_payload(repo, "../closeout.config")
+        with self.assertRaises(HygieneError):
+            history_snapshot_payload(repo, "%2e%2e%2fcloseout.config")
+
+    def test_closeout_dashboard_page_uses_sse_with_polling_fallback(self) -> None:
+        repo = self.init_repo(remote=True)
+        page = dashboard_html(load_closeout_config(repo))
+
+        self.assertIn("new EventSource", page)
+        self.assertIn('source.addEventListener("repo-state"', page)
+        self.assertIn("startPolling", page)
+        self.assertIn("window.setInterval", page)
+        self.assertIn("/api/closeout/events", page)
+
     def test_repo_state_dashboard_and_rollback_contract_required(self) -> None:
         config = load_closeout_config(ROOT)
         baseline = config["toolingBaseline"]
@@ -764,23 +831,35 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_repo_state_dashboard_and_rollback_contract_required", baseline["requiredTests"])
         self.assertIn("test_repo_state_latest_only_refresh_updates_feed_without_audit_noise", baseline["requiredTests"])
         self.assertIn("test_repo_state_rollback_readiness_fails_closed_without_actor", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_actions_are_read_only_and_owned", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_history_snapshot_rejects_path_escape", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_page_uses_sse_with_polling_fallback", baseline["requiredTests"])
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "closeout-history-index.v1"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "rollback-readiness.v1"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTIONS_SCHEMA"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_actions_payload"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def history_snapshot_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "repo-state"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "--latest-only"), required_symbols)
         self.assertIn(("tools/closeout/write-repo-state.ps1", "LatestOnly"), required_symbols)
+        self.assertIn(("tools/closeout/start-closeout-dashboard.ps1", "serverProcessId"), required_symbols)
+        self.assertIn(("tools/closeout/start-closeout-dashboard.ps1", "reuse"), required_symbols)
         self.assertIn(("AGENTS.md", "repoStateLedger"), required_symbols)
         self.assertIn(("CLAUDE.md", "rollbackPolicy"), required_symbols)
         for text in (agents_text, claude_text, standard_text, docs_text):
             self.assertIn("repoStateLedger", text)
             self.assertIn("webDashboardSpec", text)
             self.assertIn("rollbackPolicy", text)
+            self.assertIn("start-closeout-dashboard.ps1", text)
+            self.assertIn("/api/closeout/actions", text)
         self.assertIn("repo-state-snapshot.v1", dashboard_spec_text)
         self.assertIn("closeout-history-index.v1", dashboard_spec_text)
         self.assertIn("rollback-readiness.v1", dashboard_spec_text)
         self.assertIn("symbolic-action-request-only", dashboard_spec_text)
         self.assertIn("write-repo-state.ps1", dashboard_spec_text)
+        self.assertIn("start-closeout-dashboard.ps1", dashboard_spec_text)
+        self.assertIn("/api/closeout/repo-state/latest", dashboard_spec_text)
         self.assertIn("http://127.0.0.1:8765/closeout", dashboard_spec_text)
 
     def test_capability_ledger_contains_frozen_row_inventory(self) -> None:
@@ -1153,7 +1232,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             repo,
             {
                 "validation": {
-                    "timeoutMs": 500,
+                    "timeoutMs": 2500,
                     "maxOutputBytes": 8192,
                     "commands": [
                         {
