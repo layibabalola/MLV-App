@@ -267,18 +267,24 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     },
     "repoStateLedger": {
         "enabled": True,
+        "artifactSchema": "repo-state-snapshot.v1",
         "artifactKind": "repoStateSnapshot",
         "auditType": "repo_state_snapshot",
         "latestPath": ".claude-state/closeout/repo-state/latest.json",
         "historyRoot": ".claude-state/closeout/repo-state/history",
         "historyRetentionDays": 90,
-        "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "rollback"],
+        "closeoutHistoryLimit": 25,
+        "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"],
     },
     "webDashboardSpec": {
         "enabled": True,
+        "localUrl": "http://127.0.0.1:8765/closeout",
         "stickyUrlPath": "/closeout",
+        "refreshTransport": "sse-with-polling-fallback",
         "autoRefreshMs": 5000,
         "readOnlyByDefault": True,
+        "preserveClientStateAcrossRefresh": True,
+        "mutationModel": "symbolic-action-request-only",
         "dataSources": [
             "repoStateLedger.latestPath",
             "repoClosedPostcondition.closeoutCleanTruth",
@@ -287,13 +293,19 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "repoSweepCandidateReports",
         ],
         "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"],
+        "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "audit-timeline", "rollback-readiness"],
     },
     "rollbackPolicy": {
         "enabled": True,
         "preferredStrategy": "git-revert-or-recovery-branch",
+        "allowedStrategies": ["git-revert", "recovery-branch-restore", "preservation-ref-promote", "path-restore-from-snapshot"],
+        "startNewWorkBlockForRollback": True,
+        "requireUserApprovalForRollback": True,
         "neverUseResetHardWithoutExplicitUserRequest": True,
         "requireRepoStateSnapshotBeforeMutation": True,
         "requireRecoveryCommandInMutatingAudits": True,
+        "writeRollbackPlanBeforeMutation": True,
+        "disallowedDefaultActions": ["reset-hard", "force-push"],
         "recoveryEvidenceRoots": [
             ".claude-state/closeout/manual-prune",
             ".claude-state/closeout/dirty-splits",
@@ -6042,6 +6054,48 @@ def latest_closeout_audit_state(rows: Sequence[Dict[str, Any]], *, limit: int = 
     }
 
 
+def closeout_history_state(rows: Sequence[Dict[str, Any]], *, limit: int = 25) -> Dict[str, Any]:
+    work_blocks: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        work_block_id = row.get("workBlockId")
+        if not work_block_id:
+            continue
+        key = str(work_block_id)
+        entry = work_blocks.setdefault(
+            key,
+            {
+                "workBlockId": key,
+                "firstSeenAt": row.get("createdAt"),
+                "latestSeenAt": row.get("createdAt"),
+                "auditCount": 0,
+                "latestAuditType": None,
+                "latestOutcome": None,
+                "latestAuditHash": None,
+                "latestRepoClosedAuditHash": None,
+                "repoClosedOk": None,
+                "latestCloseoutCleanTruth": None,
+            },
+        )
+        entry["auditCount"] = int(entry["auditCount"]) + 1
+        entry["latestSeenAt"] = row.get("createdAt")
+        entry["latestAuditType"] = row.get("auditType")
+        entry["latestOutcome"] = row.get("outcome")
+        entry["latestAuditHash"] = row.get("auditHash")
+        if row.get("auditType") == "repo_closed_postcondition":
+            payload = row.get("payload", {})
+            if isinstance(payload, dict):
+                entry["latestRepoClosedAuditHash"] = row.get("auditHash")
+                entry["repoClosedOk"] = payload.get("ok")
+                truth = payload.get("closeoutCleanTruth")
+                entry["latestCloseoutCleanTruth"] = truth if isinstance(truth, dict) else None
+    recent = list(reversed(list(work_blocks.values())))
+    return {
+        "workBlockCount": len(work_blocks),
+        "recentWorkBlocks": recent[:limit],
+        "limit": limit,
+    }
+
+
 def repo_state_snapshot(
     repo_root_arg: Path,
     *,
@@ -6056,11 +6110,13 @@ def repo_state_snapshot(
     audit_log_rel = normalize_rel(str((audit_root(repo_root, config) / "audits.jsonl").relative_to(repo_root)))
     audit_rows = audit_entries(repo_root, config)
     state_audits = latest_closeout_audit_state(audit_rows)
+    closeout_history = closeout_history_state(audit_rows, limit=int(ledger.get("closeoutHistoryLimit") or 25))
     dirty_entries = parse_status_paths(repo_root)
     latest_path = repo_state_path(repo_root, config, "latestPath", ".claude-state/closeout/repo-state/latest.json")
     history_root = repo_state_path(repo_root, config, "historyRoot", ".claude-state/closeout/repo-state/history")
     snapshot = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
+        "artifactSchema": str(ledger.get("artifactSchema") or "repo-state-snapshot.v1"),
         "artifactKind": str(ledger.get("artifactKind") or "repoStateSnapshot"),
         "status": "success",
         "capturedAt": utc_now(),
@@ -6086,21 +6142,32 @@ def repo_state_snapshot(
             },
             "latestRepoClosedAuditHash": state_audits["latestRepoClosedAuditHash"],
             "latestCloseoutCleanTruth": state_audits["latestCloseoutCleanTruth"],
+            "history": closeout_history,
         },
         "dashboard": {
             "enabled": bool(dashboard.get("enabled", True)),
+            "localUrl": str(dashboard.get("localUrl") or "http://127.0.0.1:8765/closeout"),
             "stickyUrlPath": str(dashboard.get("stickyUrlPath") or "/closeout"),
+            "refreshTransport": str(dashboard.get("refreshTransport") or "sse-with-polling-fallback"),
             "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
             "readOnlyByDefault": bool(dashboard.get("readOnlyByDefault", True)),
+            "preserveClientStateAcrossRefresh": bool(dashboard.get("preserveClientStateAcrossRefresh", True)),
+            "mutationModel": str(dashboard.get("mutationModel") or "symbolic-action-request-only"),
             "dataSources": list(dashboard.get("dataSources") or []),
             "views": list(dashboard.get("views") or []),
+            "primaryPanels": list(dashboard.get("primaryPanels") or []),
         },
         "rollback": {
             "enabled": bool(rollback.get("enabled", True)),
             "preferredStrategy": str(rollback.get("preferredStrategy") or "git-revert-or-recovery-branch"),
+            "allowedStrategies": list(rollback.get("allowedStrategies") or []),
+            "startNewWorkBlockForRollback": bool(rollback.get("startNewWorkBlockForRollback", True)),
+            "requireUserApprovalForRollback": bool(rollback.get("requireUserApprovalForRollback", True)),
             "requireRepoStateSnapshotBeforeMutation": bool(rollback.get("requireRepoStateSnapshotBeforeMutation", True)),
             "requireRecoveryCommandInMutatingAudits": bool(rollback.get("requireRecoveryCommandInMutatingAudits", True)),
             "neverUseResetHardWithoutExplicitUserRequest": bool(rollback.get("neverUseResetHardWithoutExplicitUserRequest", True)),
+            "writeRollbackPlanBeforeMutation": bool(rollback.get("writeRollbackPlanBeforeMutation", True)),
+            "disallowedDefaultActions": list(rollback.get("disallowedDefaultActions") or []),
             "recoveryEvidenceRoots": list(rollback.get("recoveryEvidenceRoots") or []),
             "userFacingFeasibility": str(rollback.get("userFacingFeasibility") or ""),
         },
