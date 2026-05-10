@@ -265,6 +265,42 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     "autoEligibilityRepair": {
         "timeoutMs": 300000,
     },
+    "repoStateLedger": {
+        "enabled": True,
+        "artifactKind": "repoStateSnapshot",
+        "auditType": "repo_state_snapshot",
+        "latestPath": ".claude-state/closeout/repo-state/latest.json",
+        "historyRoot": ".claude-state/closeout/repo-state/history",
+        "historyRetentionDays": 90,
+        "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "rollback"],
+    },
+    "webDashboardSpec": {
+        "enabled": True,
+        "stickyUrlPath": "/closeout",
+        "autoRefreshMs": 5000,
+        "readOnlyByDefault": True,
+        "dataSources": [
+            "repoStateLedger.latestPath",
+            "repoClosedPostcondition.closeoutCleanTruth",
+            "closeoutAudits",
+            "workBlockManifests",
+            "repoSweepCandidateReports",
+        ],
+        "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"],
+    },
+    "rollbackPolicy": {
+        "enabled": True,
+        "preferredStrategy": "git-revert-or-recovery-branch",
+        "neverUseResetHardWithoutExplicitUserRequest": True,
+        "requireRepoStateSnapshotBeforeMutation": True,
+        "requireRecoveryCommandInMutatingAudits": True,
+        "recoveryEvidenceRoots": [
+            ".claude-state/closeout/manual-prune",
+            ".claude-state/closeout/dirty-splits",
+            ".closeout-evidence",
+        ],
+        "userFacingFeasibility": "high for committed Git changes; medium for branch/worktree cleanup with recovery evidence; manual for uncommitted foreign dirty paths",
+    },
     "closeoutAddendumPersistence": {
         "enabled": True,
         "sameTurnRequired": True,
@@ -353,7 +389,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
+        "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair", "repoStateLedger", "webDashboardSpec", "rollbackPolicy"],
         "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
@@ -460,6 +496,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_validation_commands_ignore_failure_words_in_successful_test_names",
             "test_timeout_and_output_cap_settings_are_contract_required",
             "test_bounded_runner_exit_code_taxonomy_is_contract_required",
+            "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
+            "test_repo_state_dashboard_and_rollback_contract_required",
             "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
             "test_hard_clean_final_response_blocks_remaining_stash",
@@ -498,6 +536,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_runner_exit_code"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
@@ -520,6 +559,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dirty_state_remediation_triage"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_review_surface_unavailable_report"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "repo-state"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--mark-surface-unavailable"},
             {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
@@ -543,6 +583,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
             {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
+            {"path": "AGENTS.md", "contains": "repoStateLedger"},
+            {"path": "AGENTS.md", "contains": "rollbackPolicy"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "semantic success authority"},
             {"path": "CLAUDE.md", "contains": "boundedRunnerExitCodes"},
@@ -553,6 +595,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
             {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
+            {"path": "CLAUDE.md", "contains": "repoStateLedger"},
+            {"path": "CLAUDE.md", "contains": "rollbackPolicy"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
@@ -564,6 +608,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "closeout.config.json", "contains": "boundedRunnerExitCodes"},
             {"path": "closeout.config.json", "contains": "unifiedTruthReport"},
             {"path": "closeout.config.json", "contains": "failureTextPatterns"},
+            {"path": "closeout.config.json", "contains": "repoStateLedger"},
+            {"path": "closeout.config.json", "contains": "webDashboardSpec"},
+            {"path": "closeout.config.json", "contains": "rollbackPolicy"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "remediation-freeze-status"},
             {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
@@ -5889,6 +5936,211 @@ def stash_rows(repo_root: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def worktree_rows(repo_root: Path) -> List[Dict[str, Any]]:
+    result = run_git(repo_root, ["worktree", "list", "--porcelain"])
+    if result.returncode != 0:
+        return []
+    rows: List[Dict[str, Any]] = []
+    current: Dict[str, Any] = {}
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            rows.append(current)
+            current = {}
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            flush()
+            continue
+        key, _, value = line.partition(" ")
+        if key == "worktree":
+            flush()
+            current = {"path": value}
+        elif key == "HEAD":
+            current["head"] = value
+        elif key == "branch":
+            current["branch"] = value.removeprefix("refs/heads/")
+        elif key == "detached":
+            current["detached"] = True
+        elif key == "bare":
+            current["bare"] = True
+        elif key == "locked":
+            current["locked"] = value or True
+        elif key == "prunable":
+            current["prunable"] = value or True
+    flush()
+    return rows
+
+
+def repo_state_ledger_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    value = config.get("repoStateLedger", {})
+    return value if isinstance(value, dict) else {}
+
+
+def repo_state_dashboard_spec(config: Dict[str, Any]) -> Dict[str, Any]:
+    value = config.get("webDashboardSpec", {})
+    return value if isinstance(value, dict) else {}
+
+
+def rollback_policy(config: Dict[str, Any]) -> Dict[str, Any]:
+    value = config.get("rollbackPolicy", {})
+    return value if isinstance(value, dict) else {}
+
+
+def repo_state_path(repo_root: Path, config: Dict[str, Any], key: str, default: str) -> Path:
+    policy = repo_state_ledger_config(config)
+    rel = normalize_rel(str(policy.get(key) or default))
+    if not rel.startswith(".claude-state/"):
+        raise HygieneError("repo state ledger path must stay under .claude-state/: %s" % rel)
+    return repo_root / rel
+
+
+def current_repo_ref_state(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    git_config = config.get("git", {})
+    branch = current_branch(repo_root)
+    head = rev_parse(repo_root, "HEAD", required=False)
+    upstream = git_stdout(repo_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], required=False) if branch else ""
+    tracking = {"upstream": upstream or None, "ahead": None, "behind": None}
+    if upstream:
+        tracking.update(ahead_behind_between(repo_root, upstream, "HEAD"))
+    target_branch = str(git_config.get("targetBranch", "master"))
+    remote = str(git_config.get("remote", "origin"))
+    remote_ref = f"refs/remotes/{remote}/{target_branch}"
+    return {
+        "currentBranch": branch,
+        "head": head,
+        "tracking": tracking,
+        "target": {
+            "branch": target_branch,
+            "remote": remote if remote_exists(repo_root, remote) else None,
+            "localHead": rev_parse(repo_root, f"refs/heads/{target_branch}", required=False),
+            "remoteHead": rev_parse(repo_root, remote_ref, required=False),
+        },
+    }
+
+
+def latest_closeout_audit_state(rows: Sequence[Dict[str, Any]], *, limit: int = 12) -> Dict[str, Any]:
+    latest = [
+        {
+            "auditType": row.get("auditType"),
+            "outcome": row.get("outcome"),
+            "createdAt": row.get("createdAt"),
+            "workBlockId": row.get("workBlockId"),
+            "auditHash": row.get("auditHash"),
+        }
+        for row in rows[-limit:]
+    ]
+    latest_repo_closed = next((row for row in reversed(rows) if row.get("auditType") == "repo_closed_postcondition"), None)
+    payload = latest_repo_closed.get("payload", {}) if isinstance(latest_repo_closed, dict) else {}
+    truth = payload.get("closeoutCleanTruth") if isinstance(payload, dict) else None
+    return {
+        "auditCount": len(rows),
+        "latestAudits": latest,
+        "latestRepoClosedAuditHash": latest_repo_closed.get("auditHash") if isinstance(latest_repo_closed, dict) else None,
+        "latestCloseoutCleanTruth": truth if isinstance(truth, dict) else None,
+    }
+
+
+def repo_state_snapshot(
+    repo_root_arg: Path,
+    *,
+    write: bool = False,
+    work_block_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    ledger = repo_state_ledger_config(config)
+    dashboard = repo_state_dashboard_spec(config)
+    rollback = rollback_policy(config)
+    audit_log_rel = normalize_rel(str((audit_root(repo_root, config) / "audits.jsonl").relative_to(repo_root)))
+    audit_rows = audit_entries(repo_root, config)
+    state_audits = latest_closeout_audit_state(audit_rows)
+    dirty_entries = parse_status_paths(repo_root)
+    latest_path = repo_state_path(repo_root, config, "latestPath", ".claude-state/closeout/repo-state/latest.json")
+    history_root = repo_state_path(repo_root, config, "historyRoot", ".claude-state/closeout/repo-state/history")
+    snapshot = {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "artifactKind": str(ledger.get("artifactKind") or "repoStateSnapshot"),
+        "status": "success",
+        "capturedAt": utc_now(),
+        "repo": {
+            "root": str(repo_root),
+            "stateRoot": normalize_rel(str(closeout_state_root(repo_root, config).relative_to(repo_root))),
+            "policyHash": config.get("policyHash"),
+        },
+        "branch": current_repo_ref_state(repo_root, config),
+        "dirty": {
+            "clean": not dirty_entries,
+            "entryCount": len(dirty_entries),
+            "entries": dirty_entries,
+        },
+        "localBranches": local_branch_rows(repo_root),
+        "worktrees": worktree_rows(repo_root),
+        "stashes": stash_rows(repo_root),
+        "closeout": {
+            "auditTrail": {
+                "path": audit_log_rel,
+                "auditCount": state_audits["auditCount"],
+                "latestAudits": state_audits["latestAudits"],
+            },
+            "latestRepoClosedAuditHash": state_audits["latestRepoClosedAuditHash"],
+            "latestCloseoutCleanTruth": state_audits["latestCloseoutCleanTruth"],
+        },
+        "dashboard": {
+            "enabled": bool(dashboard.get("enabled", True)),
+            "stickyUrlPath": str(dashboard.get("stickyUrlPath") or "/closeout"),
+            "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
+            "readOnlyByDefault": bool(dashboard.get("readOnlyByDefault", True)),
+            "dataSources": list(dashboard.get("dataSources") or []),
+            "views": list(dashboard.get("views") or []),
+        },
+        "rollback": {
+            "enabled": bool(rollback.get("enabled", True)),
+            "preferredStrategy": str(rollback.get("preferredStrategy") or "git-revert-or-recovery-branch"),
+            "requireRepoStateSnapshotBeforeMutation": bool(rollback.get("requireRepoStateSnapshotBeforeMutation", True)),
+            "requireRecoveryCommandInMutatingAudits": bool(rollback.get("requireRecoveryCommandInMutatingAudits", True)),
+            "neverUseResetHardWithoutExplicitUserRequest": bool(rollback.get("neverUseResetHardWithoutExplicitUserRequest", True)),
+            "recoveryEvidenceRoots": list(rollback.get("recoveryEvidenceRoots") or []),
+            "userFacingFeasibility": str(rollback.get("userFacingFeasibility") or ""),
+        },
+        "stateLedger": {
+            "enabled": bool(ledger.get("enabled", True)),
+            "latestPath": normalize_rel(str(latest_path.relative_to(repo_root))),
+            "historyRoot": normalize_rel(str(history_root.relative_to(repo_root))),
+            "historyRetentionDays": int(ledger.get("historyRetentionDays") or 90),
+        },
+    }
+    if write:
+        snapshot_hash = stable_hash(snapshot)
+        history_name = "%s-repo-state-%s.json" % (
+            str(snapshot["capturedAt"]).replace(":", "").replace("+", "Z"),
+            snapshot_hash[:12],
+        )
+        history_path = history_root / history_name
+        snapshot["stateLedger"]["historyPath"] = normalize_rel(str(history_path.relative_to(repo_root)))
+        snapshot["stateLedger"]["snapshotHash"] = snapshot_hash
+        write_json(latest_path, snapshot)
+        write_json(history_path, snapshot)
+        write_audit(
+            repo_root,
+            config,
+            str(ledger.get("auditType") or "repo_state_snapshot"),
+            {
+                "snapshotHash": snapshot_hash,
+                "latestPath": snapshot["stateLedger"]["latestPath"],
+                "historyPath": snapshot["stateLedger"]["historyPath"],
+                "branch": snapshot["branch"],
+                "dirtyEntryCount": snapshot["dirty"]["entryCount"],
+                "stashCount": len(snapshot["stashes"]),
+                "worktreeCount": len(snapshot["worktrees"]),
+            },
+            work_block_id=work_block_id,
+            outcome="success",
+        )
+    return snapshot
+
+
 def remote_feature_patterns(config: Dict[str, Any]) -> List[str]:
     configured = config.get("repoSweep", {}).get("remoteFeaturePatterns", [])
     if isinstance(configured, list) and configured:
@@ -8713,7 +8965,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"]
+    required_config_keys = ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair", "repoStateLedger", "webDashboardSpec", "rollbackPolicy"]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),
