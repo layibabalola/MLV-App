@@ -31,6 +31,28 @@ Historical browsing comes from the repo-state history directory and the durable
 audit log. The UI may summarize those artifacts, but the artifacts remain the
 source of truth.
 
+## Local Helper
+
+Start or reuse the local helper with
+`tools\closeout\start-closeout-dashboard.ps1 -RepoRoot .`. The helper is
+localhost-only, binds the sticky dashboard at `http://127.0.0.1:8765/closeout`,
+and refuses to reuse the port when `/api/closeout/actions` reports a different
+`repoRoot`. A healthy same-repo helper is reused rather than launched twice.
+
+Required endpoints:
+
+- `/api/closeout/repo-state/latest`: refreshes and returns the latest-only
+  generated feed
+- `/api/closeout/repo-state/history-index`: returns the bounded
+  `closeout-history-index.v1`
+- `/api/closeout/repo-state/history/{snapshotId}`: returns one immutable history
+  snapshot by file id after path-safety checks
+- `/api/closeout/actions`: returns `closeout-dashboard-actions.v1` with
+  `serverProcessId`, repo ownership, endpoint metadata, symbolic actions, and
+  fail-closed rollback actionability
+- `/api/closeout/events`: SSE refresh stream for clients that prefer events,
+  with polling remaining as the fallback path
+
 ## UX Contract
 
 The dashboard should auto-refresh through SSE with a polling fallback using
