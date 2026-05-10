@@ -158,6 +158,11 @@ stderr heartbeat during long quiet runs. The heartbeat is liveness evidence only
 it must not alter stdout JSON, bypass timeouts or CPU-stall detection, or weaken
 the repo-closed postcondition.
 
+Bounded-runner boundary failures use the shared exit-code taxonomy: timeout=124,
+output cap=125, and CPU stall=126. Child tools may still return their own domain
+codes; these three values are reserved for the runner proving why it stopped the
+process tree.
+
 Final clean/blocked reporting should come from
 `repoClosedPostcondition.closeoutCleanTruth`, not from separate raw-git,
 handoff, metrics, or cleanup helpers. That summary records raw Git status,
