@@ -37,6 +37,7 @@
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_rollback_readiness_fails_closed_without_actor",
           "-v"
         ],
         "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"]
@@ -200,8 +201,15 @@
     "historyRoot": ".claude-state/closeout/repo-state/history",
     "historyRetentionDays": 90,
     "closeoutHistoryLimit": 25,
+    "closeoutHistorySchema": "closeout-history-index.v1",
     "liveRefreshWritesHistory": false,
     "liveRefreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
+    "feedPathPolicy": {
+      "generatedRoot": ".claude-state/closeout/repo-state",
+      "latestJsonIsMutableDashboardFeed": true,
+      "latestJsonIsRollbackEvidence": false,
+      "historyJsonIsImmutableRollbackEvidence": true
+    },
     "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"]
   },
   "webDashboardSpec": {
@@ -213,7 +221,9 @@
     "refreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
     "readOnlyByDefault": true,
     "preserveClientStateAcrossRefresh": true,
+    "preservedClientStateKeys": ["scrollPosition", "focusedElement", "selectedWorkBlockId", "expandedRows", "activeHistoryFilters"],
     "mutationModel": "symbolic-action-request-only",
+    "feedAuthority": "latest-json-is-display-feed-only",
     "dataSources": [
       "repoStateLedger.latestPath",
       "repoClosedPostcondition.closeoutCleanTruth",
@@ -234,6 +244,21 @@
     "requireRepoStateSnapshotBeforeMutation": true,
     "requireRecoveryCommandInMutatingAudits": true,
     "writeRollbackPlanBeforeMutation": true,
+    "readinessSchema": "rollback-readiness.v1",
+    "requiredManifestSchema": "closeout-rollback-manifest.v1",
+    "readinessDefaultActionability": "read-only-no-actor",
+    "latestFeedIsRollbackEvidence": false,
+    "requireImmutableSourceSnapshotForRollback": true,
+    "requiredManifestFields": [
+      "schema",
+      "targetHead",
+      "sourceSnapshotPath",
+      "sourceSnapshotHash",
+      "policyHash",
+      "plannedStrategy",
+      "userApproval",
+      "recoveryCommand"
+    ],
     "disallowedDefaultActions": ["reset-hard", "force-push"],
     "recoveryEvidenceRoots": [
       ".claude-state/closeout/manual-prune",
@@ -389,6 +414,7 @@
       "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
       "test_repo_state_dashboard_and_rollback_contract_required",
       "test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
+      "test_repo_state_rollback_readiness_fails_closed_without_actor",
       "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
       "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
       "test_hard_clean_final_response_blocks_remaining_stash",
@@ -436,6 +462,8 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_runner_exit_code"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "closeout-history-index.v1"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "rollback-readiness.v1"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
