@@ -175,6 +175,10 @@ timestamped history, and `repo_state_snapshot` audit under `.claude-state`.
 Snapshots use `repo-state-snapshot.v1` and include files, branches, worktrees,
 stashes, latest closeout truth, audit trail pointers, a bounded closeout-history
 index, and `rollbackPolicy`.
+For live dashboard refresh, repos should expose a latest-only actor such as
+`tools/closeout/write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That actor
+updates the stable latest feed without adding history snapshots or audit rows on
+every poll.
 
 `webDashboardSpec` is the iterative dashboard contract: sticky `/closeout` URL,
 auto-refresh through SSE with polling fallback, read-only default, preserved

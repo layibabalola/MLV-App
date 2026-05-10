@@ -36,6 +36,7 @@
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_commands_ignore_failure_words_in_successful_test_names",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
           "-v"
         ],
         "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"]
@@ -199,6 +200,8 @@
     "historyRoot": ".claude-state/closeout/repo-state/history",
     "historyRetentionDays": 90,
     "closeoutHistoryLimit": 25,
+    "liveRefreshWritesHistory": false,
+    "liveRefreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
     "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"]
   },
   "webDashboardSpec": {
@@ -207,6 +210,7 @@
     "stickyUrlPath": "/closeout",
     "refreshTransport": "sse-with-polling-fallback",
     "autoRefreshMs": 5000,
+    "refreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
     "readOnlyByDefault": true,
     "preserveClientStateAcrossRefresh": true,
     "mutationModel": "symbolic-action-request-only",
@@ -274,6 +278,7 @@
       "tools/repo_hygiene/work_block_cli.py",
       "tools/repo_hygiene/test_brokered_closeout.py",
       "tools/closeout/Invoke-CloseoutCli.ps1",
+      "tools/closeout/write-repo-state.ps1",
       "tools/closeout/work-block-complete.ps1",
       "tools/closeout/agent-remediation-queue.ps1",
       "tools/agent-bridge/codex_pre_response.ps1",
@@ -383,6 +388,7 @@
       "test_bounded_runner_exit_code_taxonomy_is_contract_required",
       "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
       "test_repo_state_dashboard_and_rollback_contract_required",
+      "test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
       "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
       "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
       "test_hard_clean_final_response_blocks_remaining_stash",
@@ -456,6 +462,8 @@
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-results"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "repo-state"},
+      {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--latest-only"},
+      {"path": "tools/closeout/write-repo-state.ps1", "contains": "LatestOnly"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
       {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "bounded_closeout_cli_main"},
       {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "closeout-heartbeat"},
