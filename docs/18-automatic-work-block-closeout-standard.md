@@ -158,6 +158,12 @@ stderr heartbeat during long quiet runs. The heartbeat is liveness evidence only
 it must not alter stdout JSON, bypass timeouts or CPU-stall detection, or weaken
 the repo-closed postcondition.
 
+Final clean/blocked reporting should come from
+`repoClosedPostcondition.closeoutCleanTruth`, not from separate raw-git,
+handoff, metrics, or cleanup helpers. That summary records raw Git status,
+policy-clean status, and cleanup-clean status together so generated/exempt dirty
+state is visible without becoming contradictory closeout text.
+
 Target push non-fast-forward is a recoverable race: fetch, re-pin, rebuild the
 integration candidate, regenerate quorum if the tuple changed, and retry within
 the configured bounded limit. Never force-push the target automatically.

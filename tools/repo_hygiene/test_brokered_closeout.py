@@ -17,6 +17,7 @@ from .brokered_closeout import (
     broker_contract,
     check_review_quorum,
     checkpoint_owned_work,
+    closeout_clean_truth_from_postcondition,
     collect_agent_remediation_results,
     closeout_command_timeout_ms,
     closeout_max_process_output_bytes,
@@ -192,6 +193,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "allowRetainedForeignDirtyAtCompletion": True,
                 "requireNoStash": True,
                 "protectedTargetNoopCloseout": {"enabled": True},
+                "unifiedTruthReport": {
+                    "enabled": True,
+                    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+                    "reportFields": ["rawGit", "policy", "cleanup"],
+                },
                 "exemptStatusPatterns": [".claude-state/**", ".codex-state/**", "**/__pycache__/**", "**/*.pyc"],
             },
             "runtimeServices": {
@@ -574,6 +580,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["hardClean"]["allowRetainedForeignDirtyAtCompletion"])
         self.assertTrue(config["hardClean"]["requireNoStash"])
         self.assertTrue(config["hardClean"]["protectedTargetNoopCloseout"]["enabled"])
+        self.assertTrue(config["hardClean"]["unifiedTruthReport"]["enabled"])
+        self.assertEqual(config["hardClean"]["unifiedTruthReport"]["authoritativeSource"], "repoClosedPostcondition.closeoutCleanTruth")
         self.assertIn(".claude-state/**", config["hardClean"]["exemptStatusPatterns"])
         self.assertIn(".codex-state/**", config["hardClean"]["exemptStatusPatterns"])
         self.assertFalse(config["runtimeServices"]["mlvapp-preview"]["enabled"])
@@ -643,6 +651,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_runtime_service_stops_before_validation_and_restarts_after_repo_closed", baseline["requiredTests"])
         self.assertIn("test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure", baseline["requiredTests"])
         self.assertIn("test_closeout_tooling_stale_reports_missing_hard_clean_gate", baseline["requiredTests"])
+        self.assertIn("test_repo_closed_postcondition_reports_unified_closeout_clean_truth", baseline["requiredTests"])
+        self.assertIn("test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state", baseline["requiredTests"])
+        self.assertIn("test_closeout_clean_truth_contract_required", baseline["requiredTests"])
         self.assertIn("test_closeout_adapter_heartbeat_is_contract_required", baseline["requiredTests"])
         self.assertIn("test_agent_remediation_queue_policy_fields_are_contract_required", baseline["requiredTests"])
         self.assertIn("test_codex_agent_queue_consumer_plans_one_background_agent_per_eligible_shard", baseline["requiredTests"])
@@ -674,18 +685,22 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def process_tree_cpu_sample"), required_symbols)
         self.assertIn(("AGENTS.md", "Closeout actors must be bounded at the process boundary"), required_symbols)
         self.assertIn(("AGENTS.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
+        self.assertIn(("AGENTS.md", "closeoutCleanTruth"), required_symbols)
         self.assertIn(("AGENTS.md", "agentRemediationQueue.queueRoots"), required_symbols)
         self.assertIn(("AGENTS.md", "protected-target-noop-closeout"), required_symbols)
         self.assertIn(("AGENTS.md", "workBlockBootstrap.autoBranchFromProtectedTarget"), required_symbols)
         self.assertIn(("CLAUDE.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
+        self.assertIn(("CLAUDE.md", "closeoutCleanTruth"), required_symbols)
         self.assertIn(("CLAUDE.md", "agentRemediationQueue.queueRoots"), required_symbols)
         self.assertIn(("CLAUDE.md", "protected-target-noop-closeout"), required_symbols)
         self.assertIn(("CLAUDE.md", "workBlockBootstrap.autoBranchFromProtectedTarget"), required_symbols)
         self.assertIn(("closeout.config.json", "workBlockBootstrap"), required_symbols)
+        self.assertIn(("closeout.config.json", "unifiedTruthReport"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def run_bounded_closeout_process"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def bounded_closeout_cli_main"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def auto_branch_from_protected_target"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def verify_repo_closed_postcondition"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def closeout_clean_truth_from_postcondition"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def stop_runtime_services_before_promotion"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def restart_runtime_services_after_clean_promotion"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def agent_remediation_queue_consumer_plan"), required_symbols)
@@ -1252,6 +1267,51 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["status"], "success", result)
         self.assertTrue(result["ok"])
         self.assertFalse(result["blockers"])
+
+    def test_repo_closed_postcondition_reports_unified_closeout_clean_truth(self) -> None:
+        repo = self.init_repo()
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        truth = result["closeoutCleanTruth"]
+        self.assertEqual(truth, closeout_clean_truth_from_postcondition(result))
+        self.assertEqual(truth["artifactKind"], "closeoutCleanTruth")
+        self.assertEqual(truth["authoritativeSource"], "repoClosedPostcondition")
+        self.assertEqual(truth["status"], "clean")
+        self.assertTrue(truth["repoClosed"])
+        self.assertTrue(truth["rawGit"]["clean"])
+        self.assertTrue(truth["policy"]["clean"])
+        self.assertTrue(truth["cleanup"]["clean"])
+
+    def test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state(self) -> None:
+        repo = self.init_repo()
+        prompt = repo / ".codex-state" / "agent-loop" / "inbox" / "loop-test--to-codex.prompt.md"
+        prompt.parent.mkdir(parents=True, exist_ok=True)
+        prompt.write_text("generated prompt state\n", encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        truth = result["closeoutCleanTruth"]
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(truth["status"], "clean")
+        self.assertFalse(truth["rawGit"]["clean"])
+        self.assertEqual(truth["rawGit"]["statusEntryCount"], 1)
+        self.assertTrue(truth["policy"]["clean"])
+        self.assertTrue(truth["cleanup"]["clean"])
+
+    def test_closeout_clean_truth_contract_required(self) -> None:
+        config = load_closeout_config(ROOT)
+        self.assertTrue(config["hardClean"]["unifiedTruthReport"]["enabled"])
+        self.assertEqual(config["hardClean"]["unifiedTruthReport"]["authoritativeSource"], "repoClosedPostcondition.closeoutCleanTruth")
+        baseline = config["toolingBaseline"]
+        self.assertIn("test_repo_closed_postcondition_reports_unified_closeout_clean_truth", baseline["requiredTests"])
+        self.assertIn("test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state", baseline["requiredTests"])
+        self.assertIn("test_closeout_clean_truth_contract_required", baseline["requiredTests"])
+        required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def closeout_clean_truth_from_postcondition"), required_symbols)
+        self.assertIn(("closeout.config.json", "unifiedTruthReport"), required_symbols)
+        self.assertIn(("AGENTS.md", "closeoutCleanTruth"), required_symbols)
+        self.assertIn(("CLAUDE.md", "closeoutCleanTruth"), required_symbols)
 
     def test_complete_finalize_enforces_hard_clean_config_without_switch(self) -> None:
         repo = self.init_repo()
