@@ -91,6 +91,82 @@ BOUNDED_RUNNER_STATUS_EXIT_CODE_KEYS = {
     "output_cap": "outputCap",
     "cpu_stall": "cpuStall",
 }
+POWERSHELL_DEFAULT_POLICY: Dict[str, Any] = {
+    "preferredExecutable": "pwsh.exe",
+    "fallbackExecutable": "powershell.exe",
+    "requiredArgs": ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"],
+    "preferFor": ["closeout adapters", "repo-state dashboard refresh", "repo-sweep recovery commands", "agent bridge process metadata probes"],
+    "fallbackOnlyWhenPwshUnavailable": True,
+    "windowsPowerShellOnly": [
+        "tools/agent-bridge/codex_bridge_reminder.ps1 WinRT toast activation",
+        "tools/agent-bridge/wake_codex.ps1 Windows shell activation",
+        "tools/agent-bridge/watcher.py WinRT toast notification activation",
+        "tools/agent-bridge/watcher.py WinForms balloon fallback",
+    ],
+    "justification": "PowerShell 7+ starts faster for repeated script launches; -NoProfile avoids profile load and profile side effects.",
+}
+
+
+def command_string(argv: Sequence[str]) -> str:
+    parts: List[str] = []
+    for raw in argv:
+        value = str(raw)
+        if not value:
+            parts.append('""')
+        elif any(ch.isspace() or ch == '"' for ch in value):
+            parts.append('"' + value.replace('"', '\\"') + '"')
+        else:
+            parts.append(value)
+    return " ".join(parts)
+
+
+def powershell_policy(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    configured = (config or {}).get("powerShell") if isinstance(config, dict) else None
+    if isinstance(configured, dict):
+        return deep_merge(POWERSHELL_DEFAULT_POLICY, configured)
+    return deep_merge(POWERSHELL_DEFAULT_POLICY, {})
+
+
+def powershell_executable_for_policy(policy: Dict[str, Any]) -> str:
+    preferred = str(policy.get("preferredExecutable") or "pwsh.exe")
+    if os.name != "nt" or not bool(policy.get("fallbackOnlyWhenPwshUnavailable", True)):
+        return preferred
+    probes = [preferred]
+    if preferred.lower() == "pwsh.exe":
+        probes.append("pwsh")
+    for candidate in probes:
+        if shutil.which(candidate):
+            return candidate
+    return str(policy.get("fallbackExecutable") or "powershell.exe")
+
+
+def powershell_command_prefix(config: Optional[Dict[str, Any]] = None) -> List[str]:
+    policy = powershell_policy(config)
+    args = policy.get("requiredArgs") if isinstance(policy.get("requiredArgs"), list) else []
+    return [powershell_executable_for_policy(policy)] + [str(arg) for arg in args]
+
+
+def closeout_script_command(script: str, extra_args: Optional[Sequence[str]] = None, config: Optional[Dict[str, Any]] = None) -> str:
+    argv = powershell_command_prefix(config) + ["-File", "tools\\closeout\\%s" % script, "-RepoRoot", "."]
+    argv.extend(str(arg) for arg in (extra_args or []))
+    return command_string(argv)
+
+
+def command_references_closeout_script(command: str, script: str) -> bool:
+    normalized = str(command or "").replace("/", "\\").casefold()
+    return ("tools\\closeout\\%s" % script).casefold() in normalized
+
+
+def effective_closeout_script_command(
+    config: Dict[str, Any],
+    script: str,
+    extra_args: Optional[Sequence[str]] = None,
+    configured: Optional[str] = None,
+) -> str:
+    configured_text = str(configured or "").strip()
+    if not configured_text or command_references_closeout_script(configured_text, script):
+        return closeout_script_command(script, extra_args, config)
+    return configured_text
 
 
 DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
@@ -129,6 +205,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_full_validation_suite_is_skipped_without_explicit_request",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_path_scoped_validation_skips_unmatched_commands",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_commands_ignore_failure_words_in_successful_test_names",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_tooling_stale_reports_missing_power_shell_policy",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
@@ -155,6 +233,12 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "-m",
                     "unittest",
                     "tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks",
+                    "tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_bootstrap_watcher_enumeration_prefers_pwsh_for_cim",
+                    "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_prefer_pwsh_for_cim",
+                    "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_uses_pwsh_alias_when_exe_probe_is_absent",
+                    "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_windows_process_table_queries_fall_back_to_windows_powershell",
+                    "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_trampoline_host_env_queries_prefer_pwsh_for_cim",
+                    "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_server_wrapper_process_entry_prefers_pwsh_for_cim",
                     "tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation",
                 ],
                 "pathPatterns": ["tools/agent-bridge/**", "AGENTS.md", "CLAUDE.md", "bridge_trigger_heuristics.md"],
@@ -177,6 +261,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "requireNoOutputProgress": True,
         },
     },
+    "powerShell": POWERSHELL_DEFAULT_POLICY,
     "paths": {
         "generated": [
             ".claude-state/**",
@@ -284,7 +369,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "closeoutHistoryLimit": 25,
         "closeoutHistorySchema": "closeout-history-index.v1",
         "liveRefreshWritesHistory": False,
-        "liveRefreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
+        "liveRefreshCommand": closeout_script_command("write-repo-state.ps1", ["-Write", "-LatestOnly"]),
         "feedPathPolicy": {
             "generatedRoot": ".claude-state/closeout/repo-state",
             "latestJsonIsMutableDashboardFeed": True,
@@ -299,7 +384,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "stickyUrlPath": "/closeout",
         "refreshTransport": "sse-with-polling-fallback",
         "autoRefreshMs": 5000,
-        "refreshCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly",
+        "refreshCommand": closeout_script_command("write-repo-state.ps1", ["-Write", "-LatestOnly"]),
         "readOnlyByDefault": True,
         "preserveClientStateAcrossRefresh": True,
         "preservedClientStateKeys": ["scrollPosition", "focusedElement", "selectedWorkBlockId", "expandedRows", "activeHistoryFilters"],
@@ -458,7 +543,41 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "tools/repo-hygiene/closeout.contract.json",
             "tools/repo-hygiene/hygiene.config.json",
         ],
-        "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair", "repoStateLedger", "webDashboardSpec", "rollbackPolicy"],
+        "requiredConfigKeys": [
+            "git",
+            "workBlockBootstrap",
+            "validation",
+            "processResources",
+            "powerShell",
+            "powerShell.preferredExecutable",
+            "powerShell.fallbackExecutable",
+            "powerShell.requiredArgs",
+            "powerShell.preferFor",
+            "powerShell.fallbackOnlyWhenPwshUnavailable",
+            "powerShell.windowsPowerShellOnly",
+            "powerShell.justification",
+            "paths",
+            "dirtySplit",
+            "toolingBaseline",
+            "evidenceRepair",
+            "stashPolicy",
+            "cleanupPolicy",
+            "reviewQuorum",
+            "responseHookLifecycle",
+            "hardClean",
+            "runtimeServices",
+            "blockerAutoRemediation",
+            "closeoutAddendumPersistence",
+            "finalizeLoop",
+            "remediationFreeze",
+            "agentRemediation",
+            "agentRemediationQueue",
+            "locking",
+            "autoEligibilityRepair",
+            "repoStateLedger",
+            "webDashboardSpec",
+            "rollbackPolicy",
+        ],
         "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
         "requiredAutoQuorumActions": [
             "integrated_branch_prune",
@@ -565,6 +684,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_validation_commands_ignore_failure_words_in_successful_test_names",
             "test_timeout_and_output_cap_settings_are_contract_required",
             "test_bounded_runner_exit_code_taxonomy_is_contract_required",
+            "test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands",
             "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
             "test_repo_state_dashboard_and_rollback_contract_required",
             "test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
@@ -588,6 +708,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_runtime_service_stops_before_validation_and_restarts_after_repo_closed",
             "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
             "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
+            "test_closeout_tooling_stale_reports_missing_power_shell_policy",
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -604,6 +725,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_process_resource_policy"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_windows_process_tree_affinity"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def process_tree_cpu_sample"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def powershell_executable_for_policy"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_script_command"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def effective_closeout_script_command"},
+            {"path": "tools/agent-bridge/powershell_runtime.py", "contains": "def powershell_cim_command"},
+            {"path": "tools/agent-bridge/bootstrap_session.py", "contains": "powershell_cim_command"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_timeout_ms"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_full_suite_requested"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validation_command_applies"},
@@ -666,6 +792,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
             {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
+            {"path": "AGENTS.md", "contains": "PowerShell 7+"},
             {"path": "AGENTS.md", "contains": "repoStateLedger"},
             {"path": "AGENTS.md", "contains": "rollbackPolicy"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
@@ -678,6 +805,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
             {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
+            {"path": "CLAUDE.md", "contains": "PowerShell 7+"},
             {"path": "CLAUDE.md", "contains": "repoStateLedger"},
             {"path": "CLAUDE.md", "contains": "rollbackPolicy"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
@@ -689,6 +817,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
             {"path": "closeout.config.json", "contains": "adapterHeartbeatSeconds"},
             {"path": "closeout.config.json", "contains": "boundedRunnerExitCodes"},
+            {"path": "closeout.config.json", "contains": "preferredExecutable"},
             {"path": "closeout.config.json", "contains": "unifiedTruthReport"},
             {"path": "closeout.config.json", "contains": "failureTextPatterns"},
             {"path": "closeout.config.json", "contains": "repoStateLedger"},
@@ -1911,7 +2040,7 @@ def process_tree_cpu_sample(pid: int) -> Optional[Dict[str, Any]]:
     return {"seconds": total, "pids": observed}
 
 
-def closeout_recovery_command(closeout_args: Sequence[str]) -> str:
+def closeout_recovery_command(closeout_args: Sequence[str], config: Optional[Dict[str, Any]] = None) -> str:
     command = str(closeout_args[0]) if closeout_args else "complete"
     script_by_command = {
         "start": "start-work-block.ps1",
@@ -1929,7 +2058,7 @@ def closeout_recovery_command(closeout_args: Sequence[str]) -> str:
         "remediate-retained": "remediate-retained-closeout.ps1",
     }
     script = script_by_command.get(command, "work-block-complete.ps1")
-    return "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\%s -RepoRoot ." % script
+    return closeout_script_command(script, config=config)
 
 
 def parse_child_json(stdout: str) -> Optional[Dict[str, Any]]:
@@ -2322,7 +2451,7 @@ def bounded_closeout_run(repo_root_arg: Path, closeout_args: Sequence[str]) -> D
         command,
         timeout_ms=closeout_command_timeout_ms(config, args),
         max_output_bytes=closeout_max_process_output_bytes(config),
-        recovery_command=closeout_recovery_command(args),
+        recovery_command=closeout_recovery_command(args, config),
         closeout_args=args,
     )
 
@@ -3267,7 +3396,7 @@ def unblock_detail(
         "pinnedRefs": pinned_refs,
         "tupleHash": tuple_hash,
         "reviewPacketPath": str(packet_dir / "review-packet.json"),
-        "allowedNextCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot . -Apply",
+        "allowedNextCommand": closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config),
         "allowedPhrase": "unblock closeout",
         "actionClass": action_class,
         "autoUnblockAllowed": auto_unblock_allowed,
@@ -4022,11 +4151,11 @@ def push_failed_non_fast_forward(push_result: Dict[str, Any]) -> bool:
     return "non-fast-forward" in lowered or "updates were rejected" in lowered or "fetch first" in lowered
 
 
-def target_push_recovery_command(remote: str, target_branch: str) -> Dict[str, Any]:
+def target_push_recovery_command(remote: str, target_branch: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {
         "fetch": "git fetch %s %s" % (remote, target_branch),
         "integrateLocalTarget": "switch to %s, then run git merge --ff-only %s/%s" % (target_branch, remote, target_branch),
-        "rerunCloseout": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\work-block-complete.ps1 -RepoRoot . -Finalize",
+        "rerunCloseout": closeout_script_command("work-block-complete.ps1", ["-Finalize"], config),
         "raceAdvice": "If another closeout keeps moving %s/%s, wait for it to finish, fetch again, then rerun closeout." % (remote, target_branch),
     }
 
@@ -4041,7 +4170,7 @@ def repair_target_push_failure(
     push_result: Dict[str, Any],
     work_block_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    command = target_push_recovery_command(remote, target_branch)
+    command = target_push_recovery_command(remote, target_branch, config)
     recovery: Dict[str, Any] = {
         "status": "blocked",
         "reason": "target_push_failed",
@@ -5814,7 +5943,7 @@ def agent_conflict_resolution_packet(config: Dict[str, Any], *, candidate_id: st
         "shards": shards,
         "surfaceAdapters": agent_config.get("surfaceAdapters", []),
         "queueRequired": bool(agent_config.get("requireSurfaceExecution", True)),
-        "recoveryCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\remediate-retained-closeout.ps1 -RepoRoot . -Apply",
+        "recoveryCommand": closeout_script_command("remediate-retained-closeout.ps1", ["-Apply"], config),
     }
 
 
@@ -6215,6 +6344,18 @@ def repo_state_snapshot(
     ledger = repo_state_ledger_config(config)
     dashboard = repo_state_dashboard_spec(config)
     rollback = rollback_policy(config)
+    live_refresh_command = effective_closeout_script_command(
+        config,
+        "write-repo-state.ps1",
+        ["-Write", "-LatestOnly"],
+        str(ledger.get("liveRefreshCommand") or dashboard.get("refreshCommand") or ""),
+    )
+    dashboard_refresh_command = effective_closeout_script_command(
+        config,
+        "write-repo-state.ps1",
+        ["-Write", "-LatestOnly"],
+        str(dashboard.get("refreshCommand") or ledger.get("liveRefreshCommand") or ""),
+    )
     audit_log_rel = normalize_rel(str((audit_root(repo_root, config) / "audits.jsonl").relative_to(repo_root)))
     audit_rows = audit_entries(repo_root, config)
     state_audits = latest_closeout_audit_state(audit_rows)
@@ -6263,7 +6404,7 @@ def repo_state_snapshot(
             "stickyUrlPath": str(dashboard.get("stickyUrlPath") or "/closeout"),
             "refreshTransport": str(dashboard.get("refreshTransport") or "sse-with-polling-fallback"),
             "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
-            "refreshCommand": str(dashboard.get("refreshCommand") or ledger.get("liveRefreshCommand") or ""),
+            "refreshCommand": dashboard_refresh_command,
             "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
             "readOnlyByDefault": bool(dashboard.get("readOnlyByDefault", True)),
             "preserveClientStateAcrossRefresh": bool(dashboard.get("preserveClientStateAcrossRefresh", True)),
@@ -6300,7 +6441,7 @@ def repo_state_snapshot(
             "historyRetentionDays": int(ledger.get("historyRetentionDays") or 90),
             "closeoutHistorySchema": str(ledger.get("closeoutHistorySchema") or "closeout-history-index.v1"),
             "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
-            "liveRefreshCommand": str(ledger.get("liveRefreshCommand") or dashboard.get("refreshCommand") or ""),
+            "liveRefreshCommand": live_refresh_command,
             "feedPathPolicy": dict(ledger.get("feedPathPolicy") or {}),
         },
     }
@@ -6660,7 +6801,7 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
     recommended_action = "retain_with_proven_blocker"
     action_class = "ambiguous_merge_required"
     blockers: List[str] = []
-    recovery_command = "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot . -Apply"
+    recovery_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
     worktree = item.get("worktree") or {}
     worktree_path = Path(str(worktree.get("path") or repo_root))
     if item.get("checkedOut") and item.get("worktreeDirty", {}).get("dirty"):
@@ -6686,11 +6827,11 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
         ):
             recommended_action = "switch_target_and_prune"
             action_class = "foreign_dirty_integrated_branch_prune"
-            recovery_command = "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot . -Apply"
+            recovery_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
         elif dirty_classification["ownedDirty"] and dirty_classification.get("workBlockId"):
             recommended_action = "split_now"
             action_class = "dirty_split"
-            recovery_command = "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\publish-checkpoint.ps1 -RepoRoot . -WorkBlockId %s" % dirty_classification["workBlockId"]
+            recovery_command = closeout_script_command("publish-checkpoint.ps1", ["-WorkBlockId", str(dirty_classification["workBlockId"])], config)
         elif dirty_classification["unownedDirty"]:
             action_class = "unowned_dirty_triage"
             blockers.append("unowned_dirty")
@@ -6823,7 +6964,7 @@ def investigate_remote_feature_candidate(repo_root: Path, config: Dict[str, Any]
     recommended_action = "retain_with_proven_blocker"
     action_class = "ambiguous_merge_required"
     blockers: List[str] = []
-    recovery_command = "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\remediate-retained-closeout.ps1 -RepoRoot . -Apply"
+    recovery_command = closeout_script_command("remediate-retained-closeout.ps1", ["-Apply"], config)
     if item.get("protected"):
         action_class = "protected_branch"
         blockers.append("protected_remote_branch")
@@ -7018,7 +7159,7 @@ def write_evidence_preserving_prune_recovery(
         "recoveryCommands": [
             "git bundle verify %s" % repo_relative_or_absolute(repo_root, bundle_path) if bundle_required else "inspect recovery artifact %s" % repo_relative_or_absolute(repo_root, artifact_path),
             "git branch closeout/recovered/%s %s" % (safe_state_name(branch), head),
-            "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot .",
+            closeout_script_command("repo-sweep-closeout.ps1", config=config),
         ],
         "candidate": item,
         "candidateReport": report,
@@ -7183,7 +7324,7 @@ def write_dirty_worktree_recovery_evidence(
         "recoveryCommands": [
             "git branch %s %s" % (preservation_branch, preservation_head),
             "git apply --binary %s" % repo_relative_or_absolute(repo_root, tracked_diff_path),
-            "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot .",
+            closeout_script_command("repo-sweep-closeout.ps1", config=config),
         ],
         "artifactPath": repo_relative_or_absolute(repo_root, artifact_path),
     }
@@ -7262,7 +7403,7 @@ def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan
     if not blockers and paths:
         recommended_action = "preserve_detached_dirty_now"
         action_class = "detached_dirty_preserve"
-        recovery_command = "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\closeout\\repo-sweep-closeout.ps1 -RepoRoot . -Apply"
+        recovery_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
     report = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "reportType": "repo_sweep_worktree_investigation",
@@ -9163,13 +9304,47 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     config = load_closeout_config(repo_root)
     scripts_dir = repo_root / "tools" / "closeout"
     scripts = sorted(path.name for path in scripts_dir.glob("*.ps1")) if scripts_dir.exists() else []
-    required_config_keys = ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair", "repoStateLedger", "webDashboardSpec", "rollbackPolicy"]
+    required_config_keys = [
+        "git",
+        "workBlockBootstrap",
+        "validation",
+        "processResources",
+        "powerShell",
+        "powerShell.preferredExecutable",
+        "powerShell.fallbackExecutable",
+        "powerShell.requiredArgs",
+        "powerShell.preferFor",
+        "powerShell.fallbackOnlyWhenPwshUnavailable",
+        "powerShell.windowsPowerShellOnly",
+        "powerShell.justification",
+        "paths",
+        "dirtySplit",
+        "toolingBaseline",
+        "evidenceRepair",
+        "stashPolicy",
+        "cleanupPolicy",
+        "reviewQuorum",
+        "responseHookLifecycle",
+        "hardClean",
+        "runtimeServices",
+        "blockerAutoRemediation",
+        "closeoutAddendumPersistence",
+        "finalizeLoop",
+        "remediationFreeze",
+        "agentRemediation",
+        "agentRemediationQueue",
+        "locking",
+        "autoEligibilityRepair",
+        "repoStateLedger",
+        "webDashboardSpec",
+        "rollbackPolicy",
+    ]
     return {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "configPath": str(repo_root / CONFIG_PATH),
         "policyHash": config.get("policyHash"),
         "requiredConfigKeys": required_config_keys,
-        "missingConfigKeys": [key for key in required_config_keys if key not in config],
+        "missingConfigKeys": [key for key in required_config_keys if config_path_value(config, key) is None],
         "requiredScripts": REQUIRED_SCRIPT_NAMES,
         "scripts": scripts,
         "missingScripts": [name for name in REQUIRED_SCRIPT_NAMES if name not in scripts],

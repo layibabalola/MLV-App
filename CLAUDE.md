@@ -61,11 +61,20 @@ Hardening plan and audit log: `tools/agent-bridge/BRIDGE_HARDENING.md`
 This repo now owns the work-block completion transaction. Claude Code,
 Claude Desktop, Codex, humans, hooks, and future adapters should all call the
 same repo-local scripts instead of inventing surface-specific closeout logic.
+Repo-owned closeout/dashboard PowerShell commands must prefer PowerShell 7+
+through `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass`.
+The `powerShell` policy in `closeout.config.json`/`DEFAULT_CLOSEOUT_CONFIG`
+records the justification: PowerShell 7+ starts materially faster for repeated
+script launches, while `-NoProfile` avoids profile load and profile side
+effects. Use Windows PowerShell only when `pwsh.exe` is unavailable or a surface
+is explicitly PS 5.1-only, such as bridge WinRT/wake/toast/balloon behavior.
+Bridge process metadata probes are not part of that exception and should use the
+shared `powershell_runtime.powershell_cim_command()` policy helper.
 
 For non-trivial work, start a brokered block with:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .
 ```
 
 If the start command begins on a clean protected target branch and
@@ -77,19 +86,19 @@ targets block before branch creation and must list the dirty paths.
 Before declaring the work complete, always run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize
 ```
 
 To audit cross-branch cleanup, run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .
 ```
 
 To advance retained cleanup one safe candidate at a time, run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\closeout\remediate-retained-closeout.ps1 -RepoRoot . -Apply
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\remediate-retained-closeout.ps1 -RepoRoot . -Apply
 ```
 
 The trigger must run even when mutation is not eligible. The detector classifies
@@ -162,7 +171,7 @@ A target push non-fast-forward means the target moved during closeout. Treat it
 as a recoverable race, never as permission to force-push: fetch the target
 (`git fetch fork master` in this repo), fast-forward/update the local target
 only when the fetched ref proves it is a descendant, then rerun
-`tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`. If the fetched
+`pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`. If the fetched
 target already contains the attempted closeout head, finalize may continue. If
 the target moved to different work, block as `target_push_rerun_required` with
 the attempted head, fetched target head, local target head, and recovery
@@ -227,7 +236,7 @@ The future `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
 For live dashboard polling, use the latest-only repo-state adapter:
-`tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. It
+`pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. It
 refreshes `latest.json` without appending history or `repo_state_snapshot` audit
 rows on every poll.
 `webDashboardSpec` is read-only by default and
