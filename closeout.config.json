@@ -129,6 +129,11 @@
     "protectedTargetNoopCloseout": {
       "enabled": true
     },
+    "unifiedTruthReport": {
+      "enabled": true,
+      "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+      "reportFields": ["rawGit", "policy", "cleanup"]
+    },
     "exemptStatusPatterns": [
       ".claude-state/**",
       ".codex-state/**",
@@ -326,6 +331,9 @@
       "test_complete_finalize_enforces_hard_clean_config_without_switch",
       "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
       "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
+      "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
+      "test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state",
+      "test_closeout_clean_truth_contract_required",
       "test_hard_clean_blocks_retained_remote_feature_refs",
       "test_review_quorum_requires_allowed_ten_score_self_plus_two_independent",
       "test_declared_review_surfaces_write_unavailable_reports",
@@ -374,6 +382,7 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_dirty_worktree_recovery_evidence"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_clean_truth_from_postcondition"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_status"},
@@ -397,6 +406,7 @@
       {"path": "AGENTS.md", "contains": "Closeout actors must be bounded at the process boundary"},
       {"path": "AGENTS.md", "contains": "semantic success authority"},
       {"path": "AGENTS.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+      {"path": "AGENTS.md", "contains": "closeoutCleanTruth"},
       {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
       {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
       {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
@@ -404,6 +414,7 @@
       {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
       {"path": "CLAUDE.md", "contains": "semantic success authority"},
       {"path": "CLAUDE.md", "contains": "Hard-clean final responses are blocked unless the repo-closed postcondition passes"},
+      {"path": "CLAUDE.md", "contains": "closeoutCleanTruth"},
       {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
       {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
       {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
@@ -416,6 +427,7 @@
       {"path": "closeout.config.json", "contains": "remediationFreeze"},
       {"path": "closeout.config.json", "contains": "maxProcessOutputBytes"},
       {"path": "closeout.config.json", "contains": "adapterHeartbeatSeconds"},
+      {"path": "closeout.config.json", "contains": "unifiedTruthReport"},
       {"path": "closeout.config.json", "contains": "failureTextPatterns"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "remediation-freeze-status"},

@@ -209,6 +209,11 @@ cleanup audit are inspectable, with no non-exempt dirty/untracked files,
 disallowed stashes, stale transaction branches, stale managed worktrees, or
 orphaned closeout/runtime artifacts left behind. Failures report
 `repo_closed_postcondition_failed`, not success with deferred cleanup.
+Closeout summaries, handoffs, metrics, and cleanup status derive final
+clean/blocked wording from `repoClosedPostcondition.closeoutCleanTruth`. That
+report keeps raw Git status, policy-clean status, and cleanup-clean status
+beside each other so generated/exempt dirty state does not create contradictory
+final claims.
 Protected target closeout is a no-op only when
 `hardClean.protectedTargetNoopCloseout.enabled=true`, the current branch is
 protected, no explicit workBlockId was supplied, and hard-clean passes. It writes
