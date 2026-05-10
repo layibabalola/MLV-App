@@ -174,7 +174,8 @@ The repo-owned `repo-state --write` command records a stable latest snapshot,
 timestamped history, and `repo_state_snapshot` audit under `.claude-state`.
 Snapshots use `repo-state-snapshot.v1` and include files, branches, worktrees,
 stashes, latest closeout truth, audit trail pointers, a bounded closeout-history
-index, and `rollbackPolicy`.
+index such as `closeout-history-index.v1`, and `rollbackPolicy` plus
+`rollback-readiness.v1`.
 For live dashboard refresh, repos should expose a latest-only actor such as
 `tools/closeout/write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That actor
 updates the stable latest feed without adding history snapshots or audit rows on
@@ -182,13 +183,15 @@ every poll.
 
 `webDashboardSpec` is the iterative dashboard contract: sticky `/closeout` URL,
 auto-refresh through SSE with polling fallback, read-only default, preserved
-scroll/focus/detail state across refreshes, historical closeouts,
-repo-map/workflow/blocker/audit/rollback views, and symbolic actions only.
+scroll/focus/selection/expanded/history-filter state across refreshes,
+historical closeouts, repo-map/workflow/blocker/audit/rollback views, and
+symbolic actions only. `latest.json` is display state, not rollback evidence.
 `rollbackPolicy` documents how undo works: prefer Git revert, recovery-branch
 restoration, path restore from snapshot, or preservation-ref promotion; preserve
-evidence before cleanup; require a new work block, user approval, rollback plan,
-and recovery commands in mutating audits; and reserve `reset --hard` or force
-push for explicit user requests.
+evidence before cleanup; require a new work block, user approval, immutable
+source snapshot evidence, `closeout-rollback-manifest.v1`, rollback plan, and
+recovery commands in mutating audits; and reserve `reset --hard` or force push
+for explicit user requests.
 
 Target push non-fast-forward is a recoverable race: fetch, re-pin, rebuild the
 integration candidate, regenerate quorum if the tuple changed, and retry within
@@ -215,6 +218,18 @@ Expected behavior:
 
 Retain is valid only after active investigation proves autonomous mutation is
 unsafe and writes a candidate-specific report.
+
+## Repo-State Dashboard And Rollback Evidence
+
+Repos that expose closeout state for dashboards should publish a
+`repo-state-snapshot.v1` feed with a bounded `closeout-history-index.v1`. A
+latest-only refresh actor may update the sticky dashboard feed, but that feed is
+display state only and should not append audit or history rows during polling.
+
+Rollback readiness must fail closed. A dashboard can describe feasible strategies,
+but controls stay read-only until a repo-owned actor validates immutable source
+snapshot evidence and a `closeout-rollback-manifest.v1` for the exact target.
+`latest.json` is not rollback evidence.
 
 ## Agent Remediation Queue
 

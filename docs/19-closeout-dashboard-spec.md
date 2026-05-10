@@ -12,7 +12,8 @@ The primary feed is `.claude-state/closeout/repo-state/latest.json`, emitted by
 `tools\repo_hygiene\work_block_cli.py repo-state --write`. The feed declares
 `repo-state-snapshot.v1` and includes branch/tracking, dirty entries, local
 branches, worktrees, stashes, latest `closeoutCleanTruth`, audit pointers,
-bounded closeout history, dashboard settings, and rollback readiness.
+bounded `closeout-history-index.v1`, dashboard settings, and
+`rollback-readiness.v1`.
 
 Live refresh uses
 `tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That
@@ -20,6 +21,11 @@ command updates only the stable latest feed so a dashboard polling every few
 seconds does not create synthetic closeout history or audit noise. Full closeout
 and explicit audit captures should continue to use the normal history-writing
 mode.
+
+`latest.json` is a mutable display feed. It must not be used as rollback
+evidence. Rollback panels may show readiness only from the fail-closed
+`rollback-readiness.v1` payload and must require immutable history/source
+snapshot evidence before presenting any action as executable.
 
 Historical browsing comes from the repo-state history directory and the durable
 audit log. The UI may summarize those artifacts, but the artifacts remain the
@@ -30,6 +36,8 @@ source of truth.
 The dashboard should auto-refresh through SSE with a polling fallback using
 `webDashboardSpec.autoRefreshMs`. Refreshes preserve scroll position, focused
 controls, selected work block, expanded detail rows, and active history filters.
+The snapshot exposes these as `preservedClientStateKeys` so clients do not have
+to infer state names.
 
 Primary panels:
 
@@ -46,5 +54,8 @@ requests such as rollback, retained remediation, or repo-state refresh, but a
 repo-owned actor must revalidate the exact tuple before anything changes.
 
 Rollback defaults to a new work block, user approval, a pre-mutation repo-state
-snapshot, an explicit rollback plan, and recovery commands in every mutating
-audit. `reset --hard` and force push are never default actions.
+snapshot, immutable source snapshot evidence, a
+`closeout-rollback-manifest.v1`, an explicit rollback plan, and recovery
+commands in every mutating audit. `reset --hard` and force push are never
+default actions. Until a repo-owned rollback actor validates that manifest,
+actionability remains `read-only-no-actor`.
