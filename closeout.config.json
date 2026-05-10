@@ -34,6 +34,8 @@
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_full_validation_suite_is_skipped_without_explicit_request",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_path_scoped_validation_skips_unmatched_commands",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validation_commands_ignore_failure_words_in_successful_test_names",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
           "-v"
         ],
         "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"]
@@ -188,6 +190,42 @@
   "autoEligibilityRepair": {
     "timeoutMs": 300000
   },
+  "repoStateLedger": {
+    "enabled": true,
+    "artifactKind": "repoStateSnapshot",
+    "auditType": "repo_state_snapshot",
+    "latestPath": ".claude-state/closeout/repo-state/latest.json",
+    "historyRoot": ".claude-state/closeout/repo-state/history",
+    "historyRetentionDays": 90,
+    "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "rollback"]
+  },
+  "webDashboardSpec": {
+    "enabled": true,
+    "stickyUrlPath": "/closeout",
+    "autoRefreshMs": 5000,
+    "readOnlyByDefault": true,
+    "dataSources": [
+      "repoStateLedger.latestPath",
+      "repoClosedPostcondition.closeoutCleanTruth",
+      "closeoutAudits",
+      "workBlockManifests",
+      "repoSweepCandidateReports"
+    ],
+    "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"]
+  },
+  "rollbackPolicy": {
+    "enabled": true,
+    "preferredStrategy": "git-revert-or-recovery-branch",
+    "neverUseResetHardWithoutExplicitUserRequest": true,
+    "requireRepoStateSnapshotBeforeMutation": true,
+    "requireRecoveryCommandInMutatingAudits": true,
+    "recoveryEvidenceRoots": [
+      ".claude-state/closeout/manual-prune",
+      ".claude-state/closeout/dirty-splits",
+      ".closeout-evidence"
+    ],
+    "userFacingFeasibility": "high for committed Git changes; medium for branch/worktree cleanup with recovery evidence; manual for uncommitted foreign dirty paths"
+  },
   "remediationFreeze": {
     "enabled": true,
     "markerPath": ".claude-state/closeout-remediation.freeze",
@@ -232,7 +270,7 @@
       "tools/repo-hygiene/closeout.contract.json",
       "tools/repo-hygiene/hygiene.config.json"
     ],
-    "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair"],
+    "requiredConfigKeys": ["git", "workBlockBootstrap", "validation", "processResources", "paths", "dirtySplit", "toolingBaseline", "evidenceRepair", "stashPolicy", "cleanupPolicy", "reviewQuorum", "responseHookLifecycle", "hardClean", "runtimeServices", "blockerAutoRemediation", "closeoutAddendumPersistence", "finalizeLoop", "remediationFreeze", "agentRemediation", "agentRemediationQueue", "locking", "autoEligibilityRepair", "repoStateLedger", "webDashboardSpec", "rollbackPolicy"],
     "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
     "requiredAutoQuorumActions": [
       "integrated_branch_prune",
@@ -331,6 +369,8 @@
       "test_validation_commands_ignore_failure_words_in_successful_test_names",
       "test_timeout_and_output_cap_settings_are_contract_required",
       "test_bounded_runner_exit_code_taxonomy_is_contract_required",
+      "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
+      "test_repo_state_dashboard_and_rollback_contract_required",
       "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
       "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
       "test_hard_clean_final_response_blocks_remaining_stash",
@@ -377,6 +417,7 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def kill_process_tree"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def normalize_closeout_child_status"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_runner_exit_code"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
@@ -402,6 +443,7 @@
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-queue"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-results"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
+      {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "repo-state"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "hook-guard"},
       {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "bounded_closeout_cli_main"},
       {"path": "tools/closeout/Invoke-CloseoutCli.ps1", "contains": "closeout-heartbeat"},
@@ -420,6 +462,8 @@
       {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
       {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
       {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
+      {"path": "AGENTS.md", "contains": "repoStateLedger"},
+      {"path": "AGENTS.md", "contains": "rollbackPolicy"},
       {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
       {"path": "CLAUDE.md", "contains": "semantic success authority"},
       {"path": "CLAUDE.md", "contains": "boundedRunnerExitCodes"},
@@ -429,6 +473,8 @@
       {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
       {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
       {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
+      {"path": "CLAUDE.md", "contains": "repoStateLedger"},
+      {"path": "CLAUDE.md", "contains": "rollbackPolicy"},
       {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
       {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
       {"path": "closeout.config.json", "contains": "finalizeLoop"},
@@ -440,6 +486,9 @@
       {"path": "closeout.config.json", "contains": "boundedRunnerExitCodes"},
       {"path": "closeout.config.json", "contains": "unifiedTruthReport"},
       {"path": "closeout.config.json", "contains": "failureTextPatterns"},
+      {"path": "closeout.config.json", "contains": "repoStateLedger"},
+      {"path": "closeout.config.json", "contains": "webDashboardSpec"},
+      {"path": "closeout.config.json", "contains": "rollbackPolicy"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "bootstrap-response"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "remediation-freeze-status"},
       {"path": "tools/agent-bridge/codex_pre_response.ps1", "contains": "-SkipSessionWorktree"},
