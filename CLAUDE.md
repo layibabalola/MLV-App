@@ -225,6 +225,10 @@ branches, worktrees, stashes, latest closeout audit/truth pointers, a bounded
 closeout-history index, and `rollbackPolicy`. The future `webDashboardSpec`
 surface should auto-refresh `http://127.0.0.1:8765/closeout` from that feed and
 the closeout audits instead of creating a separate state authority.
+For live dashboard polling, use the latest-only repo-state adapter:
+`tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. It
+refreshes `latest.json` without appending history or `repo_state_snapshot` audit
+rows on every poll.
 `webDashboardSpec` is read-only by default and
 `symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
 preserved scroll/focus/detail state across refresh, and repo-map, workflow,
