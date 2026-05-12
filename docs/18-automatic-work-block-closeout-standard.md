@@ -176,6 +176,11 @@ Snapshots use `repo-state-snapshot.v1` and include files, branches, worktrees,
 stashes, latest closeout truth, audit trail pointers, a bounded closeout-history
 index such as `closeout-history-index.v1`, and `rollbackPolicy` plus
 `rollback-readiness.v1`.
+Snapshots should also expose a `worktree-inspection.v1` result derived from
+`git worktree list --porcelain`, including whether the current repo root appeared
+in the listing, ordinary linked sibling worktrees, protected linked worktrees,
+and inspection failures. A repo-closed claim that cannot prove this inspection is
+not authoritative.
 For live dashboard refresh, repos should expose a latest-only actor such as
 `tools/closeout/write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That actor
 updates the stable latest feed without adding history snapshots or audit rows on
@@ -195,6 +200,14 @@ requirements, and rollback non-actionability/reason. Data endpoints should inclu
 `/api/closeout/repo-state/latest`,
 `/api/closeout/repo-state/history-index`, and
 `/api/closeout/repo-state/history/{snapshotId}`.
+Dashboard symbolic action intent should be recorded as generated request packets
+under `.claude-state/closeout/dashboard-action-requests/` through an endpoint
+such as `/api/closeout/actions/request`. These packets are evidence of user/UI
+intent only; repo-owned actors still revalidate helper freshness, repo-state
+hash, actionability, and exact tuple fields before mutation. The request layer
+must reject missing/stale/future helper timestamps, mismatched helper process
+ids, empty exact-tuple values, and request roots that resolve outside generated
+state.
 `rollbackPolicy` documents how undo works: prefer Git revert, recovery-branch
 restoration, path restore from snapshot, or preservation-ref promotion; preserve
 evidence before cleanup; require a new work block, user approval, immutable
