@@ -238,7 +238,9 @@ of creating a separate state authority.
 For live dashboard polling, use the latest-only repo-state adapter:
 `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. It
 refreshes `latest.json` without appending history or `repo_state_snapshot` audit
-rows on every poll.
+rows on every poll. Configured refresh commands must fail closed unless they
+resolve to this repo-owned latest-only writer; arbitrary commands must not be
+surfaced through dashboard metadata.
 `webDashboardSpec` is read-only by default and
 `symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
 preserved scroll/focus/selection/expanded/history-filter state across refresh,
@@ -251,7 +253,8 @@ closed if the port belongs to another repo. Required endpoints are
 `/api/closeout/repo-state/history-index`,
 `/api/closeout/repo-state/history/{snapshotId}`, and
 `/api/closeout/actions`; `/api/closeout/actions` reports `serverProcessId`,
-repo ownership, symbolic actions, and rollback non-actionability.
+repo ownership, symbolic actions, exact-tuple requirements, command policy, and
+rollback non-actionability plus the readiness reason.
 Rollback is handled by repo-owned evidence, not by blind cleanup. `rollbackPolicy`
 prefers Git revert, recovery-branch restoration, path restore from snapshot, or
 preservation-ref promotion; requires a new work block, user approval, a

@@ -166,7 +166,10 @@ def effective_closeout_script_command(
     configured_text = str(configured or "").strip()
     if not configured_text or command_references_closeout_script(configured_text, script):
         return closeout_script_command(script, extra_args, config)
-    return configured_text
+    raise HygieneError(
+        "unsupported configured closeout command for %s; dashboard and closeout command surfaces "
+        "may only resolve to repo-owned tools\\closeout\\%s" % (script, script)
+    )
 
 
 DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
@@ -214,6 +217,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_actions_are_read_only_and_owned",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_history_snapshot_rejects_path_escape",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_uses_sse_with_polling_fallback",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_preserves_configured_client_state_keys",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_dashboard_refresh_command_rejects_unsupported_configured_command",
                     "-v",
                 ],
                 "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
@@ -369,12 +374,15 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "closeoutHistoryLimit": 25,
         "closeoutHistorySchema": "closeout-history-index.v1",
         "liveRefreshWritesHistory": False,
+        "refreshCommandPolicy": "repo-owned-write-repo-state-latest-only",
         "liveRefreshCommand": closeout_script_command("write-repo-state.ps1", ["-Write", "-LatestOnly"]),
         "feedPathPolicy": {
             "generatedRoot": ".claude-state/closeout/repo-state",
             "latestJsonIsMutableDashboardFeed": True,
             "latestJsonIsRollbackEvidence": False,
             "historyJsonIsImmutableRollbackEvidence": True,
+            "latestFeedUse": "display-only-dashboard-feed",
+            "historyEvidenceUse": "immutable-history-source-for-rollback-actor",
         },
         "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"],
     },
@@ -385,6 +393,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "refreshTransport": "sse-with-polling-fallback",
         "autoRefreshMs": 5000,
         "refreshCommand": closeout_script_command("write-repo-state.ps1", ["-Write", "-LatestOnly"]),
+        "refreshCommandPolicy": "repo-owned-write-repo-state-latest-only",
         "readOnlyByDefault": True,
         "preserveClientStateAcrossRefresh": True,
         "preservedClientStateKeys": ["scrollPosition", "focusedElement", "selectedWorkBlockId", "expandedRows", "activeHistoryFilters"],
@@ -692,6 +701,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_dashboard_actions_are_read_only_and_owned",
             "test_closeout_dashboard_history_snapshot_rejects_path_escape",
             "test_closeout_dashboard_page_uses_sse_with_polling_fallback",
+            "test_closeout_dashboard_page_preserves_configured_client_state_keys",
+            "test_dashboard_refresh_command_rejects_unsupported_configured_command",
             "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
             "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
             "test_hard_clean_final_response_blocks_remaining_stash",
@@ -6321,6 +6332,7 @@ def rollback_readiness_state(policy: Dict[str, Any], ref_state: Dict[str, Any]) 
         "actionability": str(policy.get("readinessDefaultActionability") or "read-only-no-actor"),
         "evidenceFresh": False,
         "evidenceStatus": "not_evaluated_by_rollback_actor",
+        "readinessReason": "rollback actor has not validated an immutable source snapshot and closeout-rollback-manifest.v1",
         "currentHead": ref_state.get("head"),
         "sourceSnapshotPath": None,
         "sourceSnapshotHash": None,
@@ -6405,6 +6417,7 @@ def repo_state_snapshot(
             "refreshTransport": str(dashboard.get("refreshTransport") or "sse-with-polling-fallback"),
             "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
             "refreshCommand": dashboard_refresh_command,
+            "refreshCommandPolicy": str(dashboard.get("refreshCommandPolicy") or "repo-owned-write-repo-state-latest-only"),
             "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
             "readOnlyByDefault": bool(dashboard.get("readOnlyByDefault", True)),
             "preserveClientStateAcrossRefresh": bool(dashboard.get("preserveClientStateAcrossRefresh", True)),
@@ -6441,6 +6454,7 @@ def repo_state_snapshot(
             "historyRetentionDays": int(ledger.get("historyRetentionDays") or 90),
             "closeoutHistorySchema": str(ledger.get("closeoutHistorySchema") or "closeout-history-index.v1"),
             "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
+            "refreshCommandPolicy": str(ledger.get("refreshCommandPolicy") or "repo-owned-write-repo-state-latest-only"),
             "liveRefreshCommand": live_refresh_command,
             "feedPathPolicy": dict(ledger.get("feedPathPolicy") or {}),
         },

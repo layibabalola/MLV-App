@@ -43,6 +43,8 @@
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_actions_are_read_only_and_owned",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_history_snapshot_rejects_path_escape",
           "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_uses_sse_with_polling_fallback",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_preserves_configured_client_state_keys",
+          "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_dashboard_refresh_command_rejects_unsupported_configured_command",
           "-v"
         ],
         "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"]
@@ -228,11 +230,14 @@
     "closeoutHistoryLimit": 25,
     "closeoutHistorySchema": "closeout-history-index.v1",
     "liveRefreshWritesHistory": false,
+    "refreshCommandPolicy": "repo-owned-write-repo-state-latest-only",
     "feedPathPolicy": {
       "generatedRoot": ".claude-state/closeout/repo-state",
       "latestJsonIsMutableDashboardFeed": true,
       "latestJsonIsRollbackEvidence": false,
-      "historyJsonIsImmutableRollbackEvidence": true
+      "historyJsonIsImmutableRollbackEvidence": true,
+      "latestFeedUse": "display-only-dashboard-feed",
+      "historyEvidenceUse": "immutable-history-source-for-rollback-actor"
     },
     "include": ["branch", "tracking", "dirty", "worktrees", "stashes", "localBranches", "closeoutCleanTruth", "auditTrail", "closeoutHistory", "rollback"]
   },
@@ -242,6 +247,7 @@
     "stickyUrlPath": "/closeout",
     "refreshTransport": "sse-with-polling-fallback",
     "autoRefreshMs": 5000,
+    "refreshCommandPolicy": "repo-owned-write-repo-state-latest-only",
     "readOnlyByDefault": true,
     "preserveClientStateAcrossRefresh": true,
     "preservedClientStateKeys": ["scrollPosition", "focusedElement", "selectedWorkBlockId", "expandedRows", "activeHistoryFilters"],
@@ -498,6 +504,8 @@
       "test_closeout_dashboard_actions_are_read_only_and_owned",
       "test_closeout_dashboard_history_snapshot_rejects_path_escape",
       "test_closeout_dashboard_page_uses_sse_with_polling_fallback",
+      "test_closeout_dashboard_page_preserves_configured_client_state_keys",
+      "test_dashboard_refresh_command_rejects_unsupported_configured_command",
       "test_stale_tooling_without_bounded_runner_reports_tooling_drift",
       "test_hard_clean_final_response_blocks_non_exempt_dirty_files",
       "test_hard_clean_final_response_blocks_remaining_stash",
