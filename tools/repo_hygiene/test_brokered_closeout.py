@@ -56,6 +56,7 @@ from .brokered_closeout import (
     stable_hash,
     start_work_block,
     stop_runtime_services_before_promotion,
+    validate_rollback_manifest,
     verify_repo_closed_postcondition,
     verify_prune_recovery_artifact,
     write_audit,
@@ -448,6 +449,32 @@ class BrokeredCloseoutTests(unittest.TestCase):
             return []
         return [json.loads(line)["auditType"] for line in audit_log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
+    def audit_rows(self, repo: Path) -> list[dict]:
+        audit_log = repo / ".claude-state" / "closeout" / "audits" / "audits.jsonl"
+        if not audit_log.exists():
+            return []
+        return [json.loads(line) for line in audit_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def write_closeout_work_block_manifest(self, repo: Path, work_block_id: str = "wb-rollback") -> None:
+        head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        manifest = {
+            "schemaVersion": "1.0",
+            "workBlockId": work_block_id,
+            "state": "completed",
+            "actor": "local-test",
+            "branch": git(repo, "branch", "--show-current").stdout.strip(),
+            "worktree": str(repo),
+            "targetBranch": "master",
+            "pathClaims": [],
+            "startHead": head,
+            "dirtyBaseline": {"paths": [], "entries": []},
+            "startedAt": "2026-01-01T00:00:00+00:00",
+            "updatedAt": "2026-01-01T00:00:00+00:00",
+        }
+        block_dir = repo / ".claude-state" / "closeout" / "work-blocks" / work_block_id
+        block_dir.mkdir(parents=True, exist_ok=True)
+        (block_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
     def runtime_service_updates(self, marker: Path, log: Path, *, validation_rc: int = 0) -> dict:
         marker_text = repr(str(marker))
         log_text = repr(str(log))
@@ -674,10 +701,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["rollbackPolicy"]["writeRollbackPlanBeforeMutation"])
         self.assertEqual(config["rollbackPolicy"]["readinessSchema"], "rollback-readiness.v1")
         self.assertEqual(config["rollbackPolicy"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
+        self.assertEqual(config["rollbackPolicy"]["validationSchema"], "closeout-rollback-manifest-validation.v1")
+        self.assertEqual(config["rollbackPolicy"]["manifestRoot"], ".claude-state/closeout/rollback")
+        self.assertIn("validate-rollback-manifest.ps1", config["rollbackPolicy"]["validatorCommand"])
+        self.assertEqual(config["rollbackPolicy"]["validatorActionability"], "read-only-validator")
         self.assertEqual(config["rollbackPolicy"]["readinessDefaultActionability"], "read-only-no-actor")
         self.assertFalse(config["rollbackPolicy"]["latestFeedIsRollbackEvidence"])
         self.assertTrue(config["rollbackPolicy"]["requireImmutableSourceSnapshotForRollback"])
         self.assertIn("sourceSnapshotPath", config["rollbackPolicy"]["requiredManifestFields"])
+        self.assertIn("sourceSnapshotAuditHash", config["rollbackPolicy"]["requiredManifestFields"])
+        self.assertIn("repoClosedAuditHash", config["rollbackPolicy"]["requiredManifestFields"])
         self.assertIn("reset-hard", config["rollbackPolicy"]["disallowedDefaultActions"])
         self.assertIn("delete-evidence", config["rollbackPolicy"]["disallowedDefaultActions"])
 
@@ -799,6 +832,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(snapshot["rollback"]["requireUserApprovalForRollback"])
         self.assertTrue(snapshot["rollback"]["neverUseResetHardWithoutExplicitUserRequest"])
         self.assertIn(".claude-state/closeout/manual-prune", snapshot["rollback"]["recoveryEvidenceRoots"])
+        self.assertEqual(snapshot["rollback"]["manifestRoot"], ".claude-state/closeout/rollback")
+        self.assertEqual(snapshot["rollback"]["validationSchema"], "closeout-rollback-manifest-validation.v1")
+        self.assertIn("validate-rollback-manifest.ps1", snapshot["rollback"]["validatorCommand"])
+        self.assertEqual(snapshot["rollback"]["validatorActionability"], "read-only-validator")
         self.assertEqual(snapshot["rollback"]["readiness"]["schema"], "rollback-readiness.v1")
         self.assertEqual(snapshot["rollback"]["readiness"]["actionability"], "read-only-no-actor")
         self.assertFalse(snapshot["rollback"]["readiness"]["evidenceFresh"])
@@ -921,7 +958,245 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(readiness["requiresImmutableSourceSnapshot"])
         self.assertEqual(readiness["requiredManifestSchema"], "closeout-rollback-manifest.v1")
         self.assertIn("sourceSnapshotPath", readiness["requiredManifestFields"])
+        self.assertIn("sourceSnapshotAuditHash", readiness["requiredManifestFields"])
+        self.assertIn("repoClosedAuditHash", readiness["requiredManifestFields"])
         self.assertNotEqual(persisted["stateLedger"]["latestPath"], readiness["sourceSnapshotPath"])
+
+    def test_validate_rollback_manifest_accepts_immutable_history_and_audit(self) -> None:
+        repo = self.init_repo(remote=True)
+        config = load_closeout_config(repo)
+        self.write_closeout_work_block_manifest(repo, "wb-rollback")
+        verify_repo_closed_postcondition(repo, config, work_block_id="wb-rollback", finalize_result={"status": "success"})
+        snapshot = repo_state_snapshot(repo, write=True, work_block_id="wb-rollback")
+        repo_closed_audit = next(row for row in self.audit_rows(repo) if row["auditType"] == "repo_closed_postcondition")
+        source_audit = next(
+            row
+            for row in self.audit_rows(repo)
+            if row["auditType"] == "repo_state_snapshot" and row.get("payload", {}).get("snapshotHash") == snapshot["stateLedger"]["snapshotHash"]
+        )
+        manifest_dir = repo / ".claude-state" / "closeout" / "rollback"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "schema": "closeout-rollback-manifest.v1",
+            "targetHead": snapshot["branch"]["head"],
+            "sourceSnapshotPath": snapshot["stateLedger"]["historyPath"],
+            "sourceSnapshotHash": snapshot["stateLedger"]["snapshotHash"],
+            "sourceSnapshotAuditHash": source_audit["auditHash"],
+            "repoClosedAuditHash": repo_closed_audit["auditHash"],
+            "policyHash": config["policyHash"],
+            "plannedStrategy": "git-revert",
+            "userApproval": True,
+            "recoveryCommand": "git revert --no-edit " + snapshot["branch"]["head"],
+        }
+        manifest_path = manifest_dir / "valid.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        result = validate_rollback_manifest(repo, ".claude-state/closeout/rollback/valid.json")
+
+        self.assertEqual(result["schema"], "closeout-rollback-manifest-validation.v1")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["actionability"], "read-only-validator")
+        self.assertFalse(result["actionActorAvailable"])
+        self.assertFalse(result["mutationReady"])
+        self.assertFalse(result["latestFeedIsRollbackEvidence"])
+        self.assertEqual(result["sourceSnapshotHash"], snapshot["stateLedger"]["snapshotHash"])
+        self.assertEqual(result["sourceSnapshotHashScope"], "repo-state-snapshot without stateLedger.snapshotHash/historyPath")
+        self.assertEqual(result["repoClosedAuditHash"], repo_closed_audit["auditHash"])
+        self.assertEqual(result["sourceSnapshotAuditHash"], source_audit["auditHash"])
+        self.assertEqual(result["workBlockId"], "wb-rollback")
+        self.assertTrue(result["sourceSnapshotAuditSidecarPath"])
+        self.assertTrue(result["repoClosedAuditSidecarPath"])
+
+        cli = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.repo_hygiene.work_block_cli",
+                "--repo-root",
+                str(repo),
+                "validate-rollback-manifest",
+                "--manifest-path",
+                ".claude-state/closeout/rollback/valid.json",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+        self.assertEqual(json.loads(cli.stdout)["status"], "success")
+
+    def test_validate_rollback_manifest_rejects_latest_forbidden_and_stale_evidence(self) -> None:
+        repo = self.init_repo(remote=True)
+        config = load_closeout_config(repo)
+        self.write_closeout_work_block_manifest(repo, "wb-rollback")
+        verify_repo_closed_postcondition(repo, config, work_block_id="wb-rollback", finalize_result={"status": "success"})
+        snapshot = repo_state_snapshot(repo, write=True, work_block_id="wb-rollback")
+        repo_closed_audit = next(row for row in self.audit_rows(repo) if row["auditType"] == "repo_closed_postcondition")
+        source_audit = next(
+            row
+            for row in self.audit_rows(repo)
+            if row["auditType"] == "repo_state_snapshot" and row.get("payload", {}).get("snapshotHash") == snapshot["stateLedger"]["snapshotHash"]
+        )
+        manifest_dir = repo / ".claude-state" / "closeout" / "rollback"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        base_manifest = {
+            "schema": "closeout-rollback-manifest.v1",
+            "targetHead": snapshot["branch"]["head"],
+            "sourceSnapshotPath": snapshot["stateLedger"]["historyPath"],
+            "sourceSnapshotHash": snapshot["stateLedger"]["snapshotHash"],
+            "sourceSnapshotAuditHash": source_audit["auditHash"],
+            "repoClosedAuditHash": repo_closed_audit["auditHash"],
+            "policyHash": config["policyHash"],
+            "plannedStrategy": "git-revert",
+            "userApproval": True,
+            "recoveryCommand": "git revert --no-edit " + snapshot["branch"]["head"],
+        }
+
+        def write_manifest(name: str, updates: dict) -> str:
+            payload = dict(base_manifest)
+            payload.update(updates)
+            path = manifest_dir / name
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return ".claude-state/closeout/rollback/" + name
+
+        with self.assertRaisesRegex(HygieneError, "latest/current repo-state feeds"):
+            validate_rollback_manifest(repo, write_manifest("latest.json", {"sourceSnapshotPath": snapshot["stateLedger"]["latestPath"]}))
+
+        with self.assertRaisesRegex(HygieneError, "plannedStrategy is forbidden"):
+            validate_rollback_manifest(repo, write_manifest("forbidden.json", {"plannedStrategy": "reset-hard"}))
+
+        with self.assertRaisesRegex(HygieneError, "recoveryCommand contains forbidden action: reset-hard"):
+            validate_rollback_manifest(repo, write_manifest("forbidden-command.json", {"recoveryCommand": "git reset --hard HEAD~1"}))
+
+        with self.assertRaisesRegex(HygieneError, "recoveryCommand contains forbidden action: force-push"):
+            validate_rollback_manifest(repo, write_manifest("force-refspec.json", {"recoveryCommand": "git push origin +HEAD:master"}))
+
+        with self.assertRaisesRegex(HygieneError, "recoveryCommand contains forbidden action: force-push"):
+            validate_rollback_manifest(repo, write_manifest("force-short-refspec.json", {"recoveryCommand": "git push origin +main"}))
+
+        with self.assertRaisesRegex(HygieneError, "targetHead is stale"):
+            validate_rollback_manifest(repo, write_manifest("stale.json", {"targetHead": "0" * 40}))
+
+        with self.assertRaisesRegex(HygieneError, "policyHash mismatch"):
+            validate_rollback_manifest(repo, write_manifest("policy.json", {"policyHash": "stale-policy"}))
+
+        with self.assertRaisesRegex(HygieneError, "repoClosedAuditHash not found"):
+            validate_rollback_manifest(repo, write_manifest("audit.json", {"repoClosedAuditHash": "missing"}))
+
+        with self.assertRaisesRegex(HygieneError, "sourceSnapshotAuditHash not found"):
+            validate_rollback_manifest(repo, write_manifest("source-audit.json", {"sourceSnapshotAuditHash": "missing"}))
+
+        mismatched_source = json.loads((repo / snapshot["stateLedger"]["historyPath"]).read_text(encoding="utf-8"))
+        mismatched_source["branch"]["head"] = "1" * 40
+        mismatched_source["stateLedger"]["snapshotHash"] = stable_hash(
+            {
+                key: (
+                    {inner_key: inner_value for inner_key, inner_value in value.items() if inner_key not in {"snapshotHash", "historyPath"}}
+                    if key == "stateLedger" and isinstance(value, dict)
+                    else value
+                )
+                for key, value in mismatched_source.items()
+            }
+        )
+        mismatched_path = repo / snapshot["stateLedger"]["historyRoot"] / "mismatched-head.json"
+        mismatched_path.write_text(json.dumps(mismatched_source, indent=2), encoding="utf-8")
+        write_audit(
+            repo,
+            config,
+            "repo_state_snapshot",
+            {
+                "snapshotHash": mismatched_source["stateLedger"]["snapshotHash"],
+                "latestPath": mismatched_source["stateLedger"]["latestPath"],
+                "historyPath": str(mismatched_path.relative_to(repo)).replace("\\", "/"),
+                "writeMode": "latest-and-history",
+                "branch": mismatched_source["branch"],
+                "dirtyEntryCount": mismatched_source["dirty"]["entryCount"],
+                "stashCount": len(mismatched_source["stashes"]),
+                "worktreeCount": len(mismatched_source["worktrees"]),
+                "linkedSiblingWorktreeCount": mismatched_source["worktreeInspection"]["ordinaryLinkedWorktreeCount"],
+                "worktreeInspectionFailureCount": len(mismatched_source["worktreeInspection"]["inspectionFailures"]),
+            },
+            work_block_id="wb-rollback",
+            outcome="success",
+        )
+        mismatched_audit = next(
+            row
+            for row in self.audit_rows(repo)
+            if row["auditType"] == "repo_state_snapshot" and row.get("payload", {}).get("snapshotHash") == mismatched_source["stateLedger"]["snapshotHash"]
+        )
+        with self.assertRaisesRegex(HygieneError, "source snapshot branch head mismatch"):
+            validate_rollback_manifest(
+                repo,
+                write_manifest(
+                    "mismatched-head.json",
+                    {
+                        "sourceSnapshotPath": str(mismatched_path.relative_to(repo)).replace("\\", "/"),
+                        "sourceSnapshotHash": mismatched_source["stateLedger"]["snapshotHash"],
+                        "sourceSnapshotAuditHash": mismatched_audit["auditHash"],
+                    },
+                ),
+            )
+
+        outside_manifest = repo / ".claude-state" / "outside-rollback.json"
+        outside_manifest.write_text(json.dumps(base_manifest, indent=2), encoding="utf-8")
+        with self.assertRaisesRegex(HygieneError, "rollback manifest path must stay under"):
+            validate_rollback_manifest(repo, ".claude-state/outside-rollback.json")
+
+        with self.assertRaisesRegex(HygieneError, "sourceSnapshotPath must stay under immutable repo-state history"):
+            validate_rollback_manifest(
+                repo,
+                write_manifest("outside-source.json", {"sourceSnapshotPath": ".claude-state/closeout/manual-prune/source.json"}),
+            )
+
+        tampered_source = json.loads((repo / snapshot["stateLedger"]["historyPath"]).read_text(encoding="utf-8"))
+        tampered_source["dirty"]["entryCount"] = 99
+        tampered_path = repo / snapshot["stateLedger"]["historyRoot"] / "tampered.json"
+        tampered_path.write_text(json.dumps(tampered_source, indent=2), encoding="utf-8")
+        with self.assertRaisesRegex(HygieneError, "declared hash mismatch"):
+            validate_rollback_manifest(
+                repo,
+                write_manifest(
+                    "tampered.json",
+                    {
+                        "sourceSnapshotPath": str(tampered_path.relative_to(repo)).replace("\\", "/"),
+                        "sourceSnapshotHash": tampered_source["stateLedger"]["snapshotHash"],
+                    },
+                ),
+            )
+
+        audit_log = repo / ".claude-state" / "closeout" / "audits" / "audits.jsonl"
+        audit_rows = self.audit_rows(repo)
+        for row in audit_rows:
+            if row["auditType"] == "repo_state_snapshot" and row.get("payload", {}).get("snapshotHash") == snapshot["stateLedger"]["snapshotHash"]:
+                row["payload"]["dirtyEntryCount"] = 777
+                break
+        audit_log.write_text("\n".join(json.dumps(row, sort_keys=True) for row in audit_rows) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(HygieneError, "source snapshot audit hash mismatch"):
+            validate_rollback_manifest(repo, write_manifest("tampered-audit.json", {}))
+
+        pwsh = shutil.which("pwsh.exe")
+        if pwsh:
+            wrapper = subprocess.run(
+                [
+                    pwsh,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "tools" / "closeout" / "validate-rollback-manifest.ps1"),
+                    "-RepoRoot",
+                    str(repo),
+                    "-ManifestPath",
+                    ".claude-state/closeout/rollback/missing.json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(wrapper.returncode, 0)
 
     def test_closeout_dashboard_actions_are_read_only_and_owned(self) -> None:
         repo = self.init_repo(remote=True)
@@ -960,6 +1235,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(by_id["request_rollback"]["actionability"], "read-only-no-actor")
         self.assertIn("rollback actor has not validated", by_id["request_rollback"]["readinessReason"])
         self.assertEqual(by_id["request_rollback"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
+        self.assertIn("validate-rollback-manifest.ps1", by_id["request_rollback"]["validatorCommand"])
+        self.assertEqual(by_id["request_rollback"]["validatorActionability"], "read-only-validator")
+        self.assertFalse(by_id["request_rollback"]["actionActorAvailable"])
+        self.assertFalse(by_id["request_rollback"]["mutationReady"])
+        self.assertIn("sourceSnapshotPath", by_id["request_rollback"]["exactTupleRequired"])
+        self.assertIn("sourceSnapshotAuditHash", by_id["request_rollback"]["exactTupleRequired"])
+        self.assertIn("repoClosedAuditHash", by_id["request_rollback"]["exactTupleRequired"])
+        self.assertIn("recoveryCommand", by_id["request_rollback"]["exactTupleRequired"])
 
     def test_closeout_dashboard_action_request_writes_packet_without_mutation(self) -> None:
         repo = self.init_repo(remote=True)
@@ -1243,6 +1526,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("repoStateLedger", baseline["requiredConfigKeys"])
         self.assertIn("webDashboardSpec", baseline["requiredConfigKeys"])
         self.assertIn("rollbackPolicy", baseline["requiredConfigKeys"])
+        self.assertIn("rollbackPolicy.validationSchema", baseline["requiredConfigKeys"])
+        self.assertIn("rollbackPolicy.manifestRoot", baseline["requiredConfigKeys"])
+        self.assertIn("rollbackPolicy.validatorCommand", baseline["requiredConfigKeys"])
+        self.assertIn("rollbackPolicy.validatorActionability", baseline["requiredConfigKeys"])
         self.assertIn("powerShell", baseline["requiredConfigKeys"])
         self.assertIn("powerShell.preferredExecutable", baseline["requiredConfigKeys"])
         self.assertIn("powerShell.requiredArgs", baseline["requiredConfigKeys"])
@@ -1254,6 +1541,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_repo_state_latest_only_refresh_updates_feed_without_audit_noise", baseline["requiredTests"])
         self.assertIn("test_repo_state_snapshot_reports_worktree_inspection", baseline["requiredTests"])
         self.assertIn("test_repo_state_rollback_readiness_fails_closed_without_actor", baseline["requiredTests"])
+        self.assertIn("test_validate_rollback_manifest_accepts_immutable_history_and_audit", baseline["requiredTests"])
+        self.assertIn("test_validate_rollback_manifest_rejects_latest_forbidden_and_stale_evidence", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_actions_are_read_only_and_owned", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_action_request_writes_packet_without_mutation", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_action_request_rejects_stale_or_unknown_action", baseline["requiredTests"])
@@ -1267,6 +1556,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "closeout-history-index.v1"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "rollback-readiness.v1"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot_evidence_hash"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def recovery_command_forbidden_action"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def require_integrity_checked_audit"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def validate_rollback_manifest"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/work_block_cli.py", "validate-rollback-manifest"), required_symbols)
+        self.assertIn(("tools/closeout/validate-rollback-manifest.ps1", "validate-rollback-manifest"), required_symbols)
+        self.assertIn(("tools/closeout/validate-rollback-manifest.ps1", "exit $LASTEXITCODE"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def powershell_executable_for_policy"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def closeout_script_command"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def effective_closeout_script_command"), required_symbols)
@@ -1296,9 +1592,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
             self.assertIn("start-closeout-dashboard.ps1", text)
             self.assertIn("/api/closeout/actions", text)
             self.assertIn("dashboard-action-requests", text)
+            self.assertIn("validate-rollback-manifest.ps1", text)
+            self.assertIn("repoClosedAuditHash", text)
         self.assertIn("repo-state-snapshot.v1", dashboard_spec_text)
         self.assertIn("closeout-history-index.v1", dashboard_spec_text)
         self.assertIn("rollback-readiness.v1", dashboard_spec_text)
+        self.assertIn("closeout-rollback-manifest-validation.v1", dashboard_spec_text)
         self.assertIn("worktree-inspection.v1", dashboard_spec_text)
         self.assertIn("symbolic-action-request-only", dashboard_spec_text)
         self.assertIn("write-repo-state.ps1", dashboard_spec_text)

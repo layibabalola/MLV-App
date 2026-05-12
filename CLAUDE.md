@@ -275,9 +275,16 @@ repo-state snapshot before mutation, immutable source snapshot evidence, a
 `closeout-rollback-manifest.v1`, a rollback plan, and recovery commands in
 mutating audits; and forbids `reset --hard` or force push unless the user
 explicitly asks for it. Until a rollback actor validates the manifest, readiness
-must remain `read-only-no-actor`. Committed Git changes are usually highly
-recoverable; branch/worktree cleanup depends on preserved evidence; uncommitted
-foreign dirty paths are manual.
+must remain `read-only-no-actor`. `tools\closeout\validate-rollback-manifest.ps1`
+is a read-only `closeout-rollback-manifest-validation.v1` validator: manifests
+must stay under `.claude-state/closeout/rollback`, reject `latest.json` and
+`current.json`, bind `sourceSnapshotHash` to the repo-state snapshot hash scope,
+require explicit `sourceSnapshotAuditHash` and `repoClosedAuditHash`,
+integrity-check audit hashes/sidecars, require the source snapshot and
+repo-closed audit to share `workBlockId`, and reject forbidden recovery
+commands. Committed Git changes are usually highly recoverable; branch/worktree
+cleanup depends on preserved evidence; uncommitted foreign dirty paths are
+manual.
 Protected target closeout is a no-op only when
 `hardClean.protectedTargetNoopCloseout.enabled=true`, the current branch is
 protected, no explicit workBlockId was supplied, and hard-clean passes. It writes

@@ -217,6 +217,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_rollback_readiness_fails_closed_without_actor",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validate_rollback_manifest_accepts_immutable_history_and_audit",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_validate_rollback_manifest_rejects_latest_forbidden_and_stale_evidence",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_actions_are_read_only_and_owned",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_writes_packet_without_mutation",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_rejects_stale_or_unknown_action",
@@ -454,7 +456,11 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "writeRollbackPlanBeforeMutation": True,
         "readinessSchema": "rollback-readiness.v1",
         "requiredManifestSchema": "closeout-rollback-manifest.v1",
+        "validationSchema": "closeout-rollback-manifest-validation.v1",
+        "manifestRoot": ".claude-state/closeout/rollback",
+        "validatorCommand": "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\\closeout\\validate-rollback-manifest.ps1 -RepoRoot . -ManifestPath <path>",
         "readinessDefaultActionability": "read-only-no-actor",
+        "validatorActionability": "read-only-validator",
         "latestFeedIsRollbackEvidence": False,
         "requireImmutableSourceSnapshotForRollback": True,
         "requiredManifestFields": [
@@ -462,6 +468,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "targetHead",
             "sourceSnapshotPath",
             "sourceSnapshotHash",
+            "sourceSnapshotAuditHash",
+            "repoClosedAuditHash",
             "policyHash",
             "plannedStrategy",
             "userApproval",
@@ -599,6 +607,10 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "repoStateLedger",
             "webDashboardSpec",
             "rollbackPolicy",
+            "rollbackPolicy.validationSchema",
+            "rollbackPolicy.manifestRoot",
+            "rollbackPolicy.validatorCommand",
+            "rollbackPolicy.validatorActionability",
         ],
         "requiredHighImpactActions": ["clean_integrate", "checkpoint-owned-dirty", "delete_local_branch", "delete_remote_branch", "repo_sweep_prune_merged", "split", "resolve_conflicts_with_agent", "preserve_dirty_cluster", "release_stale_claim", "remove_remediation_freeze"],
         "requiredAutoQuorumActions": [
@@ -712,6 +724,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_state_dashboard_and_rollback_contract_required",
             "test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
             "test_repo_state_rollback_readiness_fails_closed_without_actor",
+            "test_validate_rollback_manifest_accepts_immutable_history_and_audit",
+            "test_validate_rollback_manifest_rejects_latest_forbidden_and_stale_evidence",
             "test_closeout_dashboard_actions_are_read_only_and_owned",
             "test_closeout_dashboard_action_request_writes_packet_without_mutation",
             "test_closeout_dashboard_action_request_rejects_stale_or_unknown_action",
@@ -770,6 +784,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "closeout-history-index.v1"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "rollback-readiness.v1"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot_evidence_hash"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def recovery_command_forbidden_action"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def require_integrity_checked_audit"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_rollback_manifest"},
+            {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "validate-rollback-manifest"},
+            {"path": "tools/closeout/validate-rollback-manifest.ps1", "contains": "validate-rollback-manifest"},
+            {"path": "tools/closeout/validate-rollback-manifest.ps1", "contains": "exit $LASTEXITCODE"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTIONS_SCHEMA"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_REQUEST_SCHEMA"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_actions_payload"},
@@ -6340,6 +6361,87 @@ def rollback_policy(config: Dict[str, Any]) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def rollback_manifest_root(repo_root: Path, policy: Dict[str, Any]) -> Path:
+    rel = normalize_rel(str(policy.get("manifestRoot") or ".claude-state/closeout/rollback"))
+    if not rel.startswith(".claude-state/"):
+        raise HygieneError("rollback manifest root must stay under .claude-state/: %s" % rel)
+    root = (repo_root / rel).resolve()
+    claude_state_root = (repo_root / ".claude-state").resolve()
+    try:
+        root.relative_to(claude_state_root)
+    except ValueError as exc:
+        raise HygieneError("rollback manifest root must stay under .claude-state/: %s" % rel) from exc
+    return root
+
+
+def require_path_under_root(repo_root: Path, rel_path: str, root: Path, field: str) -> Path:
+    path = safe_repo_path(repo_root, rel_path)
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise HygieneError("%s must stay under %s: %s" % (field, normalize_rel(str(root.relative_to(repo_root))), normalize_rel(rel_path))) from exc
+    return path
+
+
+def repo_state_snapshot_evidence_hash(snapshot: Dict[str, Any]) -> str:
+    hash_scope = json.loads(json.dumps(snapshot))
+    state_ledger = hash_scope.get("stateLedger") if isinstance(hash_scope.get("stateLedger"), dict) else {}
+    state_ledger.pop("snapshotHash", None)
+    state_ledger.pop("historyPath", None)
+    return stable_hash(hash_scope)
+
+
+def recovery_command_forbidden_action(command: str, disallowed: set[str]) -> Optional[str]:
+    text = command.lower()
+    if "reset-hard" in disallowed and re.search(r"\bgit\s+reset\s+--hard\b|\breset\s+--hard\b", text):
+        return "reset-hard"
+    if "force-push" in disallowed and re.search(r"\bgit\s+push\b[^\r\n]*(--force|-f|\+[^\s]+)\b", text):
+        return "force-push"
+    if "delete-evidence" in disallowed:
+        evidence_delete_patterns = [
+            r"\bdelete-evidence\b",
+            r"\bremove-item\b[^\r\n]*\.claude-state[\\/]+closeout",
+            r"\brm\b[^\r\n]*\.claude-state[\\/]+closeout",
+        ]
+        if any(re.search(pattern, text) for pattern in evidence_delete_patterns):
+            return "delete-evidence"
+    return None
+
+
+def require_integrity_checked_audit(
+    repo_root: Path,
+    config: Dict[str, Any],
+    row: Any,
+    *,
+    field: str,
+    audit_type: str,
+    outcome: str,
+) -> Dict[str, Any]:
+    if not isinstance(row, dict):
+        raise HygieneError("rollback %s audit evidence not found" % field)
+    declared = str(row.get("auditHash") or "")
+    if not declared:
+        raise HygieneError("rollback %s auditHash missing" % field)
+    clean = json.loads(json.dumps(row))
+    clean.pop("auditHash", None)
+    if stable_hash(clean) != declared:
+        raise HygieneError("rollback %s audit hash mismatch" % field)
+    if row.get("policyHash") != config.get("policyHash"):
+        raise HygieneError("rollback %s audit policyHash mismatch" % field)
+    if row.get("auditType") != audit_type or row.get("outcome") != outcome:
+        raise HygieneError("rollback %s audit type/outcome mismatch" % field)
+    candidates = sorted(audit_root(repo_root, config).glob("*-%s-%s.json" % (audit_type, declared[:12])))
+    matching_sidecars = [path for path in candidates if read_json(path, {}).get("auditHash") == declared]
+    if not matching_sidecars:
+        raise HygieneError("rollback %s audit sidecar not found" % field)
+    sidecar = read_json(matching_sidecars[0], {})
+    if sidecar != row:
+        raise HygieneError("rollback %s audit sidecar mismatch" % field)
+    checked = dict(row)
+    checked["auditSidecarPath"] = normalize_rel(str(matching_sidecars[0].relative_to(repo_root)))
+    return checked
+
+
 def repo_state_path(repo_root: Path, config: Dict[str, Any], key: str, default: str) -> Path:
     policy = repo_state_ledger_config(config)
     rel = normalize_rel(str(policy.get(key) or default))
@@ -6450,6 +6552,8 @@ def rollback_readiness_state(policy: Dict[str, Any], ref_state: Dict[str, Any]) 
             "targetHead",
             "sourceSnapshotPath",
             "sourceSnapshotHash",
+            "sourceSnapshotAuditHash",
+            "repoClosedAuditHash",
             "policyHash",
             "plannedStrategy",
             "userApproval",
@@ -6470,6 +6574,153 @@ def rollback_readiness_state(policy: Dict[str, Any], ref_state: Dict[str, Any]) 
         "requiredManifestSchema": str(policy.get("requiredManifestSchema") or "closeout-rollback-manifest.v1"),
         "requiredManifestFields": required_manifest_fields,
         "note": "latest.json is a mutable dashboard feed and cannot make rollback evidence fresh.",
+    }
+
+
+def validate_rollback_manifest(repo_root_arg: Path, manifest_path_arg: str | Path) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    policy = rollback_policy(config)
+    schema = str(policy.get("requiredManifestSchema") or "closeout-rollback-manifest.v1")
+    validation_schema = str(policy.get("validationSchema") or "closeout-rollback-manifest-validation.v1")
+    manifest_root = rollback_manifest_root(repo_root, policy)
+    manifest_path = require_path_under_root(repo_root, str(manifest_path_arg), manifest_root, "rollback manifest path")
+    manifest = read_json(manifest_path, None)
+    if not isinstance(manifest, dict):
+        raise HygieneError("rollback manifest must be a JSON object")
+    required_fields = list(policy.get("requiredManifestFields") or [])
+    missing = [field for field in required_fields if field not in manifest or manifest.get(field) in (None, "")]
+    if missing:
+        raise HygieneError("rollback manifest missing required fields: %s" % ", ".join(missing))
+    if manifest.get("schema") != schema:
+        raise HygieneError("rollback manifest schema mismatch: %s" % manifest.get("schema"))
+    ref_state = current_repo_ref_state(repo_root, config)
+    target_head = str(manifest.get("targetHead") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", target_head):
+        raise HygieneError("rollback manifest targetHead must be a 40-character commit SHA")
+    if target_head != ref_state.get("head"):
+        raise HygieneError("rollback manifest targetHead is stale: %s" % target_head)
+    if manifest.get("policyHash") != config.get("policyHash"):
+        raise HygieneError("rollback manifest policyHash mismatch")
+    planned_strategy = str(manifest.get("plannedStrategy") or "")
+    allowed = {str(item) for item in policy.get("allowedStrategies") or []}
+    disallowed = {str(item) for item in policy.get("disallowedDefaultActions") or []}
+    if planned_strategy in disallowed:
+        raise HygieneError("rollback manifest plannedStrategy is forbidden: %s" % planned_strategy)
+    if planned_strategy not in allowed:
+        raise HygieneError("rollback manifest plannedStrategy is not allowed: %s" % planned_strategy)
+    if bool(policy.get("requireUserApprovalForRollback", True)) and manifest.get("userApproval") is not True:
+        raise HygieneError("rollback manifest requires explicit userApproval=true")
+    recovery_command = str(manifest.get("recoveryCommand") or "").strip()
+    if bool(policy.get("requireRecoveryCommandInMutatingAudits", True)) and not recovery_command:
+        raise HygieneError("rollback manifest requires a recoveryCommand")
+    forbidden_command_action = recovery_command_forbidden_action(recovery_command, disallowed)
+    if forbidden_command_action:
+        raise HygieneError("rollback manifest recoveryCommand contains forbidden action: %s" % forbidden_command_action)
+
+    ledger = repo_state_ledger_config(config)
+    latest_path = repo_state_path(repo_root, config, "latestPath", ".claude-state/closeout/repo-state/latest.json")
+    history_root = repo_state_path(repo_root, config, "historyRoot", ".claude-state/closeout/repo-state/history")
+    source_path_text = str(manifest.get("sourceSnapshotPath") or "")
+    source_path = safe_repo_path(repo_root, source_path_text)
+    if source_path.resolve() == latest_path.resolve() or source_path.name.lower() in {"latest.json", "current.json"}:
+        raise HygieneError("latest/current repo-state feeds are display-only and cannot be rollback evidence")
+    try:
+        source_path.resolve().relative_to(history_root.resolve())
+    except ValueError as exc:
+        raise HygieneError("rollback sourceSnapshotPath must stay under immutable repo-state history") from exc
+    source_snapshot = read_json(source_path, None)
+    if not isinstance(source_snapshot, dict):
+        raise HygieneError("rollback source snapshot must be a JSON object")
+    if source_snapshot.get("artifactSchema") != str(ledger.get("artifactSchema") or "repo-state-snapshot.v1"):
+        raise HygieneError("rollback source snapshot schema mismatch")
+    if source_snapshot.get("stateLedger", {}).get("writeMode") == "latest-only":
+        raise HygieneError("latest-only repo-state snapshots cannot be rollback evidence")
+    declared_source_hash = str(source_snapshot.get("stateLedger", {}).get("snapshotHash") or "")
+    source_hash = repo_state_snapshot_evidence_hash(source_snapshot)
+    if declared_source_hash != source_hash:
+        raise HygieneError("rollback source snapshot declared hash mismatch")
+    if manifest.get("sourceSnapshotHash") != source_hash:
+        raise HygieneError("rollback sourceSnapshotHash mismatch")
+    rel_source = normalize_rel(str(source_path.relative_to(repo_root)))
+    audits = audit_entries(repo_root, config)
+    source_audit_hash = str(manifest.get("sourceSnapshotAuditHash") or "")
+    source_audit = next((row for row in audits if row.get("auditHash") == source_audit_hash), None)
+    if not isinstance(source_audit, dict):
+        raise HygieneError("rollback sourceSnapshotAuditHash not found")
+    source_audit = require_integrity_checked_audit(
+        repo_root,
+        config,
+        source_audit,
+        field="source snapshot",
+        audit_type=str(ledger.get("auditType") or "repo_state_snapshot"),
+        outcome="success",
+    )
+    source_audit_payload = source_audit.get("payload") if isinstance(source_audit.get("payload"), dict) else {}
+    if (
+        source_audit_payload.get("snapshotHash") != source_hash
+        or source_audit_payload.get("historyPath") != rel_source
+        or source_audit_payload.get("writeMode") != "latest-and-history"
+    ):
+        raise HygieneError("rollback sourceSnapshotAuditHash does not match source snapshot evidence")
+
+    repo_closed_audit_hash = str(manifest.get("repoClosedAuditHash") or "")
+    audit = next((row for row in audits if row.get("auditHash") == repo_closed_audit_hash), None)
+    if not isinstance(audit, dict):
+        raise HygieneError("rollback repoClosedAuditHash not found")
+    audit = require_integrity_checked_audit(
+        repo_root,
+        config,
+        audit,
+        field="repoClosedAuditHash",
+        audit_type="repo_closed_postcondition",
+        outcome="success",
+    )
+    audit_payload = audit.get("payload") if isinstance(audit.get("payload"), dict) else {}
+    if not audit_payload.get("ok"):
+        raise HygieneError("rollback repo-closed audit did not pass")
+    truth = audit_payload.get("closeoutCleanTruth") if isinstance(audit_payload.get("closeoutCleanTruth"), dict) else {}
+    if truth.get("repoClosed") is not True:
+        raise HygieneError("rollback repo-closed audit lacks clean closeout truth")
+    audit_target = audit_payload.get("targetRef") if isinstance(audit_payload.get("targetRef"), dict) else {}
+    if audit_target.get("head") and audit_target.get("head") != target_head:
+        raise HygieneError("rollback repo-closed audit target head mismatch")
+    source_branch = source_snapshot.get("branch") if isinstance(source_snapshot.get("branch"), dict) else {}
+    if source_branch.get("head") != target_head:
+        raise HygieneError("rollback source snapshot branch head mismatch")
+    source_target = source_branch.get("target") if isinstance(source_branch.get("target"), dict) else {}
+    source_target_heads = {str(source_target.get(key)) for key in ("localHead", "remoteHead", "head") if source_target.get(key)}
+    if source_target_heads and target_head not in source_target_heads:
+        raise HygieneError("rollback source snapshot target head mismatch")
+    source_closeout = source_snapshot.get("closeout") if isinstance(source_snapshot.get("closeout"), dict) else {}
+    if source_closeout.get("latestRepoClosedAuditHash") != repo_closed_audit_hash:
+        raise HygieneError("rollback source snapshot repoClosedAuditHash binding mismatch")
+    if not source_audit.get("workBlockId") or source_audit.get("workBlockId") != audit.get("workBlockId"):
+        raise HygieneError("rollback source snapshot and repo-closed audits must share a workBlockId")
+
+    rel_manifest = normalize_rel(str(manifest_path.relative_to(repo_root)))
+    return {
+        "schema": validation_schema,
+        "status": "success",
+        "actionability": str(policy.get("validatorActionability") or "read-only-validator"),
+        "actionActorAvailable": False,
+        "mutationReady": False,
+        "mutationBoundary": "future repo-owned rollback actor only",
+        "manifestPath": rel_manifest,
+        "manifestHash": stable_hash(manifest),
+        "targetHead": target_head,
+        "currentHead": ref_state.get("head"),
+        "sourceSnapshotPath": rel_source,
+        "sourceSnapshotHash": source_hash,
+        "sourceSnapshotHashScope": "repo-state-snapshot without stateLedger.snapshotHash/historyPath",
+        "sourceSnapshotAuditHash": source_audit_hash,
+        "sourceSnapshotAuditSidecarPath": source_audit.get("auditSidecarPath"),
+        "repoClosedAuditHash": repo_closed_audit_hash,
+        "repoClosedAuditSidecarPath": audit.get("auditSidecarPath"),
+        "workBlockId": source_audit.get("workBlockId"),
+        "plannedStrategy": planned_strategy,
+        "latestFeedIsRollbackEvidence": False,
+        "recoveryCommand": recovery_command,
     }
 
 
@@ -6616,6 +6867,10 @@ def repo_state_snapshot(
             "writeRollbackPlanBeforeMutation": bool(rollback.get("writeRollbackPlanBeforeMutation", True)),
             "disallowedDefaultActions": list(rollback.get("disallowedDefaultActions") or []),
             "recoveryEvidenceRoots": list(rollback.get("recoveryEvidenceRoots") or []),
+            "manifestRoot": str(rollback.get("manifestRoot") or ".claude-state/closeout/rollback"),
+            "validationSchema": str(rollback.get("validationSchema") or "closeout-rollback-manifest-validation.v1"),
+            "validatorCommand": str(rollback.get("validatorCommand") or ""),
+            "validatorActionability": str(rollback.get("validatorActionability") or "read-only-validator"),
             "userFacingFeasibility": str(rollback.get("userFacingFeasibility") or ""),
             "readiness": rollback_readiness_state(rollback, ref_state),
         },
@@ -6633,7 +6888,7 @@ def repo_state_snapshot(
     }
     if write:
         snapshot["stateLedger"]["writeMode"] = "latest-only" if latest_only else "latest-and-history"
-        snapshot_hash = stable_hash(snapshot)
+        snapshot_hash = repo_state_snapshot_evidence_hash(snapshot)
         snapshot["stateLedger"]["snapshotHash"] = snapshot_hash
         if latest_only:
             write_json(latest_path, snapshot)

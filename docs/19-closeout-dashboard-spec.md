@@ -102,3 +102,15 @@ snapshot, immutable source snapshot evidence, a
 commands in every mutating audit. `reset --hard` and force push are never
 default actions. Until a repo-owned rollback actor validates that manifest,
 actionability remains `read-only-no-actor`.
+The dashboard may expose the read-only validator command
+`tools\closeout\validate-rollback-manifest.ps1`, but it must not execute a
+rollback actor. Validator results use
+`closeout-rollback-manifest-validation.v1`; manifests live under
+`.claude-state/closeout/rollback`, reject `latest.json` and `current.json`,
+bind `sourceSnapshotHash` to the repo-state snapshot hash scope, require
+explicit `sourceSnapshotAuditHash` and `repoClosedAuditHash`, require matching
+`repo_state_snapshot` audit evidence, integrity-check audit hashes and sidecar
+JSON, require the source snapshot and repo-closed audit to share `workBlockId`,
+and reject forbidden recovery commands. Rollback symbolic request packets must
+include the full manifest-binding tuple, including `sourceSnapshotPath` and
+`recoveryCommand`.
