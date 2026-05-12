@@ -14,6 +14,12 @@ The primary feed is `.claude-state/closeout/repo-state/latest.json`, emitted by
 branches, worktrees, stashes, latest `closeoutCleanTruth`, audit pointers,
 bounded `closeout-history-index.v1`, dashboard settings, and
 `rollback-readiness.v1`.
+It also includes `worktreeInspection` with `worktree-inspection.v1`: the raw
+linked-worktree inventory, whether the current repo root was present, ordinary
+linked sibling counts, protected linked worktree counts, and fail-closed
+inspection errors. The dashboard may visualize protected worktrees, but ordinary
+linked siblings are closeout blockers until merged/pruned or explicitly retained
+by repo-owned evidence.
 
 Live refresh uses
 `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That
@@ -55,6 +61,12 @@ Required endpoints:
 - `/api/closeout/actions`: returns `closeout-dashboard-actions.v1` with
   `serverProcessId`, repo ownership, endpoint metadata, symbolic actions, and
   fail-closed rollback actionability
+- `/api/closeout/actions/request`: records symbolic action intent as generated
+  packets under `.claude-state/closeout/dashboard-action-requests/` after helper
+  freshness, action id, and non-empty exact tuple validation; it rejects
+  missing/stale/future helper timestamps, mismatched helper process ids, and
+  request roots that resolve outside generated state; it does not mutate repo
+  refs, worktrees, stashes, or source files
 - `/api/closeout/events`: SSE refresh stream for clients that prefer events,
   with polling remaining as the fallback path
 

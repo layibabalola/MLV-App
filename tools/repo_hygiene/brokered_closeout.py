@@ -33,6 +33,8 @@ from .core import (
 
 BROKER_SCHEMA_VERSION = "1.0"
 CONFIG_PATH = Path("closeout.config.json")
+DASHBOARD_MIN_INTERVAL_MS = 1000
+DASHBOARD_MAX_INTERVAL_MS = 60000
 HIGH_IMPACT_ACTIONS = [
     "clean_integrate",
     "checkpoint-owned-dirty",
@@ -211,14 +213,21 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_tooling_stale_reports_missing_power_shell_policy",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_snapshot_reports_worktree_inspection",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_dashboard_and_rollback_contract_required",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_state_rollback_readiness_fails_closed_without_actor",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_actions_are_read_only_and_owned",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_writes_packet_without_mutation",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_rejects_stale_or_unknown_action",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_rejects_missing_future_or_malformed_helper_evidence",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_rejects_empty_tuple_values_and_path_escape",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_rejects_malformed_config_numbers",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_history_snapshot_rejects_path_escape",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_uses_sse_with_polling_fallback",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_preserves_configured_client_state_keys",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_dashboard_refresh_command_rejects_unsupported_configured_command",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_closed_postcondition_blocks_linked_sibling_worktree",
                     "-v",
                 ],
                 "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
@@ -320,6 +329,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requireForCompletion": True,
         "allowRetainedForeignDirtyAtCompletion": True,
         "requireNoStash": True,
+        "requireWorktreeInspection": True,
+        "requireNoLinkedSiblingWorktrees": True,
         "protectedTargetNoopCloseout": {
             "enabled": True,
         },
@@ -398,6 +409,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "preserveClientStateAcrossRefresh": True,
         "preservedClientStateKeys": ["scrollPosition", "focusedElement", "selectedWorkBlockId", "expandedRows", "activeHistoryFilters"],
         "mutationModel": "symbolic-action-request-only",
+        "actionRequestRoot": ".claude-state/closeout/dashboard-action-requests",
         "feedAuthority": "latest-json-is-display-feed-only",
         "duplicateLaunchPolicy": "reuse-same-repo-fail-foreign-owner",
         "rollbackForbiddenActions": ["reset-hard", "force-push", "delete-evidence"],
@@ -417,6 +429,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "historyIndex": "/api/closeout/repo-state/history-index",
             "historySnapshot": "/api/closeout/repo-state/history/{snapshotId}",
             "actions": "/api/closeout/actions",
+            "actionsRequest": "/api/closeout/actions/request",
             "events": "/api/closeout/events",
         },
         "dataSources": [
@@ -695,10 +708,16 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_bounded_runner_exit_code_taxonomy_is_contract_required",
             "test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands",
             "test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit",
+            "test_repo_state_snapshot_reports_worktree_inspection",
             "test_repo_state_dashboard_and_rollback_contract_required",
             "test_repo_state_latest_only_refresh_updates_feed_without_audit_noise",
             "test_repo_state_rollback_readiness_fails_closed_without_actor",
             "test_closeout_dashboard_actions_are_read_only_and_owned",
+            "test_closeout_dashboard_action_request_writes_packet_without_mutation",
+            "test_closeout_dashboard_action_request_rejects_stale_or_unknown_action",
+            "test_closeout_dashboard_action_request_rejects_missing_future_or_malformed_helper_evidence",
+            "test_closeout_dashboard_action_request_rejects_empty_tuple_values_and_path_escape",
+            "test_closeout_dashboard_rejects_malformed_config_numbers",
             "test_closeout_dashboard_history_snapshot_rejects_path_escape",
             "test_closeout_dashboard_page_uses_sse_with_polling_fallback",
             "test_closeout_dashboard_page_preserves_configured_client_state_keys",
@@ -711,6 +730,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
             "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
             "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
+            "test_repo_closed_postcondition_blocks_linked_sibling_worktree",
             "test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state",
             "test_closeout_clean_truth_contract_required",
             "test_hard_clean_blocks_retained_remote_feature_refs",
@@ -751,7 +771,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "closeout-history-index.v1"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "rollback-readiness.v1"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTIONS_SCHEMA"},
+            {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_REQUEST_SCHEMA"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_actions_payload"},
+            {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_action_request_payload"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def history_snapshot_payload"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
@@ -766,6 +788,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def write_dirty_worktree_recovery_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def agent_conflict_resolution_packet"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_repo_closed_postcondition"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def worktree_inspection_state"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_clean_truth_from_postcondition"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
@@ -805,6 +828,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "AGENTS.md", "contains": "PowerShell 7+"},
             {"path": "AGENTS.md", "contains": "repoStateLedger"},
+            {"path": "AGENTS.md", "contains": "worktree-inspection.v1"},
             {"path": "AGENTS.md", "contains": "rollbackPolicy"},
             {"path": "CLAUDE.md", "contains": "Closeout actors must be bounded at the process boundary"},
             {"path": "CLAUDE.md", "contains": "semantic success authority"},
@@ -818,6 +842,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "CLAUDE.md", "contains": "PowerShell 7+"},
             {"path": "CLAUDE.md", "contains": "repoStateLedger"},
+            {"path": "CLAUDE.md", "contains": "worktree-inspection.v1"},
             {"path": "CLAUDE.md", "contains": "rollbackPolicy"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
@@ -4511,7 +4536,7 @@ def hard_clean_stale_worktrees(repo_root: Path, config: Dict[str, Any]) -> List[
     )
     stale: List[Dict[str, Any]] = []
     repo_resolved = repo_root.resolve()
-    for item in parse_worktree_list(repo_root):
+    for item in worktree_rows(repo_root):
         path = Path(str(item.get("path") or ""))
         if not path:
             continue
@@ -4690,6 +4715,11 @@ def closeout_clean_truth_from_postcondition(postcondition: Dict[str, Any]) -> Di
     stashes = stash_state.get("stashes") if isinstance(stash_state.get("stashes"), list) else []
     stale_branches = branch_state.get("staleTransactionBranches") if isinstance(branch_state.get("staleTransactionBranches"), list) else []
     stale_worktrees = worktree_state.get("staleManagedWorktrees") if isinstance(worktree_state.get("staleManagedWorktrees"), list) else []
+    linked_sibling_worktrees = worktree_state.get("linkedSiblingWorktrees") if isinstance(worktree_state.get("linkedSiblingWorktrees"), list) else []
+    worktree_inspection = worktree_state.get("inspection") if isinstance(worktree_state.get("inspection"), dict) else {}
+    worktree_inspection_failures = (
+        worktree_inspection.get("inspectionFailures") if isinstance(worktree_inspection.get("inspectionFailures"), list) else []
+    )
     orphaned_artifacts = runtime_state.get("orphanedArtifacts") if isinstance(runtime_state.get("orphanedArtifacts"), list) else []
     remote_features = remote_state.get("retainedRemoteFeatureRefs") if isinstance(remote_state.get("retainedRemoteFeatureRefs"), list) else []
     agent_blockers = agent_state.get("blockers") if isinstance(agent_state.get("blockers"), list) else []
@@ -4721,6 +4751,8 @@ def closeout_clean_truth_from_postcondition(postcondition: Dict[str, Any]) -> Di
             "stashClean": not stashes,
             "branchClean": not stale_branches,
             "worktreeClean": not stale_worktrees,
+            "linkedSiblingWorktreeClean": not linked_sibling_worktrees,
+            "worktreeInspectionClean": not worktree_inspection_failures,
             "runtimeArtifactClean": not orphaned_artifacts,
             "remoteFeatureClean": not remote_features,
             "agentQueueClosed": not agent_blockers,
@@ -4794,8 +4826,19 @@ def verify_repo_closed_postcondition(
         blockers.append({"kind": "disallowed_stashes", "stashes": stashes})
     elif stashes and not audit_type_exists(repo_root, config, ["cleanup_retention", "snapshot_pruning", "stash_retention"]):
         blockers.append({"kind": "stash_retention_audit_missing", "stashes": stashes})
+    worktree_inspection = worktree_inspection_state(repo_root, config)
     if stale_branches:
         blockers.append({"kind": "stale_transaction_branches", "branches": stale_branches})
+    if bool(hard_clean.get("requireWorktreeInspection", True)) and worktree_inspection["inspectionFailures"]:
+        blockers.append({"kind": "worktree_inspection_failed", "worktreeInspection": worktree_inspection})
+    if bool(hard_clean.get("requireNoLinkedSiblingWorktrees", True)) and worktree_inspection["ordinaryLinkedWorktrees"]:
+        blockers.append(
+            {
+                "kind": "linked_sibling_worktrees",
+                "worktrees": worktree_inspection["ordinaryLinkedWorktrees"],
+                "protectedLinkedWorktrees": worktree_inspection["protectedLinkedWorktrees"],
+            }
+        )
     if stale_worktrees:
         blockers.append({"kind": "stale_managed_worktrees", "worktrees": stale_worktrees})
     if orphan_artifacts:
@@ -4828,7 +4871,12 @@ def verify_repo_closed_postcondition(
         },
         "stashState": {"stashes": stashes, "requireNoStash": bool(hard_clean.get("requireNoStash", True))},
         "branchState": {"staleTransactionBranches": stale_branches},
-        "worktreeState": {"staleManagedWorktrees": stale_worktrees},
+        "worktreeState": {
+            "staleManagedWorktrees": stale_worktrees,
+            "inspection": worktree_inspection,
+            "linkedSiblingWorktrees": worktree_inspection["ordinaryLinkedWorktrees"],
+            "protectedLinkedWorktrees": worktree_inspection["protectedLinkedWorktrees"],
+        },
         "runtimeArtifactState": {"orphanedArtifacts": orphan_artifacts},
         "agentRemediationState": agent_remediation_state,
         "remediationFreezeState": freeze,
@@ -5485,13 +5533,13 @@ def quarantine_orphans(repo_root_arg: Path, *, apply: bool = False) -> Dict[str,
 
 REPO_SWEEP_CANDIDATE_ID = "candidate:repo-sweep"
 REPO_SWEEP_ACTION_ID = "repo_sweep_prune_merged"
+WORKTREE_INSPECTION_SCHEMA = "worktree-inspection.v1"
 
 
-def parse_worktree_list(repo_root: Path) -> List[Dict[str, Any]]:
-    result = run_git(repo_root, ["worktree", "list", "--porcelain"], check=True)
+def parse_worktree_porcelain(stdout: str) -> List[Dict[str, Any]]:
     worktrees: List[Dict[str, Any]] = []
     current: Dict[str, Any] = {}
-    for raw in result.stdout.splitlines():
+    for raw in stdout.splitlines():
         line = raw.strip()
         if not line:
             if current:
@@ -5509,12 +5557,94 @@ def parse_worktree_list(repo_root: Path) -> List[Dict[str, Any]]:
             current["branch"] = value[len(prefix) :] if value.startswith(prefix) else value
         elif key == "detached":
             current["detached"] = True
+        elif key == "bare":
+            current["bare"] = True
         elif key == "locked":
             current["locked"] = True
             current["lockReason"] = value
+        elif key == "prunable":
+            current["prunable"] = value or True
     if current:
         worktrees.append(current)
     return worktrees
+
+
+def parse_worktree_list(repo_root: Path) -> List[Dict[str, Any]]:
+    result = run_git(repo_root, ["worktree", "list", "--porcelain"], check=True)
+    return parse_worktree_porcelain(result.stdout)
+
+
+def worktree_inspection_state(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    result = run_git(repo_root, ["worktree", "list", "--porcelain"])
+    hard_clean = config.get("hardClean", {})
+    protected_patterns = list(config.get("cleanupPolicy", {}).get("protectedWorktreeRoots", []))
+    state: Dict[str, Any] = {
+        "schema": WORKTREE_INSPECTION_SCHEMA,
+        "status": "success",
+        "returncode": result.returncode,
+        "stderr": result.stderr[-2000:] if result.stderr else "",
+        "worktrees": [],
+        "currentRootPresent": False,
+        "linkedWorktreeCount": 0,
+        "ordinaryLinkedWorktreeCount": 0,
+        "protectedLinkedWorktreeCount": 0,
+        "linkedWorktrees": [],
+        "ordinaryLinkedWorktrees": [],
+        "protectedLinkedWorktrees": [],
+        "inspectionFailures": [],
+        "requireWorktreeInspection": bool(hard_clean.get("requireWorktreeInspection", True)),
+        "requireNoLinkedSiblingWorktrees": bool(hard_clean.get("requireNoLinkedSiblingWorktrees", True)),
+        "protectedWorktreeRoots": protected_patterns,
+    }
+    if result.returncode != 0:
+        state["status"] = "blocked"
+        state["inspectionFailures"].append(
+            {
+                "kind": "worktree_list_failed",
+                "returncode": result.returncode,
+                "stderr": result.stderr[-2000:] if result.stderr else "",
+            }
+        )
+        return state
+    rows = parse_worktree_porcelain(result.stdout)
+    state["worktrees"] = rows
+    if not rows:
+        state["status"] = "blocked"
+        state["inspectionFailures"].append({"kind": "worktree_list_empty"})
+        return state
+    repo_resolved = repo_root.resolve()
+    for item in rows:
+        row = dict(item)
+        raw_path = str(item.get("path") or "")
+        path = Path(raw_path)
+        rel = repo_relative_or_absolute(repo_root, path)
+        row["repoRelativePath"] = rel
+        try:
+            resolved = path.resolve()
+            row["resolvedPath"] = str(resolved)
+            is_current = resolved == repo_resolved
+        except OSError as exc:
+            row["pathResolutionError"] = str(exc)
+            is_current = False
+        row["isCurrentWorktree"] = is_current
+        protected = path_matches_any(rel, protected_patterns) or path_matches_any(raw_path, protected_patterns)
+        row["protectedByPolicy"] = protected
+        if is_current:
+            state["currentRootPresent"] = True
+            continue
+        state["linkedWorktrees"].append(row)
+        if protected:
+            state["protectedLinkedWorktrees"].append(row)
+        else:
+            state["ordinaryLinkedWorktrees"].append(row)
+    state["linkedWorktreeCount"] = len(state["linkedWorktrees"])
+    state["ordinaryLinkedWorktreeCount"] = len(state["ordinaryLinkedWorktrees"])
+    state["protectedLinkedWorktreeCount"] = len(state["protectedLinkedWorktrees"])
+    if not state["currentRootPresent"]:
+        state["inspectionFailures"].append({"kind": "current_worktree_missing", "repoRoot": str(repo_root)})
+    if state["inspectionFailures"]:
+        state["status"] = "blocked"
+    return state
 
 
 def worktree_dirty_state(path: Path) -> Dict[str, Any]:
@@ -6163,37 +6293,7 @@ def worktree_rows(repo_root: Path) -> List[Dict[str, Any]]:
     result = run_git(repo_root, ["worktree", "list", "--porcelain"])
     if result.returncode != 0:
         return []
-    rows: List[Dict[str, Any]] = []
-    current: Dict[str, Any] = {}
-
-    def flush() -> None:
-        nonlocal current
-        if current:
-            rows.append(current)
-            current = {}
-
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            flush()
-            continue
-        key, _, value = line.partition(" ")
-        if key == "worktree":
-            flush()
-            current = {"path": value}
-        elif key == "HEAD":
-            current["head"] = value
-        elif key == "branch":
-            current["branch"] = value.removeprefix("refs/heads/")
-        elif key == "detached":
-            current["detached"] = True
-        elif key == "bare":
-            current["bare"] = True
-        elif key == "locked":
-            current["locked"] = value or True
-        elif key == "prunable":
-            current["prunable"] = value or True
-    flush()
-    return rows
+    return parse_worktree_porcelain(result.stdout)
 
 
 def repo_state_ledger_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -6204,6 +6304,35 @@ def repo_state_ledger_config(config: Dict[str, Any]) -> Dict[str, Any]:
 def repo_state_dashboard_spec(config: Dict[str, Any]) -> Dict[str, Any]:
     value = config.get("webDashboardSpec", {})
     return value if isinstance(value, dict) else {}
+
+
+def dashboard_config_value(mapping: Dict[str, Any], key: str, default: Any) -> Any:
+    return mapping[key] if key in mapping else default
+
+
+def dashboard_config_int(
+    mapping: Dict[str, Any],
+    key: str,
+    default: int,
+    field_name: str,
+    *,
+    min_value: Optional[int] = None,
+    max_value: Optional[int] = None,
+) -> int:
+    value = dashboard_config_value(mapping, key, default)
+    if isinstance(value, bool):
+        raise HygieneError("%s must be an integer" % field_name)
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        parsed = int(value.strip())
+    else:
+        raise HygieneError("%s must be an integer" % field_name)
+    if min_value is not None and parsed < min_value:
+        raise HygieneError("%s must be >= %s" % (field_name, min_value))
+    if max_value is not None and parsed > max_value:
+        raise HygieneError("%s must be <= %s" % (field_name, max_value))
+    return parsed
 
 
 def rollback_policy(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -6380,6 +6509,41 @@ def repo_state_snapshot(
     latest_path = repo_state_path(repo_root, config, "latestPath", ".claude-state/closeout/repo-state/latest.json")
     history_root = repo_state_path(repo_root, config, "historyRoot", ".claude-state/closeout/repo-state/history")
     ref_state = current_repo_ref_state(repo_root, config)
+    worktree_inspection = worktree_inspection_state(repo_root, config)
+    dashboard_helper = dashboard.get("helper") if isinstance(dashboard.get("helper"), dict) else {}
+    dashboard_endpoints_config = dashboard.get("endpoints") if isinstance(dashboard.get("endpoints"), dict) else {}
+    dashboard_endpoints_snapshot = {
+        "page": str(dashboard_endpoints_config.get("page") or "/closeout"),
+        "latest": str(dashboard_endpoints_config.get("latest") or "/api/closeout/repo-state/latest"),
+        "historyIndex": str(dashboard_endpoints_config.get("historyIndex") or "/api/closeout/repo-state/history-index"),
+        "historySnapshot": str(dashboard_endpoints_config.get("historySnapshot") or "/api/closeout/repo-state/history/{snapshotId}"),
+        "actions": str(dashboard_endpoints_config.get("actions") or "/api/closeout/actions"),
+        "actionsRequest": str(dashboard_endpoints_config.get("actionsRequest") or "/api/closeout/actions/request"),
+        "events": str(dashboard_endpoints_config.get("events") or "/api/closeout/events"),
+    }
+    helper_pid_source = str(dashboard_helper.get("serverProcessIdSource") or "")
+    if not helper_pid_source or helper_pid_source == "/api/closeout/actions":
+        helper_pid_source = dashboard_endpoints_snapshot["actions"]
+    helper_readiness_endpoint = str(dashboard_helper.get("readinessEndpoint") or "")
+    if not helper_readiness_endpoint or helper_readiness_endpoint == "/api/closeout/actions":
+        helper_readiness_endpoint = dashboard_endpoints_snapshot["actions"]
+    dashboard_helper_snapshot = {
+        "scriptPath": str(dashboard_helper.get("scriptPath") or "tools\\closeout\\start-closeout-dashboard.ps1"),
+        "module": str(dashboard_helper.get("module") or "tools.repo_hygiene.closeout_dashboard"),
+        "host": str(dashboard_helper.get("host") or "127.0.0.1"),
+        "port": dashboard_config_int(dashboard_helper, "port", 8765, "helper.port", min_value=1, max_value=65535),
+        "reuseExistingForSameRepo": bool(dashboard_helper.get("reuseExistingForSameRepo", True)),
+        "serverProcessIdSource": helper_pid_source,
+        "readinessEndpoint": helper_readiness_endpoint,
+        "staleAfterMs": dashboard_config_int(
+            dashboard_helper,
+            "staleAfterMs",
+            15000,
+            "helper.staleAfterMs",
+            min_value=DASHBOARD_MIN_INTERVAL_MS,
+            max_value=DASHBOARD_MAX_INTERVAL_MS,
+        ),
+    }
     snapshot = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "artifactSchema": str(ledger.get("artifactSchema") or "repo-state-snapshot.v1"),
@@ -6398,7 +6562,8 @@ def repo_state_snapshot(
             "entries": dirty_entries,
         },
         "localBranches": local_branch_rows(repo_root),
-        "worktrees": worktree_rows(repo_root),
+        "worktrees": worktree_inspection["worktrees"],
+        "worktreeInspection": worktree_inspection,
         "stashes": stash_rows(repo_root),
         "closeout": {
             "auditTrail": {
@@ -6415,7 +6580,14 @@ def repo_state_snapshot(
             "localUrl": str(dashboard.get("localUrl") or "http://127.0.0.1:8765/closeout"),
             "stickyUrlPath": str(dashboard.get("stickyUrlPath") or "/closeout"),
             "refreshTransport": str(dashboard.get("refreshTransport") or "sse-with-polling-fallback"),
-            "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
+            "autoRefreshMs": dashboard_config_int(
+                dashboard,
+                "autoRefreshMs",
+                5000,
+                "dashboard.autoRefreshMs",
+                min_value=DASHBOARD_MIN_INTERVAL_MS,
+                max_value=DASHBOARD_MAX_INTERVAL_MS,
+            ),
             "refreshCommand": dashboard_refresh_command,
             "refreshCommandPolicy": str(dashboard.get("refreshCommandPolicy") or "repo-owned-write-repo-state-latest-only"),
             "liveRefreshWritesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
@@ -6426,8 +6598,8 @@ def repo_state_snapshot(
             "feedAuthority": str(dashboard.get("feedAuthority") or "latest-json-is-display-feed-only"),
             "duplicateLaunchPolicy": str(dashboard.get("duplicateLaunchPolicy") or "reuse-same-repo-fail-foreign-owner"),
             "rollbackForbiddenActions": list(dashboard.get("rollbackForbiddenActions") or []),
-            "helper": dict(dashboard.get("helper") or {}),
-            "endpoints": dict(dashboard.get("endpoints") or {}),
+            "helper": dashboard_helper_snapshot,
+            "endpoints": dashboard_endpoints_snapshot,
             "dataSources": list(dashboard.get("dataSources") or []),
             "views": list(dashboard.get("views") or []),
             "primaryPanels": list(dashboard.get("primaryPanels") or []),
@@ -6487,6 +6659,8 @@ def repo_state_snapshot(
                     "dirtyEntryCount": snapshot["dirty"]["entryCount"],
                     "stashCount": len(snapshot["stashes"]),
                     "worktreeCount": len(snapshot["worktrees"]),
+                    "linkedSiblingWorktreeCount": snapshot["worktreeInspection"]["ordinaryLinkedWorktreeCount"],
+                    "worktreeInspectionFailureCount": len(snapshot["worktreeInspection"]["inspectionFailures"]),
                 },
                 work_block_id=work_block_id,
                 outcome="success",
