@@ -32,6 +32,7 @@ from .brokered_closeout import (
     repo_state_snapshot,
     review_tuple_hash,
     start_work_block,
+    validate_rollback_manifest,
     write_review_surface_unavailable_report,
 )
 from .core import HygieneError, resolve_repo_root, stable_id
@@ -99,6 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     repo_state.add_argument("--write", action="store_true", help="Write latest/history snapshots and a repo_state_snapshot audit.")
     repo_state.add_argument("--latest-only", action="store_true", help="With --write, refresh only latest.json for live dashboard polling.")
     repo_state.add_argument("--work-block-id")
+
+    rollback_validate = sub.add_parser("validate-rollback-manifest", help="Validate a read-only closeout rollback manifest.")
+    rollback_validate.add_argument("--manifest-path", required=True)
 
     sweep = sub.add_parser("sweep", help="Plan or apply whole-repo branch/worktree/stash cleanup.")
     sweep.add_argument("--apply", action="store_true")
@@ -226,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
                 latest_only=args.latest_only,
                 work_block_id=args.work_block_id,
             )
+        elif args.command == "validate-rollback-manifest":
+            result = validate_rollback_manifest(repo_root, args.manifest_path)
         elif args.command == "sweep":
             if args.print_tuple:
                 result = repo_sweep_tuple(repo_root)
