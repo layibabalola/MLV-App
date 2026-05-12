@@ -714,10 +714,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             fallback_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
         self.assertTrue(fallback_command.startswith("powershell.exe -NoLogo -NoProfile -NonInteractive"), fallback_command)
         custom_command = "custom-refresh --repo ."
-        self.assertEqual(
-            effective_closeout_script_command(config, "write-repo-state.ps1", ["-Write", "-LatestOnly"], custom_command),
-            custom_command,
-        )
+        with self.assertRaisesRegex(HygieneError, "unsupported configured closeout command"):
+            effective_closeout_script_command(config, "write-repo-state.ps1", ["-Write", "-LatestOnly"], custom_command)
 
         repo = self.init_repo(remote=True)
         with mock.patch("tools.repo_hygiene.brokered_closeout.os.name", "nt"), mock.patch("tools.repo_hygiene.brokered_closeout.shutil.which", side_effect=pwsh_available):
@@ -779,6 +777,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(snapshot["dashboard"]["refreshTransport"], "sse-with-polling-fallback")
         self.assertGreater(snapshot["dashboard"]["autoRefreshMs"], 0)
         self.assertIn("write-repo-state.ps1", snapshot["dashboard"]["refreshCommand"])
+        self.assertEqual(snapshot["dashboard"]["refreshCommandPolicy"], "repo-owned-write-repo-state-latest-only")
         self.assertFalse(snapshot["dashboard"]["liveRefreshWritesHistory"])
         self.assertEqual(snapshot["dashboard"]["mutationModel"], "symbolic-action-request-only")
         self.assertIn("selectedWorkBlockId", snapshot["dashboard"]["preservedClientStateKeys"])
@@ -794,6 +793,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(snapshot["rollback"]["readiness"]["schema"], "rollback-readiness.v1")
         self.assertEqual(snapshot["rollback"]["readiness"]["actionability"], "read-only-no-actor")
         self.assertFalse(snapshot["rollback"]["readiness"]["evidenceFresh"])
+        self.assertIn("rollback actor has not validated", snapshot["rollback"]["readiness"]["readinessReason"])
         self.assertFalse(snapshot["rollback"]["readiness"]["latestFeedIsRollbackEvidence"])
         self.assertEqual(snapshot["rollback"]["readiness"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
         self.assertTrue((repo / snapshot["stateLedger"]["latestPath"]).exists())
@@ -801,7 +801,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(snapshot["stateLedger"]["writeMode"], "latest-and-history")
         self.assertEqual(snapshot["stateLedger"]["closeoutHistorySchema"], "closeout-history-index.v1")
         self.assertFalse(snapshot["stateLedger"]["liveRefreshWritesHistory"])
+        self.assertEqual(snapshot["stateLedger"]["refreshCommandPolicy"], "repo-owned-write-repo-state-latest-only")
         self.assertFalse(snapshot["stateLedger"]["feedPathPolicy"]["latestJsonIsRollbackEvidence"])
+        self.assertTrue(snapshot["stateLedger"]["feedPathPolicy"]["historyJsonIsImmutableRollbackEvidence"])
+        self.assertEqual(snapshot["stateLedger"]["feedPathPolicy"]["latestFeedUse"], "display-only-dashboard-feed")
+        self.assertEqual(snapshot["stateLedger"]["feedPathPolicy"]["historyEvidenceUse"], "immutable-history-source-for-rollback-actor")
         self.assertIn("repo_state_snapshot", self.audit_types(repo))
         audit = json.loads((repo / ".claude-state" / "closeout" / "audits" / "audits.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(audit["payload"]["latestPath"], ".claude-state/closeout/repo-state/latest.json")
@@ -816,6 +820,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         latest_path = repo / first["stateLedger"]["latestPath"]
         audit_before = audit_path.read_text(encoding="utf-8").splitlines()
         history_before = sorted(history_root.glob("*.json"))
+        history_bytes_before = {path.name: path.read_bytes() for path in history_before}
 
         (repo / "live-refresh.txt").write_text("dashboard refresh dirty\n", encoding="utf-8")
         latest = repo_state_snapshot(repo, write=True, latest_only=True, work_block_id="wb-dashboard")
@@ -828,10 +833,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertNotIn("historyPath", latest["stateLedger"])
         self.assertEqual(audit_after, audit_before)
         self.assertEqual(history_after, history_before)
+        self.assertEqual({path.name: path.read_bytes() for path in history_after}, history_bytes_before)
         self.assertTrue(persisted["dirty"]["entryCount"] >= 1)
         self.assertIn("live-refresh.txt", {entry["path"] for entry in persisted["dirty"]["entries"]})
         self.assertEqual(persisted["stateLedger"]["writeMode"], "latest-only")
         self.assertIn("write-repo-state.ps1", persisted["stateLedger"]["liveRefreshCommand"])
+        self.assertEqual(persisted["stateLedger"]["refreshCommandPolicy"], "repo-owned-write-repo-state-latest-only")
+        self.assertTrue(persisted["stateLedger"]["feedPathPolicy"]["historyJsonIsImmutableRollbackEvidence"])
         self.assertFalse(persisted["rollback"]["readiness"]["evidenceFresh"])
         self.assertFalse(persisted["rollback"]["readiness"]["latestFeedIsRollbackEvidence"])
 
@@ -880,12 +888,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(actions["endpoints"]["page"], "/closeout")
         self.assertEqual(actions["endpoints"]["latest"], "/api/closeout/repo-state/latest")
         self.assertIn("delete-evidence", actions["forbiddenActions"])
+        self.assertEqual(actions["dashboard"]["refreshCommandPolicy"], "repo-owned-write-repo-state-latest-only")
         by_id = {item["id"]: item for item in actions["symbolicActions"]}
         self.assertEqual(by_id["refresh_repo_state"]["actionability"], "generated-feed-only")
+        self.assertEqual(by_id["refresh_repo_state"]["commandPolicy"], "repo-owned-write-repo-state-latest-only")
         self.assertFalse(by_id["refresh_repo_state"]["writesHistory"])
         self.assertTrue(by_id["refresh_repo_state"]["command"].startswith("pwsh.exe -NoLogo -NoProfile -NonInteractive"))
         self.assertTrue(by_id["request_retained_remediation"]["command"].startswith("pwsh.exe -NoLogo -NoProfile -NonInteractive"))
+        self.assertEqual(by_id["request_retained_remediation"]["exactTupleRequired"], ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"])
         self.assertEqual(by_id["request_rollback"]["actionability"], "read-only-no-actor")
+        self.assertIn("rollback actor has not validated", by_id["request_rollback"]["readinessReason"])
         self.assertEqual(by_id["request_rollback"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
 
     def test_closeout_dashboard_history_snapshot_rejects_path_escape(self) -> None:
@@ -911,6 +923,37 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("startPolling", page)
         self.assertIn("window.setInterval", page)
         self.assertIn("/api/closeout/events", page)
+
+    def test_closeout_dashboard_page_preserves_configured_client_state_keys(self) -> None:
+        repo = self.init_repo(remote=True)
+        page = dashboard_html(load_closeout_config(repo))
+
+        self.assertIn("data-preserved-client-state-keys", page)
+        self.assertIn("preservedClientStateKeys", page)
+        self.assertIn("scrollPosition", page)
+        self.assertIn("focusedElement", page)
+        self.assertIn("selectedWorkBlockId", page)
+        self.assertIn("expandedRows", page)
+        self.assertIn("activeHistoryFilters", page)
+        self.assertIn("configuredClientState", page)
+
+    def test_dashboard_refresh_command_rejects_unsupported_configured_command(self) -> None:
+        repo = self.init_repo(
+            remote=True,
+            config_updates={
+                "repoStateLedger": {
+                    "liveRefreshCommand": "custom-refresh --repo .",
+                },
+                "webDashboardSpec": {
+                    "refreshCommand": "custom-refresh --repo .",
+                },
+            },
+        )
+
+        with self.assertRaisesRegex(HygieneError, "unsupported configured closeout command"):
+            repo_state_snapshot(repo, write=False)
+        with self.assertRaisesRegex(HygieneError, "unsupported configured closeout command"):
+            dashboard_actions_payload(repo)
 
     def test_repo_state_dashboard_and_rollback_contract_required(self) -> None:
         config = load_closeout_config(ROOT)
@@ -938,6 +981,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_closeout_dashboard_actions_are_read_only_and_owned", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_history_snapshot_rejects_path_escape", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_page_uses_sse_with_polling_fallback", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_page_preserves_configured_client_state_keys", baseline["requiredTests"])
+        self.assertIn("test_dashboard_refresh_command_rejects_unsupported_configured_command", baseline["requiredTests"])
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "closeout-history-index.v1"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "rollback-readiness.v1"), required_symbols)

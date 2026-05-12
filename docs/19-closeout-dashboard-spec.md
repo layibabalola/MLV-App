@@ -22,6 +22,11 @@ seconds does not create synthetic closeout history or audit noise. Full closeout
 and explicit audit captures should continue to use the normal history-writing
 mode.
 
+The configured refresh command policy is
+`repo-owned-write-repo-state-latest-only`. Any configured refresh command that
+does not resolve to `tools\closeout\write-repo-state.ps1 -Write -LatestOnly`
+must fail closed rather than being surfaced through dashboard metadata.
+
 `latest.json` is a mutable display feed. It must not be used as rollback
 evidence. Rollback panels may show readiness only from the fail-closed
 `rollback-readiness.v1` payload and must require immutable history/source
@@ -59,7 +64,8 @@ The dashboard should auto-refresh through SSE with a polling fallback using
 `webDashboardSpec.autoRefreshMs`. Refreshes preserve scroll position, focused
 controls, selected work block, expanded detail rows, and active history filters.
 The snapshot exposes these as `preservedClientStateKeys` so clients do not have
-to infer state names.
+to infer state names. The first-party page persists each configured key in
+browser storage before refresh and restores it after the feed updates.
 
 Primary panels:
 
@@ -74,6 +80,9 @@ Primary panels:
 The dashboard mutation model is `symbolic-action-request-only`. Buttons may draft
 requests such as rollback, retained remediation, or repo-state refresh, but a
 repo-owned actor must revalidate the exact tuple before anything changes.
+`/api/closeout/actions` must include the command policy, actionability reason,
+and exact-tuple requirements so the UI can explain why an action is read-only
+instead of hiding the control.
 
 Rollback defaults to a new work block, user approval, a pre-mutation repo-state
 snapshot, immutable source snapshot evidence, a
