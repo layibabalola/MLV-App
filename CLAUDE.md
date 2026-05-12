@@ -220,6 +220,11 @@ cleanup audit are inspectable, with no non-exempt dirty/untracked files,
 disallowed stashes, stale transaction branches, stale managed worktrees, or
 orphaned closeout/runtime artifacts left behind. Failures report
 `repo_closed_postcondition_failed`, not success with deferred cleanup.
+Hard-clean must also inspect `git worktree list --porcelain`. A failed or empty
+listing, a listing that omits the current repo root, or any ordinary linked
+sibling worktree blocks closeout; protected load-bearing worktrees such as
+`.claude/worktrees/**` remain inspect-only under policy and still appear in
+repo-state evidence.
 Closeout summaries, handoffs, metrics, and cleanup status derive final
 clean/blocked wording from `repoClosedPostcondition.closeoutCleanTruth`. That
 report keeps raw Git status, policy-clean status, and cleanup-clean status
@@ -231,7 +236,8 @@ Repo state for dashboard and audit consumers is recorded through
 history snapshot, and a `repo_state_snapshot` audit. The snapshot uses
 `repo-state-snapshot.v1` and contains branch/tracking, dirty entries, local
 branches, worktrees, stashes, latest closeout audit/truth pointers, a bounded
-`closeout-history-index.v1`, and `rollbackPolicy` plus `rollback-readiness.v1`.
+`closeout-history-index.v1`, `worktree-inspection.v1`, and `rollbackPolicy`
+plus `rollback-readiness.v1`.
 The future `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
@@ -255,6 +261,13 @@ closed if the port belongs to another repo. Required endpoints are
 `/api/closeout/actions`; `/api/closeout/actions` reports `serverProcessId`,
 repo ownership, symbolic actions, exact-tuple requirements, command policy, and
 rollback non-actionability plus the readiness reason.
+Dashboard symbolic action intent is durable but non-mutating:
+`/api/closeout/actions/request` writes generated request packets under
+`.claude-state/closeout/dashboard-action-requests/` with helper freshness,
+repo-state hash, actionability reason, and exact tuple fields. It rejects
+missing/stale/future helper timestamps, mismatched helper process ids, empty
+exact-tuple values, and request roots that resolve outside `.claude-state/`;
+repo-owned actors must still revalidate before mutation.
 Rollback is handled by repo-owned evidence, not by blind cleanup. `rollbackPolicy`
 prefers Git revert, recovery-branch restoration, path restore from snapshot, or
 preservation-ref promotion; requires a new work block, user approval, a

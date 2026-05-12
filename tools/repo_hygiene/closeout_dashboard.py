@@ -27,8 +27,18 @@ from .core import normalize_rel, resolve_repo_root, sha256_text
 
 
 DASHBOARD_ACTIONS_SCHEMA = "closeout-dashboard-actions.v1"
+DASHBOARD_ACTION_REQUEST_SCHEMA = "closeout-dashboard-action-request.v1"
 DASHBOARD_ENDPOINTS_SCHEMA = "closeout-dashboard-endpoints.v1"
 SAFE_HISTORY_ID = re.compile(r"^[A-Za-z0-9_.-]+(?:\.json)?$")
+SAFE_ACTION_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+HELPER_FUTURE_SKEW_MS = 1000
+DASHBOARD_MIN_INTERVAL_MS = 1000
+DASHBOARD_MAX_INTERVAL_MS = 60000
+MAX_PROCESS_ID = 2147483647
+
+
+def _configured_value(mapping: Dict[str, Any], key: str, default: Any) -> Any:
+    return mapping[key] if key in mapping else default
 
 
 def dashboard_endpoints(config: Dict[str, Any]) -> Dict[str, str]:
@@ -42,6 +52,7 @@ def dashboard_endpoints(config: Dict[str, Any]) -> Dict[str, str]:
         "historyIndex": str(configured.get("historyIndex") or "/api/closeout/repo-state/history-index"),
         "historySnapshot": str(configured.get("historySnapshot") or "/api/closeout/repo-state/history/{snapshotId}"),
         "actions": str(configured.get("actions") or "/api/closeout/actions"),
+        "actionsRequest": str(configured.get("actionsRequest") or "/api/closeout/actions/request"),
         "events": str(configured.get("events") or "/api/closeout/events"),
     }
 
@@ -73,11 +84,22 @@ def dashboard_actions_payload(
     for extra in dashboard.get("rollbackForbiddenActions") or []:
         if extra not in disallowed:
             disallowed.append(str(extra))
+    helper_pid_source = str(helper.get("serverProcessIdSource") or "")
+    if not helper_pid_source or helper_pid_source == "/api/closeout/actions":
+        helper_pid_source = endpoints["actions"]
+    helper_readiness_endpoint = str(helper.get("readinessEndpoint") or "")
+    if not helper_readiness_endpoint or helper_readiness_endpoint == "/api/closeout/actions":
+        helper_readiness_endpoint = endpoints["actions"]
 
     return {
         "schema": DASHBOARD_ACTIONS_SCHEMA,
         "status": "ready",
-        "serverProcessId": int(server_process_id if server_process_id is not None else os.getpid()),
+        "serverProcessId": _request_int(
+            server_process_id if server_process_id is not None else os.getpid(),
+            "serverProcessId",
+            min_value=1,
+            max_value=MAX_PROCESS_ID,
+        ),
         "repoRoot": str(repo_root),
         "repoRootHash": sha256_text(str(repo_root).casefold())[:16],
         "endpointsSchema": DASHBOARD_ENDPOINTS_SCHEMA,
@@ -86,16 +108,26 @@ def dashboard_actions_payload(
             "scriptPath": str(helper.get("scriptPath") or "tools\\closeout\\start-closeout-dashboard.ps1"),
             "module": str(helper.get("module") or "tools.repo_hygiene.closeout_dashboard"),
             "host": str(helper.get("host") or "127.0.0.1"),
-            "port": int(helper.get("port") or 8765),
+            "port": _request_int(_configured_value(helper, "port", 8765), "helper.port", min_value=1, max_value=65535),
             "reuseExistingForSameRepo": bool(helper.get("reuseExistingForSameRepo", True)),
-            "serverProcessIdSource": str(helper.get("serverProcessIdSource") or endpoints["actions"]),
-            "readinessEndpoint": str(helper.get("readinessEndpoint") or endpoints["actions"]),
-            "staleAfterMs": int(helper.get("staleAfterMs") or 15000),
+            "serverProcessIdSource": helper_pid_source,
+            "readinessEndpoint": helper_readiness_endpoint,
+            "staleAfterMs": _request_int(
+                _configured_value(helper, "staleAfterMs", 15000),
+                "helper.staleAfterMs",
+                min_value=DASHBOARD_MIN_INTERVAL_MS,
+                max_value=DASHBOARD_MAX_INTERVAL_MS,
+            ),
         },
         "dashboard": {
             "localUrl": str(dashboard.get("localUrl") or "http://127.0.0.1:8765/closeout"),
             "stickyUrlPath": str(dashboard.get("stickyUrlPath") or "/closeout"),
-            "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
+            "autoRefreshMs": _request_int(
+                _configured_value(dashboard, "autoRefreshMs", 5000),
+                "dashboard.autoRefreshMs",
+                min_value=DASHBOARD_MIN_INTERVAL_MS,
+                max_value=DASHBOARD_MAX_INTERVAL_MS,
+            ),
             "refreshCommandPolicy": refresh_command_policy,
             "mutationModel": str(dashboard.get("mutationModel") or "symbolic-action-request-only"),
             "feedAuthority": str(dashboard.get("feedAuthority") or "latest-json-is-display-feed-only"),
@@ -133,6 +165,158 @@ def dashboard_actions_payload(
         ],
         "forbiddenActions": disallowed,
     }
+
+
+def dashboard_action_request_root(repo_root: Path, config: Dict[str, Any]) -> Path:
+    dashboard = repo_state_dashboard_spec(config)
+    rel = normalize_rel(str(dashboard.get("actionRequestRoot") or ".claude-state/closeout/dashboard-action-requests"))
+    if not rel.startswith(".claude-state/"):
+        raise HygieneError("dashboard action request root must stay under .claude-state/: %s" % rel)
+    root = (repo_root / rel).resolve()
+    claude_state_root = (repo_root / ".claude-state").resolve()
+    if root != claude_state_root and claude_state_root not in root.parents:
+        raise HygieneError("dashboard action request root must stay under .claude-state/: %s" % rel)
+    return root
+
+
+def _request_int(
+    value: Any,
+    field_name: str,
+    *,
+    min_value: Optional[int] = None,
+    max_value: Optional[int] = None,
+) -> int:
+    if isinstance(value, bool):
+        raise HygieneError("%s must be an integer" % field_name)
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"[0-9]+", text):
+            parsed = int(text)
+        else:
+            raise HygieneError("%s must be an integer" % field_name)
+    else:
+        raise HygieneError("%s must be an integer" % field_name)
+    if min_value is not None and parsed < min_value:
+        raise HygieneError("%s must be >= %s" % (field_name, min_value))
+    if max_value is not None and parsed > max_value:
+        raise HygieneError("%s must be <= %s" % (field_name, max_value))
+    return parsed
+
+
+def _empty_exact_tuple_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, dict):
+        return not value or any(_empty_exact_tuple_value(item_value) for item_value in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return not value or any(_empty_exact_tuple_value(item_value) for item_value in value)
+    return False
+
+
+def dashboard_action_request_payload(
+    repo_root_arg: Path,
+    request: Dict[str, Any],
+    *,
+    server_process_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not isinstance(request, dict):
+        raise HygieneError("dashboard action request body must be a JSON object")
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    actions = dashboard_actions_payload(repo_root, server_process_id=server_process_id)
+    by_id = {str(item.get("id")): item for item in actions["symbolicActions"]}
+    action_id = str(request.get("actionId") or request.get("id") or "").strip()
+    if not SAFE_ACTION_ID.match(action_id) or action_id not in by_id:
+        raise HygieneError("unsupported dashboard symbolic action request: %s" % (action_id or "<missing>"))
+    action = by_id[action_id]
+    exact_tuple = request.get("exactTuple") if isinstance(request.get("exactTuple"), dict) else {}
+    required_tuple_fields = list(action.get("exactTupleRequired") or [])
+    missing_tuple_fields = [
+        field
+        for field in required_tuple_fields
+        if field not in exact_tuple or _empty_exact_tuple_value(exact_tuple.get(field))
+    ]
+    if missing_tuple_fields:
+        raise HygieneError("dashboard symbolic action request missing exact tuple fields: %s" % ", ".join(missing_tuple_fields))
+    server_pid = _request_int(
+        server_process_id if server_process_id is not None else os.getpid(),
+        "serverProcessId",
+        min_value=1,
+        max_value=MAX_PROCESS_ID,
+    )
+    observed_pid_fields = ["serverProcessId", "observedServerProcessId"]
+    supplied_pid_fields = [field for field in observed_pid_fields if field in request]
+    if "serverProcessId" not in request:
+        raise HygieneError("dashboard action request missing serverProcessId")
+    for field in supplied_pid_fields:
+        if _request_int(request.get(field), field, min_value=1, max_value=MAX_PROCESS_ID) != server_pid:
+            raise HygieneError("stale dashboard helper process id")
+    helper = actions["helper"]
+    stale_after_ms = _request_int(
+        _configured_value(helper, "staleAfterMs", 15000),
+        "helper.staleAfterMs",
+        min_value=DASHBOARD_MIN_INTERVAL_MS,
+        max_value=DASHBOARD_MAX_INTERVAL_MS,
+    )
+    now_ms = int(time.time() * 1000)
+    if "helperObservedAtMs" in request:
+        observed_at_ms = request["helperObservedAtMs"]
+    elif "observedAtMs" in request:
+        observed_at_ms = request["observedAtMs"]
+    else:
+        raise HygieneError("dashboard action request missing helperObservedAtMs")
+    observed_at_ms = _request_int(observed_at_ms, "helperObservedAtMs")
+    if now_ms - observed_at_ms > stale_after_ms:
+        raise HygieneError("stale dashboard helper state")
+    if observed_at_ms - now_ms > HELPER_FUTURE_SKEW_MS:
+        raise HygieneError("dashboard helper observation timestamp is in the future")
+    snapshot = repo_state_snapshot(repo_root, write=False)
+    snapshot_hash = sha256_text(json.dumps(snapshot, sort_keys=True, default=str))
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    packet = {
+        "schema": DASHBOARD_ACTION_REQUEST_SCHEMA,
+        "status": "recorded",
+        "createdAt": created_at,
+        "actionId": action_id,
+        "actionability": action.get("actionability"),
+        "requestOnlyReason": action.get("requestOnlyReason") or action.get("readinessReason"),
+        "mutationBoundary": "repo-owned symbolic actors only",
+        "noDirectMutation": True,
+        "repoRoot": str(repo_root),
+        "repoRootHash": actions["repoRootHash"],
+        "serverProcessId": server_pid,
+        "helperFreshness": {
+            "observedAtMs": observed_at_ms,
+            "receivedAtMs": now_ms,
+            "staleAfterMs": stale_after_ms,
+            "fresh": True,
+        },
+        "repoStateHash": snapshot_hash,
+        "exactTupleRequired": required_tuple_fields,
+        "exactTuple": exact_tuple,
+        "rollbackManifest": {
+            "requiredManifestSchema": action.get("requiredManifestSchema"),
+            "requiredManifestFields": action.get("requiredManifestFields"),
+            "requiresUserApproval": action.get("requiresUserApproval"),
+            "requiresImmutableSourceSnapshot": action.get("requiresImmutableSourceSnapshot"),
+        },
+        "userIntent": str(request.get("userIntent") or ""),
+    }
+    request_root = dashboard_action_request_root(repo_root, config)
+    request_root.mkdir(parents=True, exist_ok=True)
+    safe_action = re.sub(r"[^A-Za-z0-9_.-]+", "-", action_id).strip("-") or "action"
+    packet_hash = sha256_text(json.dumps(packet, sort_keys=True, default=str))[:12]
+    packet_name = "%s-%s-%s.json" % (created_at.replace(":", "").replace("+", "Z"), safe_action, packet_hash)
+    packet_path = request_root / packet_name
+    packet["requestPath"] = normalize_rel(str(packet_path.relative_to(repo_root)))
+    with packet_path.open("w", encoding="utf-8") as handle:
+        json.dump(packet, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return packet
 
 
 def latest_repo_state_payload(repo_root_arg: Path) -> Dict[str, Any]:
@@ -185,7 +369,12 @@ def dashboard_html(config: Dict[str, Any]) -> str:
     escaped_endpoints = html.escape(json.dumps(endpoints, sort_keys=True), quote=True)
     preserved_keys = list(dashboard.get("preservedClientStateKeys") or [])
     escaped_preserved_keys = html.escape(json.dumps(preserved_keys, sort_keys=True), quote=True)
-    auto_refresh = int(dashboard.get("autoRefreshMs") or 5000)
+    auto_refresh = _request_int(
+        _configured_value(dashboard, "autoRefreshMs", 5000),
+        "dashboard.autoRefreshMs",
+        min_value=DASHBOARD_MIN_INTERVAL_MS,
+        max_value=DASHBOARD_MAX_INTERVAL_MS,
+    )
     return f"""<!doctype html>
 <html lang=\"en\">
 <head>
@@ -482,7 +671,16 @@ class CloseoutDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
-                interval = max(1.0, float(repo_state_dashboard_spec(self.server.config).get("autoRefreshMs") or 5000) / 1000.0)
+                interval = max(
+                    1.0,
+                    _request_int(
+                        _configured_value(repo_state_dashboard_spec(self.server.config), "autoRefreshMs", 5000),
+                        "dashboard.autoRefreshMs",
+                        min_value=DASHBOARD_MIN_INTERVAL_MS,
+                        max_value=DASHBOARD_MAX_INTERVAL_MS,
+                    )
+                    / 1000.0,
+                )
                 ready_payload = json.dumps({"status": "ready", "endpoint": endpoints["latest"]}, sort_keys=True)
                 self.wfile.write(f"event: ready\ndata: {ready_payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
@@ -504,6 +702,34 @@ class CloseoutDashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover - final fail-closed boundary
             self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
+    def do_POST(self) -> None:  # noqa: N802 - stdlib hook
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        endpoints = dashboard_endpoints(self.server.config)
+        try:
+            if path != endpoints["actionsRequest"]:
+                self._write_error(HTTPStatus.NOT_FOUND, "unknown closeout dashboard route")
+                return
+            length = _request_int(self.headers.get("Content-Length") or "0", "Content-Length", min_value=0, max_value=65536)
+            if length <= 0 or length > 65536:
+                raise HygieneError("dashboard action request body must be 1-65536 bytes")
+            raw = self.rfile.read(length).decode("utf-8")
+            request = json.loads(raw)
+            self._write_json(
+                dashboard_action_request_payload(
+                    self.server.repo_root,
+                    request,
+                    server_process_id=os.getpid(),
+                ),
+                status=HTTPStatus.CREATED,
+            )
+        except json.JSONDecodeError as exc:
+            self._write_error(HTTPStatus.BAD_REQUEST, "invalid JSON request body: %s" % exc)
+        except HygieneError as exc:
+            self._write_error(HTTPStatus.BAD_REQUEST, str(exc))
+        except Exception as exc:  # pragma: no cover - final fail-closed boundary
+            self._write_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
         return
 
@@ -518,7 +744,7 @@ class CloseoutDashboardServer(ThreadingHTTPServer):
 def run_server(repo_root: Path, *, host: str = "127.0.0.1", port: int = 8765) -> None:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise HygieneError("closeout dashboard may only bind a localhost address")
-    server = CloseoutDashboardServer((host, int(port)), CloseoutDashboardHandler, repo_root)
+    server = CloseoutDashboardServer((host, _request_int(port, "port", min_value=1, max_value=65535)), CloseoutDashboardHandler, repo_root)
     print(json.dumps(dashboard_actions_payload(server.repo_root, server_process_id=os.getpid()), indent=2, sort_keys=True), flush=True)
     try:
         server.serve_forever()
