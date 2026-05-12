@@ -213,7 +213,18 @@ restoration, path restore from snapshot, or preservation-ref promotion; preserve
 evidence before cleanup; require a new work block, user approval, immutable
 source snapshot evidence, `closeout-rollback-manifest.v1`, rollback plan, and
 recovery commands in mutating audits; and reserve `reset --hard` or force push
-for explicit user requests.
+for explicit user requests. `tools\closeout\validate-rollback-manifest.ps1`
+provides the current read-only validator surface. It returns
+`closeout-rollback-manifest-validation.v1`, requires manifests under
+`.claude-state/closeout/rollback`, rejects `latest.json` and `current.json`,
+binds `sourceSnapshotHash` to the repo-state snapshot hash scope, requires a
+matching `repo_state_snapshot` audit, requires explicit
+`sourceSnapshotAuditHash` and `repoClosedAuditHash`, integrity-checks audit
+hashes and sidecar JSON, requires the source snapshot and repo-closed audit to
+share `workBlockId`, and rejects forbidden recovery commands before any future
+rollback actor can become actionable.
+Dashboard rollback exact tuples include every manifest-binding field, including
+`sourceSnapshotPath` and `recoveryCommand`.
 
 Target push non-fast-forward is a recoverable race: fetch, re-pin, rebuild the
 integration candidate, regenerate quorum if the tuple changed, and retry within
