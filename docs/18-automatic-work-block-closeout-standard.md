@@ -179,7 +179,8 @@ index such as `closeout-history-index.v1`, and `rollbackPolicy` plus
 For live dashboard refresh, repos should expose a latest-only actor such as
 `tools/closeout/write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That actor
 updates the stable latest feed without adding history snapshots or audit rows on
-every poll.
+every poll. Dashboard refresh command configuration must be allowlisted to that
+repo-owned writer and fail closed for arbitrary commands.
 
 `webDashboardSpec` is the iterative dashboard contract: sticky `/closeout` URL,
 auto-refresh through SSE with polling fallback, read-only default, preserved
@@ -189,8 +190,8 @@ symbolic actions only. `latest.json` is display state, not rollback evidence.
 The local helper entrypoint is `tools/closeout/start-closeout-dashboard.ps1`.
 It should reuse a healthy same-repo dashboard server, fail closed when the port
 owner is foreign or unknown, and expose `/api/closeout/actions` with
-`serverProcessId`, repo ownership, symbolic actions, and rollback
-non-actionability. Data endpoints should include
+`serverProcessId`, repo ownership, command policy, symbolic actions, exact-tuple
+requirements, and rollback non-actionability/reason. Data endpoints should include
 `/api/closeout/repo-state/latest`,
 `/api/closeout/repo-state/history-index`, and
 `/api/closeout/repo-state/history/{snapshotId}`.

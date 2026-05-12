@@ -63,6 +63,11 @@ def dashboard_actions_payload(
         ["-Write", "-LatestOnly"],
         str(ledger.get("liveRefreshCommand") or dashboard.get("refreshCommand") or ""),
     )
+    refresh_command_policy = str(
+        ledger.get("refreshCommandPolicy")
+        or dashboard.get("refreshCommandPolicy")
+        or "repo-owned-write-repo-state-latest-only"
+    )
     helper = dashboard.get("helper") if isinstance(dashboard.get("helper"), dict) else {}
     disallowed = list(rollback.get("disallowedDefaultActions") or [])
     for extra in dashboard.get("rollbackForbiddenActions") or []:
@@ -91,6 +96,7 @@ def dashboard_actions_payload(
             "localUrl": str(dashboard.get("localUrl") or "http://127.0.0.1:8765/closeout"),
             "stickyUrlPath": str(dashboard.get("stickyUrlPath") or "/closeout"),
             "autoRefreshMs": int(dashboard.get("autoRefreshMs") or 5000),
+            "refreshCommandPolicy": refresh_command_policy,
             "mutationModel": str(dashboard.get("mutationModel") or "symbolic-action-request-only"),
             "feedAuthority": str(dashboard.get("feedAuthority") or "latest-json-is-display-feed-only"),
             "duplicateLaunchPolicy": str(dashboard.get("duplicateLaunchPolicy") or "reuse-same-repo-fail-foreign-owner"),
@@ -102,21 +108,27 @@ def dashboard_actions_payload(
                 "label": "Refresh repo state feed",
                 "actionability": "generated-feed-only",
                 "command": refresh_command,
+                "commandPolicy": refresh_command_policy,
                 "writesHistory": bool(ledger.get("liveRefreshWritesHistory", False)),
             },
             {
                 "id": "request_rollback",
                 "label": "Request rollback plan",
                 "actionability": str(rollback.get("readinessDefaultActionability") or "read-only-no-actor"),
+                "readinessReason": "rollback actor has not validated an immutable source snapshot and closeout-rollback-manifest.v1",
                 "requiredManifestSchema": str(rollback.get("requiredManifestSchema") or "closeout-rollback-manifest.v1"),
+                "requiredManifestFields": list(rollback.get("requiredManifestFields") or []),
                 "requiresUserApproval": bool(rollback.get("requireUserApprovalForRollback", True)),
                 "requiresImmutableSourceSnapshot": bool(rollback.get("requireImmutableSourceSnapshotForRollback", True)),
+                "exactTupleRequired": ["targetHead", "sourceSnapshotHash", "policyHash", "plannedStrategy", "userApproval"],
             },
             {
                 "id": "request_retained_remediation",
                 "label": "Request retained-candidate remediation",
                 "actionability": "symbolic-request-only",
                 "command": closeout_script_command("remediate-retained-closeout.ps1", ["-Apply"], config),
+                "exactTupleRequired": ["candidateId", "actionId", "evidenceHash", "policyHash", "pinnedRefs"],
+                "requestOnlyReason": "repo-owned retained-remediation actor must revalidate the tuple before mutation",
             },
         ],
         "forbiddenActions": disallowed,
@@ -171,6 +183,8 @@ def dashboard_html(config: Dict[str, Any]) -> str:
     endpoints = dashboard_endpoints(config)
     title = "Closeout Dashboard"
     escaped_endpoints = html.escape(json.dumps(endpoints, sort_keys=True), quote=True)
+    preserved_keys = list(dashboard.get("preservedClientStateKeys") or [])
+    escaped_preserved_keys = html.escape(json.dumps(preserved_keys, sort_keys=True), quote=True)
     auto_refresh = int(dashboard.get("autoRefreshMs") or 5000)
     return f"""<!doctype html>
 <html lang=\"en\">
@@ -264,7 +278,7 @@ def dashboard_html(config: Dict[str, Any]) -> str:
     @media (max-width: 780px) {{ .grid {{ grid-template-columns: 1fr; }} header {{ align-items: flex-start; flex-direction: column; }} }}
   </style>
 </head>
-<body data-endpoints=\"{escaped_endpoints}\" data-refresh-ms=\"{auto_refresh}\">
+<body data-endpoints=\"{escaped_endpoints}\" data-refresh-ms=\"{auto_refresh}\" data-preserved-client-state-keys=\"{escaped_preserved_keys}\">
   <header>
     <div>
       <h1>Closeout Dashboard</h1>
@@ -302,6 +316,7 @@ def dashboard_html(config: Dict[str, Any]) -> str:
   <script>
     const endpoints = JSON.parse(document.body.dataset.endpoints);
     const refreshMs = Number(document.body.dataset.refreshMs || 5000);
+    const preservedClientStateKeys = JSON.parse(document.body.dataset.preservedClientStateKeys || "[]");
     const stateKey = "mlv-closeout-dashboard-state";
     function byId(id) {{ return document.getElementById(id); }}
     function escapeHtml(value) {{
@@ -317,14 +332,30 @@ def dashboard_html(config: Dict[str, Any]) -> str:
       if(!response.ok) throw new Error(`${{response.status}} ${{response.statusText}}`);
       return response.json();
     }}
+    function configuredClientState() {{
+      const stored = JSON.parse(localStorage.getItem(stateKey) || "{{}}");
+      const state = {{}};
+      for (const key of preservedClientStateKeys) {{
+        if (key === "scrollPosition") state.scrollPosition = {{x: window.scrollX, y: window.scrollY}};
+        else if (key === "focusedElement") state.focusedElement = document.activeElement && document.activeElement.id || "";
+        else if (key === "selectedWorkBlockId") state.selectedWorkBlockId = stored.selectedWorkBlockId || "";
+        else if (key === "expandedRows") state.expandedRows = Array.isArray(stored.expandedRows) ? stored.expandedRows : [];
+        else if (key === "activeHistoryFilters") state.activeHistoryFilters = stored.activeHistoryFilters && typeof stored.activeHistoryFilters === "object" ? stored.activeHistoryFilters : {{}};
+      }}
+      state.scrollY = window.scrollY;
+      state.focusedId = document.activeElement && document.activeElement.id || "";
+      return state;
+    }}
     function saveClientState() {{
-      localStorage.setItem(stateKey, JSON.stringify({{scrollY: window.scrollY, focusedId: document.activeElement && document.activeElement.id}}));
+      localStorage.setItem(stateKey, JSON.stringify(configuredClientState()));
     }}
     function restoreClientState() {{
       try {{
         const stored = JSON.parse(localStorage.getItem(stateKey) || "{{}}");
-        if(stored.focusedId && byId(stored.focusedId)) byId(stored.focusedId).focus({{preventScroll: true}});
-        if(Number.isFinite(stored.scrollY)) window.scrollTo({{top: stored.scrollY, behavior: "instant"}});
+        const focused = stored.focusedElement || stored.focusedId;
+        if(focused && byId(focused)) byId(focused).focus({{preventScroll: true}});
+        const scroll = stored.scrollPosition && Number.isFinite(stored.scrollPosition.y) ? stored.scrollPosition.y : stored.scrollY;
+        if(Number.isFinite(scroll)) window.scrollTo({{top: scroll, behavior: "instant"}});
       }} catch(_err) {{}}
     }}
     async function refresh() {{
