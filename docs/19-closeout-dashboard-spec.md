@@ -82,17 +82,19 @@ Required endpoints:
 
 The dashboard should auto-refresh through SSE with a polling fallback using
 `webDashboardSpec.autoRefreshMs`. Refreshes preserve scroll position, focused
-controls, selected work block, expanded detail rows, and active history filters.
-The snapshot exposes these as `preservedClientStateKeys` so clients do not have
-to infer state names. The first-party page persists each configured key in
-browser storage before refresh and restores it after the feed updates.
+controls, selected action/work block, expanded detail rows, and active history
+filters. The snapshot exposes these as `preservedClientStateKeys` so clients do
+not have to infer state names. The first-party page persists each configured key
+in browser storage before refresh and restores it after the feed updates. The
+current action selection is mirrored into the URL as `?actionId=<id>` for sticky
+deep-linking across refreshes.
 
 Primary panels:
 
 - repo-map: branches, worktrees, stashes, dirty files, and target/upstream state
 - workflow-lane: closeout stages, current blocker, retries, and final authority
 - blocker-queue: retained candidates, owner/classification, and recovery command
-- action-preview: read-only explanation of cleanup/rollback consequences,
+- action-preview: read-only explanation of cleanup/rollback consequences and, when exact-tuple requirements are known, an inline queue action that writes immutable symbolic request packets for operator approval workflows.
   safeguards, and exact-tuple inputs before a request is queued
 - audit-timeline: current and historical closeout events with audit hashes
 - rollback-readiness: feasible strategies, required approvals, and evidence roots
