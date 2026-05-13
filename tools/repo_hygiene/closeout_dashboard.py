@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -31,6 +32,7 @@ from .core import normalize_rel, resolve_repo_root, sha256_text
 DASHBOARD_ACTIONS_SCHEMA = "closeout-dashboard-actions.v1"
 DASHBOARD_ACTION_PREVIEW_SCHEMA = "closeout-dashboard-action-preview.v1"
 DASHBOARD_ACTION_REQUEST_SCHEMA = "closeout-dashboard-action-request.v1"
+DASHBOARD_ACTION_REQUEST_HISTORY_SCHEMA = "closeout-dashboard-action-request-history.v1"
 DASHBOARD_ENDPOINTS_SCHEMA = "closeout-dashboard-endpoints.v1"
 SAFE_HISTORY_ID = re.compile(r"^[A-Za-z0-9_.-]+(?:\.json)?$")
 SAFE_ACTION_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -38,10 +40,30 @@ HELPER_FUTURE_SKEW_MS = 1000
 DASHBOARD_MIN_INTERVAL_MS = 1000
 DASHBOARD_MAX_INTERVAL_MS = 60000
 MAX_PROCESS_ID = 2147483647
+MAX_DASHBOARD_ACTION_REQUESTS = 25
 
 
 def _configured_value(mapping: Dict[str, Any], key: str, default: Any) -> Any:
     return mapping[key] if key in mapping else default
+
+
+def _dashboard_request_id_from_path(path: Path, repo_root: Path) -> str:
+    rel_path = normalize_rel(str(path.relative_to(repo_root)))
+    return rel_path.replace("/", "_").removesuffix(".json")
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _dashboard_preview_token(action_id: str, repo_state_hash: str, actionability: Any, exact_tuple_required: List[str]) -> str:
+    payload = {
+        "actionId": str(action_id or ""),
+        "repoStateHash": str(repo_state_hash or ""),
+        "actionability": str(actionability or ""),
+        "exactTupleRequired": [str(field) for field in exact_tuple_required],
+    }
+    return sha256_text(json.dumps(payload, sort_keys=True, default=str))
 
 
 def dashboard_endpoints(config: Dict[str, Any]) -> Dict[str, str]:
@@ -57,6 +79,7 @@ def dashboard_endpoints(config: Dict[str, Any]) -> Dict[str, str]:
         "actions": str(configured.get("actions") or "/api/closeout/actions"),
         "actionsPreview": str(configured.get("actionsPreview") or "/api/closeout/actions/preview"),
         "actionsRequest": str(configured.get("actionsRequest") or "/api/closeout/actions/request"),
+        "actionsRequestHistory": str(configured.get("actionsRequestHistory") or "/api/closeout/actions/requests"),
         "events": str(configured.get("events") or "/api/closeout/events"),
     }
 
@@ -242,7 +265,10 @@ def _empty_exact_tuple_value(value: Any) -> bool:
 
 
 def _repo_state_hash(snapshot: Dict[str, Any]) -> str:
-    return sha256_text(json.dumps(snapshot, sort_keys=True, default=str))
+    clean = json.loads(json.dumps(snapshot, sort_keys=True, default=str))
+    if isinstance(clean, dict):
+        clean.pop("capturedAt", None)
+    return sha256_text(json.dumps(clean, sort_keys=True, default=str))
 
 
 def _blocker_preview_rows(blockers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -336,6 +362,9 @@ def dashboard_action_preview_payload(repo_root_arg: Path, request: Dict[str, Any
         raise HygieneError("unsupported dashboard symbolic action preview: %s" % (action_id or "<missing>"))
     action = by_id[action_id]
     snapshot = repo_state_snapshot(repo_root, write=False)
+    repo_state_hash = _repo_state_hash(snapshot)
+    exact_tuple_required = [str(field) for field in (action.get("exactTupleRequired") or [])]
+    preview_token = _dashboard_preview_token(action_id, repo_state_hash, action.get("actionability"), exact_tuple_required)
     preview = {
         "schema": DASHBOARD_ACTION_PREVIEW_SCHEMA,
         "status": "ready",
@@ -348,12 +377,15 @@ def dashboard_action_preview_payload(repo_root_arg: Path, request: Dict[str, Any
         "wouldMutateNow": False,
         "repoRoot": str(repo_root),
         "repoRootHash": actions["repoRootHash"],
-        "repoStateHash": _repo_state_hash(snapshot),
+        "repoStateHash": repo_state_hash,
+        "previewToken": preview_token,
         "requestOnlyReason": action.get("requestOnlyReason") or action.get("readinessReason") or "",
-        "exactTupleRequired": list(action.get("exactTupleRequired") or []),
+        "exactTupleRequired": exact_tuple_required,
         "requestTemplate": {
             "actionId": action_id,
-            "exactTuple": {field: "<required>" for field in (action.get("exactTupleRequired") or [])},
+            "previewToken": preview_token,
+            "previewRepoStateHash": repo_state_hash,
+            "exactTuple": {field: "<required>" for field in exact_tuple_required},
         },
         "consequences": [],
         "safeguards": [],
@@ -500,7 +532,18 @@ def dashboard_action_request_payload(
     if observed_at_ms - now_ms > HELPER_FUTURE_SKEW_MS:
         raise HygieneError("dashboard helper observation timestamp is in the future")
     snapshot = repo_state_snapshot(repo_root, write=False)
-    snapshot_hash = sha256_text(json.dumps(snapshot, sort_keys=True, default=str))
+    snapshot_hash = _repo_state_hash(snapshot)
+    preview_token = str(request.get("previewToken") or "").strip()
+    if not preview_token:
+        raise HygieneError("dashboard action request missing previewToken")
+    preview_repo_state_hash = str(request.get("previewRepoStateHash") or request.get("repoStateHash") or "").strip()
+    if not preview_repo_state_hash:
+        raise HygieneError("dashboard action request missing previewRepoStateHash")
+    if preview_repo_state_hash != snapshot_hash:
+        raise HygieneError("stale dashboard preview repo state")
+    expected_preview_token = _dashboard_preview_token(action_id, snapshot_hash, action.get("actionability"), required_tuple_fields)
+    if preview_token != expected_preview_token:
+        raise HygieneError("stale dashboard preview token")
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     packet = {
         "schema": DASHBOARD_ACTION_REQUEST_SCHEMA,
@@ -514,6 +557,8 @@ def dashboard_action_request_payload(
         "repoRoot": str(repo_root),
         "repoRootHash": actions["repoRootHash"],
         "serverProcessId": server_pid,
+        "previewToken": preview_token,
+        "previewRepoStateHash": preview_repo_state_hash,
         "helperFreshness": {
             "observedAtMs": observed_at_ms,
             "receivedAtMs": now_ms,
@@ -537,11 +582,100 @@ def dashboard_action_request_payload(
     packet_hash = sha256_text(json.dumps(packet, sort_keys=True, default=str))[:12]
     packet_name = "%s-%s-%s.json" % (created_at.replace(":", "").replace("+", "Z"), safe_action, packet_hash)
     packet_path = request_root / packet_name
+    packet["requestId"] = _dashboard_request_id_from_path(packet_path, repo_root)
     packet["requestPath"] = normalize_rel(str(packet_path.relative_to(repo_root)))
     with packet_path.open("w", encoding="utf-8") as handle:
         json.dump(packet, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return packet
+
+
+def dashboard_action_request_history_payload(repo_root_arg: Path) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    request_root = dashboard_action_request_root(repo_root, config)
+    if not request_root.exists():
+        return {
+            "schema": DASHBOARD_ACTION_REQUEST_HISTORY_SCHEMA,
+            "status": "empty",
+            "requestRoot": normalize_rel(str(request_root.relative_to(repo_root))),
+            "requestCount": 0,
+            "immutable": True,
+            "entries": [],
+        }
+
+    def _iso_ts(path: Path) -> str:
+        stat = path.stat()
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
+
+    entries = []
+    malformed_count = 0
+    request_files = sorted(request_root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    total_request_count = len(request_files)
+    for path in request_files[:MAX_DASHBOARD_ACTION_REQUESTS]:
+        rel_path = normalize_rel(str(path.relative_to(repo_root)))
+        request_id = _dashboard_request_id_from_path(path, repo_root)
+        request_hash = _sha256_bytes(path.read_bytes())
+        try:
+            raw = path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise HygieneError("dashboard action request history packet must be a JSON object")
+            exact_tuple = payload.get("exactTuple") if isinstance(payload.get("exactTuple"), dict) else {}
+            entries.append(
+                {
+                    "schema": str(payload.get("schema") or DASHBOARD_ACTION_REQUEST_SCHEMA),
+                    "status": str(payload.get("status") or "recorded"),
+                    "requestId": str(payload.get("requestId") or request_id),
+                    "actionId": str(payload.get("actionId") or ""),
+                    "requestPath": rel_path,
+                    "repoRootHash": str(payload.get("repoRootHash") or ""),
+                    "repoStateHash": str(payload.get("repoStateHash") or ""),
+                    "requestHash": request_hash,
+                    "actionability": str(
+                        payload.get("actionability")
+                        or payload.get("requestOnlyReason")
+                        or payload.get("readinessReason")
+                        or "symbolic-request-only"
+                    ),
+                    "serverProcessId": payload.get("serverProcessId"),
+                    "createdAt": str(payload.get("createdAt") or _iso_ts(path)),
+                    "exactTuple": exact_tuple,
+                    "userIntent": str(payload.get("userIntent") or ""),
+                }
+            )
+        except Exception as error:
+            malformed_count += 1
+            entries.append(
+                {
+                    "schema": DASHBOARD_ACTION_REQUEST_SCHEMA,
+                    "status": "malformed",
+                    "requestId": request_id,
+                    "actionId": "",
+                    "requestPath": rel_path,
+                    "requestHash": request_hash,
+                    "serverProcessId": None,
+                    "createdAt": _iso_ts(path),
+                    "error": str(error),
+                }
+            )
+
+    status = "empty"
+    if entries:
+        status = "partial" if malformed_count else "ready"
+    return {
+        "schema": DASHBOARD_ACTION_REQUEST_HISTORY_SCHEMA,
+        "status": status,
+        "requestRoot": normalize_rel(str(request_root.relative_to(repo_root))),
+        "requestCount": len(entries),
+        "totalRequestCount": total_request_count,
+        "displayedRequestCount": len(entries),
+        "maxEntries": MAX_DASHBOARD_ACTION_REQUESTS,
+        "truncated": total_request_count > len(entries),
+        "malformedCount": malformed_count,
+        "immutable": True,
+        "entries": entries,
+    }
 
 
 def latest_repo_state_payload(repo_root_arg: Path) -> Dict[str, Any]:
@@ -760,6 +894,11 @@ def dashboard_html(config: Dict[str, Any]) -> str:
       <article class=\"panel full\">
         <h2>Action Preview</h2>
         <div id=\"action-preview\" class=\"muted\">Choose an action to see a dry-run explanation.</div>
+      </article>
+      <article class=\"panel full\">
+        <h2>Action Request History</h2>
+        <div id=\"action-request-history-summary\" class=\"muted\">Loading...</div>
+        <div id=\"action-request-history-table\" class=\"muted\">Loading...</div>
       </article>
       <article class=\"panel full\">
         <h2>Action Metadata</h2>
@@ -1038,6 +1177,8 @@ def dashboard_html(config: Dict[str, Any]) -> str:
           actionId,
           serverProcessId: Number(latestActions.serverProcessId),
           helperObservedAtMs: Date.now(),
+          previewToken: String(actionPreview.previewToken || ""),
+          previewRepoStateHash: String(actionPreview.repoStateHash || ""),
           exactTuple,
           userIntent: String((byId("action-request-intent") && byId("action-request-intent").value) || "").trim(),
         }};
@@ -1056,6 +1197,7 @@ def dashboard_html(config: Dict[str, Any]) -> str:
           throw new Error("Malformed response from action request endpoint.");
         }}
         setRequestFeedback(`Queued symbolic request to ${{payload.requestPath || "repo-owned packet"}}`);
+        void refresh();
       }} catch(error) {{
         setRequestFeedback(String(error.message || error));
       }}
@@ -1103,10 +1245,11 @@ def dashboard_html(config: Dict[str, Any]) -> str:
       saveClientState();
       byId("refresh-status").textContent = "Refreshing";
       try {{
-        const [latest, history, actions] = await Promise.all([
+        const [latest, history, actions, actionRequestHistory] = await Promise.all([
           getJson(endpoints.latest),
           getJson(endpoints.historyIndex),
-          getJson(endpoints.actions)
+          getJson(endpoints.actions),
+          getJson(endpoints.actionsRequestHistory)
         ]);
         byId("subtitle").textContent = latest.repo.root;
         const branch = latest.branch || {{}};
@@ -1133,6 +1276,25 @@ def dashboard_html(config: Dict[str, Any]) -> str:
           {{key:"latestAuditType", label:"Latest audit"}},
           {{key:"latestOutcome", label:"Outcome"}},
           {{key:"latestSeenAt", label:"Seen"}}
+        ]);
+        const historySummaryBits = [
+          `status=${{actionRequestHistory.status || "unknown"}}`,
+          `showing=${{actionRequestHistory.displayedRequestCount ?? (actionRequestHistory.entries || []).length}}`,
+          `total=${{actionRequestHistory.totalRequestCount ?? (actionRequestHistory.entries || []).length}}`,
+          `malformed=${{actionRequestHistory.malformedCount ?? 0}}`
+        ];
+        if(actionRequestHistory.truncated) {{
+          historySummaryBits.push(`truncated at ${{actionRequestHistory.maxEntries || "configured limit"}}`);
+        }}
+        byId("action-request-history-summary").textContent = historySummaryBits.join(" | ");
+        byId("action-request-history-table").innerHTML = table(actionRequestHistory.entries || [], [
+          {{key:"createdAt", label:"Queued"}},
+          {{key:"actionId", label:"Action"}},
+          {{key:"requestId", label:"Request"}},
+          {{key:"status", label:"Status"}},
+          {{key:"requestHash", label:"Hash"}},
+          {{key:"requestPath", label:"Packet"}},
+          {{key:"serverProcessId", label:"Helper PID"}}
         ]);
         renderActionCards(actions);
         byId("actions-json").textContent = JSON.stringify(actions, null, 2);
@@ -1226,6 +1388,9 @@ class CloseoutDashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == endpoints["historyIndex"]:
                 self._write_json(history_index_payload(self.server.repo_root))
+                return
+            if path == endpoints["actionsRequestHistory"]:
+                self._write_json(dashboard_action_request_history_payload(self.server.repo_root))
                 return
             if path == endpoints["actions"]:
                 self._write_json(dashboard_actions_payload(self.server.repo_root))

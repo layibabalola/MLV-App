@@ -63,8 +63,10 @@ from .brokered_closeout import (
     write_review_surface_unavailable_report,
 )
 from .closeout_dashboard import (
+    MAX_DASHBOARD_ACTION_REQUESTS,
     dashboard_action_preview_payload,
     dashboard_action_request_payload,
+    dashboard_action_request_history_payload,
     dashboard_actions_payload,
     dashboard_html,
     history_index_payload,
@@ -691,8 +693,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(config["webDashboardSpec"]["helper"]["serverProcessIdSource"], "/api/closeout/actions")
         self.assertEqual(config["webDashboardSpec"]["endpoints"]["page"], "/closeout")
         self.assertEqual(config["webDashboardSpec"]["endpoints"]["actions"], "/api/closeout/actions")
+        self.assertEqual(config["webDashboardSpec"]["endpoints"]["actionsRequestHistory"], "/api/closeout/actions/requests")
         self.assertIn("historical-closeouts", config["webDashboardSpec"]["views"])
         self.assertIn("repo-map", config["webDashboardSpec"]["primaryPanels"])
+        self.assertIn("action-request-history", config["webDashboardSpec"]["primaryPanels"])
         self.assertTrue(config["rollbackPolicy"]["enabled"])
         self.assertIn("git-revert", config["rollbackPolicy"]["allowedStrategies"])
         self.assertTrue(config["rollbackPolicy"]["startNewWorkBlockForRollback"])
@@ -823,10 +827,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(snapshot["dashboard"]["helper"]["scriptPath"], "tools\\closeout\\start-closeout-dashboard.ps1")
         self.assertEqual(snapshot["dashboard"]["endpoints"]["latest"], "/api/closeout/repo-state/latest")
         self.assertEqual(snapshot["dashboard"]["endpoints"]["actionsPreview"], "/api/closeout/actions/preview")
+        self.assertEqual(snapshot["dashboard"]["endpoints"]["actionsRequestHistory"], "/api/closeout/actions/requests")
         self.assertEqual(snapshot["dashboard"]["helper"]["serverProcessIdSource"], snapshot["dashboard"]["endpoints"]["actions"])
         self.assertEqual(snapshot["dashboard"]["helper"]["readinessEndpoint"], snapshot["dashboard"]["endpoints"]["actions"])
         self.assertIn("audit-timeline", snapshot["dashboard"]["primaryPanels"])
         self.assertIn("action-preview", snapshot["dashboard"]["primaryPanels"])
+        self.assertIn("action-request-history", snapshot["dashboard"]["primaryPanels"])
         self.assertEqual(snapshot["worktreeInspection"]["schema"], "worktree-inspection.v1")
         self.assertTrue(snapshot["worktreeInspection"]["currentRootPresent"])
         self.assertEqual(snapshot["worktreeInspection"]["ordinaryLinkedWorktreeCount"], 0)
@@ -1227,6 +1233,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(actions["endpoints"]["latest"], "/api/closeout/repo-state/latest")
         self.assertEqual(actions["endpoints"]["actionsPreview"], "/api/closeout/actions/preview")
         self.assertEqual(actions["endpoints"]["actionsRequest"], "/api/closeout/actions/request")
+        self.assertEqual(actions["endpoints"]["actionsRequestHistory"], "/api/closeout/actions/requests")
         self.assertIn("delete-evidence", actions["forbiddenActions"])
         self.assertEqual(actions["dashboard"]["refreshCommandPolicy"], "repo-owned-write-repo-state-latest-only")
         by_id = {item["id"]: item for item in actions["symbolicActions"]}
@@ -1263,6 +1270,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(preview["status"], "ready")
         self.assertEqual(preview["actionId"], "request_retained_remediation")
         self.assertEqual(preview["previewMode"], "read-only-explain-and-dry-run")
+        self.assertTrue(preview["previewToken"])
+        self.assertEqual(preview["requestTemplate"]["previewToken"], preview["previewToken"])
+        self.assertEqual(preview["requestTemplate"]["previewRepoStateHash"], preview["repoStateHash"])
         self.assertTrue(preview["noDirectMutation"])
         self.assertFalse(preview["wouldMutateNow"])
         self.assertEqual(preview["repoClosedPostcondition"]["status"], "blocked")
@@ -1280,6 +1290,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
         self.assertEqual(preview["schema"], "closeout-dashboard-action-preview.v1")
         self.assertEqual(preview["actionId"], "request_rollback")
+        self.assertTrue(preview["previewToken"])
         self.assertFalse(preview["wouldMutateNow"])
         self.assertIn("Rollback is ultimately a mutating action", preview["explanation"])
         self.assertEqual(preview["rollback"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
@@ -1287,22 +1298,41 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(preview["rollback"]["readiness"]["actionability"], "read-only-no-actor")
         self.assertFalse(preview["rollback"]["readiness"]["latestFeedIsRollbackEvidence"])
 
+    def _dashboard_bound_request(
+        self,
+        repo: Path,
+        *,
+        action_id: str = "request_retained_remediation",
+        exact_tuple: dict | None = None,
+        server_process_id: int = 1234,
+        helper_observed_at_ms: int | None = None,
+        user_intent: str = "",
+    ) -> dict:
+        preview = dashboard_action_preview_payload(repo, {"actionId": action_id})
+        return {
+            "actionId": action_id,
+            "serverProcessId": server_process_id,
+            "helperObservedAtMs": int(time.time() * 1000) if helper_observed_at_ms is None else helper_observed_at_ms,
+            "previewToken": preview["previewToken"],
+            "previewRepoStateHash": preview["repoStateHash"],
+            "exactTuple": exact_tuple if exact_tuple is not None else {},
+            "userIntent": user_intent,
+        }
+
     def test_closeout_dashboard_action_request_writes_packet_without_mutation(self) -> None:
         repo = self.init_repo(remote=True)
         branches_before = git(repo, "branch", "--format=%(refname:short)").stdout.splitlines()
-        request = {
-            "actionId": "request_retained_remediation",
-            "serverProcessId": 1234,
-            "helperObservedAtMs": int(time.time() * 1000),
-            "exactTuple": {
+        request = self._dashboard_bound_request(
+            repo,
+            exact_tuple={
                 "candidateId": "candidate:retained",
                 "actionId": "repo_sweep_prune_merged",
                 "evidenceHash": "evidence",
                 "policyHash": "policy",
                 "pinnedRefs": {"target": "HEAD"},
             },
-            "userIntent": "dashboard smoke request",
-        }
+            user_intent="dashboard smoke request",
+        )
 
         packet = dashboard_action_request_payload(repo, request, server_process_id=1234)
 
@@ -1325,6 +1355,84 @@ class BrokeredCloseoutTests(unittest.TestCase):
         ]
         self.assertEqual(status_paths, [])
 
+    def test_closeout_dashboard_action_request_history_lists_recent_requests(self) -> None:
+        repo = self.init_repo(remote=True)
+        request_1 = self._dashboard_bound_request(
+            repo,
+            exact_tuple={
+                "candidateId": "candidate:retained",
+                "actionId": "repo_sweep_prune_merged",
+                "evidenceHash": "evidence",
+                "policyHash": "policy",
+                "pinnedRefs": {"target": "HEAD"},
+            },
+            user_intent="history smoke request 1",
+        )
+        request_2 = dict(request_1)
+        request_2["userIntent"] = "history smoke request 2"
+        request_2["helperObservedAtMs"] = int(time.time() * 1000) + 500
+
+        packet_1 = dashboard_action_request_payload(repo, request_1, server_process_id=1234)
+        packet_2 = dashboard_action_request_payload(repo, request_2, server_process_id=1234)
+
+        history = dashboard_action_request_history_payload(repo)
+
+        self.assertEqual(history["schema"], "closeout-dashboard-action-request-history.v1")
+        self.assertEqual(history["status"], "ready")
+        self.assertTrue(history["immutable"])
+        self.assertEqual(history["requestCount"], 2)
+        self.assertEqual(history["displayedRequestCount"], 2)
+        self.assertEqual(history["totalRequestCount"], 2)
+        self.assertEqual(history["malformedCount"], 0)
+        self.assertFalse(history["truncated"])
+        self.assertGreaterEqual(len(history["entries"]), 2)
+        history_request_ids = [entry["requestId"] for entry in history["entries"][:2]]
+        self.assertIn(packet_1["requestId"], history_request_ids)
+        self.assertIn(packet_2["requestId"], history_request_ids)
+        self.assertIn("requestPath", history["entries"][0])
+        self.assertIn("requestHash", history["entries"][0])
+        self.assertEqual(history["entries"][0]["actionId"], "request_retained_remediation")
+        self.assertEqual(history["entries"][0]["requestId"], packet_2["requestId"])
+
+    def test_closeout_dashboard_action_request_history_surfaces_malformed_and_truncated_rows(self) -> None:
+        repo = self.init_repo(remote=True)
+        for index in range(30):
+            dashboard_action_request_payload(
+                repo,
+                self._dashboard_bound_request(
+                    repo,
+                    helper_observed_at_ms=int(time.time() * 1000),
+                    exact_tuple={
+                        "candidateId": f"candidate:{index}",
+                        "actionId": "repo_sweep_prune_merged",
+                        "evidenceHash": f"evidence-{index}",
+                        "policyHash": "policy",
+                        "pinnedRefs": {"target": "HEAD"},
+                    },
+                    user_intent=f"history request {index}",
+                ),
+                server_process_id=1234,
+            )
+        request_root = repo / ".claude-state" / "closeout" / "dashboard-action-requests"
+        malformed_path = request_root / "zz-malformed-request.json"
+        malformed_path.write_text("{not-json", encoding="utf-8")
+        os.utime(malformed_path, None)
+
+        history = dashboard_action_request_history_payload(repo)
+
+        self.assertEqual(history["schema"], "closeout-dashboard-action-request-history.v1")
+        self.assertEqual(history["status"], "partial")
+        self.assertTrue(history["immutable"])
+        self.assertEqual(history["displayedRequestCount"], MAX_DASHBOARD_ACTION_REQUESTS)
+        self.assertEqual(history["requestCount"], MAX_DASHBOARD_ACTION_REQUESTS)
+        self.assertEqual(history["totalRequestCount"], 31)
+        self.assertTrue(history["truncated"])
+        self.assertEqual(history["malformedCount"], 1)
+        malformed_rows = [entry for entry in history["entries"] if entry.get("status") == "malformed"]
+        self.assertEqual(len(malformed_rows), 1)
+        self.assertEqual(malformed_rows[0]["requestPath"], ".claude-state/closeout/dashboard-action-requests/zz-malformed-request.json")
+        self.assertTrue(malformed_rows[0]["requestHash"])
+
     def test_closeout_dashboard_action_request_rejects_stale_or_unknown_action(self) -> None:
         repo = self.init_repo(remote=True)
         tuple_payload = {
@@ -1334,22 +1442,30 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "policyHash": "policy",
             "pinnedRefs": {"target": "HEAD"},
         }
+        bound_request = self._dashboard_bound_request(repo, exact_tuple=tuple_payload)
 
         with self.assertRaisesRegex(HygieneError, "stale dashboard helper state"):
             dashboard_action_request_payload(
                 repo,
                 {
-                    "actionId": "request_retained_remediation",
+                    **bound_request,
                     "serverProcessId": 4321,
                     "helperObservedAtMs": 0,
-                    "exactTuple": tuple_payload,
                 },
                 server_process_id=4321,
             )
         with self.assertRaisesRegex(HygieneError, "unsupported dashboard symbolic action request"):
             dashboard_action_request_payload(repo, {"actionId": "delete_everything"}, server_process_id=4321)
         with self.assertRaisesRegex(HygieneError, "missing exact tuple fields"):
-            dashboard_action_request_payload(repo, {"actionId": "request_retained_remediation", "exactTuple": {}}, server_process_id=4321)
+            dashboard_action_request_payload(
+                repo,
+                {
+                    **bound_request,
+                    "serverProcessId": 4321,
+                    "exactTuple": {},
+                },
+                server_process_id=4321,
+            )
 
     def test_closeout_dashboard_action_request_rejects_missing_future_or_malformed_helper_evidence(self) -> None:
         repo = self.init_repo(remote=True)
@@ -1361,27 +1477,31 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "pinnedRefs": {"target": "HEAD"},
         }
         now_ms = int(time.time() * 1000)
+        bound_request = self._dashboard_bound_request(
+            repo,
+            exact_tuple=tuple_payload,
+            server_process_id=4321,
+            helper_observed_at_ms=now_ms,
+        )
 
         with self.assertRaisesRegex(HygieneError, "missing serverProcessId"):
             dashboard_action_request_payload(
                 repo,
-                {"actionId": "request_retained_remediation", "helperObservedAtMs": now_ms, "exactTuple": tuple_payload},
+                {key: value for key, value in bound_request.items() if key != "serverProcessId"},
                 server_process_id=4321,
             )
         with self.assertRaisesRegex(HygieneError, "missing helperObservedAtMs"):
             dashboard_action_request_payload(
                 repo,
-                {"actionId": "request_retained_remediation", "serverProcessId": 4321, "exactTuple": tuple_payload},
+                {key: value for key, value in bound_request.items() if key != "helperObservedAtMs"},
                 server_process_id=4321,
             )
         with self.assertRaisesRegex(HygieneError, "timestamp is in the future"):
             dashboard_action_request_payload(
                 repo,
                 {
-                    "actionId": "request_retained_remediation",
-                    "serverProcessId": 4321,
+                    **bound_request,
                     "helperObservedAtMs": now_ms + 60000,
-                    "exactTuple": tuple_payload,
                 },
                 server_process_id=4321,
             )
@@ -1389,10 +1509,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             dashboard_action_request_payload(
                 repo,
                 {
-                    "actionId": "request_retained_remediation",
+                    **bound_request,
                     "serverProcessId": "not-a-pid",
-                    "helperObservedAtMs": now_ms,
-                    "exactTuple": tuple_payload,
                 },
                 server_process_id=4321,
             )
@@ -1400,10 +1518,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             dashboard_action_request_payload(
                 repo,
                 {
-                    "actionId": "request_retained_remediation",
+                    **bound_request,
                     "serverProcessId": 4321.9,
-                    "helperObservedAtMs": now_ms,
-                    "exactTuple": tuple_payload,
                 },
                 server_process_id=4321,
             )
@@ -1411,11 +1527,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
             dashboard_action_request_payload(
                 repo,
                 {
-                    "actionId": "request_retained_remediation",
+                    **bound_request,
                     "serverProcessId": 1235,
                     "observedServerProcessId": 4321,
-                    "helperObservedAtMs": now_ms,
-                    "exactTuple": tuple_payload,
                 },
                 server_process_id=4321,
             )
@@ -1423,10 +1537,32 @@ class BrokeredCloseoutTests(unittest.TestCase):
             dashboard_action_request_payload(
                 repo,
                 {
-                    "actionId": "request_retained_remediation",
-                    "serverProcessId": 4321,
+                    **bound_request,
                     "helperObservedAtMs": "not-a-time",
-                    "exactTuple": tuple_payload,
+                },
+                server_process_id=4321,
+            )
+        with self.assertRaisesRegex(HygieneError, "missing previewToken"):
+            dashboard_action_request_payload(
+                repo,
+                {key: value for key, value in bound_request.items() if key != "previewToken"},
+                server_process_id=4321,
+            )
+        with self.assertRaisesRegex(HygieneError, "stale dashboard preview repo state"):
+            dashboard_action_request_payload(
+                repo,
+                {
+                    **bound_request,
+                    "previewRepoStateHash": "stale-hash",
+                },
+                server_process_id=4321,
+            )
+        with self.assertRaisesRegex(HygieneError, "stale dashboard preview token"):
+            dashboard_action_request_payload(
+                repo,
+                {
+                    **bound_request,
+                    "previewToken": "stale-token",
                 },
                 server_process_id=4321,
             )
@@ -1436,18 +1572,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
             remote=True,
             config_updates={"webDashboardSpec": {"actionRequestRoot": ".claude-state/../../outside-action-requests"}},
         )
-        request = {
-            "actionId": "request_retained_remediation",
-            "serverProcessId": 1234,
-            "helperObservedAtMs": int(time.time() * 1000),
-            "exactTuple": {
+        request = self._dashboard_bound_request(
+            repo,
+            exact_tuple={
                 "candidateId": "candidate:retained",
                 "actionId": "repo_sweep_prune_merged",
                 "evidenceHash": "evidence",
                 "policyHash": "",
                 "pinnedRefs": {"target": "HEAD"},
             },
-        }
+        )
 
         with self.assertRaisesRegex(HygieneError, "missing exact tuple fields: policyHash"):
             dashboard_action_request_payload(repo, request, server_process_id=1234)
@@ -1526,9 +1660,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("/api/closeout/events", page)
         self.assertIn("/api/closeout/actions/preview", page)
         self.assertIn("/api/closeout/actions/request", page)
+        self.assertIn("/api/closeout/actions/requests", page)
         self.assertIn("Queue symbolic request", page)
         self.assertIn("loadActionPreview", page)
         self.assertIn("Preview</button>", page)
+        self.assertIn("action-request-history-summary", page)
+        self.assertIn("action-request-history-table", page)
         self.assertIn("selectedActionIdFromUrl", page)
         self.assertIn("actionId", page)
 
@@ -1603,6 +1740,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_closeout_dashboard_rejects_malformed_config_numbers", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_history_snapshot_rejects_path_escape", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_page_uses_sse_with_polling_fallback", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_action_request_history_lists_recent_requests", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_action_request_history_surfaces_malformed_and_truncated_rows", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_page_preserves_configured_client_state_keys", baseline["requiredTests"])
         self.assertIn("test_dashboard_refresh_command_rejects_unsupported_configured_command", baseline["requiredTests"])
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot"), required_symbols)
@@ -1610,6 +1749,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "rollback-readiness.v1"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot_evidence_hash"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_closed_postcondition_state"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def recover_dirty_protected_target_to_work_block"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def recovery_command_forbidden_action"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def require_integrity_checked_audit"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def validate_rollback_manifest"), required_symbols)
@@ -1624,9 +1764,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTIONS_SCHEMA"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTION_PREVIEW_SCHEMA"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTION_REQUEST_SCHEMA"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTION_REQUEST_HISTORY_SCHEMA"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_actions_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_action_preview_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_action_request_payload"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_action_request_history_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def history_snapshot_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "repo-state"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "--latest-only"), required_symbols)
@@ -1647,6 +1789,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             self.assertIn("start-closeout-dashboard.ps1", text)
             self.assertIn("/api/closeout/actions", text)
             self.assertIn("/api/closeout/actions/preview", text)
+            self.assertIn("/api/closeout/actions/requests", text)
+            self.assertIn("action-request-history", text)
             self.assertIn("dashboard-action-requests", text)
             self.assertIn("validate-rollback-manifest.ps1", text)
             self.assertIn("repoClosedAuditHash", text)
@@ -1662,6 +1806,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("/api/closeout/repo-state/latest", dashboard_spec_text)
         self.assertIn("/api/closeout/actions/preview", dashboard_spec_text)
         self.assertIn("/api/closeout/actions/request", dashboard_spec_text)
+        self.assertIn("malformedCount", dashboard_spec_text)
+        self.assertIn("truncated", dashboard_spec_text)
         self.assertIn("http://127.0.0.1:8765/closeout", dashboard_spec_text)
 
     def test_capability_ledger_contains_frozen_row_inventory(self) -> None:
@@ -1754,7 +1900,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_stale_transaction_branch_pruned_after_recovery_evidence", baseline["requiredTests"])
         self.assertIn("test_final_repo_sweep_after_prune_reports_zero_candidates", baseline["requiredTests"])
         self.assertIn("test_deletion_tuple_rejects_missing_or_stale_recovery_artifact", baseline["requiredTests"])
-        self.assertIn("test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed", baseline["requiredTests"])
+        self.assertIn("test_dirty_protected_target_finalize_recovers_to_feature_branch", baseline["requiredTests"])
         required_symbols = {(item["path"], item["contains"]) for item in baseline["requiredSymbols"]}
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def closeout_process_resource_policy"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def apply_windows_process_tree_affinity"), required_symbols)
@@ -1764,11 +1910,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("AGENTS.md", "closeoutCleanTruth"), required_symbols)
         self.assertIn(("AGENTS.md", "agentRemediationQueue.queueRoots"), required_symbols)
         self.assertIn(("AGENTS.md", "protected-target-noop-closeout"), required_symbols)
+        self.assertIn(("AGENTS.md", "protected-target-dirty-recovery"), required_symbols)
         self.assertIn(("AGENTS.md", "workBlockBootstrap.autoBranchFromProtectedTarget"), required_symbols)
         self.assertIn(("CLAUDE.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
         self.assertIn(("CLAUDE.md", "closeoutCleanTruth"), required_symbols)
         self.assertIn(("CLAUDE.md", "agentRemediationQueue.queueRoots"), required_symbols)
         self.assertIn(("CLAUDE.md", "protected-target-noop-closeout"), required_symbols)
+        self.assertIn(("CLAUDE.md", "protected-target-dirty-recovery"), required_symbols)
         self.assertIn(("CLAUDE.md", "workBlockBootstrap.autoBranchFromProtectedTarget"), required_symbols)
         self.assertIn(("closeout.config.json", "workBlockBootstrap"), required_symbols)
         self.assertIn(("closeout.config.json", "unifiedTruthReport"), required_symbols)
@@ -2465,19 +2613,34 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(list((repo / ".claude-state" / "closeout" / "work-blocks").glob("*/manifest.json")), [])
         self.assertIn("protected-target-noop-closeout", self.audit_types(repo))
 
-    def test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed(self) -> None:
+    def test_dirty_protected_target_finalize_recovers_to_feature_branch(self) -> None:
         repo = self.init_repo(remote=True)
         (repo / "dirty.txt").write_text("target dirty\n", encoding="utf-8")
 
         result = complete_work_block(repo, finalize=True)
 
         self.assertEqual(result["status"], "blocked", result)
-        self.assertEqual(result["reason"], "repo_closed_postcondition_failed")
-        self.assertEqual(result["finalizeStatus"], "noop")
+        self.assertEqual(result["reason"], "protected_target_dirty_recovered_to_feature_branch")
+        self.assertEqual(result["finalizeStatus"], "recovered-to-feature-branch")
         blocker_kinds = {item["kind"] for item in result["repoClosedPostcondition"]["blockers"]}
         self.assertIn("non_exempt_dirty_files", blocker_kinds)
-        self.assertEqual(list((repo / ".claude-state" / "closeout" / "work-blocks").glob("*/manifest.json")), [])
-        self.assertIn("protected-target-noop-closeout", self.audit_types(repo))
+        branch = git(repo, "branch", "--show-current").stdout.strip()
+        self.assertTrue(branch.startswith("codex/work-block/"), branch)
+        manifests = list((repo / ".claude-state" / "closeout" / "work-blocks").glob("*/manifest.json"))
+        self.assertEqual(len(manifests), 1)
+        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+        self.assertEqual(manifest["branch"], branch)
+        self.assertEqual(manifest["protectedBranchBootstrap"]["fromProtectedBranch"], "master")
+        self.assertEqual(manifest["protectedBranchBootstrap"]["reason"], "protected_branch_dirty_recovery")
+        self.assertIn("dirty.txt", manifest["dirtyBaseline"]["paths"])
+        self.assertEqual(manifest["pathClaims"], ["dirty.txt"])
+        detection = detect_work_block(repo, work_block_id=manifest["workBlockId"])
+        self.assertEqual([item["path"] for item in detection["ownedDirty"]], ["dirty.txt"])
+        self.assertEqual(detection["foreignDirty"], [])
+        finalize_result = finalize_work_block(repo, work_block_id=manifest["workBlockId"])
+        self.assertEqual(finalize_result["status"], "success", finalize_result)
+        self.assertEqual(git(repo, "show", "master:dirty.txt").stdout, "target dirty\n")
+        self.assertIn("protected-target-dirty-recovery", self.audit_types(repo))
 
     def test_hard_clean_blocks_retained_remote_feature_refs(self) -> None:
         repo = self.init_repo(remote=True)

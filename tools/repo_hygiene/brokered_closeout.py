@@ -224,6 +224,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_rejects_stale_or_unknown_action",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_rejects_missing_future_or_malformed_helper_evidence",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_rejects_empty_tuple_values_and_path_escape",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_history_lists_recent_requests",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_action_request_history_surfaces_malformed_and_truncated_rows",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_rejects_malformed_config_numbers",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_history_snapshot_rejects_path_escape",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_uses_sse_with_polling_fallback",
@@ -433,6 +435,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "actions": "/api/closeout/actions",
             "actionsPreview": "/api/closeout/actions/preview",
             "actionsRequest": "/api/closeout/actions/request",
+            "actionsRequestHistory": "/api/closeout/actions/requests",
             "events": "/api/closeout/events",
         },
         "dataSources": [
@@ -443,7 +446,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "repoSweepCandidateReports",
         ],
         "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"],
-        "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "action-preview", "audit-timeline", "rollback-readiness"],
+        "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "action-preview", "action-request-history", "audit-timeline", "rollback-readiness"],
     },
     "rollbackPolicy": {
         "enabled": True,
@@ -732,6 +735,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_dashboard_action_request_rejects_stale_or_unknown_action",
             "test_closeout_dashboard_action_request_rejects_missing_future_or_malformed_helper_evidence",
             "test_closeout_dashboard_action_request_rejects_empty_tuple_values_and_path_escape",
+            "test_closeout_dashboard_action_request_history_lists_recent_requests",
+            "test_closeout_dashboard_action_request_history_surfaces_malformed_and_truncated_rows",
             "test_closeout_dashboard_rejects_malformed_config_numbers",
             "test_closeout_dashboard_history_snapshot_rejects_path_escape",
             "test_closeout_dashboard_page_uses_sse_with_polling_fallback",
@@ -743,7 +748,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_hard_clean_final_response_passes_after_clean_promotion",
             "test_complete_finalize_enforces_hard_clean_config_without_switch",
             "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
-            "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
+            "test_dirty_protected_target_finalize_recovers_to_feature_branch",
             "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
             "test_repo_closed_postcondition_blocks_linked_sibling_worktree",
             "test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state",
@@ -786,6 +791,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "closeout-history-index.v1"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "rollback-readiness.v1"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot_evidence_hash"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def recover_dirty_protected_target_to_work_block"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def recovery_command_forbidden_action"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def require_integrity_checked_audit"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_rollback_manifest"},
@@ -793,9 +799,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/closeout/validate-rollback-manifest.ps1", "contains": "validate-rollback-manifest"},
             {"path": "tools/closeout/validate-rollback-manifest.ps1", "contains": "exit $LASTEXITCODE"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTIONS_SCHEMA"},
+            {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_PREVIEW_SCHEMA"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_REQUEST_SCHEMA"},
+            {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_REQUEST_HISTORY_SCHEMA"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_actions_payload"},
+            {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_action_preview_payload"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_action_request_payload"},
+            {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_action_request_history_payload"},
             {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def history_snapshot_payload"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
@@ -846,6 +856,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "Closeout Remediation Freeze"},
             {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
+            {"path": "AGENTS.md", "contains": "protected-target-dirty-recovery"},
             {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "AGENTS.md", "contains": "PowerShell 7+"},
@@ -860,6 +871,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "CLAUDE.md", "contains": "Closeout Remediation Freeze"},
             {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
             {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
+            {"path": "CLAUDE.md", "contains": "protected-target-dirty-recovery"},
             {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
             {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "CLAUDE.md", "contains": "PowerShell 7+"},
@@ -2609,6 +2621,81 @@ def start_work_block(
     return {"status": "started", "workBlockId": block_id, "manifest": manifest}
 
 
+def recover_dirty_protected_target_to_work_block(
+    repo_root: Path,
+    config: Dict[str, Any],
+    protected_branch: str,
+    *,
+    actor: str = "codex-protected-target-recovery",
+    path_claims: Optional[Sequence[str]] = None,
+    lease_seconds: int = 3600,
+) -> Dict[str, Any]:
+    dirty_before = dirty_baseline_snapshot(repo_root)
+    if not dirty_before["paths"]:
+        raise HygieneError("dirty protected target recovery requires dirty paths")
+    block_id = "wb-%s" % uuid.uuid4().hex[:16]
+    effective_claims = list(path_claims or dirty_before["paths"])
+    claims = sorted({normalize_rel(path) for path in effective_claims if normalize_rel(str(path))})
+    with broker_lease(repo_root, config, "broker", lease_seconds=30):
+        block_dir = work_block_dir(repo_root, config, block_id)
+        if (block_dir / "manifest.json").exists():
+            raise HygieneError("work block already exists: %s" % block_id)
+        branch = work_block_bootstrap_branch(config, block_id)
+        if rev_parse(repo_root, f"refs/heads/{branch}", required=False):
+            raise HygieneError("work block bootstrap branch already exists: %s" % branch)
+        start_head = rev_parse(repo_root, "HEAD")
+        checkout = run_git(repo_root, ["checkout", "-b", branch])
+        if checkout.returncode != 0:
+            raise HygieneError("failed to recover dirty protected target onto %s: %s" % (branch, checkout.stderr.strip()))
+        head = rev_parse(repo_root, "HEAD")
+        dirty_baseline = dirty_baseline_snapshot(repo_root)
+        protected_bootstrap = {
+            "enabled": True,
+            "fromProtectedBranch": protected_branch,
+            "createdBranch": branch,
+            "startHead": start_head,
+            "reason": "protected_branch_dirty_recovery",
+            "dirtyPaths": dirty_before["paths"],
+        }
+        manifest = {
+            "schemaVersion": BROKER_SCHEMA_VERSION,
+            "workBlockId": block_id,
+            "state": "active",
+            "actor": actor,
+            "branch": branch,
+            "worktree": str(repo_root),
+            "targetBranch": config.get("git", {}).get("targetBranch", "master"),
+            "targetRemote": config.get("git", {}).get("remote", "origin"),
+            "pathClaims": claims,
+            "startedAt": utc_now(),
+            "updatedAt": utc_now(),
+            "lease": {
+                "holder": actor,
+                "seconds": lease_seconds,
+                "createdAt": utc_now(),
+            },
+            "startHead": head,
+            "dirtyBaseline": dirty_baseline,
+            "protectedBranchBootstrap": protected_bootstrap,
+        }
+        write_json(block_dir / "manifest.json", manifest)
+        append_event(
+            repo_root,
+            config,
+            block_id,
+            {
+                "event": "protected_target_dirty_recovered",
+                "fromProtectedBranch": protected_branch,
+                "branch": branch,
+                "head": head,
+                "pathClaims": claims,
+                "dirtyBaselinePaths": dirty_baseline["paths"],
+                "protectedBranchBootstrap": protected_bootstrap,
+            },
+        )
+    return {"status": "recovered", "workBlockId": block_id, "manifest": manifest}
+
+
 def update_manifest(repo_root: Path, config: Dict[str, Any], work_block_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
     manifest = load_manifest(repo_root, config, work_block_id)
     manifest.update(updates)
@@ -2863,6 +2950,13 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
     own_claims = set(manifest_path_claims(manifest))
     baseline_paths = manifest_dirty_baseline_paths(manifest)
     baseline_available = manifest_has_dirty_baseline(manifest)
+    protected_bootstrap = manifest.get("protectedBranchBootstrap") if isinstance(manifest.get("protectedBranchBootstrap"), dict) else {}
+    protected_dirty_recovery = str(protected_bootstrap.get("reason") or "") == "protected_branch_dirty_recovery"
+    protected_recovery_paths = {
+        normalize_rel(path)
+        for path in (protected_bootstrap.get("dirtyPaths") or [])
+        if normalize_rel(str(path))
+    }
     generated_patterns = config.get("paths", {}).get("generated", [])
     sensitive_patterns = config.get("paths", {}).get("sensitive", [])
     unclaimed_default = str(config.get("dirty", {}).get("unclaimedOutsideDelta", "foreign"))
@@ -2894,6 +2988,10 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
         elif generated:
             enriched["classificationReason"] = "generated closeout/runtime path is not owned source work"
             foreign_dirty.append(enriched)
+        elif protected_dirty_recovery and path in protected_recovery_paths:
+            enriched["classificationReason"] = "protected target dirty recovery ownership proof"
+            enriched["protectedTargetDirtyRecovery"] = True
+            owned_dirty.append(enriched)
         elif dirty_at_baseline and (in_delta or claimed_by_self):
             enriched["classificationReason"] = "baseline dirty path overlaps candidate delta or claim"
             enriched["blocker"] = "baseline-dirty-overlaps-candidate"
@@ -5352,6 +5450,35 @@ def complete_work_block(
             "repoClosedPostcondition": postcondition,
             "finalizeStatus": "noop",
         }
+        if not postcondition["ok"]:
+            blocker_kinds = {str(item.get("kind") or "") for item in postcondition.get("blockers", []) if isinstance(item, dict)}
+            if "non_exempt_dirty_files" in blocker_kinds:
+                recovered = recover_dirty_protected_target_to_work_block(repo_root, config, branch)
+                recovered_manifest = attach_work_block_selection(
+                    recovered["manifest"],
+                    "recovered_dirty_protected_target",
+                    1,
+                )
+                result = {
+                    "status": "blocked",
+                    "reason": "protected_target_dirty_recovered_to_feature_branch",
+                    "workBlockId": str(recovered_manifest["workBlockId"]),
+                    "selectedWorkBlockId": str(recovered_manifest["workBlockId"]),
+                    "workBlockSelection": recovered_manifest.get("workBlockSelection"),
+                    "repoClosedPostcondition": postcondition,
+                    "finalizeStatus": "recovered-to-feature-branch",
+                    "recoveryBranch": str(recovered_manifest.get("branch") or ""),
+                    "recoveryManifest": recovered_manifest,
+                }
+                write_audit(
+                    repo_root,
+                    config,
+                    "protected-target-dirty-recovery",
+                    result,
+                    work_block_id=str(recovered_manifest["workBlockId"]),
+                    outcome="blocked",
+                )
+                return result
         write_audit(
             repo_root,
             config,
@@ -6790,6 +6917,7 @@ def repo_state_snapshot(
         "actions": str(dashboard_endpoints_config.get("actions") or "/api/closeout/actions"),
         "actionsPreview": str(dashboard_endpoints_config.get("actionsPreview") or "/api/closeout/actions/preview"),
         "actionsRequest": str(dashboard_endpoints_config.get("actionsRequest") or "/api/closeout/actions/request"),
+        "actionsRequestHistory": str(dashboard_endpoints_config.get("actionsRequestHistory") or "/api/closeout/actions/requests"),
         "events": str(dashboard_endpoints_config.get("events") or "/api/closeout/events"),
     }
     helper_pid_source = str(dashboard_helper.get("serverProcessIdSource") or "")
