@@ -138,7 +138,11 @@ commits through the broker, then reruns detection and finalize. Paths already
 dirty at the broker baseline are `mixedDirty`/`unownedDirty` when they overlap a
 claim or candidate delta and must block with
 `baseline-dirty-overlaps-candidate` plus exact recovery detail rather than being
-whole-file checkpointed.
+whole-file checkpointed. The narrow exception is
+`protected_branch_dirty_recovery`: when finalize preserves exact dirty paths
+from a protected target onto a broker-created work-block branch, those exact
+preserved paths and claims are explicit ownership proof and may proceed through
+`ownedDirty`.
 Repo sweep retention is an investigated outcome, not a first-pass label. For
 non-protected retained candidates, the sweep actor writes durable candidate
 investigation reports under `.claude-state/closeout/repo-sweep/candidate-reports/`.
@@ -250,7 +254,7 @@ surfaced through dashboard metadata.
 `webDashboardSpec` is read-only by default and
 `symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
 preserved scroll/focus/selection/expanded/history-filter state across refresh,
-and repo-map, workflow, blocker, action-preview, audit, rollback, and
+and repo-map, workflow, blocker, action-preview, action-request-history, audit, rollback, and
 historical closeout views. Read-only preview and dry-run explanations are
 allowed when they are derived from repo-owned truth and do not create a second
 mutation authority. `latest.json` is a mutable display feed, not rollback
@@ -261,18 +265,24 @@ closed if the port belongs to another repo. Required endpoints are
 `/api/closeout/repo-state/latest`,
 `/api/closeout/repo-state/history-index`,
 `/api/closeout/repo-state/history/{snapshotId}`,
-`/api/closeout/actions`, and `/api/closeout/actions/preview`;
+`/api/closeout/actions`, `/api/closeout/actions/requests`,
+`/api/closeout/actions/preview`, and `/api/closeout/actions/request`;
 `/api/closeout/actions` reports `serverProcessId`, repo ownership, symbolic
 actions, exact-tuple requirements, command policy, and rollback
 non-actionability plus the readiness reason, while
 `/api/closeout/actions/preview` explains cleanup or rollback consequences
 without mutating the repo.
+`/api/closeout/actions/requests` exposes immutable request history rows for
+audit handoff and post-action traceability. The feed should distinguish
+`empty`, `ready`, and `partial` history states and surface malformed/truncated
+row counts instead of silently hiding them.
 Dashboard symbolic action intent is durable but non-mutating:
 `/api/closeout/actions/request` writes generated request packets under
 `.claude-state/closeout/dashboard-action-requests/` with helper freshness,
-repo-state hash, actionability reason, and exact tuple fields. It rejects
-missing/stale/future helper timestamps, mismatched helper process ids, empty
-exact-tuple values, and request roots that resolve outside `.claude-state/`;
+repo-state hash, actionability reason, preview-token binding, and exact tuple
+fields. It rejects missing/stale/future helper timestamps, mismatched helper
+process ids, stale preview bindings, empty exact-tuple values, and request
+roots that resolve outside `.claude-state/`;
 repo-owned actors must still revalidate before mutation.
 Rollback is handled by repo-owned evidence, not by blind cleanup. `rollbackPolicy`
 prefers Git revert, recovery-branch restoration, path restore from snapshot, or
@@ -295,10 +305,13 @@ manual.
 Protected target closeout is a no-op only when
 `hardClean.protectedTargetNoopCloseout.enabled=true`, the current branch is
 protected, no explicit workBlockId was supplied, and hard-clean passes. It writes
-`protected-target-noop-closeout`; dirty protected targets, unresolved stashes,
-stale branches/worktrees, runtime blockers, or missing remediation results still
-block as `repo_closed_postcondition_failed` and must not create a synthetic work
-block.
+`protected-target-noop-closeout`. Dirty protected targets must not be left
+stranded on the protected branch: finalize should preserve the exact dirty state
+onto an allowed `workBlockBootstrap.branchPrefix/<workBlockId>` branch,
+materialize a work-block manifest there, and write
+`protected-target-dirty-recovery` before reporting any remaining blocker.
+Unresolved stashes, stale branches/worktrees, runtime blockers, or missing
+remediation results still block closeout.
 Runtime services that execute repo code follow configured lifecycle actors. When
 `runtimeServices.<service>.stopBeforePromotion=true`, closeout stops and verifies
 the service before promotion/finalize; when `restartAfterCleanPromotion=true`,
