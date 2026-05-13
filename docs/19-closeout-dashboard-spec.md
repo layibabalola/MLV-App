@@ -69,12 +69,18 @@ Required endpoints:
   may summarize `repoClosedPostcondition.closeoutCleanTruth`, retained-candidate
   reports, rollback readiness, and request-template fields, but it must not
   write repo-closed artifacts or mutate refs/worktrees/stashes/source
+- `/api/closeout/actions/requests`: returns `closeout-dashboard-action-request-history.v1` and
+  exposes immutable symbolic request records written under `.claude-state/closeout/dashboard-action-requests/`;
+  it must report top-level `status` as `empty`, `ready`, or `partial`, include
+  `displayedRequestCount`, `totalRequestCount`, `malformedCount`, and
+  `truncated`, and preserve malformed rows instead of hiding them
 - `/api/closeout/actions/request`: records symbolic action intent as generated
   packets under `.claude-state/closeout/dashboard-action-requests/` after helper
-  freshness, action id, and non-empty exact tuple validation; it rejects
-  missing/stale/future helper timestamps, mismatched helper process ids, and
-  request roots that resolve outside generated state; it does not mutate repo
-  refs, worktrees, stashes, or source files
+  freshness, action id, preview-token/repo-state-hash binding, and non-empty
+  exact tuple validation; it rejects missing/stale/future helper timestamps,
+  mismatched helper process ids, stale preview bindings, and request roots that
+  resolve outside generated state; it does not mutate repo refs, worktrees,
+  stashes, or source files
 - `/api/closeout/events`: SSE refresh stream for clients that prefer events,
   with polling remaining as the fallback path
 
@@ -96,6 +102,10 @@ Primary panels:
 - blocker-queue: retained candidates, owner/classification, and recovery command
 - action-preview: read-only explanation of cleanup/rollback consequences and, when exact-tuple requirements are known, an inline queue action that writes immutable symbolic request packets for operator approval workflows.
   safeguards, and exact-tuple inputs before a request is queued
+- action-request-history: immutable request ledger rows (`createdAt`, `actionId`,
+  `requestId`, `status`, `requestPath`, `requestHash`) plus a visible summary
+  of readiness/truncation/malformed-row counts from
+  `.claude-state/closeout/dashboard-action-requests/` for auditability and handoff
 - audit-timeline: current and historical closeout events with audit hashes
 - rollback-readiness: feasible strategies, required approvals, and evidence roots
 
@@ -108,7 +118,16 @@ revalidate the exact tuple before anything changes. `/api/closeout/actions`
 must include the command policy, actionability reason, and exact-tuple
 requirements so the UI can explain why an action is read-only instead of hiding
 the control. `/api/closeout/actions/preview` should explain likely cleanup or
-rollback consequences before any request packet is recorded.
+rollback consequences before any request packet is recorded. Request packets
+must echo the preview token and preview repo-state hash they were reviewed
+against so the server can reject queue attempts after state drift.
+
+If finalize discovers repo-owned dirty state on the protected target branch
+without an explicit work block, the repo-owned closeout path should first
+preserve that exact dirty state onto an allowed work-block branch and
+materialize a manifest there before it reports the remaining blocker. The
+dashboard should treat that recovery as repo-owned lifecycle behavior, not as a
+direct UI mutation.
 
 Rollback defaults to a new work block, user approval, a pre-mutation repo-state
 snapshot, immutable source snapshot evidence, a
