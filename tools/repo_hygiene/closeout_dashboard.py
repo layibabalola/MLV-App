@@ -708,6 +708,18 @@ def dashboard_html(config: Dict[str, Any]) -> str:
       padding-left: 12px;
       color: var(--muted);
     }}
+    .tuple-grid {{ display: grid; gap: 8px; }}
+    .tuple-grid .tuple-row {{ display: grid; gap: 6px; }}
+    label.tuple-label {{ display: grid; gap: 4px; font-size: 12px; }}
+    .tuple-grid input {{
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px;
+      color: var(--text);
+      background: var(--panel);
+      min-width: 0;
+    }}
+    .tuple-grid input::placeholder {{ color: var(--muted); }}
     @media (max-width: 780px) {{ .grid {{ grid-template-columns: 1fr; }} header {{ align-items: flex-start; flex-direction: column; }} }}
     @media (max-width: 780px) {{ .split {{ grid-template-columns: 1fr; }} }}
   </style>
@@ -760,7 +772,34 @@ def dashboard_html(config: Dict[str, Any]) -> str:
     const refreshMs = Number(document.body.dataset.refreshMs || 5000);
     const preservedClientStateKeys = JSON.parse(document.body.dataset.preservedClientStateKeys || "[]");
     const stateKey = "mlv-closeout-dashboard-state";
+    const cachedPreviews = {{}};
+    let latestActions = null;
+    function selectedActionIdFromUrl() {{
+      const params = new URLSearchParams(window.location.search);
+      return params.get("actionId") || params.get("action") || "";
+    }}
+    function syncActionInUrl(actionId) {{
+      try {{
+        const next = new URL(window.location.href);
+        if(actionId) {{
+          next.searchParams.set("actionId", actionId);
+        }} else {{
+          next.searchParams.delete("actionId");
+          next.searchParams.delete("action");
+        }}
+        window.history.replaceState({{}}, "", next.toString());
+      }} catch(_err) {{}}
+    }}
+    function setSelectedActionState(actionId) {{
+      const stored = JSON.parse(localStorage.getItem(stateKey) || "{{}}");
+      stored.selectedActionId = actionId || "";
+      localStorage.setItem(stateKey, JSON.stringify(stored));
+      syncActionInUrl(actionId);
+    }}
     function byId(id) {{ return document.getElementById(id); }}
+    function safeDomId(value) {{
+      return String(value ?? "").replace(/[^A-Za-z0-9_-]+/g, "-");
+    }}
     function escapeHtml(value) {{
       return String(value ?? "").replace(/[&<>\"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c]));
     }}
@@ -805,14 +844,41 @@ def dashboard_html(config: Dict[str, Any]) -> str:
       for (const button of document.querySelectorAll(".preview-button")) {{
         button.addEventListener("click", () => {{
           const actionId = button.dataset.actionId || "";
-          const stored = JSON.parse(localStorage.getItem(stateKey) || "{{}}");
-          stored.selectedActionId = actionId;
-          localStorage.setItem(stateKey, JSON.stringify(stored));
+          setSelectedActionState(actionId);
           void loadActionPreview(actionId);
         }});
       }}
     }}
+    function setRequestFeedback(message) {{
+      const feedback = byId("action-request-feedback");
+      if(feedback) {{
+        feedback.textContent = String(message ?? "");
+      }}
+    }}
+    function tupleInputId(actionId, field) {{
+      return `tuple-${{safeDomId(actionId || "action")}}-${{safeDomId(field)}}`;
+    }}
+    function tupleTemplateValue(template, field) {{
+      if(!template || typeof template !== "object") return "";
+      const raw = template[field];
+      if(raw === undefined || raw === null) return "";
+      if(typeof raw === "string") return raw;
+      return JSON.stringify(raw);
+    }}
+    function parseTupleValue(rawValue) {{
+      const text = String(rawValue ?? "").trim();
+      if(!text) return null;
+      if(text === "<required>") return "<required>";
+      if(text.startsWith(String.fromCharCode(123)) || text.startsWith("[") || text === "true" || text === "false" || /^-?\\d+(?:\\.\\d+)?$/.test(text)) {{
+        try {{ return JSON.parse(text); }}
+        catch (_err) {{ return text; }}
+      }}
+      return text;
+    }}
     function renderActionPreview(preview) {{
+      if(preview && preview.actionId) {{
+        cachedPreviews[preview.actionId] = preview;
+      }}
       const current = preview.repoClosedPostcondition || {{}};
       const cleanTruth = current.closeoutCleanTruth || {{}};
       const blockerRows = (preview.blockerSummary || []).map(row => ({{
@@ -832,6 +898,39 @@ def dashboard_html(config: Dict[str, Any]) -> str:
       const requestTemplate = preview.requestTemplate && Object.keys(preview.requestTemplate).length
         ? JSON.stringify(preview.requestTemplate, null, 2)
         : "";
+      const exactTupleFields = Array.isArray(preview.exactTupleRequired) ? preview.exactTupleRequired : [];
+      const templateTuple = preview.requestTemplate && preview.requestTemplate.exactTuple && typeof preview.requestTemplate.exactTuple === "object"
+        ? preview.requestTemplate.exactTuple
+        : {{}};
+      const canRequest = exactTupleFields.length > 0;
+      const exactTupleInputs = exactTupleFields.map(field => `
+        <div class="tuple-row">
+          <label class="tuple-label">
+            ${{escapeHtml(field)}}
+            <input
+              id="${{tupleInputId(preview.actionId || "action", field)}}"
+              type="text"
+              autocomplete="off"
+              placeholder="${{escapeHtml(tupleTemplateValue(templateTuple, field) || "required")}}"
+            />
+          </label>
+        </div>
+      `).join("");
+      const requestSection = canRequest ? `
+        <div>
+          <h3>Queue symbolic request</h3>
+          <div class="muted">Populate required exact-tuple fields to queue a symbolic request packet.</div>
+          <div class="tuple-grid">${{exactTupleInputs}}</div>
+          <label class="tuple-label">
+            User intent (optional)
+            <input id="action-request-intent" type="text" placeholder="Optional operator/audit intent" />
+          </label>
+          <div class="stack">
+            <button type="button" id="queue-action-button" data-action-id="${{escapeHtml(preview.actionId || "")}}">Queue request</button>
+            <span id="action-request-feedback" class="muted">Ready to queue.</span>
+          </div>
+        </div>`
+        : `<div><h3>Queue symbolic request</h3><div class="muted">No exact tuple required for this action.</div></div>`;
       byId("action-preview").innerHTML = `
         <div class="stack">
           <div class="chips">
@@ -859,9 +958,10 @@ def dashboard_html(config: Dict[str, Any]) -> str:
             </div>
             <div>
               <h3>Exact Tuple</h3>
-              ${{listHtml(preview.exactTupleRequired || [], "No exact tuple required.")}}
+              ${{listHtml(exactTupleFields, "No exact tuple required.")}}
             </div>
           </div>
+          ${{requestSection}}
           <div>
             <h3>Current Blockers</h3>
             ${{table(blockerRows, [
@@ -899,12 +999,79 @@ def dashboard_html(config: Dict[str, Any]) -> str:
             <pre>${{escapeHtml(JSON.stringify(cleanTruth, null, 2) || "{{}}")}}</pre>
           </div>
         </div>`;
+      if(canRequest) {{
+        const requestButton = byId("queue-action-button");
+        if(requestButton) {{
+          requestButton.addEventListener("click", () => {{
+            void requestSymbolicAction(preview.actionId || "");
+          }});
+        }}
+      }}
+    }}
+    async function requestSymbolicAction(actionId) {{
+      const actionPreview = cachedPreviews[actionId] || {{}};
+      const required = Array.isArray(actionPreview.exactTupleRequired) ? actionPreview.exactTupleRequired : [];
+      if(!actionId || required.length === 0) {{
+        setRequestFeedback("No actionable exact tuple is defined for this action.");
+        return;
+      }}
+      try {{
+        const exactTuple = {{}};
+        for (const field of required) {{
+          const input = byId(tupleInputId(actionId || "action", field));
+          const value = parseTupleValue(input ? input.value : "");
+          if(value === null || value === undefined || value === "") {{
+            setRequestFeedback(`Missing exact tuple value: ${{field}}`);
+            return;
+          }}
+          if(value === "<required>") {{
+            setRequestFeedback(`Replace placeholder tuple value for ${{field}}`);
+            return;
+          }}
+          exactTuple[field] = value;
+        }}
+        if(!latestActions || !Number.isFinite(Number(latestActions.serverProcessId))) {{
+          setRequestFeedback("Refresh the dashboard first to capture helper freshness.");
+          return;
+        }}
+        const request = {{
+          actionId,
+          serverProcessId: Number(latestActions.serverProcessId),
+          helperObservedAtMs: Date.now(),
+          exactTuple,
+          userIntent: String((byId("action-request-intent") && byId("action-request-intent").value) || "").trim(),
+        }};
+        setRequestFeedback("Submitting symbolic request...");
+        const response = await fetch(endpoints.actionsRequest, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify(request),
+        }});
+        if(!response.ok) {{
+          const message = await response.text();
+          throw new Error(`${{response.status}} ${{response.statusText}}: ${{message}}`);
+        }}
+        const payload = await response.json();
+        if(!payload || typeof payload !== "object") {{
+          throw new Error("Malformed response from action request endpoint.");
+        }}
+        setRequestFeedback(`Queued symbolic request to ${{payload.requestPath || "repo-owned packet"}}`);
+      }} catch(error) {{
+        setRequestFeedback(String(error.message || error));
+      }}
     }}
     async function loadActionPreview(actionId) {{
       if(!actionId || !endpoints.actionsPreview) return;
+      setSelectedActionState(actionId);
+      setRequestFeedback("Loading...");
       byId("action-preview").textContent = "Loading preview...";
-      const preview = await getJson(actionPreviewUrl(actionId));
-      renderActionPreview(preview);
+      try {{
+        const preview = await getJson(actionPreviewUrl(actionId));
+        renderActionPreview(preview);
+      }} catch(error) {{
+        setRequestFeedback(String(error.message || error));
+        byId("action-preview").textContent = String(error.message || error);
+      }}
     }}
     function configuredClientState() {{
       const stored = JSON.parse(localStorage.getItem(stateKey) || "{{}}");
@@ -960,6 +1127,7 @@ def dashboard_html(config: Dict[str, Any]) -> str:
           {{key:"xy", label:"Status"}},
           {{key:"path", label:"Path"}}
         ]);
+        latestActions = actions;
         byId("history-table").innerHTML = table(history.entries || [], [
           {{key:"workBlockId", label:"Work block"}},
           {{key:"latestAuditType", label:"Latest audit"}},
@@ -969,7 +1137,18 @@ def dashboard_html(config: Dict[str, Any]) -> str:
         renderActionCards(actions);
         byId("actions-json").textContent = JSON.stringify(actions, null, 2);
         const stored = JSON.parse(localStorage.getItem(stateKey) || "{{}}");
-        const selectedActionId = stored.selectedActionId || ((actions.symbolicActions || [])[0] || {{}}).id;
+        const actionIds = new Set((actions.symbolicActions || []).map(item => String(item.id || "")));
+        const selectedActionId = (
+          selectedActionIdFromUrl() && actionIds.has(selectedActionIdFromUrl())
+            ? selectedActionIdFromUrl()
+            : stored.selectedActionId && actionIds.has(stored.selectedActionId)
+              ? stored.selectedActionId
+              : (((actions.symbolicActions || [])[0] || {{}}).id || "")
+        );
+        if(selectedActionId) {{
+          setSelectedActionState(selectedActionId);
+          syncActionInUrl(selectedActionId);
+        }}
         if(selectedActionId) await loadActionPreview(selectedActionId);
         byId("refresh-status").textContent = "Updated " + new Date().toLocaleTimeString();
         restoreClientState();
