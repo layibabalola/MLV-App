@@ -1,0 +1,29 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/work-block/wb-dashboard-closeout-fix-20260513T101739Z",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-05-13T15:17:49+00:00",
+  "detectorHash": "4574753b91e938c0e80c4c3a79202bbc",
+  "eligible": true,
+  "featureHead": "7f9a9dacc8afc988f618356cce666f5285db9b17",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/work-block/wb-dashboard-closeout-fix-20260513T101739Z",
+      "head": "7f9a9dacc8afc988f618356cce666f5285db9b17"
+    },
+    "target": {
+      "branch": "master",
+      "head": "7f9a9dacc8afc988f618356cce666f5285db9b17",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "7f9a9dacc8afc988f618356cce666f5285db9b17",
+  "workBlockId": "wb-6d1dc43365c14c6d"
+}
