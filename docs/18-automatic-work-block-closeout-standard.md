@@ -99,6 +99,10 @@ baseline:
 
 Clean-at-start files may be auto-claimed only when the broker proves they were
 clean or absent at the dirty baseline and no other active block claims them.
+The narrow exception is `protected_branch_dirty_recovery`: when finalize
+preserves exact dirty paths from a protected target onto a broker-created
+work-block branch, those exact preserved paths and claims become the ownership
+proof for `ownedDirty`.
 
 ## Autonomous Review Quorum
 
@@ -169,6 +173,13 @@ handoff, metrics, or cleanup helpers. That summary records raw Git status,
 policy-clean status, and cleanup-clean status together so generated/exempt dirty
 state is visible without becoming contradictory closeout text.
 
+Protected target closeout may be a no-op only when the protected target is
+already repo-closed. If finalize reaches a protected target with repo-owned
+dirty state and no explicit work block, the repo should preserve that exact
+dirty state onto an allowed feature/work-block branch, materialize a work-block
+manifest there, and then report the remaining blocker. Repo-owned dirty work
+must not be left stranded on the protected target branch.
+
 Repo state for dashboards and audit review should come from `repoStateLedger`.
 The repo-owned `repo-state --write` command records a stable latest snapshot,
 timestamped history, and `repo_state_snapshot` audit under `.claude-state`.
@@ -190,7 +201,7 @@ repo-owned writer and fail closed for arbitrary commands.
 `webDashboardSpec` is the iterative dashboard contract: sticky `/closeout` URL,
 auto-refresh through SSE with polling fallback, read-only default, preserved
 scroll/focus/selection/expanded/history-filter state across refreshes,
-historical closeouts, repo-map/workflow/blocker/action-preview/audit/rollback
+historical closeouts, repo-map/workflow/blocker/action-preview/action-request-history/audit/rollback
 views, and symbolic actions only. Read-only preview and dry-run explanations
 are allowed when they are derived from repo-owned truth and do not become a
 second mutation surface. `latest.json` is display state, not rollback evidence.
@@ -200,7 +211,11 @@ owner is foreign or unknown, and expose `/api/closeout/actions` with
 `serverProcessId`, repo ownership, command policy, symbolic actions, exact-tuple
 requirements, and rollback non-actionability/reason, plus
 `/api/closeout/actions/preview` for non-mutating cleanup or rollback
-explanations. Data endpoints should include `/api/closeout/repo-state/latest`,
+explanations. Add `/api/closeout/actions/requests` as a read-only request history
+view. That feed should expose immutable rows, visible malformed-row/truncation
+counts, and a top-level readiness status so operators can tell whether the
+ledger is fully trustworthy without reading raw packets. Data endpoints should
+include `/api/closeout/repo-state/latest`,
 `/api/closeout/repo-state/history-index`, and
 `/api/closeout/repo-state/history/{snapshotId}`.
 Dashboard symbolic action intent should be recorded as generated request packets
@@ -209,8 +224,8 @@ such as `/api/closeout/actions/request`. These packets are evidence of user/UI
 intent only; repo-owned actors still revalidate helper freshness, repo-state
 hash, actionability, and exact tuple fields before mutation. The request layer
 must reject missing/stale/future helper timestamps, mismatched helper process
-ids, empty exact-tuple values, and request roots that resolve outside generated
-state.
+ids, stale preview-token/repo-state bindings, empty exact-tuple values, and
+request roots that resolve outside generated state.
 `rollbackPolicy` documents how undo works: prefer Git revert, recovery-branch
 restoration, path restore from snapshot, or preservation-ref promotion; preserve
 evidence before cleanup; require a new work block, user approval, immutable

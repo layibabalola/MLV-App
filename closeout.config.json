@@ -287,6 +287,7 @@
       "actions": "/api/closeout/actions",
       "actionsPreview": "/api/closeout/actions/preview",
       "actionsRequest": "/api/closeout/actions/request",
+      "actionsRequestHistory": "/api/closeout/actions/requests",
       "events": "/api/closeout/events"
     },
     "dataSources": [
@@ -297,7 +298,7 @@
       "repoSweepCandidateReports"
     ],
     "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"],
-    "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "action-preview", "audit-timeline", "rollback-readiness"]
+    "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "action-preview", "action-request-history", "audit-timeline", "rollback-readiness"]
   },
   "rollbackPolicy": {
     "enabled": true,
@@ -537,6 +538,8 @@
       "test_closeout_dashboard_action_request_rejects_stale_or_unknown_action",
       "test_closeout_dashboard_action_request_rejects_missing_future_or_malformed_helper_evidence",
       "test_closeout_dashboard_action_request_rejects_empty_tuple_values_and_path_escape",
+      "test_closeout_dashboard_action_request_history_lists_recent_requests",
+      "test_closeout_dashboard_action_request_history_surfaces_malformed_and_truncated_rows",
       "test_closeout_dashboard_rejects_malformed_config_numbers",
       "test_closeout_dashboard_history_snapshot_rejects_path_escape",
       "test_closeout_dashboard_page_uses_sse_with_polling_fallback",
@@ -548,7 +551,7 @@
       "test_hard_clean_final_response_passes_after_clean_promotion",
       "test_complete_finalize_enforces_hard_clean_config_without_switch",
       "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
-      "test_dirty_protected_target_finalize_blocks_with_repo_closed_postcondition_failed",
+      "test_dirty_protected_target_finalize_recovers_to_feature_branch",
       "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
       "test_repo_closed_postcondition_blocks_linked_sibling_worktree",
       "test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state",
@@ -600,6 +603,7 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "rollback-readiness.v1"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot_evidence_hash"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_closed_postcondition_state"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def recover_dirty_protected_target_to_work_block"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def recovery_command_forbidden_action"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def require_integrity_checked_audit"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_rollback_manifest"},
@@ -609,9 +613,11 @@
       {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTIONS_SCHEMA"},
       {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_PREVIEW_SCHEMA"},
       {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_REQUEST_SCHEMA"},
+      {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "DASHBOARD_ACTION_REQUEST_HISTORY_SCHEMA"},
       {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_actions_payload"},
       {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_action_preview_payload"},
       {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_action_request_payload"},
+      {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def dashboard_action_request_history_payload"},
       {"path": "tools/repo_hygiene/closeout_dashboard.py", "contains": "def history_snapshot_payload"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
@@ -660,6 +666,7 @@
       {"path": "AGENTS.md", "contains": "closeoutCleanTruth"},
       {"path": "AGENTS.md", "contains": "agentRemediationQueue.queueRoots"},
       {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
+      {"path": "AGENTS.md", "contains": "protected-target-dirty-recovery"},
       {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
       {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
       {"path": "AGENTS.md", "contains": "PowerShell 7+"},
@@ -673,6 +680,7 @@
       {"path": "CLAUDE.md", "contains": "closeoutCleanTruth"},
       {"path": "CLAUDE.md", "contains": "agentRemediationQueue.queueRoots"},
       {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
+      {"path": "CLAUDE.md", "contains": "protected-target-dirty-recovery"},
       {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
       {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
       {"path": "CLAUDE.md", "contains": "PowerShell 7+"},
