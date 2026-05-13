@@ -1525,8 +1525,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("window.setInterval", page)
         self.assertIn("/api/closeout/events", page)
         self.assertIn("/api/closeout/actions/preview", page)
+        self.assertIn("/api/closeout/actions/request", page)
+        self.assertIn("Queue symbolic request", page)
         self.assertIn("loadActionPreview", page)
         self.assertIn("Preview</button>", page)
+        self.assertIn("selectedActionIdFromUrl", page)
+        self.assertIn("actionId", page)
 
     def test_closeout_dashboard_page_preserves_configured_client_state_keys(self) -> None:
         repo = self.init_repo(remote=True)
