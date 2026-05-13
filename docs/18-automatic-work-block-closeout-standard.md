@@ -190,14 +190,17 @@ repo-owned writer and fail closed for arbitrary commands.
 `webDashboardSpec` is the iterative dashboard contract: sticky `/closeout` URL,
 auto-refresh through SSE with polling fallback, read-only default, preserved
 scroll/focus/selection/expanded/history-filter state across refreshes,
-historical closeouts, repo-map/workflow/blocker/audit/rollback views, and
-symbolic actions only. `latest.json` is display state, not rollback evidence.
+historical closeouts, repo-map/workflow/blocker/action-preview/audit/rollback
+views, and symbolic actions only. Read-only preview and dry-run explanations
+are allowed when they are derived from repo-owned truth and do not become a
+second mutation surface. `latest.json` is display state, not rollback evidence.
 The local helper entrypoint is `tools/closeout/start-closeout-dashboard.ps1`.
 It should reuse a healthy same-repo dashboard server, fail closed when the port
 owner is foreign or unknown, and expose `/api/closeout/actions` with
 `serverProcessId`, repo ownership, command policy, symbolic actions, exact-tuple
-requirements, and rollback non-actionability/reason. Data endpoints should include
-`/api/closeout/repo-state/latest`,
+requirements, and rollback non-actionability/reason, plus
+`/api/closeout/actions/preview` for non-mutating cleanup or rollback
+explanations. Data endpoints should include `/api/closeout/repo-state/latest`,
 `/api/closeout/repo-state/history-index`, and
 `/api/closeout/repo-state/history/{snapshotId}`.
 Dashboard symbolic action intent should be recorded as generated request packets
@@ -213,7 +216,9 @@ restoration, path restore from snapshot, or preservation-ref promotion; preserve
 evidence before cleanup; require a new work block, user approval, immutable
 source snapshot evidence, `closeout-rollback-manifest.v1`, rollback plan, and
 recovery commands in mutating audits; and reserve `reset --hard` or force push
-for explicit user requests. `tools\closeout\validate-rollback-manifest.ps1`
+for explicit user requests. Rollback itself remains a mutating action once a
+repo-owned actor exists and the user approves the plan.
+`tools\closeout\validate-rollback-manifest.ps1`
 provides the current read-only validator surface. It returns
 `closeout-rollback-manifest-validation.v1`, requires manifests under
 `.claude-state/closeout/rollback`, rejects `latest.json` and `current.json`,
