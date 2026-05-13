@@ -63,6 +63,7 @@ from .brokered_closeout import (
     write_review_surface_unavailable_report,
 )
 from .closeout_dashboard import (
+    dashboard_action_preview_payload,
     dashboard_action_request_payload,
     dashboard_actions_payload,
     dashboard_html,
@@ -821,9 +822,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(snapshot["dashboard"]["duplicateLaunchPolicy"], "reuse-same-repo-fail-foreign-owner")
         self.assertEqual(snapshot["dashboard"]["helper"]["scriptPath"], "tools\\closeout\\start-closeout-dashboard.ps1")
         self.assertEqual(snapshot["dashboard"]["endpoints"]["latest"], "/api/closeout/repo-state/latest")
+        self.assertEqual(snapshot["dashboard"]["endpoints"]["actionsPreview"], "/api/closeout/actions/preview")
         self.assertEqual(snapshot["dashboard"]["helper"]["serverProcessIdSource"], snapshot["dashboard"]["endpoints"]["actions"])
         self.assertEqual(snapshot["dashboard"]["helper"]["readinessEndpoint"], snapshot["dashboard"]["endpoints"]["actions"])
         self.assertIn("audit-timeline", snapshot["dashboard"]["primaryPanels"])
+        self.assertIn("action-preview", snapshot["dashboard"]["primaryPanels"])
         self.assertEqual(snapshot["worktreeInspection"]["schema"], "worktree-inspection.v1")
         self.assertTrue(snapshot["worktreeInspection"]["currentRootPresent"])
         self.assertEqual(snapshot["worktreeInspection"]["ordinaryLinkedWorktreeCount"], 0)
@@ -1222,11 +1225,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(actions["helper"]["serverProcessIdSource"], "/api/closeout/actions")
         self.assertEqual(actions["endpoints"]["page"], "/closeout")
         self.assertEqual(actions["endpoints"]["latest"], "/api/closeout/repo-state/latest")
+        self.assertEqual(actions["endpoints"]["actionsPreview"], "/api/closeout/actions/preview")
         self.assertEqual(actions["endpoints"]["actionsRequest"], "/api/closeout/actions/request")
         self.assertIn("delete-evidence", actions["forbiddenActions"])
         self.assertEqual(actions["dashboard"]["refreshCommandPolicy"], "repo-owned-write-repo-state-latest-only")
         by_id = {item["id"]: item for item in actions["symbolicActions"]}
         self.assertEqual(by_id["refresh_repo_state"]["actionability"], "generated-feed-only")
+        self.assertTrue(by_id["refresh_repo_state"]["previewAvailable"])
+        self.assertEqual(by_id["refresh_repo_state"]["previewEndpoint"], "/api/closeout/actions/preview")
         self.assertEqual(by_id["refresh_repo_state"]["commandPolicy"], "repo-owned-write-repo-state-latest-only")
         self.assertFalse(by_id["refresh_repo_state"]["writesHistory"])
         self.assertTrue(by_id["refresh_repo_state"]["command"].startswith("pwsh.exe -NoLogo -NoProfile -NonInteractive"))
@@ -1243,6 +1249,43 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("sourceSnapshotAuditHash", by_id["request_rollback"]["exactTupleRequired"])
         self.assertIn("repoClosedAuditHash", by_id["request_rollback"]["exactTupleRequired"])
         self.assertIn("recoveryCommand", by_id["request_rollback"]["exactTupleRequired"])
+
+    def test_closeout_dashboard_action_preview_explains_current_blockers_without_mutation(self) -> None:
+        repo = self.init_repo(remote=True)
+        (repo / "dashboard-dirty.txt").write_text("dirty preview\n", encoding="utf-8")
+        audit_path = repo / ".claude-state" / "closeout" / "audits" / "audits.jsonl"
+        repo_closed_path = repo / ".claude-state" / "closeout" / "repo-closed" / "repo.json"
+        audit_before = audit_path.read_text(encoding="utf-8").splitlines() if audit_path.exists() else []
+
+        preview = dashboard_action_preview_payload(repo, {"actionId": "request_retained_remediation"})
+
+        self.assertEqual(preview["schema"], "closeout-dashboard-action-preview.v1")
+        self.assertEqual(preview["status"], "ready")
+        self.assertEqual(preview["actionId"], "request_retained_remediation")
+        self.assertEqual(preview["previewMode"], "read-only-explain-and-dry-run")
+        self.assertTrue(preview["noDirectMutation"])
+        self.assertFalse(preview["wouldMutateNow"])
+        self.assertEqual(preview["repoClosedPostcondition"]["status"], "blocked")
+        blocker_kinds = {row["kind"] for row in preview["blockerSummary"]}
+        self.assertIn("non_exempt_dirty_files", blocker_kinds)
+        self.assertEqual(preview["candidateReports"]["reportRoot"], ".claude-state/closeout/repo-sweep/candidate-reports")
+        self.assertFalse(repo_closed_path.exists())
+        audit_after = audit_path.read_text(encoding="utf-8").splitlines() if audit_path.exists() else []
+        self.assertEqual(audit_after, audit_before)
+
+    def test_closeout_dashboard_action_preview_reports_rollback_readiness(self) -> None:
+        repo = self.init_repo(remote=True)
+
+        preview = dashboard_action_preview_payload(repo, {"actionId": "request_rollback"})
+
+        self.assertEqual(preview["schema"], "closeout-dashboard-action-preview.v1")
+        self.assertEqual(preview["actionId"], "request_rollback")
+        self.assertFalse(preview["wouldMutateNow"])
+        self.assertIn("Rollback is ultimately a mutating action", preview["explanation"])
+        self.assertEqual(preview["rollback"]["requiredManifestSchema"], "closeout-rollback-manifest.v1")
+        self.assertIn("sourceSnapshotPath", preview["rollback"]["requiredManifestFields"])
+        self.assertEqual(preview["rollback"]["readiness"]["actionability"], "read-only-no-actor")
+        self.assertFalse(preview["rollback"]["readiness"]["latestFeedIsRollbackEvidence"])
 
     def test_closeout_dashboard_action_request_writes_packet_without_mutation(self) -> None:
         repo = self.init_repo(remote=True)
@@ -1481,6 +1524,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("startPolling", page)
         self.assertIn("window.setInterval", page)
         self.assertIn("/api/closeout/events", page)
+        self.assertIn("/api/closeout/actions/preview", page)
+        self.assertIn("loadActionPreview", page)
+        self.assertIn("Preview</button>", page)
 
     def test_closeout_dashboard_page_preserves_configured_client_state_keys(self) -> None:
         repo = self.init_repo(remote=True)
@@ -1544,6 +1590,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_validate_rollback_manifest_accepts_immutable_history_and_audit", baseline["requiredTests"])
         self.assertIn("test_validate_rollback_manifest_rejects_latest_forbidden_and_stale_evidence", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_actions_are_read_only_and_owned", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_action_preview_explains_current_blockers_without_mutation", baseline["requiredTests"])
+        self.assertIn("test_closeout_dashboard_action_preview_reports_rollback_readiness", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_action_request_writes_packet_without_mutation", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_action_request_rejects_stale_or_unknown_action", baseline["requiredTests"])
         self.assertIn("test_closeout_dashboard_action_request_rejects_missing_future_or_malformed_helper_evidence", baseline["requiredTests"])
@@ -1557,6 +1605,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "closeout-history-index.v1"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "rollback-readiness.v1"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_state_snapshot_evidence_hash"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def repo_closed_postcondition_state"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def recovery_command_forbidden_action"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def require_integrity_checked_audit"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def validate_rollback_manifest"), required_symbols)
@@ -1569,8 +1618,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/agent-bridge/powershell_runtime.py", "def powershell_cim_command"), required_symbols)
         self.assertIn(("tools/agent-bridge/bootstrap_session.py", "powershell_cim_command"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTIONS_SCHEMA"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTION_PREVIEW_SCHEMA"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "DASHBOARD_ACTION_REQUEST_SCHEMA"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_actions_payload"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_action_preview_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def dashboard_action_request_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/closeout_dashboard.py", "def history_snapshot_payload"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "repo-state"), required_symbols)
@@ -1591,6 +1642,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             self.assertIn("worktree-inspection.v1", text)
             self.assertIn("start-closeout-dashboard.ps1", text)
             self.assertIn("/api/closeout/actions", text)
+            self.assertIn("/api/closeout/actions/preview", text)
             self.assertIn("dashboard-action-requests", text)
             self.assertIn("validate-rollback-manifest.ps1", text)
             self.assertIn("repoClosedAuditHash", text)
@@ -1604,6 +1656,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("start-closeout-dashboard.ps1", dashboard_spec_text)
         self.assertIn("pwsh.exe -NoLogo -NoProfile -NonInteractive", dashboard_spec_text)
         self.assertIn("/api/closeout/repo-state/latest", dashboard_spec_text)
+        self.assertIn("/api/closeout/actions/preview", dashboard_spec_text)
         self.assertIn("/api/closeout/actions/request", dashboard_spec_text)
         self.assertIn("http://127.0.0.1:8765/closeout", dashboard_spec_text)
 

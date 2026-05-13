@@ -431,6 +431,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "historyIndex": "/api/closeout/repo-state/history-index",
             "historySnapshot": "/api/closeout/repo-state/history/{snapshotId}",
             "actions": "/api/closeout/actions",
+            "actionsPreview": "/api/closeout/actions/preview",
             "actionsRequest": "/api/closeout/actions/request",
             "events": "/api/closeout/events",
         },
@@ -442,7 +443,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "repoSweepCandidateReports",
         ],
         "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"],
-        "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "audit-timeline", "rollback-readiness"],
+        "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "action-preview", "audit-timeline", "rollback-readiness"],
     },
     "rollbackPolicy": {
         "enabled": True,
@@ -4785,12 +4786,13 @@ def closeout_clean_truth_from_postcondition(postcondition: Dict[str, Any]) -> Di
     }
 
 
-def verify_repo_closed_postcondition(
+def repo_closed_postcondition_state(
     repo_root_arg: Path,
     config: Optional[Dict[str, Any]] = None,
     *,
     work_block_id: Optional[str] = None,
     finalize_result: Optional[Dict[str, Any]] = None,
+    write_artifacts: bool = True,
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = config or load_closeout_config(repo_root)
@@ -4911,9 +4913,26 @@ def verify_repo_closed_postcondition(
     }
     if bool(hard_clean.get("unifiedTruthReport", {}).get("enabled", True)):
         result["closeoutCleanTruth"] = closeout_clean_truth_from_postcondition(result)
-    write_json(repo_closed_artifact_path(repo_root, config, work_block_id), result)
-    write_audit(repo_root, config, "repo_closed_postcondition", result, work_block_id=work_block_id, outcome="success" if ok else "blocked")
+    if write_artifacts:
+        write_json(repo_closed_artifact_path(repo_root, config, work_block_id), result)
+        write_audit(repo_root, config, "repo_closed_postcondition", result, work_block_id=work_block_id, outcome="success" if ok else "blocked")
     return result
+
+
+def verify_repo_closed_postcondition(
+    repo_root_arg: Path,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    work_block_id: Optional[str] = None,
+    finalize_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return repo_closed_postcondition_state(
+        repo_root_arg,
+        config,
+        work_block_id=work_block_id,
+        finalize_result=finalize_result,
+        write_artifacts=True,
+    )
 
 
 def finalize_retry_decision(
@@ -6769,6 +6788,7 @@ def repo_state_snapshot(
         "historyIndex": str(dashboard_endpoints_config.get("historyIndex") or "/api/closeout/repo-state/history-index"),
         "historySnapshot": str(dashboard_endpoints_config.get("historySnapshot") or "/api/closeout/repo-state/history/{snapshotId}"),
         "actions": str(dashboard_endpoints_config.get("actions") or "/api/closeout/actions"),
+        "actionsPreview": str(dashboard_endpoints_config.get("actionsPreview") or "/api/closeout/actions/preview"),
         "actionsRequest": str(dashboard_endpoints_config.get("actionsRequest") or "/api/closeout/actions/request"),
         "events": str(dashboard_endpoints_config.get("events") or "/api/closeout/events"),
     }
