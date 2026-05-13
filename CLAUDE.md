@@ -238,7 +238,7 @@ history snapshot, and a `repo_state_snapshot` audit. The snapshot uses
 branches, worktrees, stashes, latest closeout audit/truth pointers, a bounded
 `closeout-history-index.v1`, `worktree-inspection.v1`, and `rollbackPolicy`
 plus `rollback-readiness.v1`.
-The future `webDashboardSpec` surface should auto-refresh
+The `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
 For live dashboard polling, use the latest-only repo-state adapter:
@@ -250,17 +250,23 @@ surfaced through dashboard metadata.
 `webDashboardSpec` is read-only by default and
 `symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
 preserved scroll/focus/selection/expanded/history-filter state across refresh,
-and repo-map, workflow, blocker, audit, rollback, and historical closeout views.
-`latest.json` is a mutable display feed, not rollback evidence.
+and repo-map, workflow, blocker, action-preview, audit, rollback, and
+historical closeout views. Read-only preview and dry-run explanations are
+allowed when they are derived from repo-owned truth and do not create a second
+mutation authority. `latest.json` is a mutable display feed, not rollback
+evidence.
 The local helper is `tools\closeout\start-closeout-dashboard.ps1`. It serves
 `http://127.0.0.1:8765/closeout`, reuses a healthy same-repo process, and fails
 closed if the port belongs to another repo. Required endpoints are
 `/api/closeout/repo-state/latest`,
 `/api/closeout/repo-state/history-index`,
-`/api/closeout/repo-state/history/{snapshotId}`, and
-`/api/closeout/actions`; `/api/closeout/actions` reports `serverProcessId`,
-repo ownership, symbolic actions, exact-tuple requirements, command policy, and
-rollback non-actionability plus the readiness reason.
+`/api/closeout/repo-state/history/{snapshotId}`,
+`/api/closeout/actions`, and `/api/closeout/actions/preview`;
+`/api/closeout/actions` reports `serverProcessId`, repo ownership, symbolic
+actions, exact-tuple requirements, command policy, and rollback
+non-actionability plus the readiness reason, while
+`/api/closeout/actions/preview` explains cleanup or rollback consequences
+without mutating the repo.
 Dashboard symbolic action intent is durable but non-mutating:
 `/api/closeout/actions/request` writes generated request packets under
 `.claude-state/closeout/dashboard-action-requests/` with helper freshness,
@@ -275,7 +281,8 @@ repo-state snapshot before mutation, immutable source snapshot evidence, a
 `closeout-rollback-manifest.v1`, a rollback plan, and recovery commands in
 mutating audits; and forbids `reset --hard` or force push unless the user
 explicitly asks for it. Until a rollback actor validates the manifest, readiness
-must remain `read-only-no-actor`. `tools\closeout\validate-rollback-manifest.ps1`
+must remain `read-only-no-actor`; rollback itself is still a mutating action
+once that actor exists and the user approves it. `tools\closeout\validate-rollback-manifest.ps1`
 is a read-only `closeout-rollback-manifest-validation.v1` validator: manifests
 must stay under `.claude-state/closeout/rollback`, reject `latest.json` and
 `current.json`, bind `sourceSnapshotHash` to the repo-state snapshot hash scope,
