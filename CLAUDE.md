@@ -192,6 +192,10 @@ When publish/upstream/final-push repair is blocked only by missing metrics,
 handoff, session, or closeout evidence, generate the configured evidence bundle,
 claim and commit only those evidence files, retain unrelated dirty work, and
 rerun safe publish repair before stopping.
+Repo-owned closeout commits should read clearly in normal `git log` output. When
+the broker generates commits, the subject should identify the work block or
+candidate, summarize the purpose of the change, and avoid generic checkpoint or
+evidence-repair wording when a more informative summary is available.
 The finalize loop must be bounded and auditable. Each retry must write the
 selected `workBlockId`, blocker kind, symbolic repair attempted, evidence hash
 before repair, evidence hash after repair, pinned refs before retry, retry

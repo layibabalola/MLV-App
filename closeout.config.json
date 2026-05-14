@@ -742,7 +742,7 @@
     "evidenceRoot": ".closeout-evidence",
     "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
     "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
-    "commitMessage": "brokered closeout evidence repair"
+    "commitMessage": "chore(closeout): repair closeout evidence artifacts"
   },
   "closeoutAddendumPersistence": {
     "enabled": true,

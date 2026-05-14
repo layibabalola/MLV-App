@@ -19,8 +19,12 @@ from .brokered_closeout import (
     broker_contract,
     check_review_quorum,
     checkpoint_owned_work,
+    checkpoint_commit_message,
     closeout_clean_truth_from_postcondition,
+    closeout_merge_commit_message,
     closeout_script_command,
+    dirty_split_commit_message,
+    evidence_repair_commit_message,
     effective_closeout_script_command,
     collect_agent_remediation_results,
     closeout_command_timeout_ms,
@@ -261,7 +265,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "evidenceRoot": ".closeout-evidence",
                 "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
                 "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
-                "commitMessage": "brokered closeout evidence repair",
+                "commitMessage": "chore(closeout): repair closeout evidence artifacts",
             },
             "reviewQuorum": {
                 "requiredApprovals": 3,
@@ -647,10 +651,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["closeoutAddendumPersistence"]["enabled"])
         self.assertTrue(config["closeoutAddendumPersistence"]["sameTurnRequired"])
         self.assertTrue(config["finalizeLoop"]["enabled"])
+        self.assertEqual(config["finalizeLoop"]["maxRetries"], 8)
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["final_push_evidence_repaired"], "evidence_repair")
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["target_push_rerun_required"], "target_push_recovery")
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["stale_review"], "renew_stale_review")
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["validation_failed"], "rerun_validation_smoke")
+        self.assertEqual(config["evidenceRepair"]["commitMessage"], "chore(closeout): repair closeout evidence artifacts")
         self.assertTrue(config["agentRemediation"]["enabled"])
         self.assertIn("codex-desktop", config["agentRemediation"]["surfaceAdapters"])
         self.assertTrue(config["agentRemediationQueue"]["enabled"])
@@ -3001,6 +3007,43 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(decision["shouldRetry"], decision)
         self.assertEqual(decision["symbolicRepairAttempted"], "rerun_validation_smoke")
         self.assertIsNone(decision["terminalReason"])
+
+    def test_evidence_repair_commit_message_is_human_readable(self) -> None:
+        config = load_closeout_config(ROOT)
+        message = evidence_repair_commit_message(
+            config,
+            reason="final_push",
+            work_block_id="wb-demo",
+            paths=[
+                ".closeout-evidence/wb-demo/closeout.json",
+                ".closeout-evidence/wb-demo/metrics.json",
+                ".closeout-evidence/wb-demo/session.json",
+            ],
+        )
+        self.assertEqual(
+            message,
+            "chore(closeout): repair closeout.json, metrics.json, and session.json for wb-demo before final push",
+        )
+
+    def test_checkpoint_commit_message_is_human_readable(self) -> None:
+        message = checkpoint_commit_message("wb-demo", ["tools/repo_hygiene/brokered_closeout.py", "closeout.config.json"])
+        self.assertEqual(
+            message,
+            "chore(closeout): checkpoint brokered_closeout.py, and closeout.config.json for wb-demo",
+        )
+
+    def test_dirty_split_commit_message_is_human_readable(self) -> None:
+        message = dirty_split_commit_message("wb-demo", ["closeout.config.json", "docs/19-closeout-dashboard-spec.md"])
+        self.assertEqual(
+            message,
+            "chore(closeout): preserve split-owned changes for wb-demo (closeout.config.json, and 19-closeout-dashboard-spec.md)",
+        )
+
+    def test_closeout_merge_commit_message_is_human_readable(self) -> None:
+        work_block_merge = closeout_merge_commit_message("codex/work-block/wb-demo", "master")
+        split_merge = closeout_merge_commit_message("closeout/split/wb-demo", "master")
+        self.assertEqual(work_block_merge, "merge(closeout): integrate wb-demo closeout hardening into master")
+        self.assertEqual(split_merge, "merge(closeout): integrate preserved split changes from wb-demo into master")
 
     def test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason(self) -> None:
         repo = self.init_repo(remote=False)
