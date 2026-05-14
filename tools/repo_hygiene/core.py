@@ -94,6 +94,7 @@ IMPLEMENTED_CLOSEOUT_ARTIFACT_NAMES = [
     "approval-anchor.json",
     "apply-validation.json",
     "executor-handoff.json",
+    "closeout-compare-result.json",
     "agent-remediation-queue/*.json",
     "agent-remediation-results/*.json",
     "manual-prune/*.json",
