@@ -56,7 +56,9 @@ audit log. The UI may summarize those artifacts, but the artifacts remain the
 source of truth. When available, the dashboard should also surface a short
 round-delta note so multiple repos can compare closeout workflow changes side
 by side and keep cross-repo comparison meaningful without reconstructing them
-from chat.
+from chat. This canonical spec is itself part of the machine-checked baseline;
+the tracked round-delta note should live in `CLOSEOUT-CROSS-MAP-COMPARISON.md`
+or an equivalent durable repo note.
 
 ## Local Helper
 
