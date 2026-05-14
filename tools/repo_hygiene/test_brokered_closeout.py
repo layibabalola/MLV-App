@@ -1796,6 +1796,14 @@ class BrokeredCloseoutTests(unittest.TestCase):
             self.assertIn("dashboard-action-requests", text)
             self.assertIn("validate-rollback-manifest.ps1", text)
             self.assertIn("repoClosedAuditHash", text)
+        self.assertIn("canonical dashboard contract", agents_text)
+        self.assertIn("canonical dashboard contract", claude_text)
+        self.assertIn("canonical phase matrix", standard_text)
+        self.assertIn("read-first", dashboard_spec_text)
+        self.assertIn("Inspect: evidence only", dashboard_spec_text)
+        self.assertIn("Preview: explain consequences and blockers", dashboard_spec_text)
+        self.assertIn("Request: record durable symbolic intent", dashboard_spec_text)
+        self.assertIn("Apply: repo-owned actor only", dashboard_spec_text)
         self.assertIn("repo-state-snapshot.v1", dashboard_spec_text)
         self.assertIn("closeout-history-index.v1", dashboard_spec_text)
         self.assertIn("rollback-readiness.v1", dashboard_spec_text)
@@ -2433,6 +2441,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(closeout_max_process_output_bytes(config), 0)
         self.assertGreater(config["validation"]["timeoutMs"], 0)
         self.assertGreater(config["validation"]["maxOutputBytes"], 0)
+        validation_names = [command["name"] for command in config["validation"]["commands"]]
+        self.assertEqual(
+            validation_names[:3],
+            [
+                "brokered-closeout-smoke-core",
+                "brokered-closeout-smoke-state",
+                "brokered-closeout-smoke-dashboard",
+            ],
+        )
+        self.assertNotIn("brokered-closeout-smoke", validation_names)
         self.assertIn("pathPatterns", config["validation"]["commands"][0])
         self.assertEqual(config["processResources"]["defaultPriority"], "below_normal")
         self.assertEqual(config["processResources"]["validationPriority"], "below_normal")
