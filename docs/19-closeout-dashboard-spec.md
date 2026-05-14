@@ -88,10 +88,17 @@ The compare loop should stay explicit:
 1. Regenerate the canonical dashboard spec and the tracked round-delta note in
    the same work block whenever either one changes.
 2. Capture each repo's closeout state in the shared report envelope above.
-3. Compare matching headings across repos before interpreting the results.
-4. Record a visible freshness marker or timestamp next to the compare result.
-5. Block closeout if any report is stale, missing the envelope, or impossible
+3. Emit a `closeout-compare-result.v1` artifact with `status` set to `current`,
+   `stale`, `divergent`, or `blocked` before interpreting the results.
+4. Compare matching headings across repos before interpreting the results.
+5. Record a visible freshness marker or timestamp next to the compare result.
+6. Block closeout if any report is stale, missing the envelope, or impossible
    to compare mechanically.
+
+The workflow-comparison panel should surface that artifact directly so a human
+can compare the repo's structured outcome without translating the prose first.
+At minimum it should show `status`, the freshness marker or timestamp, the
+snapshot pointer, compare findings, and the blocker reason when present.
 
 ## Local Helper
 

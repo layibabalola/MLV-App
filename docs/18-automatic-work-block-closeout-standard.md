@@ -218,6 +218,12 @@ ledger is fully trustworthy without reading raw packets. Data endpoints should
 include `/api/closeout/repo-state/latest`,
 `/api/closeout/repo-state/history-index`, and
 `/api/closeout/repo-state/history/{snapshotId}`.
+For cross-repo comparison, the workflow-comparison view should also surface a
+durable `closeout-compare-result.v1` artifact. Use the same machine labels as
+the newer dashboard spec: `current`, `stale`, `divergent`, and `blocked`.
+Carry the freshness marker or timestamp, snapshot pointer, compare findings,
+and blocker reason beside the human-readable report envelope so another repo
+can compare the same result without re-reading the prose first.
 Dashboard symbolic action intent should be recorded as generated request packets
 under `.claude-state/closeout/dashboard-action-requests/` through an endpoint
 such as `/api/closeout/actions/request`. These packets are evidence of user/UI
