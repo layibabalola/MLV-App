@@ -1551,17 +1551,21 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 },
                 server_process_id=4321,
             )
+        fresh_bound_request = {
+            **bound_request,
+            "helperObservedAtMs": int(time.time() * 1000),
+        }
         with self.assertRaisesRegex(HygieneError, "missing previewToken"):
             dashboard_action_request_payload(
                 repo,
-                {key: value for key, value in bound_request.items() if key != "previewToken"},
+                {key: value for key, value in fresh_bound_request.items() if key != "previewToken"},
                 server_process_id=4321,
             )
         with self.assertRaisesRegex(HygieneError, "stale dashboard preview repo state"):
             dashboard_action_request_payload(
                 repo,
                 {
-                    **bound_request,
+                    **fresh_bound_request,
                     "previewRepoStateHash": "stale-hash",
                 },
                 server_process_id=4321,
@@ -1570,7 +1574,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             dashboard_action_request_payload(
                 repo,
                 {
-                    **bound_request,
+                    **fresh_bound_request,
                     "previewToken": "stale-token",
                 },
                 server_process_id=4321,
