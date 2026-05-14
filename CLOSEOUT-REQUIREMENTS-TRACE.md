@@ -73,6 +73,7 @@ Rules:
 | `REQ-030` | Checked-out, locked, active, dirty, or protected worktrees require evidence before cleanup. | Verified locally in incident map and test corpus; cross-checked in matrix. | `checked-out-and-locked-worktree-handling`; `evidence-preserving-prune`; `dirty-classification`. | Standard SHOULD | Ledger must cite lock/protected/dirty evidence and blocker behavior. | Include in Standard; Core invariant is that ambiguous worktree cleanup blocks. |
 | `REQ-031` | The capability ledger must make compliance machine-readable and block documentation-only `YES` claims. | Verified locally: `CLOSEOUT-CAPABILITY-LEDGER.schema.json`. | `capability-ledger-schema`; `requirements-trace-to-original-standard`; `tooling-drift-detection`. | Core MUST | Ledger schema requires status, profile, decision, evidence paths, blockers, next step, and YES guardrails. | Include as evidence contract for adoption. |
 | `REQ-032` | The clean standard must not smuggle Max-profile machinery into Core. | Verified locally: `CLOSEOUT-FRAMEWORK-PROFILES.md`. | `capability-ledger-schema`; `runtime-service-lifecycle`; `remediation-freeze`; `agent-remediation-queue`; `automated-subagent-dispatch`. | Core governance rule; Max/Surface rows stay optional unless risk is present | Ledger must allow honest `UNAVAILABLE`, `NO`, or `PARTIAL` for unsupported non-Core rows. | Include non-smuggling rule near profile section of clean standard. |
+| `REQ-033` | The canonical dashboard spec and tracked round-delta note must stay visibly fresh by regenerating the comparison artifacts in the same work block whenever either anchor changes. | Verified locally: `docs/19-closeout-dashboard-spec.md`; `CLOSEOUT-CROSS-MAP-COMPARISON.md`; `CLOSEOUT-REFERENCE-MATRIX.md`. | `docs-freshness-regeneration`; `historical-incident-traceability`; `requirements-trace-to-original-standard`. | Core MUST | The ledger and docs should show same-block regeneration evidence or a stale-artifact blocker whenever the freshness anchors move. | Include as a docs-freshness rule in the clean standard. |
 
 ## Explicit Non-Goals And Repo Policy Items
 
@@ -100,6 +101,7 @@ The clean standard should carry forward:
 8. The single-candidate mutation default and audited bulk override rule.
 9. The no-force-push target recovery invariant.
 10. The generated/exempt final utility discipline.
+11. The same-work-block docs-freshness rule for the canonical dashboard spec and the tracked round-delta note.
 
 The clean standard should avoid:
 
