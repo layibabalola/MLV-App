@@ -10,6 +10,12 @@ generic subjects such as `brokered closeout checkpoint` or
 `brokered closeout evidence repair`. The commits themselves are valid, but the
 subjects do not explain what changed or why.
 
+This map is also a compare-result landing zone for historical closeout rounds:
+the history entry should be readable alongside a `closeout-compare-result.v1`
+artifact that says whether the round is `current`, `stale`, `divergent`, or
+`blocked`. That keeps the commit history narrative and the comparison outcome
+in sync when another repo is doing a side-by-side workflow review.
+
 ## Recent Commit Map
 
 | Commit | Original subject | What actually changed |
