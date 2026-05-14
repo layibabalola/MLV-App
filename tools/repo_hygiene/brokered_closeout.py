@@ -519,6 +519,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "safeSecondOrderRepairs": {
             "final_push_evidence_repaired": "evidence_repair",
             "target_push_rerun_required": "target_push_recovery",
+            "stale_review": "renew_stale_review",
         },
         "retryAuditType": "finalize_retry",
     },
@@ -5074,6 +5075,8 @@ def finalize_retry_decision(
     loop = config.get("finalizeLoop", {})
     tuple_key = stable_hash({"blockerKind": blocker_kind, "evidenceHash": evidence_hash_before}, 16)
     symbolic = dict(loop.get("safeSecondOrderRepairs", {})).get(blocker_kind)
+    if blocker_kind == "stale_review" and not symbolic and bool(config.get("autoQuorum", {}).get("allowStaleReviewRenewal", True)):
+        symbolic = "renew_stale_review"
     max_retries = int(loop.get("maxRetries", 0) or 0)
     renewal_allowed = bool(loop.get("allowRepeatedBlockerEvidenceTupleRenewal", False))
     seen = set(seen_tuples)
