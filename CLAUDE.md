@@ -89,6 +89,8 @@ Before declaring the work complete, always run:
 pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize
 ```
 
+The completion wrapper finalizes by default, so ordinary substantive replies should be treated as closeout events rather than deferred checkpoints.
+
 To audit cross-branch cleanup, run:
 
 ```powershell

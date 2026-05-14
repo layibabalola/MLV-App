@@ -653,6 +653,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(config["agentRemediationQueue"]["surfaceUnavailableStatus"], "agent_remediation_surface_unavailable")
         self.assertIn("agent_conflict_remediation", config["autoQuorum"]["autonomousActionClasses"])
         self.assertEqual(config["responseHookLifecycle"]["skipSessionWorktreeSignal"], "SkipSessionWorktree")
+        self.assertEqual(config["responseHookLifecycle"]["readOnlyHookPhases"], ["response", "final"])
+        self.assertEqual(config["responseHookLifecycle"]["managedSessionWorktreeRoots"], [".codex-worktrees/**"])
         self.assertTrue(config["responseHookLifecycle"]["bootstrapAllowedOnlyByExplicitStart"])
         self.assertTrue(config["hardClean"]["requireForCompletion"])
         self.assertTrue(config["hardClean"]["allowRetainedForeignDirtyAtCompletion"])
@@ -2598,6 +2600,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("repoClosedPostcondition", result)
         blocker_kinds = {item["kind"] for item in result["repoClosedPostcondition"]["blockers"]}
         self.assertIn("disallowed_stashes", blocker_kinds)
+
+    def test_work_block_complete_wrapper_finalizes_by_default(self) -> None:
+        script_text = (ROOT / "tools" / "closeout" / "work-block-complete.ps1").read_text(encoding="utf-8")
+        self.assertIn("[switch]$Finalize", script_text)
+        self.assertIn("[switch]$NoFinalize", script_text)
+        self.assertIn("if ($Finalize -or -not $NoFinalize)", script_text)
+        self.assertIn('$argsList += "--finalize"', script_text)
 
     def test_complete_finalize_on_clean_protected_target_is_noop_repo_closed(self) -> None:
         repo = self.init_repo(remote=True)
