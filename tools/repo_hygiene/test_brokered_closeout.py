@@ -649,6 +649,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["finalizeLoop"]["enabled"])
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["final_push_evidence_repaired"], "evidence_repair")
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["target_push_rerun_required"], "target_push_recovery")
+        self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["stale_review"], "renew_stale_review")
         self.assertTrue(config["agentRemediation"]["enabled"])
         self.assertIn("codex-desktop", config["agentRemediation"]["surfaceAdapters"])
         self.assertTrue(config["agentRemediationQueue"]["enabled"])
@@ -2966,6 +2967,22 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
         self.assertTrue(decision["shouldRetry"], decision)
         self.assertEqual(decision["symbolicRepairAttempted"], "evidence_repair")
+        self.assertIsNone(decision["terminalReason"])
+
+    def test_finalize_loop_renews_stale_review_as_safe_second_order_repair(self) -> None:
+        config = load_closeout_config(ROOT)
+        decision = finalize_retry_decision(
+            config,
+            blocker_kind="stale_review",
+            evidence_hash_before="evidence-before",
+            evidence_hash_after="evidence-after",
+            pinned_refs_before_retry={"feature": {"head": "same"}, "target": {"head": "same"}},
+            pins_match=True,
+            retry_number=0,
+            seen_tuples=[],
+        )
+        self.assertTrue(decision["shouldRetry"], decision)
+        self.assertEqual(decision["symbolicRepairAttempted"], "renew_stale_review")
         self.assertIsNone(decision["terminalReason"])
 
     def test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason(self) -> None:
