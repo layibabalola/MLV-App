@@ -15,6 +15,13 @@ the history entry should be readable alongside a `closeout-compare-result.v1`
 artifact that says whether the round is `current`, `stale`, `divergent`, or
 `blocked`. That keeps the commit history narrative and the comparison outcome
 in sync when another repo is doing a side-by-side workflow review.
+The canonical schema lives at
+`tools/repo-hygiene/closeout.compare-result.schema.json`, and the comparable
+result should be stored at
+`.claude-state/closeout/workflow-comparison/compare-result.json`.
+The result should only be called current when the schema validates, the
+snapshot pointer resolves to the latest repo-state feed, and the freshness
+marker or timestamp matches the adjacent round-delta note.
 
 ## Recent Commit Map
 

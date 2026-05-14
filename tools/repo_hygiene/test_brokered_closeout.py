@@ -66,6 +66,7 @@ from .brokered_closeout import (
     write_audit,
     write_review_surface_unavailable_report,
 )
+from .closeout import validate_compare_result_schema
 from .closeout_dashboard import (
     MAX_DASHBOARD_ACTION_REQUESTS,
     dashboard_action_preview_payload,
@@ -1838,7 +1839,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("closeout-compare-result.v1", (ROOT / "CLOSEOUT-CROSS-MAP-COMPARISON.md").read_text(encoding="utf-8"))
         self.assertIn("closeout-compare-result.v1", (ROOT / "docs/18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8"))
         self.assertIn("closeout-compare-result.v1", (ROOT / "docs/20-closeout-commit-history-map.md").read_text(encoding="utf-8"))
+        self.assertIn("closeout.compare-result.schema.json", dashboard_spec_text)
+        self.assertIn("closeout.compare-result.schema.json", (ROOT / "docs/18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8"))
+        self.assertIn("closeout.compare-result.schema.json", (ROOT / "docs/20-closeout-commit-history-map.md").read_text(encoding="utf-8"))
         self.assertIn("closeout-compare-result.json", (ROOT / "tools/repo-hygiene/closeout.contract.json").read_text(encoding="utf-8"))
+        self.assertIn("closeout-compare-result.schema.json", (ROOT / "tools/repo-hygiene/closeout.contract.json").read_text(encoding="utf-8"))
+        self.assertIn("compare-result.json", dashboard_spec_text)
         self.assertIn("current", dashboard_spec_text)
         self.assertIn("stale", dashboard_spec_text)
         self.assertIn("divergent", dashboard_spec_text)
@@ -1863,6 +1869,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("malformedCount", dashboard_spec_text)
         self.assertIn("truncated", dashboard_spec_text)
         self.assertIn("http://127.0.0.1:8765/closeout", dashboard_spec_text)
+
+    def test_compare_result_artifact_shape_is_pinned(self) -> None:
+        compare_result_path = ROOT / ".claude-state" / "closeout" / "workflow-comparison" / "compare-result.json"
+        self.assertTrue(compare_result_path.exists(), compare_result_path)
+        compare_result = json.loads(compare_result_path.read_text(encoding="utf-8"))
+        validate_compare_result_schema(compare_result)
 
     def test_capability_ledger_contains_frozen_row_inventory(self) -> None:
         ledger = json.loads((ROOT / "CLOSEOUT-CAPABILITY-LEDGER.json").read_text(encoding="utf-8"))
