@@ -15,6 +15,17 @@ Principle:
 
 > Scar tissue first, comparison second, protocol third, law later.
 
+## Round Delta Note
+
+This round-delta note converted the cross-repo comparison idea into a durable contract:
+
+- `workflow-comparison` is now treated as a baseline-checked dashboard surface, not just a descriptive label.
+- The canonical dashboard spec at `docs/19-closeout-dashboard-spec.md` is now part of the machine-checked baseline.
+- `webDashboardSpec` now carries explicit baseline keys for `readOnlyByDefault`, `preserveClientStateAcrossRefresh`, and `rollbackForbiddenActions`.
+- The rollback ban is regression-checked for both `delete-evidence` and `force-push`.
+
+The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
+
 ## Cross-Map Worksheet
 
 | Capability / Incident Pattern | DNG Evidence | MLV-App Evidence | AdversarialLLM Evidence | Common Rule Emerging | Profile Candidate | Open Gap |
