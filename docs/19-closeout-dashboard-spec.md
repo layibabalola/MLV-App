@@ -53,7 +53,10 @@ history/source snapshot evidence plus repo-owned actor revalidation.
 
 Historical browsing comes from the repo-state history directory and the durable
 audit log. The UI may summarize those artifacts, but the artifacts remain the
-source of truth.
+source of truth. When available, the dashboard should also surface a short
+round-delta note so multiple repos can compare closeout workflow changes side
+by side and keep cross-repo comparison meaningful without reconstructing them
+from chat.
 
 ## Local Helper
 
@@ -109,6 +112,7 @@ Primary panels:
 
 - repo-map: branches, worktrees, stashes, dirty files, and target/upstream state
 - workflow-lane: closeout stages, current blocker, retries, and final authority
+- workflow-comparison: round-delta notes and side-by-side closeout workflow deltas across histories
 - blocker-queue: retained candidates, owner/classification, and recovery command
 - action-preview: read-only explanation of cleanup/rollback consequences and, when exact-tuple requirements are known, an inline queue action that writes immutable symbolic request packets for operator approval workflows. It must surface safeguards and exact-tuple inputs before a request is queued.
 - action-request-history: immutable request ledger rows (`createdAt`, `actionId`,

@@ -78,7 +78,7 @@ Core repos MUST provide:
 - machine-readable capability ledger schema
 - capability ledger entries for local claims
 
-Incoming closeout addenda or closeout rules MUST become durable policy, config, test, blocker, roadmap item, or explicit non-goal when feasible. They MUST NOT remain chat-only instructions when they alter repo-wide closeout behavior.
+Incoming closeout addenda or closeout rules MUST become durable policy, config, test, blocker, roadmap item, or explicit non-goal when feasible. They MUST NOT remain chat-only instructions when they alter repo-wide closeout behavior. Repos SHOULD keep their auto-closeout docs, canonical dashboard spec, and a short round-delta note synchronized in the same work block so cross-repo comparison stays reproducible.
 
 ### Capability Ledger
 

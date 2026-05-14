@@ -315,8 +315,8 @@
       "workBlockManifests",
       "repoSweepCandidateReports"
     ],
-    "views": ["repo-state", "closeout-workflow", "historical-closeouts", "rollback-readiness"],
-    "primaryPanels": ["repo-map", "workflow-lane", "blocker-queue", "action-preview", "action-request-history", "audit-timeline", "rollback-readiness"]
+    "views": ["repo-state", "closeout-workflow", "workflow-comparison", "historical-closeouts", "rollback-readiness"],
+    "primaryPanels": ["repo-map", "workflow-lane", "workflow-comparison", "blocker-queue", "action-preview", "action-request-history", "audit-timeline", "rollback-readiness"]
   },
   "rollbackPolicy": {
     "enabled": true,
