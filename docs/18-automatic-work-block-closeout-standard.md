@@ -224,6 +224,14 @@ the newer dashboard spec: `current`, `stale`, `divergent`, and `blocked`.
 Carry the freshness marker or timestamp, snapshot pointer, compare findings,
 and blocker reason beside the human-readable report envelope so another repo
 can compare the same result without re-reading the prose first.
+The canonical schema lives at
+`tools/repo-hygiene/closeout.compare-result.schema.json`, and the canonical
+result path is `.claude-state/closeout/workflow-comparison/compare-result.json`.
+The compare result is authoritative only when the schema validates, the
+snapshot pointer resolves against the latest repo-state feed, and the freshness
+marker or timestamp matches the report envelope. Otherwise the dashboard should
+surface `stale` or `blocked` instead of silently treating the artifact as
+current.
 Dashboard symbolic action intent should be recorded as generated request packets
 under `.claude-state/closeout/dashboard-action-requests/` through an endpoint
 such as `/api/closeout/actions/request`. These packets are evidence of user/UI

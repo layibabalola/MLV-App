@@ -100,6 +100,40 @@ can compare the repo's structured outcome without translating the prose first.
 At minimum it should show `status`, the freshness marker or timestamp, the
 snapshot pointer, compare findings, and the blocker reason when present.
 
+Canonical schema:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "closeout.compare-result.v1",
+  "title": "Closeout Compare Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "generatedAt",
+    "freshnessMarkerOrTimestamp",
+    "snapshotPointer",
+    "reportEnvelope",
+    "compareFindings"
+  ]
+}
+```
+
+Canonical file path:
+`tools/repo-hygiene/closeout.compare-result.schema.json`
+
+Canonical result path:
+`.claude-state/closeout/workflow-comparison/compare-result.json`
+
+Authority rule:
+the dashboard should treat the compare-result artifact as authoritative only
+when the JSON validates against the schema, the snapshot pointer resolves to
+the latest repo-state feed, and the freshness marker or timestamp matches the
+report envelope. If any of those checks fail, the panel should surface the
+artifact as `stale` or `blocked` rather than silently reinterpreting the prose.
+
 ## Local Helper
 
 Start or reuse the local helper with

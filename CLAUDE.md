@@ -202,6 +202,9 @@ and `compare findings`. The comparison output should also be durable and
 machine-labeled as `closeout-compare-result.v1` with `current`, `stale`,
 `divergent`, or `blocked` status so later repos can compare the outcome without
 reconstructing it from prose.
+The canonical schema for that artifact lives at
+`tools/repo-hygiene/closeout.compare-result.schema.json`, and the canonical
+result file lives at `.claude-state/closeout/workflow-comparison/compare-result.json`.
 The finalize loop must be bounded and auditable. Each retry must write the
 selected `workBlockId`, blocker kind, symbolic repair attempted, evidence hash
 before repair, evidence hash after repair, pinned refs before retry, retry
