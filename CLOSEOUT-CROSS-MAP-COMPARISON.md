@@ -57,6 +57,22 @@ manually translated. The compare note, dashboard spec, and repo-local closeout
 docs should all carry the same envelope so the group can diff them without
 renaming sections.
 
+## Compare Result Artifact
+
+The report envelope is the human-readable layer. The machine-readable outcome
+should travel beside it as a durable `closeout-compare-result.v1` artifact with
+these fields:
+
+- `status`: one of `current`, `stale`, `divergent`, or `blocked`
+- `freshness marker or timestamp`
+- `snapshot pointer`
+- `compare findings`
+- `blocker reason` when the status is not `current`
+
+That artifact keeps the comparison result copyable across repos without
+re-parsing prose and gives later rounds a stable place to attach freshness and
+blocker evidence.
+
 ## Mechanical Compare Loop
 
 The compare loop for future rounds should be:
@@ -64,9 +80,11 @@ The compare loop for future rounds should be:
 1. Regenerate the canonical dashboard spec and this round-delta note in the
    same work block.
 2. Publish each repo's closeout workflow using the shared report envelope.
-3. Compare matching headings across repos, not free-form summaries.
-4. Record the freshness marker or timestamp beside the comparison result.
-5. Block closeout if the freshness marker, snapshot pointer, or compare
+3. Emit a `closeout-compare-result.v1` artifact for each repo using the same
+   `status` values and snapshot pointer shape.
+4. Compare matching headings across repos, not free-form summaries.
+5. Record the freshness marker or timestamp beside the comparison result.
+6. Block closeout if the freshness marker, snapshot pointer, or compare
    artifact is missing or stale.
 
 How this round changed from last round:
