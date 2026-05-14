@@ -28,6 +28,12 @@ This round-delta note converted the cross-repo comparison idea into a durable co
 
 The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
 
+The next comparison hardening step is report symmetry: every repo should use
+the same closeout-report headings and freshness marker so "report in detail"
+means the same thing everywhere. When the report shape is aligned, all repos
+can publish their closeout workflow in one pass and the results can be
+compared mechanically instead of manually translated.
+
 ## Cross-Map Worksheet
 
 | Capability / Incident Pattern | DNG Evidence | MLV-App Evidence | AdversarialLLM Evidence | Common Rule Emerging | Profile Candidate | Open Gap |

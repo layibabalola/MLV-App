@@ -63,6 +63,21 @@ workflow changes, regenerate the canonical spec and the tracked round-delta
 note in the same work block, and keep a visible freshness marker or timestamp
 in the durable note so stale comparison docs are obvious.
 
+To make cross-repo comparison mechanical, every repo should report its
+closeout workflow with the same section order and vocabulary. The canonical
+report shape is:
+
+- objective
+- last completed work
+- next steps
+- blockers
+- freshness marker or timestamp
+- compare findings
+
+That shared shape is what turns "when can all repos report their workflow in
+detail and have them all compare?" into a routine documentation check instead
+of an ad hoc conversation.
+
 ## Local Helper
 
 Start or reuse the local helper with

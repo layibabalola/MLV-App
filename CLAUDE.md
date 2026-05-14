@@ -257,7 +257,8 @@ the tracked round-delta note in `CLOSEOUT-CROSS-MAP-COMPARISON.md` or an
 equivalent durable repo note. Treat freshness as operational, not aspirational:
 regenerate the spec and round-delta note together, and keep a visible
 freshness marker or timestamp in the durable note so stale comparison docs are
-obvious.
+obvious. Repos should also use the same closeout-report headings and compare
+findings so the other repos can line up their own reports mechanically.
 The `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
