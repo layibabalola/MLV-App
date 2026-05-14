@@ -34,6 +34,19 @@ means the same thing everywhere. When the report shape is aligned, all repos
 can publish their closeout workflow in one pass and the results can be
 compared mechanically instead of manually translated.
 
+Round delta from the previous round:
+
+- Last round hardened the compare artifacts themselves.
+- This round hardens the shared reporting envelope so the compare artifacts
+  can be regenerated and read in the same shape across repos.
+- The practical next step is to treat the shared report headings as the
+  canonical closeout resume format, not just a note-taking convention.
+- A visible freshness marker should be stable enough to copy verbatim, for
+  example `Last updated: YYYY-MM-DD HH:MM TZ` or `Round delta snapshot: <id>`.
+- The portable dashboard contract is the same sticky URL, SSE/polling refresh,
+  history browsing, and `Inspect -> Preview -> Request -> Apply` flow already
+  captured in the canonical dashboard spec.
+
 ## Cross-Map Worksheet
 
 | Capability / Incident Pattern | DNG Evidence | MLV-App Evidence | AdversarialLLM Evidence | Common Rule Emerging | Profile Candidate | Open Gap |
