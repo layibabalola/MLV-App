@@ -83,6 +83,14 @@ KNOWN_CLOSEOUT_FAILURE_TEXT = [
     "owned_dirty_blocked",
     "unowned_dirty",
 ]
+LEGACY_GENERIC_EVIDENCE_REPAIR_MESSAGES = {
+    "brokered closeout evidence repair",
+    "chore(closeout): repair closeout evidence artifacts",
+}
+LEGACY_GENERIC_CHECKPOINT_MESSAGES = {
+    "brokered closeout checkpoint",
+    "chore(closeout): checkpoint owned work",
+}
 BOUNDED_RUNNER_EXIT_CODE_DEFAULTS = {
     "timeout": 124,
     "outputCap": 125,
@@ -120,6 +128,66 @@ def command_string(argv: Sequence[str]) -> str:
         else:
             parts.append(value)
     return " ".join(parts)
+
+
+def summarize_commit_paths(paths: Sequence[str], *, max_items: int = 3) -> str:
+    labels = [Path(str(path)).name or str(path) for path in paths if str(path)]
+    if not labels:
+        return "repo-managed updates"
+    unique: List[str] = []
+    for label in labels:
+        if label not in unique:
+            unique.append(label)
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) <= max_items:
+        return ", ".join(unique[:-1]) + ", and " + unique[-1]
+    shown = unique[:max_items]
+    return ", ".join(shown) + ", and %d more" % (len(unique) - max_items)
+
+
+def evidence_repair_reason_label(reason: str) -> str:
+    mapping = {
+        "publish_missing_upstream": "publish with missing upstream metadata",
+        "publish_ahead_only": "publish ahead-only branch state",
+        "final_push": "final push",
+    }
+    return mapping.get(reason, reason.replace("_", " "))
+
+
+def evidence_repair_commit_message(config: Dict[str, Any], *, reason: str, work_block_id: str, paths: Sequence[str]) -> str:
+    configured = str(config.get("evidenceRepair", {}).get("commitMessage") or "").strip()
+    if configured and configured not in LEGACY_GENERIC_EVIDENCE_REPAIR_MESSAGES:
+        return configured
+    return "chore(closeout): repair %s for %s before %s" % (
+        summarize_commit_paths(paths),
+        work_block_id,
+        evidence_repair_reason_label(reason),
+    )
+
+
+def checkpoint_commit_message(work_block_id: str, paths: Sequence[str], *, explicit_message: Optional[str] = None) -> str:
+    configured = str(explicit_message or "").strip()
+    if configured and configured not in LEGACY_GENERIC_CHECKPOINT_MESSAGES:
+        return configured
+    return "chore(closeout): checkpoint %s for %s" % (summarize_commit_paths(paths), work_block_id)
+
+
+def dirty_split_commit_message(work_block_id: str, paths: Sequence[str]) -> str:
+    return "chore(closeout): preserve split-owned changes for %s (%s)" % (
+        work_block_id,
+        summarize_commit_paths(paths),
+    )
+
+
+def closeout_merge_commit_message(branch: str, target_branch: str) -> str:
+    if branch.startswith("codex/work-block/"):
+        work_block_id = branch.rsplit("/", 1)[-1]
+        return "merge(closeout): integrate %s closeout hardening into %s" % (work_block_id, target_branch)
+    if branch.startswith("closeout/split/"):
+        work_block_id = branch.rsplit("/", 1)[-1]
+        return "merge(closeout): integrate preserved split changes from %s into %s" % (work_block_id, target_branch)
+    return "merge(closeout): integrate %s into %s after clean validation" % (branch, target_branch)
 
 
 def powershell_policy(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -935,7 +1003,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "evidenceRoot": ".closeout-evidence",
         "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
         "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
-        "commitMessage": "brokered closeout evidence repair",
+        "commitMessage": "chore(closeout): repair closeout evidence artifacts",
     },
     "reviewQuorum": {
         "requiredApprovals": 3,
@@ -3207,7 +3275,8 @@ def repair_missing_evidence(repo_root_arg: Path, config: Dict[str, Any], detecti
         result = {"status": "blocked", "reason": "evidence_git_add_failed", "paths": paths, "stderr": add.stderr[-3000:]}
         write_audit(repo_root, config, "evidence_repair_blocked", result, work_block_id=work_block_id, outcome="blocked")
         return result
-    commit = run_git(repo_root, ["commit", "-m", str(config.get("evidenceRepair", {}).get("commitMessage") or "brokered closeout evidence repair")])
+    commit_message = evidence_repair_commit_message(config, reason=reason, work_block_id=work_block_id, paths=paths)
+    commit = run_git(repo_root, ["commit", "-m", commit_message])
     if commit.returncode != 0:
         result = {"status": "blocked", "reason": "evidence_commit_failed", "paths": paths, "stdout": commit.stdout[-3000:], "stderr": commit.stderr[-3000:]}
         write_audit(repo_root, config, "evidence_repair_blocked", result, work_block_id=work_block_id, outcome="blocked")
@@ -4068,7 +4137,10 @@ def apply_dirty_split_candidate(repo_root_arg: Path, candidate: Dict[str, Any]) 
             payload = {"candidate": candidate, "operation": "git_add_preservation", "returncode": add.returncode, "stderr": add.stderr[-3000:], "copied": copied}
             write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=str(candidate["workBlockId"]), outcome="blocked")
             return {"status": "blocked", "reason": "preservation_add_failed", **payload}
-        commit = run_git(worktree_path, ["commit", "-m", "preserve dirty split for %s" % candidate["workBlockId"]])
+        commit = run_git(
+            worktree_path,
+            ["commit", "-m", dirty_split_commit_message(str(candidate["workBlockId"]), candidate["paths"])],
+        )
         if commit.returncode != 0:
             payload = {"candidate": candidate, "operation": "git_commit_preservation", "returncode": commit.returncode, "stdout": commit.stdout[-3000:], "stderr": commit.stderr[-3000:], "copied": copied}
             write_audit(repo_root, config, "dirty_split_blocked_preservation", payload, work_block_id=str(candidate["workBlockId"]), outcome="blocked")
@@ -5252,7 +5324,10 @@ def _finalize_work_block_once(
             write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "integration_worktree_failed"})
             return {"status": "blocked", "reason": "integration_worktree_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
-        merge = run_git(integration_path, ["merge", "--no-ff", "--no-edit", feature_head])
+        merge = run_git(
+            integration_path,
+            ["merge", "--no-ff", "-m", closeout_merge_commit_message(current_branch(repo_root) or block_id, target_branch), feature_head],
+        )
         if merge.returncode != 0:
             payload = {"operation": "merge", "returncode": merge.returncode, "stdout": merge.stdout[-4000:], "stderr": merge.stderr[-4000:]}
             write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
@@ -5669,7 +5744,7 @@ def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] =
         }
         write_audit(repo_root, config, "checkpoint_owned_dirty_blocked", payload, work_block_id=block_id, outcome="blocked")
         return {"status": "blocked", "reason": "checkpoint_stage_scope_mismatch", **payload}
-    commit = run_git(repo_root, ["commit", "-m", message])
+    commit = run_git(repo_root, ["commit", "-m", checkpoint_commit_message(block_id, paths, explicit_message=message)])
     payload = {
         "candidateId": candidate["candidateId"],
         "actionId": candidate["actionId"],
@@ -6419,7 +6494,10 @@ def simulate_clean_integration(repo_root: Path, config: Dict[str, Any], *, targe
     if add.returncode != 0:
         return {"clean": False, "reason": "probe_worktree_failed", "attempt": attempt, "returncode": add.returncode, "stderr": add.stderr[-2000:], "validationStatus": "not_reached"}
     try:
-        merge = run_git(integration_path, ["merge", "--no-ff", "--no-edit", branch_head])
+        merge = run_git(
+            integration_path,
+            ["merge", "--no-ff", "-m", closeout_merge_commit_message(branch, target_branch), branch_head],
+        )
         if merge.returncode != 0:
             conflicts = merge_conflict_paths(merge.stdout, merge.stderr)
             return {
@@ -9066,7 +9144,10 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
     if add.returncode != 0:
         return {"status": "blocked", "reason": "integration_worktree_failed", "returncode": add.returncode, "stderr": add.stderr[-2000:]}
     try:
-        merge = run_git(integration_path, ["merge", "--no-ff", "--no-edit", branch_head])
+        merge = run_git(
+            integration_path,
+            ["merge", "--no-ff", "-m", closeout_merge_commit_message(branch, target_branch), branch_head],
+        )
         if merge.returncode != 0:
             return {"status": "blocked", "reason": "merge_failed", "returncode": merge.returncode, "stdout": merge.stdout[-2000:], "stderr": merge.stderr[-2000:]}
         diff_check = run_git(integration_path, ["diff", "--check"])
