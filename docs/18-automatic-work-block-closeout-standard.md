@@ -335,6 +335,7 @@ Codex Desktop:
 
 - starts work blocks through repo entrypoints for non-trivial work
 - runs completion/finalize before final response after non-trivial edits
+- treats the human-facing completion wrapper as finalize-by-default, so ordinary substantive replies are closeout events rather than deferred checkpoints
 - reads agent-remediation queue packets and spawns background agents when asked
 - leaves mutation to repo-owned actors
 

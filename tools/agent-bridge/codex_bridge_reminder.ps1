@@ -1275,10 +1275,10 @@ if ($executionDigest.resume) {
     Write-Output $executionDigest.resume
 }
 if ($HookPhase -eq "final" -and $executionIdle -and $ledgerHasPending) {
-    Write-Output "FINAL-GUARD: execution is idle but the Codex ledger is not empty. Do not send a final response until the top item is worked, blocked, parked, or explicitly displaced."
+    Write-Output "FINAL-GUARD: execution is idle but the Codex ledger is not empty. A substantive reply is a closeout event; do not send a final response until the top item is worked, blocked, parked, explicitly displaced, or the completion wrapper has run and finalized."
 }
 if ($HookPhase -eq "final" -and $executionHasActiveTask) {
-    Write-Output "FINAL-GUARD: an active Codex task is still open. Do not treat an interrupt, inbox check, status answer, or checkpoint as completion; resume it now, or explicitly classify it as blocked, parked, displaced, or complete."
+    Write-Output "FINAL-GUARD: an active Codex task is still open. Do not treat an interrupt, inbox check, status answer, checkpoint, or ordinary reply as completion; resume it now, or explicitly classify it as blocked, parked, displaced, or complete."
     if ([string]::IsNullOrWhiteSpace([string]$executionDigest.classification)) {
         Write-Output "FINAL-GUARD: active-task interrupt classification artifact is missing. Record classify_execution_interrupt(disposition=resume|complete|blocked|parked|displaced), or close the active task, before 10/10 closeout."
     }

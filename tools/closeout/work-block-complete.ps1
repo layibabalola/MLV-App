@@ -2,6 +2,7 @@ param(
     [string]$RepoRoot = ".",
     [string]$WorkBlockId,
     [switch]$Finalize,
+    [switch]$NoFinalize,
     [switch]$AutoApprove,
     [switch]$RequireRepoClosed
 )
@@ -10,7 +11,7 @@ $argsList = @("complete")
 if ($WorkBlockId) {
     $argsList += @("--work-block-id", $WorkBlockId)
 }
-if ($Finalize) {
+if ($Finalize -or -not $NoFinalize) {
     $argsList += "--finalize"
 }
 if ($AutoApprove) {
