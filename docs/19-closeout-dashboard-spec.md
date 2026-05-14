@@ -2,11 +2,21 @@
 
 ## Purpose
 
-The closeout dashboard is a read-only-by-default operator view over repo-owned
-evidence. It must not scrape ad hoc Git commands for authority and must not
-mutate repo state directly. Read-only preview and dry-run explanations are
-allowed when they are derived from repo-owned truth and do not become a second
-mutation authority. Its sticky local URL is `http://127.0.0.1:8765/closeout`.
+The closeout dashboard is a read-only-by-default, read-first operator view over
+repo-owned evidence. It must not scrape ad hoc Git commands for authority and
+must not mutate repo state directly. Read-only preview and dry-run explanations
+are allowed when they are derived from repo-owned truth and do not become a
+second mutation authority. Its sticky local URL is
+`http://127.0.0.1:8765/closeout`.
+
+## Operator Phases
+
+The dashboard should present the closeout flow as four explicit phases:
+
+- Inspect: evidence only
+- Preview: explain consequences and blockers
+- Request: record durable symbolic intent
+- Apply: repo-owned actor only, behind gates, outside dashboard authority
 
 ## Data Contract
 
@@ -100,8 +110,7 @@ Primary panels:
 - repo-map: branches, worktrees, stashes, dirty files, and target/upstream state
 - workflow-lane: closeout stages, current blocker, retries, and final authority
 - blocker-queue: retained candidates, owner/classification, and recovery command
-- action-preview: read-only explanation of cleanup/rollback consequences and, when exact-tuple requirements are known, an inline queue action that writes immutable symbolic request packets for operator approval workflows.
-  safeguards, and exact-tuple inputs before a request is queued
+- action-preview: read-only explanation of cleanup/rollback consequences and, when exact-tuple requirements are known, an inline queue action that writes immutable symbolic request packets for operator approval workflows. It must surface safeguards and exact-tuple inputs before a request is queued.
 - action-request-history: immutable request ledger rows (`createdAt`, `actionId`,
   `requestId`, `status`, `requestPath`, `requestHash`) plus a visible summary
   of readiness/truncation/malformed-row counts from

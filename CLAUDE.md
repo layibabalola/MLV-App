@@ -243,7 +243,8 @@ history snapshot, and a `repo_state_snapshot` audit. The snapshot uses
 `repo-state-snapshot.v1` and contains branch/tracking, dirty entries, local
 branches, worktrees, stashes, latest closeout audit/truth pointers, a bounded
 `closeout-history-index.v1`, `worktree-inspection.v1`, and `rollbackPolicy`
-plus `rollback-readiness.v1`.
+plus `rollback-readiness.v1`. Treat [`docs/19-closeout-dashboard-spec.md`](docs/19-closeout-dashboard-spec.md)
+as the canonical dashboard contract and keep this summary aligned with it.
 The `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
@@ -257,10 +258,12 @@ surfaced through dashboard metadata.
 `symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
 preserved scroll/focus/selection/expanded/history-filter state across refresh,
 and repo-map, workflow, blocker, action-preview, action-request-history, audit, rollback, and
-historical closeout views. Read-only preview and dry-run explanations are
-allowed when they are derived from repo-owned truth and do not create a second
-mutation authority. `latest.json` is a mutable display feed, not rollback
-evidence.
+historical closeout views. The flow is read-first: `Inspect` evidence,
+`Preview` consequences, `Request` symbolic intent, and leave `Apply` to
+repo-owned actors outside dashboard authority. Read-only preview and dry-run
+explanations are allowed when they are derived from repo-owned truth and do not
+create a second mutation authority. `latest.json` is a mutable display feed,
+not rollback evidence.
 The local helper is `tools\closeout\start-closeout-dashboard.ps1`. It serves
 `http://127.0.0.1:8765/closeout`, reuses a healthy same-repo process, and fails
 closed if the port belongs to another repo. Required endpoints are
