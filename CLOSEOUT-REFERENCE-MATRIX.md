@@ -65,6 +65,9 @@ Status legend:
 - Any later edit to the canonical dashboard spec or tracked round-delta note
   should trigger same-work-block regeneration of this matrix and the sibling
   comparison docs before the work block can be closed.
+- The comparison reports themselves should use the same headings and compare
+  findings so each repo can publish a detailed closeout report that is still
+  machine-comparable with the others.
 - AdversarialLLM reported pushed commit `04d7cdd` on
   `codex/closeout-cross-repo-improvements`, adding focused local-only and
   ahead-only dirty repair regressions. Its `local-only-repo-closeout` row remains
