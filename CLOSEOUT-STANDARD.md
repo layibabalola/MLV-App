@@ -372,7 +372,7 @@ Repo closeout reporting MUST derive its final clean/blocked wording from the sam
 
 The repo-closed postcondition MUST inspect linked Git worktrees from repo-owned evidence such as `git worktree list --porcelain`. A failed or empty inspection, an inspection that omits the current repo root, or an ordinary linked sibling worktree MUST block hard-clean closeout. Protected load-bearing worktrees MAY be inspect-only when policy names their roots, but they still MUST be visible in repo-state evidence.
 
-If the repo is not closed, the agent may report WIP or a blocker, but MUST NOT claim final closeout completion.
+If the repo is not closed, the agent may report WIP or a blocker, but MUST NOT claim final closeout completion. The human-facing completion wrapper finalizes by default, so ordinary substantive replies should flow through `work-block-complete.ps1 -Finalize` unless a deliberate blocker or dry-run is recorded.
 
 ### Repo State, Dashboard, And Rollback
 
