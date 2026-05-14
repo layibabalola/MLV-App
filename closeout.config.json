@@ -550,6 +550,7 @@
       "test_hard_clean_final_response_blocks_remaining_stash",
       "test_hard_clean_final_response_passes_after_clean_promotion",
       "test_complete_finalize_enforces_hard_clean_config_without_switch",
+      "test_work_block_complete_wrapper_finalizes_by_default",
       "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
       "test_dirty_protected_target_finalize_recovers_to_feature_branch",
       "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
