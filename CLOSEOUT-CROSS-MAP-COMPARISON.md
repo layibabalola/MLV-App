@@ -28,6 +28,16 @@ This round-delta note converted the cross-repo comparison idea into a durable co
 
 The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
 
+## Current Workflow Implementation
+
+This repo's closeout workflow is read-first and repo-owned:
+
+- Inspect repo-owned evidence from the latest state feed and history.
+- Preview consequences, blockers, and rollback readiness without mutating repo state.
+- Request symbolic intent only, using durable request packets when an operator wants cleanup or rollback.
+- Apply mutations only through repo-owned actors after exact-tuple revalidation.
+- Treat rollback as a separate approval-gated work block with source evidence, a rollback manifest, and recovery commands.
+
 ## Shared Report Envelope
 
 The next comparison hardening step is report symmetry: every repo should use
@@ -62,8 +72,7 @@ The compare loop for future rounds should be:
 How this round changed from last round:
 
 - Last round hardened the compare artifacts themselves.
-- This round hardens the shared reporting envelope so the compare artifacts can
-  be regenerated and read in the same shape across repos.
+- This round hardens the shared reporting envelope and the read-first workflow vocabulary so the compare artifacts can be regenerated and read in the same shape across repos.
 - The practical next step is to treat the shared report headings as the
   canonical closeout resume format, not just a note-taking convention.
 - A visible freshness marker should be stable enough to copy verbatim, for
