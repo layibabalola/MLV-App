@@ -245,6 +245,10 @@ branches, worktrees, stashes, latest closeout audit/truth pointers, a bounded
 `closeout-history-index.v1`, `worktree-inspection.v1`, and `rollbackPolicy`
 plus `rollback-readiness.v1`. Treat [`docs/19-closeout-dashboard-spec.md`](docs/19-closeout-dashboard-spec.md)
 as the canonical dashboard contract and keep this summary aligned with it.
+Whenever closeout workflow semantics change, update this summary, the
+canonical dashboard spec, and a short round-delta note in the same work block
+so later repos can compare the same workflow change instead of reconstructing
+it from chat.
 The `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
