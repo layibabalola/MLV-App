@@ -81,6 +81,16 @@ It is also the resume envelope for the round-delta note: each repo should be
 able to lift that same structure into chat, docs, or dashboard output without
 renaming the sections.
 
+The compare loop should stay explicit:
+
+1. Regenerate the canonical dashboard spec and the tracked round-delta note in
+   the same work block whenever either one changes.
+2. Capture each repo's closeout state in the shared report envelope above.
+3. Compare matching headings across repos before interpreting the results.
+4. Record a visible freshness marker or timestamp next to the compare result.
+5. Block closeout if any report is stale, missing the envelope, or impossible
+   to compare mechanically.
+
 ## Local Helper
 
 Start or reuse the local helper with

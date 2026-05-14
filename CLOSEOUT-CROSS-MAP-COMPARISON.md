@@ -28,11 +28,36 @@ This round-delta note converted the cross-repo comparison idea into a durable co
 
 The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
 
+## Shared Report Envelope
+
 The next comparison hardening step is report symmetry: every repo should use
 the same closeout-report headings and freshness marker so "report in detail"
-means the same thing everywhere. When the report shape is aligned, all repos
-can publish their closeout workflow in one pass and the results can be
-compared mechanically instead of manually translated.
+means the same thing everywhere. The canonical compare envelope is:
+
+- objective
+- last completed work
+- next steps
+- blockers
+- freshness marker or timestamp
+- compare findings
+
+When the report shape is aligned, all repos can publish their closeout
+workflow in one pass and the results can be compared mechanically instead of
+manually translated. The compare note, dashboard spec, and repo-local closeout
+docs should all carry the same envelope so the group can diff them without
+renaming sections.
+
+## Mechanical Compare Loop
+
+The compare loop for future rounds should be:
+
+1. Regenerate the canonical dashboard spec and this round-delta note in the
+   same work block.
+2. Publish each repo's closeout workflow using the shared report envelope.
+3. Compare matching headings across repos, not free-form summaries.
+4. Record the freshness marker or timestamp beside the comparison result.
+5. Block closeout if the freshness marker, snapshot pointer, or compare
+   artifact is missing or stale.
 
 Round delta from the previous round:
 
