@@ -77,6 +77,9 @@ report shape is:
 That shared shape is what turns "when can all repos report their workflow in
 detail and have them all compare?" into a routine documentation check instead
 of an ad hoc conversation.
+It is also the resume envelope for the round-delta note: each repo should be
+able to lift that same structure into chat, docs, or dashboard output without
+renaming the sections.
 
 ## Local Helper
 
