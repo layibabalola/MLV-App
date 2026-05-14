@@ -147,6 +147,7 @@ Primary panels:
 
 - repo-map: branches, worktrees, stashes, dirty files, and target/upstream state
 - workflow-lane: closeout stages, current blocker, retries, and final authority
+- operator-timeline: historical closeouts, live blockers, preview packets, request history, and rollback evidence in one scrollable resume flow
 - workflow-comparison: round-delta notes and side-by-side closeout workflow deltas across histories
 - blocker-queue: retained candidates, owner/classification, and recovery command
 - action-preview: read-only explanation of cleanup/rollback consequences and, when exact-tuple requirements are known, an inline queue action that writes immutable symbolic request packets for operator approval workflows. It must surface safeguards and exact-tuple inputs before a request is queued.
@@ -156,6 +157,15 @@ Primary panels:
   `.claude-state/closeout/dashboard-action-requests/` for auditability and handoff
 - audit-timeline: current and historical closeout events with audit hashes
 - rollback-readiness: feasible strategies, required approvals, and evidence roots
+
+Rollback readiness should expose a simple state machine so the UI can explain
+why mutation is not yet allowed:
+
+- `read-only-no-actor`: validator or actor missing, so only inspection/preview is available
+- `approval-pending`: evidence exists, but user approval or a new work block is still required
+- `ready-to-apply`: the exact tuple is revalidated and a repo-owned actor may proceed
+- `applied`: the recovery or cleanup action completed
+- `failed-revalidated`: state drift or a failed gate invalidated the previous approval
 
 ## Mutation Boundary
 
@@ -196,3 +206,8 @@ JSON, require the source snapshot and repo-closed audit to share `workBlockId`,
 and reject forbidden recovery commands. Rollback symbolic request packets must
 include the full manifest-binding tuple, including `sourceSnapshotPath` and
 `recoveryCommand`.
+
+The rollback state machine above is intentionally narrower than "read-only":
+it distinguishes no-actor validation, approval gating, ready-to-apply, and
+failed revalidation so the UI can show actionable next steps without hiding the
+mutation path.
