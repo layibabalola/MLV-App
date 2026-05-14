@@ -514,7 +514,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     },
     "finalizeLoop": {
         "enabled": True,
-        "maxRetries": 3,
+        "maxRetries": 5,
         "allowRepeatedBlockerEvidenceTupleRenewal": False,
         "safeSecondOrderRepairs": {
             "final_push_evidence_repaired": "evidence_repair",
