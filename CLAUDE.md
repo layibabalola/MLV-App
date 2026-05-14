@@ -196,6 +196,12 @@ Repo-owned closeout commits should read clearly in normal `git log` output. When
 the broker generates commits, the subject should identify the work block or
 candidate, summarize the purpose of the change, and avoid generic checkpoint or
 evidence-repair wording when a more informative summary is available.
+The shared closeout report envelope is canonical across repos: `objective`,
+`last completed work`, `next steps`, `blockers`, `freshness marker or timestamp`,
+and `compare findings`. The comparison output should also be durable and
+machine-labeled as `closeout-compare-result.v1` with `current`, `stale`,
+`divergent`, or `blocked` status so later repos can compare the outcome without
+reconstructing it from prose.
 The finalize loop must be bounded and auditable. Each retry must write the
 selected `workBlockId`, blocker kind, symbolic repair attempted, evidence hash
 before repair, evidence hash after repair, pinned refs before retry, retry
