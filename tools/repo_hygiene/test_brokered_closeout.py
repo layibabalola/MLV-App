@@ -2441,6 +2441,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(closeout_max_process_output_bytes(config), 0)
         self.assertGreater(config["validation"]["timeoutMs"], 0)
         self.assertGreater(config["validation"]["maxOutputBytes"], 0)
+        validation_names = [command["name"] for command in config["validation"]["commands"]]
+        self.assertEqual(
+            validation_names[:3],
+            [
+                "brokered-closeout-smoke-core",
+                "brokered-closeout-smoke-state",
+                "brokered-closeout-smoke-dashboard",
+            ],
+        )
+        self.assertNotIn("brokered-closeout-smoke", validation_names)
         self.assertIn("pathPatterns", config["validation"]["commands"][0])
         self.assertEqual(config["processResources"]["defaultPriority"], "below_normal")
         self.assertEqual(config["processResources"]["validationPriority"], "below_normal")
