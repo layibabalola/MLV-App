@@ -186,6 +186,7 @@ class RepoHygieneTests(unittest.TestCase):
         contract = json.loads((ROOT / "tools" / "repo-hygiene" / "closeout.contract.json").read_text(encoding="utf-8"))
         self.assertIn("executor-handoff.json", contract["artifact_names"])
         self.assertIn("closeout-compare-result.json", contract["artifact_names"])
+        self.assertIn("closeout-compare-result.schema.json", contract["artifact_names"])
         self.assertIn("agent-remediation-queue/*.json", contract["artifact_names"])
         self.assertIn("agent-remediation-results/*.json", contract["artifact_names"])
         self.assertIn("manual-prune/*.json", contract["artifact_names"])

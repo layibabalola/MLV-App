@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "closeout.compare-result.v1",
+  "title": "Closeout Compare Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "generatedAt",
+    "freshnessMarkerOrTimestamp",
+    "snapshotPointer",
+    "reportEnvelope",
+    "compareFindings"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "closeout-compare-result.v1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["current", "stale", "divergent", "blocked"]
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "freshnessMarkerOrTimestamp": {
+      "type": "string",
+      "minLength": 1
+    },
+    "snapshotPointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "path", "hash"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "repo-state-snapshot.v1"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "auditHash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workBlockId": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "reportEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objective",
+        "lastCompletedWork",
+        "nextSteps",
+        "blockers",
+        "freshnessMarkerOrTimestamp",
+        "compareFindings"
+      ],
+      "properties": {
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lastCompletedWork": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "freshnessMarkerOrTimestamp": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compareFindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/compareFinding"
+          }
+        }
+      }
+    },
+    "compareFindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/compareFinding"
+      }
+    },
+    "blockerReason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "current"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "not": {
+          "required": ["blockerReason"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["stale", "divergent", "blocked"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["blockerReason"]
+      }
+    }
+  ],
+  "$defs": {
+    "compareFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heading", "status", "summary"],
+      "properties": {
+        "heading": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": ["current", "stale", "divergent", "blocked"]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidencePaths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "blockerReason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": ["stale", "divergent", "blocked"]
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "required": ["blockerReason"]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -25,6 +25,7 @@ This round-delta note converted the cross-repo comparison idea into a durable co
 - `webDashboardSpec` now carries explicit baseline keys for `readOnlyByDefault`, `preserveClientStateAcrossRefresh`, and `rollbackForbiddenActions`.
 - The rollback ban is regression-checked for both `delete-evidence` and `force-push`.
 - Freshness is visible in the artifact itself, not aspirational in chat: the comparison docs must show the regeneration rule and the latest comparison state instead of merely promising future sync.
+- This round is the first one to carry a concrete `closeout-compare-result.v1` instance file in `.claude-state/closeout/workflow-comparison/compare-result.json`, so later repos can copy the same payload shape instead of reconstructing it from the schema.
 
 The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
 
@@ -72,6 +73,98 @@ these fields:
 That artifact keeps the comparison result copyable across repos without
 re-parsing prose and gives later rounds a stable place to attach freshness and
 blocker evidence.
+
+Canonical current instance shape:
+
+```json
+{
+  "schema": "closeout-compare-result.v1",
+  "status": "current",
+  "generatedAt": "2026-05-14T21:01:08Z",
+  "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:01 -05:00",
+  "snapshotPointer": {
+    "schema": "repo-state-snapshot.v1",
+    "path": ".claude-state/closeout/repo-state/latest.json",
+    "hash": "bbe152cf3ffc71a27da63802240ffd5b",
+    "auditHash": "645dfd88e53bd9f2b1ea80b549a9c674"
+  },
+  "reportEnvelope": {
+    "objective": "Report the current closeout workflow in a mechanically comparable shape.",
+    "lastCompletedWork": "Added the canonical compare-result artifact and pinned it with a schema-aware regression test.",
+    "nextSteps": [
+      "Regenerate the compare-result artifact whenever the canonical dashboard spec or round-delta note changes.",
+      "Keep the report envelope and compare findings in sync across docs and the instance file.",
+      "Re-run the compare loop before finalizing if repo-state freshness changes."
+    ],
+    "blockers": [],
+    "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:01 -05:00",
+    "compareFindings": [
+      {
+        "heading": "shared-report-envelope",
+        "status": "current",
+        "summary": "The canonical report headings are present and stable for cross-repo comparison.",
+        "evidencePaths": [
+          "AGENTS.md",
+          "CLAUDE.md",
+          "CLOSEOUT-CROSS-MAP-COMPARISON.md",
+          "docs/19-closeout-dashboard-spec.md"
+        ]
+      },
+      {
+        "heading": "dashboard-comparison-contract",
+        "status": "current",
+        "summary": "The workflow-comparison panel surfaces the compare-result artifact directly instead of reconstructing it from prose.",
+        "evidencePaths": [
+          "docs/19-closeout-dashboard-spec.md",
+          "docs/18-automatic-work-block-closeout-standard.md"
+        ]
+      },
+      {
+        "heading": "freshness-gate",
+        "status": "current",
+        "summary": "The artifact is authoritative only when schema validation, snapshot identity, and freshness all agree.",
+        "evidencePaths": [
+          "tools/repo-hygiene/closeout.compare-result.schema.json",
+          "docs/19-closeout-dashboard-spec.md",
+          "CLOSEOUT-CROSS-MAP-COMPARISON.md"
+        ]
+      }
+    ]
+  },
+  "compareFindings": [
+    {
+      "heading": "shared-report-envelope",
+      "status": "current",
+      "summary": "The canonical report headings are present and stable for cross-repo comparison.",
+      "evidencePaths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CLOSEOUT-CROSS-MAP-COMPARISON.md",
+        "docs/19-closeout-dashboard-spec.md"
+      ]
+    },
+    {
+      "heading": "dashboard-comparison-contract",
+      "status": "current",
+      "summary": "The workflow-comparison panel surfaces the compare-result artifact directly instead of reconstructing it from prose.",
+      "evidencePaths": [
+        "docs/19-closeout-dashboard-spec.md",
+        "docs/18-automatic-work-block-closeout-standard.md"
+      ]
+    },
+    {
+      "heading": "freshness-gate",
+      "status": "current",
+      "summary": "The artifact is authoritative only when schema validation, snapshot identity, and freshness all agree.",
+      "evidencePaths": [
+        "tools/repo-hygiene/closeout.compare-result.schema.json",
+        "docs/19-closeout-dashboard-spec.md",
+        "CLOSEOUT-CROSS-MAP-COMPARISON.md"
+      ]
+    }
+  ]
+}
+```
 
 ## Mechanical Compare Loop
 
