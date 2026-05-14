@@ -58,7 +58,10 @@ round-delta note so multiple repos can compare closeout workflow changes side
 by side and keep cross-repo comparison meaningful without reconstructing them
 from chat. This canonical spec is itself part of the machine-checked baseline;
 the tracked round-delta note should live in `CLOSEOUT-CROSS-MAP-COMPARISON.md`
-or an equivalent durable repo note.
+or an equivalent durable repo note. Freshness is part of that contract: after
+workflow changes, regenerate the canonical spec and the tracked round-delta
+note in the same work block, and keep a visible freshness marker or timestamp
+in the durable note so stale comparison docs are obvious.
 
 ## Local Helper
 

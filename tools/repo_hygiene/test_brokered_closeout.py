@@ -649,6 +649,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["finalizeLoop"]["enabled"])
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["final_push_evidence_repaired"], "evidence_repair")
         self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["target_push_rerun_required"], "target_push_recovery")
+        self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["stale_review"], "renew_stale_review")
+        self.assertEqual(config["finalizeLoop"]["safeSecondOrderRepairs"]["validation_failed"], "rerun_validation_smoke")
         self.assertTrue(config["agentRemediation"]["enabled"])
         self.assertIn("codex-desktop", config["agentRemediation"]["surfaceAdapters"])
         self.assertTrue(config["agentRemediationQueue"]["enabled"])
@@ -1789,6 +1791,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("docs/19-closeout-dashboard-spec.md", "workflow-comparison"), required_symbols)
         self.assertIn(("docs/19-closeout-dashboard-spec.md", "round-delta note"), required_symbols)
         self.assertIn(("docs/19-closeout-dashboard-spec.md", "read-first"), required_symbols)
+        self.assertIn(("docs/19-closeout-dashboard-spec.md", "same work block"), required_symbols)
+        self.assertIn(("docs/19-closeout-dashboard-spec.md", "freshness"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "repo-state"), required_symbols)
         self.assertIn(("tools/repo_hygiene/work_block_cli.py", "--latest-only"), required_symbols)
         self.assertIn(("tools/closeout/write-repo-state.ps1", "LatestOnly"), required_symbols)
@@ -1821,6 +1825,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("round-delta note", claude_text)
         self.assertIn("round-delta note", standard_text)
         self.assertIn("round-delta note", (ROOT / "CLOSEOUT-CROSS-MAP-COMPARISON.md").read_text(encoding="utf-8"))
+        self.assertIn("same work block", dashboard_spec_text)
+        self.assertIn("freshness", dashboard_spec_text)
         self.assertIn("cross-repo comparison", dashboard_spec_text)
         self.assertIn("read-first", dashboard_spec_text)
         self.assertIn("Inspect: evidence only", dashboard_spec_text)
@@ -2962,6 +2968,38 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
         self.assertTrue(decision["shouldRetry"], decision)
         self.assertEqual(decision["symbolicRepairAttempted"], "evidence_repair")
+        self.assertIsNone(decision["terminalReason"])
+
+    def test_finalize_loop_renews_stale_review_as_safe_second_order_repair(self) -> None:
+        config = load_closeout_config(ROOT)
+        decision = finalize_retry_decision(
+            config,
+            blocker_kind="stale_review",
+            evidence_hash_before="evidence-before",
+            evidence_hash_after="evidence-after",
+            pinned_refs_before_retry={"feature": {"head": "same"}, "target": {"head": "same"}},
+            pins_match=True,
+            retry_number=0,
+            seen_tuples=[],
+        )
+        self.assertTrue(decision["shouldRetry"], decision)
+        self.assertEqual(decision["symbolicRepairAttempted"], "renew_stale_review")
+        self.assertIsNone(decision["terminalReason"])
+
+    def test_finalize_loop_reruns_validation_failed_as_safe_second_order_repair(self) -> None:
+        config = load_closeout_config(ROOT)
+        decision = finalize_retry_decision(
+            config,
+            blocker_kind="validation_failed",
+            evidence_hash_before="evidence-before",
+            evidence_hash_after="evidence-after",
+            pinned_refs_before_retry={"feature": {"head": "same"}, "target": {"head": "same"}},
+            pins_match=True,
+            retry_number=0,
+            seen_tuples=[],
+        )
+        self.assertTrue(decision["shouldRetry"], decision)
+        self.assertEqual(decision["symbolicRepairAttempted"], "rerun_validation_smoke")
         self.assertIsNone(decision["terminalReason"])
 
     def test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason(self) -> None:

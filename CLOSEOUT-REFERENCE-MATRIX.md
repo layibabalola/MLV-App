@@ -15,6 +15,12 @@ It is not the final standard and not the capability ledger. It converts the
 incident map, cross-map worksheet, and adjudication protocol into capability
 rows so the next profile and ledger artifacts can make explicit decisions.
 
+Docs freshness is visible and operational here, not aspirational: when the
+canonical dashboard spec at `docs/19-closeout-dashboard-spec.md` or the tracked
+round-delta note in `CLOSEOUT-CROSS-MAP-COMPARISON.md` changes, this matrix and
+the other comparison artifacts must be regenerated in the same work block.
+Freshness is part of the artifact state, not a promise to sync later.
+
 Evidence boundary:
 
 - MLV-App status is based on local files, local tests referenced by the incident
@@ -23,6 +29,10 @@ Evidence boundary:
   the cross-repo planning thread, not direct inspection from this workspace.
 - `PARTIAL` is expected and not a failure. It means at least one durable layer,
   behavioral test, actor path, adapter path, or edge case is still missing.
+
+The comparison docs also treat freshness as a tracked operating condition:
+same-work-block regeneration is required when the canonical dashboard spec or
+the round-delta note changes.
 
 Status legend:
 
@@ -52,6 +62,9 @@ Status legend:
   test selection, and ledger promotion of
   `surface-unavailable-or-insufficient-reviewer-block` to `YES`
   (`33 YES / 7 PARTIAL`).
+- Any later edit to the canonical dashboard spec or tracked round-delta note
+  should trigger same-work-block regeneration of this matrix and the sibling
+  comparison docs before the work block can be closed.
 - AdversarialLLM reported pushed commit `04d7cdd` on
   `codex/closeout-cross-repo-improvements`, adding focused local-only and
   ahead-only dirty repair regressions. Its `local-only-repo-closeout` row remains
