@@ -250,7 +250,10 @@ canonical dashboard spec, and a short round-delta note in the same work block
 so later repos can compare the same workflow change instead of reconstructing
 it from chat. Keep the canonical dashboard spec itself machine-checked and keep
 the tracked round-delta note in `CLOSEOUT-CROSS-MAP-COMPARISON.md` or an
-equivalent durable repo note.
+equivalent durable repo note. Treat freshness as operational, not aspirational:
+regenerate the spec and round-delta note together, and keep a visible
+freshness marker or timestamp in the durable note so stale comparison docs are
+obvious.
 The `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
