@@ -79,7 +79,9 @@ detail and have them all compare?" into a routine documentation check instead
 of an ad hoc conversation.
 It is also the resume envelope for the round-delta note: each repo should be
 able to lift that same structure into chat, docs, or dashboard output without
-renaming the sections.
+renaming the sections. The round-delta note should include a brief "how this
+round changed from last round" summary using the same headings so the compare
+loop stays mechanical.
 
 The compare loop should stay explicit:
 
