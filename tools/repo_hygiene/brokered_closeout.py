@@ -514,11 +514,13 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     },
     "finalizeLoop": {
         "enabled": True,
-        "maxRetries": 3,
+        "maxRetries": 8,
         "allowRepeatedBlockerEvidenceTupleRenewal": False,
         "safeSecondOrderRepairs": {
             "final_push_evidence_repaired": "evidence_repair",
             "target_push_rerun_required": "target_push_recovery",
+            "stale_review": "renew_stale_review",
+            "validation_failed": "rerun_validation_smoke",
         },
         "retryAuditType": "finalize_retry",
     },
@@ -832,6 +834,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "docs/19-closeout-dashboard-spec.md", "contains": "workflow-comparison"},
             {"path": "docs/19-closeout-dashboard-spec.md", "contains": "round-delta note"},
             {"path": "docs/19-closeout-dashboard-spec.md", "contains": "read-first"},
+            {"path": "docs/19-closeout-dashboard-spec.md", "contains": "same work block"},
+            {"path": "docs/19-closeout-dashboard-spec.md", "contains": "freshness"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def closeout_command_has_semantic_success_authority"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bounded_closeout_cli_main"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_feature_rows"},
@@ -5072,6 +5076,8 @@ def finalize_retry_decision(
     loop = config.get("finalizeLoop", {})
     tuple_key = stable_hash({"blockerKind": blocker_kind, "evidenceHash": evidence_hash_before}, 16)
     symbolic = dict(loop.get("safeSecondOrderRepairs", {})).get(blocker_kind)
+    if blocker_kind == "stale_review" and not symbolic and bool(config.get("autoQuorum", {}).get("allowStaleReviewRenewal", True)):
+        symbolic = "renew_stale_review"
     max_retries = int(loop.get("maxRetries", 0) or 0)
     renewal_allowed = bool(loop.get("allowRepeatedBlockerEvidenceTupleRenewal", False))
     seen = set(seen_tuples)

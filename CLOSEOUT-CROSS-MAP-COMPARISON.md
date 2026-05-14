@@ -21,8 +21,10 @@ This round-delta note converted the cross-repo comparison idea into a durable co
 
 - `workflow-comparison` is now treated as a baseline-checked dashboard surface, not just a descriptive label.
 - The canonical dashboard spec at `docs/19-closeout-dashboard-spec.md` is now part of the machine-checked baseline.
+- Docs freshness is operational: when either the canonical dashboard spec or this tracked round-delta note changes, the comparison artifacts in this work block must be regenerated before the block is closed.
 - `webDashboardSpec` now carries explicit baseline keys for `readOnlyByDefault`, `preserveClientStateAcrossRefresh`, and `rollbackForbiddenActions`.
 - The rollback ban is regression-checked for both `delete-evidence` and `force-push`.
+- Freshness is visible in the artifact itself, not aspirational in chat: the comparison docs must show the regeneration rule and the latest comparison state instead of merely promising future sync.
 
 The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
 
@@ -54,6 +56,7 @@ The intent is that later repos can compare workflow changes from this tracked no
 | `evidence-preserving-prune` | DNG policy covers dirty detached and historical prune preservation, with exact byte preservation to verify. | MLV-App has stronger evidence-preserving prune behavior. | AdversarialLLM marks dirty detached preservation as partial. | Historical, non-ancestor, or dirty deletion needs preservation evidence and recovery path. | Max SHOULD | Establish minimum recovery bundle and byte preservation requirements. |
 | `runtime-service-lifecycle` | DNG treats runtime lifecycle as conditional when services exist. | MLV-App stops/restarts configured runtime services around clean promotion and repo-closed. | AdversarialLLM tests runtime stop/restart behavior. | Runtime services executing repo code must be managed when configured. | Max / Conditional SHOULD | Only required for repos that own runtime services. |
 | `requirements-trace-to-original-standard` | DNG maps the original standard/addenda to capability rows and says trace is Core. | MLV-App treats the old standard as source corpus, not final spec. | AdversarialLLM says addenda were instrumental and trace must precede the clean standard. | The old standard/addenda must be mined into capability rows, profile decisions, tests, or explicit non-goals. | Core MUST | Create `CLOSEOUT-REQUIREMENTS-TRACE.md` before `CLOSEOUT-STANDARD.md`. |
+| `docs-freshness-regeneration` | The canonical dashboard spec and tracked round-delta note are paired freshness anchors. | Comparison docs must regenerate in the same work block when either anchor changes. | Freshness must be visible in the artifact, not deferred to future chat. | Comparison freshness is operational, not aspirational: regenerate the comparison artifacts before closing the work block. | Core MUST | Add a stale-artifact blocker and regeneration evidence path whenever the anchors move. |
 
 ## Common Rules Emerging
 
@@ -67,6 +70,7 @@ The intent is that later repos can compare workflow changes from this tracked no
 - Broad read-only planning is allowed.
 - Mutation is single-candidate by default.
 - Bulk mutation requires explicit override, configured permission, and audit reason.
+- Comparison freshness is operational: the canonical dashboard spec and tracked round-delta note are freshness anchors, and comparison artifacts must be regenerated in the same work block when either changes.
 - The original LLM Automatic Work Block Closeout Standard and addenda remain source evidence.
 
 ## Inputs For `CLOSEOUT-ADJUDICATION-PROTOCOL.md`
