@@ -7052,6 +7052,26 @@ def repo_state_snapshot(
             max_value=DASHBOARD_MAX_INTERVAL_MS,
         ),
     }
+    compare_result_path = repo_root / ".claude-state" / "closeout" / "workflow-comparison" / "compare-result.json"
+    workflow_comparison: Dict[str, Any] = {
+        "compareResultPath": normalize_rel(str(compare_result_path.relative_to(repo_root))),
+        "compareResultAvailable": compare_result_path.exists(),
+    }
+    if compare_result_path.exists():
+        try:
+            compare_result = json.loads(compare_result_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            workflow_comparison["compareResultLoadError"] = str(exc)
+        else:
+            if isinstance(compare_result, dict):
+                workflow_comparison["compareResult"] = {
+                    "artifactType": str(compare_result.get("artifactType") or ""),
+                    "schemaVersion": compare_result.get("schemaVersion"),
+                    "schema": str(compare_result.get("schema") or ""),
+                    "status": str(compare_result.get("status") or ""),
+                    "generatedAt": str(compare_result.get("generatedAt") or ""),
+                    "freshnessMarkerOrTimestamp": str(compare_result.get("freshnessMarkerOrTimestamp") or ""),
+                }
     snapshot = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "artifactSchema": str(ledger.get("artifactSchema") or "repo-state-snapshot.v1"),
@@ -7108,6 +7128,7 @@ def repo_state_snapshot(
             "rollbackForbiddenActions": list(dashboard.get("rollbackForbiddenActions") or []),
             "helper": dashboard_helper_snapshot,
             "endpoints": dashboard_endpoints_snapshot,
+            "workflowComparison": workflow_comparison,
             "dataSources": list(dashboard.get("dataSources") or []),
             "views": list(dashboard.get("views") or []),
             "primaryPanels": list(dashboard.get("primaryPanels") or []),
