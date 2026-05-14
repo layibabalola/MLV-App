@@ -1216,6 +1216,85 @@ def validate_approval_schema(approval: Dict[str, Any]) -> None:
         require_type("approval approved_candidate_ids", approval.get("approved_candidate_ids"), list)
 
 
+def validate_compare_result_schema(compare_result: Dict[str, Any]) -> None:
+    require_keys(
+        "closeout compare result",
+        compare_result,
+        ["schema", "status", "generatedAt", "freshnessMarkerOrTimestamp", "snapshotPointer", "reportEnvelope", "compareFindings"],
+        ["schema", "status", "generatedAt", "freshnessMarkerOrTimestamp", "snapshotPointer", "reportEnvelope", "compareFindings", "blockerReason"],
+    )
+    require_type("closeout compare result schema", compare_result.get("schema"), str)
+    if compare_result.get("schema") != "closeout-compare-result.v1":
+        raise HygieneError("closeout compare result schema must be closeout-compare-result.v1")
+    if compare_result.get("status") not in {"current", "stale", "divergent", "blocked"}:
+        raise HygieneError("closeout compare result status must be current, stale, divergent, or blocked")
+    require_type("closeout compare result generatedAt", compare_result.get("generatedAt"), str)
+    require_type("closeout compare result freshnessMarkerOrTimestamp", compare_result.get("freshnessMarkerOrTimestamp"), str)
+    snapshot_pointer = compare_result.get("snapshotPointer")
+    if not isinstance(snapshot_pointer, dict):
+        raise HygieneError("closeout compare result snapshotPointer must be a dict")
+    require_keys(
+        "closeout compare result snapshotPointer",
+        snapshot_pointer,
+        ["schema", "path", "hash"],
+        ["schema", "path", "hash", "auditHash", "workBlockId"],
+    )
+    require_type("closeout compare result snapshotPointer.schema", snapshot_pointer.get("schema"), str)
+    if snapshot_pointer.get("schema") != "repo-state-snapshot.v1":
+        raise HygieneError("closeout compare result snapshotPointer.schema must be repo-state-snapshot.v1")
+    require_type("closeout compare result snapshotPointer.path", snapshot_pointer.get("path"), str)
+    require_type("closeout compare result snapshotPointer.hash", snapshot_pointer.get("hash"), str)
+    if "auditHash" in snapshot_pointer:
+        require_type("closeout compare result snapshotPointer.auditHash", snapshot_pointer.get("auditHash"), str)
+    if "workBlockId" in snapshot_pointer:
+        require_type("closeout compare result snapshotPointer.workBlockId", snapshot_pointer.get("workBlockId"), str)
+    report_envelope = compare_result.get("reportEnvelope")
+    if not isinstance(report_envelope, dict):
+        raise HygieneError("closeout compare result reportEnvelope must be a dict")
+    require_keys(
+        "closeout compare result reportEnvelope",
+        report_envelope,
+        ["objective", "lastCompletedWork", "nextSteps", "blockers", "freshnessMarkerOrTimestamp", "compareFindings"],
+        ["objective", "lastCompletedWork", "nextSteps", "blockers", "freshnessMarkerOrTimestamp", "compareFindings"],
+    )
+    require_type("closeout compare result reportEnvelope.objective", report_envelope.get("objective"), str)
+    require_type("closeout compare result reportEnvelope.lastCompletedWork", report_envelope.get("lastCompletedWork"), str)
+    require_type("closeout compare result reportEnvelope.nextSteps", report_envelope.get("nextSteps"), list)
+    require_type("closeout compare result reportEnvelope.blockers", report_envelope.get("blockers"), list)
+    require_type(
+        "closeout compare result reportEnvelope.freshnessMarkerOrTimestamp",
+        report_envelope.get("freshnessMarkerOrTimestamp"),
+        str,
+    )
+    compare_findings = compare_result.get("compareFindings")
+    if not isinstance(compare_findings, list) or not compare_findings:
+        raise HygieneError("closeout compare result compareFindings must be a non-empty list")
+    if report_envelope.get("compareFindings") != compare_findings:
+        raise HygieneError("closeout compare result reportEnvelope.compareFindings must match compareFindings")
+    for idx, finding in enumerate(compare_findings):
+        if not isinstance(finding, dict):
+            raise HygieneError("closeout compare result compareFindings[%s] must be a dict" % idx)
+        require_keys(
+            "closeout compare result compareFindings[%s]" % idx,
+            finding,
+            ["heading", "status", "summary"],
+            ["heading", "status", "summary", "evidencePaths", "blockerReason"],
+        )
+        require_type("closeout compare result compareFindings[%s].heading" % idx, finding.get("heading"), str)
+        require_type("closeout compare result compareFindings[%s].status" % idx, finding.get("status"), str)
+        if finding.get("status") not in {"current", "stale", "divergent", "blocked"}:
+            raise HygieneError("closeout compare result compareFindings[%s].status must be current, stale, divergent, or blocked" % idx)
+        require_type("closeout compare result compareFindings[%s].summary" % idx, finding.get("summary"), str)
+        if "evidencePaths" in finding:
+            require_type("closeout compare result compareFindings[%s].evidencePaths" % idx, finding.get("evidencePaths"), list)
+        if finding.get("status") != "current" and not finding.get("blockerReason"):
+            raise HygieneError("closeout compare result compareFindings[%s] requires blockerReason when status is not current" % idx)
+    if compare_result.get("status") != "current" and not compare_result.get("blockerReason"):
+        raise HygieneError("closeout compare result requires blockerReason when status is not current")
+    if compare_result.get("status") == "current" and "blockerReason" in compare_result:
+        raise HygieneError("current closeout compare result must not include blockerReason")
+
+
 def recommendation_reference_sets(recommendation: Dict[str, Any]) -> Dict[str, List[str]]:
     action_ids: List[str] = []
     commit_unit_ids: List[str] = []
