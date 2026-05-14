@@ -17,7 +17,7 @@ Principle:
 
 ## Round Delta Note
 
-This round-delta note converted the cross-repo comparison idea into a durable contract:
+This round-delta note converted the cross-repo comparison idea into a durable contract and keeps the current round's delta visible beside the comparison rules:
 
 - `workflow-comparison` is now treated as a baseline-checked dashboard surface, not just a descriptive label.
 - The canonical dashboard spec at `docs/19-closeout-dashboard-spec.md` is now part of the machine-checked baseline.
@@ -59,11 +59,11 @@ The compare loop for future rounds should be:
 5. Block closeout if the freshness marker, snapshot pointer, or compare
    artifact is missing or stale.
 
-Round delta from the previous round:
+How this round changed from last round:
 
 - Last round hardened the compare artifacts themselves.
-- This round hardens the shared reporting envelope so the compare artifacts
-  can be regenerated and read in the same shape across repos.
+- This round hardens the shared reporting envelope so the compare artifacts can
+  be regenerated and read in the same shape across repos.
 - The practical next step is to treat the shared report headings as the
   canonical closeout resume format, not just a note-taking convention.
 - A visible freshness marker should be stable enough to copy verbatim, for
