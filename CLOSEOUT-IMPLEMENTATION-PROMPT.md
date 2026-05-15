@@ -12,6 +12,22 @@ Source standard:
 
 This prompt is for future implementation work. It does not replace the standard, the capability ledger, or repo-specific policy.
 
+## Cross-Repo Prompt Comparison
+
+When comparing closeout work across repos, compare this implementation prompt
+itself alongside `CLOSEOUT-CROSS-MAP-COMPARISON.md`, the dashboard spec, and
+the compare-result artifact. The goal is to align the implementation shape,
+not just the prose summary, so each repo refreshes the same contract in the
+same work block.
+
+The shared comparison should keep these items synchronized:
+
+- the report envelope headings
+- the `closeout-compare-result.v1` instance shape
+- the freshness marker or timestamp
+- the read-first and symbolic-action-only dashboard boundary
+- the same-work-block regeneration rule for docs and comparison artifacts
+
 ## Prompt
 
 You are implementing the portable, repo-owned brokered closeout framework in this repository.
