@@ -5,6 +5,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "artifactType",
+    "schemaVersion",
     "schema",
     "status",
     "generatedAt",
@@ -14,6 +16,14 @@
     "compareFindings"
   ],
   "properties": {
+    "artifactType": {
+      "type": "string",
+      "const": "closeout-compare-result.v1"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
     "schema": {
       "type": "string",
       "const": "closeout-compare-result.v1"
