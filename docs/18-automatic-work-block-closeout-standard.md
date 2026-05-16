@@ -5,6 +5,11 @@ Claude Desktop, humans, hooks, dashboards, and future tools. The repo owns the
 workflow. External tools are trigger and agent surfaces only; safety logic,
 policy, validation, audit, and mutation live in versioned repo files.
 
+When multiple repos are being aligned, compare the closeout implementation
+prompt itself alongside the dashboard spec, compare-result artifact, and
+round-delta note so the same contract is being implemented in each repo
+rather than translated ad hoc.
+
 ## Goal
 
 Every completed work block must be either promoted into the configured target
@@ -224,6 +229,12 @@ the newer dashboard spec: `current`, `stale`, `divergent`, and `blocked`.
 Carry the freshness marker or timestamp, snapshot pointer, compare findings,
 and blocker reason beside the human-readable report envelope so another repo
 can compare the same result without re-reading the prose first.
+The snapshot pointer should carry `workBlockId` when the compare artifact is
+fresh enough to be tied back to a specific work block; that keeps the anchor
+strong without widening the top-level compare shape.
+The concrete payload may carry both the local `schema` discriminator and the
+shared `artifactType`/`schemaVersion` bridge fields so the compare shape can be
+copied without renaming the payload.
 The canonical schema lives at
 `tools/repo-hygiene/closeout.compare-result.schema.json`, and the canonical
 result path is `.claude-state/closeout/workflow-comparison/compare-result.json`.
