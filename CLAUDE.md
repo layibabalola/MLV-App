@@ -267,7 +267,10 @@ equivalent durable repo note. Treat freshness as operational, not aspirational:
 regenerate the spec and round-delta note together, and keep a visible
 freshness marker or timestamp in the durable note so stale comparison docs are
 obvious. Repos should also use the same closeout-report headings and compare
-findings so the other repos can line up their own reports mechanically.
+findings so the other repos can line up their own reports mechanically. When
+the workflow contract itself changes, compare the `CLOSEOUT-IMPLEMENTATION-PROMPT.md`
+between repos in the same work block so the same shape is being implemented,
+not just the same summary language.
 The `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.
@@ -277,6 +280,10 @@ refreshes `latest.json` without appending history or `repo_state_snapshot` audit
 rows on every poll. Configured refresh commands must fail closed unless they
 resolve to this repo-owned latest-only writer; arbitrary commands must not be
 surfaced through dashboard metadata.
+When `repoClosedPostcondition.closeoutCleanTruth` reports success but raw Git
+still contains retained foreign or exempt dirt, describe that state as an
+audited retained baseline rather than a failed publish. The published truth is
+`closeoutCleanTruth`, not raw Git cleanliness alone.
 `webDashboardSpec` is read-only by default and
 `symbolic-action-request-only`: sticky `/closeout`, SSE with polling fallback,
 preserved scroll/focus/selection/expanded/history-filter state across refresh,

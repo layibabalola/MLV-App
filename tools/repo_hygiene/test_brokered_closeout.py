@@ -9,6 +9,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 from .brokered_closeout import (
     bounded_closeout_run,
     bounded_runner_exit_code,
@@ -797,6 +799,37 @@ class BrokeredCloseoutTests(unittest.TestCase):
     def test_repo_state_snapshot_writes_dashboard_ready_ledger_and_audit(self) -> None:
         repo = self.init_repo(remote=True)
         (repo / "dashboard-dirty.txt").write_text("dashboard dirty\n", encoding="utf-8")
+        compare_result_path = repo / ".claude-state" / "closeout" / "workflow-comparison" / "compare-result.json"
+        compare_result_path.parent.mkdir(parents=True, exist_ok=True)
+        compare_result_path.write_text(
+            json.dumps(
+                {
+                    "artifactType": "closeout-compare-result.v1",
+                    "schemaVersion": 1,
+                    "schema": "closeout-compare-result.v1",
+                    "status": "current",
+                    "generatedAt": "2026-05-14T21:20:00Z",
+                    "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:20 -05:00",
+                    "snapshotPointer": {
+                        "schema": "repo-state-snapshot.v1",
+                        "path": ".claude-state/closeout/repo-state/latest.json",
+                        "hash": "example-hash",
+                        "workBlockId": "wb-dashboard",
+                    },
+                    "reportEnvelope": {
+                        "objective": "Report the current closeout workflow in a mechanically comparable shape.",
+                        "lastCompletedWork": "Seeded the live compare-result pointer for the dashboard snapshot test.",
+                        "nextSteps": ["Keep the live pointer in sync with the compare-result artifact."],
+                        "blockers": [],
+                        "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:20 -05:00",
+                        "compareFindings": [],
+                    },
+                    "compareFindings": [],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         write_audit(
             repo,
             load_closeout_config(repo),
@@ -844,6 +877,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(snapshot["dashboard"]["endpoints"]["latest"], "/api/closeout/repo-state/latest")
         self.assertEqual(snapshot["dashboard"]["endpoints"]["actionsPreview"], "/api/closeout/actions/preview")
         self.assertEqual(snapshot["dashboard"]["endpoints"]["actionsRequestHistory"], "/api/closeout/actions/requests")
+        self.assertEqual(snapshot["dashboard"]["workflowComparison"]["compareResultPath"], ".claude-state/closeout/workflow-comparison/compare-result.json")
+        self.assertTrue(snapshot["dashboard"]["workflowComparison"]["compareResultAvailable"])
+        self.assertEqual(snapshot["dashboard"]["workflowComparison"]["compareResult"]["artifactType"], "closeout-compare-result.v1")
+        self.assertEqual(snapshot["dashboard"]["workflowComparison"]["compareResult"]["schemaVersion"], 1)
+        self.assertEqual(snapshot["dashboard"]["workflowComparison"]["compareResult"]["status"], "current")
+        self.assertEqual(snapshot["dashboard"]["workflowComparison"]["compareResult"]["snapshotPointer"]["workBlockId"], "wb-dashboard")
         self.assertEqual(snapshot["dashboard"]["helper"]["serverProcessIdSource"], snapshot["dashboard"]["endpoints"]["actions"])
         self.assertEqual(snapshot["dashboard"]["helper"]["readinessEndpoint"], snapshot["dashboard"]["endpoints"]["actions"])
         self.assertIn("audit-timeline", snapshot["dashboard"]["primaryPanels"])
@@ -1729,6 +1768,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         standard_text = (ROOT / "CLOSEOUT-STANDARD.md").read_text(encoding="utf-8")
+        prompt_text = (ROOT / "CLOSEOUT-IMPLEMENTATION-PROMPT.md").read_text(encoding="utf-8")
         docs_text = (ROOT / "docs" / "18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8")
         dashboard_spec_text = (ROOT / "docs" / "19-closeout-dashboard-spec.md").read_text(encoding="utf-8")
 
@@ -1831,6 +1871,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("round-delta note", agents_text)
         self.assertIn("round-delta note", claude_text)
         self.assertIn("round-delta note", standard_text)
+        self.assertIn("Cross-Repo Prompt Comparison", prompt_text)
+        self.assertIn("same-work-block regeneration rule", prompt_text)
         self.assertIn("round-delta note", (ROOT / "CLOSEOUT-CROSS-MAP-COMPARISON.md").read_text(encoding="utf-8"))
         self.assertIn("same work block", dashboard_spec_text)
         self.assertIn("freshness", dashboard_spec_text)
@@ -1874,6 +1916,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         compare_result_path = ROOT / ".claude-state" / "closeout" / "workflow-comparison" / "compare-result.json"
         self.assertTrue(compare_result_path.exists(), compare_result_path)
         compare_result = json.loads(compare_result_path.read_text(encoding="utf-8"))
+        self.assertEqual(compare_result["artifactType"], "closeout-compare-result.v1")
+        self.assertEqual(compare_result["schemaVersion"], 1)
+        schema_path = ROOT / "tools" / "repo-hygiene" / "closeout.compare-result.schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        Draft202012Validator(schema).validate(compare_result)
         validate_compare_result_schema(compare_result)
 
     def test_capability_ledger_contains_frozen_row_inventory(self) -> None:
@@ -3441,6 +3488,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.approve_current_tuple(repo, "wb-foreign")
         result = finalize_work_block(repo, work_block_id="wb-foreign")
         self.assertEqual(result["status"], "success")
+        self.assertTrue(result["repoClosedPostcondition"]["ok"])
+        self.assertEqual(result["repoClosedPostcondition"]["status"], "success")
+        self.assertFalse(result["repoClosedPostcondition"]["closeoutCleanTruth"]["rawGit"]["clean"])
+        self.assertTrue(result["repoClosedPostcondition"]["closeoutCleanTruth"]["policy"]["retainedForeignDirtyAllowed"])
+        self.assertEqual(result["repoClosedPostcondition"]["closeoutCleanTruth"]["status"], "clean")
         self.assertEqual([item["path"] for item in result["foreignDirtyRetained"]], ["foreign.txt"])
         self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), "master")
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/test-work", check=False).returncode, 0)

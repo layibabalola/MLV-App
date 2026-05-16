@@ -1220,12 +1220,41 @@ def validate_compare_result_schema(compare_result: Dict[str, Any]) -> None:
     require_keys(
         "closeout compare result",
         compare_result,
-        ["schema", "status", "generatedAt", "freshnessMarkerOrTimestamp", "snapshotPointer", "reportEnvelope", "compareFindings"],
-        ["schema", "status", "generatedAt", "freshnessMarkerOrTimestamp", "snapshotPointer", "reportEnvelope", "compareFindings", "blockerReason"],
+        [
+            "artifactType",
+            "schemaVersion",
+            "schema",
+            "status",
+            "generatedAt",
+            "freshnessMarkerOrTimestamp",
+            "snapshotPointer",
+            "reportEnvelope",
+            "compareFindings",
+        ],
+        [
+            "artifactType",
+            "schemaVersion",
+            "schema",
+            "status",
+            "generatedAt",
+            "freshnessMarkerOrTimestamp",
+            "snapshotPointer",
+            "reportEnvelope",
+            "compareFindings",
+            "blockerReason",
+        ],
     )
+    require_type("closeout compare result artifactType", compare_result.get("artifactType"), str)
+    if compare_result.get("artifactType") != "closeout-compare-result.v1":
+        raise HygieneError("closeout compare result artifactType must be closeout-compare-result.v1")
+    require_type("closeout compare result schemaVersion", compare_result.get("schemaVersion"), int)
+    if compare_result.get("schemaVersion") != 1:
+        raise HygieneError("closeout compare result schemaVersion must be 1")
     require_type("closeout compare result schema", compare_result.get("schema"), str)
     if compare_result.get("schema") != "closeout-compare-result.v1":
         raise HygieneError("closeout compare result schema must be closeout-compare-result.v1")
+    if compare_result.get("schema") != compare_result.get("artifactType"):
+        raise HygieneError("closeout compare result schema and artifactType must match")
     if compare_result.get("status") not in {"current", "stale", "divergent", "blocked"}:
         raise HygieneError("closeout compare result status must be current, stale, divergent, or blocked")
     require_type("closeout compare result generatedAt", compare_result.get("generatedAt"), str)

@@ -22,12 +22,40 @@ This round-delta note converted the cross-repo comparison idea into a durable co
 - `workflow-comparison` is now treated as a baseline-checked dashboard surface, not just a descriptive label.
 - The canonical dashboard spec at `docs/19-closeout-dashboard-spec.md` is now part of the machine-checked baseline.
 - Docs freshness is operational: when either the canonical dashboard spec or this tracked round-delta note changes, the comparison artifacts in this work block must be regenerated before the block is closed.
-- `webDashboardSpec` now carries explicit baseline keys for `readOnlyByDefault`, `preserveClientStateAcrossRefresh`, and `rollbackForbiddenActions`.
+- `webDashboardSpec` remains the authoritative source for read-only-by-default behavior, preserved client state across refresh, and rollback gating.
 - The rollback ban is regression-checked for both `delete-evidence` and `force-push`.
 - Freshness is visible in the artifact itself, not aspirational in chat: the comparison docs must show the regeneration rule and the latest comparison state instead of merely promising future sync.
-- This round is the first one to carry a concrete `closeout-compare-result.v1` instance file in `.claude-state/closeout/workflow-comparison/compare-result.json`, so later repos can copy the same payload shape instead of reconstructing it from the schema.
+- This round carries a concrete `closeout-compare-result.v1` instance file in `.claude-state/closeout/workflow-comparison/compare-result.json`, so later repos can copy the same payload shape instead of reconstructing it from the schema.
+- The repo-state feed now also advertises that artifact through a live `dashboard.workflowComparison.compareResult` pointer, which is the useful compromise between "artifact-only authority" and "dashboard can find the live source without guessing."
+- A successful closeout can still retain foreign or exempt dirty paths when the repo-closed postcondition audits them as baseline state; that should be described as retained dirty evidence, not as a failed publish.
 
 The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
+
+## Current Round Report
+
+Objective: Keep the closeout workflow docs and compare artifact mechanically comparable across repos.
+
+Last completed work: Added the concrete compare-result instance, the compatibility bridge fields, the doc updates that point at the actual artifact instead of only the schema, and a live repo-state pointer to that artifact for dashboard discovery.
+
+Next steps:
+
+- Keep the compare-result file, dashboard spec, and round-delta note synchronized in the same work block.
+- Compare Closeout Implementation Prompts between repos before changing the shared closeout contract so the same workflow is being implemented, not just described.
+- Keep the report envelope stable so other repos can paste it without translating headings.
+- Keep the repo-state pointer to the compare-result artifact in sync with the committed file so the dashboard stays read-first but discoverable.
+- Treat the shared next-step plan as reusable implementation guidance for the next repo, not as one-off retrospective prose.
+
+Blockers: Final closeout is still pending repo-closed verification for the current work block.
+
+Freshness: Last updated: 2026-05-14 16:20 -05:00
+
+Compare findings:
+
+- The compare artifact now carries the shared `artifactType`/`schemaVersion` bridge fields while preserving the local schema-backed discriminator.
+- The compare artifact's snapshot pointer now carries `workBlockId` so the freshness anchor is tied to the producing work block without a new top-level field.
+- The dashboard spec remains the authoritative source for sticky URL, SSE/polling, and preserved client-state behavior.
+- The round note no longer claims dashboard baseline keys that the canonical spec does not serialize.
+- The repo-state feed now points at the live compare-result artifact instead of forcing the UI to rediscover it from prose.
 
 ## Current Workflow Implementation
 
@@ -78,15 +106,18 @@ Canonical current instance shape:
 
 ```json
 {
+  "artifactType": "closeout-compare-result.v1",
+  "schemaVersion": 1,
   "schema": "closeout-compare-result.v1",
   "status": "current",
-  "generatedAt": "2026-05-14T21:01:08Z",
-  "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:01 -05:00",
+  "generatedAt": "2026-05-14T21:20:00Z",
+  "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:20 -05:00",
   "snapshotPointer": {
     "schema": "repo-state-snapshot.v1",
     "path": ".claude-state/closeout/repo-state/latest.json",
     "hash": "bbe152cf3ffc71a27da63802240ffd5b",
-    "auditHash": "645dfd88e53bd9f2b1ea80b549a9c674"
+    "auditHash": "645dfd88e53bd9f2b1ea80b549a9c674",
+    "workBlockId": "wb-dashboard"
   },
   "reportEnvelope": {
     "objective": "Report the current closeout workflow in a mechanically comparable shape.",
@@ -97,7 +128,7 @@ Canonical current instance shape:
       "Re-run the compare loop before finalizing if repo-state freshness changes."
     ],
     "blockers": [],
-    "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:01 -05:00",
+    "freshnessMarkerOrTimestamp": "Last updated: 2026-05-14 16:20 -05:00",
     "compareFindings": [
       {
         "heading": "shared-report-envelope",
@@ -183,9 +214,8 @@ The compare loop for future rounds should be:
 How this round changed from last round:
 
 - Last round hardened the compare artifacts themselves.
-- This round hardens the shared reporting envelope and the read-first workflow vocabulary so the compare artifacts can be regenerated and read in the same shape across repos.
-- The practical next step is to treat the shared report headings as the
-  canonical closeout resume format, not just a note-taking convention.
+- This round hardens the shared reporting envelope, the read-first workflow vocabulary, the live dashboard pointer, and the cross-repo implementation-prompt comparison step so the compare artifacts can be regenerated and read in the same shape across repos.
+- The practical next step is to treat the shared report headings and the shared implementation prompt as the canonical closeout resume format, not just a note-taking convention.
 - A visible freshness marker should be stable enough to copy verbatim, for
   example `Last updated: YYYY-MM-DD HH:MM TZ` or `Round delta snapshot: <id>`.
 - The portable dashboard contract is the same sticky URL, SSE/polling refresh,

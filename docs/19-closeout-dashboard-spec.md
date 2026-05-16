@@ -32,6 +32,13 @@ linked sibling counts, protected linked worktree counts, and fail-closed
 inspection errors. The dashboard may visualize protected worktrees, but ordinary
 linked siblings are closeout blockers until merged/pruned or explicitly retained
 by repo-owned evidence.
+The same feed now also carries a `dashboard.workflowComparison.compareResult`
+pointer derived from the committed compare-result artifact so the comparison
+panel can surface the live instance directly instead of rediscovering it from
+prose.
+The lightweight live view should carry the snapshot pointer as well so the UI
+can display the freshness anchor, including `workBlockId` when present, without
+promoting the feed into a second source of truth.
 
 Live refresh uses
 `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\write-repo-state.ps1 -RepoRoot . -Write -LatestOnly`. That
@@ -50,6 +57,10 @@ evidence. Rollback panels may show readiness only from the fail-closed
 `rollback-readiness.v1` payload, and cleanup or rollback preview panels may use
 read-only repo-owned truth, but executable actions still require immutable
 history/source snapshot evidence plus repo-owned actor revalidation.
+When the repo-closed postcondition succeeds while `closeoutCleanTruth.rawGit`
+still shows dirty entries, the dashboard should explain that the dirty paths
+were retained and audited as foreign or exempt baseline state rather than
+describing the publish as failed.
 
 Historical browsing comes from the repo-state history directory and the durable
 audit log. The UI may summarize those artifacts, but the artifacts remain the
@@ -87,18 +98,29 @@ The compare loop should stay explicit:
 
 1. Regenerate the canonical dashboard spec and the tracked round-delta note in
    the same work block whenever either one changes.
-2. Capture each repo's closeout state in the shared report envelope above.
-3. Emit a `closeout-compare-result.v1` artifact with `status` set to `current`,
+2. Compare Closeout Implementation Prompts between repos when the workflow
+   contract changes so the same implementation shape is being aligned.
+3. Capture each repo's closeout state in the shared report envelope above.
+4. Emit a `closeout-compare-result.v1` artifact with `status` set to `current`,
    `stale`, `divergent`, or `blocked` before interpreting the results.
-4. Compare matching headings across repos before interpreting the results.
-5. Record a visible freshness marker or timestamp next to the compare result.
-6. Block closeout if any report is stale, missing the envelope, or impossible
+5. Compare matching headings across repos before interpreting the results.
+6. Record a visible freshness marker or timestamp next to the compare result.
+7. Block closeout if any report is stale, missing the envelope, or impossible
    to compare mechanically.
 
 The workflow-comparison panel should surface that artifact directly so a human
 can compare the repo's structured outcome without translating the prose first.
 At minimum it should show `status`, the freshness marker or timestamp, the
-snapshot pointer, compare findings, and the blocker reason when present.
+snapshot pointer, compare findings, and the blocker reason when present. The
+snapshot pointer should include `schema`, `path`, `hash`, and, when available,
+`auditHash` plus `workBlockId` so freshness can be tied to the exact work block
+without adding a new top-level compare schema family.
+The concrete payload may carry both the local `schema` discriminator and the
+shared `artifactType`/`schemaVersion` bridge fields so other repos can copy the
+instance shape without translating the payload.
+The repo-state feed may expose a lightweight `workflowComparison.compareResult`
+view of that artifact for dashboard discovery, but the committed compare-result
+file remains the source of truth.
 
 Canonical schema:
 
@@ -110,6 +132,8 @@ Canonical schema:
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "artifactType",
+    "schemaVersion",
     "schema",
     "status",
     "generatedAt",
@@ -129,10 +153,11 @@ Canonical result path:
 
 Authority rule:
 the dashboard should treat the compare-result artifact as authoritative only
-when the JSON validates against the schema, the snapshot pointer resolves to
-the latest repo-state feed, and the freshness marker or timestamp matches the
-report envelope. If any of those checks fail, the panel should surface the
-artifact as `stale` or `blocked` rather than silently reinterpreting the prose.
+when the JSON validates against the schema, the dashboard can match the
+snapshot pointer to the latest repo-state feed it is currently rendering, and
+the freshness marker or timestamp matches the report envelope. If any of those
+checks fail, the panel should surface the artifact as `stale` or `blocked`
+rather than silently reinterpreting the prose.
 
 ## Local Helper
 
