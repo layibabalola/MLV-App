@@ -7071,6 +7071,7 @@ def repo_state_snapshot(
                     "status": str(compare_result.get("status") or ""),
                     "generatedAt": str(compare_result.get("generatedAt") or ""),
                     "freshnessMarkerOrTimestamp": str(compare_result.get("freshnessMarkerOrTimestamp") or ""),
+                    "snapshotPointer": compare_result.get("snapshotPointer"),
                 }
     snapshot = {
         "schemaVersion": BROKER_SCHEMA_VERSION,

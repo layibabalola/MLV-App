@@ -19,9 +19,21 @@ The canonical schema lives at
 `tools/repo-hygiene/closeout.compare-result.schema.json`, and the comparable
 result should be stored at
 `.claude-state/closeout/workflow-comparison/compare-result.json`.
+The dashboard's repo-state feed may also point at that artifact through
+`dashboard.workflowComparison.compareResult` so the UI can discover the live
+instance without reconstructing it from prose.
 The result should only be called current when the schema validates, the
-snapshot pointer resolves to the latest repo-state feed, and the freshness
-marker or timestamp matches the adjacent round-delta note.
+snapshot pointer matches the latest repo-state feed being rendered, and the
+freshness marker or timestamp matches the adjacent round-delta note.
+When present, `snapshotPointer.workBlockId` is the preferred freshness anchor
+for the current round because it ties the compare artifact back to the work
+block that produced it.
+The concrete payload may carry the shared `artifactType`/`schemaVersion`
+bridge fields alongside the local `schema` discriminator so the compare
+artifact stays copyable across repos.
+When the workflow contract changes, compare `CLOSEOUT-IMPLEMENTATION-PROMPT.md`
+between repos alongside this history map so the implementation shape stays
+aligned, not just the prose summary of the latest commit.
 
 ## Recent Commit Map
 
