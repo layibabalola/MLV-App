@@ -6190,6 +6190,29 @@ for index in range(count):
         self.assertIn("wake_recovery_backlog_selected", actions)
         self.assertIn("wake_breaker_autoclose_retry", actions)
 
+    def test_run_command_for_session_hides_console_windows_on_windows(self) -> None:
+        inbox = self.tempdir / "inbox-codex.jsonl"
+        completed = subprocess.CompletedProcess(args=["powershell"], returncode=0, stdout="", stderr="")
+
+        with patch.object(watcher.os, "name", "nt"), patch.object(
+            watcher.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True
+        ), patch("watcher.subprocess.run", return_value=completed) as run:
+            result = watcher.run_command_for_session(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"],
+                "codex",
+                "codex-live",
+                [{"id": "msg-1", "body": "wake"}],
+                inbox,
+            )
+
+        self.assertTrue(result["ok"])
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["creationflags"], 0x08000000)
+        self.assertFalse(kwargs["shell"])
+        self.assertEqual(kwargs["timeout"], 90)
+        self.assertIn("stdout", kwargs)
+        self.assertIn("stderr", kwargs)
+
     def test_wake_fire_history_filters_and_limits_recent_entries(self) -> None:
         bridge = AgentBridge(self.state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
