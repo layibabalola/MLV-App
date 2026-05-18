@@ -1935,14 +1935,28 @@ def run_command_for_session(
     env["BRIDGE_MESSAGE_COUNT"] = str(len(messages))
     env["BRIDGE_MESSAGE_IDS"] = json.dumps([msg.get("id") for msg in messages])
     try:
+        run_kwargs = {
+            "shell": False,
+            "env": env,
+            "timeout": 90,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+        }
+        if os.name == "nt":
+            # Keep watcher-triggered wake launches from flashing a console window.
+            run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+            showwindow_flag = getattr(subprocess, "STARTF_USESHOWWINDOW", None)
+            hide_window = getattr(subprocess, "SW_HIDE", 0)
+            if startupinfo_cls is not None and showwindow_flag is not None:
+                startupinfo = startupinfo_cls()
+                startupinfo.dwFlags |= showwindow_flag
+                startupinfo.wShowWindow = hide_window
+                run_kwargs["startupinfo"] = startupinfo
         proc = subprocess.run(
             list(cmd),
-            shell=False,
-            env=env,
-            timeout=90,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            **run_kwargs,
         )
         if proc.stdout:
             print(proc.stdout.rstrip(), flush=True)
