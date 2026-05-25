@@ -2075,13 +2075,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
      * frame cache key so a scale=1 entry never satisfies a scale=2 lookup.
      * Once Phase 4B lands the dial will start producing smaller buffers
      * without any further plumbing churn. */
-    {
-        const int envScale = playback_scale_factor_env_override();
-        requestContext.playbackScaleFactor =
-            ( envScale == 1 || envScale == 2 || envScale == 4 )
-                ? envScale
-                : effectivePlaybackScaleFactorForRequest();
-    }
+    requestContext.playbackScaleFactor = effectivePlaybackScaleFactorForRequest();
 
     RenderFrameThread::PresentationPreparationOptions presentationPreparation;
     presentationPreparation.fastPlaybackScale = requestContext.fastPlaybackScaleEligible;
@@ -3168,6 +3162,7 @@ int MainWindow::openMlv( QString fileName )
 
     //Set raw black level auto correct button
     ui->toolButtonRawBlackAutoCorrect->setEnabled( isRawBlackLevelWrong() );
+    ui->toolButtonRawLevelsAutoFix->setEnabled( true );
 
     //Give curves GUI a link to processing object
     ui->labelCurves->setProcessingObject( m_pProcessingObject );
@@ -3315,6 +3310,13 @@ void MainWindow::initGui( void )
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityAuto );
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityPhase3Fast );
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityPhase3HQ );
+
+    m_playbackScaleFactorGroup = new QActionGroup( this );
+    m_playbackScaleFactorGroup->setExclusive( true );
+    m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScaleAuto );
+    m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale1 );
+    m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale2 );
+    m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale4 );
 
     const QString phase3Tooltip = tr(
         "Experimental Phase 3 pipeline parallelism. Falls back to serial "
@@ -3554,6 +3556,7 @@ void MainWindow::initGui( void )
     //Must run AFTER initGui() (action groups exist) and AFTER readSettings()
     //(though Playback Quality keys are independent of legacy keys).
     initPlaybackQualityFromSettings();
+    initPlaybackScaleFactorFromSettings();
 
     //Add recent sessions to filemenu
     ui->menuFile->insertMenu( ui->actionSaveSession, m_pRecentFilesMenu );
@@ -9909,6 +9912,70 @@ void MainWindow::initPlaybackQualityFromSettings( void )
     setPlaybackQualityIndicatorVisible( indicatorVisible, /*persist*/false );
 }
 
+void MainWindow::initPlaybackScaleFactorFromSettings( void )
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    int rawScale = set.value( PlaybackQualitySettings::kKeyScaleFactorOverride(),
+                              PlaybackQualitySettings::kDefaultScaleFactorOverride() ).toInt();
+    if ( rawScale != 0 && rawScale != 1 && rawScale != 2 && rawScale != 4 )
+    {
+        rawScale = 0;
+    }
+    qInfo().noquote() << "Loaded playback scale override setting ="
+                      << ( rawScale == 0 ? QStringLiteral( "auto" )
+                                         : QString::number( rawScale ) )
+                      << "(QSettings Playback/ScaleFactorOverride).";
+    applyPlaybackScaleFactorOverride( rawScale, /*persist*/false );
+}
+
+void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist )
+{
+    if ( scaleFactor != 0 && scaleFactor != 1 && scaleFactor != 2 && scaleFactor != 4 )
+    {
+        scaleFactor = 0;
+    }
+
+    const bool changed = ( scaleFactor != m_playbackScaleFactorOverride );
+    m_playbackScaleFactorOverride = scaleFactor;
+
+    if ( ui->actionPlaybackScaleAuto )
+        ui->actionPlaybackScaleAuto->setChecked( scaleFactor == 0 );
+    if ( ui->actionPlaybackScale1 )
+        ui->actionPlaybackScale1->setChecked( scaleFactor == 1 );
+    if ( ui->actionPlaybackScale2 )
+        ui->actionPlaybackScale2->setChecked( scaleFactor == 2 );
+    if ( ui->actionPlaybackScale4 )
+        ui->actionPlaybackScale4->setChecked( scaleFactor == 4 );
+
+    if ( persist )
+    {
+        QSettings set( QSettings::UserScope,
+                       PlaybackQualitySettings::kOrganization(),
+                       PlaybackQualitySettings::kApplication() );
+        set.setValue( PlaybackQualitySettings::kKeyScaleFactorOverride(), scaleFactor );
+    }
+
+    if ( scaleFactor == 0 )
+    {
+        qInfo().noquote() << "Playback scale override = auto (ui override cleared).";
+    }
+    else
+    {
+        qInfo().noquote() << "Playback scale override =" << scaleFactor
+                          << "(ui override; GUI dial is bypassed).";
+    }
+
+    if ( changed )
+    {
+        invalidateDisplayPreviewCache();
+        m_frameChanged = true;
+        applyEffectiveDualIsoPlaybackSettings();
+    }
+    updatePlaybackQualityIndicator();
+}
+
 void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh )
 {
     if ( mode < 0 || mode > 4 ) mode = 0;
@@ -10042,23 +10109,54 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         else m_pPlaybackQualityIndicator->hide();
     }
 
-    /* The actual render uses env vars (MLVAPP_PLAYBACK_SCALE_FACTOR and
-     * MLVAPP_PLAYBACK_PREFER_HQ_MEAN23) at higher priority than the
-     * QSettings-stored mode (see effectivePlaybackScaleFactorForRequest()
-     * + the env-var probe at the requestContext build site). The
-     * indicator must reflect what is ACTUALLY happening, not what is
-     * stored, otherwise users who have an env var set see a misleading
-     * "Quality: Fast" while the pipeline is really running HQ x4.
-     * Detect env-var override first, surface "[env]" suffix so it is
-     * obvious the GUI dial is being bypassed, and color-code by the
-     * effective behaviour rather than the stored mode. */
+    /* The indicator must reflect what is ACTUALLY happening, not what is
+     * stored. Prefer the explicit UI override when present, otherwise fall
+     * back to env vars, then the saved playback mode. That keeps the
+     * on-screen label aligned with the same resolved scale the request
+     * builder uses. */
+    const bool guiScaleOverrideActive =
+        ( m_playbackScaleFactorOverride == 1 || m_playbackScaleFactorOverride == 2
+       || m_playbackScaleFactorOverride == 4 );
     const int envScale = playback_scale_factor_env_override();
     const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
-    const bool envOverrideActive = ( envScale == 1 || envScale == 2 || envScale == 4 ) || envHq;
+    const bool envOverrideActive =
+        !guiScaleOverrideActive && ( ( envScale == 1 || envScale == 2 || envScale == 4 ) || envHq );
 
     QString text;
     QString color;
-    if ( envOverrideActive )
+    if ( guiScaleOverrideActive )
+    {
+        const int scale = m_playbackScaleFactorOverride;
+        switch ( m_playbackQualityMode )
+        {
+            case 0:
+                text = tr( "Quality: Fast x%1 [ui]" ).arg( scale );
+                color = QStringLiteral( "#A0A0A0" );
+                break;
+            case 1:
+                text = tr( "Quality: HQ x%1 [ui]" ).arg( scale );
+                color = QStringLiteral( "#7CCB6E" );
+                break;
+            case 2:
+                text = m_playbackQualityActiveHq ? tr( "Quality: Auto (HQ x%1) [ui]" ).arg( scale )
+                                                 : tr( "Quality: Auto (Fast x%1) [ui]" ).arg( scale );
+                color = QStringLiteral( "#5DADE2" );
+                break;
+            case 3:
+                text = tr( "Quality: Fast* x%1 [ui]" ).arg( scale );
+                color = QStringLiteral( "#F1C40F" );
+                break;
+            case 4:
+                text = tr( "Quality: HQ* x%1 [ui]" ).arg( scale );
+                color = QStringLiteral( "#F1C40F" );
+                break;
+            default:
+                text = tr( "Quality: ? [ui]" );
+                color = QStringLiteral( "#A0A0A0" );
+                break;
+        }
+    }
+    else if ( envOverrideActive )
     {
         const int effScale = ( envScale == 1 || envScale == 2 || envScale == 4 )
                                  ? envScale
@@ -10081,29 +10179,37 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     }
     else
     {
-        const int scale = m_playbackQualityActiveScale;
+        const int scale = guiScaleOverrideActive ? m_playbackScaleFactorOverride
+                                                 : m_playbackQualityActiveScale;
         const bool hq = m_playbackQualityActiveHq;
         switch ( m_playbackQualityMode )
         {
             case 0:
-                text = tr( "Quality: Fast" );
+                text = guiScaleOverrideActive ? tr( "Quality: Fast x%1 [ui]" ).arg( scale )
+                                              : tr( "Quality: Fast" );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
             case 1:
-                text = tr( "Quality: HQ x%1" ).arg( scale );
+                text = guiScaleOverrideActive ? tr( "Quality: HQ x%1 [ui]" ).arg( scale )
+                                              : tr( "Quality: HQ x%1" ).arg( scale );
                 color = QStringLiteral( "#7CCB6E" );
                 break;
             case 2:
-                text = hq ? tr( "Quality: Auto (HQ x%1)" ).arg( scale )
-                          : tr( "Quality: Auto (Fast)" );
+                text = guiScaleOverrideActive
+                           ? ( hq ? tr( "Quality: Auto (HQ x%1) [ui]" ).arg( scale )
+                                  : tr( "Quality: Auto (Fast x%1) [ui]" ).arg( scale ) )
+                           : ( hq ? tr( "Quality: Auto (HQ x%1)" ).arg( scale )
+                                  : tr( "Quality: Auto (Fast)" ) );
                 color = QStringLiteral( "#5DADE2" );
                 break;
             case 3:
-                text = tr( "Quality: Fast* x%1" ).arg( scale );
+                text = guiScaleOverrideActive ? tr( "Quality: Fast* x%1 [ui]" ).arg( scale )
+                                              : tr( "Quality: Fast* x%1" ).arg( scale );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             case 4:
-                text = tr( "Quality: HQ* x%1" ).arg( scale );
+                text = guiScaleOverrideActive ? tr( "Quality: HQ* x%1 [ui]" ).arg( scale )
+                                              : tr( "Quality: HQ* x%1" ).arg( scale );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             default:
@@ -10163,10 +10269,17 @@ void MainWindow::updatePlaybackQualityIndicator( void )
 
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
 {
-    /* Env var takes priority and matches the existing
-     * playback_scale_factor_from_environment() rules. The static cache in
-     * that function would also return the env value, so returning that
-     * here keeps both paths consistent. */
+    if ( m_playbackScaleFactorOverride == 1
+      || m_playbackScaleFactorOverride == 2
+      || m_playbackScaleFactorOverride == 4 )
+    {
+        return m_playbackScaleFactorOverride;
+    }
+    const int envScale = playback_scale_factor_env_override();
+    if ( envScale == 1 || envScale == 2 || envScale == 4 )
+    {
+        return envScale;
+    }
     const int active = m_playbackQualityActiveScale;
     if ( active == 1 || active == 2 || active == 4 ) return active;
     return 1;
@@ -10195,6 +10308,26 @@ void MainWindow::on_actionPlaybackQualityPhase3Fast_triggered()
 void MainWindow::on_actionPlaybackQualityPhase3HQ_triggered()
 {
     applyPlaybackQualityMode( 4, /*persist*/true, /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackScaleAuto_triggered()
+{
+    applyPlaybackScaleFactorOverride( 0, /*persist*/true );
+}
+
+void MainWindow::on_actionPlaybackScale1_triggered()
+{
+    applyPlaybackScaleFactorOverride( 1, /*persist*/true );
+}
+
+void MainWindow::on_actionPlaybackScale2_triggered()
+{
+    applyPlaybackScaleFactorOverride( 2, /*persist*/true );
+}
+
+void MainWindow::on_actionPlaybackScale4_triggered()
+{
+    applyPlaybackScaleFactorOverride( 4, /*persist*/true );
 }
 
 void MainWindow::on_actionPlaybackShowQualityIndicator_triggered()
@@ -11670,19 +11803,10 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
     const int mean23OverrideValue = settings.playbackForceMean23 ? 1 : 0;
 
     /* Phase E5 scale-aware downgrade: the policy says "approve the alias_map
-     * / FR-blending downgrade IF the runtime scale is >= 4". We AND-combine
-     * with the active scale here. The active scale comes from the same
-     * source the render request reads (m_playbackQualityActiveScale)
-     * with the env-var override taking priority — that mirrors the
-     * effectivePlaybackScaleFactorForRequest() rules so the policy
-     * decision tracks the actual buffer the worker thread renders. */
-    const int activeScaleForPolicy = []() -> int {
-        const int envScale = playback_scale_factor_env_override();
-        return ( envScale == 1 || envScale == 2 || envScale == 4 ) ? envScale : -1;
-    }();
-    const int effectiveScale = ( activeScaleForPolicy > 0 )
-                                 ? activeScaleForPolicy
-                                 : m_playbackQualityActiveScale;
+     * / FR-blending downgrade IF the runtime scale is >= 4". We use the
+     * same resolved scale as the render request so the policy decision tracks
+     * the actual buffer the worker thread renders. */
+    const int effectiveScale = effectivePlaybackScaleFactorForRequest();
     const bool scaleGate = ( effectiveScale >= 4 );
     const int disableAliasMapValue = ( settings.playbackDisableAliasMapAtScale && scaleGate ) ? 1 : 0;
     const int disableFrBlendingValue = ( settings.playbackDisableFrBlendingAtScale && scaleGate ) ? 1 : 0;
@@ -12227,7 +12351,8 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     ui->toolButtonDarkFrameSubtractionFile->setEnabled( m_fileLoaded && checked );
     ui->lineEditDarkFrameFile->setEnabled( m_fileLoaded && checked );
 
-    ui->toolButtonRawBlackAutoCorrect->setEnabled( isRawBlackLevelWrong() );
+    ui->toolButtonRawBlackAutoCorrect->setEnabled( checked && isRawBlackLevelWrong() );
+    ui->toolButtonRawLevelsAutoFix->setEnabled( checked );
     ui->RawBlackLabel->setEnabled( checked );
     ui->horizontalSliderRawBlack->setEnabled( checked );
     ui->label_RawBlackVal->setEnabled( checked );
@@ -13711,6 +13836,20 @@ void MainWindow::on_toolButtonRawBlackAutoCorrect_clicked()
     int value = autoCorrectRawBlackLevel();
     if( value != getMlvOriginalBlackLevel( m_pMlvObject ) )
         ui->horizontalSliderRawBlack->setValue( value * 10 );
+}
+
+//Auto fix RAW black and white levels
+void MainWindow::on_toolButtonRawLevelsAutoFix_clicked()
+{
+    if( !m_fileLoaded ) return;
+
+    const uint16_t black = autoCorrectRawBlackLevel();
+    const uint16_t white = getMlvOriginalWhiteLevel( m_pMlvObject );
+
+    if( black != getMlvOriginalBlackLevel( m_pMlvObject ) )
+        ui->horizontalSliderRawBlack->setValue( black * 10 );
+    if( white != ui->horizontalSliderRawWhite->value() )
+        ui->horizontalSliderRawWhite->setValue( white );
 }
 
 //Open UserManualDialog

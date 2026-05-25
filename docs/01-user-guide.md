@@ -581,6 +581,11 @@ similar sensors).
 in the MLV header. Adjust only if the defaults crush shadows or clip
 highlights.
 
+Use **Repair** next to RAW Black Level when shadows look green or pink.
+Use **Auto Fix** next to RAW White Level to restore both raw levels for
+viewing; double-clicking the white value still resets it to the metadata
+default.
+
 ### 7.7 Dual ISO
 
 Magic Lantern's Dual ISO alternates scanlines between two ISOs for
@@ -683,6 +688,12 @@ the receipt is compatible (default-on; auto-disables when the receipt
 contains heavy denoise (RBF) above modest thresholds, Highlight
 Reconstruction with Cyan Highlight Fix, or any debayer other than
 AMaZE / Bilinear; full processing returns the moment playback stops).
+
+**Playback → Playback Quality → Scale Factor** lets you force the
+preview size with **Auto**, **x1**, **x2**, or **x4**. Use **x1** for
+the sharpest paused view, **x4** for the smoothest preview, and **Auto**
+to follow the current quality mode and sampler. The scale control is a
+UI equivalent of the old `MLVAPP_PLAYBACK_SCALE_FACTOR` override.
 
 ---
 
