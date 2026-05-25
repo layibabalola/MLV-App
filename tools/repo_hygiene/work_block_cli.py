@@ -25,6 +25,7 @@ from .brokered_closeout import (
     record_review_approval,
     remediate_retained_candidates,
     remediation_freeze_status,
+    remove_remediation_freeze,
     remediation_packet_template,
     repair_eligibility,
     repo_sweep,
@@ -123,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
     freeze = sub.add_parser("remediation-freeze-status", help="Inspect the closeout remediation freeze guard.")
     freeze.add_argument("--action", default="status")
     freeze.add_argument("--audit", action="store_true")
+
+    thaw = sub.add_parser("remediation-freeze-remove", help="Remove the remediation freeze after revalidation and quorum.")
+    thaw.add_argument("--work-block-id")
 
     hook_guard = sub.add_parser("hook-guard", help="Fail closed when a lifecycle hook runs during remediation freeze.")
     hook_guard.add_argument("--hook-name", required=True)
@@ -253,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "remediation-freeze-status":
             config = load_closeout_config(repo_root)
             result = remediation_freeze_status(repo_root, config, action=args.action, write_audit_packet=args.audit)
+        elif args.command == "remediation-freeze-remove":
+            result = remove_remediation_freeze(repo_root, work_block_id=args.work_block_id)
         elif args.command == "hook-guard":
             result = guard_closeout_hook(repo_root, hook_name=args.hook_name)
         elif args.command == "remediation-packet-template":

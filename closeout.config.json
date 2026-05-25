@@ -595,6 +595,8 @@
       "test_remediation_packet_requires_stale_claim_proof_not_gone_upstream_only",
       "test_remediation_preservation_requires_exact_allowlist_and_ref_or_bundle_backing",
       "test_remediation_freeze_removal_requires_coordinator_lock_quorum_and_revalidation",
+      "test_remediation_freeze_remove_clears_marker_after_revalidation_and_quorum",
+      "test_remediation_freeze_remove_allows_stale_transaction_branches_after_revalidation",
       "test_remediation_hard_clean_blocks_remaining_freeze_marker"
     ],
     "requiredSymbols": [
@@ -670,6 +672,7 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_status"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remove_remediation_freeze"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def assert_remediation_freeze_not_active"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_packet_template"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--require-repo-closed"},
@@ -678,6 +681,7 @@
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-queue"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "agent-results"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-status"},
+      {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "remediation-freeze-remove"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "repo-state"},
       {"path": "tools/repo_hygiene/work_block_cli.py", "contains": "--latest-only"},
       {"path": "tools/closeout/write-repo-state.ps1", "contains": "LatestOnly"},

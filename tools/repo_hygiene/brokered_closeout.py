@@ -1634,6 +1634,96 @@ def remediation_freeze_status(
     return status
 
 
+def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[str] = None) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    freeze = remediation_freeze_status(repo_root, config, action="remove-remediation-freeze", write_audit_packet=True)
+    if not freeze["active"]:
+        result = {"status": "success", "reason": "freeze_not_active", "freeze": freeze}
+        write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="success")
+        return result
+    if freeze["envActive"]:
+        result = {"status": "blocked", "reason": "remediation_freeze_env_active", "freeze": freeze}
+        write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="blocked")
+        return result
+
+    postcondition = repo_closed_postcondition_state(repo_root, config, work_block_id=work_block_id, write_artifacts=True)
+    thawable_blocker_kinds = {"remediation_freeze_active", "stale_transaction_branches"}
+    non_thawable_blockers = [
+        item for item in (postcondition.get("blockers") or []) if str(item.get("kind")) not in thawable_blocker_kinds
+    ]
+    if non_thawable_blockers:
+        result = {
+            "status": "blocked",
+            "reason": "repo_closed_postcondition_failed",
+            "freeze": freeze,
+            "postcondition": postcondition,
+        }
+        write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="blocked")
+        return result
+
+    target = target_ref_for(repo_root, config)
+    candidate_id = "candidate:remediation-freeze-removal:%s" % stable_hash(
+        {
+            "freeze": freeze,
+            "postcondition": postcondition.get("closeoutCleanTruth"),
+            "head": rev_parse(repo_root, "HEAD", required=False),
+        },
+        16,
+    )
+    action_id = "action:remove-remediation-freeze:%s" % stable_hash(
+        {"candidateId": candidate_id, "markerPath": freeze.get("markerPath")},
+        16,
+    )
+    evidence = {
+        "freeze": freeze,
+        "postcondition": postcondition,
+        "candidateId": candidate_id,
+        "actionId": action_id,
+        "target": target,
+    }
+    quorum = ensure_autonomous_quorum(
+        repo_root,
+        config,
+        candidate_id=candidate_id,
+        action_id=action_id,
+        evidence_hash=stable_hash(evidence, 64),
+        pinned_refs={
+            "target": target,
+            "remoteAdvertisedTargetHead": target.get("head") if target.get("mode") == "remote" else None,
+            "feature": {"branch": current_branch(repo_root), "head": rev_parse(repo_root, "HEAD", required=False)},
+        },
+        evidence=evidence,
+        action_class="remediation_freeze_removal",
+        blockers=[],
+    )
+    if not quorum["quorum"]["ok"]:
+        result = {
+            "status": "blocked",
+            "reason": quorum["quorum"]["reason"] or "review_quorum_blocked",
+            "freeze": freeze,
+            "quorum": quorum["quorum"],
+            "quorumResult": quorum,
+        }
+        write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="blocked")
+        return result
+
+    marker = remediation_freeze_marker_path(repo_root, config)
+    marker.unlink(missing_ok=True)
+    cleared = remediation_freeze_status(repo_root, config, action="remove-remediation-freeze-post", write_audit_packet=True)
+    result = {
+        "status": "success",
+        "reason": "remediation_freeze_removed",
+        "freeze": freeze,
+        "postcondition": postcondition,
+        "quorum": quorum["quorum"],
+        "quorumResult": quorum,
+        "clearedFreeze": cleared,
+    }
+    write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="success")
+    return result
+
+
 def assert_remediation_freeze_not_active(repo_root: Path, config: Dict[str, Any], *, action: str) -> Dict[str, Any]:
     status = remediation_freeze_status(repo_root, config, action=action, write_audit_packet=True)
     if status["active"]:

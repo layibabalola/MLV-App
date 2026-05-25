@@ -232,6 +232,10 @@ can compare the same result without re-reading the prose first.
 The final-closeout gate still belongs to `repo_closed_for_final_response` plus
 the repo-closed postcondition; the compare artifact can explain alignment, but
 it does not authorize closure on its own.
+If the remediation freeze marker is still present after the repo becomes
+clean, the supported thaw path is `tools\repo_hygiene\work_block_cli.py
+remediation-freeze-remove`, which revalidates the repo-closed postcondition
+before clearing the marker.
 The snapshot pointer should carry `workBlockId` when the compare artifact is
 fresh enough to be tied back to a specific work block; that keeps the anchor
 strong without widening the top-level compare shape.

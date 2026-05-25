@@ -386,7 +386,9 @@ override comes from `remediationFreeze.envVar`. While frozen, response/final
 hooks, broker bootstrap, start-work-block, ensure-feature-branch, publish,
 finalize, auto-closeout, pre-commit, and pre-push paths must not mutate lifecycle
 state, and only generated-exempt content-addressed freeze audit packets may be
-written. Dirty preservation/removal must use fresh target-pinned worktrees, exact
+written. The repo-owned thaw path is `tools\\repo_hygiene\\work_block_cli.py
+remediation-freeze-remove`, which revalidates repo-closed truth and clears the
+marker only after quorum. Dirty preservation/removal must use fresh target-pinned worktrees, exact
 allowlisted clusters, byte hashes, file modes, git object ids, remote-advertised
 pins, hook-guard proof, process quiescence evidence, recovery commands, and
 exact-tuple quorum from Codex/self plus two independent 10/10 reviewers. Freeze
