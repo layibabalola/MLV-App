@@ -17,6 +17,9 @@ This document is derived from:
 - `CLOSEOUT-CAPABILITY-LEDGER.schema.json`
 
 It is not the clean standard. Its job is to prove that the accumulated LLM Automatic Work Block Closeout Standard and addenda were mined into capability rows, profile decisions, ledger evidence expectations, or explicit non-goals before `CLOSEOUT-STANDARD.md` is written.
+If `CLOSEOUT-CANONICAL-CONTRACT.md` is present, treat it as the verbatim shared
+contract block that this trace helps justify and keep aligned with the source
+corpus.
 
 ## Trace Boundary
 

@@ -4,6 +4,7 @@ Portable standard for repo-owned brokered closeout.
 
 This document is distilled from:
 
+- `CLOSEOUT-CANONICAL-CONTRACT.md`
 - `CLOSEOUT-HISTORICAL-INCIDENT-MAP.md`
 - `CLOSEOUT-CROSS-MAP-COMPARISON.md`
 - `CLOSEOUT-ADJUDICATION-PROTOCOL.md`
@@ -13,6 +14,9 @@ This document is distilled from:
 - `CLOSEOUT-REQUIREMENTS-TRACE.md`
 
 This is the clean normative standard. It does not reprint every incident or prescribe one repo's implementation language, shell, tool layout, agent runtime, or worktree strategy.
+Where present, `CLOSEOUT-CANONICAL-CONTRACT.md` is the verbatim shared block to
+copy across repos; this standard explains and validates that block rather than
+replacing it.
 
 ## Normative Language
 
