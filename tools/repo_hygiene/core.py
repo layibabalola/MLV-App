@@ -96,6 +96,8 @@ IMPLEMENTED_CLOSEOUT_ARTIFACT_NAMES = [
     "executor-handoff.json",
     "closeout-compare-result.json",
     "closeout-compare-result.schema.json",
+    "CLOSEOUT-CANONICAL-CONTRACT.md",
+    "CLOSEOUT-CANONICAL-CONTRACT.sha256",
     "agent-remediation-queue/*.json",
     "agent-remediation-results/*.json",
     "manual-prune/*.json",

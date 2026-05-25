@@ -473,3 +473,13 @@
 - Net takeaway:
   - the current 1-thread direct receipt path remains the best measured lane on this VM
   - the next honest optimization, if any, needs to be smaller and more targeted than the path swaps I tested here
+
+## 2026-05-25 - playback scale threshold keep
+
+- I rejected a black/white sync micro-optimization in `src/mlv/video_mlv.c` after it regressed the large Dual ISO warm cadence.
+- I then tightened the playback scaling helper in `platform/qt/PlaybackScaling.h` so the OpenMP row loop only fans out for images at or above `262144` pixels.
+- On the same `large_dual_iso.mlv` / `large_dual_iso_hq.marxml` receipt with `MLVAPP_PLAYBACK_SCALE_FACTOR=4`, the new threshold cut the render-thread scale bucket from about `6.25 ms` to `2.00 ms` on the first runset and to `0.75 ms` on the repeat runset.
+- End-to-end warm cadence improved from the earlier kept baseline of about `53.24 ms` to about `40.51 ms` on the first runset and `28.15 ms` on the repeat runset.
+- The threshold change is currently the best kept playback win from this iteration; next work should profile the row loop itself only if we need more headroom.
+- I also tried the same threshold idea on the visible-path RGB16→RGB8 converter in `platform/qt/MainWindow.cpp`, but it regressed the UI smoke (`draw_frame_ready_image_ms` rose from about `20 ms` to about `43 ms`), so I reverted that part and kept only the render-thread scaling threshold.
+- I briefly tried the same threshold idea on the raw `pre_calc_levels` sweep in `src/processing/raw_processing.c`, but it did not improve the end-to-end warm cadence on this receipt, so I reverted it and kept the better display-scale path only.
