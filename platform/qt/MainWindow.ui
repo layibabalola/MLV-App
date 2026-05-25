@@ -219,6 +219,15 @@
       <addaction name="actionPlaybackAutoTarget30"/>
       <addaction name="actionPlaybackAutoTarget60"/>
      </widget>
+     <widget class="QMenu" name="menuPlaybackScaleFactor">
+      <property name="title">
+       <string>Scale Factor</string>
+      </property>
+      <addaction name="actionPlaybackScaleAuto"/>
+      <addaction name="actionPlaybackScale1"/>
+      <addaction name="actionPlaybackScale2"/>
+      <addaction name="actionPlaybackScale4"/>
+     </widget>
      <addaction name="actionPlaybackQualityFast"/>
      <addaction name="actionPlaybackQualityHQ"/>
      <addaction name="actionPlaybackQualityAuto"/>
@@ -226,6 +235,7 @@
      <addaction name="actionPlaybackQualityPhase3HQ"/>
      <addaction name="separator"/>
      <addaction name="actionPlaybackShowQualityIndicator"/>
+     <addaction name="menuPlaybackScaleFactor"/>
      <addaction name="menuPlaybackAutoTargetFps"/>
     </widget>
     <addaction name="actionGoto_First_Frame"/>
@@ -2733,7 +2743,17 @@ QGroupBox::indicator:checked:disabled {
                      </property>
                     </widget>
                    </item>
-                   <item row="1" column="0" colspan="3">
+                   <item row="0" column="3">
+                    <widget class="QToolButton" name="toolButtonRawLevelsAutoFix">
+                     <property name="text">
+                      <string>Auto Fix</string>
+                     </property>
+                     <property name="toolTip">
+                      <string>Auto-correct RAW Black Level and restore RAW White Level from metadata.</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item row="1" column="0" colspan="4">
                     <widget class="NoScrollSlider" name="horizontalSliderRawWhite">
                      <property name="sizePolicy">
                       <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
@@ -11085,6 +11105,62 @@ QGroupBox::indicator:checked:disabled {
    </property>
    <property name="statusTip">
     <string>Playback Quality: Experimental Phase 3 High Quality path.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackScaleAuto">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Auto</string>
+   </property>
+   <property name="toolTip">
+    <string>Use the playback scale chosen by the current quality mode and auto sampler.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback scale: follow the current quality mode and auto sampler.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackScale1">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>x1</string>
+   </property>
+   <property name="toolTip">
+    <string>Force full-resolution playback scaling.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback scale: force x1.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackScale2">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>x2</string>
+   </property>
+   <property name="toolTip">
+    <string>Force half-resolution playback scaling.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback scale: force x2.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackScale4">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>x4</string>
+   </property>
+   <property name="toolTip">
+    <string>Force quarter-resolution playback scaling for the smoothest preview.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback scale: force x4.</string>
    </property>
   </action>
   <action name="actionPlaybackShowQualityIndicator">

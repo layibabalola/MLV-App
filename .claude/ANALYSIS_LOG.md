@@ -511,3 +511,10 @@
 - The working environment overrides are `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1` and `MLVAPP_PLAYBACK_SCALE_FACTOR=4`.
 - Keep `scope=none` and `zebras=false` when the goal is judging the frame itself rather than the overlay stack.
 - The build executable to launch for interactive poking is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+
+## 2026-05-25 - UI scale override and RAW auto-fix helper
+
+- I added a `Playback -> Playback Quality -> Scale Factor` submenu with `Auto`, `x1`, `x2`, and `x4` choices and persisted the setting as `Playback/ScaleFactorOverride`.
+- I added a RAW `Auto Fix` helper next to the RAW White Level slider that auto-corrects black level and restores white from metadata for viewing.
+- The UI scale override now takes precedence over `MLVAPP_PLAYBACK_SCALE_FACTOR`, so interactive testing can use the menu even if an old env var is still present in the shell.
+- A proof run with registry/UI scale set to `1` and `MLVAPP_PLAYBACK_SCALE_FACTOR=4` still rendered at `render_thread_playback_scale_factor_request=1`, with the stage log confirming the loaded UI override.

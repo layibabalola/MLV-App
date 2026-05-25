@@ -506,6 +506,12 @@ private slots:
     void on_lineEditLutName_textChanged(const QString &arg1);
 
     void on_toolButtonRawBlackAutoCorrect_clicked();
+    void on_toolButtonRawLevelsAutoFix_clicked();
+
+    void on_actionPlaybackScaleAuto_triggered();
+    void on_actionPlaybackScale1_triggered();
+    void on_actionPlaybackScale2_triggered();
+    void on_actionPlaybackScale4_triggered();
 
     void on_actionSelectExternalApplication_triggered();
     void openRecentSession( QString fileName );
@@ -637,6 +643,7 @@ private:
     // by the Playback -> Playback Quality menu and the Q shortcut.
     QToolButton *m_pPlaybackQualityToolButton = nullptr;
     QMenu *m_pPlaybackQualityToolButtonMenu = nullptr;
+    int m_playbackScaleFactorOverride = 0;
     QActionGroup *m_darkFrameGroup;
     QActionGroup *m_previewDebayerGroup;
     QActionGroup *m_sessionListGroup;
@@ -644,6 +651,7 @@ private:
     QActionGroup *m_scopeGroup;
     QActionGroup *m_playbackQualityGroup = nullptr;       // Phase 4E
     QActionGroup *m_playbackAutoTargetFpsGroup = nullptr; // Phase 4E
+    QActionGroup *m_playbackScaleFactorGroup = nullptr;   // Phase 4E
     DoubleClickLabel *m_pTcLabel;
     bool m_tcModeDuration;
     uint8_t *m_pRawImage;
@@ -829,7 +837,9 @@ private:
     void applyEffectiveDualIsoPlaybackSettings( void );
     /* Phase 4E: Playback Quality dial helpers. */
     void initPlaybackQualityFromSettings( void );
+    void initPlaybackScaleFactorFromSettings( void );
     void applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh );
+    void applyPlaybackScaleFactorOverride( int scaleFactor, bool persist );
     void applyPlaybackAutoTargetFps( int targetFps, bool persist );
     void setPlaybackQualityIndicatorVisible( bool visible, bool persist );
     void updatePlaybackQualityIndicator( void );

@@ -63,6 +63,7 @@ namespace PlaybackQualitySettings
     inline constexpr const char * kOrganization() { return "magiclantern.MLVApp"; }
     inline constexpr const char * kApplication() { return "MLVApp"; }
     inline constexpr const char * kKeyQualityMode() { return "Playback/QualityMode"; }
+    inline constexpr const char * kKeyScaleFactorOverride() { return "Playback/ScaleFactorOverride"; }
     inline constexpr const char * kKeyAutoTargetFps() { return "Playback/AutoTargetFps"; }
     inline constexpr const char * kKeyShowQualityIndicator() { return "Playback/ShowQualityIndicator"; }
     inline constexpr const char * kKeyShowExperimentalPhase3Modes() { return "Playback/ShowExperimentalPhase3Modes"; }
@@ -78,6 +79,7 @@ namespace PlaybackQualitySettings
     inline constexpr const char * kKeyClipPlaytimePrefix() { return "Playback/ClipPlaytime/"; }
 
     inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Fast ); }
+    inline constexpr int kDefaultScaleFactorOverride() { return 0; }
     inline constexpr int kDefaultAutoTargetFps() { return 30; }
     inline constexpr int kDefaultShowQualityIndicator() { return 1; }
     inline constexpr int kDefaultShowExperimentalPhase3Modes() { return 0; }

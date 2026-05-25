@@ -1945,3 +1945,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / low effort: vary one clip at a time, keeping the receipt and environment overrides fixed so the visual result stays comparable.
 3. Medium impact / low effort: only drop to `Fast` when the goal is performance profiling rather than judging the frame’s final appearance.
 
+## UI playback scale override and raw auto-fix helper (2026-05-25)
+
+### Verified locally
+
+- I added a `Playback -> Playback Quality -> Scale Factor` submenu with `Auto`, `x1`, `x2`, and `x4` choices, persisted through `QSettings` key `Playback/ScaleFactorOverride`.
+- I also added a RAW levels helper button, `Auto Fix`, next to the RAW White Level slider so a clip can auto-correct black and restore white from metadata in one click.
+- The scale-factor UI override now wins over the legacy `MLVAPP_PLAYBACK_SCALE_FACTOR` env var when both are present, which makes the menu usable even if a developer shell still has the old env override set.
+- The request-context profile smoke confirmed the new priority chain:
+  - registry/UI scale override set to `1`
+  - `MLVAPP_PLAYBACK_SCALE_FACTOR=4`
+  - rendered request scale still came back as `1`
+  - the stage log recorded `Loaded playback scale override setting = 1` followed by `Playback scale override = 1 (ui override; GUI dial is bypassed).`
+- The same smoke also confirmed the visible-request shape stayed full-res when `x1` was selected:
+  - `render_thread_playback_scale_factor_request = 1`
+  - `render_thread_rendered_width = 1808`
+  - `render_thread_rendered_height = 2268`
+- I updated the user guide and the raw-level help text so the new UI controls are documented instead of living only in code.
+
+### Cross-checked from prior analysis
+
+- The earlier visible-smoke recipe remains the right default for judging a clip’s final look when `stretchFactorY=0.3333` is required.
+- The raw black/white helper complements, rather than replaces, the existing manual slider controls and the black-level `Repair` action.
+
+### Ranked next steps
+
+1. High impact / low effort: use the new `Scale Factor` menu in the app instead of relying on env vars for interactive playback experiments.
+2. High impact / low effort: use `Auto Fix` on clips that show green/pink shadow cast before spending time judging geometry or color.
+3. Medium effort: if a clip still looks wrong after the auto-fix helper, vary only the receipt stretch factors and keep the scale override fixed so the visual diagnosis stays isolated.
+
