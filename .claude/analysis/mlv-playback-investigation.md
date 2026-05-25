@@ -1756,6 +1756,72 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / medium effort: revisit playback-only subset work only if it is measurably cheaper than the current direct processed8 path on the real large Dual ISO preview receipt.
 3. Medium impact / low-medium effort: if another micro-pass is attempted, capture same-session control and candidate artifacts before and after the change so VM drift does not masquerade as a real keep.
 
+## Async-prep follow-up status (2026-05-25)
+
+### Verified locally
+
+- The playback async-prep branch remains clean at `codex/playback-async-split` with commit `6288cb80ef112f826268b4364ae7d73b9401b00c`.
+- The repo closeout path is still blocked on the protected target because the root checkout carries preexisting tracked dirty files and the work-block closeout tool classifies the branch as a stale transaction branch.
+- Fresh closeout output reports:
+  - `repo_closed_postcondition_failed`
+  - non-exempt dirty tracked files in the protected root checkout
+  - stale transaction branch `codex/playback-async-split`
+- The async-prep profile payloads confirm the GUI-side prep is no longer the ceiling:
+  - `draw_frame_ready_image_ms = 0` on the warm path
+  - `draw_frame_ready_present_ms = 0`
+  - worker conflation counters stayed at `0`
+- The remaining warm buckets on the large Dual ISO fixture are still in the render/process path:
+  - `render_thread_work_ms`
+  - `processed16_total_ms`
+  - `llrawproc_ms`
+  - `processing_core_ms` stays much smaller than those buckets
+
+### Cross-checked from prior analysis
+
+- The render-thread queue is already non-trivial: `RenderFrameThread` keeps four render request slots and a four-entry request queue, so the next easy win is not just a wider mailbox.
+- The current async split already removed the serial GUI image-build bucket, which means the next performance step should target the render/process hot loops or a truly cheaper playback subset.
+
+### Ranked next steps
+
+1. High impact / medium effort: prototype the playback-only subset only if we can prove it beats the current processed path on the same receipt.
+2. High impact / medium effort: add runtime-dispatched AVX2 on the surviving hot current-receipt loops if subset work does not win cleanly.
+3. Medium impact / medium effort: keep a close eye on queue depth only after the hot compute buckets are trimmed, because the current telemetry says compute still dominates.
+
+## Async follow-up experiments (2026-05-25)
+
+### Verified locally
+
+- I ran three compute-side experiment families against the same large Dual ISO fixture after the async-prep split:
+  - `MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH=1`
+  - `MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1`
+  - `--playback-processing subset`
+- The processed8 prefetch path did not produce a warm hit on the measured frames and did not improve cadence.
+  - smoke warm cadence: about `25.966 ms`
+  - `processed8_prefetch_hit`: `False`
+- The hand-tuned AVX2 direct8 intrinsics path was a clear regression on this receipt.
+  - 4-run across-run warm median: `52.4097 ms`
+  - best run: `51.1612 ms`
+  - worst run: `53.5724 ms`
+- Forcing playback subset was also a regression on this receipt, even though it was supported.
+  - `playback_processing_effective = subset`
+  - `playback_processing_supported = True`
+  - warm cadence on the smoke run: about `49.965 ms`
+- Worker scaling to `--threads 2` did not help overall cadence on this fixture.
+  - 4-run across-run warm median: `33.9629 ms`
+  - best run: `19.7496 ms`
+  - worst run: `34.5155 ms`
+
+### Cross-checked from prior analysis
+
+- These runs reinforce the earlier conclusion that the current 1-thread receipt path is still the best measured lane on this VM.
+- The compute-side experiments did reduce some sub-buckets (`llrawproc_ms`, `processed16_total_ms`) in isolation, but they did not improve end-to-end cadence enough to justify a branch-wide switch.
+
+### Ranked next steps
+
+1. High impact / medium effort: stop chasing the known regressions above and return to the current direct receipt path as the baseline.
+2. High impact / medium effort: look for a smaller compute-side reduction inside the current receipt path rather than a wholesale path swap.
+3. Medium impact / medium effort: if a new compute candidate is tried, measure it against the same 1-thread receipt baseline before touching the docs or commit set.
+
 
 
 

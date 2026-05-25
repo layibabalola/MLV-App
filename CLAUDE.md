@@ -114,6 +114,11 @@ whenever feasible: update `AGENTS.md`/`CLAUDE.md` for agent policy,
 `tools/repo_hygiene/test_brokered_closeout.py` or tooling-baseline required
 symbols/tests for executable coverage. If implementation is not feasible,
 record an explicit closeout blocker or roadmap item before final response.
+The shared hybrid closeout contract lives in
+[`CLOSEOUT-CANONICAL-CONTRACT.md`](CLOSEOUT-CANONICAL-CONTRACT.md) and its
+drift sentinel is [`CLOSEOUT-CANONICAL-CONTRACT.sha256`](CLOSEOUT-CANONICAL-CONTRACT.sha256);
+when that contract changes, compare the verbatim block itself across repos in
+the same work block before closeout.
 High-impact mutation, including repo-sweep pruning, requires the exact review
 tuple recorded by the broker: candidate id, action id, evidence hash, policy
 hash, and pinned refs.
@@ -202,6 +207,10 @@ and `compare findings`. The comparison output should also be durable and
 machine-labeled as `closeout-compare-result.v1` with `current`, `stale`,
 `divergent`, or `blocked` status so later repos can compare the outcome without
 reconstructing it from prose.
+The canonical hybrid block that defines the shared closeout contract lives in
+[`CLOSEOUT-CANONICAL-CONTRACT.md`](CLOSEOUT-CANONICAL-CONTRACT.md); keep that
+file byte-for-byte identical across repos and use the hash sentinel to detect
+drift.
 The canonical schema for that artifact lives at
 `tools/repo-hygiene/closeout.compare-result.schema.json`, and the canonical
 result file lives at `.claude-state/closeout/workflow-comparison/compare-result.json`.
@@ -268,9 +277,16 @@ regenerate the spec and round-delta note together, and keep a visible
 freshness marker or timestamp in the durable note so stale comparison docs are
 obvious. Repos should also use the same closeout-report headings and compare
 findings so the other repos can line up their own reports mechanically. When
-the workflow contract itself changes, compare the `CLOSEOUT-IMPLEMENTATION-PROMPT.md`
-between repos in the same work block so the same shape is being implemented,
-not just the same summary language.
+the workflow contract itself changes, compare the
+`CLOSEOUT-IMPLEMENTATION-PROMPT.md` between repos in the same work block
+before closeout so the same shape is being implemented, not just the same
+summary language. Treat stale freshness, missing comparison artifacts, or
+snapshot drift as closeout blockers rather than advisory notes. The final gate
+remains `repo_closed_for_final_response` plus the repo-closed postcondition;
+if either fails, the repo is not closed.
+Keep the canonical closeout contract file and its hash sentinel synchronized
+with those docs so all repos are aligned on the same verbatim block next
+round.
 The `webDashboardSpec` surface should auto-refresh
 `http://127.0.0.1:8765/closeout` from that feed and the closeout audits instead
 of creating a separate state authority.

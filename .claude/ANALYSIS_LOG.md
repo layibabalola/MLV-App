@@ -446,3 +446,30 @@
   - plain `console_tests --check-golden`: `41/160/17/0`
   - app-backed `console_tests --check-golden`: `41/750/1/0`
   - `pipeline_tests --check-golden`: `47/537/4/0`
+
+## 2026-05-25 - async-prep follow-up status and closeout blocker
+
+- Re-checked the async-prep branch on the large Dual ISO fixture after the GUI-side split landed.
+- The branch remains clean at `codex/playback-async-split` (`6288cb80ef112f826268b4364ae7d73b9401b00c`).
+- Closeout is still blocked by the protected target's existing dirty tracked files and the repo tool's stale-transaction-branch classification.
+- Fresh profile payloads confirm the GUI prep bucket is gone (`draw_frame_ready_image_ms = 0` on warm frames), so the next real optimization target is the render/process hot path rather than more UI-side image prep.
+- The remaining warm buckets worth watching are `render_thread_work_ms`, `processed16_total_ms`, `llrawproc_ms`, and `processing_core_ms`.
+- Next-step ranking from this checkpoint:
+  1. Try a truly cheaper playback-only subset on the same receipt before touching deeper queue depth.
+  2. If subset does not win, attack the surviving hot loops with runtime-dispatched AVX2 or another compute-side reduction.
+  3. Revisit queue depth only after compute buckets shrink, because current telemetry still says compute dominates.
+
+## 2026-05-25 - async follow-up experiments
+
+- I tested three alternate compute-side levers on the same large Dual ISO fixture after the async-prep split:
+  - processed8 prefetch via `MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH=1`
+  - hand-tuned direct8 AVX2 intrinsics via `MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1`
+  - explicit playback subset via `--playback-processing subset`
+- Result summary:
+  - prefetch did not hit on the warm frames and did not beat the current receipt path
+  - direct8 AVX2 intrinsics were a clear regression
+  - explicit playback subset was also a regression even though it is supported
+  - `--threads 2` also failed to beat the current 1-thread baseline on the same fixture
+- Net takeaway:
+  - the current 1-thread direct receipt path remains the best measured lane on this VM
+  - the next honest optimization, if any, needs to be smaller and more targeted than the path swaps I tested here

@@ -19,21 +19,30 @@ The canonical schema lives at
 `tools/repo-hygiene/closeout.compare-result.schema.json`, and the comparable
 result should be stored at
 `.claude-state/closeout/workflow-comparison/compare-result.json`.
-The dashboard's repo-state feed may also point at that artifact through
+The dashboard's repo-state feed points at that artifact through
 `dashboard.workflowComparison.compareResult` so the UI can discover the live
 instance without reconstructing it from prose.
+If `CLOSEOUT-CANONICAL-CONTRACT.md` exists, treat that verbatim block as the
+shared copy target for the closeout contract itself and keep its hash sentinel
+in sync with the same-work-block comparison artifacts.
 The result should only be called current when the schema validates, the
 snapshot pointer matches the latest repo-state feed being rendered, and the
 freshness marker or timestamp matches the adjacent round-delta note.
-When present, `snapshotPointer.workBlockId` is the preferred freshness anchor
-for the current round because it ties the compare artifact back to the work
-block that produced it.
+When present, `snapshotPointer.workBlockId` is the freshness anchor for the
+current round because it ties the compare artifact back to the work block that
+produced it.
 The concrete payload may carry the shared `artifactType`/`schemaVersion`
 bridge fields alongside the local `schema` discriminator so the compare
 artifact stays copyable across repos.
-When the workflow contract changes, compare `CLOSEOUT-IMPLEMENTATION-PROMPT.md`
-between repos alongside this history map so the implementation shape stays
+When the workflow contract changes, compare
+`CLOSEOUT-IMPLEMENTATION-PROMPT.md` between repos alongside this history map
+in the same work block before closeout so the implementation shape stays
 aligned, not just the prose summary of the latest commit.
+The final-closeout gate remains `repo_closed_for_final_response` plus the
+repo-closed postcondition; compare artifacts describe alignment, but they do
+not replace the repo-closed check.
+
+Freshness marker: Last updated: 2026-05-25 00:08 -05:00
 
 ## Recent Commit Map
 

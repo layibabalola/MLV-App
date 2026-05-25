@@ -1824,7 +1824,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     }
 
     m_lastDrawFrameReadyImageMs = result.imageBuildMs;
-    mlv_stage_timing_note_elapsed("draw_frameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
+    mlv_stage_timing_note_elapsed("drawFrameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
 
     const double present_start = mlv_stage_timing_now();
     if( displayPreviewCachingAllowed && !framePresentedByViewport )

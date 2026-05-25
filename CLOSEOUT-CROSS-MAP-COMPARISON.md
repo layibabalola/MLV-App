@@ -19,9 +19,14 @@ Principle:
 
 This round-delta note converted the cross-repo comparison idea into a durable contract and keeps the current round's delta visible beside the comparison rules:
 
+Freshness marker: Last updated: 2026-05-25 00:08 -05:00
+
 - `workflow-comparison` is now treated as a baseline-checked dashboard surface, not just a descriptive label.
 - The canonical dashboard spec at `docs/19-closeout-dashboard-spec.md` is now part of the machine-checked baseline.
+- The canonical hybrid closeout block now lives in `CLOSEOUT-CANONICAL-CONTRACT.md` with a drift sentinel in `CLOSEOUT-CANONICAL-CONTRACT.sha256`, so future repos can copy one verbatim block instead of reconciling several near-matches.
 - Docs freshness is operational: when either the canonical dashboard spec or this tracked round-delta note changes, the comparison artifacts in this work block must be regenerated before the block is closed.
+- When the workflow contract changes, `CLOSEOUT-IMPLEMENTATION-PROMPT.md` must be compared across repos in the same work block before closeout so the implementation shape stays aligned with the regenerated artifacts.
+- The final-closeout gate remains `repo_closed_for_final_response` plus the repo-closed postcondition; aligned prose does not override a stale or failing final gate.
 - `webDashboardSpec` remains the authoritative source for read-only-by-default behavior, preserved client state across refresh, and rollback gating.
 - The rollback ban is regression-checked for both `delete-evidence` and `force-push`.
 - Freshness is visible in the artifact itself, not aspirational in chat: the comparison docs must show the regeneration rule and the latest comparison state instead of merely promising future sync.
@@ -35,7 +40,12 @@ The intent is that later repos can compare workflow changes from this tracked no
 
 Objective: Keep the closeout workflow docs and compare artifact mechanically comparable across repos.
 
-Last completed work: Added the concrete compare-result instance, the compatibility bridge fields, the doc updates that point at the actual artifact instead of only the schema, and a live repo-state pointer to that artifact for dashboard discovery.
+Freshness marker: Last updated: 2026-05-25 00:08 -05:00
+
+Last completed work: Aligned the round-delta note with the same-work-block prompt comparison rule, tightened the final-closeout gate wording, refreshed the shared compare-result freshness marker, and added the canonical hybrid closeout contract plus hash sentinel.
+The next alignment step is to keep the canonical hybrid closeout contract and
+its hash sentinel synchronized with the docs-sync bundle so the same verbatim
+block can be copied into the other repos next round.
 
 Next steps:
 
@@ -44,10 +54,11 @@ Next steps:
 - Keep the report envelope stable so other repos can paste it without translating headings.
 - Keep the repo-state pointer to the compare-result artifact in sync with the committed file so the dashboard stays read-first but discoverable.
 - Treat the shared next-step plan as reusable implementation guidance for the next repo, not as one-off retrospective prose.
+- Keep the final gate anchored on `repo_closed_for_final_response` plus the repo-closed postcondition, not on prose alignment alone.
 
-Blockers: Final closeout is still pending repo-closed verification for the current work block.
+Blockers: Final closeout remains gated on repo-closed verification for the current work block and on the final `repo_closed_for_final_response` check.
 
-Freshness: Last updated: 2026-05-14 16:20 -05:00
+Freshness: Last updated: 2026-05-25 00:08 -05:00
 
 Compare findings:
 
@@ -56,6 +67,7 @@ Compare findings:
 - The dashboard spec remains the authoritative source for sticky URL, SSE/polling, and preserved client-state behavior.
 - The round note no longer claims dashboard baseline keys that the canonical spec does not serialize.
 - The repo-state feed now points at the live compare-result artifact instead of forcing the UI to rediscover it from prose.
+- The canonical hybrid closeout contract and hash sentinel are tracked alongside the same-work-block comparison artifacts so the next repo can copy one verbatim block.
 
 ## Current Workflow Implementation
 

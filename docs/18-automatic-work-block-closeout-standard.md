@@ -229,6 +229,9 @@ the newer dashboard spec: `current`, `stale`, `divergent`, and `blocked`.
 Carry the freshness marker or timestamp, snapshot pointer, compare findings,
 and blocker reason beside the human-readable report envelope so another repo
 can compare the same result without re-reading the prose first.
+The final-closeout gate still belongs to `repo_closed_for_final_response` plus
+the repo-closed postcondition; the compare artifact can explain alignment, but
+it does not authorize closure on its own.
 The snapshot pointer should carry `workBlockId` when the compare artifact is
 fresh enough to be tied back to a specific work block; that keeps the anchor
 strong without widening the top-level compare shape.

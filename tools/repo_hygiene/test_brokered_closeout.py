@@ -41,6 +41,7 @@ from .brokered_closeout import (
     finalize_work_block,
     guard_closeout_hook,
     load_closeout_config,
+    file_content_hash,
     plan_dirty_split_candidates,
     apply_dirty_split_candidate,
     preserve_owned_dirty_split,
@@ -1881,11 +1882,18 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("closeout-compare-result.v1", (ROOT / "CLOSEOUT-CROSS-MAP-COMPARISON.md").read_text(encoding="utf-8"))
         self.assertIn("closeout-compare-result.v1", (ROOT / "docs/18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8"))
         self.assertIn("closeout-compare-result.v1", (ROOT / "docs/20-closeout-commit-history-map.md").read_text(encoding="utf-8"))
+        self.assertIn("repo_closed_for_final_response", claude_text)
+        self.assertIn("repo_closed_for_final_response", dashboard_spec_text)
+        self.assertIn("repo_closed_for_final_response", (ROOT / "CLOSEOUT-CROSS-MAP-COMPARISON.md").read_text(encoding="utf-8"))
+        self.assertIn("repo_closed_for_final_response", (ROOT / "docs/20-closeout-commit-history-map.md").read_text(encoding="utf-8"))
         self.assertIn("closeout.compare-result.schema.json", dashboard_spec_text)
         self.assertIn("closeout.compare-result.schema.json", (ROOT / "docs/18-automatic-work-block-closeout-standard.md").read_text(encoding="utf-8"))
         self.assertIn("closeout.compare-result.schema.json", (ROOT / "docs/20-closeout-commit-history-map.md").read_text(encoding="utf-8"))
         self.assertIn("closeout-compare-result.json", (ROOT / "tools/repo-hygiene/closeout.contract.json").read_text(encoding="utf-8"))
         self.assertIn("closeout-compare-result.schema.json", (ROOT / "tools/repo-hygiene/closeout.contract.json").read_text(encoding="utf-8"))
+        self.assertIn(("CLOSEOUT-CANONICAL-CONTRACT.md", "repo_closed_for_final_response"), required_symbols)
+        self.assertIn(("CLOSEOUT-CANONICAL-CONTRACT.md", "closeout-compare-result.v1"), required_symbols)
+        self.assertIn(("CLOSEOUT-CANONICAL-CONTRACT.md", "CLOSEOUT-IMPLEMENTATION-PROMPT.md"), required_symbols)
         self.assertIn("compare-result.json", dashboard_spec_text)
         self.assertIn("current", dashboard_spec_text)
         self.assertIn("stale", dashboard_spec_text)
@@ -1911,6 +1919,26 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("malformedCount", dashboard_spec_text)
         self.assertIn("truncated", dashboard_spec_text)
         self.assertIn("http://127.0.0.1:8765/closeout", dashboard_spec_text)
+
+    def test_canonical_closeout_contract_block_is_pinned(self) -> None:
+        contract_path = ROOT / "CLOSEOUT-CANONICAL-CONTRACT.md"
+        sentinel_path = ROOT / "CLOSEOUT-CANONICAL-CONTRACT.sha256"
+        self.assertTrue(contract_path.exists(), contract_path)
+        self.assertTrue(sentinel_path.exists(), sentinel_path)
+
+        contract_text = contract_path.read_text(encoding="utf-8")
+        expected_hash = file_content_hash(contract_path)
+        self.assertIsNotNone(expected_hash)
+        self.assertEqual(sentinel_path.read_text(encoding="utf-8").strip(), expected_hash)
+
+        self.assertIn("byte-for-byte identical", contract_text)
+        self.assertIn("CLOSEOUT-IMPLEMENTATION-PROMPT.md", contract_text)
+        self.assertIn("CLOSEOUT-STANDARD.md", contract_text)
+        self.assertIn("closeout-compare-result.v1", contract_text)
+        self.assertIn("repo_closed_for_final_response", contract_text)
+        self.assertIn("closeoutCleanTruth", contract_text)
+        self.assertIn("CLOSEOUT-CROSS-MAP-COMPARISON.md", contract_text)
+        self.assertIn("CLOSEOUT-REQUIREMENTS-TRACE.md", contract_text)
 
     def test_compare_result_artifact_shape_is_pinned(self) -> None:
         compare_result_path = ROOT / ".claude-state" / "closeout" / "workflow-comparison" / "compare-result.json"

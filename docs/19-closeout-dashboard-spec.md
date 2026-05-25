@@ -73,6 +73,9 @@ or an equivalent durable repo note. Freshness is part of that contract: after
 workflow changes, regenerate the canonical spec and the tracked round-delta
 note in the same work block, and keep a visible freshness marker or timestamp
 in the durable note so stale comparison docs are obvious.
+If `CLOSEOUT-CANONICAL-CONTRACT.md` exists, treat that verbatim block as the
+shared copy target and keep its hash sentinel in sync with the docs-sync
+bundle so the next repo can align mechanically.
 
 To make cross-repo comparison mechanical, every repo should report its
 closeout workflow with the same section order and vocabulary. The canonical
@@ -99,7 +102,8 @@ The compare loop should stay explicit:
 1. Regenerate the canonical dashboard spec and the tracked round-delta note in
    the same work block whenever either one changes.
 2. Compare Closeout Implementation Prompts between repos when the workflow
-   contract changes so the same implementation shape is being aligned.
+   contract changes, in the same work block and before closeout, so the same
+   implementation shape is being aligned.
 3. Capture each repo's closeout state in the shared report envelope above.
 4. Emit a `closeout-compare-result.v1` artifact with `status` set to `current`,
    `stale`, `divergent`, or `blocked` before interpreting the results.
@@ -157,7 +161,9 @@ when the JSON validates against the schema, the dashboard can match the
 snapshot pointer to the latest repo-state feed it is currently rendering, and
 the freshness marker or timestamp matches the report envelope. If any of those
 checks fail, the panel should surface the artifact as `stale` or `blocked`
-rather than silently reinterpreting the prose.
+rather than silently reinterpreting the prose. The compare view does not
+replace the final-closeout gate: `repo_closed_for_final_response` and the
+repo-closed postcondition still decide whether the repo is actually closed.
 
 ## Local Helper
 

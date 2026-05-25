@@ -3,6 +3,8 @@
   "artifact_names": [
     "decision-packet.json",
     "codex-closeout-recommendation.json",
+    "CLOSEOUT-CANONICAL-CONTRACT.md",
+    "CLOSEOUT-CANONICAL-CONTRACT.sha256",
     "agent-review-*.json",
     "approval.json",
     "approval-anchor.json",
