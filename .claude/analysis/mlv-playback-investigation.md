@@ -1835,6 +1835,9 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - first 4-run warm median: `40.507475 ms` latency, `39.2499566078186 ms` render-thread total, `2.00003385543823 ms` playback-scale time
   - repeat 4-run warm median: `28.148825 ms` latency, `27.9999971389771 ms` render-thread total, `0.749945640563965 ms` playback-scale time
   - both runs were materially faster than the earlier kept baseline (`53.240183333333334 ms` latency, `53.2499551773071 ms` render-thread total, `6.25008344650269 ms` playback-scale time)
+- A matching threshold on the visible-path RGB16→RGB8 converter in `platform/qt/MainWindow.cpp` did not help the UI smoke:
+  - `draw_frame_ready_image_ms` rose from about `20 ms` to about `43 ms`
+  - that revert left the better headless/display-scale win intact and avoided a visible-path regression
 
 ### Cross-checked from prior analysis
 
