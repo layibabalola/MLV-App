@@ -98,7 +98,7 @@ inline bool playbackBuildFastScaledRgb8(const uint8_t *source,
         }
     }
 
-    #pragma omp parallel for if(targetHeight >= 32)
+    #pragma omp parallel for if(targetPixels >= 262144u)
     for( int y = 0; y < targetHeight; ++y )
     {
         const uint8_t *srcRow =
@@ -265,7 +265,7 @@ inline bool playbackBuildBilinearScaledRgb8(const uint8_t *source,
         }
     }
 
-    #pragma omp parallel for if(targetHeight >= 32)
+    #pragma omp parallel for if(targetPixels >= 262144u)
     for( int y = 0; y < targetHeight; ++y )
     {
         const uint8_t *rowTop =

@@ -1822,6 +1822,31 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / medium effort: look for a smaller compute-side reduction inside the current receipt path rather than a wholesale path swap.
 3. Medium impact / medium effort: if a new compute candidate is tried, measure it against the same 1-thread receipt baseline before touching the docs or commit set.
 
+## Playback scale-threshold keep (2026-05-25)
+
+### Verified locally
+
+- I rejected a black/white sync shortcut in `src/mlv/video_mlv.c` after it regressed the warm cadence on the same large Dual ISO fixture:
+  - across-run warm cadence median moved from about `53.24 ms` to `54.95 ms`
+  - `render_thread_work_ms` moved from about `49.17 ms` to `52.25 ms`
+  - `processing_core_ms` moved from about `8.12 ms` to `12.25 ms`
+- I then tightened the playback scaling helper in [`platform/qt/PlaybackScaling.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/PlaybackScaling.h) so the OMP loop only fans out when the scaled image is at least `262144` pixels.
+- That change produced a repeatable improvement on the same `large_dual_iso.mlv` + `large_dual_iso_hq.marxml` receipt with `MLVAPP_PLAYBACK_SCALE_FACTOR=4`:
+  - first 4-run warm median: `40.507475 ms` latency, `39.2499566078186 ms` render-thread total, `2.00003385543823 ms` playback-scale time
+  - repeat 4-run warm median: `28.148825 ms` latency, `27.9999971389771 ms` render-thread total, `0.749945640563965 ms` playback-scale time
+  - both runs were materially faster than the earlier kept baseline (`53.240183333333334 ms` latency, `53.2499551773071 ms` render-thread total, `6.25008344650269 ms` playback-scale time)
+
+### Cross-checked from prior analysis
+
+- The current playback-scale hotspot is not the GUI image build anymore; it is the render-thread scale helper that was still parallelizing a relatively small 4x playback job.
+- The repeat run confirms the threshold change is not a single-run fluke.
+
+### Ranked next steps
+
+1. High impact / low-medium effort: keep the current playback-scale threshold and fold it into the main branch once the repo is ready for another commit.
+2. Medium impact / medium effort: if more headroom is needed, profile the `playbackBuildFastScaledRgb8` row loop itself now that the OMP overhead is reduced.
+3. Medium impact / low effort: run one sanity pass on a different playback scale or fixture before trying more invasive scaling changes.
+
 
 
 
