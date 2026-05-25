@@ -1997,3 +1997,58 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / low effort: treat any future auto-exposure feature as an opt-in helper, not a silent default.
 3. Medium effort: if we later add auto-exposure, make it a “suggested starting point” based on histogram percentiles and clipping guardrails, not a hard rule that mutates every clip on open.
 
+## Auto look assist design note (2026-05-25)
+
+### Recommended approach
+
+- If we automate clip appearance on load, it should be a clip-scoped `Look Assist` rather than a silent global grade.
+- `Look Assist` should be applied automatically on open, with a per-clip toggle to disable it.
+- The auto step should combine:
+  - raw technical correction first (`RAW Black Level`, `RAW White Level`)
+  - exposure placement second (`Exposure Correction`)
+  - tone shaping third (`Contrast`, `Pivot`, `Shadows/Highlights` or `Dark/Light`)
+  - color polish last (`Temperature/Tint`, `Vibrance`, maybe `Saturation`)
+- `RAW Black Level` and `RAW White Level` are useful because they fix the sensor-domain problem that creates green/pink casts and broken highlights.
+- `Exposure Correction` is useful because it places the midtones, but it should not be the only auto control.
+- `Contrast`, `Pivot`, and shadows/highlights controls are what make the image feel “pretty” after exposure is placed.
+
+### Scene-aware defaults
+
+- Night:
+  - modest exposure lift
+  - protect highlights aggressively
+  - lift shadows a little
+  - keep saturation conservative
+- Artificial lights:
+  - small exposure lift
+  - moderate contrast
+  - keep highlight guardrails strict
+  - avoid heavy vibrance
+- Bright sun:
+  - little or no exposure lift
+  - preserve highlights first
+  - modest contrast / pivot shaping
+  - avoid over-lifting shadows
+- Shade / overcast:
+  - moderate exposure lift
+  - gentle contrast
+  - a little shadow lift
+  - mild vibrance if the clip is flat
+
+### Guardrails
+
+- Never silently save the auto-look result back to the receipt unless the user explicitly asks.
+- If the scene is already well exposed, the auto step should stay close to neutral rather than forcing a “pretty” look.
+- If the clip is extreme or ambiguous, the helper should prefer a conservative starting point and let the user adjust manually.
+
+### Cross-checked from prior analysis
+
+- The current `RAW -> Auto Fix` button is already the safe technical fix for raw black/white mistakes.
+- The new scale-factor UI override proved that user-facing controls can safely replace environment-only overrides without changing the underlying pipeline behavior.
+
+### Ranked next steps
+
+1. High impact / low effort: if we build auto-look later, make it clip-scoped and togglable per clip.
+2. High impact / low effort: keep raw black/white auto-fix separate from creative exposure/tone shaping.
+3. Medium effort: if a future auto-look is added, surface it as a visible “assist” with a reset button and a toggle state, not as a silent mutation.
+

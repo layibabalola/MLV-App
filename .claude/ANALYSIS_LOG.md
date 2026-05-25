@@ -528,3 +528,11 @@
   - safest general browsing: `Auto` + `Auto`, with `scope=none` and `zebras=false`
 - I did not add silent automatic exposure correction on clip load. Exposure Correction is a display-referred creative control, so auto-driving it would be a risky guess rather than a reliable fix.
 - If we ever add auto-exposure later, it should be opt-in and use histogram percentiles plus highlight/shadow guardrails as a suggested starting point, not a hard default that mutates every clip on open.
+
+## 2026-05-25 - auto-look assist design note
+
+- If we automate clip appearance on load in the future, it should be a clip-scoped `Look Assist` with a per-clip toggle, not a silent global grade.
+- The useful order is technical correction first, then exposure placement, then tone shaping, then light color polish.
+- `RAW Black Level` and `RAW White Level` are the important sensor-domain fixes because they prevent the green/pink cast and bad highlight behavior.
+- `Exposure Correction` is still useful, but it should be part of a bundle with `Contrast`, `Pivot`, and shadow/highlight shaping rather than the only auto control.
+- Scene-aware starting points should differ for night, artificial light, bright sun, and shade, with conservative guardrails when the clip is already close to neutral.
