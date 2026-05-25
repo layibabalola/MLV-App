@@ -1838,6 +1838,7 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - A matching threshold on the visible-path RGB16→RGB8 converter in `platform/qt/MainWindow.cpp` did not help the UI smoke:
   - `draw_frame_ready_image_ms` rose from about `20 ms` to about `43 ms`
   - that revert left the better headless/display-scale win intact and avoided a visible-path regression
+- A matching threshold on the raw `pre_calc_levels` sweep in `src/processing/raw_processing.c` also failed to improve the end-to-end warm cadence on this receipt, so that idea was reverted as well.
 
 ### Cross-checked from prior analysis
 

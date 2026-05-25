@@ -482,3 +482,4 @@
 - End-to-end warm cadence improved from the earlier kept baseline of about `53.24 ms` to about `40.51 ms` on the first runset and `28.15 ms` on the repeat runset.
 - The threshold change is currently the best kept playback win from this iteration; next work should profile the row loop itself only if we need more headroom.
 - I also tried the same threshold idea on the visible-path RGB16→RGB8 converter in `platform/qt/MainWindow.cpp`, but it regressed the UI smoke (`draw_frame_ready_image_ms` rose from about `20 ms` to about `43 ms`), so I reverted that part and kept only the render-thread scaling threshold.
+- I briefly tried the same threshold idea on the raw `pre_calc_levels` sweep in `src/processing/raw_processing.c`, but it did not improve the end-to-end warm cadence on this receipt, so I reverted it and kept the better display-scale path only.
