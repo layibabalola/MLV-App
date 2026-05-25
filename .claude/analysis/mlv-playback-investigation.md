@@ -1851,6 +1851,22 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / medium effort: if more headroom is needed, profile the `playbackBuildFastScaledRgb8` row loop itself now that the OMP overhead is reduced.
 3. Medium impact / low effort: run one sanity pass on a different playback scale or fixture before trying more invasive scaling changes.
 
+## 2026-05-25 - closeout stabilization and repo closeout completion
 
+### Verified locally
 
+- I committed the closeout-policy and smoke-suite fixes to the work-block branch, then re-ran the brokered finalize path successfully.
+- The current branch has been integrated into `master`, the remote `fork/master` was pushed, and the working tree is clean.
+- The final closeout blockers were a stale managed integration worktree under `.claude-state/closeout/integration-worktrees` plus a registry entry in Git's worktree metadata; removing the directory and pruning the worktree registry cleared the repo-closed postcondition.
+
+### Cross-checked from prior analysis
+
+- The playback scale-threshold keep remains the strongest measured playback win from this iteration.
+- The rejected GUI threshold and raw `pre_calc_levels` threshold are still dead ends and remain reverted.
+
+### Ranked next steps
+
+1. High impact / low effort: if more playback headroom is needed later, profile the render-thread row loop behind the current `PlaybackScaling.h` threshold.
+2. Medium impact / low effort: keep the repo closeout workflow changes that made validation budgets and stale-worktree cleanup explicit.
+3. Low effort: use the current `master` branch as the next baseline for any new playback experiment.
 
