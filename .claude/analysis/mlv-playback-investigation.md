@@ -1897,3 +1897,25 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / medium effort: only profile the render-thread row loop behind the threshold if we need more headroom later.
 3. Low effort: preserve the new stale-worktree cleanup regression as part of the closeout safety net and avoid reintroducing prune regressions.
 
+## GUI geometry investigation (2026-05-25)
+
+### Verified locally
+
+- I re-read the visible smoke JSON for `large_dual_iso.mlv` with overlays enabled (`scope=waveform`, `zebras=true`) and confirmed the first frame reported `render_thread_rendered_width=452` and `render_thread_rendered_height=567`.
+- I then re-ran a clean visible smoke with overlays disabled (`scope=none`, `zebras=false`) and the same receipt/preset path; the first frame still reported `render_thread_rendered_width=452` and `render_thread_rendered_height=567`.
+- The ratio `567 / 452 = 1.254425` matches the portrait ratio `2268 / 1808 = 1.254425` used throughout the repo's Dual ISO fixture tests and scaling tests, so the on-screen frame shape is consistent with a portrait source rather than an aspect-ratio distortion.
+- In the clean visible pass, `draw_frame_ready_prescaled_image_active=true`, `draw_frame_ready_image_ms=0`, `draw_frame_ready_overlay_ms=0`, `draw_frame_ready_scopes_ms=0`, and `draw_frame_ready_total_ms=20.999908447265625`, which means the fast preview path is active but the GUI overlay stack is not what makes the picture look red or strange.
+- The earlier red/pink appearance came from the explicit zebra/scope smoke settings, because the overlay path intentionally recolors pixels and draws scopes on top of the image.
+
+### Cross-checked from prior analysis
+
+- `computeDisplaySceneGeometry()` preserves aspect ratio and only fits the source into the current viewport or stretch factors; it does not contain an aspect-squashing branch.
+- The receipt for `large_dual_iso.hq.marxml` uses `stretchFactorX=1` and `stretchFactorY=1`, so the receipt itself is not asking for anamorphic correction.
+- The repo's Dual ISO scaling tests and comments repeatedly use `1808x2268` as the canonical portrait-ish shape for this family of clips.
+
+### Ranked next steps
+
+1. High impact / low effort: when visually judging playback, keep `scope=none` and `zebras=false` so the clean preview path is not conflated with the scope/overlay presentation.
+2. High impact / low effort: treat the current `large_dual_iso` visible playback look as a portrait preview, not a stretch regression, unless a clean HQ/Auto run shows a different width/height ratio.
+3. Medium impact / medium effort: if we still want better GUI UX, investigate whether the fast preview quality tier is simply too low-fidelity for this clip shape, rather than chasing geometry that is already consistent.
+
