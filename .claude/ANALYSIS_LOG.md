@@ -497,3 +497,10 @@
 - The repeat set produced warm-window medians of `cadence_ms 23.70/27.28/17.66/24.30` across the four runs, with across-run medians of `cadence_ms 23.9969`, `render_thread_work_ms 22.5`, and `render_thread_playback_scale_ms 0.25`.
 - The immediately prior repeat set on the same code path landed at `cadence_ms 28.1488`, `render_thread_work_ms 27.2501`, and `render_thread_playback_scale_ms 0.7499`, so the new run looks better but still sits inside the kind of variance this VM has been showing.
 - I therefore kept the current `PlaybackScaling.h` threshold as the best playback baseline and did not treat the latest repeat set as a new code win.
+
+## 2026-05-25 - GUI geometry investigation
+
+- I verified that the visible `large_dual_iso.mlv` smoke is portrait-shaped by design rather than stretched: the render thread reported `452x567`, which matches the canonical `1808x2268` aspect ratio used in the repo's Dual ISO tests.
+- I confirmed the clean overlay-free visible smoke still used `render_thread_rendered_width=452` and `render_thread_rendered_height=567`, with `draw_frame_ready_prescaled_image_active=true`, `draw_frame_ready_image_ms=0`, `draw_frame_ready_overlay_ms=0`, and `draw_frame_ready_scopes_ms=0`.
+- The red/pink look from the earlier screenshots is explained by the explicit zebra/scope smoke settings, because those overlays intentionally recolor pixels and draw scopes on top of the frame.
+- The geometry helper in `MainWindow.cpp` preserves aspect ratio, so the current evidence points to a fast-preview / portrait-clip presentation issue rather than a stretch regression.
