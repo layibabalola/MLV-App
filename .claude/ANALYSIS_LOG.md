@@ -518,3 +518,13 @@
 - I added a RAW `Auto Fix` helper next to the RAW White Level slider that auto-corrects black level and restores white from metadata for viewing.
 - The UI scale override now takes precedence over `MLVAPP_PLAYBACK_SCALE_FACTOR`, so interactive testing can use the menu even if an old env var is still present in the shell.
 - A proof run with registry/UI scale set to `1` and `MLVAPP_PLAYBACK_SCALE_FACTOR=4` still rendered at `render_thread_playback_scale_factor_request=1`, with the stage log confirming the loaded UI override.
+
+## 2026-05-25 - playback presets and auto-exposure caution
+
+- The app now opens in a sane visual state by default because the persisted UI playback scale override is authoritative over the legacy env override.
+- The working interactive presets are:
+  - sharpest paused view: `HQ` + `x1`
+  - smoothest playback: `HQ` + `x4`
+  - safest general browsing: `Auto` + `Auto`, with `scope=none` and `zebras=false`
+- I did not add silent automatic exposure correction on clip load. Exposure Correction is a display-referred creative control, so auto-driving it would be a risky guess rather than a reliable fix.
+- If we ever add auto-exposure later, it should be opt-in and use histogram percentiles plus highlight/shadow guardrails as a suggested starting point, not a hard default that mutates every clip on open.
