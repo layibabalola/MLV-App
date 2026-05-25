@@ -22,6 +22,7 @@
     "commands": [
       {
         "name": "brokered-closeout-smoke-core",
+        "timeoutMs": 900000,
         "argv": [
           "py",
           "-3",
@@ -42,6 +43,7 @@
       },
       {
         "name": "brokered-closeout-smoke-state",
+        "timeoutMs": 900000,
         "argv": [
           "py",
           "-3",
@@ -59,6 +61,7 @@
       },
       {
         "name": "brokered-closeout-smoke-dashboard",
+        "timeoutMs": 900000,
         "argv": [
           "py",
           "-3",
@@ -221,7 +224,7 @@
   },
   "locking": {
     "detectTimeoutMs": 120000,
-    "finalizeTimeoutMs": 600000,
+    "finalizeTimeoutMs": 1800000,
     "repoSweepTimeoutMs": 600000,
     "adapterHeartbeatSeconds": 30,
     "maxProcessOutputBytes": 1048576,
@@ -940,3 +943,5 @@
     "remediate-retained-closeout.ps1"
   ]
 }
+
+

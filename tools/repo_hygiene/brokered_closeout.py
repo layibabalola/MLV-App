@@ -2701,7 +2701,14 @@ def bounded_closeout_run(repo_root_arg: Path, closeout_args: Sequence[str]) -> D
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     args = list(closeout_args)
-    command = [sys.executable, "-m", "tools.repo_hygiene.work_block_cli", "--repo-root", ".", *args]
+    command = [
+        sys.executable,
+        "-m",
+        "tools.repo_hygiene.work_block_cli",
+        "--repo-root",
+        ".",
+        *args,
+    ]
     return run_bounded_closeout_process(
         repo_root,
         config,
