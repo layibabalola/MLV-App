@@ -4,6 +4,7 @@ Reusable prompt for implementing the portable, repo-owned brokered closeout fram
 
 Source standard:
 
+- `CLOSEOUT-CANONICAL-CONTRACT.md`
 - `CLOSEOUT-STANDARD.md`
 - `CLOSEOUT-ADJUDICATION-PROTOCOL.md`
 - `CLOSEOUT-FRAMEWORK-PROFILES.md`
@@ -19,6 +20,9 @@ itself alongside `CLOSEOUT-CROSS-MAP-COMPARISON.md`, the dashboard spec, and
 the compare-result artifact. The goal is to align the implementation shape,
 not just the prose summary, so each repo refreshes the same contract in the
 same work block.
+If `CLOSEOUT-CANONICAL-CONTRACT.md` exists, compare that verbatim block in the
+same work block too so the shared source-of-truth text stays identical across
+repos.
 
 The shared comparison should keep these items synchronized:
 
