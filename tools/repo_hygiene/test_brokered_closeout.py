@@ -60,6 +60,7 @@ from .brokered_closeout import (
     validation_full_suite_requested,
     remediation_freeze_status,
     remove_remediation_freeze,
+    remove_worktree,
     remediation_packet_template,
     stable_hash,
     start_work_block,
@@ -2095,6 +2096,22 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn('run_git_longpaths(repo_root, ["worktree", "prune"', text)
         self.assertNotIn('run_git(repo_root, ["worktree", "add"', text)
         self.assertNotIn('run_git(repo_root, ["worktree", "remove"', text)
+
+    def test_remove_worktree_prunes_stale_registry_after_path_is_already_gone(self) -> None:
+        repo = self.init_repo()
+        stale = self.tempdir / "stale-detached-worktree"
+        git(repo, "worktree", "add", "--detach", str(stale), "HEAD")
+        self.assertTrue(stale.exists())
+        before = git(repo, "worktree", "list", "--porcelain").stdout
+        self.assertIn(stale.name, before)
+        shutil.rmtree(stale, ignore_errors=True)
+
+        result = remove_worktree(repo, stale)
+
+        self.assertEqual(result["pruneReturncode"], 0, result)
+        after = git(repo, "worktree", "list", "--porcelain").stdout
+        self.assertNotIn(stale.name, after)
+        self.assertIn("worktree ", after)
 
     def test_bounded_runner_kills_hung_finalize_child_with_descendants(self) -> None:
         repo = self.init_repo()

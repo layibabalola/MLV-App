@@ -458,8 +458,15 @@ non-ancestor branch/worktree, repo sweep must write recovery evidence under
 deletion requires bundle-backed recovery evidence plus reviewer prune-readiness
 verdicts in the exact tuple. Dirty detached worktree removal requires tracked
 binary diff, untracked byte copies, file modes, HEAD/target heads, SHA256
-hashes, preservation ref, reviewer verdicts, and recovery commands. Missing,
-stale, hash-mismatched, or out-of-root recovery artifacts block prune.
+hashes, preservation ref, reviewer verdicts, and recovery commands. Deletion
+order is preserve evidence, remove worktree only after preservation proof,
+delete local branch, delete remote feature branch, fetch/prune, rerun sweep,
+then rerun final closeout. `tools/repo_hygiene/brokered_closeout.remove_worktree()`
+must still call `git worktree prune` after the removal attempt so stale
+registry entries are cleared even when the on-disk path has already
+disappeared, and `tools/repo_hygiene/test_brokered_closeout.py` keeps that
+behavior regression-tested. Missing, stale, hash-mismatched, or out-of-root
+recovery artifacts block prune.
 
 ### Gap 1 — Workflow Debt Gate (agent-side, fires regardless of hook)
 

@@ -1870,3 +1870,30 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low effort: keep the repo closeout workflow changes that made validation budgets and stale-worktree cleanup explicit.
 3. Low effort: use the current `master` branch as the next baseline for any new playback experiment.
 
+## Stale-worktree cleanup regression and threshold repeat check (2026-05-25)
+
+### Verified locally
+
+- I added a regression test in [`tools/repo_hygiene/test_brokered_closeout.py`](C:/!Layi%20Wkspc/MLV-App/tools/repo_hygiene/test_brokered_closeout.py) proving that `remove_worktree()` still clears Git's worktree registry with `git worktree prune` even if the on-disk detached worktree path has already been removed.
+- The new test covers the stale-registry case that blocked earlier closeout cleanup, so the prune-after-remove behavior is now locked into the repo's executable contract.
+- I reran the same `large_dual_iso.mlv` + `large_dual_iso_hq.marxml` threshold profile shape in a fresh scratch folder with `MLVAPP_PLAYBACK_SCALE_FACTOR=4`, `--frames 16`, and `--threads 1`.
+- Warm-window medians for the repeat set came back as:
+  - `run1`: `cadence_ms 23.70`, `render_thread_work_ms 23.00`, `render_thread_playback_scale_ms 0.50`
+  - `run2`: `cadence_ms 27.28`, `render_thread_work_ms 26.50`, `render_thread_playback_scale_ms 0.50`
+  - `run3`: `cadence_ms 17.66`, `render_thread_work_ms 16.00`, `render_thread_playback_scale_ms 0.00`
+  - `run4`: `cadence_ms 24.30`, `render_thread_work_ms 22.00`, `render_thread_playback_scale_ms 0.00`
+- Across-run medians of those warm medians were `cadence_ms 23.9969`, `render_thread_work_ms 22.5`, and `render_thread_playback_scale_ms 0.25`.
+- I compared that against the immediately prior threshold repeat set using the same warm-window calculation, which landed at `cadence_ms 28.1488`, `render_thread_work_ms 27.2501`, and `render_thread_playback_scale_ms 0.7499`.
+- The new repeat set looks faster, but the run-to-run spread is large enough that I am not claiming a new code win from the same code path; the current `PlaybackScaling.h` threshold remains the best kept playback change, and this pass did not uncover a safer follow-up optimization.
+
+### Cross-checked from prior analysis
+
+- The stale-worktree cleanup helper already had the right runtime shape (`worktree remove` followed by `worktree prune`); the new regression test makes that behavior explicit and durable.
+- The scale-threshold keep still appears to be the right baseline, but the measured deltas in this pass sit close to the normal variance band for this VM.
+
+### Ranked next steps
+
+1. High impact / low effort: keep the current `PlaybackScaling.h` threshold as the active playback baseline.
+2. Medium impact / medium effort: only profile the render-thread row loop behind the threshold if we need more headroom later.
+3. Low effort: preserve the new stale-worktree cleanup regression as part of the closeout safety net and avoid reintroducing prune regressions.
+

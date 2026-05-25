@@ -489,3 +489,11 @@
 - I committed the closeout-policy and smoke-suite fixes to the work-block branch, then re-ran the brokered finalize path successfully.
 - `master` is now the clean integrated branch, `fork/master` was pushed, and the local worktree is clean.
 - The last repo-closed blocker was stale closeout runtime/worktree metadata under `.claude-state/closeout/integration-worktrees`; deleting the generated path and pruning Git's worktree registry cleared it.
+
+## 2026-05-25 - stale-worktree prune regression and threshold repeat check
+
+- I added a regression test in `tools/repo_hygiene/test_brokered_closeout.py` proving that `remove_worktree()` still calls `git worktree prune` after a removal attempt, even when the detached worktree directory has already been deleted on disk.
+- I reran the same `large_dual_iso.mlv` + `large_dual_iso_hq.marxml` scale-threshold profile shape in a fresh scratch folder with `MLVAPP_PLAYBACK_SCALE_FACTOR=4`, `--frames 16`, and `--threads 1`.
+- The repeat set produced warm-window medians of `cadence_ms 23.70/27.28/17.66/24.30` across the four runs, with across-run medians of `cadence_ms 23.9969`, `render_thread_work_ms 22.5`, and `render_thread_playback_scale_ms 0.25`.
+- The immediately prior repeat set on the same code path landed at `cadence_ms 28.1488`, `render_thread_work_ms 27.2501`, and `render_thread_playback_scale_ms 0.7499`, so the new run looks better but still sits inside the kind of variance this VM has been showing.
+- I therefore kept the current `PlaybackScaling.h` threshold as the best playback baseline and did not treat the latest repeat set as a new code win.
