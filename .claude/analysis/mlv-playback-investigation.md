@@ -1919,3 +1919,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / low effort: treat the current `large_dual_iso` visible playback look as a portrait preview, not a stretch regression, unless a clean HQ/Auto run shows a different width/height ratio.
 3. Medium impact / medium effort: if we still want better GUI UX, investigate whether the fast preview quality tier is simply too low-fidelity for this clip shape, rather than chasing geometry that is already consistent.
 
+## Preferred visual smoke recipe (2026-05-25)
+
+### Verified locally
+
+- For the `large_dual_iso.mlv` fixture, the cleanest UX-facing smoke is `HQ x4` with a vertical stretch correction of `0.3333`, not the default `Fast` preview tier.
+- The working receipt recipe is:
+  - `stretchFactorX=1`
+  - `stretchFactorY=0.3333`
+  - `chromaSmooth=2`
+  - `patternNoise=1`
+- The useful runtime overrides for visual smoke are:
+  - `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`
+  - `MLVAPP_PLAYBACK_SCALE_FACTOR=4`
+- The GUI presentation should keep `scope=none` and `zebras=false` unless the user is explicitly testing overlays.
+
+### Cross-checked from prior analysis
+
+- `playback_processing=auto` on this receipt resolves to the `receipt` processing path.
+- The `master` build executable is available at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+
+### Ranked next steps
+
+1. High impact / low effort: use the `HQ x4` visual recipe above as the default starting point for new clip smoke tests.
+2. High impact / low effort: vary one clip at a time, keeping the receipt and environment overrides fixed so the visual result stays comparable.
+3. Medium impact / low effort: only drop to `Fast` when the goal is performance profiling rather than judging the frame’s final appearance.
+

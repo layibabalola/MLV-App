@@ -504,3 +504,10 @@
 - I confirmed the clean overlay-free visible smoke still used `render_thread_rendered_width=452` and `render_thread_rendered_height=567`, with `draw_frame_ready_prescaled_image_active=true`, `draw_frame_ready_image_ms=0`, `draw_frame_ready_overlay_ms=0`, and `draw_frame_ready_scopes_ms=0`.
 - The red/pink look from the earlier screenshots is explained by the explicit zebra/scope smoke settings, because those overlays intentionally recolor pixels and draw scopes on top of the frame.
 - The geometry helper in `MainWindow.cpp` preserves aspect ratio, so the current evidence points to a fast-preview / portrait-clip presentation issue rather than a stretch regression.
+
+## 2026-05-25 - preferred visual smoke recipe
+
+- For `large_dual_iso.mlv`, the best UX-facing smoke recipe is now `HQ x4` with `stretchFactorY=0.3333`, not the default fast preview path.
+- The working environment overrides are `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1` and `MLVAPP_PLAYBACK_SCALE_FACTOR=4`.
+- Keep `scope=none` and `zebras=false` when the goal is judging the frame itself rather than the overlay stack.
+- The build executable to launch for interactive poking is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
