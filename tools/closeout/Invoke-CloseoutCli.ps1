@@ -25,11 +25,11 @@ try {
     if ($env:CLOSEOUT_DISABLE_ADAPTER_HEARTBEAT -eq "1") {
         $heartbeatSeconds = 0
     }
-    $runner = @'
+$runner = @'
 import os
 import sys
-sys.path.insert(0, os.getcwd())
-from tools.repo_hygiene.brokered_closeout import bounded_closeout_cli_main
+sys.path.insert(0, os.path.join(os.getcwd(), "tools"))
+from repo_hygiene.brokered_closeout import bounded_closeout_cli_main
 raise SystemExit(bounded_closeout_cli_main(sys.argv[1:]))
 '@
     $runnerArgs = @("--repo-root", ".", "--") + $Arguments
