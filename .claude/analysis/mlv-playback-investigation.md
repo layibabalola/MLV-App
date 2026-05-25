@@ -1974,3 +1974,26 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / low effort: use `Auto Fix` on clips that show green/pink shadow cast before spending time judging geometry or color.
 3. Medium effort: if a clip still looks wrong after the auto-fix helper, vary only the receipt stretch factors and keep the scale override fixed so the visual diagnosis stays isolated.
 
+## Playback presets and auto-exposure caution (2026-05-25)
+
+### Verified locally
+
+- The app now starts in a sane visual state without manual cleanup because the persisted UI scale override is authoritative over the old `MLVAPP_PLAYBACK_SCALE_FACTOR` shell override.
+- The practical interactive presets are:
+  - sharpest paused view: `Playback Quality = HQ`, `Scale Factor = x1`
+  - smoothest playback: `Playback Quality = HQ`, `Scale Factor = x4`
+  - safest general browsing: `Playback Quality = Auto`, `Scale Factor = Auto`, `scope=none`, `zebras=false`
+- `RAW -> Auto Fix` is still the right explicit tool when a clip shows the classic green/pink raw-level cast.
+- I did **not** add silent automatic exposure correction on clip load. The existing `Exposure Correction` slider is display-referred and subjective, so making it auto-drive every clip would risk clipping highlights or flattening the look just to satisfy a histogram target.
+
+### Cross-checked from prior analysis
+
+- The user-guide guidance already treats `Exposure Correction` as a manual grade control, not a clip-autonomy control.
+- The raw black/white helpers are the safer place for true “clip looks wrong on open” automation because they restore metadata and fix sensor-domain mistakes rather than guessing taste.
+
+### Ranked next steps
+
+1. High impact / low effort: keep the new UI scale override and raw auto-fix helpers as the default clip-opening workflow.
+2. High impact / low effort: treat any future auto-exposure feature as an opt-in helper, not a silent default.
+3. Medium effort: if we later add auto-exposure, make it a “suggested starting point” based on histogram percentiles and clipping guardrails, not a hard rule that mutates every clip on open.
+
