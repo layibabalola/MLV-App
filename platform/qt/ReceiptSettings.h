@@ -70,6 +70,18 @@ public:
     void setAgx( bool on )                    {m_agx = on;}
     void setRawWhite( int value )             {m_rawWhite = value;}
     void setRawBlack( int value )             {m_rawBlack = value;}
+    void setLookAssistEnabled( bool on )      {m_lookAssistEnabled = on;}
+    void setLookAssistBaselineValid( bool on ){m_lookAssistBaselineValid = on;}
+    void setLookAssistBaselineExposure( int value )   {m_lookAssistBaselineExposure = value;}
+    void setLookAssistBaselineContrast( int value )    {m_lookAssistBaselineContrast = value;}
+    void setLookAssistBaselinePivot( int value )       {m_lookAssistBaselinePivot = value;}
+    void setLookAssistBaselineVibrance( int value )    {m_lookAssistBaselineVibrance = value;}
+    void setLookAssistBaselineShadows( int value )     {m_lookAssistBaselineShadows = value;}
+    void setLookAssistBaselineHighlights( int value )   {m_lookAssistBaselineHighlights = value;}
+    void setLookAssistBaselineRawBlack( int value )     {m_lookAssistBaselineRawBlack = value;}
+    void setLookAssistBaselineRawWhite( int value )     {m_lookAssistBaselineRawWhite = value;}
+    void setLookAssistBaselineStretchX( double value )  {m_lookAssistBaselineStretchX = value;}
+    void setLookAssistBaselineStretchY( double value )  {m_lookAssistBaselineStretchY = value;}
     void setTone( uint8_t value )             {m_tone = value;}
     void setToningStrength( uint8_t value )   {m_toningStrength = value;}
     void setFileName( QString fileName )      {m_fileName = fileName;}
@@ -228,6 +240,18 @@ public:
     bool agx( void ){return m_agx;}
     int rawWhite( void ) {return m_rawWhite;}
     int rawBlack( void ) {return m_rawBlack;}
+    bool lookAssistEnabled( void ) {return m_lookAssistEnabled;}
+    bool lookAssistBaselineValid( void ) {return m_lookAssistBaselineValid;}
+    int lookAssistBaselineExposure( void ) {return m_lookAssistBaselineExposure;}
+    int lookAssistBaselineContrast( void ) {return m_lookAssistBaselineContrast;}
+    int lookAssistBaselinePivot( void ) {return m_lookAssistBaselinePivot;}
+    int lookAssistBaselineVibrance( void ) {return m_lookAssistBaselineVibrance;}
+    int lookAssistBaselineShadows( void ) {return m_lookAssistBaselineShadows;}
+    int lookAssistBaselineHighlights( void ) {return m_lookAssistBaselineHighlights;}
+    int lookAssistBaselineRawBlack( void ) {return m_lookAssistBaselineRawBlack;}
+    int lookAssistBaselineRawWhite( void ) {return m_lookAssistBaselineRawWhite;}
+    double lookAssistBaselineStretchX( void ) {return m_lookAssistBaselineStretchX;}
+    double lookAssistBaselineStretchY( void ) {return m_lookAssistBaselineStretchY;}
     uint8_t tone( void ) {return m_tone;}
     uint8_t toningStrength( void ){return m_toningStrength;}
     QString fileName( void ){return m_fileName;}
@@ -340,6 +364,18 @@ private:
     bool m_agx;
     int m_rawWhite;
     int m_rawBlack;
+    bool m_lookAssistEnabled;
+    bool m_lookAssistBaselineValid;
+    int m_lookAssistBaselineExposure;
+    int m_lookAssistBaselineContrast;
+    int m_lookAssistBaselinePivot;
+    int m_lookAssistBaselineVibrance;
+    int m_lookAssistBaselineShadows;
+    int m_lookAssistBaselineHighlights;
+    int m_lookAssistBaselineRawBlack;
+    int m_lookAssistBaselineRawWhite;
+    double m_lookAssistBaselineStretchX;
+    double m_lookAssistBaselineStretchY;
     uint8_t m_tone;
     uint8_t m_toningStrength;
     QString m_fileName;

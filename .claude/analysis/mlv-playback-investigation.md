@@ -2052,3 +2052,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. High impact / low effort: keep raw black/white auto-fix separate from creative exposure/tone shaping.
 3. Medium effort: if a future auto-look is added, surface it as a visible “assist” with a reset button and a toggle state, not as a silent mutation.
 
+## 2026-05-25 - look assist geometry guardrail
+
+- The first look-assist pass went too far by also auto-selecting vertical stretch from `getMlvAspectRatio()`.
+- That turned a pure appearance helper into a geometry mutator, which is the wrong layer for clip-specific aspect decisions.
+- The corrected rule is: Look Assist may auto-fix raw levels and tone, but it must not silently change the frame shape or stretch preset.
+- If geometry ever needs an assist mode, it should be a separate explicit `Auto Aspect` action with per-clip opt-in, not part of Look Assist.
+
+## 2026-05-25 - Qt/MinGW build and GUI smoke blocker resolved
+
+### Verified locally
+
+- The local runnable Windows build must use the internally consistent Qt/MinGW pair:
+  - `C:\Qt\6.10.2\mingw_64\bin\qmake.exe`
+  - `C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe`
+- Do not let LLVM/Clang-built objects remain in `platform/qt/build-release`. The stale link failure showed `std::__1` symbols mixed into a MinGW/libstdc++ link. If `mingw32-make clean` cannot remove objects because `rm` is unavailable, delete the generated build outputs directly before rebuilding.
+- Deploy the release folder with `windeployqt --release --compiler-runtime`, then ensure the MinGW/OpenMP runtime DLLs are present beside `MLVApp.exe`, especially `libgomp-1.dll`.
+- The visible profile shutdown crash was a real app lifetime bug, not just a deployment issue. `MainWindow::~MainWindow()` now stops playback prep/render/audio and frees the active `mlvObject_t` plus `processingObject_t`, allowing the C-side cache/prefetch threads to join before process teardown.
+- The profile paint probe now removes its event filter and disarms per-frame stack pointers after paint or timeout, preventing a later paint event from touching a dead `QEventLoop`.
+- Look Assist is still auto-on for normal GUI clip load, but `--profile-playback --receipt ...` disables Look Assist for old receipts that do not explicitly contain `lookAssistEnabled`. This keeps profiling deterministic and prevents old smoke fixtures from silently changing processing mode.
+- Look Assist must not restore or mutate stretch/aspect. It may adjust raw levels and tone controls, but geometry belongs to the receipt or to an explicit future `Auto Aspect` action.
+
+### Validation
+
+- Full Qt app rebuild succeeded with Qt 6.10.2 and MinGW 13.1.
+- GUI profile trigger matrix passed for hidden/visible and frameReady/paint-wait modes: all four runs exited `0`, wrote JSON, and measured 2/2 frames.
+- Console suite with `MLVAPP_PROFILE_EXE=platform/qt/build-release/release/MLVApp.exe` passed: 67 tests, 865 assertions, 1 expected batch-export skip, 0 failures.
+
+### Guardrails
+
+- Future GUI smoke recipes should not judge appearance with zebras/scopes enabled unless the overlay stack itself is under test.
+- Future profiling receipts that intentionally want Look Assist should save an explicit `<lookAssistEnabled>1</lookAssistEnabled>` element.
+- If aspect ratio regresses again, inspect Look Assist restore/copy paths first and confirm no stretch combo or `stretchFactorX/Y` write is coupled to the appearance helper.

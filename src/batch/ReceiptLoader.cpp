@@ -132,6 +132,14 @@ void ReceiptLoader::printCdngSettings(const ReceiptSettings *receipt)
     /* --- Raw black/white levels --- */
     BatchLogger::out(QStringLiteral("[BATCH]   rawBlack          = %1\n").arg( r->rawBlack() ));
     BatchLogger::out(QStringLiteral("[BATCH]   rawWhite          = %1\n").arg( r->rawWhite() ));
+    BatchLogger::out(QStringLiteral("[BATCH]   lookAssistEnabled = %1\n")
+                .arg( r->lookAssistEnabled() ? QStringLiteral("true")
+                                             : QStringLiteral("false") ));
+    BatchLogger::out(QStringLiteral("[BATCH]   lookAssistBaseVal = %1\n")
+                .arg( r->lookAssistBaselineValid() ? QStringLiteral("true")
+                                                   : QStringLiteral("false") ));
+    BatchLogger::out(QStringLiteral("[BATCH]   lookAssistStretchX = %1\n").arg( r->lookAssistBaselineStretchX(), 0, 'f', 4 ));
+    BatchLogger::out(QStringLiteral("[BATCH]   lookAssistStretchY = %1\n").arg( r->lookAssistBaselineStretchY(), 0, 'f', 4 ));
 
     /* --- Cut in/out --- */
     BatchLogger::out(QStringLiteral("[BATCH]   cutIn             = %1\n").arg( r->cutIn() ));
@@ -580,6 +588,66 @@ void ReceiptLoader::parseXmlElements(QXmlStreamReader *Rxml,
         else if( Rxml->isStartElement() && Rxml->name() == QString( "rawWhite" ) )
         {
             receipt->setRawWhite( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistEnabled" ) )
+        {
+            receipt->setLookAssistEnabled( (bool)Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineValid" ) )
+        {
+            receipt->setLookAssistBaselineValid( (bool)Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineExposure" ) )
+        {
+            receipt->setLookAssistBaselineExposure( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineContrast" ) )
+        {
+            receipt->setLookAssistBaselineContrast( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselinePivot" ) )
+        {
+            receipt->setLookAssistBaselinePivot( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineVibrance" ) )
+        {
+            receipt->setLookAssistBaselineVibrance( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineShadows" ) )
+        {
+            receipt->setLookAssistBaselineShadows( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineHighlights" ) )
+        {
+            receipt->setLookAssistBaselineHighlights( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineRawBlack" ) )
+        {
+            receipt->setLookAssistBaselineRawBlack( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineRawWhite" ) )
+        {
+            receipt->setLookAssistBaselineRawWhite( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineStretchX" ) )
+        {
+            receipt->setLookAssistBaselineStretchX( Rxml->readElementText().toDouble() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineStretchY" ) )
+        {
+            receipt->setLookAssistBaselineStretchY( Rxml->readElementText().toDouble() );
             Rxml->readNext();
         }
         else if( Rxml->isStartElement() && Rxml->name() == QString( "tone" ) )
