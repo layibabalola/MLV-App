@@ -270,6 +270,7 @@ private slots:
     void on_actionExport_triggered();
     void on_actionExportCurrentFrame_triggered();
     void on_checkBoxHighLightReconstruction_toggled(bool checked);
+    void on_checkBoxLookAssistEnable_clicked(bool checked);
     void on_comboBoxUseCameraMatrix_currentIndexChanged(int index);
     void on_checkBoxCreativeAdjustments_toggled(bool checked);
     void on_checkBoxExrMode_toggled(bool checked);
@@ -915,6 +916,9 @@ private:
     double getHorizontalStretchFactor( bool downScale );
     double getVerticalStretchFactor( bool downScale );
     void setWhiteBalanceFromMlv( ReceiptSettings *sliders );
+    void captureLookAssistBaseline( ReceiptSettings *receipt );
+    void restoreLookAssistBaseline( ReceiptSettings *receipt );
+    void applyLookAssistToReceipt( ReceiptSettings *receipt );
     void setGradientMask( void );
     uint16_t autoCorrectRawBlackLevel( void );
     bool isRawBlackLevelWrong( void );

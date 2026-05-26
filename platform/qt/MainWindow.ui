@@ -2787,6 +2787,19 @@ QGroupBox::indicator:checked:disabled {
                      </property>
                     </widget>
                    </item>
+                   <item row="2" column="0" colspan="4">
+                    <widget class="QCheckBox" name="checkBoxLookAssistEnable">
+                     <property name="toolTip">
+                      <string>Automatically apply a conservative, clip-scoped look when the clip loads. This does not change the frame geometry or stretch preset. Turn off to restore the stored clip settings.</string>
+                     </property>
+                     <property name="text">
+                      <string>Auto Look Assist</string>
+                     </property>
+                     <property name="checked">
+                      <bool>true</bool>
+                     </property>
+                    </widget>
+                   </item>
                   </layout>
                  </item>
                 </layout>

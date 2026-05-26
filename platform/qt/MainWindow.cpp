@@ -18,6 +18,8 @@ extern "C" {
 #include <QShortcut>
 #include <QThread>
 #include <QTime>
+#include <QByteArray>
+#include <QSignalBlocker>
 #include <QSettings>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -39,6 +41,173 @@ extern "C" {
 #include <math.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+
+namespace
+{
+enum class LookAssistScene
+{
+    Night,
+    ArtificialLights,
+    Shade,
+    BrightSun
+};
+
+struct LookAssistStats
+{
+    double median = 0.0;
+    double p05 = 0.0;
+    double p95 = 0.0;
+    double p99 = 0.0;
+    double clipLow = 0.0;
+    double clipHigh = 0.0;
+    double dynamicRange = 0.0;
+};
+
+struct LookAssistPreset
+{
+    int exposure = 0;
+    int contrast = 0;
+    int pivot = 75;
+    int shadows = 0;
+    int highlights = 0;
+    int vibrance = 0;
+};
+
+static double lookAssistPercentile( const int *histogram, int totalSamples, double fraction )
+{
+    if( !histogram || totalSamples <= 0 ) return 0.0;
+
+    const int target = qBound( 1, (int)ceil( fraction * totalSamples ), totalSamples );
+    int cumulative = 0;
+    for( int i = 0; i < 256; ++i )
+    {
+        cumulative += histogram[i];
+        if( cumulative >= target ) return (double)i;
+    }
+    return 255.0;
+}
+
+static LookAssistStats analyzeLookAssistThumbnail( const unsigned char *rgb, int width, int height )
+{
+    LookAssistStats stats;
+    if( !rgb || width <= 0 || height <= 0 ) return stats;
+
+    int histogram[256] = { 0 };
+    const int totalSamples = width * height;
+
+    for( int i = 0; i < totalSamples; ++i )
+    {
+        const int base = i * 3;
+        const int r = rgb[base + 0];
+        const int g = rgb[base + 1];
+        const int b = rgb[base + 2];
+        const int luma = qBound( 0, ( 54 * r + 183 * g + 19 * b ) >> 8, 255 );
+        histogram[luma]++;
+    }
+
+    stats.median = lookAssistPercentile( histogram, totalSamples, 0.50 );
+    stats.p05 = lookAssistPercentile( histogram, totalSamples, 0.05 );
+    stats.p95 = lookAssistPercentile( histogram, totalSamples, 0.95 );
+    stats.p99 = lookAssistPercentile( histogram, totalSamples, 0.99 );
+    stats.dynamicRange = stats.p95 - stats.p05;
+
+    int clipLow = histogram[0] + histogram[1] + histogram[2] + histogram[3];
+    int clipHigh = histogram[252] + histogram[253] + histogram[254] + histogram[255];
+    stats.clipLow = (double)clipLow / (double)totalSamples;
+    stats.clipHigh = (double)clipHigh / (double)totalSamples;
+    return stats;
+}
+
+static LookAssistScene classifyLookAssistScene( const LookAssistStats &stats )
+{
+    if( stats.p95 >= 220.0 || stats.clipHigh > 0.015 )
+        return LookAssistScene::BrightSun;
+
+    if( stats.median < 60.0 )
+    {
+        if( stats.clipHigh > 0.006 || stats.p99 >= 236.0 || stats.p95 >= 185.0 )
+            return LookAssistScene::ArtificialLights;
+        return LookAssistScene::Night;
+    }
+
+    return LookAssistScene::Shade;
+}
+
+static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const LookAssistStats &stats )
+{
+    LookAssistPreset preset;
+    int targetMedian = 110;
+
+    switch( scene )
+    {
+    case LookAssistScene::Night:
+        targetMedian = 88;
+        preset.contrast = 8;
+        preset.pivot = 46;
+        preset.shadows = 24;
+        preset.highlights = -18;
+        preset.vibrance = 3;
+        break;
+    case LookAssistScene::ArtificialLights:
+        targetMedian = 96;
+        preset.contrast = 10;
+        preset.pivot = 50;
+        preset.shadows = 10;
+        preset.highlights = -24;
+        preset.vibrance = 2;
+        break;
+    case LookAssistScene::Shade:
+        targetMedian = 112;
+        preset.contrast = 9;
+        preset.pivot = 55;
+        preset.shadows = 12;
+        preset.highlights = -12;
+        preset.vibrance = 5;
+        break;
+    case LookAssistScene::BrightSun:
+        targetMedian = 118;
+        preset.contrast = 6;
+        preset.pivot = 60;
+        preset.shadows = 4;
+        preset.highlights = -30;
+        preset.vibrance = 0;
+        break;
+    }
+
+    const double sourceMedian = qMax( 1.0, stats.median );
+    int exposure = (int)qRound( log( targetMedian / sourceMedian ) / log( 2.0 ) * 100.0 );
+    exposure = qBound( -120, exposure, 140 );
+    if( scene == LookAssistScene::BrightSun )
+        exposure = qMin( exposure, 0 );
+    if( scene == LookAssistScene::Night )
+        exposure = qMax( exposure, 0 );
+
+    preset.exposure = exposure;
+
+    if( stats.dynamicRange < 100.0 ) preset.contrast += 6;
+    else if( stats.dynamicRange < 130.0 ) preset.contrast += 3;
+    else if( stats.dynamicRange > 180.0 ) preset.contrast -= 4;
+
+    if( stats.p05 < 18.0 ) preset.shadows += 8;
+    if( stats.p05 < 12.0 ) preset.shadows += 6;
+    if( stats.clipHigh > 0.010 ) preset.highlights -= 8;
+    if( stats.clipHigh > 0.020 ) preset.highlights -= 8;
+
+    if( scene == LookAssistScene::BrightSun )
+    {
+        preset.shadows = qMin( preset.shadows, 6 );
+        preset.vibrance = qMin( preset.vibrance, 2 );
+    }
+
+    preset.contrast = qBound( -100, preset.contrast, 100 );
+    preset.pivot = qBound( 0, preset.pivot, 100 );
+    preset.shadows = qBound( -100, preset.shadows, 100 );
+    preset.highlights = qBound( -100, preset.highlights, 100 );
+    preset.vibrance = qBound( -100, preset.vibrance, 100 );
+    return preset;
+}
+
+}
 
 #ifdef Q_OS_MACX
 #include "AvfLibWrapper.h"
@@ -95,6 +264,23 @@ extern "C" {
 
 static uint8_t scanZebrasRgb8(const uint8_t *rgbData, int width, int height);
 static uint8_t applyZebrasToImage( QImage *image, bool enableZebras );
+static bool receiptFileDeclaresLookAssistEnabled( const QString &path )
+{
+    QFile file(path);
+    if( !file.open( QIODevice::ReadOnly | QIODevice::Text ) ) return false;
+
+    QXmlStreamReader reader(&file);
+    while( !reader.atEnd() )
+    {
+        reader.readNext();
+        if( reader.isStartElement()
+         && reader.name() == QStringLiteral("lookAssistEnabled") )
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* spaceTag argument options: ffmpeg color space tag number compliant */
 #define SPACETAG_REC709   1   /* rec709 color space */
@@ -358,6 +544,13 @@ public:
         if( m_paintNs ) m_paintNs->store(-1);
     }
 
+    void disarm()
+    {
+        m_armed = false;
+        m_loop = nullptr;
+        m_paintNs = nullptr;
+    }
+
 protected:
     bool eventFilter(QObject * watched, QEvent * event) override
     {
@@ -370,6 +563,7 @@ protected:
                 m_paintNs->store(m_clock->nsecsElapsed());
             }
             if( m_loop ) m_loop->quit();
+            disarm();
         }
         return QObject::eventFilter(watched, event);
     }
@@ -379,6 +573,36 @@ private:
     QEventLoop * m_loop = nullptr;
     std::atomic<qint64> * m_paintNs = nullptr;
     bool m_armed = false;
+};
+
+class ScopedEventFilterInstall
+{
+public:
+    ~ScopedEventFilterInstall()
+    {
+        if( m_watched && m_filter )
+        {
+            m_watched->removeEventFilter( m_filter );
+        }
+    }
+
+    void install( QObject * watched, QObject * filter )
+    {
+        if( m_watched && m_filter )
+        {
+            m_watched->removeEventFilter( m_filter );
+        }
+        m_watched = watched;
+        m_filter = filter;
+        if( m_watched && m_filter )
+        {
+            m_watched->installEventFilter( m_filter );
+        }
+    }
+
+private:
+    QObject * m_watched = nullptr;
+    QObject * m_filter = nullptr;
 };
 }
 
@@ -544,6 +768,21 @@ MainWindow::~MainWindow()
     m_pRenderThread->stop();
     while( !m_pRenderThread->isFinished() ) {}
     delete m_pRenderThread;
+
+    if( m_pAudioPlayback ) m_pAudioPlayback->stop();
+
+    if( m_pMlvObject )
+    {
+        freeMlvObject( m_pMlvObject );
+        m_pMlvObject = nullptr;
+        m_fileLoaded = false;
+    }
+
+    if( m_pProcessingObject )
+    {
+        freeProcessingObject( m_pProcessingObject );
+        m_pProcessingObject = nullptr;
+    }
 
     //Save settings
     writeSettings();
@@ -2218,6 +2457,12 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             return 5;
         }
 
+        if( !receiptFileDeclaresLookAssistEnabled( options.receiptPath ) )
+        {
+            // Profiling old fixture/user receipts should measure the receipt as
+            // authored; GUI-created receipts can opt in explicitly.
+            receipt.setLookAssistEnabled( false );
+        }
         setSliders( &receipt, false );
         m_frameChanged = true;
         trace(QStringLiteral("receipt-complete"));
@@ -2280,9 +2525,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     monotonicClock.start();
     qint64 previousCompletionNs = -1;
     PlaybackPaintProbe paintProbe(&monotonicClock);
+    ScopedEventFilterInstall paintProbeInstall;
     if( options.waitForPaint && ui->graphicsView && ui->graphicsView->viewport() )
     {
-        ui->graphicsView->viewport()->installEventFilter(&paintProbe);
+        paintProbeInstall.install( ui->graphicsView->viewport(), &paintProbe );
     }
 
     auto renderFrameIndex = [&](int frameIndex, int sampleIndex, bool warmup, QString * failureReason) -> bool
@@ -2368,6 +2614,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             }
             disconnect(paintTimeoutConnection);
             paintCompletionNs = paintNs.load();
+            paintProbe.disarm();
         }
 
         if( !warmup )
@@ -6418,6 +6665,66 @@ void MainWindow::readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings
             receipt->setRawWhite( Rxml->readElementText().toInt() );
             Rxml->readNext();
         }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistEnabled" ) )
+        {
+            receipt->setLookAssistEnabled( (bool)Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineValid" ) )
+        {
+            receipt->setLookAssistBaselineValid( (bool)Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineExposure" ) )
+        {
+            receipt->setLookAssistBaselineExposure( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineContrast" ) )
+        {
+            receipt->setLookAssistBaselineContrast( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselinePivot" ) )
+        {
+            receipt->setLookAssistBaselinePivot( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineVibrance" ) )
+        {
+            receipt->setLookAssistBaselineVibrance( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineShadows" ) )
+        {
+            receipt->setLookAssistBaselineShadows( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineHighlights" ) )
+        {
+            receipt->setLookAssistBaselineHighlights( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineRawBlack" ) )
+        {
+            receipt->setLookAssistBaselineRawBlack( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineRawWhite" ) )
+        {
+            receipt->setLookAssistBaselineRawWhite( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineStretchX" ) )
+        {
+            receipt->setLookAssistBaselineStretchX( Rxml->readElementText().toDouble() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineStretchY" ) )
+        {
+            receipt->setLookAssistBaselineStretchY( Rxml->readElementText().toDouble() );
+            Rxml->readNext();
+        }
         else if( Rxml->isStartElement() && Rxml->name() == QString( "tone" ) )
         {
             receipt->setTone( Rxml->readElementText().toInt() );
@@ -6618,6 +6925,16 @@ void MainWindow::writeXmlElementsToFile(QXmlStreamWriter *xmlWriter, ReceiptSett
     xmlWriter->writeTextElement( "grainStrength",           QString( "%1" ).arg( receipt->grainStrength() ) );
     xmlWriter->writeTextElement( "grainLumaWeight",         QString( "%1" ).arg( receipt->grainLumaWeight() ) );
     xmlWriter->writeTextElement( "rawFixesEnabled",         QString( "%1" ).arg( receipt->rawFixesEnabled() ) );
+    xmlWriter->writeTextElement( "lookAssistEnabled",       QString( "%1" ).arg( receipt->lookAssistEnabled() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineValid", QString( "%1" ).arg( receipt->lookAssistBaselineValid() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineExposure", QString( "%1" ).arg( receipt->lookAssistBaselineExposure() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineContrast", QString( "%1" ).arg( receipt->lookAssistBaselineContrast() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselinePivot",  QString( "%1" ).arg( receipt->lookAssistBaselinePivot() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineVibrance", QString( "%1" ).arg( receipt->lookAssistBaselineVibrance() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineShadows", QString( "%1" ).arg( receipt->lookAssistBaselineShadows() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineHighlights", QString( "%1" ).arg( receipt->lookAssistBaselineHighlights() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineRawBlack", QString( "%1" ).arg( receipt->lookAssistBaselineRawBlack() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineRawWhite", QString( "%1" ).arg( receipt->lookAssistBaselineRawWhite() ) );
     xmlWriter->writeTextElement( "verticalStripes",         QString( "%1" ).arg( receipt->verticalStripes() ) );
     xmlWriter->writeTextElement( "focusPixels",             QString( "%1" ).arg( receipt->focusPixels() ) );
     xmlWriter->writeTextElement( "fpiMethod",               QString( "%1" ).arg( receipt->fpiMethod() ) );
@@ -6642,6 +6959,8 @@ void MainWindow::writeXmlElementsToFile(QXmlStreamWriter *xmlWriter, ReceiptSett
     xmlWriter->writeTextElement( "darkFrameEnabled",        QString( "%1" ).arg( receipt->darkFrameEnabled() ) );
     xmlWriter->writeTextElement( "rawBlack",                QString( "%1" ).arg( receipt->rawBlack() ) );
     xmlWriter->writeTextElement( "rawWhite",                QString( "%1" ).arg( receipt->rawWhite() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineStretchX", QString( "%1" ).arg( receipt->lookAssistBaselineStretchX() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineStretchY", QString( "%1" ).arg( receipt->lookAssistBaselineStretchY() ) );
     xmlWriter->writeTextElement( "tone",                    QString( "%1" ).arg( receipt->tone() ) );
     xmlWriter->writeTextElement( "toningStrength",          QString( "%1" ).arg( receipt->toningStrength() ) );
     xmlWriter->writeTextElement( "lutEnabled",              QString( "%1" ).arg( receipt->lutEnabled() ) );
@@ -6732,6 +7051,8 @@ void MainWindow::deleteSession()
     ui->checkBoxGradientEnable->setChecked( false );
     ui->checkBoxGradientEnable->setEnabled( false );
     ui->toolButtonGradientPaint->setEnabled( false );
+    ui->checkBoxLookAssistEnable->setChecked( false );
+    ui->checkBoxLookAssistEnable->setEnabled( false );
 
     //Cut In & Out
     initCutInOut( -1 );
@@ -7095,9 +7416,17 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
     {
         ui->horizontalSliderRawBlack->setValue( receipt->rawBlack() );
     }
+    else if( m_pMlvObject )
+    {
+        ui->horizontalSliderRawBlack->setValue( (int)getMlvOriginalBlackLevel( m_pMlvObject ) * 10 );
+    }
     if( receipt->rawWhite() != -1 )
     {
         ui->horizontalSliderRawWhite->setValue( receipt->rawWhite() );
+    }
+    else if( m_pMlvObject )
+    {
+        ui->horizontalSliderRawWhite->setValue( (int)getMlvOriginalWhiteLevel( m_pMlvObject ) );
     }
 
     m_pMlvObject->current_cached_frame_active = 0;
@@ -7116,7 +7445,139 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
     ui->checkBoxVidstabTripod->setChecked( receipt->vidStabTripod() );
     on_checkBoxVidstabTripod_toggled( receipt->vidStabTripod() );
 
+    {
+        const bool lookAssistEnabled = receipt->lookAssistEnabled();
+        QSignalBlocker lookAssistBlocker( ui->checkBoxLookAssistEnable );
+        ui->checkBoxLookAssistEnable->setEnabled( m_fileLoaded );
+        ui->checkBoxLookAssistEnable->setChecked( lookAssistEnabled );
+    }
+
+    if( m_fileLoaded && receipt->lookAssistEnabled() )
+    {
+        if( receipt->lookAssistBaselineValid() )
+            restoreLookAssistBaseline( receipt );
+        else
+            captureLookAssistBaseline( receipt );
+
+        applyLookAssistToReceipt( receipt );
+    }
+    else if( receipt->lookAssistBaselineValid() )
+    {
+        restoreLookAssistBaseline( receipt );
+    }
+
     m_setSliders = false;
+}
+
+void MainWindow::captureLookAssistBaseline( ReceiptSettings *receipt )
+{
+    if( !receipt ) return;
+
+    receipt->setLookAssistBaselineExposure( receipt->exposure() );
+    receipt->setLookAssistBaselineContrast( receipt->contrast() );
+    receipt->setLookAssistBaselinePivot( receipt->pivot() );
+    receipt->setLookAssistBaselineVibrance( receipt->vibrance() );
+    receipt->setLookAssistBaselineShadows( receipt->shadows() );
+    receipt->setLookAssistBaselineHighlights( receipt->highlights() );
+    receipt->setLookAssistBaselineStretchX( getHorizontalStretchFactor( true ) );
+    receipt->setLookAssistBaselineStretchY( getVerticalStretchFactor( true ) );
+
+    if( receipt->rawBlack() != -1 )
+        receipt->setLookAssistBaselineRawBlack( receipt->rawBlack() );
+    else if( m_pMlvObject )
+        receipt->setLookAssistBaselineRawBlack( (int)getMlvOriginalBlackLevel( m_pMlvObject ) * 10 );
+    else
+        receipt->setLookAssistBaselineRawBlack( -1 );
+
+    if( receipt->rawWhite() != -1 )
+        receipt->setLookAssistBaselineRawWhite( receipt->rawWhite() );
+    else if( m_pMlvObject )
+        receipt->setLookAssistBaselineRawWhite( (int)getMlvOriginalWhiteLevel( m_pMlvObject ) );
+    else
+        receipt->setLookAssistBaselineRawWhite( -1 );
+
+    receipt->setLookAssistBaselineValid( true );
+}
+
+void MainWindow::restoreLookAssistBaseline( ReceiptSettings *receipt )
+{
+    if( !receipt || !receipt->lookAssistBaselineValid() ) return;
+
+    receipt->setExposure( receipt->lookAssistBaselineExposure() );
+    receipt->setContrast( receipt->lookAssistBaselineContrast() );
+    receipt->setPivot( receipt->lookAssistBaselinePivot() );
+    receipt->setVibrance( receipt->lookAssistBaselineVibrance() );
+    receipt->setShadows( receipt->lookAssistBaselineShadows() );
+    receipt->setHighlights( receipt->lookAssistBaselineHighlights() );
+    receipt->setRawBlack( receipt->lookAssistBaselineRawBlack() );
+    receipt->setRawWhite( receipt->lookAssistBaselineRawWhite() );
+
+    ui->horizontalSliderExposure->setValue( receipt->exposure() );
+    ui->horizontalSliderContrast->setValue( receipt->contrast() );
+    ui->horizontalSliderPivot->setValue( receipt->pivot() );
+    ui->horizontalSliderVibrance->setValue( receipt->vibrance() );
+    ui->horizontalSliderShadows->setValue( receipt->shadows() );
+    ui->horizontalSliderHighlights->setValue( receipt->highlights() );
+    if( receipt->rawBlack() != -1 )
+        ui->horizontalSliderRawBlack->setValue( receipt->rawBlack() );
+    if( receipt->rawWhite() != -1 )
+        ui->horizontalSliderRawWhite->setValue( receipt->rawWhite() );
+}
+
+void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
+{
+    if( !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() ) return;
+
+    // Keep the technical raw fix in sync with the auto look.
+    on_toolButtonRawLevelsAutoFix_clicked();
+    // Leave clip geometry alone here. Look Assist should improve the image
+    // balance without silently changing the frame shape or stretch preset.
+
+    const int raw_w = m_pMlvObject->RAWI.xRes;
+    const int raw_h = m_pMlvObject->RAWI.yRes;
+    if( raw_w <= 0 || raw_h <= 0 ) return;
+
+    int downscaleFactor = 8;
+    if( raw_w > 4000 || raw_h > 2500 ) downscaleFactor = 12;
+    else if( raw_w > 2800 || raw_h > 1900 ) downscaleFactor = 10;
+    else if( raw_w > 1800 || raw_h > 1200 ) downscaleFactor = 8;
+    else downscaleFactor = 6;
+
+    const int width = raw_w / downscaleFactor;
+    const int height = raw_h / downscaleFactor;
+    if( width <= 0 || height <= 0 ) return;
+
+    QByteArray thumbnail;
+    thumbnail.resize( width * height * 3 );
+    get_area_average_downscale_thumnail( m_pMlvObject,
+                                         ui->horizontalSliderPosition->value(),
+                                         downscaleFactor,
+                                         QThread::idealThreadCount(),
+                                         reinterpret_cast<unsigned char *>( thumbnail.data() ) );
+
+    const LookAssistStats stats = analyzeLookAssistThumbnail(
+                reinterpret_cast<const unsigned char *>( thumbnail.constData() ),
+                width,
+                height );
+
+    if( stats.median <= 0.0 ) return;
+
+    const LookAssistScene scene = classifyLookAssistScene( stats );
+    const LookAssistPreset preset = presetForLookAssistScene( scene, stats );
+
+    receipt->setExposure( preset.exposure );
+    receipt->setContrast( preset.contrast );
+    receipt->setPivot( preset.pivot );
+    receipt->setVibrance( preset.vibrance );
+    receipt->setShadows( preset.shadows );
+    receipt->setHighlights( preset.highlights );
+
+    ui->horizontalSliderExposure->setValue( preset.exposure );
+    ui->horizontalSliderContrast->setValue( preset.contrast );
+    ui->horizontalSliderPivot->setValue( preset.pivot );
+    ui->horizontalSliderVibrance->setValue( preset.vibrance );
+    ui->horizontalSliderShadows->setValue( preset.shadows );
+    ui->horizontalSliderHighlights->setValue( preset.highlights );
 }
 
 void MainWindow::resetSliders( void )
@@ -7199,6 +7660,7 @@ void MainWindow::setReceipt( ReceiptSettings *receipt )
     receipt->setGrainLumaWeight( ui->horizontalSliderGrainLumaWeight->value() );
 
     receipt->setRawFixesEnabled( ui->checkBoxRawFixEnable->isChecked() );
+    receipt->setLookAssistEnabled( ui->checkBoxLookAssistEnable->isChecked() );
     receipt->setVerticalStripes( toolButtonVerticalStripesCurrentIndex() );
     receipt->setFocusPixels( toolButtonFocusPixelsCurrentIndex() );
     receipt->setFpiMethod( toolButtonFocusPixelsIntMethodCurrentIndex() );
@@ -7352,6 +7814,21 @@ void MainWindow::replaceReceipt(ReceiptSettings *receiptTarget, ReceiptSettings 
     if( paste && cdui->checkBoxDualIso->isChecked() )          receiptTarget->setDualIsoBlack( receiptSource->dualIsoBlack() );
     if( paste && cdui->checkBoxRawBlackLevel->isChecked() )    receiptTarget->setRawBlack( receiptSource->rawBlack() );
     if( paste && cdui->checkBoxRawWhiteLevel->isChecked() )    receiptTarget->setRawWhite( receiptSource->rawWhite() );
+    if( paste && cdui->checkBoxRawCorrectEnable->isChecked() )
+    {
+        receiptTarget->setLookAssistEnabled( receiptSource->lookAssistEnabled() );
+        receiptTarget->setLookAssistBaselineValid( receiptSource->lookAssistBaselineValid() );
+        receiptTarget->setLookAssistBaselineExposure( receiptSource->lookAssistBaselineExposure() );
+        receiptTarget->setLookAssistBaselineContrast( receiptSource->lookAssistBaselineContrast() );
+        receiptTarget->setLookAssistBaselinePivot( receiptSource->lookAssistBaselinePivot() );
+        receiptTarget->setLookAssistBaselineVibrance( receiptSource->lookAssistBaselineVibrance() );
+        receiptTarget->setLookAssistBaselineShadows( receiptSource->lookAssistBaselineShadows() );
+        receiptTarget->setLookAssistBaselineHighlights( receiptSource->lookAssistBaselineHighlights() );
+        receiptTarget->setLookAssistBaselineRawBlack( receiptSource->lookAssistBaselineRawBlack() );
+        receiptTarget->setLookAssistBaselineRawWhite( receiptSource->lookAssistBaselineRawWhite() );
+        receiptTarget->setLookAssistBaselineStretchX( receiptSource->lookAssistBaselineStretchX() );
+        receiptTarget->setLookAssistBaselineStretchY( receiptSource->lookAssistBaselineStretchY() );
+    }
 
     receiptTarget->setDeflickerTarget( receiptSource->deflickerTarget() );
 
@@ -12353,6 +12830,7 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
 
     ui->toolButtonRawBlackAutoCorrect->setEnabled( checked && isRawBlackLevelWrong() );
     ui->toolButtonRawLevelsAutoFix->setEnabled( checked );
+    ui->checkBoxLookAssistEnable->setEnabled( checked );
     ui->RawBlackLabel->setEnabled( checked );
     ui->horizontalSliderRawBlack->setEnabled( checked );
     ui->label_RawBlackVal->setEnabled( checked );
@@ -12362,6 +12840,29 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     on_horizontalSliderRawBlack_valueChanged( ui->horizontalSliderRawBlack->value() );
     on_horizontalSliderRawWhite_valueChanged( ui->horizontalSliderRawWhite->value() );
     applyEffectiveDualIsoPlaybackSettings();
+}
+
+void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
+{
+    if( !m_fileLoaded || !ACTIVE_RECEIPT ) return;
+
+    ACTIVE_RECEIPT->setLookAssistEnabled( checked );
+
+    if( checked )
+    {
+        if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
+            restoreLookAssistBaseline( ACTIVE_RECEIPT );
+        else
+            captureLookAssistBaseline( ACTIVE_RECEIPT );
+
+        applyLookAssistToReceipt( ACTIVE_RECEIPT );
+    }
+    else if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
+    {
+        restoreLookAssistBaseline( ACTIVE_RECEIPT );
+    }
+
+    setReceipt( ACTIVE_RECEIPT );
 }
 
 //En-/disable all LUT processing

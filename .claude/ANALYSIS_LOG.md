@@ -536,3 +536,19 @@
 - `RAW Black Level` and `RAW White Level` are the important sensor-domain fixes because they prevent the green/pink cast and bad highlight behavior.
 - `Exposure Correction` is still useful, but it should be part of a bundle with `Contrast`, `Pivot`, and shadow/highlight shaping rather than the only auto control.
 - Scene-aware starting points should differ for night, artificial light, bright sun, and shade, with conservative guardrails when the clip is already close to neutral.
+
+## 2026-05-25 - look assist geometry guardrail
+
+- The first implementation accidentally coupled Look Assist to vertical stretch selection via `getMlvAspectRatio()`.
+- That was too aggressive because aspect/geometry should stay on the clip receipt or explicit user control path.
+- The current correction is to keep Look Assist focused on raw-level and tone correction only.
+- If we ever add geometry help, it should be a separate explicit action, not part of the automatic appearance pass.
+
+## 2026-05-25 - Qt/MinGW build and GUI smoke blocker resolved
+
+- The local Windows build is now verified with the consistent kit pair `C:\Qt\6.10.2\mingw_64\bin\qmake.exe` plus `C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe`; stale LLVM/Clang objects in `platform/qt/build-release` were the source of the mixed `std::__1` link failure.
+- The release deployment needs `windeployqt --release --compiler-runtime` and the MinGW/OpenMP DLLs beside `MLVApp.exe`, including `libgomp-1.dll`.
+- The visible profile exit crash was fixed by making `MainWindow::~MainWindow()` free the active MLV and processing objects after stopping Qt playback/render work, so C-side cache/prefetch threads shut down before process teardown.
+- The profile paint probe now disarms stack pointers after paint or timeout, and Look Assist no longer restores stretch/aspect state.
+- `--profile-playback --receipt ...` disables Look Assist for receipts that do not explicitly declare `lookAssistEnabled`, preserving deterministic profiling while keeping normal GUI clip load auto-look behavior.
+- Validation: Qt app rebuild passed; hidden/visible profile trigger matrix passed; profile-backed console suite passed with 67 tests, 865 assertions, 1 expected skip, and 0 failures.
