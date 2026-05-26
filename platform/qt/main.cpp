@@ -473,6 +473,16 @@ static int runPlaybackProfile(QApplication &app)
         QStringLiteral("After each frameReady(), wait for the graphics viewport to receive a paint event and record paint latency. Implies --show-window."));
     parser.addOption(waitForPaintOpt);
 
+    const QCommandLineOption exercisePlayActionOpt(
+        QStringLiteral("exercise-play-action"),
+        QStringLiteral("Toggle the real Play QAction and fail if frameReady/slider advance does not happen."));
+    parser.addOption(exercisePlayActionOpt);
+
+    const QCommandLineOption exerciseLookAssistToggleOpt(
+        QStringLiteral("exercise-look-assist-toggle"),
+        QStringLiteral("When Look Assist is enabled, click it off/on and verify the re-applied look matches the load-time look."));
+    parser.addOption(exerciseLookAssistToggleOpt);
+
     const QCommandLineOption stageLogOpt(
         QStringLiteral("stage-log"),
         QStringLiteral("Optional stage timing log path. Also enables MLVAPP_STAGE_TIMING."),
@@ -639,6 +649,8 @@ static int runPlaybackProfile(QApplication &app)
     options.fastOpen = parser.isSet(fastOpenOpt);
     options.showWindow = parser.isSet(showWindowOpt) || parser.isSet(waitForPaintOpt);
     options.waitForPaint = parser.isSet(waitForPaintOpt);
+    options.exercisePlayAction = parser.isSet(exercisePlayActionOpt);
+    options.exerciseLookAssistToggle = parser.isSet(exerciseLookAssistToggleOpt);
     options.scope = scope;
     options.playbackDebayer = playbackDebayer;
     options.playbackProcessing = playbackProcessing;
