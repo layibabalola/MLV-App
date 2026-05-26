@@ -6579,7 +6579,15 @@ def backup_branch_analysis(repo_root: Path, config: Dict[str, Any], plan: Dict[s
     }
 
 
-def simulate_clean_integration(repo_root: Path, config: Dict[str, Any], *, target_head: str, branch_head: str) -> Dict[str, Any]:
+def simulate_clean_integration(
+    repo_root: Path,
+    config: Dict[str, Any],
+    *,
+    target_head: str,
+    branch_head: str,
+    branch_name: str,
+    target_branch: str,
+) -> Dict[str, Any]:
     integration_path = closeout_state_root(repo_root, config) / "repo-sweep" / "integration-probes" / uuid.uuid4().hex[:12]
     integration_path.parent.mkdir(parents=True, exist_ok=True)
     attempt = {
@@ -6593,7 +6601,7 @@ def simulate_clean_integration(repo_root: Path, config: Dict[str, Any], *, targe
     try:
         merge = run_git(
             integration_path,
-            ["merge", "--no-ff", "-m", closeout_merge_commit_message(branch, target_branch), branch_head],
+            ["merge", "--no-ff", "-m", closeout_merge_commit_message(branch_name, target_branch), branch_head],
         )
         if merge.returncode != 0:
             conflicts = merge_conflict_paths(merge.stdout, merge.stderr)
@@ -7691,7 +7699,14 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
                 recommended_action = "cleanup_worktree_and_prune"
                 action_class = "stale_locked_worktree_cleanup"
             else:
-                merge_probe = simulate_clean_integration(repo_root, config, target_head=target_head, branch_head=branch_head)
+                merge_probe = simulate_clean_integration(
+                    repo_root,
+                    config,
+                    target_head=target_head,
+                    branch_head=branch_head,
+                    branch_name=branch,
+                    target_branch=str(target["branch"]),
+                )
                 scope["mergeProbe"] = merge_probe
                 if merge_probe.get("clean") and str(config.get("repoSweep", {}).get("mergeMode", "auto_clean")) == "auto_clean":
                     recommended_action = "clean_integrate_now"
@@ -7710,7 +7725,14 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
         recommended_action = "prune_now"
         action_class = "redundant_backup_prune" if backup["isBackupBranch"] else "redundant_branch_prune"
     elif not item.get("ancestorOfTarget"):
-        merge_probe = simulate_clean_integration(repo_root, config, target_head=target_head, branch_head=branch_head)
+        merge_probe = simulate_clean_integration(
+            repo_root,
+            config,
+            target_head=target_head,
+            branch_head=branch_head,
+            branch_name=branch,
+            target_branch=str(target["branch"]),
+        )
         if merge_probe.get("clean") and str(config.get("repoSweep", {}).get("mergeMode", "auto_clean")) == "auto_clean":
             recommended_action = "clean_integrate_now"
             action_class = "repo_sweep_clean_integrate"
@@ -7792,7 +7814,14 @@ def investigate_remote_feature_candidate(repo_root: Path, config: Dict[str, Any]
         recommended_action = "prune_remote_now"
         action_class = "patch_equivalent_remote_feature_prune"
     elif bool(config.get("repoSweep", {}).get("cleanIntegrateRemoteFeatureBranches", True)):
-        merge_probe = simulate_clean_integration(repo_root, config, target_head=target_head, branch_head=branch_head)
+        merge_probe = simulate_clean_integration(
+            repo_root,
+            config,
+            target_head=target_head,
+            branch_head=branch_head,
+            branch_name=branch,
+            target_branch=str(target["branch"]),
+        )
         scope["mergeProbe"] = merge_probe
         if merge_probe.get("clean") and str(config.get("repoSweep", {}).get("mergeMode", "auto_clean")) == "auto_clean":
             recommended_action = "clean_integrate_remote_now"
