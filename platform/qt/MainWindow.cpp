@@ -38,6 +38,7 @@ extern "C" {
 #include <QDate>
 #include <QStorageInfo>
 #include <QColorDialog>
+#include <memory>
 #include <unistd.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -2708,6 +2709,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     bool playActionSmokeTimedOut = false;
     int playActionSmokeInitialFrame = -1;
     int playActionSmokeFinalFrame = -1;
+    int playActionSmokeCutInAfter = -1;
+    int playActionSmokeCutOutAfter = -1;
     int playActionSmokeFrameReadyCount = 0;
     qint64 playActionSmokeElapsedMs = -1;
     QString playActionSmokeFailure;
@@ -2747,6 +2750,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         bool frameCompleted = false;
         std::atomic<qint64> engineCompletionNs(-1);
         const qint64 requestNs = monotonicClock.nsecsElapsed();
+        const uint64_t requestSerialFloor = m_nextRenderRequestSerial;
 
         QMetaObject::Connection engineReadyConnection = connect(
             m_pRenderThread,
@@ -2763,6 +2767,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             &loop,
             [&]()
             {
+                if( m_lastPresentedRequestSerial < requestSerialFloor )
+                {
+                    return;
+                }
                 frameCompleted = true;
                 loop.quit();
             } );
@@ -2784,7 +2792,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         {
             if( failureReason )
             {
-                *failureReason = QStringLiteral("timed out waiting for frameReady() for frame %1").arg( frameIndex );
+                *failureReason = QStringLiteral("timed out waiting for frameReady() for frame %1 serial >= %2; last serial %3")
+                    .arg( frameIndex )
+                    .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) );
             }
             return false;
         }
@@ -3023,6 +3034,20 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     if( options.exerciseLookAssistToggle )
     {
         trace(QStringLiteral("look-assist-toggle-smoke-begin"));
+        if( ui->checkBoxLookAssistEnable->isChecked() )
+        {
+            QString settleFailure;
+            trace(QStringLiteral("look-assist-toggle-smoke-load-settle-begin"));
+            if( !renderFrameIndex( startFrame, -1, true, &settleFailure ) )
+            {
+                err << "[PROFILE] ERROR: " << settleFailure << "\n";
+                trace(QStringLiteral("look-assist-toggle-smoke-load-settle-failed: ") + settleFailure);
+                return 7;
+            }
+            qApp->processEvents( QEventLoop::AllEvents );
+            trace(QStringLiteral("look-assist-toggle-smoke-load-settle-complete"));
+        }
+
         lookAssistLoadState = captureLookAssistState();
         if( !ui->checkBoxLookAssistEnable->isChecked() )
         {
@@ -3037,6 +3062,16 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             qApp->processEvents( QEventLoop::AllEvents );
             ui->checkBoxLookAssistEnable->click();
             qApp->processEvents( QEventLoop::AllEvents );
+            QString toggleSettleFailure;
+            trace(QStringLiteral("look-assist-toggle-smoke-recheck-settle-begin"));
+            if( !renderFrameIndex( startFrame, -1, true, &toggleSettleFailure ) )
+            {
+                err << "[PROFILE] ERROR: " << toggleSettleFailure << "\n";
+                trace(QStringLiteral("look-assist-toggle-smoke-recheck-settle-failed: ") + toggleSettleFailure);
+                return 7;
+            }
+            qApp->processEvents( QEventLoop::AllEvents );
+            trace(QStringLiteral("look-assist-toggle-smoke-recheck-settle-complete"));
             lookAssistToggleState = captureLookAssistState();
             lookAssistToggleSmokeStable =
                 compareLookAssistStates( lookAssistLoadState,
@@ -3052,6 +3087,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                 return 9;
             }
         }
+        previousCompletionNs = -1;
     }
 
     QString renderFailure;
@@ -3139,6 +3175,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
         disconnect( readyConnection );
         disconnect( timeoutConnection );
+        playActionSmokeCutInAfter = ui->spinBoxCutIn->value();
+        playActionSmokeCutOutAfter = ui->spinBoxCutOut->value();
 
         if( !playActionSmokeStarted )
         {
@@ -3249,6 +3287,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("play_action_smoke_timed_out"), playActionSmokeTimedOut );
     metadata.insert( QStringLiteral("play_action_smoke_initial_frame"), playActionSmokeInitialFrame );
     metadata.insert( QStringLiteral("play_action_smoke_final_frame"), playActionSmokeFinalFrame );
+    metadata.insert( QStringLiteral("play_action_smoke_cut_in_after"), playActionSmokeCutInAfter );
+    metadata.insert( QStringLiteral("play_action_smoke_cut_out_after"), playActionSmokeCutOutAfter );
     metadata.insert( QStringLiteral("play_action_smoke_frame_ready_count"), playActionSmokeFrameReadyCount );
     metadata.insert( QStringLiteral("play_action_smoke_elapsed_ms"), static_cast<double>( playActionSmokeElapsedMs ) );
     metadata.insert( QStringLiteral("play_action_smoke_failure"), playActionSmokeFailure );
@@ -3352,6 +3392,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     ui->horizontalSliderHighlights->value() );
     metadata.insert( QStringLiteral("look_assist_diagnostics_valid"),
                     m_lastLookAssistDiagnosticsValid );
+    metadata.insert( QStringLiteral("look_assist_analysis_source"),
+                    QStringLiteral("raw_debayered_downscale") );
     if( m_lastLookAssistDiagnosticsValid )
     {
         metadata.insert( QStringLiteral("look_assist_scene"), m_lastLookAssistScene );
@@ -3917,6 +3959,28 @@ void MainWindow::playbackHandling(int timeDiff)
 {
     if( ui->actionPlay->isChecked() )
     {
+        if( m_fileLoaded && m_pMlvObject )
+        {
+            const int totalFrames = getMlvFrames( m_pMlvObject );
+            if( totalFrames > 1
+             && ui->spinBoxCutOut->value() <= ui->spinBoxCutIn->value()
+             && ui->spinBoxCutOut->value() < totalFrames )
+            {
+                logInteractionEvent(
+                    QStringLiteral("play.cut_range_repaired"),
+                    QStringLiteral("where=playbackHandling cut_in=%1 cut_out_before=%2 total_frames=%3 position=%4")
+                        .arg( ui->spinBoxCutIn->value() )
+                        .arg( ui->spinBoxCutOut->value() )
+                        .arg( totalFrames )
+                        .arg( ui->horizontalSliderPosition->value() ) );
+                ui->spinBoxCutOut->setValue( totalFrames );
+                if( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 && ACTIVE_RECEIPT )
+                {
+                    ACTIVE_RECEIPT->setCutOut( totalFrames );
+                }
+            }
+        }
+
         //when on last frame
         if( ui->horizontalSliderPosition->value() >= ui->spinBoxCutOut->value() - 1 )
         {
@@ -7972,6 +8036,18 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                 .arg( ui->horizontalSliderPosition->value() ) );
     }
 
+    ReceiptSettings *activeReceiptAtLoad = nullptr;
+    if( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 )
+    {
+        activeReceiptAtLoad = ACTIVE_RECEIPT;
+    }
+    const bool deferLookAssistUntilBaselineFrame =
+        m_fileLoaded
+        && receipt
+        && activeReceiptAtLoad
+        && receipt == activeReceiptAtLoad
+        && receipt->lookAssistEnabled();
+
     m_lastLookAssistDiagnosticsValid = false;
     if( m_fileLoaded && receipt->lookAssistEnabled() )
     {
@@ -7980,7 +8056,10 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
         else
             captureLookAssistBaseline( receipt );
 
-        applyLookAssistToReceipt( receipt );
+        if( !deferLookAssistUntilBaselineFrame )
+        {
+            applyLookAssistToReceipt( receipt );
+        }
         syncLookAssistDerivedUiToReceipt( receipt );
     }
     else if( receipt->lookAssistBaselineValid() )
@@ -8005,23 +8084,39 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
             .arg( ui->horizontalSliderRawWhite->value() )
             .arg( ui->horizontalSliderPosition->value() ) );
 
-    ReceiptSettings *activeReceiptAtLoad = nullptr;
-    if( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 )
-    {
-        activeReceiptAtLoad = ACTIVE_RECEIPT;
-    }
-    const bool reapplyLookAssistWhenSettled =
-        m_fileLoaded
-        && receipt
-        && activeReceiptAtLoad
-        && receipt == activeReceiptAtLoad
-        && receipt->lookAssistEnabled();
-
     m_setSliders = false;
-    if( reapplyLookAssistWhenSettled )
+    if( deferLookAssistUntilBaselineFrame )
     {
-        QTimer::singleShot( 0, this, [this, activeReceiptAtLoad]()
+        logInteractionEvent(
+            QStringLiteral("look_assist.setSliders.defer_until_frame_ready"),
+            QStringLiteral("baseline_valid=%1 exp=%2 contrast=%3 temp=%4 tint=%5 raw_black=%6 raw_white=%7 frame=%8")
+                .arg( bool01( activeReceiptAtLoad->lookAssistBaselineValid() ) )
+                .arg( ui->horizontalSliderExposure->value() )
+                .arg( ui->horizontalSliderContrast->value() )
+                .arg( ui->horizontalSliderTemperature->value() )
+                .arg( ui->horizontalSliderTint->value() )
+                .arg( ui->horizontalSliderRawBlack->value() )
+                .arg( ui->horizontalSliderRawWhite->value() )
+                .arg( ui->horizontalSliderPosition->value() ) );
+
+        const uint64_t baselineRequestFloor = m_nextRenderRequestSerial;
+        auto applied = std::make_shared<bool>( false );
+        auto readyConnection = std::make_shared<QMetaObject::Connection>();
+        auto applyAfterBaselineFrame =
+            [this, activeReceiptAtLoad, baselineRequestFloor, applied, readyConnection]()
         {
+            if( *applied ) return;
+            if( m_lastPresentedRequestSerial < baselineRequestFloor )
+            {
+                return;
+            }
+
+            *applied = true;
+            if( readyConnection )
+            {
+                disconnect( *readyConnection );
+            }
+
             if( !m_fileLoaded
              || SESSION_CLIP_COUNT <= 0
              || SESSION_ACTIVE_CLIP_ROW < 0
@@ -8033,7 +8128,7 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
             }
 
             logInteractionEvent(
-                QStringLiteral("look_assist.setSliders.settled_reapply"),
+                QStringLiteral("look_assist.setSliders.frame_ready_apply"),
                 QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8")
                     .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
                     .arg( ui->horizontalSliderExposure->value() )
@@ -8052,8 +8147,40 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
             applyLookAssistToReceipt( ACTIVE_RECEIPT );
             syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
             setReceipt( ACTIVE_RECEIPT );
-            requestFrameRefresh( true, "look-assist-load-settled" );
+            requestFrameRefresh( true, "look-assist-baseline-frame-ready" );
+        };
+
+        *readyConnection = connect(
+            this,
+            &MainWindow::frameReady,
+            this,
+            [applyAfterBaselineFrame]()
+            {
+                applyAfterBaselineFrame();
+            } );
+
+        QTimer::singleShot( 3000, this, [this, activeReceiptAtLoad, applied]()
+        {
+            if( *applied ) return;
+            if( !m_fileLoaded
+             || SESSION_CLIP_COUNT <= 0
+             || SESSION_ACTIVE_CLIP_ROW < 0
+             || !ACTIVE_RECEIPT
+             || ACTIVE_RECEIPT != activeReceiptAtLoad
+             || !ACTIVE_RECEIPT->lookAssistEnabled() )
+            {
+                return;
+            }
+
+            logInteractionEvent(
+                QStringLiteral("look_assist.setSliders.frame_ready_wait_retry"),
+                QStringLiteral("last_serial=%1 next_serial=%2 frame=%3")
+                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                    .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                    .arg( ui->horizontalSliderPosition->value() ) );
+            requestFrameRefresh( true, "look-assist-baseline-load-retry" );
         } );
+        requestFrameRefresh( true, "look-assist-baseline-load" );
     }
     else
     {
@@ -8187,11 +8314,10 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
 
     QByteArray thumbnail;
     thumbnail.resize( width * height * 3 );
-    get_area_average_downscale_thumnail( m_pMlvObject,
-                                         ui->horizontalSliderPosition->value(),
-                                         downscaleFactor,
-                                         QThread::idealThreadCount(),
-                                         reinterpret_cast<unsigned char *>( thumbnail.data() ) );
+    get_area_average_downscale_raw_thumnail( m_pMlvObject,
+                                             ui->horizontalSliderPosition->value(),
+                                             downscaleFactor,
+                                             reinterpret_cast<unsigned char *>( thumbnail.data() ) );
 
     const LookAssistStats stats = analyzeLookAssistThumbnail(
                 reinterpret_cast<const unsigned char *>( thumbnail.constData() ),
@@ -8264,7 +8390,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
-        QStringLiteral("scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 frame=%19")
+        QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 frame=%19")
             .arg( m_lastLookAssistScene )
             .arg( stats.median, 0, 'f', 3 )
             .arg( stats.p05, 0, 'f', 3 )
@@ -13022,6 +13148,28 @@ void MainWindow::on_actionPlay_triggered(bool checked)
             .arg( bool01( m_frameChanged ) )
             .arg( bool01( m_frameStillDrawing ) ) );
 
+    if( checked && m_fileLoaded && m_pMlvObject )
+    {
+        const int totalFrames = getMlvFrames( m_pMlvObject );
+        if( totalFrames > 1
+         && ui->spinBoxCutOut->value() <= ui->spinBoxCutIn->value()
+         && ui->spinBoxCutOut->value() < totalFrames )
+        {
+            logInteractionEvent(
+                QStringLiteral("play.cut_range_repaired"),
+                QStringLiteral("where=triggered cut_in=%1 cut_out_before=%2 total_frames=%3 position=%4")
+                    .arg( ui->spinBoxCutIn->value() )
+                    .arg( ui->spinBoxCutOut->value() )
+                    .arg( totalFrames )
+                    .arg( ui->horizontalSliderPosition->value() ) );
+            ui->spinBoxCutOut->setValue( totalFrames );
+            if( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 && ACTIVE_RECEIPT )
+            {
+                ACTIVE_RECEIPT->setCutOut( totalFrames );
+            }
+        }
+    }
+
     //Last frame? Go to first frame!
     if( checked && ui->horizontalSliderPosition->value()+1 >= ui->spinBoxCutOut->value() )
     {
@@ -13695,7 +13843,120 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
         else
             captureLookAssistBaseline( ACTIVE_RECEIPT );
 
-        applyLookAssistToReceipt( ACTIVE_RECEIPT );
+        setReceipt( ACTIVE_RECEIPT );
+
+        ReceiptSettings *activeReceiptAtToggle = ACTIVE_RECEIPT;
+        const uint64_t baselineRequestFloor = m_nextRenderRequestSerial;
+        logInteractionEvent(
+            QStringLiteral("look_assist.toggle.defer_until_frame_ready"),
+            QStringLiteral("baseline_valid=%1 exp=%2 contrast=%3 temp=%4 tint=%5 raw_black=%6 raw_white=%7 frame=%8 serial_floor=%9")
+                .arg( bool01( activeReceiptAtToggle->lookAssistBaselineValid() ) )
+                .arg( ui->horizontalSliderExposure->value() )
+                .arg( ui->horizontalSliderContrast->value() )
+                .arg( ui->horizontalSliderTemperature->value() )
+                .arg( ui->horizontalSliderTint->value() )
+                .arg( ui->horizontalSliderRawBlack->value() )
+                .arg( ui->horizontalSliderRawWhite->value() )
+                .arg( ui->horizontalSliderPosition->value() )
+                .arg( static_cast<qulonglong>( baselineRequestFloor ) ) );
+
+        auto applied = std::make_shared<bool>( false );
+        auto readyConnection = std::make_shared<QMetaObject::Connection>();
+        auto applyAfterBaselineFrame =
+            [this, activeReceiptAtToggle, baselineRequestFloor, applied, readyConnection]()
+        {
+            if( *applied ) return;
+            if( m_lastPresentedRequestSerial < baselineRequestFloor )
+            {
+                return;
+            }
+
+            *applied = true;
+            if( readyConnection )
+            {
+                disconnect( *readyConnection );
+            }
+
+            if( !m_fileLoaded
+             || SESSION_CLIP_COUNT <= 0
+             || SESSION_ACTIVE_CLIP_ROW < 0
+             || !ACTIVE_RECEIPT
+             || ACTIVE_RECEIPT != activeReceiptAtToggle
+             || !ACTIVE_RECEIPT->lookAssistEnabled() )
+            {
+                return;
+            }
+
+            logInteractionEvent(
+                QStringLiteral("look_assist.toggle.frame_ready_apply"),
+                QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8 serial=%9")
+                    .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
+                    .arg( ui->horizontalSliderExposure->value() )
+                    .arg( ui->horizontalSliderContrast->value() )
+                    .arg( ui->horizontalSliderTemperature->value() )
+                    .arg( ui->horizontalSliderTint->value() )
+                    .arg( ui->horizontalSliderRawBlack->value() )
+                    .arg( ui->horizontalSliderRawWhite->value() )
+                    .arg( ui->horizontalSliderPosition->value() )
+                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
+
+            if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
+                restoreLookAssistBaseline( ACTIVE_RECEIPT );
+            else
+                captureLookAssistBaseline( ACTIVE_RECEIPT );
+
+            applyLookAssistToReceipt( ACTIVE_RECEIPT );
+            syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
+            setReceipt( ACTIVE_RECEIPT );
+            logInteractionEvent(
+                QStringLiteral("look_assist.toggle.end"),
+                QStringLiteral("checked=1 baseline_valid=%1 diagnostics_valid=%2 scene=%3 exp=%4 contrast=%5 pivot=%6 temp=%7 tint=%8 raw_black=%9 raw_white=%10 frame=%11")
+                    .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
+                    .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
+                    .arg( m_lastLookAssistDiagnosticsValid ? m_lastLookAssistScene : QStringLiteral("none") )
+                    .arg( ui->horizontalSliderExposure->value() )
+                    .arg( ui->horizontalSliderContrast->value() )
+                    .arg( ui->horizontalSliderPivot->value() )
+                    .arg( ui->horizontalSliderTemperature->value() )
+                    .arg( ui->horizontalSliderTint->value() )
+                    .arg( ui->horizontalSliderRawBlack->value() )
+                    .arg( ui->horizontalSliderRawWhite->value() )
+                    .arg( ui->horizontalSliderPosition->value() ) );
+            requestFrameRefresh( true, "look-assist-toggle-frame-ready" );
+        };
+
+        *readyConnection = connect(
+            this,
+            &MainWindow::frameReady,
+            this,
+            [applyAfterBaselineFrame]()
+            {
+                applyAfterBaselineFrame();
+            } );
+
+        QTimer::singleShot( 3000, this, [this, activeReceiptAtToggle, applied]()
+        {
+            if( *applied ) return;
+            if( !m_fileLoaded
+             || SESSION_CLIP_COUNT <= 0
+             || SESSION_ACTIVE_CLIP_ROW < 0
+             || !ACTIVE_RECEIPT
+             || ACTIVE_RECEIPT != activeReceiptAtToggle
+             || !ACTIVE_RECEIPT->lookAssistEnabled() )
+            {
+                return;
+            }
+
+            logInteractionEvent(
+                QStringLiteral("look_assist.toggle.frame_ready_wait_retry"),
+                QStringLiteral("last_serial=%1 next_serial=%2 frame=%3")
+                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                    .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                    .arg( ui->horizontalSliderPosition->value() ) );
+            requestFrameRefresh( true, "look-assist-toggle-baseline-retry" );
+        } );
+        requestFrameRefresh( true, "look-assist-toggle-baseline" );
+        return;
     }
     else if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
     {
