@@ -99,6 +99,8 @@ TEST(ReceiptLoader, LoadsLookAssistReceiptState)
     out << "  <lookAssistBaselineExposure>10</lookAssistBaselineExposure>\n";
     out << "  <lookAssistBaselineContrast>-4</lookAssistBaselineContrast>\n";
     out << "  <lookAssistBaselinePivot>47</lookAssistBaselinePivot>\n";
+    out << "  <lookAssistBaselineTemperature>5200</lookAssistBaselineTemperature>\n";
+    out << "  <lookAssistBaselineTint>-7</lookAssistBaselineTint>\n";
     out << "  <lookAssistBaselineVibrance>5</lookAssistBaselineVibrance>\n";
     out << "  <lookAssistBaselineShadows>18</lookAssistBaselineShadows>\n";
     out << "  <lookAssistBaselineHighlights>-12</lookAssistBaselineHighlights>\n";
@@ -118,6 +120,8 @@ TEST(ReceiptLoader, LoadsLookAssistReceiptState)
     ASSERT_EQ(10, receipt.lookAssistBaselineExposure());
     ASSERT_EQ(-4, receipt.lookAssistBaselineContrast());
     ASSERT_EQ(47, receipt.lookAssistBaselinePivot());
+    ASSERT_EQ(5200, receipt.lookAssistBaselineTemperature());
+    ASSERT_EQ(-7, receipt.lookAssistBaselineTint());
     ASSERT_EQ(5, receipt.lookAssistBaselineVibrance());
     ASSERT_EQ(18, receipt.lookAssistBaselineShadows());
     ASSERT_EQ(-12, receipt.lookAssistBaselineHighlights());

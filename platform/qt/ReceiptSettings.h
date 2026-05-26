@@ -75,6 +75,8 @@ public:
     void setLookAssistBaselineExposure( int value )   {m_lookAssistBaselineExposure = value;}
     void setLookAssistBaselineContrast( int value )    {m_lookAssistBaselineContrast = value;}
     void setLookAssistBaselinePivot( int value )       {m_lookAssistBaselinePivot = value;}
+    void setLookAssistBaselineTemperature( int value ) {m_lookAssistBaselineTemperature = value;}
+    void setLookAssistBaselineTint( int value )        {m_lookAssistBaselineTint = value;}
     void setLookAssistBaselineVibrance( int value )    {m_lookAssistBaselineVibrance = value;}
     void setLookAssistBaselineShadows( int value )     {m_lookAssistBaselineShadows = value;}
     void setLookAssistBaselineHighlights( int value )   {m_lookAssistBaselineHighlights = value;}
@@ -245,6 +247,8 @@ public:
     int lookAssistBaselineExposure( void ) {return m_lookAssistBaselineExposure;}
     int lookAssistBaselineContrast( void ) {return m_lookAssistBaselineContrast;}
     int lookAssistBaselinePivot( void ) {return m_lookAssistBaselinePivot;}
+    int lookAssistBaselineTemperature( void ) {return m_lookAssistBaselineTemperature;}
+    int lookAssistBaselineTint( void ) {return m_lookAssistBaselineTint;}
     int lookAssistBaselineVibrance( void ) {return m_lookAssistBaselineVibrance;}
     int lookAssistBaselineShadows( void ) {return m_lookAssistBaselineShadows;}
     int lookAssistBaselineHighlights( void ) {return m_lookAssistBaselineHighlights;}
@@ -369,6 +373,8 @@ private:
     int m_lookAssistBaselineExposure;
     int m_lookAssistBaselineContrast;
     int m_lookAssistBaselinePivot;
+    int m_lookAssistBaselineTemperature;
+    int m_lookAssistBaselineTint;
     int m_lookAssistBaselineVibrance;
     int m_lookAssistBaselineShadows;
     int m_lookAssistBaselineHighlights;

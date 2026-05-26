@@ -552,3 +552,13 @@
 - The profile paint probe now disarms stack pointers after paint or timeout, and Look Assist no longer restores stretch/aspect state.
 - `--profile-playback --receipt ...` disables Look Assist for receipts that do not explicitly declare `lookAssistEnabled`, preserving deterministic profiling while keeping normal GUI clip load auto-look behavior.
 - Validation: Qt app rebuild passed; hidden/visible profile trigger matrix passed; profile-backed console suite passed with 67 tests, 865 assertions, 1 expected skip, and 0 failures.
+
+## 2026-05-26 - Look Assist load parity and quality-control follow-up
+
+- I fixed the initial-load vs manual-toggle asymmetry in Look Assist. The load path now syncs derived Look Assist UI values back to the active receipt after apply/restore, covering raw black/white, exposure, contrast, pivot, shadows, highlights, vibrance, temperature, and tint.
+- Look Assist baseline state now persists temperature and tint as well, so disabling the assist can restore the original color-balance state cleanly.
+- The scene-aware preset now records diagnostics in profile metadata, including scene, luma percentiles, RGB medians, balance medians, preset values, and temperature/tint deltas.
+- M16-1446.MLV exposed an under-lifted night preset; very dark night frames now allow a stronger but still bounded exposure lift. The post-change smoke reported `look_assist_scene=night`, `look_assist_median=2`, `look_assist_p99=27`, `look_assist_exposure=380`, `look_assist_shadows=38`, `look_assist_highlights=-18`, `look_assist_raw_black=20470`, and `look_assist_raw_white=16200`.
+- I exposed the existing playback scale factor actions in the toolbar quality dropdown under `Scale Factor`, so `Auto`, `x1`, `x2`, and `x4` are reachable from the control the user was already opening.
+- Fast Preview remains a speed-biased, lower-fidelity preview mode and can still show Dual ISO cast. High Quality/cast-closed remains the recommended mode for judging color; Bilinear remains the recommended debayer for smooth playback.
+- Validation: Qt app rebuild passed; the profile-backed console suite passed with 67 tests, 867 assertions, 1 expected skip, and 0 failures after updating the receipt loader test for temperature/tint baseline fields.

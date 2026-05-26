@@ -11062,10 +11062,10 @@ QGroupBox::indicator:checked:disabled {
     <string>High Quality (cast-closed, slower)</string>
    </property>
    <property name="toolTip">
-    <string>Force HQ Dual ISO + mean23 reconstruction at scale=4 during playback. Closes the magenta cast on Dual ISO clips at the cost of cadence.</string>
+    <string>Force HQ Dual ISO + mean23 reconstruction during playback. Defaults to scale=4, or use Playback Quality &gt; Scale Factor to inspect x1/x2/x4 tradeoffs.</string>
    </property>
    <property name="statusTip">
-    <string>Playback Quality: HQ + mean23 + scale=4; cast closed; slower cadence on big sensors.</string>
+    <string>Playback Quality: HQ + mean23; cast closed; slower cadence on big sensors, especially at lower scale factors.</string>
    </property>
   </action>
   <action name="actionPlaybackQualityAuto">
