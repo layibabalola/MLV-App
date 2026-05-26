@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/work-block/wb-1c0d0568818a4ab1",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 4,
+  "createdAt": "2026-05-26T21:22:12+00:00",
+  "detectorHash": "0d51cdf91dee3b7a8472bd525ad8f606",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "d9431413f0049a75bca557b3bd6ac223ec3f43ee",
+  "schemaVersion": "1.0",
+  "targetHead": "825f0f92fc327aa85db9376266d8979f79593dc9",
+  "workBlockId": "wb-465bf46ac5254e06"
+}
