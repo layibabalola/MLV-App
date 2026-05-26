@@ -112,6 +112,8 @@ public:
         bool fastOpen = false;
         bool showWindow = false;
         bool waitForPaint = false;
+        bool exercisePlayAction = false;
+        bool exerciseLookAssistToggle = false;
         PlaybackProfileScope scope = PlaybackProfileScope::None;
         PlaybackProfileDebayerRequest playbackDebayer =
             PlaybackProfileDebayerRequest::Auto;
@@ -880,7 +882,7 @@ private:
     void notePlayToFirstFramePresentation( int presentedFrame );
     bool primePlaybackCacheOnPlayStart( void );
     void invalidateDisplayPreviewCache( void );
-    void requestFrameRefresh( bool resetCurrentFrameCache );
+    void requestFrameRefresh( bool resetCurrentFrameCache, const char *reason = nullptr );
     void readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings *receipt , int version);
     void writeXmlElementsToFile( QXmlStreamWriter *xmlWriter, ReceiptSettings *receipt );
     void deleteSession( void );
