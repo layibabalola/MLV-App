@@ -74,6 +74,33 @@ static bool write_look_assist_receipt_fixture(const QString & receipt_path)
     return file.flush();
 }
 
+static bool write_collapsed_cutout_receipt_fixture(const QString & receipt_path)
+{
+    QFile file(receipt_path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return false;
+    }
+
+    QTextStream out(&file);
+    out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    out << "<receipt version=\"4\" mlvapp=\"test\">\n";
+    out << "  <exposure>0</exposure>\n";
+    out << "  <contrast>0</contrast>\n";
+    out << "  <pivot>75</pivot>\n";
+    out << "  <temperature>5000</temperature>\n";
+    out << "  <tint>0</tint>\n";
+    out << "  <rawFixesEnabled>1</rawFixesEnabled>\n";
+    out << "  <rawBlack>20470</rawBlack>\n";
+    out << "  <rawWhite>2840</rawWhite>\n";
+    out << "  <lookAssistEnabled>0</lookAssistEnabled>\n";
+    out << "  <cutIn>1</cutIn>\n";
+    out << "  <cutOut>1</cutOut>\n";
+    out << "  <debayer>2</debayer>\n";
+    out << "</receipt>\n";
+
+    return file.flush();
+}
+
 static QString clip_manifest_path()
 {
     return repo_file_path(QStringLiteral("tests/fixtures/golden/tiny_dual_iso_hq_dng_hashes.json"));
@@ -689,6 +716,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_enabled")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_diagnostics_valid")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_analysis_source")).toString()
+                == QStringLiteral("raw_debayered_downscale"));
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_toggle_smoke_requested")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_toggle_smoke_ran")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_toggle_smoke_stable")).toBool());
@@ -775,6 +804,68 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePlayActionAdvancesFrame)
                 > metadata.value(QStringLiteral("play_action_smoke_initial_frame")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("play_action_smoke_failure")).toString().isEmpty());
     ASSERT_TRUE(metadata.value(QStringLiteral("diagnostic_log_file")).toString().size() > 0);
+
+    const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
+    ASSERT_EQ(1, frames.size());
+}
+
+TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePlayActionRepairsCollapsedCutOut)
+{
+    const QString fixture_path = clip_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/tiny_dual_iso.mlv");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString receipt_path = temp_dir.filePath(QStringLiteral("collapsed-cutout.marxml"));
+    ASSERT_TRUE(write_collapsed_cutout_receipt_fixture(receipt_path));
+
+    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-collapsed-cutout.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--receipt") << receipt_path
+            << QStringLiteral("--frames") << QStringLiteral("1")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("1")
+            << QStringLiteral("--exercise-play-action"),
+        QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_INTERACTIVE_TRACE"), QStringLiteral("1")));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_TRUE(metadata.value(QStringLiteral("play_action_smoke_requested")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("play_action_smoke_started")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("play_action_smoke_frame_advanced")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("play_action_smoke_failure")).toString().isEmpty());
+    ASSERT_EQ(1, metadata.value(QStringLiteral("play_action_smoke_cut_in_after")).toInt());
+    ASSERT_EQ(metadata.value(QStringLiteral("total_frames")).toInt(),
+              metadata.value(QStringLiteral("play_action_smoke_cut_out_after")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("play_action_smoke_final_frame")).toInt()
+                > metadata.value(QStringLiteral("play_action_smoke_initial_frame")).toInt());
 
     const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
     ASSERT_EQ(1, frames.size());

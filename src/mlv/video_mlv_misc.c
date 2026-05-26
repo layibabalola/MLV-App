@@ -187,3 +187,69 @@ void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, in
     free(debayered_raw_frame);
     free(raw_frame);
 }
+
+void get_area_average_downscale_raw_thumnail(mlvObject_t *video, int frame_index, int downscale_factor, unsigned char *out_buffer)
+{
+    if (!video || !out_buffer) {
+        return;
+    }
+
+    int raw_w = video->RAWI.xRes;
+    int raw_h = video->RAWI.yRes;
+
+    if (raw_w <= 0 || raw_h <= 0 || downscale_factor <= 0) {
+        return;
+    }
+
+    float *raw_frame = (float *) malloc(raw_w * raw_h * sizeof(float));
+    if (!raw_frame) {
+        return;
+    }
+
+    getMlvRawFrameFloat(video, frame_index, raw_frame);
+
+    uint16_t *debayered_raw_frame = (uint16_t *) malloc(
+        (size_t) (raw_w * raw_h * 3) * sizeof(uint16_t));
+    if (!debayered_raw_frame) {
+        free(raw_frame);
+        return;
+    }
+
+    debayerBasic(debayered_raw_frame, raw_frame, raw_w, raw_h, 1);
+
+    const int thumbW = raw_w / downscale_factor;
+    const int thumbH = raw_h / downscale_factor;
+    if (thumbW <= 0 || thumbH <= 0) {
+        free(debayered_raw_frame);
+        free(raw_frame);
+        return;
+    }
+
+    for (int outY = 0; outY < thumbH; ++outY) {
+        for (int outX = 0; outX < thumbW; ++outX) {
+            uint64_t sum_r = 0;
+            uint64_t sum_g = 0;
+            uint64_t sum_b = 0;
+
+            int start_y = outY * downscale_factor;
+            int start_x = outX * downscale_factor;
+
+            for (int j = 0; j < downscale_factor; j++) {
+                for (int i = 0; i < downscale_factor; i++) {
+                    size_t pixel_index = ((size_t) (start_y + j) * raw_w + (start_x + i)) * 3;
+                    sum_r += debayered_raw_frame[pixel_index + 0];
+                    sum_g += debayered_raw_frame[pixel_index + 1];
+                    sum_b += debayered_raw_frame[pixel_index + 2];
+                }
+            }
+
+            size_t out_pixel_index = ((size_t) outY * thumbW + outX) * 3;
+            out_buffer[out_pixel_index + 0] = (unsigned char) ((sum_r / (downscale_factor * downscale_factor)) >> 8);
+            out_buffer[out_pixel_index + 1] = (unsigned char) ((sum_g / (downscale_factor * downscale_factor)) >> 8);
+            out_buffer[out_pixel_index + 2] = (unsigned char) ((sum_b / (downscale_factor * downscale_factor)) >> 8);
+        }
+    }
+
+    free(debayered_raw_frame);
+    free(raw_frame);
+}

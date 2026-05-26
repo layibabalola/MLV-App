@@ -247,4 +247,7 @@ int create_thumbnail(mlvObject_t * video, uint8_t * thumbnail_img, int downscale
 /* Thumbnail Creation with full debayer, but downscaled image processing */
 void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, int downscale_factor, int cpu_cores, unsigned char *out_buffer);
 
+/* Thumbnail Creation with full debayer and downscale, before color processing */
+void get_area_average_downscale_raw_thumnail(mlvObject_t *video, int frame_index, int downscale_factor, unsigned char *out_buffer);
+
 #endif
