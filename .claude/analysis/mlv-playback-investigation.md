@@ -2084,3 +2084,56 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Future GUI smoke recipes should not judge appearance with zebras/scopes enabled unless the overlay stack itself is under test.
 - Future profiling receipts that intentionally want Look Assist should save an explicit `<lookAssistEnabled>1</lookAssistEnabled>` element.
 - If aspect ratio regresses again, inspect Look Assist restore/copy paths first and confirm no stretch combo or `stretchFactorX/Y` write is coupled to the appearance helper.
+
+## 2026-05-26 - Look Assist load-path parity and quality controls
+
+### Verified locally
+
+- Initial clip load and manual Look Assist toggle now share the same effective receipt state. The prior asymmetry was that `setSliders()` applied derived Look Assist UI values, but did not write those derived values back to the active receipt until a later full `setReceipt()` path. That made some clips look better only after toggling Look Assist off/on.
+- Look Assist now syncs its derived values back to the receipt immediately after apply or restore:
+  - raw technical correction: `rawFixesEnabled`, `rawBlack`, `rawWhite`
+  - tone: `Exposure Correction`, `Contrast`, `Pivot`, `Shadows`, `Highlights`, `Vibrance`
+  - color polish: `Temperature`, `Tint`
+- Look Assist baseline persistence now includes `Temperature` and `Tint`, so toggling the assist off can return to the original clip state instead of leaving color-balance changes behind.
+- `--profile-playback` metadata now records Look Assist diagnostics and chosen values, including scene classification, luma percentiles, RGB medians, balance medians, exposure/contrast/pivot/shadow/highlight/vibrance preset values, and temperature/tint deltas. This is the runtime breadcrumb trail to use when a clip still looks wrong.
+- The M16-1446 dark/green report exposed that the night-scene cap was too timid for extremely dark frames. For very dark night frames (`p99 < 55`), Look Assist can now lift exposure correction up to `+380` instead of topping out at the old `+140` range.
+- A headless profile smoke on `C:\temp\MLV\M16-1446.MLV` after this change reported:
+  - `look_assist_scene = night`
+  - `look_assist_median = 2`
+  - `look_assist_p99 = 27`
+  - `look_assist_exposure = 380`
+  - `look_assist_shadows = 38`
+  - `look_assist_highlights = -18`
+  - `look_assist_temperature = 6000`
+  - `look_assist_tint = 0`
+  - `look_assist_raw_black = 20470`
+  - `look_assist_raw_white = 16200`
+  - artifact: `.claude-state/profiling/look-assist-userclips/20260526-final-smoke-rerun/M16-1446.MLV.json`
+- The playback quality toolbar dropdown now exposes the existing scale-factor actions (`Auto`, `x1`, `x2`, `x4`) directly under `Scale Factor`, so users do not need to rely on environment variables or hunt through only the top-level menu.
+- The receipt loader test now covers the new Look Assist baseline temperature/tint fields. The profile-backed console test suite passed after the loader was updated: `67` tests, `867` assertions, `1` expected skip, `0` failures.
+- The release Qt app rebuilt successfully after the code changes using the known-good Qt 6.10.2 / MinGW 13.1 kit.
+
+### Cross-checked from prior analysis
+
+- Fast Preview / max-cadence playback can still show Dual ISO color cast, especially magenta/pink, because that mode prioritizes speed and lower-fidelity preview cadence. For color judgment on Dual ISO clips, prefer `High Quality (cast-closed)` rather than Fast Preview.
+- Bilinear remains the practical playback debayer recommendation for smooth GUI playback. AMaZE/RCD are better for paused quality or export judgment, but they are not the default recommendation for choppy interactive playback.
+- `Use Fast Processing for Playback` is a playback-only speed/quality tradeoff. It should be treated like a preview acceleration switch, not an export-quality guarantee.
+- Look Assist remains an appearance helper only. It must not change stretch/aspect/geometry. If a future clip needs automatic geometry help, that belongs in a separate explicit `Auto Aspect` control.
+- Scale-factor behavior is quality/performance sensitive:
+  - `x1` is sharpest and slowest.
+  - `x2` is the hoped-for middle ground when the clip/policy allows it.
+  - `x4` is the safest smooth playback and artifact-hiding option for heavier Dual ISO cases.
+
+### Needs runtime profiling
+
+- GUI smoke still needs human visual confirmation on the user clip set after this commit, especially:
+  - M16-1446.MLV should no longer open as too dark/green.
+  - M15-1321.MLV and M29-1756.MLV should not require toggling Look Assist off/on to get the intended auto look.
+  - Fast Preview should still be documented as a lower-fidelity preview mode if it remains pink during playback.
+- If M16-1446.MLV still looks green after the stronger night lift, use the new profile metadata to decide whether the next fix should be stronger tint correction, a raw-level correction guard, or a scene-specific white-balance rule.
+
+### Ranked next steps
+
+1. High impact / low effort: smoke the GUI on M15-1321.MLV, M15-1355.MLV, M16-1446.MLV, and M29-1756.MLV with Look Assist enabled from initial load, then compare only against manual toggle if the first frame looks wrong.
+2. High impact / low effort: use `High Quality (cast-closed)` plus toolbar `Scale Factor` for visual judgment, and reserve `Fast Preview` for cadence checks.
+3. Medium impact / medium effort: if some clips still need a prettier first look, tune the scene-aware Look Assist preset using the new diagnostics rather than adding unbounded histogram exposure guesses.

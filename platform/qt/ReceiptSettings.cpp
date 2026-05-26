@@ -115,6 +115,8 @@ ReceiptSettings::ReceiptSettings()
     m_lookAssistBaselineExposure = 0;
     m_lookAssistBaselineContrast = 0;
     m_lookAssistBaselinePivot = 75;
+    m_lookAssistBaselineTemperature = 6000;
+    m_lookAssistBaselineTint = 0;
     m_lookAssistBaselineVibrance = 0;
     m_lookAssistBaselineShadows = 0;
     m_lookAssistBaselineHighlights = 0;

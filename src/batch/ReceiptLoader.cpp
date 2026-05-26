@@ -615,6 +615,16 @@ void ReceiptLoader::parseXmlElements(QXmlStreamReader *Rxml,
             receipt->setLookAssistBaselinePivot( Rxml->readElementText().toInt() );
             Rxml->readNext();
         }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineTemperature" ) )
+        {
+            receipt->setLookAssistBaselineTemperature( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineTint" ) )
+        {
+            receipt->setLookAssistBaselineTint( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
         else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineVibrance" ) )
         {
             receipt->setLookAssistBaselineVibrance( Rxml->readElementText().toInt() );
