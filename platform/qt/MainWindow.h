@@ -880,6 +880,7 @@ private:
     void notePlayToFirstFramePresentation( int presentedFrame );
     bool primePlaybackCacheOnPlayStart( void );
     void invalidateDisplayPreviewCache( void );
+    void requestFrameRefresh( bool resetCurrentFrameCache );
     void readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings *receipt , int version);
     void writeXmlElementsToFile( QXmlStreamWriter *xmlWriter, ReceiptSettings *receipt );
     void deleteSession( void );

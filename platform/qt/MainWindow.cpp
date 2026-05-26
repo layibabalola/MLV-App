@@ -7599,7 +7599,7 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
         ui->horizontalSliderRawWhite->setValue( (int)getMlvOriginalWhiteLevel( m_pMlvObject ) );
     }
 
-    m_pMlvObject->current_cached_frame_active = 0;
+    resetMlvCachedFrame( m_pMlvObject );
 
     if( ui->actionPlaybackPosition->isChecked() ) ui->horizontalSliderPosition->setValue( receipt->lastPlaybackPosition() );
     ui->comboBoxDebayer->setCurrentIndex( receipt->debayer() );
@@ -7639,9 +7639,8 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
         syncLookAssistDerivedUiToReceipt( receipt );
     }
 
-    // Ensure the newly selected clip is redrawn with the latest look-assist state.
-    m_frameChanged = true;
     m_setSliders = false;
+    requestFrameRefresh( true );
 }
 
 void MainWindow::captureLookAssistBaseline( ReceiptSettings *receipt )
@@ -8531,6 +8530,27 @@ void MainWindow::invalidateDisplayPreviewCache( void )
     {
         entry = DisplayPreviewCacheEntry();
     }
+}
+
+void MainWindow::requestFrameRefresh( bool resetCurrentFrameCache )
+{
+    if( resetCurrentFrameCache && m_pMlvObject )
+    {
+        resetMlvCachedFrame( m_pMlvObject );
+    }
+
+    invalidateDisplayPreviewCache();
+    m_frameChanged = true;
+
+    if( !m_fileLoaded ) return;
+
+    QTimer::singleShot( 0, this, [this]()
+    {
+        if( m_fileLoaded && m_frameChanged && !m_frameStillDrawing )
+        {
+            timerFrameEvent();
+        }
+    } );
 }
 
 bool MainWindow::shouldUseGpu16PreviewPath( void ) const
@@ -12637,8 +12657,7 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     else
     {
         beginPlayToFirstFrameMeasurement();
-        // Re-arm the current frame so playback starts from a fresh render state.
-        m_frameChanged = true;
+        requestFrameRefresh( true );
         m_playbackFrameAdvancePending = true;
     }
 
@@ -13117,8 +13136,8 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
         m_lastLookAssistDiagnosticsValid = false;
     }
 
-    m_frameChanged = true;
     setReceipt( ACTIVE_RECEIPT );
+    requestFrameRefresh( true );
 }
 
 //En-/disable all LUT processing
