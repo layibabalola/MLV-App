@@ -14,6 +14,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
+#include <QTextStream>
 
 #include <iostream>
 #include <map>
@@ -31,6 +32,46 @@ static QString clip_receipt_path()
 static QString clip_preview_receipt_path()
 {
     return repo_file_path(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"));
+}
+
+static bool write_look_assist_receipt_fixture(const QString & receipt_path)
+{
+    QFile file(receipt_path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return false;
+    }
+
+    QTextStream out(&file);
+    out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    out << "<receipt version=\"4\" mlvapp=\"test\">\n";
+    out << "  <exposure>3</exposure>\n";
+    out << "  <contrast>7</contrast>\n";
+    out << "  <pivot>91</pivot>\n";
+    out << "  <temperature>6400</temperature>\n";
+    out << "  <tint>9</tint>\n";
+    out << "  <vibrance>15</vibrance>\n";
+    out << "  <shadows>22</shadows>\n";
+    out << "  <highlights>-6</highlights>\n";
+    out << "  <rawFixesEnabled>1</rawFixesEnabled>\n";
+    out << "  <rawBlack>20470</rawBlack>\n";
+    out << "  <rawWhite>2840</rawWhite>\n";
+    out << "  <lookAssistEnabled>1</lookAssistEnabled>\n";
+    out << "  <lookAssistBaselineValid>1</lookAssistBaselineValid>\n";
+    out << "  <lookAssistBaselineExposure>10</lookAssistBaselineExposure>\n";
+    out << "  <lookAssistBaselineContrast>-4</lookAssistBaselineContrast>\n";
+    out << "  <lookAssistBaselinePivot>47</lookAssistBaselinePivot>\n";
+    out << "  <lookAssistBaselineTemperature>5200</lookAssistBaselineTemperature>\n";
+    out << "  <lookAssistBaselineTint>-7</lookAssistBaselineTint>\n";
+    out << "  <lookAssistBaselineVibrance>5</lookAssistBaselineVibrance>\n";
+    out << "  <lookAssistBaselineShadows>18</lookAssistBaselineShadows>\n";
+    out << "  <lookAssistBaselineHighlights>-12</lookAssistBaselineHighlights>\n";
+    out << "  <lookAssistBaselineRawBlack>20490</lookAssistBaselineRawBlack>\n";
+    out << "  <lookAssistBaselineRawWhite>3021</lookAssistBaselineRawWhite>\n";
+    out << "  <lookAssistBaselineStretchX>1</lookAssistBaselineStretchX>\n";
+    out << "  <lookAssistBaselineStretchY>0.3333</lookAssistBaselineStretchY>\n";
+    out << "</receipt>\n";
+
+    return file.flush();
 }
 
 static QString clip_manifest_path()
@@ -598,6 +639,76 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtR
         ASSERT_TRUE(sample.contains(QStringLiteral("processed8_direct_path_active")));
         ASSERT_TRUE(sample.value(QStringLiteral("processed8_direct_path_active")).toBool());
     }
+}
+
+TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtRuntime)
+{
+    const QString fixture_path = clip_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/tiny_dual_iso.mlv");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString receipt_path = temp_dir.filePath(QStringLiteral("lookassist-runtime.marxml"));
+    ASSERT_TRUE(write_look_assist_receipt_fixture(receipt_path));
+
+    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-lookassist.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--receipt") << receipt_path
+            << QStringLiteral("--frames") << QStringLiteral("2")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("1"));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_enabled")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_diagnostics_valid")).toBool());
+    ASSERT_NE(3, metadata.value(QStringLiteral("look_assist_exposure")).toInt());
+    ASSERT_NE(7, metadata.value(QStringLiteral("look_assist_contrast")).toInt());
+    ASSERT_NE(91, metadata.value(QStringLiteral("look_assist_pivot")).toInt());
+    ASSERT_NE(6400, metadata.value(QStringLiteral("look_assist_temperature")).toInt());
+    ASSERT_NE(9, metadata.value(QStringLiteral("look_assist_tint")).toInt());
+    ASSERT_NE(15, metadata.value(QStringLiteral("look_assist_vibrance")).toInt());
+    ASSERT_NE(22, metadata.value(QStringLiteral("look_assist_shadows")).toInt());
+    ASSERT_NE(-6, metadata.value(QStringLiteral("look_assist_highlights")).toInt());
+    ASSERT_NE(20470, metadata.value(QStringLiteral("look_assist_raw_black")).toInt());
+    ASSERT_NE(2840, metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_original_raw_black")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_original_raw_white")));
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_scene")).toString().size() > 0);
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_exposure")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_contrast")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_pivot")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_shadows")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_highlights")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_vibrance")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_temperature_delta")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_tint_delta")));
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileCpuBackendProducesJson)

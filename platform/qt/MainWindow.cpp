@@ -7639,6 +7639,8 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
         syncLookAssistDerivedUiToReceipt( receipt );
     }
 
+    // Ensure the newly selected clip is redrawn with the latest look-assist state.
+    m_frameChanged = true;
     m_setSliders = false;
 }
 
@@ -12635,6 +12637,9 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     else
     {
         beginPlayToFirstFrameMeasurement();
+        // Re-arm the current frame so playback starts from a fresh render state.
+        m_frameChanged = true;
+        m_playbackFrameAdvancePending = true;
     }
 
     selectDebayerAlgorithm();
@@ -13112,6 +13117,7 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
         m_lastLookAssistDiagnosticsValid = false;
     }
 
+    m_frameChanged = true;
     setReceipt( ACTIVE_RECEIPT );
 }
 
