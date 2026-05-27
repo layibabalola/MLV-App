@@ -5,6 +5,19 @@
  * Exercises platform/qt/PlaybackScaling.h's
  * playbackBuildBilinearScaledRgb8 alongside the existing nearest-neighbour
  * path:
+ *   - BilinearScaleOneIsByteIdentity : proves the bilinear path is exact
+ *                                     when target == source, so scale=1
+ *                                     presentation cannot soften or tint.
+ *   - BilinearMatchesReferenceAtPlaybackScales : checks 1x/2x/4x against
+ *                                     an independent centre-aligned scalar
+ *                                     reference while reusing one cache
+ *                                     across scale changes.
+ *   - BilinearPreservesFlatFieldsAtPlaybackScales : proves constant RGB
+ *                                     fields survive 1x/2x/4x without
+ *                                     per-channel drift.
+ *   - BilinearImpulseResponseIsSmoothAtPlaybackScales : verifies 2x/4x
+ *                                     produce a smooth impulse footprint
+ *                                     rather than nearest-neighbour blocks.
  *   - BilinearOutputDimensions      : feeds a synthetic 904x1134 buffer to
  *                                     playbackBuildBilinearScaledRgb8 at
  *                                     1808x2268 and verifies the output
@@ -31,6 +44,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <omp.h>
 #include <vector>
@@ -49,6 +63,27 @@ std::vector<uint8_t> make_synthetic_rgb8(int width, int height)
             buffer[index + 0] = static_cast<uint8_t>((x * 7 + y * 11) & 0xFF);
             buffer[index + 1] = static_cast<uint8_t>((x * 13 + y * 17) & 0xFF);
             buffer[index + 2] = static_cast<uint8_t>((x * 19 + y * 23) & 0xFF);
+        }
+    }
+    return buffer;
+}
+
+std::vector<uint8_t> make_flat_rgb8(int width,
+                                    int height,
+                                    uint8_t red,
+                                    uint8_t green,
+                                    uint8_t blue)
+{
+    std::vector<uint8_t> buffer(static_cast<size_t>(width) * static_cast<size_t>(height) * 3u);
+    for( int y = 0; y < height; ++y )
+    {
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width)
+                                  + static_cast<size_t>(x)) * 3u;
+            buffer[index + 0] = red;
+            buffer[index + 1] = green;
+            buffer[index + 2] = blue;
         }
     }
     return buffer;
@@ -73,6 +108,86 @@ std::vector<uint8_t> make_diagonal_line_rgb8(int width, int height)
         buffer[index + 2] = 0u;
     }
     return buffer;
+}
+
+std::vector<uint8_t> make_impulse_rgb8(int width, int height)
+{
+    std::vector<uint8_t> buffer(static_cast<size_t>(width) * static_cast<size_t>(height) * 3u, 0u);
+    const int cx = width / 2;
+    const int cy = height / 2;
+    const size_t index = (static_cast<size_t>(cy) * static_cast<size_t>(width)
+                          + static_cast<size_t>(cx)) * 3u;
+    buffer[index + 0] = 255u;
+    buffer[index + 1] = 255u;
+    buffer[index + 2] = 255u;
+    return buffer;
+}
+
+struct AxisReferenceSample
+{
+    int i0;
+    int i1;
+    double weight;
+};
+
+AxisReferenceSample reference_axis_sample(int outputIndex,
+                                          int sourceSize,
+                                          int targetSize)
+{
+    if( sourceSize <= 1 )
+    {
+        return { 0, 0, 0.0 };
+    }
+
+    const double sourceCentre =
+        ( ( static_cast<double>( outputIndex ) + 0.5 ) *
+          static_cast<double>( sourceSize ) /
+          static_cast<double>( targetSize ) ) - 0.5;
+    if( sourceCentre <= 0.0 )
+    {
+        return { 0, 1, 0.0 };
+    }
+    if( sourceCentre >= static_cast<double>( sourceSize - 1 ) )
+    {
+        return { sourceSize - 1, sourceSize - 1, 0.0 };
+    }
+
+    const int i0 = static_cast<int>( std::floor( sourceCentre ) );
+    const int i1 = std::min( sourceSize - 1, i0 + 1 );
+    const double weight = sourceCentre - static_cast<double>( i0 );
+    return { i0, i1, weight };
+}
+
+uint8_t reference_bilinear_channel(const std::vector<uint8_t> & source,
+                                   int sourceWidth,
+                                   int sourceHeight,
+                                   int targetWidth,
+                                   int targetHeight,
+                                   int targetX,
+                                   int targetY,
+                                   int channel)
+{
+    const AxisReferenceSample sx =
+        reference_axis_sample(targetX, sourceWidth, targetWidth);
+    const AxisReferenceSample sy =
+        reference_axis_sample(targetY, sourceHeight, targetHeight);
+
+    const auto sample = [&](int x, int y) -> double {
+        const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(sourceWidth)
+                              + static_cast<size_t>(x)) * 3u
+                           + static_cast<size_t>(channel);
+        return static_cast<double>(source[index]);
+    };
+
+    const double top =
+        sample(sx.i0, sy.i0) * (1.0 - sx.weight) +
+        sample(sx.i1, sy.i0) * sx.weight;
+    const double bottom =
+        sample(sx.i0, sy.i1) * (1.0 - sx.weight) +
+        sample(sx.i1, sy.i1) * sx.weight;
+    const double value = top * (1.0 - sy.weight) + bottom * sy.weight;
+    const int rounded = static_cast<int>(std::floor(value + 0.5));
+    return static_cast<uint8_t>(std::max(0, std::min(255, rounded)));
 }
 
 int count_intermediate_grey_pixels(const std::vector<uint8_t> & rgb,
@@ -111,6 +226,194 @@ double median_milliseconds(std::vector<double> samples)
 }
 
 } // namespace
+
+TEST(PlaybackScaling, BilinearScaleOneIsByteIdentity)
+{
+    struct SizeCase
+    {
+        int width;
+        int height;
+    };
+
+    const SizeCase cases[] = {
+        { 1, 1 },
+        { 2, 3 },
+        { 17, 13 },
+        { 37, 19 }
+    };
+
+    for( const SizeCase & sizeCase : cases )
+    {
+        const std::vector<uint8_t> source =
+            make_synthetic_rgb8(sizeCase.width, sizeCase.height);
+        BilinearPlaybackScaleCache cache;
+        std::vector<uint8_t> scaled;
+
+        const bool ok = playbackBuildBilinearScaledRgb8(source.data(),
+                                                        sizeCase.width,
+                                                        sizeCase.height,
+                                                        sizeCase.width,
+                                                        sizeCase.height,
+                                                        scaled,
+                                                        cache);
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(source.size(), scaled.size());
+        ASSERT_TRUE(source == scaled);
+    }
+}
+
+TEST(PlaybackScaling, BilinearMatchesReferenceAtPlaybackScales)
+{
+    const int sourceWidth = 11;
+    const int sourceHeight = 9;
+    const std::vector<uint8_t> source =
+        make_synthetic_rgb8(sourceWidth, sourceHeight);
+
+    /* Reuse one cache while bouncing through the real playback scale factors.
+     * This catches stale cache tables when the UI changes quality modes. */
+    BilinearPlaybackScaleCache cache;
+    std::vector<uint8_t> scaled;
+    const int scales[] = { 1, 4, 2, 1 };
+
+    for( const int scale : scales )
+    {
+        const int targetWidth = sourceWidth * scale;
+        const int targetHeight = sourceHeight * scale;
+        const bool ok = playbackBuildBilinearScaledRgb8(source.data(),
+                                                        sourceWidth,
+                                                        sourceHeight,
+                                                        targetWidth,
+                                                        targetHeight,
+                                                        scaled,
+                                                        cache);
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(static_cast<size_t>(targetWidth) * static_cast<size_t>(targetHeight) * 3u,
+                  scaled.size());
+
+        for( int y = 0; y < targetHeight; ++y )
+        {
+            for( int x = 0; x < targetWidth; ++x )
+            {
+                const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(targetWidth)
+                                      + static_cast<size_t>(x)) * 3u;
+                for( int c = 0; c < 3; ++c )
+                {
+                    const uint8_t expected = reference_bilinear_channel(source,
+                                                                        sourceWidth,
+                                                                        sourceHeight,
+                                                                        targetWidth,
+                                                                        targetHeight,
+                                                                        x,
+                                                                        y,
+                                                                        c);
+                    ASSERT_EQ(static_cast<int>(expected),
+                              static_cast<int>(scaled[index + static_cast<size_t>(c)]));
+                }
+            }
+        }
+    }
+}
+
+TEST(PlaybackScaling, BilinearPreservesFlatFieldsAtPlaybackScales)
+{
+    const int sourceWidth = 13;
+    const int sourceHeight = 7;
+    const uint8_t red = 41u;
+    const uint8_t green = 127u;
+    const uint8_t blue = 213u;
+    const std::vector<uint8_t> source =
+        make_flat_rgb8(sourceWidth, sourceHeight, red, green, blue);
+
+    BilinearPlaybackScaleCache cache;
+    std::vector<uint8_t> scaled;
+    const int scales[] = { 1, 2, 4 };
+
+    for( const int scale : scales )
+    {
+        const int targetWidth = sourceWidth * scale;
+        const int targetHeight = sourceHeight * scale;
+        ASSERT_TRUE(playbackBuildBilinearScaledRgb8(source.data(),
+                                                    sourceWidth,
+                                                    sourceHeight,
+                                                    targetWidth,
+                                                    targetHeight,
+                                                    scaled,
+                                                    cache));
+        ASSERT_EQ(static_cast<size_t>(targetWidth) * static_cast<size_t>(targetHeight) * 3u,
+                  scaled.size());
+        for( size_t i = 0; i < scaled.size(); i += 3u )
+        {
+            ASSERT_EQ(static_cast<int>(red), static_cast<int>(scaled[i + 0u]));
+            ASSERT_EQ(static_cast<int>(green), static_cast<int>(scaled[i + 1u]));
+            ASSERT_EQ(static_cast<int>(blue), static_cast<int>(scaled[i + 2u]));
+        }
+    }
+}
+
+TEST(PlaybackScaling, BilinearImpulseResponseIsSmoothAtPlaybackScales)
+{
+    const int sourceWidth = 5;
+    const int sourceHeight = 5;
+    const std::vector<uint8_t> source =
+        make_impulse_rgb8(sourceWidth, sourceHeight);
+
+    BilinearPlaybackScaleCache bilinearCache;
+    FastPlaybackScaleCache nearestCache;
+    std::vector<uint8_t> bilinearScaled;
+    std::vector<uint8_t> nearestScaled;
+    const int scales[] = { 2, 4 };
+
+    for( const int scale : scales )
+    {
+        const int targetWidth = sourceWidth * scale;
+        const int targetHeight = sourceHeight * scale;
+        ASSERT_TRUE(playbackBuildBilinearScaledRgb8(source.data(),
+                                                    sourceWidth,
+                                                    sourceHeight,
+                                                    targetWidth,
+                                                    targetHeight,
+                                                    bilinearScaled,
+                                                    bilinearCache));
+        ASSERT_TRUE(playbackBuildFastScaledRgb8(source.data(),
+                                                sourceWidth,
+                                                sourceHeight,
+                                                targetWidth,
+                                                targetHeight,
+                                                nearestScaled,
+                                                nearestCache));
+
+        int bilinearIntermediate = 0;
+        int nearestIntermediate = 0;
+        int bilinearPeak = 0;
+        for( size_t i = 0; i < bilinearScaled.size(); i += 3u )
+        {
+            const int value = bilinearScaled[i];
+            bilinearPeak = std::max(bilinearPeak, value);
+            if( value > 0 && value < 255 )
+            {
+                ++bilinearIntermediate;
+            }
+        }
+        for( size_t i = 0; i < nearestScaled.size(); i += 3u )
+        {
+            const int value = nearestScaled[i];
+            if( value > 0 && value < 255 )
+            {
+                ++nearestIntermediate;
+            }
+        }
+
+        ASSERT_EQ(0, nearestIntermediate);
+        ASSERT_TRUE(bilinearIntermediate > scale * scale);
+        ASSERT_TRUE(bilinearPeak >= 140);
+
+        const size_t firstPixel = 0u;
+        const size_t lastPixel = (static_cast<size_t>(targetWidth) *
+                                  static_cast<size_t>(targetHeight) - 1u) * 3u;
+        ASSERT_EQ(0, static_cast<int>(bilinearScaled[firstPixel]));
+        ASSERT_EQ(0, static_cast<int>(bilinearScaled[lastPixel]));
+    }
+}
 
 TEST(PlaybackScaling, BilinearOutputDimensions)
 {
