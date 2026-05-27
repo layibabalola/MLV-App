@@ -250,6 +250,7 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->outputMode = slot.outputMode;
         frame->renderedImageWidth = slot.renderedImageWidth;
         frame->renderedImageHeight = slot.renderedImageHeight;
+        frame->playbackScaleFactorActive = slot.playbackScaleFactorActive;
         frame->playbackFastScaleActive = slot.playbackFastScaleActive;
         frame->playbackScaledWidth = slot.playbackScaledWidth;
         frame->playbackScaledHeight = slot.playbackScaledHeight;
@@ -1433,9 +1434,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.gpuBilinearFallbackReason.clear();
     }
 
-    /* Phase 4A: read the requested scale factor; the pipeline ignores it
-     * today but the call routes through the *Scaled getters so the cache
-     * key sees a different signature for scale=2 vs scale=1. */
+    /* Read the requested scale factor. The MLV core can promote it to an
+     * effective scale after render (Dual ISO HQ keeps scale=2 on the safer
+     * scale=4 path), so request and active values are logged separately. */
     const int playbackScaleFactor = m_activePresentationContext.playbackScaleFactor;
     int renderedImageWidth = m_imageWidth;
     int renderedImageHeight = m_imageHeight;
@@ -1589,6 +1590,47 @@ void RenderFrameThread::drawFrame( int slotIndex,
         mlv_stage_timing_note("render_thread_draw", frameNumber, render_start);
     }
 
+    int playbackScaleFactorActive = playbackScaleFactor;
+    if( m_pMlvObject
+     && ( outputMode == OutputProcessed8 || outputMode == OutputProcessed16 ) )
+    {
+        const int coreActiveScale = m_pMlvObject->playback_scale_factor_active;
+        if( coreActiveScale == 1 || coreActiveScale == 2 || coreActiveScale == 4 )
+        {
+            playbackScaleFactorActive = coreActiveScale;
+        }
+    }
+    slot.playbackScaleFactorActive = playbackScaleFactorActive;
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_scale_factor_effective"),
+        playbackScaleFactorActive );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_scale_factor_clamped"),
+        playbackScaleFactorActive != playbackScaleFactor );
+    if( m_lastLoggedPlaybackScaleFactorRequest != playbackScaleFactor
+     || m_lastLoggedPlaybackScaleFactorActive != playbackScaleFactorActive )
+    {
+        qInfo().nospace()
+            << "Playback scale effective: requested=x"
+            << playbackScaleFactor
+            << " active=x"
+            << playbackScaleFactorActive
+            << " rendered="
+            << renderedImageWidth
+            << "x"
+            << renderedImageHeight
+            << " target="
+            << m_activePresentationPreparationOptions.targetWidth
+            << "x"
+            << m_activePresentationPreparationOptions.targetHeight
+            << " clamped="
+            << (playbackScaleFactorActive != playbackScaleFactor)
+            << " outputMode="
+            << static_cast<int>( outputMode );
+        m_lastLoggedPlaybackScaleFactorRequest = playbackScaleFactor;
+        m_lastLoggedPlaybackScaleFactorActive = playbackScaleFactorActive;
+    }
+
     slot.playbackFastScaleActive = false;
     slot.playbackScaledWidth = 0;
     slot.playbackScaledHeight = 0;
@@ -1611,9 +1653,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
         const int sourceWidthForScaler = renderedImageWidth;
         const int sourceHeightForScaler = renderedImageHeight;
         const bool upscaling =
-            playbackScaleFactor > 1
+            playbackScaleFactorActive > 1
          && sourceWidthForScaler < m_activePresentationPreparationOptions.targetWidth
          && sourceHeightForScaler < m_activePresentationPreparationOptions.targetHeight;
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_playback_scale_target_width"),
+            m_activePresentationPreparationOptions.targetWidth );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_playback_scale_target_height"),
+            m_activePresentationPreparationOptions.targetHeight );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_playback_scale_upscaling"),
+            upscaling );
         bool bilinearUsed = false;
 
         if( upscaling )
@@ -1632,8 +1683,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         {
             slot.playbackFastScaleActive =
                 playbackBuildFastScaledRgb8( slot.rawImage8.data(),
-                                             m_imageWidth,
-                                             m_imageHeight,
+                                             sourceWidthForScaler,
+                                             sourceHeightForScaler,
                                              m_activePresentationPreparationOptions.targetWidth,
                                              m_activePresentationPreparationOptions.targetHeight,
                                              slot.playbackScaledImage8,
@@ -1653,6 +1704,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
     }
     else
     {
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_target_width"),
+                                          0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_target_height"),
+                                          0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_upscaling"),
+                                          false );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_active"),
                                           false );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_bilinear"),

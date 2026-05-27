@@ -609,12 +609,11 @@ static bool playback_start_preroll_disabled_by_environment()
         && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
 }
 
-/* Phase 4A: read MLVAPP_PLAYBACK_SCALE_FACTOR once and cache the result.
- * Accepts "1", "2", or "4"; anything else clamps to 1. Today the value is
- * only observed by the processed8/16 cache key (the pipeline still renders
- * at full resolution). Phase 4B will honor it in the actual render
- * pipeline. Phase 4E: returns 0 when the env var is unset, so the caller
- * can fall back to the GUI dial. Otherwise returns the parsed value. */
+/* Read MLVAPP_PLAYBACK_SCALE_FACTOR once and cache the request.
+ * Accepts "1", "2", or "4"; returns 0 when unset so the caller can fall
+ * back to the GUI dial. The render thread logs both this requested value
+ * and the effective core value because some clip modes promote unsafe
+ * requests, for example Dual ISO HQ x2 -> x4. */
 static int playback_scale_factor_env_override()
 {
     static int cached_scale = -2; /* -2 == not yet probed, 0 == unset */
@@ -1673,6 +1672,26 @@ bool MainWindow::consumePresentationRequest( uint64_t requestSerial,
 // Conflation is by request serial: only the latest requested serial can present.
 void MainWindow::enqueuePlaybackPrepTask( const PlaybackPrepTask &task )
 {
+    const uint64_t activeGeneration =
+        m_playbackPresentationGeneration.load( std::memory_order_acquire );
+    if( task.presentationGeneration != activeGeneration )
+    {
+        m_playbackPrepStaleDropCount.fetch_add( 1, std::memory_order_acq_rel );
+        m_playbackPrepGenerationDropCount.fetch_add( 1, std::memory_order_acq_rel );
+        logInteractionEvent(
+            QStringLiteral("playback_prep.drop_enqueue_generation"),
+            QStringLiteral("serial=%1 task_generation=%2 active_generation=%3 requested_scale=%4 active_scale=%5")
+                .arg( static_cast<qulonglong>( task.requestSerial ) )
+                .arg( static_cast<qulonglong>( task.presentationGeneration ) )
+                .arg( static_cast<qulonglong>( activeGeneration ) )
+                .arg( task.requestContext.playbackScaleFactor )
+                .arg( task.readyFrame.playbackScaleFactorActive ),
+            true );
+        if( m_pRenderThread )
+            m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
+        return;
+    }
+
     m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
     {
         std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
@@ -1687,6 +1706,66 @@ void MainWindow::enqueuePlaybackPrepTask( const PlaybackPrepTask &task )
         m_playbackPrepPendingValid = true;
     }
     m_playbackPrepCv.notify_one();
+}
+
+void MainWindow::invalidatePlaybackPrepForDisplayChange( const char *reason )
+{
+    const uint64_t newGeneration =
+        m_playbackPresentationGeneration.fetch_add( 1, std::memory_order_acq_rel ) + 1;
+    std::vector<uint64_t> serialsToRelease;
+    bool droppedPending = false;
+    size_t droppedResults = 0;
+
+    {
+        std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
+        if( m_playbackPrepPendingValid )
+        {
+            droppedPending = true;
+            serialsToRelease.push_back( m_playbackPrepPending.requestSerial );
+            m_playbackPrepPendingValid = false;
+            m_playbackPrepPending = PlaybackPrepTask();
+        }
+        droppedResults = m_playbackPrepResults.size();
+        for( const PlaybackPrepResult &result : m_playbackPrepResults )
+        {
+            serialsToRelease.push_back( result.task.requestSerial );
+        }
+        m_playbackPrepResults.clear();
+    }
+
+    const uint64_t droppedCount =
+        static_cast<uint64_t>( droppedResults + ( droppedPending ? 1 : 0 ) );
+    if( droppedCount > 0 )
+    {
+        m_playbackPrepStaleDropCount.fetch_add( droppedCount, std::memory_order_acq_rel );
+        m_playbackPrepGenerationDropCount.fetch_add( droppedCount, std::memory_order_acq_rel );
+    }
+
+    if( m_pRenderThread )
+    {
+        for( uint64_t serial : serialsToRelease )
+        {
+            m_pRenderThread->releasePresentedFrameForRequestSerial( serial );
+        }
+        m_frameStillDrawing = !m_pRenderThread->isIdle();
+    }
+    else
+    {
+        m_frameStillDrawing = false;
+    }
+
+    logInteractionEvent(
+        QStringLiteral("playback_prep.invalidate_generation"),
+        QStringLiteral("reason=%1 new_generation=%2 dropped_pending=%3 dropped_results=%4 released_serials=%5 latest_serial=%6 still_drawing=%7")
+            .arg( reason && *reason ? QString::fromLatin1( reason ) : QStringLiteral("unspecified") )
+            .arg( static_cast<qulonglong>( newGeneration ) )
+            .arg( bool01( droppedPending ) )
+            .arg( static_cast<qulonglong>( droppedResults ) )
+            .arg( static_cast<qulonglong>( serialsToRelease.size() ) )
+            .arg( static_cast<qulonglong>( m_latestRequestedSerial.load( std::memory_order_acquire ) ) )
+            .arg( bool01( m_frameStillDrawing ) ),
+        true );
+    m_playbackPrepCv.notify_all();
 }
 
 MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const PlaybackPrepTask &task )
@@ -1980,10 +2059,15 @@ void MainWindow::playbackPrepThreadLoop( void )
 
         const uint64_t latestBeforeCompute =
             m_latestRequestedSerial.load( std::memory_order_acquire );
-        if( task.requestSerial != latestBeforeCompute )
+        const uint64_t activeGenerationBeforeCompute =
+            m_playbackPresentationGeneration.load( std::memory_order_acquire );
+        if( task.requestSerial != latestBeforeCompute
+         || task.presentationGeneration != activeGenerationBeforeCompute )
         {
             std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
             ++m_playbackPrepStaleDropCount;
+            if( task.presentationGeneration != activeGenerationBeforeCompute )
+                ++m_playbackPrepGenerationDropCount;
             if( m_pRenderThread )
                 m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
             continue;
@@ -1996,11 +2080,16 @@ void MainWindow::playbackPrepThreadLoop( void )
         // see a clean queue. Presenter also has an independent check to cover
         // the race between this push and the queued slot firing.
         const uint64_t latest = m_latestRequestedSerial.load( std::memory_order_acquire );
-        if( result.task.requestSerial != latest )
+        const uint64_t activeGeneration =
+            m_playbackPresentationGeneration.load( std::memory_order_acquire );
+        if( result.task.requestSerial != latest
+         || result.task.presentationGeneration != activeGeneration )
         {
             std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
             ++m_playbackPrepStaleDropCount;
             ++m_playbackPrepReplacedAfterComputeCount;
+            if( result.task.presentationGeneration != activeGeneration )
+                ++m_playbackPrepGenerationDropCount;
             if( m_pRenderThread )
                 m_pRenderThread->releasePresentedFrameForRequestSerial( result.task.requestSerial );
             continue;
@@ -2043,9 +2132,24 @@ void MainWindow::onPlaybackPrepResultReady( void )
     }
 
     const uint64_t latest = m_latestRequestedSerial.load( std::memory_order_acquire );
-    if( result.task.requestSerial != latest )
+    const uint64_t activeGeneration =
+        m_playbackPresentationGeneration.load( std::memory_order_acquire );
+    if( result.task.requestSerial != latest
+     || result.task.presentationGeneration != activeGeneration )
     {
         ++m_playbackPrepStaleDropCount;
+        if( result.task.presentationGeneration != activeGeneration )
+            ++m_playbackPrepGenerationDropCount;
+        logInteractionEvent(
+            QStringLiteral("playback_prep.drop_present_generation"),
+            QStringLiteral("serial=%1 latest_serial=%2 task_generation=%3 active_generation=%4 requested_scale=%5 active_scale=%6")
+                .arg( static_cast<qulonglong>( result.task.requestSerial ) )
+                .arg( static_cast<qulonglong>( latest ) )
+                .arg( static_cast<qulonglong>( result.task.presentationGeneration ) )
+                .arg( static_cast<qulonglong>( activeGeneration ) )
+                .arg( result.task.requestContext.playbackScaleFactor )
+                .arg( result.task.readyFrame.playbackScaleFactorActive ),
+            true );
         if( m_pRenderThread )
             m_pRenderThread->releasePresentedFrameForRequestSerial( result.task.requestSerial );
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
@@ -2275,6 +2379,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_stale_drops"),
                                            static_cast<double>( m_playbackPrepStaleDropCount.load(
                                                                  std::memory_order_acquire ) ) );
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_generation"),
+                                           static_cast<double>( task.presentationGeneration ) );
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_active_generation"),
+                                           static_cast<double>( m_playbackPresentationGeneration.load(
+                                                                 std::memory_order_acquire ) ) );
+    readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_generation_drops"),
+                                           static_cast<double>( m_playbackPrepGenerationDropCount.load(
+                                                                 std::memory_order_acquire ) ) );
     readyFrame.stageTimingTelemetry.insert( QStringLiteral("prep_replaced_before_compute"),
                                            static_cast<double>( m_playbackPrepReplacedBeforeComputeCount.load(
                                                                  std::memory_order_acquire ) ) );
@@ -2429,6 +2541,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.sceneWidth = sceneWidth;
     requestContext.sceneHeight = sceneHeight;
     requestContext.devicePixelRatioMilli = devicePixelRatioMilli;
+    requestContext.presentationGeneration =
+        m_playbackPresentationGeneration.load( std::memory_order_acquire );
     requestContext.zoomFitEnabled = zoomFitEnabled;
     requestContext.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
     requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
@@ -2501,7 +2615,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
 
     logInteractionEvent(
         QStringLiteral("draw_frame.request"),
-        QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 frame_changed=%10")
+        QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 frame_changed=%10 requested_scale=%11 generation=%12 target=%13x%14")
             .arg( static_cast<qulonglong>( requestSerial ) )
             .arg( requestedFrame )
             .arg( bool01( ui->actionPlay->isChecked() ) )
@@ -2511,7 +2625,11 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             .arg( bool01( m_renderThreadUsingGpuPreviewProcessing ) )
             .arg( bool01( m_renderThreadUsingCpuPreviewProcessing ) )
             .arg( bool01( m_renderThreadUsingGpuBilinearDebayer ) )
-            .arg( bool01( m_frameChanged ) ),
+            .arg( bool01( m_frameChanged ) )
+            .arg( requestContext.playbackScaleFactor )
+            .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
+            .arg( requestContext.imageWidth )
+            .arg( requestContext.imageHeight ),
         true );
 
     //Get frame from library
@@ -2552,6 +2670,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     QTextStream out(stdout);
     QTextStream err(stderr);
     m_headlessPlaybackProfileUsePlaybackPolicy = false;
+    m_lookAssistUnsettledAnalysisCount = 0;
     m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
     m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
 
@@ -2719,6 +2838,11 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     QString lookAssistToggleSmokeFailure;
     QJsonObject lookAssistLoadState;
     QJsonObject lookAssistToggleState;
+    bool playbackScaleToggleSmokeRan = false;
+    bool playbackScaleToggleSmokeStable = true;
+    QString playbackScaleToggleSmokeFailure;
+    QJsonObject playbackScaleToggleBeforeState;
+    QJsonObject playbackScaleToggleAfterState;
     bool playbackProcessingSubsetObserved = false;
     bool playbackProcessingSupported = false;
     QString playbackProcessingReason;
@@ -2767,7 +2891,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             &loop,
             [&]()
             {
-                if( m_lastPresentedRequestSerial < requestSerialFloor )
+                if( !isFrameSettledForAnalysis( frameIndex, requestSerialFloor ) )
                 {
                     return;
                 }
@@ -2792,10 +2916,14 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         {
             if( failureReason )
             {
-                *failureReason = QStringLiteral("timed out waiting for frameReady() for frame %1 serial >= %2; last serial %3")
+                const int lastPresentedFrame = m_lastPresentedRequestContextValid
+                    ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                    : -1;
+                *failureReason = QStringLiteral("timed out waiting for frameReady() for frame %1 serial >= %2; last serial %3 last frame %4")
                     .arg( frameIndex )
                     .arg( static_cast<qulonglong>( requestSerialFloor ) )
-                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) );
+                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                    .arg( lastPresentedFrame );
             }
             return false;
         }
@@ -2969,6 +3097,14 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         state.insert( QStringLiteral("raw_black"), ui->horizontalSliderRawBlack->value() );
         state.insert( QStringLiteral("raw_white"), ui->horizontalSliderRawWhite->value() );
         state.insert( QStringLiteral("frame"), ui->horizontalSliderPosition->value() );
+        state.insert( QStringLiteral("last_presented_request_serial"),
+                      static_cast<double>( m_lastPresentedRequestSerial ) );
+        state.insert( QStringLiteral("next_render_request_serial"),
+                      static_cast<double>( m_nextRenderRequestSerial ) );
+        state.insert( QStringLiteral("last_presented_frame"),
+                      m_lastPresentedRequestContextValid
+                          ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                          : -1 );
         if( m_lastLookAssistDiagnosticsValid )
         {
             state.insert( QStringLiteral("median"), m_lastLookAssistMedian );
@@ -2980,6 +3116,57 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             state.insert( QStringLiteral("preset_pivot"), m_lastLookAssistPivot );
             state.insert( QStringLiteral("temperature_delta"), m_lastLookAssistTemperatureDelta );
             state.insert( QStringLiteral("tint_delta"), m_lastLookAssistTintDelta );
+        }
+        return state;
+    };
+
+    auto capturePlaybackScaleState = [&]() -> QJsonObject
+    {
+        QJsonObject state;
+        const QJsonObject telemetry = m_lastPresentedStageTimingTelemetry;
+        state.insert( QStringLiteral("override"), m_playbackScaleFactorOverride );
+        state.insert( QStringLiteral("effective_for_next_request"),
+                      effectivePlaybackScaleFactorForRequest() );
+        state.insert( QStringLiteral("presentation_generation"),
+                      static_cast<double>( m_playbackPresentationGeneration.load(
+                          std::memory_order_acquire ) ) );
+        state.insert( QStringLiteral("last_presented_request_serial"),
+                      static_cast<double>( m_lastPresentedRequestSerial ) );
+        state.insert( QStringLiteral("last_presented_generation"),
+                      m_lastPresentedRequestContextValid
+                          ? static_cast<double>( m_lastPresentedRequestContext.presentationGeneration )
+                          : 0.0 );
+        state.insert( QStringLiteral("last_presented_frame"),
+                      m_lastPresentedRequestContextValid
+                          ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                          : -1 );
+        state.insert( QStringLiteral("last_presented_requested_scale"),
+                      m_lastPresentedRequestContextValid
+                          ? m_lastPresentedRequestContext.playbackScaleFactor
+                          : -1 );
+        state.insert( QStringLiteral("last_presented_active_scale"),
+                      m_lastPresentedPlaybackScaleFactorActive );
+
+        const QStringList telemetryKeys =
+            QStringList()
+            << QStringLiteral("render_thread_playback_scale_factor_request")
+            << QStringLiteral("render_thread_playback_scale_factor_effective")
+            << QStringLiteral("render_thread_playback_scale_factor_clamped")
+            << QStringLiteral("render_thread_rendered_width")
+            << QStringLiteral("render_thread_rendered_height")
+            << QStringLiteral("render_thread_playback_scale_target_width")
+            << QStringLiteral("render_thread_playback_scale_target_height")
+            << QStringLiteral("render_thread_playback_scale_upscaling")
+            << QStringLiteral("prep_generation")
+            << QStringLiteral("prep_active_generation")
+            << QStringLiteral("prep_generation_drops")
+            << QStringLiteral("prep_stale_drops");
+        for( const QString &key : telemetryKeys )
+        {
+            if( telemetry.contains( key ) )
+            {
+                state.insert( key, telemetry.value( key ) );
+            }
         }
         return state;
     };
@@ -3086,6 +3273,98 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     << lookAssistToggleSmokeFailure << "\n";
                 return 9;
             }
+        }
+        previousCompletionNs = -1;
+    }
+
+    if( options.exerciseScaleFactorToggle )
+    {
+        playbackScaleToggleSmokeRan = true;
+        trace(QStringLiteral("playback-scale-toggle-smoke-begin"));
+        const int envScale = playback_scale_factor_env_override();
+        if( envScale == 1 || envScale == 2 || envScale == 4 )
+        {
+            playbackScaleToggleSmokeStable = false;
+            playbackScaleToggleSmokeFailure =
+                QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR=%1 overrides the GUI scale toggle smoke.")
+                    .arg( envScale );
+        }
+        else
+        {
+            QString scaleSettleFailure;
+            applyPlaybackScaleFactorOverride( 2, /*persist*/false );
+            qApp->processEvents( QEventLoop::AllEvents );
+            trace(QStringLiteral("playback-scale-toggle-smoke-x2-settle-begin"));
+            if( !renderFrameIndex( startFrame, -1, true, &scaleSettleFailure ) )
+            {
+                err << "[PROFILE] ERROR: " << scaleSettleFailure << "\n";
+                trace(QStringLiteral("playback-scale-toggle-smoke-x2-settle-failed: ") + scaleSettleFailure);
+                return 11;
+            }
+            playbackScaleToggleBeforeState = capturePlaybackScaleState();
+
+            applyPlaybackScaleFactorOverride( 1, /*persist*/false );
+            qApp->processEvents( QEventLoop::AllEvents );
+            trace(QStringLiteral("playback-scale-toggle-smoke-x1-settle-begin"));
+            if( !renderFrameIndex( startFrame, -1, true, &scaleSettleFailure ) )
+            {
+                err << "[PROFILE] ERROR: " << scaleSettleFailure << "\n";
+                trace(QStringLiteral("playback-scale-toggle-smoke-x1-settle-failed: ") + scaleSettleFailure);
+                return 11;
+            }
+            playbackScaleToggleAfterState = capturePlaybackScaleState();
+
+            QStringList scaleMismatches;
+            if( playbackScaleToggleAfterState.value(
+                    QStringLiteral("render_thread_playback_scale_factor_request") ).toInt( -1 ) != 1 )
+            {
+                scaleMismatches << QStringLiteral("requested_scale_after_not_1");
+            }
+            if( playbackScaleToggleAfterState.value(
+                    QStringLiteral("render_thread_playback_scale_factor_effective") ).toInt( -1 ) != 1 )
+            {
+                scaleMismatches << QStringLiteral("effective_scale_after_not_1");
+            }
+            if( playbackScaleToggleAfterState.value(
+                    QStringLiteral("last_presented_active_scale") ).toInt( -1 ) != 1 )
+            {
+                scaleMismatches << QStringLiteral("presented_active_scale_after_not_1");
+            }
+            if( playbackScaleToggleAfterState.value(
+                    QStringLiteral("last_presented_generation") ).toDouble()
+             != playbackScaleToggleAfterState.value(
+                    QStringLiteral("presentation_generation") ).toDouble() )
+            {
+                scaleMismatches << QStringLiteral("presented_generation_not_current");
+            }
+            if( playbackScaleToggleAfterState.value(
+                    QStringLiteral("presentation_generation") ).toDouble()
+             <= playbackScaleToggleBeforeState.value(
+                    QStringLiteral("presentation_generation") ).toDouble() )
+            {
+                scaleMismatches << QStringLiteral("generation_did_not_advance");
+            }
+            const int renderedWidthAfter = playbackScaleToggleAfterState.value(
+                QStringLiteral("render_thread_rendered_width") ).toInt( 0 );
+            const int renderedHeightAfter = playbackScaleToggleAfterState.value(
+                QStringLiteral("render_thread_rendered_height") ).toInt( 0 );
+            if( renderedWidthAfter <= 0 || renderedHeightAfter <= 0 )
+            {
+                scaleMismatches << QStringLiteral("invalid_rendered_dimensions_after");
+            }
+
+            playbackScaleToggleSmokeFailure = scaleMismatches.join( QStringLiteral(",") );
+            playbackScaleToggleSmokeStable = playbackScaleToggleSmokeFailure.isEmpty();
+        }
+
+        trace(QStringLiteral("playback-scale-toggle-smoke-complete stable=%1 mismatch=%2")
+                .arg( bool01( playbackScaleToggleSmokeStable ) )
+                .arg( playbackScaleToggleSmokeFailure ));
+        if( !playbackScaleToggleSmokeStable )
+        {
+            err << "[PROFILE] ERROR: Playback Scale x2->x1 toggle smoke failed: "
+                << playbackScaleToggleSmokeFailure << "\n";
+            return 11;
         }
         previousCompletionNs = -1;
     }
@@ -3298,6 +3577,16 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("look_assist_toggle_smoke_failure"), lookAssistToggleSmokeFailure );
     metadata.insert( QStringLiteral("look_assist_load_state"), lookAssistLoadState );
     metadata.insert( QStringLiteral("look_assist_toggle_state"), lookAssistToggleState );
+    metadata.insert( QStringLiteral("playback_scale_toggle_smoke_requested"), options.exerciseScaleFactorToggle );
+    metadata.insert( QStringLiteral("playback_scale_toggle_smoke_ran"), playbackScaleToggleSmokeRan );
+    metadata.insert( QStringLiteral("playback_scale_toggle_smoke_stable"), playbackScaleToggleSmokeStable );
+    metadata.insert( QStringLiteral("playback_scale_toggle_smoke_failure"), playbackScaleToggleSmokeFailure );
+    metadata.insert( QStringLiteral("playback_scale_toggle_before_state"), playbackScaleToggleBeforeState );
+    metadata.insert( QStringLiteral("playback_scale_toggle_after_state"), playbackScaleToggleAfterState );
+    metadata.insert( QStringLiteral("look_assist_frame_settle_policy"),
+                     QStringLiteral("analysis waits for frameReady with request serial floor, exact presented frame match, and current presentation generation") );
+    metadata.insert( QStringLiteral("look_assist_unsettled_analysis_count"),
+                     m_lookAssistUnsettledAnalysisCount );
     metadata.insert( QStringLiteral("scope"), QString::fromLatin1( playback_profile_scope_name( options.scope ) ) );
     metadata.insert( QStringLiteral("playback_policy_active"),
                      m_headlessPlaybackProfileUsePlaybackPolicy );
@@ -3772,6 +4061,7 @@ int MainWindow::openMlv( QString fileName )
     m_lastPresentedRequestContextValid = false;
     m_lastPresentedRequestSerial = 0;
     m_lastPresentedFrameUsedGpuBilinearDebayer = false;
+    m_lastPresentedPlaybackScaleFactorActive = 1;
     m_lastPresentedGpuBilinearFallbackReason.clear();
     m_lastPresentedGpuBilinearRendererDescription.clear();
     m_lastPresentedDualIsoPreviewHistogramMs = 0.0;
@@ -8087,9 +8377,11 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
     m_setSliders = false;
     if( deferLookAssistUntilBaselineFrame )
     {
+        const int baselineFrame = ui->horizontalSliderPosition->value();
+        const uint64_t baselineRequestFloor = m_nextRenderRequestSerial;
         logInteractionEvent(
             QStringLiteral("look_assist.setSliders.defer_until_frame_ready"),
-            QStringLiteral("baseline_valid=%1 exp=%2 contrast=%3 temp=%4 tint=%5 raw_black=%6 raw_white=%7 frame=%8")
+            QStringLiteral("baseline_valid=%1 exp=%2 contrast=%3 temp=%4 tint=%5 raw_black=%6 raw_white=%7 frame=%8 serial_floor=%9")
                 .arg( bool01( activeReceiptAtLoad->lookAssistBaselineValid() ) )
                 .arg( ui->horizontalSliderExposure->value() )
                 .arg( ui->horizontalSliderContrast->value() )
@@ -8097,16 +8389,16 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                 .arg( ui->horizontalSliderTint->value() )
                 .arg( ui->horizontalSliderRawBlack->value() )
                 .arg( ui->horizontalSliderRawWhite->value() )
-                .arg( ui->horizontalSliderPosition->value() ) );
+                .arg( baselineFrame )
+                .arg( static_cast<qulonglong>( baselineRequestFloor ) ) );
 
-        const uint64_t baselineRequestFloor = m_nextRenderRequestSerial;
         auto applied = std::make_shared<bool>( false );
         auto readyConnection = std::make_shared<QMetaObject::Connection>();
         auto applyAfterBaselineFrame =
-            [this, activeReceiptAtLoad, baselineRequestFloor, applied, readyConnection]()
+            [this, activeReceiptAtLoad, baselineFrame, baselineRequestFloor, applied, readyConnection]()
         {
             if( *applied ) return;
-            if( m_lastPresentedRequestSerial < baselineRequestFloor )
+            if( !isFrameSettledForAnalysis( baselineFrame, baselineRequestFloor ) )
             {
                 return;
             }
@@ -8137,14 +8429,14 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                     .arg( ui->horizontalSliderTint->value() )
                     .arg( ui->horizontalSliderRawBlack->value() )
                     .arg( ui->horizontalSliderRawWhite->value() )
-                    .arg( ui->horizontalSliderPosition->value() ) );
+                    .arg( baselineFrame ) );
 
             if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
                 restoreLookAssistBaseline( ACTIVE_RECEIPT );
             else
                 captureLookAssistBaseline( ACTIVE_RECEIPT );
 
-            applyLookAssistToReceipt( ACTIVE_RECEIPT );
+            applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
             syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
             setReceipt( ACTIVE_RECEIPT );
             requestFrameRefresh( true, "look-assist-baseline-frame-ready" );
@@ -8159,7 +8451,7 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                 applyAfterBaselineFrame();
             } );
 
-        QTimer::singleShot( 3000, this, [this, activeReceiptAtLoad, applied]()
+        QTimer::singleShot( 3000, this, [this, activeReceiptAtLoad, baselineFrame, baselineRequestFloor, applied]()
         {
             if( *applied ) return;
             if( !m_fileLoaded
@@ -8174,10 +8466,15 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
 
             logInteractionEvent(
                 QStringLiteral("look_assist.setSliders.frame_ready_wait_retry"),
-                QStringLiteral("last_serial=%1 next_serial=%2 frame=%3")
+                QStringLiteral("last_serial=%1 next_serial=%2 target_frame=%3 current_frame=%4 last_frame=%5 serial_floor=%6")
                     .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
                     .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
-                    .arg( ui->horizontalSliderPosition->value() ) );
+                    .arg( baselineFrame )
+                    .arg( ui->horizontalSliderPosition->value() )
+                    .arg( m_lastPresentedRequestContextValid
+                          ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                          : -1 )
+                    .arg( static_cast<qulonglong>( baselineRequestFloor ) ) );
             requestFrameRefresh( true, "look-assist-baseline-load-retry" );
         } );
         requestFrameRefresh( true, "look-assist-baseline-load" );
@@ -8249,7 +8546,8 @@ void MainWindow::restoreLookAssistBaseline( ReceiptSettings *receipt )
         ui->horizontalSliderRawWhite->setValue( receipt->rawWhite() );
 }
 
-void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
+void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
+                                           int analysisFrame )
 {
     m_lastLookAssistDiagnosticsValid = false;
     if( !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
@@ -8262,6 +8560,39 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
                 .arg( bool01( receipt != nullptr ) )
                 .arg( bool01( receipt && receipt->lookAssistEnabled() ) ) );
         return;
+    }
+
+    if( analysisFrame < 0 )
+    {
+        analysisFrame = ui->horizontalSliderPosition->value();
+    }
+    const int totalFrames = static_cast<int>( getMlvFrames( m_pMlvObject ) );
+    if( analysisFrame < 0 || analysisFrame >= totalFrames )
+    {
+        logInteractionEvent(
+            QStringLiteral("look_assist.apply.skip"),
+            QStringLiteral("reason=invalid_analysis_frame frame=%1 total_frames=%2")
+                .arg( analysisFrame )
+                .arg( totalFrames ) );
+        return;
+    }
+    const bool settledForAnalysis =
+        m_lastPresentedRequestContextValid
+        && m_lastPresentedRequestSerial > 0
+        && static_cast<int>( m_lastPresentedRequestContext.frameNumber ) == analysisFrame;
+    if( !settledForAnalysis )
+    {
+        ++m_lookAssistUnsettledAnalysisCount;
+        logInteractionEvent(
+            QStringLiteral("look_assist.apply.unsettled"),
+            QStringLiteral("frame=%1 last_serial=%2 last_frame=%3 next_serial=%4 count=%5")
+                .arg( analysisFrame )
+                .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                .arg( m_lastPresentedRequestContextValid
+                      ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                      : -1 )
+                .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                .arg( m_lookAssistUnsettledAnalysisCount ) );
     }
 
     // Keep the technical raw fix in sync with the auto look.
@@ -8315,7 +8646,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
     QByteArray thumbnail;
     thumbnail.resize( width * height * 3 );
     get_area_average_downscale_raw_thumnail( m_pMlvObject,
-                                             ui->horizontalSliderPosition->value(),
+                                             analysisFrame,
                                              downscaleFactor,
                                              reinterpret_cast<unsigned char *>( thumbnail.data() ) );
 
@@ -8390,7 +8721,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
-        QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 frame=%19")
+        QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 frame=%19 last_serial=%20 last_frame=%21 next_serial=%22")
             .arg( m_lastLookAssistScene )
             .arg( stats.median, 0, 'f', 3 )
             .arg( stats.p05, 0, 'f', 3 )
@@ -8409,7 +8740,12 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt )
             .arg( width )
             .arg( height )
             .arg( downscaleFactor )
-            .arg( ui->horizontalSliderPosition->value() ) );
+            .arg( analysisFrame )
+            .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+            .arg( m_lastPresentedRequestContextValid
+                  ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                  : -1 )
+            .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) ) );
 }
 
 void MainWindow::syncLookAssistDerivedUiToReceipt( ReceiptSettings *receipt )
@@ -11297,7 +11633,9 @@ void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist
         scaleFactor = 0;
     }
 
-    const bool changed = ( scaleFactor != m_playbackScaleFactorOverride );
+    const int previousOverride = m_playbackScaleFactorOverride;
+    const int previousEffectiveScale = effectivePlaybackScaleFactorForRequest();
+    const bool changed = ( scaleFactor != previousOverride );
     m_playbackScaleFactorOverride = scaleFactor;
 
     if ( ui->actionPlaybackScaleAuto )
@@ -11323,15 +11661,33 @@ void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist
     }
     else
     {
+        const int envScale = playback_scale_factor_env_override();
+        const bool envScaleActive = envScale == 1 || envScale == 2 || envScale == 4;
         qInfo().noquote() << "Playback scale override =" << scaleFactor
-                          << "(ui override; GUI dial is bypassed).";
+                          << ( envScaleActive
+                               ? "(ui setting loaded; MLVAPP_PLAYBACK_SCALE_FACTOR currently has precedence)."
+                               : "(ui override; GUI dial is bypassed)." );
     }
 
     if ( changed )
     {
-        invalidateDisplayPreviewCache();
-        m_frameChanged = true;
+        const int newEffectiveScale = effectivePlaybackScaleFactorForRequest();
+        logInteractionEvent(
+            QStringLiteral("playback_scale.change"),
+            QStringLiteral("override=%1->%2 effective=%3->%4 file_loaded=%5 still_drawing=%6 latest_serial=%7 next_serial=%8 generation_before=%9")
+                .arg( previousOverride )
+                .arg( scaleFactor )
+                .arg( previousEffectiveScale )
+                .arg( newEffectiveScale )
+                .arg( bool01( m_fileLoaded ) )
+                .arg( bool01( m_frameStillDrawing ) )
+                .arg( static_cast<qulonglong>( m_latestRequestedSerial.load( std::memory_order_acquire ) ) )
+                .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                .arg( static_cast<qulonglong>( m_playbackPresentationGeneration.load( std::memory_order_acquire ) ) ),
+            true );
+        invalidatePlaybackPrepForDisplayChange( "playback-scale-factor-change" );
         applyEffectiveDualIsoPlaybackSettings();
+        requestFrameRefresh( false, "playback-scale-factor-change" );
     }
     updatePlaybackQualityIndicator();
 }
@@ -11415,9 +11771,11 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
          * because rowscale vs HQ produces different chroma. */
         invalidateDisplayPreviewCache();
         m_frameChanged = true;
+        invalidatePlaybackPrepForDisplayChange( "playback-quality-mode-change" );
         /* Phase E5: refresh the scale-aware alias_map / FR-blending
          * downgrade when the user changes Playback Quality. */
         applyEffectiveDualIsoPlaybackSettings();
+        requestFrameRefresh( false, "playback-quality-mode-change" );
     }
     updatePlaybackQualityIndicator();
 }
@@ -11470,44 +11828,60 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     }
 
     /* The indicator must reflect what is ACTUALLY happening, not what is
-     * stored. Prefer the explicit UI override when present, otherwise fall
-     * back to env vars, then the saved playback mode. That keeps the
-     * on-screen label aligned with the same resolved scale the request
-     * builder uses. */
-    const bool guiScaleOverrideActive =
+     * stored. Developer env vars win first, then the explicit UI override,
+     * then the saved playback mode. That keeps the on-screen label aligned
+     * with the same resolved scale the request builder uses. */
+    const bool guiScaleSettingActive =
         ( m_playbackScaleFactorOverride == 1 || m_playbackScaleFactorOverride == 2
        || m_playbackScaleFactorOverride == 4 );
     const int envScale = playback_scale_factor_env_override();
     const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
     const bool envOverrideActive =
-        !guiScaleOverrideActive && ( ( envScale == 1 || envScale == 2 || envScale == 4 ) || envHq );
+        ( envScale == 1 || envScale == 2 || envScale == 4 ) || envHq;
+    const bool guiScaleOverrideActive = !envOverrideActive && guiScaleSettingActive;
+    auto playbackScaleLabel = [this]( int requestedScale ) -> QString
+    {
+        const int activeScale = m_lastPresentedPlaybackScaleFactorActive;
+        const bool activeScaleValid =
+            activeScale == 1 || activeScale == 2 || activeScale == 4;
+        const bool sameRequest =
+            m_lastPresentedRequestContextValid
+         && m_lastPresentedRequestContext.playbackScaleFactor == requestedScale;
+        if( activeScaleValid && sameRequest && activeScale != requestedScale )
+        {
+            return tr( "x%1->x%2" ).arg( requestedScale ).arg( activeScale );
+        }
+        return tr( "x%1" ).arg( requestedScale );
+    };
 
     QString text;
     QString color;
     if ( guiScaleOverrideActive )
     {
         const int scale = m_playbackScaleFactorOverride;
+        const QString scaleLabel = playbackScaleLabel( scale );
         switch ( m_playbackQualityMode )
         {
             case 0:
-                text = tr( "Quality: Fast x%1 [ui]" ).arg( scale );
+                text = tr( "Quality: Fast %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
             case 1:
-                text = tr( "Quality: HQ x%1 [ui]" ).arg( scale );
+                text = tr( "Quality: HQ %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#7CCB6E" );
                 break;
             case 2:
-                text = m_playbackQualityActiveHq ? tr( "Quality: Auto (HQ x%1) [ui]" ).arg( scale )
-                                                 : tr( "Quality: Auto (Fast x%1) [ui]" ).arg( scale );
+                text = m_playbackQualityActiveHq
+                    ? tr( "Quality: Auto (HQ %1) [ui]" ).arg( scaleLabel )
+                    : tr( "Quality: Auto (Fast %1) [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#5DADE2" );
                 break;
             case 3:
-                text = tr( "Quality: Fast* x%1 [ui]" ).arg( scale );
+                text = tr( "Quality: Fast* %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             case 4:
-                text = tr( "Quality: HQ* x%1 [ui]" ).arg( scale );
+                text = tr( "Quality: HQ* %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             default:
@@ -11520,15 +11894,18 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     {
         const int effScale = ( envScale == 1 || envScale == 2 || envScale == 4 )
                                  ? envScale
-                                 : m_playbackQualityActiveScale;
+                                 : ( guiScaleSettingActive
+                                         ? m_playbackScaleFactorOverride
+                                         : m_playbackQualityActiveScale );
+        const QString scaleLabel = playbackScaleLabel( effScale );
         if ( envHq )
         {
-            text = tr( "Quality: HQ x%1 [env]" ).arg( effScale );
+            text = tr( "Quality: HQ %1 [env]" ).arg( scaleLabel );
             color = QStringLiteral( "#7CCB6E" );
         }
         else if ( effScale > 1 )
         {
-            text = tr( "Quality: Fast x%1 [env]" ).arg( effScale );
+            text = tr( "Quality: Fast %1 [env]" ).arg( scaleLabel );
             color = QStringLiteral( "#A0A0A0" );
         }
         else
@@ -11541,35 +11918,36 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     {
         const int scale = guiScaleOverrideActive ? m_playbackScaleFactorOverride
                                                  : m_playbackQualityActiveScale;
+        const QString scaleLabel = playbackScaleLabel( scale );
         const bool hq = m_playbackQualityActiveHq;
         switch ( m_playbackQualityMode )
         {
             case 0:
-                text = guiScaleOverrideActive ? tr( "Quality: Fast x%1 [ui]" ).arg( scale )
+                text = guiScaleOverrideActive ? tr( "Quality: Fast %1 [ui]" ).arg( scaleLabel )
                                               : tr( "Quality: Fast" );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
             case 1:
-                text = guiScaleOverrideActive ? tr( "Quality: HQ x%1 [ui]" ).arg( scale )
-                                              : tr( "Quality: HQ x%1" ).arg( scale );
+                text = guiScaleOverrideActive ? tr( "Quality: HQ %1 [ui]" ).arg( scaleLabel )
+                                              : tr( "Quality: HQ %1" ).arg( scaleLabel );
                 color = QStringLiteral( "#7CCB6E" );
                 break;
             case 2:
                 text = guiScaleOverrideActive
-                           ? ( hq ? tr( "Quality: Auto (HQ x%1) [ui]" ).arg( scale )
-                                  : tr( "Quality: Auto (Fast x%1) [ui]" ).arg( scale ) )
-                           : ( hq ? tr( "Quality: Auto (HQ x%1)" ).arg( scale )
+                           ? ( hq ? tr( "Quality: Auto (HQ %1) [ui]" ).arg( scaleLabel )
+                                  : tr( "Quality: Auto (Fast %1) [ui]" ).arg( scaleLabel ) )
+                           : ( hq ? tr( "Quality: Auto (HQ %1)" ).arg( scaleLabel )
                                   : tr( "Quality: Auto (Fast)" ) );
                 color = QStringLiteral( "#5DADE2" );
                 break;
             case 3:
-                text = guiScaleOverrideActive ? tr( "Quality: Fast* x%1 [ui]" ).arg( scale )
-                                              : tr( "Quality: Fast* x%1" ).arg( scale );
+                text = guiScaleOverrideActive ? tr( "Quality: Fast* %1 [ui]" ).arg( scaleLabel )
+                                              : tr( "Quality: Fast* %1" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             case 4:
-                text = guiScaleOverrideActive ? tr( "Quality: HQ* x%1 [ui]" ).arg( scale )
-                                              : tr( "Quality: HQ* x%1" ).arg( scale );
+                text = guiScaleOverrideActive ? tr( "Quality: HQ* %1 [ui]" ).arg( scaleLabel )
+                                              : tr( "Quality: HQ* %1" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             default:
@@ -11629,16 +12007,16 @@ void MainWindow::updatePlaybackQualityIndicator( void )
 
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
 {
+    const int envScale = playback_scale_factor_env_override();
+    if ( envScale == 1 || envScale == 2 || envScale == 4 )
+    {
+        return envScale;
+    }
     if ( m_playbackScaleFactorOverride == 1
       || m_playbackScaleFactorOverride == 2
       || m_playbackScaleFactorOverride == 4 )
     {
         return m_playbackScaleFactorOverride;
-    }
-    const int envScale = playback_scale_factor_env_override();
-    if ( envScale == 1 || envScale == 2 || envScale == 4 )
-    {
-        return envScale;
     }
     const int active = m_playbackQualityActiveScale;
     if ( active == 1 || active == 2 || active == 4 ) return active;
@@ -11990,6 +12368,8 @@ void MainWindow::on_actionResetReceipt_triggered()
     receipt->setRawBlack( getMlvOriginalBlackLevel( m_pMlvObject ) * 10 );
     receipt->setDualIsoAutoCorrected( 0 );
     ACTIVE_RECEIPT->setDualIsoAutoCorrected( 0 );
+    const bool resetLookAssistEnabled = receipt->lookAssistEnabled();
+    receipt->setLookAssistEnabled( false );
     setSliders( receipt, false );
     ACTIVE_RECEIPT->setLookAssistBaselineValid( receipt->lookAssistBaselineValid() );
     ACTIVE_RECEIPT->setLookAssistBaselineExposure( receipt->lookAssistBaselineExposure() );
@@ -12005,6 +12385,11 @@ void MainWindow::on_actionResetReceipt_triggered()
     ACTIVE_RECEIPT->setLookAssistBaselineStretchX( receipt->lookAssistBaselineStretchX() );
     ACTIVE_RECEIPT->setLookAssistBaselineStretchY( receipt->lookAssistBaselineStretchY() );
     setReceipt( ACTIVE_RECEIPT );
+    ACTIVE_RECEIPT->setLookAssistEnabled( resetLookAssistEnabled );
+    if( resetLookAssistEnabled )
+    {
+        setSliders( ACTIVE_RECEIPT, false );
+    }
     delete receipt;
 }
 
@@ -13846,6 +14231,7 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
         setReceipt( ACTIVE_RECEIPT );
 
         ReceiptSettings *activeReceiptAtToggle = ACTIVE_RECEIPT;
+        const int baselineFrame = ui->horizontalSliderPosition->value();
         const uint64_t baselineRequestFloor = m_nextRenderRequestSerial;
         logInteractionEvent(
             QStringLiteral("look_assist.toggle.defer_until_frame_ready"),
@@ -13857,16 +14243,16 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
                 .arg( ui->horizontalSliderTint->value() )
                 .arg( ui->horizontalSliderRawBlack->value() )
                 .arg( ui->horizontalSliderRawWhite->value() )
-                .arg( ui->horizontalSliderPosition->value() )
+                .arg( baselineFrame )
                 .arg( static_cast<qulonglong>( baselineRequestFloor ) ) );
 
         auto applied = std::make_shared<bool>( false );
         auto readyConnection = std::make_shared<QMetaObject::Connection>();
         auto applyAfterBaselineFrame =
-            [this, activeReceiptAtToggle, baselineRequestFloor, applied, readyConnection]()
+            [this, activeReceiptAtToggle, baselineFrame, baselineRequestFloor, applied, readyConnection]()
         {
             if( *applied ) return;
-            if( m_lastPresentedRequestSerial < baselineRequestFloor )
+            if( !isFrameSettledForAnalysis( baselineFrame, baselineRequestFloor ) )
             {
                 return;
             }
@@ -13897,7 +14283,7 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
                     .arg( ui->horizontalSliderTint->value() )
                     .arg( ui->horizontalSliderRawBlack->value() )
                     .arg( ui->horizontalSliderRawWhite->value() )
-                    .arg( ui->horizontalSliderPosition->value() )
+                    .arg( baselineFrame )
                     .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
 
             if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
@@ -13905,7 +14291,7 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
             else
                 captureLookAssistBaseline( ACTIVE_RECEIPT );
 
-            applyLookAssistToReceipt( ACTIVE_RECEIPT );
+            applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
             syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
             setReceipt( ACTIVE_RECEIPT );
             logInteractionEvent(
@@ -13934,7 +14320,7 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
                 applyAfterBaselineFrame();
             } );
 
-        QTimer::singleShot( 3000, this, [this, activeReceiptAtToggle, applied]()
+        QTimer::singleShot( 3000, this, [this, activeReceiptAtToggle, baselineFrame, baselineRequestFloor, applied]()
         {
             if( *applied ) return;
             if( !m_fileLoaded
@@ -13949,10 +14335,15 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
 
             logInteractionEvent(
                 QStringLiteral("look_assist.toggle.frame_ready_wait_retry"),
-                QStringLiteral("last_serial=%1 next_serial=%2 frame=%3")
+                QStringLiteral("last_serial=%1 next_serial=%2 target_frame=%3 current_frame=%4 last_frame=%5 serial_floor=%6")
                     .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
                     .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
-                    .arg( ui->horizontalSliderPosition->value() ) );
+                    .arg( baselineFrame )
+                    .arg( ui->horizontalSliderPosition->value() )
+                    .arg( m_lastPresentedRequestContextValid
+                          ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                          : -1 )
+                    .arg( static_cast<qulonglong>( baselineRequestFloor ) ) );
             requestFrameRefresh( true, "look-assist-toggle-baseline-retry" );
         } );
         requestFrameRefresh( true, "look-assist-toggle-baseline" );
@@ -14393,12 +14784,26 @@ void MainWindow::recordPresentedFrame( const RenderFrameThread::ReadyFrame &read
     m_lastPresentedRequestContext = requestContext;
     m_lastPresentedRequestContextValid = true;
     m_lastPresentedFrameUsedGpuBilinearDebayer = readyFrame.usedGpuBilinearDebayer;
+    m_lastPresentedPlaybackScaleFactorActive = readyFrame.playbackScaleFactorActive;
     m_lastPresentedGpuBilinearFallbackReason = readyFrame.gpuBilinearFallbackReason;
     m_lastPresentedGpuBilinearRendererDescription = readyFrame.gpuBilinearRendererDescription;
     m_lastPresentedDualIsoPreviewHistogramMs = readyFrame.dualIsoPreviewHistogramMs;
     m_lastPresentedDualIsoPreviewRegressionMs = readyFrame.dualIsoPreviewRegressionMs;
     m_lastPresentedDualIsoPreviewRowscaleMs = readyFrame.dualIsoPreviewRowscaleMs;
     m_lastPresentedStageTimingTelemetry = readyFrame.stageTimingTelemetry;
+}
+
+bool MainWindow::isFrameSettledForAnalysis( int frameIndex,
+                                            uint64_t requestSerialFloor ) const
+{
+    if( frameIndex < 0 || !m_lastPresentedRequestContextValid ) return false;
+    if( m_lastPresentedRequestSerial < requestSerialFloor ) return false;
+    if( m_lastPresentedRequestContext.presentationGeneration
+        != m_playbackPresentationGeneration.load( std::memory_order_acquire ) )
+    {
+        return false;
+    }
+    return static_cast<int>( m_lastPresentedRequestContext.frameNumber ) == frameIndex;
 }
 
 void MainWindow::finishPresentedFrame( uint64_t displayFrame,
@@ -14409,6 +14814,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                                        double displayStart )
 {
     recordPresentedFrame( readyFrame, requestContext );
+    updatePlaybackQualityIndicator();
 
     if( ui->actionShowEditArea->isChecked() )
     {
@@ -14550,17 +14956,50 @@ void MainWindow::drawFrameReady()
 
     consumePresentationRequest( readyFrame.requestSerial, nullptr );
     requestContext = readyFrame.presentationContext;
+    const uint64_t activeGeneration =
+        m_playbackPresentationGeneration.load( std::memory_order_acquire );
+    if( requestContext.presentationGeneration != activeGeneration )
+    {
+        m_playbackPrepStaleDropCount.fetch_add( 1, std::memory_order_acq_rel );
+        m_playbackPrepGenerationDropCount.fetch_add( 1, std::memory_order_acq_rel );
+        logInteractionEvent(
+            QStringLiteral("draw_frame_ready.drop_generation"),
+            QStringLiteral("serial=%1 display_frame=%2 request_generation=%3 active_generation=%4 requested_scale=%5 active_scale=%6 rendered=%7x%8 scaled=%9x%10")
+                .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                .arg( static_cast<qulonglong>( readyFrame.frameNumber ) )
+                .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
+                .arg( static_cast<qulonglong>( activeGeneration ) )
+                .arg( requestContext.playbackScaleFactor )
+                .arg( readyFrame.playbackScaleFactorActive )
+                .arg( readyFrame.renderedImageWidth )
+                .arg( readyFrame.renderedImageHeight )
+                .arg( readyFrame.playbackScaledWidth )
+                .arg( readyFrame.playbackScaledHeight ),
+            true );
+        if( m_pRenderThread )
+            m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
+        m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+        m_frameChanged = true;
+        return;
+    }
 
     const uint64_t display_frame = readyFrame.frameNumber;
     const double display_start = mlv_stage_timing_now();
     logInteractionEvent(
         QStringLiteral("draw_frame_ready.begin"),
-        QStringLiteral("serial=%1 display_frame=%2 play_checked=%3 position=%4 render_idle=%5")
+        QStringLiteral("serial=%1 display_frame=%2 play_checked=%3 position=%4 render_idle=%5 requested_scale=%6 active_scale=%7 generation=%8 rendered=%9x%10 scaled=%11x%12")
             .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
             .arg( static_cast<qulonglong>( display_frame ) )
             .arg( bool01( ui->actionPlay->isChecked() ) )
             .arg( ui->horizontalSliderPosition->value() )
-            .arg( bool01( m_pRenderThread && m_pRenderThread->isIdle() ) ),
+            .arg( bool01( m_pRenderThread && m_pRenderThread->isIdle() ) )
+            .arg( requestContext.playbackScaleFactor )
+            .arg( readyFrame.playbackScaleFactorActive )
+            .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
+            .arg( readyFrame.renderedImageWidth )
+            .arg( readyFrame.renderedImageHeight )
+            .arg( readyFrame.playbackScaledWidth )
+            .arg( readyFrame.playbackScaledHeight ),
         true );
     m_lastDrawFrameReadyQueueMs = 0.0;
     m_lastDrawFrameReadySceneMs = 0.0;
@@ -14704,6 +15143,7 @@ void MainWindow::drawFrameReady()
     task.readyFrame = readyFrame;
     task.requestContext = requestContext;
     task.requestSerial = readyFrame.requestSerial;
+    task.presentationGeneration = requestContext.presentationGeneration;
     task.displayStart = display_start;
     task.displayFrame = display_frame;
     task.stretchX = stretchX;

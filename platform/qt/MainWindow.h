@@ -114,6 +114,7 @@ public:
         bool waitForPaint = false;
         bool exercisePlayAction = false;
         bool exerciseLookAssistToggle = false;
+        bool exerciseScaleFactorToggle = false;
         PlaybackProfileScope scope = PlaybackProfileScope::None;
         PlaybackProfileDebayerRequest playbackDebayer =
             PlaybackProfileDebayerRequest::Auto;
@@ -571,6 +572,7 @@ private:
         RenderFrameThread::ReadyFrame readyFrame;
         PresentationRequestContext requestContext;
         uint64_t requestSerial = 0;
+        uint64_t presentationGeneration = 0;
         double displayStart = 0.0;
         uint64_t displayFrame = 0;
         double stretchX = 1.0;
@@ -724,6 +726,7 @@ private:
     int m_lastLookAssistVibrance = 0;
     int m_lastLookAssistTemperatureDelta = 0;
     int m_lastLookAssistTintDelta = 0;
+    int m_lookAssistUnsettledAnalysisCount = 0;
     QString m_phase3ClipPlaytimeFingerprint;
     qint64 m_phase3ClipPlaytimePendingMs = 0;
     qint64 m_phase3ClipPlaytimeSinceFlushMs = 0;
@@ -769,9 +772,13 @@ private:
     // - `m_latestRequestedSerial` is the staleness baseline: any result whose
     //   `task.requestSerial` != the latest requested is dropped at the
     //   presenter. Accessed from UI and worker threads.
+    // - `m_playbackPresentationGeneration` invalidates in-flight work whose
+    //   request serial is still current but whose display assumptions changed
+    //   underneath it, such as Playback Scale x2/x4 -> x1.
     // - Conflation queue semantics: at most one in-flight task ("current") and
     //   at most one queued task ("pending"). New enqueues replace pending.
     std::atomic<uint64_t> m_latestRequestedSerial{0};
+    std::atomic<uint64_t> m_playbackPresentationGeneration{1};
     std::thread m_playbackPrepThread;
     std::mutex m_playbackPrepMutex;
     std::condition_variable m_playbackPrepCv;
@@ -780,9 +787,11 @@ private:
     PlaybackPrepTask m_playbackPrepPending;
     std::deque<PlaybackPrepResult> m_playbackPrepResults;
     std::atomic<uint64_t> m_playbackPrepStaleDropCount{0};
+    std::atomic<uint64_t> m_playbackPrepGenerationDropCount{0};
     std::atomic<uint64_t> m_playbackPrepReplacedBeforeComputeCount{0};
     std::atomic<uint64_t> m_playbackPrepReplacedAfterComputeCount{0};
     bool m_lastPresentedFrameUsedGpuBilinearDebayer = false;
+    int m_lastPresentedPlaybackScaleFactorActive = 1;
     QString m_lastPresentedGpuBilinearFallbackReason;
     QString m_lastPresentedGpuBilinearRendererDescription;
     double m_lastPresentedDualIsoPreviewHistogramMs = 0.0;
@@ -821,7 +830,10 @@ private:
                                       int *sceneHeight ) const;
     void recordPresentedFrame( const RenderFrameThread::ReadyFrame &readyFrame,
                                const PresentationRequestContext &requestContext );
+    bool isFrameSettledForAnalysis( int frameIndex,
+                                    uint64_t requestSerialFloor ) const;
     void enqueuePlaybackPrepTask( const PlaybackPrepTask &task );
+    void invalidatePlaybackPrepForDisplayChange( const char *reason );
     PlaybackPrepResult buildPlaybackPrepResult( const PlaybackPrepTask &task );
     void playbackPrepThreadLoop( void );
     void presentPlaybackPreparedFrame( const PlaybackPrepResult &result );
@@ -942,7 +954,8 @@ private:
     void setWhiteBalanceFromMlv( ReceiptSettings *sliders );
     void captureLookAssistBaseline( ReceiptSettings *receipt );
     void restoreLookAssistBaseline( ReceiptSettings *receipt );
-    void applyLookAssistToReceipt( ReceiptSettings *receipt );
+    void applyLookAssistToReceipt( ReceiptSettings *receipt,
+                                   int analysisFrame = -1 );
     void syncLookAssistDerivedUiToReceipt( ReceiptSettings *receipt );
     void setGradientMask( void );
     uint16_t autoCorrectRawBlackLevel( void );

@@ -138,6 +138,7 @@ static QProcessEnvironment playback_profile_environment()
     environment.insert(QStringLiteral("MLVAPP_FORCE_THREADS"), QStringLiteral("1"));
     environment.insert(QStringLiteral("OMP_NUM_THREADS"), QStringLiteral("1"));
     environment.insert(QStringLiteral("OMP_DYNAMIC"), QStringLiteral("FALSE"));
+    environment.insert(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("0"));
     configure_qt_subprocess_environment(environment);
     return environment;
 }
@@ -506,6 +507,17 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_queue_wait_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_work_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_total_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_factor_request")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_factor_effective")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_factor_clamped")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_rendered_width")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_rendered_height")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_target_width")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_target_height")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_upscaling")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("prep_generation")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("prep_active_generation")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("prep_generation_drops")));
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_preview_histogram_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_preview_regression_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_preview_rowscale_ms")).toDouble() >= 0.0);
@@ -554,6 +566,14 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_queue_wait_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_work_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_total_ms")).toDouble() >= 0.0);
+        const int requested_scale =
+            sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt();
+        const int effective_scale =
+            sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt();
+        ASSERT_TRUE(requested_scale == 1 || requested_scale == 2 || requested_scale == 4);
+        ASSERT_TRUE(effective_scale == 1 || effective_scale == 2 || effective_scale == 4);
+        ASSERT_EQ(effective_scale != requested_scale,
+                  sample.value(QStringLiteral("render_thread_playback_scale_factor_clamped")).toBool());
         double processing_max_substage_ms = 0.0;
         require_processing_timing_field(sample, "processing_setup_ms", &processing_max_substage_ms);
         require_processing_timing_field(sample, "processing_shadows_highlights_prep_ms", &processing_max_substage_ms);
@@ -605,6 +625,141 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
     ASSERT_TRUE(saw_preview_rowscale_timing);
 
     ASSERT_TRUE(QFileInfo::exists(stage_log));
+}
+
+TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileReportsEffectiveScaleClamp)
+{
+    const QString fixture_path = clip_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/tiny_dual_iso.mlv");
+    }
+
+    const QString receipt_path = clip_receipt_path();
+    if (!QFileInfo::exists(receipt_path)) {
+        SKIP_TEST("Missing fixture receipt tests/fixtures/receipts/tiny_dual_iso_hq.marxml");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-scale-clamp.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--receipt") << receipt_path
+            << QStringLiteral("--frames") << QStringLiteral("1")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("1"),
+        QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1"))
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QStringLiteral("2")));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
+    ASSERT_EQ(1, frames.size());
+    const QJsonObject sample = frames.at(0).toObject();
+    ASSERT_EQ(2, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+    ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+    ASSERT_TRUE(sample.value(QStringLiteral("render_thread_playback_scale_factor_clamped")).toBool());
+    ASSERT_TRUE(sample.value(QStringLiteral("render_thread_rendered_width")).toInt() > 0);
+    ASSERT_TRUE(sample.value(QStringLiteral("render_thread_rendered_height")).toInt() > 0);
+    ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_upscaling")));
+    ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_target_width")));
+    ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_target_height")));
+}
+
+TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileScaleToggleToOneSettles)
+{
+    const QString fixture_path = clip_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/tiny_dual_iso.mlv");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-scale-toggle.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--frames") << QStringLiteral("1")
+            << QStringLiteral("--exercise-scale-toggle")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("1"),
+        QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_requested")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_ran")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_stable")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_failure")).toString().isEmpty());
+
+    const QJsonObject before =
+        metadata.value(QStringLiteral("playback_scale_toggle_before_state")).toObject();
+    const QJsonObject after =
+        metadata.value(QStringLiteral("playback_scale_toggle_after_state")).toObject();
+    ASSERT_EQ(2, before.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+    ASSERT_EQ(1, after.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+    ASSERT_EQ(1, after.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+    ASSERT_EQ(1, after.value(QStringLiteral("last_presented_active_scale")).toInt());
+    ASSERT_TRUE(after.value(QStringLiteral("presentation_generation")).toDouble()
+                > before.value(QStringLiteral("presentation_generation")).toDouble());
+    ASSERT_EQ(after.value(QStringLiteral("presentation_generation")).toDouble(),
+              after.value(QStringLiteral("last_presented_generation")).toDouble());
+    ASSERT_TRUE(after.value(QStringLiteral("render_thread_rendered_width")).toInt() > 0);
+    ASSERT_TRUE(after.value(QStringLiteral("render_thread_rendered_height")).toInt() > 0);
+
+    const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
+    ASSERT_EQ(1, frames.size());
+    const QJsonObject sample = frames.at(0).toObject();
+    ASSERT_EQ(1, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+    ASSERT_EQ(1, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+    ASSERT_EQ(sample.value(QStringLiteral("prep_generation")).toDouble(),
+              sample.value(QStringLiteral("prep_active_generation")).toDouble());
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtRuntime)
@@ -722,6 +877,20 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_toggle_smoke_ran")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_toggle_smoke_stable")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_toggle_smoke_failure")).toString().isEmpty());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_frame_settle_policy")).toString()
+                .contains(QStringLiteral("exact presented frame match")));
+    ASSERT_EQ(0, metadata.value(QStringLiteral("look_assist_unsettled_analysis_count")).toInt());
+    const QJsonObject look_assist_load_state =
+        metadata.value(QStringLiteral("look_assist_load_state")).toObject();
+    const QJsonObject look_assist_toggle_state =
+        metadata.value(QStringLiteral("look_assist_toggle_state")).toObject();
+    ASSERT_TRUE(look_assist_load_state.value(QStringLiteral("last_presented_request_serial")).toDouble() > 0.0);
+    ASSERT_TRUE(look_assist_toggle_state.value(QStringLiteral("last_presented_request_serial")).toDouble()
+                >= look_assist_load_state.value(QStringLiteral("last_presented_request_serial")).toDouble());
+    ASSERT_EQ(look_assist_load_state.value(QStringLiteral("frame")).toInt(),
+              look_assist_load_state.value(QStringLiteral("last_presented_frame")).toInt());
+    ASSERT_EQ(look_assist_toggle_state.value(QStringLiteral("frame")).toInt(),
+              look_assist_toggle_state.value(QStringLiteral("last_presented_frame")).toInt());
     ASSERT_NE(3, metadata.value(QStringLiteral("look_assist_exposure")).toInt());
     ASSERT_NE(7, metadata.value(QStringLiteral("look_assist_contrast")).toInt());
     ASSERT_NE(91, metadata.value(QStringLiteral("look_assist_pivot")).toInt());
