@@ -926,6 +926,19 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_samples")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_green_axis")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_blue_amber_axis")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_green_artifact_ratio")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_green_artifact_mean_axis")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_visible_green_axis")));
+    const double post_green_artifact_ratio =
+        metadata.value(QStringLiteral("look_assist_post_green_artifact_ratio")).toDouble(-1.0);
+    const double post_green_artifact_axis =
+        metadata.value(QStringLiteral("look_assist_post_green_artifact_mean_axis")).toDouble(-1.0);
+    const double post_visible_green_axis =
+        metadata.value(QStringLiteral("look_assist_post_visible_green_axis")).toDouble();
+    ASSERT_TRUE(post_green_artifact_ratio >= 0.0);
+    ASSERT_TRUE(post_green_artifact_ratio <= 1.0);
+    ASSERT_TRUE(post_green_artifact_axis >= 0.0);
+    ASSERT_TRUE(std::isfinite(post_visible_green_axis));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_temperature_delta")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_tint_delta")));
     const double look_assist_scale =

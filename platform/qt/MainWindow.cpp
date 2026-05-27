@@ -94,6 +94,13 @@ struct LookAssistStats
     double balanceG = 0.0;
     double balanceB = 0.0;
     int balanceSamples = 0;
+    double visibleMeanR = 0.0;
+    double visibleMeanG = 0.0;
+    double visibleMeanB = 0.0;
+    int visibleSamples = 0;
+    double greenArtifactRatio = 0.0;
+    double greenArtifactMeanAxis = 0.0;
+    int greenArtifactSamples = 0;
 };
 
 struct LookAssistPreset
@@ -151,6 +158,10 @@ static LookAssistStats analyzeLookAssistThumbnail( const unsigned char *rgb, int
     int balanceHistogramG[256] = { 0 };
     int balanceHistogramB[256] = { 0 };
     const int totalSamples = width * height;
+    double visibleRTotal = 0.0;
+    double visibleGTotal = 0.0;
+    double visibleBTotal = 0.0;
+    double greenArtifactAxisTotal = 0.0;
 
     for( int i = 0; i < totalSamples; ++i )
     {
@@ -167,6 +178,21 @@ static LookAssistStats analyzeLookAssistThumbnail( const unsigned char *rgb, int
         const int maxChannel = qMax( r, qMax( g, b ) );
         const int minChannel = qMin( r, qMin( g, b ) );
         const int saturationProxy = maxChannel - minChannel;
+        const double greenAxis = (double)g - ( ( (double)r + (double)b ) * 0.5 );
+        if( luma >= 12 )
+        {
+            visibleRTotal += (double)r;
+            visibleGTotal += (double)g;
+            visibleBTotal += (double)b;
+            stats.visibleSamples++;
+        }
+        if( luma >= 12
+         && g >= 30
+         && greenAxis >= 25.0 )
+        {
+            greenArtifactAxisTotal += greenAxis;
+            stats.greenArtifactSamples++;
+        }
         if( luma >= 20
          && luma <= 230
          && saturationProxy <= qMax( 14, luma / 5 ) )
@@ -198,6 +224,19 @@ static LookAssistStats analyzeLookAssistThumbnail( const unsigned char *rgb, int
         stats.balanceR = stats.medianR;
         stats.balanceG = stats.medianG;
         stats.balanceB = stats.medianB;
+    }
+    if( stats.visibleSamples > 0 )
+    {
+        stats.visibleMeanR = visibleRTotal / (double)stats.visibleSamples;
+        stats.visibleMeanG = visibleGTotal / (double)stats.visibleSamples;
+        stats.visibleMeanB = visibleBTotal / (double)stats.visibleSamples;
+        stats.greenArtifactRatio =
+            (double)stats.greenArtifactSamples / (double)stats.visibleSamples;
+    }
+    if( stats.greenArtifactSamples > 0 )
+    {
+        stats.greenArtifactMeanAxis =
+            greenArtifactAxisTotal / (double)stats.greenArtifactSamples;
     }
 
     int clipLow = histogram[0] + histogram[1] + histogram[2] + histogram[3];
@@ -360,7 +399,7 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
     const double blueAmberAxis = balanceStats.balanceB - balanceStats.balanceR;
     const int tintCap = ( scene == LookAssistScene::BrightSun )
                       ? 8
-                      : ( processedFloorLiftedBalance ? 36 : 22 );
+                      : ( processedFloorLiftedBalance ? 60 : 22 );
     const int tempCap = ( scene == LookAssistScene::BrightSun )
                       ? 250
                       : ( processedFloorLiftedBalance ? 220 : 500 );
@@ -387,6 +426,17 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
             preset.tintDelta = qMax( preset.tintDelta, 4 );
         if( blueAmberAxis <= -6.0 )
             preset.temperatureDelta = qMin( preset.temperatureDelta, -48 );
+    }
+    if( processedFloorLiftedBalance
+     && balanceStats.greenArtifactRatio >= 0.004
+     && balanceStats.greenArtifactMeanAxis >= 25.0 )
+    {
+        const int artifactTintFloor =
+            qBound( 0,
+                    (int)qRound( balanceStats.greenArtifactMeanAxis * 0.75
+                               + balanceStats.greenArtifactRatio * 420.0 ),
+                    tintCap );
+        preset.tintDelta = qMax( preset.tintDelta, artifactTintFloor );
     }
 
     preset.contrast = qBound( -100, preset.contrast, 100 );
@@ -3181,6 +3231,9 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             state.insert( QStringLiteral("temperature_delta"), m_lastLookAssistTemperatureDelta );
             state.insert( QStringLiteral("tint_delta"), m_lastLookAssistTintDelta );
             state.insert( QStringLiteral("post_balance_valid"), m_lastLookAssistPostBalanceValid );
+            state.insert( QStringLiteral("post_green_artifact_ratio"), m_lastLookAssistPostGreenArtifactRatio );
+            state.insert( QStringLiteral("post_green_artifact_mean_axis"), m_lastLookAssistPostGreenArtifactMeanAxis );
+            state.insert( QStringLiteral("post_visible_green_axis"), m_lastLookAssistPostVisibleGreenAxis );
             state.insert( QStringLiteral("post_temperature_delta"), m_lastLookAssistPostTemperatureDelta );
             state.insert( QStringLiteral("post_tint_delta"), m_lastLookAssistPostTintDelta );
         }
@@ -3811,6 +3864,12 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         metadata.insert( QStringLiteral("look_assist_post_balance_blue_amber_axis"),
                          m_lastLookAssistPostBalanceB
                          - m_lastLookAssistPostBalanceR );
+        metadata.insert( QStringLiteral("look_assist_post_green_artifact_ratio"),
+                         m_lastLookAssistPostGreenArtifactRatio );
+        metadata.insert( QStringLiteral("look_assist_post_green_artifact_mean_axis"),
+                         m_lastLookAssistPostGreenArtifactMeanAxis );
+        metadata.insert( QStringLiteral("look_assist_post_visible_green_axis"),
+                         m_lastLookAssistPostVisibleGreenAxis );
         metadata.insert( QStringLiteral("look_assist_post_temperature_delta"),
                          m_lastLookAssistPostTemperatureDelta );
         metadata.insert( QStringLiteral("look_assist_post_tint_delta"),
@@ -8665,6 +8724,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistPostBalanceG = 0.0;
     m_lastLookAssistPostBalanceB = 0.0;
     m_lastLookAssistPostBalanceSamples = 0;
+    m_lastLookAssistPostGreenArtifactRatio = 0.0;
+    m_lastLookAssistPostGreenArtifactMeanAxis = 0.0;
+    m_lastLookAssistPostVisibleGreenAxis = 0.0;
     m_lastLookAssistPostTemperatureDelta = 0;
     m_lastLookAssistPostTintDelta = 0;
     if( !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
@@ -8786,22 +8848,29 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     const LookAssistScene scene = classifyLookAssistScene( stats );
     const bool floorLiftedNightThumbnail =
         lookAssistIsFloorLiftedNightThumbnail( scene, stats );
+    const int colorDownscaleFactor = floorLiftedNightThumbnail
+                                   ? qMax( 3, downscaleFactor / 3 )
+                                   : downscaleFactor;
+    const int colorWidth = raw_w / colorDownscaleFactor;
+    const int colorHeight = raw_h / colorDownscaleFactor;
+    const bool canAnalyzeProcessedColor =
+        floorLiftedNightThumbnail && colorWidth > 0 && colorHeight > 0;
     LookAssistStats processedColorStats;
     bool useProcessedColorStats = false;
-    if( floorLiftedNightThumbnail )
+    if( canAnalyzeProcessedColor )
     {
         QByteArray processedThumbnail;
-        processedThumbnail.resize( width * height * 3 );
+        processedThumbnail.resize( colorWidth * colorHeight * 3 );
         get_area_average_downscale_thumnail( m_pMlvObject,
                                              analysisFrame,
-                                             downscaleFactor,
+                                             colorDownscaleFactor,
                                              qMax( 1, mlvappEffectiveWorkerThreadCount() ),
                                              reinterpret_cast<unsigned char *>( processedThumbnail.data() ) );
         processedColorStats = analyzeLookAssistThumbnail(
                     reinterpret_cast<const unsigned char *>( processedThumbnail.constData() ),
-                    width,
-                    height );
-        const int minColorBalanceSamples = qMax( 32, ( width * height ) / 100 );
+                    colorWidth,
+                    colorHeight );
+        const int minColorBalanceSamples = qMax( 32, ( colorWidth * colorHeight ) / 100 );
         useProcessedColorStats =
             processedColorStats.median > 0.0 &&
             processedColorStats.balanceSamples >= minColorBalanceSamples;
@@ -8856,22 +8925,22 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     const int initialTintDelta = preset.tintDelta;
     int postTemperatureDelta = 0;
     int postTintDelta = 0;
-    if( floorLiftedNightThumbnail )
+    if( canAnalyzeProcessedColor )
     {
-        const int minColorBalanceSamples = qMax( 32, ( width * height ) / 100 );
+        const int minColorBalanceSamples = qMax( 32, ( colorWidth * colorHeight ) / 100 );
         auto analyzePostAppliedLook = [&]() -> bool
         {
             QByteArray postProcessedThumbnail;
-            postProcessedThumbnail.resize( width * height * 3 );
+            postProcessedThumbnail.resize( colorWidth * colorHeight * 3 );
             get_area_average_downscale_thumnail( m_pMlvObject,
                                                  analysisFrame,
-                                                 downscaleFactor,
+                                                 colorDownscaleFactor,
                                                  qMax( 1, mlvappEffectiveWorkerThreadCount() ),
                                                  reinterpret_cast<unsigned char *>( postProcessedThumbnail.data() ) );
             postColorStats = analyzeLookAssistThumbnail(
                         reinterpret_cast<const unsigned char *>( postProcessedThumbnail.constData() ),
-                        width,
-                        height );
+                        colorWidth,
+                        colorHeight );
             return postColorStats.median > 0.0
                 && postColorStats.balanceSamples >= minColorBalanceSamples;
         };
@@ -8881,7 +8950,14 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 candidate.balanceG
                 - ( ( candidate.balanceR + candidate.balanceB ) * 0.5 );
             const double blueAmberAxis = candidate.balanceB - candidate.balanceR;
-            return fabs( greenAxis ) + ( fabs( blueAmberAxis ) * 0.5 );
+            const double visibleGreenAxis =
+                candidate.visibleMeanG
+                - ( ( candidate.visibleMeanR + candidate.visibleMeanB ) * 0.5 );
+            return fabs( greenAxis )
+                + ( fabs( blueAmberAxis ) * 0.5 )
+                + ( fabs( visibleGreenAxis ) * 0.7 )
+                + ( candidate.greenArtifactRatio * 700.0 )
+                + ( qMax( 0.0, candidate.greenArtifactMeanAxis - 22.0 ) * 0.7 );
         };
 
         bool adjustedPostBalance = false;
@@ -8923,6 +8999,16 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                          (int)qRound( postGreenAxis * 0.80 ),
                                          8 );
             }
+            if( postColorStats.greenArtifactRatio >= 0.004
+             && postColorStats.greenArtifactMeanAxis >= 25.0 )
+            {
+                const int artifactTintDelta =
+                    qBound( 2,
+                            (int)qRound( postColorStats.greenArtifactMeanAxis * 0.35
+                                       + postColorStats.greenArtifactRatio * 360.0 ),
+                            14 );
+                passTintDelta = qMax( passTintDelta, artifactTintDelta );
+            }
             if( fabs( postBlueAmberAxis ) >= 6.0 )
             {
                 passTemperatureDelta = qBound( -96,
@@ -8941,9 +9027,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         preset.temperatureDelta + passTemperatureDelta,
                         500 );
             preset.tintDelta =
-                qBound( -36,
+                qBound( -60,
                         preset.tintDelta + passTintDelta,
-                        36 );
+                        60 );
             const int appliedTemperatureDelta =
                 preset.temperatureDelta - previousTemperatureDelta;
             const int appliedTintDelta =
@@ -8968,6 +9054,31 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     postColorStats = lastAcceptedPostColorStats;
                     postColorStatsValid = true;
                     applyLookAssistValues();
+                }
+            }
+        }
+        if( postColorStatsValid
+         && postColorStats.greenArtifactRatio >= 0.004
+         && postColorStats.greenArtifactMeanAxis >= 30.0 )
+        {
+            const double postVisibleGreenAxis =
+                postColorStats.visibleMeanG
+                - ( ( postColorStats.visibleMeanR
+                    + postColorStats.visibleMeanB ) * 0.5 );
+            if( postVisibleGreenAxis > -4.5
+             || postColorStats.greenArtifactRatio >= 0.010 )
+            {
+                const int cleanupTintTarget =
+                    qBound( preset.tintDelta,
+                            (int)qRound( postColorStats.greenArtifactMeanAxis * 0.85
+                                       + postColorStats.greenArtifactRatio * 900.0 ),
+                            48 );
+                if( cleanupTintTarget > preset.tintDelta )
+                {
+                    preset.tintDelta = cleanupTintTarget;
+                    adjustedPostBalance = true;
+                    applyLookAssistValues();
+                    postColorStatsValid = analyzePostAppliedLook();
                 }
             }
         }
@@ -9006,12 +9117,23 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistPostBalanceSamples = postColorStatsValid
                                       ? postColorStats.balanceSamples
                                       : 0;
+    m_lastLookAssistPostGreenArtifactRatio = postColorStatsValid
+                                           ? postColorStats.greenArtifactRatio
+                                           : 0.0;
+    m_lastLookAssistPostGreenArtifactMeanAxis = postColorStatsValid
+                                              ? postColorStats.greenArtifactMeanAxis
+                                              : 0.0;
+    m_lastLookAssistPostVisibleGreenAxis = postColorStatsValid
+                                         ? postColorStats.visibleMeanG
+                                           - ( ( postColorStats.visibleMeanR
+                                               + postColorStats.visibleMeanB ) * 0.5 )
+                                         : 0.0;
     m_lastLookAssistPostTemperatureDelta = postTemperatureDelta;
     m_lastLookAssistPostTintDelta = postTintDelta;
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.color_balance"),
-        QStringLiteral("source=%1 floor_lifted=%2 balance_r=%3 balance_g=%4 balance_b=%5 balance_samples=%6 green_axis=%7 blue_amber_axis=%8 processed_median=%9 processed_p95=%10")
+        QStringLiteral("source=%1 floor_lifted=%2 balance_r=%3 balance_g=%4 balance_b=%5 balance_samples=%6 green_axis=%7 blue_amber_axis=%8 processed_median=%9 processed_p95=%10 color_thumb=%11x%12 color_downscale=%13")
             .arg( m_lastLookAssistBalanceSource )
             .arg( bool01( floorLiftedNightThumbnail ) )
             .arg( balanceStats.balanceR, 0, 'f', 3 )
@@ -9021,11 +9143,14 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( balanceStats.balanceG - ( ( balanceStats.balanceR + balanceStats.balanceB ) * 0.5 ), 0, 'f', 3 )
             .arg( balanceStats.balanceB - balanceStats.balanceR, 0, 'f', 3 )
             .arg( processedColorStats.median, 0, 'f', 3 )
-            .arg( processedColorStats.p95, 0, 'f', 3 ) );
+            .arg( processedColorStats.p95, 0, 'f', 3 )
+            .arg( colorWidth )
+            .arg( colorHeight )
+            .arg( colorDownscaleFactor ) );
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.post_balance"),
-        QStringLiteral("valid=%1 balance_r=%2 balance_g=%3 balance_b=%4 balance_samples=%5 green_axis=%6 blue_amber_axis=%7 post_temp_delta=%8 post_tint_delta=%9 final_temp_delta=%10 final_tint_delta=%11")
+        QStringLiteral("valid=%1 balance_r=%2 balance_g=%3 balance_b=%4 balance_samples=%5 green_axis=%6 blue_amber_axis=%7 visible_green_axis=%8 green_artifact_ratio=%9 green_artifact_axis=%10 post_temp_delta=%11 post_tint_delta=%12 final_temp_delta=%13 final_tint_delta=%14")
             .arg( bool01( postColorStatsValid ) )
             .arg( postColorStatsValid ? postColorStats.balanceR : 0.0, 0, 'f', 3 )
             .arg( postColorStatsValid ? postColorStats.balanceG : 0.0, 0, 'f', 3 )
@@ -9038,6 +9163,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( postColorStatsValid
                   ? postColorStats.balanceB - postColorStats.balanceR
                   : 0.0, 0, 'f', 3 )
+            .arg( m_lastLookAssistPostVisibleGreenAxis, 0, 'f', 3 )
+            .arg( m_lastLookAssistPostGreenArtifactRatio, 0, 'f', 6 )
+            .arg( m_lastLookAssistPostGreenArtifactMeanAxis, 0, 'f', 3 )
             .arg( postTemperatureDelta )
             .arg( postTintDelta )
             .arg( preset.temperatureDelta )
@@ -9045,7 +9173,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
-        QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 frame=%19 last_serial=%20 last_frame=%21 next_serial=%22")
+        QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 color_thumb=%19x%20 color_downscale=%21 frame=%22 last_serial=%23 last_frame=%24 next_serial=%25")
             .arg( m_lastLookAssistScene )
             .arg( stats.median, 0, 'f', 3 )
             .arg( stats.p05, 0, 'f', 3 )
@@ -9064,6 +9192,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( width )
             .arg( height )
             .arg( downscaleFactor )
+            .arg( colorWidth )
+            .arg( colorHeight )
+            .arg( colorDownscaleFactor )
             .arg( analysisFrame )
             .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
             .arg( m_lastPresentedRequestContextValid
