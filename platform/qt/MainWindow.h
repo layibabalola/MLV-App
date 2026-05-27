@@ -732,6 +732,9 @@ private:
     double m_lastLookAssistPostBalanceG = 0.0;
     double m_lastLookAssistPostBalanceB = 0.0;
     int m_lastLookAssistPostBalanceSamples = 0;
+    double m_lastLookAssistPostGreenArtifactRatio = 0.0;
+    double m_lastLookAssistPostGreenArtifactMeanAxis = 0.0;
+    double m_lastLookAssistPostVisibleGreenAxis = 0.0;
     int m_lastLookAssistPostTemperatureDelta = 0;
     int m_lastLookAssistPostTintDelta = 0;
     int m_lookAssistUnsettledAnalysisCount = 0;
