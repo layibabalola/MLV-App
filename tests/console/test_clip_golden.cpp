@@ -916,7 +916,25 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_vibrance")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_temperature_delta")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_tint_delta")));
-    ASSERT_TRUE(std::abs(metadata.value(QStringLiteral("look_assist_tint_delta")).toInt()) <= 22);
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_valid")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_source")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_temperature")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_tint")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_raw_x")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_raw_y")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_patch_luma")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_patch_chroma")));
+    const bool auto_wb_valid = metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool();
+    if (auto_wb_valid) {
+        ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_wb_tint")).toInt() >= -35);
+        ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_wb_tint")).toInt() <= 18);
+        ASSERT_EQ(metadata.value(QStringLiteral("look_assist_auto_wb_tint")).toInt(),
+                  metadata.value(QStringLiteral("look_assist_tint")).toInt());
+        ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_wb_patch_luma")).toDouble() >= 70.0);
+        ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_wb_patch_chroma")).toDouble() <= 40.0);
+    } else {
+        ASSERT_TRUE(std::abs(metadata.value(QStringLiteral("look_assist_tint_delta")).toInt()) <= 22);
+    }
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_source")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_green_axis")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_blue_amber_axis")));

@@ -727,6 +727,14 @@ private:
     int m_lastLookAssistVibrance = 0;
     int m_lastLookAssistTemperatureDelta = 0;
     int m_lastLookAssistTintDelta = 0;
+    bool m_lastLookAssistAutoWhiteBalanceValid = false;
+    QString m_lastLookAssistAutoWhiteBalanceSource;
+    int m_lastLookAssistAutoWhiteBalanceTemperature = 0;
+    int m_lastLookAssistAutoWhiteBalanceTint = 0;
+    int m_lastLookAssistAutoWhiteBalanceRawX = -1;
+    int m_lastLookAssistAutoWhiteBalanceRawY = -1;
+    double m_lastLookAssistAutoWhiteBalanceLuma = 0.0;
+    double m_lastLookAssistAutoWhiteBalanceChroma = 0.0;
     bool m_lastLookAssistPostBalanceValid = false;
     double m_lastLookAssistPostBalanceR = 0.0;
     double m_lastLookAssistPostBalanceG = 0.0;
