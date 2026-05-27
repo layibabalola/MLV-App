@@ -30,6 +30,15 @@
 - CI entrypoint for that scaffold is `.github/workflows/tests.yml`.
 - Keep the docs above synchronized with what is implemented now versus still planned next.
 
+## GUI Release Build Verification
+- After any source, UI, receipt, playback, color, scaling, or processing change that is meant to affect the Windows GUI, rebuild the user-facing release tree before final response:
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$env:PATH='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;' + $env:PATH; & 'C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe' -C platform\qt\build-release -B release -j4"`
+- Do **not** treat `.claude-state\build\mlvapp\release\MLVApp.exe` as the user-facing GUI build. That scratch build is useful for validation, but the executable the user normally launches is `platform\qt\build-release\release\MLVApp.exe`.
+- After rebuilding, verify and report the actual release executable path, `LastWriteTime`, length, and SHA256:
+  - `Get-Item platform\qt\build-release\release\MLVApp.exe | Select-Object FullName, LastWriteTime, Length`
+  - `Get-FileHash platform\qt\build-release\release\MLVApp.exe -Algorithm SHA256`
+- If the release build is intentionally skipped or cannot run, say so explicitly in the final response and explain what executable remains stale. Never imply a GUI-affecting change is ready for user testing unless the `platform\qt\build-release\release\MLVApp.exe` timestamp has moved after the change.
+
 ## Brokered Auto-Closeout
 - The repo owns work-block closeout through `closeout.config.json`, `tools/repo_hygiene/brokered_closeout.py`, and the PowerShell adapters in `tools/closeout/`.
 - The shared hybrid closeout contract lives at [`CLOSEOUT-CANONICAL-CONTRACT.md`](CLOSEOUT-CANONICAL-CONTRACT.md) and must remain byte-for-byte identical across repos; its drift sentinel is [`CLOSEOUT-CANONICAL-CONTRACT.sha256`](CLOSEOUT-CANONICAL-CONTRACT.sha256).
