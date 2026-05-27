@@ -222,13 +222,26 @@ static LookAssistScene classifyLookAssistScene( const LookAssistStats &stats )
     return LookAssistScene::Shade;
 }
 
+static bool lookAssistIsFloorLiftedNightThumbnail( LookAssistScene scene, const LookAssistStats &stats )
+{
+    // Settled Dual ISO/raw preview paths can lift near-black thumbnails to a
+    // flat floor around 32, even when the scene still needs night rescue.
+    return scene == LookAssistScene::Night &&
+           stats.median >= 24.0 &&
+           stats.p05 >= 18.0 &&
+           stats.p95 <= 70.0 &&
+           stats.dynamicRange <= 24.0;
+}
+
 static int lookAssistExposureForTarget( double sourceValue, double targetValue, int fallback )
 {
     if( sourceValue <= 1.0 || targetValue <= 1.0 ) return fallback;
     return (int)qRound( log( targetValue / sourceValue ) / log( 2.0 ) * 100.0 );
 }
 
-static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const LookAssistStats &stats )
+static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
+                                                  const LookAssistStats &stats,
+                                                  const LookAssistStats *colorStats = nullptr )
 {
     LookAssistPreset preset;
     int targetMedian = 110;
@@ -269,14 +282,8 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const L
         break;
     }
 
-    // Settled Dual ISO/raw preview paths can lift near-black thumbnails to a
-    // flat floor around 32, even when the scene still needs night rescue.
     const bool floorLiftedNightThumbnail =
-        scene == LookAssistScene::Night &&
-        stats.median >= 24.0 &&
-        stats.p05 >= 18.0 &&
-        stats.p95 <= 70.0 &&
-        stats.dynamicRange <= 24.0;
+        lookAssistIsFloorLiftedNightThumbnail( scene, stats );
     const double sourceMedian = floorLiftedNightThumbnail
         ? qMax( 2.0, ( stats.median - stats.p05 ) + 2.0 )
         : qMax( 1.0, stats.median );
@@ -343,21 +350,41 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const L
         preset.vibrance = qMin( preset.vibrance, 2 );
     }
 
-    const double magentaGreenAxis = stats.balanceG - ( ( stats.balanceR + stats.balanceB ) * 0.5 );
-    const double blueAmberAxis = stats.balanceB - stats.balanceR;
+    const LookAssistStats &balanceStats = colorStats ? *colorStats : stats;
+    const bool processedFloorLiftedBalance = colorStats && floorLiftedNightThumbnail;
+    const bool lowSignalFloorLiftedBalance =
+        processedFloorLiftedBalance &&
+        balanceStats.median > 0.0 &&
+        balanceStats.median < 32.0;
+    const double magentaGreenAxis = balanceStats.balanceG - ( ( balanceStats.balanceR + balanceStats.balanceB ) * 0.5 );
+    const double blueAmberAxis = balanceStats.balanceB - balanceStats.balanceR;
     const int tintCap = ( scene == LookAssistScene::BrightSun ) ? 8 : 22;
-    const int tempCap = ( scene == LookAssistScene::BrightSun ) ? 250 : 500;
+    const int tempCap = ( scene == LookAssistScene::BrightSun )
+                      ? 250
+                      : ( processedFloorLiftedBalance ? 220 : 500 );
+    const double tintThreshold = processedFloorLiftedBalance ? 4.0 : 10.0;
+    const double tintGain = processedFloorLiftedBalance ? 1.20 : 0.65;
+    const double tempThreshold = processedFloorLiftedBalance ? 6.0 : 14.0;
+    const double tempGain = processedFloorLiftedBalance ? 6.0 : 18.0;
 
-    if( fabs( magentaGreenAxis ) >= 10.0 )
+    if( fabs( magentaGreenAxis ) >= tintThreshold )
     {
         // Positive tint counteracts green casts; negative tint counteracts magenta casts.
-        preset.tintDelta = qBound( -tintCap, (int)qRound( magentaGreenAxis * 0.65 ), tintCap );
+        preset.tintDelta = qBound( -tintCap, (int)qRound( magentaGreenAxis * tintGain ), tintCap );
     }
 
-    if( fabs( blueAmberAxis ) >= 14.0 )
+    if( fabs( blueAmberAxis ) >= tempThreshold )
     {
         // Positive temperature warms blue-heavy clips; negative temperature cools amber-heavy clips.
-        preset.temperatureDelta = qBound( -tempCap, (int)qRound( blueAmberAxis * 18.0 ), tempCap );
+        preset.temperatureDelta = qBound( -tempCap, (int)qRound( blueAmberAxis * tempGain ), tempCap );
+    }
+
+    if( lowSignalFloorLiftedBalance )
+    {
+        if( magentaGreenAxis > -4.0 )
+            preset.tintDelta = qMax( preset.tintDelta, 4 );
+        if( blueAmberAxis <= -6.0 )
+            preset.temperatureDelta = qMin( preset.temperatureDelta, -48 );
     }
 
     preset.contrast = qBound( -100, preset.contrast, 100 );
@@ -3152,6 +3179,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             state.insert( QStringLiteral("preset_exposure"), m_lastLookAssistExposure );
             state.insert( QStringLiteral("preset_contrast"), m_lastLookAssistContrast );
             state.insert( QStringLiteral("preset_pivot"), m_lastLookAssistPivot );
+            state.insert( QStringLiteral("balance_source"), m_lastLookAssistBalanceSource );
             state.insert( QStringLiteral("temperature_delta"), m_lastLookAssistTemperatureDelta );
             state.insert( QStringLiteral("tint_delta"), m_lastLookAssistTintDelta );
         }
@@ -3735,6 +3763,11 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         metadata.insert( QStringLiteral("look_assist_balance_g"), m_lastLookAssistBalanceG );
         metadata.insert( QStringLiteral("look_assist_balance_b"), m_lastLookAssistBalanceB );
         metadata.insert( QStringLiteral("look_assist_balance_samples"), m_lastLookAssistBalanceSamples );
+        metadata.insert( QStringLiteral("look_assist_balance_source"), m_lastLookAssistBalanceSource );
+        metadata.insert( QStringLiteral("look_assist_balance_green_axis"),
+                         m_lastLookAssistBalanceG - ( ( m_lastLookAssistBalanceR + m_lastLookAssistBalanceB ) * 0.5 ) );
+        metadata.insert( QStringLiteral("look_assist_balance_blue_amber_axis"),
+                         m_lastLookAssistBalanceB - m_lastLookAssistBalanceR );
         metadata.insert( QStringLiteral("look_assist_preset_exposure"), m_lastLookAssistExposure );
         metadata.insert( QStringLiteral("look_assist_preset_contrast"), m_lastLookAssistContrast );
         metadata.insert( QStringLiteral("look_assist_preset_pivot"), m_lastLookAssistPivot );
@@ -8705,7 +8738,35 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     }
 
     const LookAssistScene scene = classifyLookAssistScene( stats );
-    const LookAssistPreset preset = presetForLookAssistScene( scene, stats );
+    const bool floorLiftedNightThumbnail =
+        lookAssistIsFloorLiftedNightThumbnail( scene, stats );
+    LookAssistStats processedColorStats;
+    bool useProcessedColorStats = false;
+    if( floorLiftedNightThumbnail )
+    {
+        QByteArray processedThumbnail;
+        processedThumbnail.resize( width * height * 3 );
+        get_area_average_downscale_thumnail( m_pMlvObject,
+                                             analysisFrame,
+                                             downscaleFactor,
+                                             qMax( 1, mlvappEffectiveWorkerThreadCount() ),
+                                             reinterpret_cast<unsigned char *>( processedThumbnail.data() ) );
+        processedColorStats = analyzeLookAssistThumbnail(
+                    reinterpret_cast<const unsigned char *>( processedThumbnail.constData() ),
+                    width,
+                    height );
+        const int minColorBalanceSamples = qMax( 32, ( width * height ) / 100 );
+        useProcessedColorStats =
+            processedColorStats.median > 0.0 &&
+            processedColorStats.balanceSamples >= minColorBalanceSamples;
+    }
+
+    const LookAssistStats &balanceStats =
+        useProcessedColorStats ? processedColorStats : stats;
+    const LookAssistPreset preset = presetForLookAssistScene(
+                scene,
+                stats,
+                useProcessedColorStats ? &processedColorStats : nullptr );
     const int baseTemperature = receipt->temperature() == -1
                               ? ui->horizontalSliderTemperature->value()
                               : receipt->temperature();
@@ -8735,10 +8796,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistMedianR = stats.medianR;
     m_lastLookAssistMedianG = stats.medianG;
     m_lastLookAssistMedianB = stats.medianB;
-    m_lastLookAssistBalanceR = stats.balanceR;
-    m_lastLookAssistBalanceG = stats.balanceG;
-    m_lastLookAssistBalanceB = stats.balanceB;
-    m_lastLookAssistBalanceSamples = stats.balanceSamples;
+    m_lastLookAssistBalanceR = balanceStats.balanceR;
+    m_lastLookAssistBalanceG = balanceStats.balanceG;
+    m_lastLookAssistBalanceB = balanceStats.balanceB;
+    m_lastLookAssistBalanceSamples = balanceStats.balanceSamples;
+    m_lastLookAssistBalanceSource = useProcessedColorStats
+                                  ? QStringLiteral("processed")
+                                  : QStringLiteral("raw");
     m_lastLookAssistExposure = preset.exposure;
     m_lastLookAssistContrast = preset.contrast;
     m_lastLookAssistPivot = preset.pivot;
@@ -8758,6 +8822,20 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     ui->horizontalSliderHighlights->setValue( preset.highlights );
 
     logInteractionEvent(
+        QStringLiteral("look_assist.apply.color_balance"),
+        QStringLiteral("source=%1 floor_lifted=%2 balance_r=%3 balance_g=%4 balance_b=%5 balance_samples=%6 green_axis=%7 blue_amber_axis=%8 processed_median=%9 processed_p95=%10")
+            .arg( m_lastLookAssistBalanceSource )
+            .arg( bool01( floorLiftedNightThumbnail ) )
+            .arg( balanceStats.balanceR, 0, 'f', 3 )
+            .arg( balanceStats.balanceG, 0, 'f', 3 )
+            .arg( balanceStats.balanceB, 0, 'f', 3 )
+            .arg( balanceStats.balanceSamples )
+            .arg( balanceStats.balanceG - ( ( balanceStats.balanceR + balanceStats.balanceB ) * 0.5 ), 0, 'f', 3 )
+            .arg( balanceStats.balanceB - balanceStats.balanceR, 0, 'f', 3 )
+            .arg( processedColorStats.median, 0, 'f', 3 )
+            .arg( processedColorStats.p95, 0, 'f', 3 ) );
+
+    logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
         QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 frame=%19 last_serial=%20 last_frame=%21 next_serial=%22")
             .arg( m_lastLookAssistScene )
@@ -8767,7 +8845,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( stats.p99, 0, 'f', 3 )
             .arg( stats.clipLow, 0, 'f', 6 )
             .arg( stats.clipHigh, 0, 'f', 6 )
-            .arg( stats.balanceSamples )
+            .arg( balanceStats.balanceSamples )
             .arg( preset.exposure )
             .arg( preset.contrast )
             .arg( preset.pivot )

@@ -2137,3 +2137,27 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / low effort: smoke the GUI on M15-1321.MLV, M15-1355.MLV, M16-1446.MLV, and M29-1756.MLV with Look Assist enabled from initial load, then compare only against manual toggle if the first frame looks wrong.
 2. High impact / low effort: use `High Quality (cast-closed)` plus toolbar `Scale Factor` for visual judgment, and reserve `Fast Preview` for cadence checks.
 3. Medium impact / medium effort: if some clips still need a prettier first look, tune the scene-aware Look Assist preset using the new diagnostics rather than adding unbounded histogram exposure guesses.
+
+## 2026-05-27 - Floor-lifted night color-balance guard
+
+### Verified locally
+
+- `M16-1243.MLV` and `M17-1152.MLV` exposed a second failure mode after the midtone/highlight cap landed: the raw Look Assist thumbnail was floor-lifted to nearly neutral values around `R=G=B=32`, so raw-thumbnail balance could not see the visible green/yellow cast.
+- The fix keeps raw-thumbnail stats authoritative for scene classification, exposure, and highlight caps, but uses a processed thumbnail for color balance only when the clip is classified as a floor-lifted night thumbnail.
+- The profile metadata now records `look_assist_balance_source`, `look_assist_balance_green_axis`, and `look_assist_balance_blue_amber_axis` so future smoke failures can distinguish raw exposure placement from processed color-balance decisions.
+- Final local smokes after the patch:
+  - `M16-1243.MLV`: exposure `+0.96 EV`, projected `p95=71.98`, projected `p99=75.87`, `temperature=6000`, `tint=4`, balance source `processed`, toggle stable, unsettled count `0`.
+  - `M17-1152.MLV`: exposure `+1.08 EV`, projected `p95=71.88`, projected `p99=76.11`, `temperature=5952`, `tint=4`, balance source `processed`, toggle stable, unsettled count `0`.
+  - `M15-1321.MLV`: exposure `+0.96 EV`, projected `p95=71.98`, projected `p99=73.92`, preserving the midtone/highlight cap behavior.
+- Pipeline capture on the displayed `S5_processed8` buffers shows the green-vs-blue cast moved toward neutral:
+  - `M16-1243.MLV`: midtone `G/B` changed from `1.243` to `1.061`.
+  - `M17-1152.MLV`: midtone `G/B` changed from `2.143` to `1.079`.
+
+### Cross-checked from prior analysis
+
+- This follows the earlier rule that Look Assist may fix raw/tone/color appearance but must not mutate geometry.
+- This does not revert to the previous `+380` floor-lift exposure behavior; highlight placement remains capped near the midtone target.
+
+### Needs runtime profiling
+
+- Human GUI smoke is still the final judge for the exact tint amount on `M16-1243.MLV` and `M17-1152.MLV`, because dark Dual ISO scene content can make channel medians overstate red/magenta after green suppression.
