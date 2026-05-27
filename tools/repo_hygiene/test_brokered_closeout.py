@@ -3481,6 +3481,31 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("checkpoint_owned_dirty", self.audit_types(repo))
         self.assertIn("auto_quorum", self.audit_types(repo))
 
+    def test_stale_integrated_claims_do_not_foreignize_clean_at_start_dirty(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/stale-claim-owner")
+        start_work_block(
+            repo,
+            work_block_id="wb-stale-claim-owner",
+            actor="local-test",
+            path_claims=["closeout.config.json"],
+        )
+        stale_manifest = repo / ".claude-state" / "closeout" / "work-blocks" / "wb-stale-claim-owner" / "manifest.json"
+        stale_data = json.loads(stale_manifest.read_text(encoding="utf-8"))
+        stale_data["state"] = "blocked"
+        stale_data["blockedReason"] = "historical_owner_already_integrated"
+        stale_manifest.write_text(json.dumps(stale_data, indent=2), encoding="utf-8")
+        git(repo, "checkout", "master")
+        git(repo, "checkout", "-b", "codex/current-config-repair")
+        start_work_block(repo, work_block_id="wb-current-config-repair", actor="local-test")
+        config_path = repo / "closeout.config.json"
+        config_path.write_text(config_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-current-config-repair")
+
+        self.assertEqual([item["path"] for item in detection["ownedDirty"]], ["closeout.config.json"])
+        self.assertEqual(detection["foreignDirty"], [])
+
     def test_generated_closeout_conflict_packets_are_not_owned_dirty(self) -> None:
         repo = self.init_repo(remote=False)
         git(repo, "checkout", "-b", "codex/generated-packet")
@@ -3647,7 +3672,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("symbol", missing_kinds)
         self.assertIn("closeout_tooling_stale", self.audit_types(repo))
 
-    def test_closeout_tooling_stale_auto_updates_only_safe_paths(self) -> None:
+    def test_tooling_baseline_check_is_plan_only_during_finalize(self) -> None:
         repo = self.init_repo(
             config_updates={
                 "toolingBaseline": {
@@ -3677,8 +3702,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "closeout_tooling_stale")
-        self.assertIn("def baseline_actor", tool_path.read_text(encoding="utf-8"))
-        self.assertTrue(result["tooling"]["updated"])
+        self.assertIn("def old_actor", tool_path.read_text(encoding="utf-8"))
+        self.assertFalse(result["tooling"]["updated"])
+        self.assertEqual(
+            result["tooling"]["plannedUpdates"],
+            [{"path": "tools/repo_hygiene/brokered_closeout.py", "baselineRef": "master"}],
+        )
+        self.assertEqual(git(repo, "status", "--short").stdout, "")
 
     def test_foreign_dirty_remains_retained_audited_and_does_not_block_independent_closeout(self) -> None:
         repo = self.init_repo()

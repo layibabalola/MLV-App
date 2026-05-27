@@ -16,6 +16,7 @@
 #include <QTemporaryDir>
 #include <QTextStream>
 
+#include <cmath>
 #include <iostream>
 #include <map>
 
@@ -912,6 +913,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_vibrance")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_temperature_delta")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_tint_delta")));
+    const double look_assist_scale =
+        std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);
+    const double projected_p95 = metadata.value(QStringLiteral("look_assist_p95")).toDouble() * look_assist_scale;
+    const double projected_p99 = metadata.value(QStringLiteral("look_assist_p99")).toDouble() * look_assist_scale;
+    ASSERT_TRUE(projected_p95 <= 82.0);
+    ASSERT_TRUE(projected_p99 <= 104.0);
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePlayActionAdvancesFrame)

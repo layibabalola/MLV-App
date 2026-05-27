@@ -753,6 +753,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_retained_terminal_outcomes_prove_remediation_attempted_or_excluded",
             "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
             "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
+            "test_stale_integrated_claims_do_not_foreignize_clean_at_start_dirty",
             "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
             "test_baseline_dirty_changed_after_start_blocks_as_mixed_without_claim",
             "test_repo_sweep_baseline_dirty_changed_is_not_pruned_as_foreign_dirty",
@@ -761,6 +762,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason",
             "test_clean_integration_worktree_add_uses_longpaths_config",
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
+            "test_tooling_baseline_check_is_plan_only_during_finalize",
             "test_missing_evidence_is_generated_and_committed_before_publish",
             "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun",
             "test_finalize_loop_stops_on_repeated_identical_blocker_evidence_tuple",
@@ -888,6 +890,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "closeout-history-index.v1"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "rollback-readiness.v1"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_state_snapshot_evidence_hash"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def manifest_path_claims_are_stale"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def recover_dirty_protected_target_to_work_block"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def recovery_command_forbidden_action"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def require_integrity_checked_audit"},
@@ -1463,6 +1466,28 @@ def manifest_path_claims(manifest: Dict[str, Any]) -> List[str]:
     return sorted({normalize_rel(path) for path in manifest.get("pathClaims", []) if normalize_rel(str(path))})
 
 
+def manifest_path_claims_are_stale(repo_root: Path, config: Dict[str, Any], manifest: Dict[str, Any]) -> bool:
+    branch = str(manifest.get("branch") or "")
+    if not branch:
+        return True
+    branch_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
+    if not branch_head:
+        return True
+    if branch == current_branch(repo_root):
+        return False
+    if str(manifest.get("state") or "") not in {"blocked", "completed"}:
+        return False
+    try:
+        target = target_ref_for(repo_root, config)
+    except HygieneError:
+        return False
+    target_head = str(target.get("head") or "")
+    target_branch = str(target.get("targetBranch") or "")
+    if branch != target_branch and target_head and is_ancestor(repo_root, branch_head, target_head):
+        return True
+    return False
+
+
 def active_path_claims(repo_root: Path, config: Dict[str, Any]) -> Dict[str, str]:
     claims: Dict[str, str] = {}
     root = work_blocks_root(repo_root, config)
@@ -1471,6 +1496,8 @@ def active_path_claims(repo_root: Path, config: Dict[str, Any]) -> Dict[str, str
     for manifest_file in root.glob("*/manifest.json"):
         manifest = read_json(manifest_file, {})
         if manifest.get("state") not in {"active", "completed", "finalizing", "blocked"}:
+            continue
+        if manifest_path_claims_are_stale(repo_root, config, manifest):
             continue
         block_id = str(manifest.get("workBlockId") or manifest_file.parent.name)
         for claim in manifest_path_claims(manifest):
@@ -3111,13 +3138,19 @@ def can_update_tooling_path(repo_root: Path, config: Dict[str, Any], path: str, 
     return True, None
 
 
-def verify_closeout_tooling_current(repo_root_arg: Path, config: Optional[Dict[str, Any]] = None, *, attempt_update: bool = True) -> Dict[str, Any]:
+def verify_closeout_tooling_current(
+    repo_root_arg: Path,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    attempt_update: bool = True,
+    plan_only: bool = False,
+) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = config or load_closeout_config(repo_root)
     raw_config = read_json(repo_root / CONFIG_PATH, {}) if (repo_root / CONFIG_PATH).exists() else {}
     baseline = config.get("toolingBaseline", {})
     if not bool(baseline.get("enabled", False)):
-        return {"ok": True, "status": "disabled", "missing": [], "updated": []}
+        return {"ok": True, "status": "disabled", "missing": [], "updated": [], "plannedUpdates": []}
 
     missing: List[Dict[str, Any]] = []
     for key in baseline.get("requiredConfigKeys", []):
@@ -3147,8 +3180,9 @@ def verify_closeout_tooling_current(repo_root_arg: Path, config: Optional[Dict[s
             missing.append({"kind": "actor", "path": normalize_rel(f"tools/closeout/{script}")})
 
     updated: List[Dict[str, Any]] = []
+    planned_updates: List[Dict[str, Any]] = []
     blocked_updates: List[Dict[str, Any]] = []
-    if missing and attempt_update and bool(baseline.get("autoUpdate", True)):
+    if missing and bool(baseline.get("autoUpdate", True)):
         ref = baseline_ref_for_tooling(repo_root, config)
         dirty_paths = dirty_path_set(repo_root)
         claims = active_path_claims(repo_root, config)
@@ -3166,17 +3200,23 @@ def verify_closeout_tooling_current(repo_root_arg: Path, config: Optional[Dict[s
             if content is None:
                 blocked_updates.append({"path": path, "reason": "path_missing_from_baseline", "baselineRef": ref})
                 continue
+            update = {"path": path, "baselineRef": ref}
+            if plan_only or not attempt_update:
+                planned_updates.append(update)
+                continue
             target = repo_root / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8", newline="")
-            updated.append({"path": path, "baselineRef": ref})
+            updated.append(update)
 
     result = {
         "ok": not missing,
         "status": "current" if not missing else "closeout_tooling_stale",
         "missing": missing,
         "updated": updated,
+        "plannedUpdates": planned_updates,
         "blockedUpdates": blocked_updates,
+        "planOnly": bool(plan_only),
         "recoveryCommand": closeout_tooling_recovery_command(),
         "authoritative": not missing,
     }
@@ -3598,7 +3638,7 @@ def repair_eligibility(repo_root_arg: Path, *, work_block_id: Optional[str] = No
     freeze = remediation_freeze_status(repo_root, config, action="repair", write_audit_packet=True)
     if freeze["active"]:
         return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
-    tooling = verify_closeout_tooling_current(repo_root, config)
+    tooling = verify_closeout_tooling_current(repo_root, config, plan_only=True)
     if not tooling["ok"]:
         return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
@@ -5513,7 +5553,7 @@ def _finalize_work_block_once(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
-    tooling = verify_closeout_tooling_current(repo_root, config)
+    tooling = verify_closeout_tooling_current(repo_root, config, plan_only=True)
     if not tooling["ok"]:
         return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
@@ -9871,7 +9911,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
     freeze = remediation_freeze_status(repo_root, config, action="repo-sweep", write_audit_packet=True)
     if freeze["active"]:
         return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
-    tooling = verify_closeout_tooling_current(repo_root, config)
+    tooling = verify_closeout_tooling_current(repo_root, config, plan_only=True)
     if not tooling["ok"]:
         return {"status": "blocked", "reason": "closeout_tooling_stale", "tooling": tooling}
     if not bool(config.get("repoSweep", {}).get("enabled", True)):
