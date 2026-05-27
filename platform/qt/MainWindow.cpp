@@ -370,6 +370,46 @@ static LookAssistAutoWhiteBalancePatch findLookAssistAutoWhiteBalancePatch(
     return best;
 }
 
+static bool lookAssistAutoWhiteBalanceSolutionIsStable(
+        const LookAssistAutoWhiteBalancePatch &patch,
+        int baseTemperature,
+        int baseTint,
+        int candidateTemperature,
+        int candidateTint )
+{
+    if( !patch.valid ) return false;
+
+    const int temperatureDelta = candidateTemperature - baseTemperature;
+    const int tintDelta = candidateTint - baseTint;
+    const bool extremeGreenCorrection =
+        candidateTint <= -34
+        && temperatureDelta <= -1200
+        && patch.luma >= 205.0
+        && patch.chroma >= 12.0
+        && fabs( patch.blueAmberAxis ) >= 14.0;
+    if( extremeGreenCorrection )
+    {
+        return false;
+    }
+
+    const bool hardGreenClampFromBrightNeutralPatch =
+        candidateTint <= -34
+        && patch.luma >= 210.0
+        && patch.chroma <= 6.0
+        && qAbs( temperatureDelta ) <= 1000;
+    if( hardGreenClampFromBrightNeutralPatch )
+    {
+        return false;
+    }
+
+    const bool implausibleDualAxisSwing =
+        fabs( static_cast<double>( tintDelta ) ) >= 34.0
+        && qAbs( temperatureDelta ) >= 1800
+        && patch.chroma >= 12.0
+        && patch.luma >= 200.0;
+    return !implausibleDualAxisSwing;
+}
+
 static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
                                                   const LookAssistStats &stats,
                                                   const LookAssistStats *colorStats = nullptr )
@@ -3509,13 +3549,17 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         else
         {
             QString scaleSettleFailure;
-            applyPlaybackScaleFactorOverride( 2, /*persist*/false );
+            const int toggleFromScale =
+                ( options.exerciseScaleFactorToggleFrom == 4 ) ? 4 : 2;
+            applyPlaybackScaleFactorOverride( toggleFromScale, /*persist*/false );
             qApp->processEvents( QEventLoop::AllEvents );
-            trace(QStringLiteral("playback-scale-toggle-smoke-x2-settle-begin"));
+            trace(QStringLiteral("playback-scale-toggle-smoke-x%1-settle-begin")
+                    .arg( toggleFromScale ));
             if( !renderFrameIndex( startFrame, -1, true, &scaleSettleFailure ) )
             {
                 err << "[PROFILE] ERROR: " << scaleSettleFailure << "\n";
-                trace(QStringLiteral("playback-scale-toggle-smoke-x2-settle-failed: ") + scaleSettleFailure);
+                trace(QStringLiteral("playback-scale-toggle-smoke-x%1-settle-failed: ")
+                        .arg( toggleFromScale ) + scaleSettleFailure);
                 return 11;
             }
             playbackScaleToggleBeforeState = capturePlaybackScaleState();
@@ -3533,14 +3577,16 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
 
             QStringList scaleMismatches;
             if( playbackScaleToggleBeforeState.value(
-                    QStringLiteral("render_thread_playback_scale_factor_request") ).toInt( -1 ) != 2 )
+                    QStringLiteral("render_thread_playback_scale_factor_request") ).toInt( -1 ) != toggleFromScale )
             {
-                scaleMismatches << QStringLiteral("requested_scale_before_not_2");
+                scaleMismatches << QStringLiteral("requested_scale_before_not_%1")
+                    .arg( toggleFromScale );
             }
             if( playbackScaleToggleBeforeState.value(
-                    QStringLiteral("render_thread_playback_scale_factor_effective") ).toInt( -1 ) != 2 )
+                    QStringLiteral("render_thread_playback_scale_factor_effective") ).toInt( -1 ) != toggleFromScale )
             {
-                scaleMismatches << QStringLiteral("effective_scale_before_not_2");
+                scaleMismatches << QStringLiteral("effective_scale_before_not_%1")
+                    .arg( toggleFromScale );
             }
             if( playbackScaleToggleBeforeState.value(
                     QStringLiteral("render_thread_playback_scale_factor_clamped") ).toBool( true ) )
@@ -3810,6 +3856,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("look_assist_load_state"), lookAssistLoadState );
     metadata.insert( QStringLiteral("look_assist_toggle_state"), lookAssistToggleState );
     metadata.insert( QStringLiteral("playback_scale_toggle_smoke_requested"), options.exerciseScaleFactorToggle );
+    metadata.insert( QStringLiteral("playback_scale_toggle_from"),
+                    options.exerciseScaleFactorToggleFrom );
     metadata.insert( QStringLiteral("playback_scale_toggle_smoke_ran"), playbackScaleToggleSmokeRan );
     metadata.insert( QStringLiteral("playback_scale_toggle_smoke_stable"), playbackScaleToggleSmokeStable );
     metadata.insert( QStringLiteral("playback_scale_toggle_smoke_failure"), playbackScaleToggleSmokeFailure );
@@ -9022,10 +9070,14 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                              raw_w,
                                              raw_h );
     bool autoWhiteBalanceValid = false;
+    QString autoWhiteBalanceSource = QStringLiteral("none");
     int autoWhiteBalanceTemperature = baseTemperature;
     int autoWhiteBalanceTint = baseTint;
     if( autoWbPatch.valid )
     {
+        autoWhiteBalanceSource = useProcessedColorStats
+                               ? QStringLiteral("processed-neutral-patch")
+                               : QStringLiteral("raw-neutral-patch");
         findMlvWhiteBalance( m_pMlvObject,
                              analysisFrame,
                              autoWbPatch.rawX,
@@ -9045,9 +9097,20 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             qBound( -35,
                     autoWhiteBalanceTint,
                     18 );
-        preset.temperatureDelta = autoWhiteBalanceTemperature - baseTemperature;
-        preset.tintDelta = autoWhiteBalanceTint - baseTint;
-        autoWhiteBalanceValid = true;
+        if( lookAssistAutoWhiteBalanceSolutionIsStable( autoWbPatch,
+                                                        baseTemperature,
+                                                        baseTint,
+                                                        autoWhiteBalanceTemperature,
+                                                        autoWhiteBalanceTint ) )
+        {
+            preset.temperatureDelta = autoWhiteBalanceTemperature - baseTemperature;
+            preset.tintDelta = autoWhiteBalanceTint - baseTint;
+            autoWhiteBalanceValid = true;
+        }
+        else
+        {
+            autoWhiteBalanceSource = QStringLiteral("rejected-extreme-color-cast");
+        }
     }
     int temperature = 0;
     int tint = 0;
@@ -9288,23 +9351,19 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistTemperatureDelta = preset.temperatureDelta;
     m_lastLookAssistTintDelta = preset.tintDelta;
     m_lastLookAssistAutoWhiteBalanceValid = autoWhiteBalanceValid;
-    m_lastLookAssistAutoWhiteBalanceSource = autoWhiteBalanceValid
-                                           ? ( useProcessedColorStats
-                                               ? QStringLiteral("processed-neutral-patch")
-                                               : QStringLiteral("raw-neutral-patch") )
-                                           : QStringLiteral("none");
+    m_lastLookAssistAutoWhiteBalanceSource = autoWhiteBalanceSource;
     m_lastLookAssistAutoWhiteBalanceTemperature =
-        autoWhiteBalanceValid ? autoWhiteBalanceTemperature : 0;
+        autoWbPatch.valid ? autoWhiteBalanceTemperature : 0;
     m_lastLookAssistAutoWhiteBalanceTint =
-        autoWhiteBalanceValid ? autoWhiteBalanceTint : 0;
+        autoWbPatch.valid ? autoWhiteBalanceTint : 0;
     m_lastLookAssistAutoWhiteBalanceRawX =
-        autoWhiteBalanceValid ? autoWbPatch.rawX : -1;
+        autoWbPatch.valid ? autoWbPatch.rawX : -1;
     m_lastLookAssistAutoWhiteBalanceRawY =
-        autoWhiteBalanceValid ? autoWbPatch.rawY : -1;
+        autoWbPatch.valid ? autoWbPatch.rawY : -1;
     m_lastLookAssistAutoWhiteBalanceLuma =
-        autoWhiteBalanceValid ? autoWbPatch.luma : 0.0;
+        autoWbPatch.valid ? autoWbPatch.luma : 0.0;
     m_lastLookAssistAutoWhiteBalanceChroma =
-        autoWhiteBalanceValid ? autoWbPatch.chroma : 0.0;
+        autoWbPatch.valid ? autoWbPatch.chroma : 0.0;
     m_lastLookAssistPostBalanceValid = postColorStatsValid;
     m_lastLookAssistPostBalanceR = postColorStatsValid ? postColorStats.balanceR : 0.0;
     m_lastLookAssistPostBalanceG = postColorStatsValid ? postColorStats.balanceG : 0.0;
@@ -9331,16 +9390,16 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
         QStringLiteral("valid=%1 source=%2 raw_x=%3 raw_y=%4 patch_luma=%5 patch_chroma=%6 patch_green_axis=%7 patch_blue_amber_axis=%8 base_temp=%9 base_tint=%10 awb_temp=%11 awb_tint=%12 final_temp_delta=%13 final_tint_delta=%14")
             .arg( bool01( autoWhiteBalanceValid ) )
             .arg( m_lastLookAssistAutoWhiteBalanceSource )
-            .arg( autoWhiteBalanceValid ? autoWbPatch.rawX : -1 )
-            .arg( autoWhiteBalanceValid ? autoWbPatch.rawY : -1 )
-            .arg( autoWhiteBalanceValid ? autoWbPatch.luma : 0.0, 0, 'f', 3 )
-            .arg( autoWhiteBalanceValid ? autoWbPatch.chroma : 0.0, 0, 'f', 3 )
-            .arg( autoWhiteBalanceValid ? autoWbPatch.greenAxis : 0.0, 0, 'f', 3 )
-            .arg( autoWhiteBalanceValid ? autoWbPatch.blueAmberAxis : 0.0, 0, 'f', 3 )
+            .arg( autoWbPatch.valid ? autoWbPatch.rawX : -1 )
+            .arg( autoWbPatch.valid ? autoWbPatch.rawY : -1 )
+            .arg( autoWbPatch.valid ? autoWbPatch.luma : 0.0, 0, 'f', 3 )
+            .arg( autoWbPatch.valid ? autoWbPatch.chroma : 0.0, 0, 'f', 3 )
+            .arg( autoWbPatch.valid ? autoWbPatch.greenAxis : 0.0, 0, 'f', 3 )
+            .arg( autoWbPatch.valid ? autoWbPatch.blueAmberAxis : 0.0, 0, 'f', 3 )
             .arg( baseTemperature )
             .arg( baseTint )
-            .arg( autoWhiteBalanceValid ? autoWhiteBalanceTemperature : 0 )
-            .arg( autoWhiteBalanceValid ? autoWhiteBalanceTint : 0 )
+            .arg( autoWbPatch.valid ? autoWhiteBalanceTemperature : 0 )
+            .arg( autoWbPatch.valid ? autoWhiteBalanceTint : 0 )
             .arg( preset.temperatureDelta )
             .arg( preset.tintDelta ) );
 
@@ -15494,19 +15553,39 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
 
         if( ui->actionShowHistogram->isChecked() )
         {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeHistogram );
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                      readyFrame.renderedImageWidth,
+                                      readyFrame.renderedImageHeight,
+                                      under,
+                                      over,
+                                      ScopesLabel::ScopeHistogram );
         }
         else if( ui->actionShowWaveFormMonitor->isChecked() )
         {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeWaveForm );
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                      readyFrame.renderedImageWidth,
+                                      readyFrame.renderedImageHeight,
+                                      under,
+                                      over,
+                                      ScopesLabel::ScopeWaveForm );
         }
         else if( ui->actionShowParade->isChecked() )
         {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeRgbParade);
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                      readyFrame.renderedImageWidth,
+                                      readyFrame.renderedImageHeight,
+                                      under,
+                                      over,
+                                      ScopesLabel::ScopeRgbParade);
         }
         else if( ui->actionShowVectorScope->isChecked() )
         {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ), getMlvWidth(m_pMlvObject), getMlvHeight(m_pMlvObject), under, over, ScopesLabel::ScopeVectorScope );
+            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                      readyFrame.renderedImageWidth,
+                                      readyFrame.renderedImageHeight,
+                                      under,
+                                      over,
+                                      ScopesLabel::ScopeVectorScope );
         }
         m_lastDrawFrameReadyScopesMs = (mlv_stage_timing_now() - scopes_start) * 1000.0;
         mlv_stage_timing_note_elapsed("drawFrameReady.scopes", displayFrame, m_lastDrawFrameReadyScopesMs);
