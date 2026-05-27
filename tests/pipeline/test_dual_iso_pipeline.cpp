@@ -2992,6 +2992,33 @@ TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleTwoWorks)
     ASSERT_TRUE(psnr > 16.0);
 }
 
+TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleFourUsesQualityFallback)
+{
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setDualIso(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+        return;
+    }
+
+    mlv_phase4bv_reset_env_cache_for_testing();
+    const std::vector<uint8_t> full = fixture.renderFrame8Scaled(0, 1, 1);
+    const std::vector<uint8_t> scaled4 = fixture.renderFrame8Scaled(0, 1, 4);
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 4) * (full_h / 4) * 3u, scaled4.size());
+    ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+
+    const std::vector<uint8_t> golden = phase4b::buildBlockAveragedGoldenRgb8(full, full_w, full_h, 4);
+    ASSERT_EQ(golden.size(), scaled4.size());
+    const double psnr = phase4b::psnrRgb8(scaled4, golden);
+    ASSERT_TRUE(psnr > 16.0);
+}
+
 /* ===================================================================== */
 /* Phase 4B-v2 tests: downsample-BEFORE-llrawproc (the actual cast-closed   */
 /* fast path). The v1 path downsamples after HQ recon — v2 downsamples     */

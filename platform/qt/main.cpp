@@ -485,8 +485,15 @@ static int runPlaybackProfile(QApplication &app)
 
     const QCommandLineOption exerciseScaleFactorToggleOpt(
         QStringLiteral("exercise-scale-toggle"),
-        QStringLiteral("Render at Playback Scale x2, switch to x1 on the loaded clip, and verify the settled frame updates safely."));
+        QStringLiteral("Render at a playback scale, switch to x1 on the loaded clip, and verify the settled frame updates safely."));
     parser.addOption(exerciseScaleFactorToggleOpt);
+
+    const QCommandLineOption exerciseScaleFactorToggleFromOpt(
+        QStringLiteral("exercise-scale-toggle-from"),
+        QStringLiteral("Starting playback scale for --exercise-scale-toggle. Supported values: 2 or 4."),
+        QStringLiteral("scale"),
+        QStringLiteral("2"));
+    parser.addOption(exerciseScaleFactorToggleFromOpt);
 
     const QCommandLineOption stageLogOpt(
         QStringLiteral("stage-log"),
@@ -625,6 +632,14 @@ static int runPlaybackProfile(QApplication &app)
     {
         qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT", QByteArrayLiteral("1"));
     }
+
+    const int exerciseScaleToggleFrom = parser.value(exerciseScaleFactorToggleFromOpt).toInt(&ok);
+    if (!ok || (exerciseScaleToggleFrom != 2 && exerciseScaleToggleFrom != 4))
+    {
+        err << "[PROFILE] ERROR: --exercise-scale-toggle-from must be 2 or 4.\n";
+        return 2;
+    }
+
     const QString inputPath = QFileInfo(parser.value(inputOpt)).absoluteFilePath();
     const QString outputPath = QFileInfo(parser.value(outputOpt)).absoluteFilePath();
     const QString receiptPath = parser.value(receiptOpt).isEmpty()
@@ -657,6 +672,7 @@ static int runPlaybackProfile(QApplication &app)
     options.exercisePlayAction = parser.isSet(exercisePlayActionOpt);
     options.exerciseLookAssistToggle = parser.isSet(exerciseLookAssistToggleOpt);
     options.exerciseScaleFactorToggle = parser.isSet(exerciseScaleFactorToggleOpt);
+    options.exerciseScaleFactorToggleFrom = exerciseScaleToggleFrom;
     options.scope = scope;
     options.playbackDebayer = playbackDebayer;
     options.playbackProcessing = playbackProcessing;

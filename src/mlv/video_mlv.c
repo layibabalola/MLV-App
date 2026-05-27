@@ -3122,6 +3122,7 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
     g_mlv_phase4bv3_y_crop_rows = 0;
 
     if (!mlv_phase4bv2_disabled_via_env()
+     && llrpHQDualIso(video)
      && mlv_phase4bv2_receipt_compatible(video)
      && scaleFactor == 4)
     {
@@ -3248,8 +3249,11 @@ static int mlv_render_scaled_rgb16(mlvObject_t * video,
 {
     if (!video || !outputFrame || scaleFactor <= 1) return 0;
 
-    /* Try Phase 4B-v2 first. */
-    if (mlv_render_scaled_rgb16_v2(video, frameIndex, outputFrame, scaleFactor, threads))
+    /* Phase 4B-v2 preserves the Dual ISO row pattern, but the pre-LLRawProc
+     * Bayer shortcut is visibly harsher on normal clips at x4. Prefer the
+     * post-LLRawProc RGB downsample for non-Dual-ISO playback quality. */
+    if (llrpHQDualIso(video)
+        && mlv_render_scaled_rgb16_v2(video, frameIndex, outputFrame, scaleFactor, threads))
     {
         return 1;
     }

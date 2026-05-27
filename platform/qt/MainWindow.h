@@ -115,6 +115,7 @@ public:
         bool exercisePlayAction = false;
         bool exerciseLookAssistToggle = false;
         bool exerciseScaleFactorToggle = false;
+        int exerciseScaleFactorToggleFrom = 2;
         PlaybackProfileScope scope = PlaybackProfileScope::None;
         PlaybackProfileDebayerRequest playbackDebayer =
             PlaybackProfileDebayerRequest::Auto;

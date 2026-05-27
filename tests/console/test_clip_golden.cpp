@@ -766,6 +766,161 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileScaleToggleToOneSettles)
               sample.value(QStringLiteral("prep_active_generation")).toDouble());
 }
 
+TEST(ClipGolden, LocalM16ScaleFourToOneWithHistogramSettlesWhenAvailable)
+{
+    const QString fixture_path = QStringLiteral("C:/temp/MLV/M16-1327.MLV");
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing local regression clip C:/temp/MLV/M16-1327.MLV");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("m16-scale4-toggle.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--frames") << QStringLiteral("1")
+            << QStringLiteral("--scope") << QStringLiteral("histogram")
+            << QStringLiteral("--exercise-scale-toggle")
+            << QStringLiteral("--exercise-scale-toggle-from") << QStringLiteral("4")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("1"),
+        QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_EQ(4, metadata.value(QStringLiteral("playback_scale_toggle_from")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_stable")).toBool());
+    const QJsonObject before =
+        metadata.value(QStringLiteral("playback_scale_toggle_before_state")).toObject();
+    const QJsonObject after =
+        metadata.value(QStringLiteral("playback_scale_toggle_after_state")).toObject();
+    ASSERT_EQ(4, before.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+    ASSERT_EQ(1, after.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+    ASSERT_EQ(1, after.value(QStringLiteral("last_presented_active_scale")).toInt());
+}
+
+TEST(ClipGolden, LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable)
+{
+    const QString fixture_path = QStringLiteral("C:/temp/MLV/M16-1327.MLV");
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing local regression clip C:/temp/MLV/M16-1327.MLV");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("m16-look-assist.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--frames") << QStringLiteral("1")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("1"),
+        QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_FALSE(metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool());
+    ASSERT_EQ(std::string("rejected-extreme-color-cast"),
+              metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_tint")).toInt() > -20);
+}
+
+TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
+{
+    const QString fixture_path = QStringLiteral("C:/temp/MLV/M16-1347.MLV");
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing local regression clip C:/temp/MLV/M16-1347.MLV");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("m16-1347-look-assist.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--frames") << QStringLiteral("1")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("1"),
+        QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_FALSE(metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool());
+    ASSERT_EQ(std::string("rejected-extreme-color-cast"),
+              metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_tint")).toInt() > -20);
+}
+
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtRuntime)
 {
     const QString fixture_path = clip_fixture_path();
