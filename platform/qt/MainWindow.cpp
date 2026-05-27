@@ -222,6 +222,12 @@ static LookAssistScene classifyLookAssistScene( const LookAssistStats &stats )
     return LookAssistScene::Shade;
 }
 
+static int lookAssistExposureForTarget( double sourceValue, double targetValue, int fallback )
+{
+    if( sourceValue <= 1.0 || targetValue <= 1.0 ) return fallback;
+    return (int)qRound( log( targetValue / sourceValue ) / log( 2.0 ) * 100.0 );
+}
+
 static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const LookAssistStats &stats )
 {
     LookAssistPreset preset;
@@ -274,24 +280,43 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const L
     const double sourceMedian = floorLiftedNightThumbnail
         ? qMax( 2.0, ( stats.median - stats.p05 ) + 2.0 )
         : qMax( 1.0, stats.median );
-    int exposure = (int)qRound( log( targetMedian / sourceMedian ) / log( 2.0 ) * 100.0 );
+    int exposure = lookAssistExposureForTarget( sourceMedian, targetMedian, 0 );
     int maxExposure = 180;
     int minExposure = -140;
+    double p95Ceiling = 172.0;
+    double p99Ceiling = 218.0;
     if( scene == LookAssistScene::Night )
     {
         maxExposure = ( stats.p99 < 55.0 ) ? 380 : 260;
         minExposure = -40;
+        p95Ceiling = floorLiftedNightThumbnail ? 72.0 : 142.0;
+        p99Ceiling = floorLiftedNightThumbnail ? 94.0 : 188.0;
     }
     else if( scene == LookAssistScene::ArtificialLights )
     {
         maxExposure = 220;
         minExposure = -120;
+        p95Ceiling = 150.0;
+        p99Ceiling = 194.0;
     }
     else if( scene == LookAssistScene::BrightSun )
     {
         maxExposure = 0;
         minExposure = -180;
+        p95Ceiling = 146.0;
+        p99Ceiling = 184.0;
     }
+
+    if( !floorLiftedNightThumbnail )
+    {
+        int highlightCap = maxExposure;
+        highlightCap = qMin( highlightCap, lookAssistExposureForTarget( stats.p95, p95Ceiling, highlightCap ) );
+        highlightCap = qMin( highlightCap, lookAssistExposureForTarget( stats.p99, p99Ceiling, highlightCap ) );
+        if( stats.clipHigh > 0.002 )
+            highlightCap = qMin( highlightCap, 0 );
+        exposure = qMin( exposure, highlightCap );
+    }
+
     exposure = qBound( minExposure, exposure, maxExposure );
     if( scene == LookAssistScene::BrightSun )
         exposure = qMin( exposure, 0 );
@@ -306,9 +331,14 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const L
 
     if( stats.p05 < 18.0 ) preset.shadows += 8;
     if( stats.p05 < 12.0 ) preset.shadows += 6;
-    if( floorLiftedNightThumbnail ) preset.shadows = qMax( preset.shadows, 38 );
+    if( floorLiftedNightThumbnail ) preset.shadows = qMax( preset.shadows, 32 );
     if( stats.clipHigh > 0.010 ) preset.highlights -= 8;
     if( stats.clipHigh > 0.020 ) preset.highlights -= 8;
+    const double exposureScale = pow( 2.0, exposure / 100.0 );
+    const double projectedP95 = stats.p95 * exposureScale;
+    const double projectedP99 = stats.p99 * exposureScale;
+    if( projectedP95 > p95Ceiling - 2.0 ) preset.highlights -= 8;
+    if( projectedP99 > p99Ceiling - 2.0 ) preset.highlights -= 8;
 
     if( scene == LookAssistScene::BrightSun )
     {
