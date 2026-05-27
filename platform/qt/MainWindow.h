@@ -718,6 +718,7 @@ private:
     double m_lastLookAssistBalanceG = 0.0;
     double m_lastLookAssistBalanceB = 0.0;
     int m_lastLookAssistBalanceSamples = 0;
+    QString m_lastLookAssistBalanceSource;
     int m_lastLookAssistExposure = 0;
     int m_lastLookAssistContrast = 0;
     int m_lastLookAssistPivot = 75;
