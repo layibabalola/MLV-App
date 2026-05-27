@@ -263,7 +263,17 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const L
         break;
     }
 
-    const double sourceMedian = qMax( 1.0, stats.median );
+    // Settled Dual ISO/raw preview paths can lift near-black thumbnails to a
+    // flat floor around 32, even when the scene still needs night rescue.
+    const bool floorLiftedNightThumbnail =
+        scene == LookAssistScene::Night &&
+        stats.median >= 24.0 &&
+        stats.p05 >= 18.0 &&
+        stats.p95 <= 70.0 &&
+        stats.dynamicRange <= 24.0;
+    const double sourceMedian = floorLiftedNightThumbnail
+        ? qMax( 2.0, ( stats.median - stats.p05 ) + 2.0 )
+        : qMax( 1.0, stats.median );
     int exposure = (int)qRound( log( targetMedian / sourceMedian ) / log( 2.0 ) * 100.0 );
     int maxExposure = 180;
     int minExposure = -140;
@@ -296,6 +306,7 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene, const L
 
     if( stats.p05 < 18.0 ) preset.shadows += 8;
     if( stats.p05 < 12.0 ) preset.shadows += 6;
+    if( floorLiftedNightThumbnail ) preset.shadows = qMax( preset.shadows, 38 );
     if( stats.clipHigh > 0.010 ) preset.highlights -= 8;
     if( stats.clipHigh > 0.020 ) preset.highlights -= 8;
 

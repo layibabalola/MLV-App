@@ -488,6 +488,8 @@
       "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
       "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
       "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
+      "test_baseline_dirty_changed_after_start_blocks_as_mixed_without_claim",
+      "test_repo_sweep_baseline_dirty_changed_is_not_pruned_as_foreign_dirty",
       "test_owned_dirty_checkpoint_stages_only_exact_owned_paths",
       "test_foreign_dirty_remains_retained_audited_and_does_not_block_independent_closeout",
       "test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason",
@@ -600,6 +602,8 @@
       "test_remediation_freeze_removal_requires_coordinator_lock_quorum_and_revalidation",
       "test_remediation_freeze_remove_clears_marker_after_revalidation_and_quorum",
       "test_remediation_freeze_remove_allows_stale_transaction_branches_after_revalidation",
+      "test_remediation_freeze_remove_blocks_fresh_dirty_marker",
+      "test_remediation_freeze_remove_allows_stale_dirty_marker_after_quorum",
       "test_remediation_hard_clean_blocks_remaining_freeze_marker"
     ],
     "requiredSymbols": [
@@ -675,6 +679,7 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_status"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_staleness"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remove_remediation_freeze"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def assert_remediation_freeze_not_active"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_packet_template"},
