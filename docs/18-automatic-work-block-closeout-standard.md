@@ -96,7 +96,8 @@ baseline:
 
 - `ownedDirty`: belongs to this work block and may be checkpointed only through
   exact-tuple quorum.
-- `mixedDirty`: overlaps baseline dirty state and must not be whole-file
+- `mixedDirty`: overlaps baseline dirty state, or changed after being recorded
+  in the baseline, and must not be retained as foreign dirt or whole-file
   checkpointed.
 - `unownedDirty`: cannot be attributed and blocks that candidate.
 - `foreignDirty`: outside this candidate and retained without blocking
@@ -104,6 +105,10 @@ baseline:
 
 Clean-at-start files may be auto-claimed only when the broker proves they were
 clean or absent at the dirty baseline and no other active block claims them.
+Baseline-dirty files carry status/content fingerprints; if those fingerprints
+change after broker start, direct detection and repo sweep both classify the
+path as mixed and block with `baseline-dirty-overlaps-candidate` until the
+pre-existing bytes are split/checkpointed separately or ownership is proven.
 The narrow exception is `protected_branch_dirty_recovery`: when finalize
 preserves exact dirty paths from a protected target onto a broker-created
 work-block branch, those exact preserved paths and claims become the ownership
@@ -236,6 +241,12 @@ If the remediation freeze marker is still present after the repo becomes
 clean, the supported thaw path is `tools\repo_hygiene\work_block_cli.py
 remediation-freeze-remove`, which revalidates the repo-closed postcondition
 before clearing the marker.
+If the marker's recorded remediation packet is stale relative to the current
+branch, feature head, target head, policy hash, or dirty-path fingerprints, the
+same thaw actor may clear the marker after exact stale-evidence audit/quorum so
+the current work can be re-evaluated. Fresh dirty-state markers that still match
+the current dirty evidence remain blocking until the dirty source is preserved or
+the repo reaches the normal repo-closed postcondition.
 The snapshot pointer should carry `workBlockId` when the compare artifact is
 fresh enough to be tied back to a specific work block; that keeps the anchor
 strong without widening the top-level compare shape.
