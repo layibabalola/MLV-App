@@ -483,6 +483,11 @@ static int runPlaybackProfile(QApplication &app)
         QStringLiteral("When Look Assist is enabled, click it off/on and verify the re-applied look matches the load-time look."));
     parser.addOption(exerciseLookAssistToggleOpt);
 
+    const QCommandLineOption exerciseScaleFactorToggleOpt(
+        QStringLiteral("exercise-scale-toggle"),
+        QStringLiteral("Render at Playback Scale x2, switch to x1 on the loaded clip, and verify the settled frame updates safely."));
+    parser.addOption(exerciseScaleFactorToggleOpt);
+
     const QCommandLineOption stageLogOpt(
         QStringLiteral("stage-log"),
         QStringLiteral("Optional stage timing log path. Also enables MLVAPP_STAGE_TIMING."),
@@ -651,6 +656,7 @@ static int runPlaybackProfile(QApplication &app)
     options.waitForPaint = parser.isSet(waitForPaintOpt);
     options.exercisePlayAction = parser.isSet(exercisePlayActionOpt);
     options.exerciseLookAssistToggle = parser.isSet(exerciseLookAssistToggleOpt);
+    options.exerciseScaleFactorToggle = parser.isSet(exerciseScaleFactorToggleOpt);
     options.scope = scope;
     options.playbackDebayer = playbackDebayer;
     options.playbackProcessing = playbackProcessing;

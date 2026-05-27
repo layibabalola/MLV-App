@@ -65,8 +65,10 @@ public:
             int devicePixelRatioMilli = 0;
             bool zoomFitEnabled = false;
             bool fastPlaybackScaleEligible = false;
-            /* Phase 4A: requested playback scale factor (1, 2, or 4). Always
-             * 1 in production today; observed only by the cache key. */
+            uint64_t presentationGeneration = 0;
+            /* Requested playback scale factor (1, 2, or 4). The renderer may
+             * promote this to a safer effective factor, for example Dual ISO
+             * HQ x2 -> x4. */
             int playbackScaleFactor = 1;
             MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
@@ -86,6 +88,7 @@ public:
         OutputMode outputMode = OutputProcessed8;
         int renderedImageWidth = 0;
         int renderedImageHeight = 0;
+        int playbackScaleFactorActive = 1;
         bool playbackFastScaleActive = false;
         int playbackScaledWidth = 0;
         int playbackScaledHeight = 0;
@@ -187,6 +190,7 @@ private:
         Phase3Mode phase3Mode = Phase3Mode::Disabled;
         int renderedImageWidth = 0;
         int renderedImageHeight = 0;
+        int playbackScaleFactorActive = 1;
         bool playbackFastScaleActive = false;
         int playbackScaledWidth = 0;
         int playbackScaledHeight = 0;
@@ -219,6 +223,7 @@ private:
             phase3Mode = Phase3Mode::Disabled;
             renderedImageWidth = 0;
             renderedImageHeight = 0;
+            playbackScaleFactorActive = 1;
             playbackFastScaleActive = false;
             playbackScaledWidth = 0;
             playbackScaledHeight = 0;
@@ -273,6 +278,8 @@ private:
     double m_lastRenderThreadTotalMs;
     double m_lastFrameReadyEmitStageTime;
     QJsonObject m_lastStageTimingTelemetry;
+    int m_lastLoggedPlaybackScaleFactorRequest = 0;
+    int m_lastLoggedPlaybackScaleFactorActive = 0;
     int m_imageWidth;
     int m_imageHeight;
     int m_renderingSlotIndex;
