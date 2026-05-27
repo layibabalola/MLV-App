@@ -628,7 +628,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
     ASSERT_TRUE(QFileInfo::exists(stage_log));
 }
 
-TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileReportsEffectiveScaleClamp)
+TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileHonorsExplicitScaleTwo)
 {
     const QString fixture_path = clip_fixture_path();
     if (!QFileInfo::exists(fixture_path)) {
@@ -650,7 +650,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileReportsEffectiveScaleClamp)
 
     QTemporaryDir temp_dir;
     ASSERT_TRUE(temp_dir.isValid());
-    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-scale-clamp.json"));
+    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-scale-two.json"));
 
     QProcess process;
     configure_playback_profile_process(
@@ -681,13 +681,14 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileReportsEffectiveScaleClamp)
     ASSERT_EQ(1, frames.size());
     const QJsonObject sample = frames.at(0).toObject();
     ASSERT_EQ(2, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
-    ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
-    ASSERT_TRUE(sample.value(QStringLiteral("render_thread_playback_scale_factor_clamped")).toBool());
+    ASSERT_EQ(2, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+    ASSERT_FALSE(sample.value(QStringLiteral("render_thread_playback_scale_factor_clamped")).toBool());
     ASSERT_TRUE(sample.value(QStringLiteral("render_thread_rendered_width")).toInt() > 0);
     ASSERT_TRUE(sample.value(QStringLiteral("render_thread_rendered_height")).toInt() > 0);
     ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_upscaling")));
     ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_target_width")));
     ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_target_height")));
+    ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_playback_scale_bilinear")));
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileScaleToggleToOneSettles)
@@ -744,6 +745,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileScaleToggleToOneSettles)
     const QJsonObject after =
         metadata.value(QStringLiteral("playback_scale_toggle_after_state")).toObject();
     ASSERT_EQ(2, before.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+    ASSERT_EQ(2, before.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+    ASSERT_FALSE(before.value(QStringLiteral("render_thread_playback_scale_factor_clamped")).toBool());
     ASSERT_EQ(1, after.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
     ASSERT_EQ(1, after.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
     ASSERT_EQ(1, after.value(QStringLiteral("last_presented_active_scale")).toInt());
@@ -916,6 +919,15 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_source")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_green_axis")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_blue_amber_axis")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_valid")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_r")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_g")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_b")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_samples")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_green_axis")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_balance_blue_amber_axis")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_temperature_delta")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_tint_delta")));
     const double look_assist_scale =
         std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);
     const double projected_p95 = metadata.value(QStringLiteral("look_assist_p95")).toDouble() * look_assist_scale;

@@ -727,6 +727,13 @@ private:
     int m_lastLookAssistVibrance = 0;
     int m_lastLookAssistTemperatureDelta = 0;
     int m_lastLookAssistTintDelta = 0;
+    bool m_lastLookAssistPostBalanceValid = false;
+    double m_lastLookAssistPostBalanceR = 0.0;
+    double m_lastLookAssistPostBalanceG = 0.0;
+    double m_lastLookAssistPostBalanceB = 0.0;
+    int m_lastLookAssistPostBalanceSamples = 0;
+    int m_lastLookAssistPostTemperatureDelta = 0;
+    int m_lastLookAssistPostTintDelta = 0;
     int m_lookAssistUnsettledAnalysisCount = 0;
     QString m_phase3ClipPlaytimeFingerprint;
     qint64 m_phase3ClipPlaytimePendingMs = 0;

@@ -514,7 +514,8 @@ struct PlaybackQualityAutoSampler
 
     /* Returns the recommended scale factor for the next slot.
      * targetFps is the user's chosen target (24, 30, or 60).
-     * dualIsoActive forces scale=4 when HQ is selected (no scale=2 for DI).
+     * dualIsoActive keeps Auto conservative at scale=4 for throughput; an
+     * explicit user x2 override is still honored by the renderer.
      *
      * Logic:
      *   - if window not full yet -> stay at HQ scale=4 (gather more data)

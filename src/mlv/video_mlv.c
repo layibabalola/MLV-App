@@ -443,10 +443,12 @@ static int mlv_normalize_playback_scale_factor(int scaleFactor)
 }
 
 /* Phase 4B: resolve the effective scale factor for a given video object.
- * Forces scale=4 when dual ISO is active (the dual-ISO recon relies on
- * the 4-row iso_patterns cycle, so half-rate sampling at scale=2 would
- * silently corrupt the recon). Also rejects scales that don't divide the
- * sensor dimensions evenly (we need clean 2x2 / 4x4 block alignment). */
+ * Explicit scale=2 must stay scale=2. The fast pre-recon Dual ISO shortcut
+ * remains scale=4-only, but the scale=2 renderer falls back to full-res recon
+ * then post-recon downsample so the user gets a real half-res image instead
+ * of being silently demoted to the quarter-res path. Reject scales that don't
+ * divide the sensor dimensions evenly (we need clean 2x2 / 4x4 block
+ * alignment). */
 static int mlv_effective_playback_scale_factor(mlvObject_t * video, int requestedScale)
 {
     int s = mlv_normalize_playback_scale_factor(requestedScale);
@@ -457,13 +459,6 @@ static int mlv_effective_playback_scale_factor(mlvObject_t * video, int requeste
     const int width = (int)getMlvWidth(video);
     const int height = (int)getMlvHeight(video);
     if (width <= 0 || height <= 0) return 1;
-
-    /* Dual ISO HQ recon: scale must be 4 (or 1). The 4-row iso_patterns
-     * cycle isn't preserved at scale=2. */
-    if (llrpHQDualIso(video) && s == 2)
-    {
-        s = 4;
-    }
 
     /* Block alignment: width and height must be a multiple of (s*1) for
      * the 2x kernel and (s) for the 4x kernel. To be safe we require both
@@ -3688,10 +3683,10 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
     g_mlv_last_processed16_total_ms = 0.0;
     g_mlv_last_processed8_direct_path_active = 0;
 
-    /* Phase 4B: resolve effective scale (clamps dual ISO scale=2 up to 4,
-     * rejects scales that don't divide the sensor evenly). The cache key
-     * uses the *effective* scale so a request that gets clamped doesn't
-     * collide with a different request that lands at the same scale. */
+    /* Phase 4B: resolve effective scale (rejects scales that don't divide
+     * the sensor evenly). The cache key uses the *effective* scale so a
+     * request that gets clamped doesn't collide with a different request
+     * that lands at the same scale. */
     const int normalizedScale = mlv_effective_playback_scale_factor(video, scaleFactor);
     if (video)
     {
@@ -3890,8 +3885,8 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed8_direct_path_active = 0;
     g_mlv_last_processed8_prefetch_hit = 0;
 
-    /* Phase 4B: resolve effective scale (clamps dual ISO scale=2 up to 4,
-     * rejects scales that don't divide the sensor evenly). */
+    /* Phase 4B: resolve effective scale (rejects scales that don't divide
+     * the sensor evenly). */
     const int normalizedScale = mlv_effective_playback_scale_factor(video, scaleFactor);
     if (video)
     {
@@ -4267,9 +4262,10 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
  * the scaled pipeline. Returns (W/scale, H/scale) when the requested
  * scale is honoured, else returns the full sensor dimensions.
  *
- * The "effective" scale is computed with the same dual-ISO clamp rules as
- * the rendering path — for HQ Dual ISO clips, scale=2 is forced up to
- * scale=4 because the recon relies on the 4-row iso_patterns cycle. */
+ * The "effective" scale is computed with the same alignment rules as the
+ * rendering path. Explicit scale=2 is honored for Dual ISO by using the
+ * safe full-recon-then-downsample path instead of the scale=4 pre-recon
+ * shortcut. */
 void mlvFrameOutputDimensions(mlvObject_t * video,
                               int scaleFactor,
                               int * outWidth,
