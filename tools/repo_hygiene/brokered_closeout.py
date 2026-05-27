@@ -735,6 +735,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_remediation_preservation_requires_exact_allowlist_and_ref_or_bundle_backing",
             "test_remediation_freeze_removal_requires_coordinator_lock_quorum_and_revalidation",
             "test_remediation_hard_clean_blocks_remaining_freeze_marker",
+            "test_remediation_freeze_remove_blocks_fresh_dirty_marker",
+            "test_remediation_freeze_remove_allows_stale_dirty_marker_after_quorum",
             "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
             "test_dirty_split_stale_tuple_is_rejected_before_mutation",
             "test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes",
@@ -752,6 +754,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
             "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
             "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
+            "test_baseline_dirty_changed_after_start_blocks_as_mixed_without_claim",
+            "test_repo_sweep_baseline_dirty_changed_is_not_pruned_as_foreign_dirty",
             "test_owned_dirty_checkpoint_stages_only_exact_owned_paths",
             "test_foreign_dirty_remains_retained_audited_and_does_not_block_independent_closeout",
             "test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason",
@@ -841,6 +845,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_work_block_complete_wrapper_finalizes_by_default",
             "test_complete_finalize_on_clean_protected_target_is_noop_repo_closed",
             "test_dirty_protected_target_finalize_recovers_to_feature_branch",
+            "test_dirty_protected_target_recovery_owns_paths_despite_stale_claim",
             "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
             "test_repo_closed_postcondition_blocks_linked_sibling_worktree",
             "test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state",
@@ -922,6 +927,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def stop_runtime_services_before_promotion"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def restart_runtime_services_after_clean_promotion"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_status"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_freeze_staleness"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def assert_remediation_freeze_not_active"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remediation_packet_template"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def dirty_state_remediation_triage"},
@@ -1386,6 +1392,51 @@ def manifest_dirty_baseline_paths(manifest: Dict[str, Any]) -> set[str]:
     return set()
 
 
+def manifest_dirty_baseline_entries(manifest: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    baseline = manifest.get("dirtyBaseline")
+    if not isinstance(baseline, dict):
+        return {}
+    entries = baseline.get("entries")
+    if not isinstance(entries, list):
+        return {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        path = normalize_rel(str(item.get("path") or ""))
+        if path:
+            result[path] = item
+    return result
+
+
+def dirty_baseline_change_details(
+    worktree_root: Path,
+    entry: Dict[str, Any],
+    baseline_entry: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not baseline_entry:
+        return {"dirtyBaselineContentChanged": False}
+    path = normalize_rel(str(entry.get("path") or ""))
+    current_hash = file_content_hash(worktree_root / path)
+    baseline_hash = baseline_entry.get("contentSha256")
+    current_status = str(entry.get("status") or "")
+    baseline_status = str(baseline_entry.get("status") or "")
+    current_original = normalize_rel(str(entry.get("originalPath") or ""))
+    baseline_original = normalize_rel(str(baseline_entry.get("originalPath") or ""))
+    changed = (
+        current_hash != baseline_hash
+        or current_status != baseline_status
+        or current_original != baseline_original
+    )
+    return {
+        "dirtyBaselineContentChanged": changed,
+        "dirtyBaselineContentSha256": baseline_hash,
+        "currentContentSha256": current_hash,
+        "dirtyBaselineStatus": baseline_status,
+        "dirtyBaselineOriginalPath": baseline_original or None,
+    }
+
+
 def manifest_has_dirty_baseline(manifest: Dict[str, Any]) -> bool:
     return isinstance(manifest.get("dirtyBaseline"), dict)
 
@@ -1561,7 +1612,122 @@ def remediation_freeze_audit_root(repo_root: Path, config: Dict[str, Any]) -> Pa
 
 def remediation_freeze_audit_rel_path(repo_root: Path, config: Dict[str, Any], audit_hash: str) -> str:
     root = remediation_freeze_audit_root(repo_root, config)
-    return normalize_rel(str((root / f"sha256-{audit_hash}.json").relative_to(repo_root)))
+    return normalize_rel(str((root / f"sha256-{audit_hash}.json").resolve().relative_to(repo_root.resolve())))
+
+
+def remediation_freeze_marker_payload(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    marker = remediation_freeze_marker_path(repo_root, config)
+    if not marker.exists():
+        return {}
+    try:
+        payload = read_json(marker, {})
+    except Exception as exc:
+        return {"_readError": str(exc)}
+    return payload if isinstance(payload, dict) else {"_readError": "marker payload is not an object"}
+
+
+def remediation_freeze_packet_payload(
+    repo_root: Path,
+    marker_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    packet_path = normalize_rel(str(marker_payload.get("remediationPacketPath") or ""))
+    if not packet_path:
+        return {"packet": None, "packetPath": None, "readError": "marker has no remediationPacketPath"}
+    try:
+        resolved = safe_repo_path(repo_root, packet_path)
+    except Exception as exc:
+        return {"packet": None, "packetPath": packet_path, "readError": str(exc)}
+    if not resolved.exists():
+        return {"packet": None, "packetPath": packet_path, "readError": "remediation packet is missing"}
+    try:
+        packet = read_json(resolved, {})
+    except Exception as exc:
+        return {"packet": None, "packetPath": packet_path, "readError": str(exc)}
+    if not isinstance(packet, dict):
+        return {"packet": None, "packetPath": packet_path, "readError": "remediation packet is not an object"}
+    return {"packet": packet, "packetPath": packet_path, "readError": None}
+
+
+def remediation_freeze_dirty_signature(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    signature: List[Dict[str, Any]] = []
+    for row in rows:
+        signature.append(
+            {
+                "path": normalize_rel(str(row.get("path") or "")),
+                "status": str(row.get("status") or ""),
+                "tracked": bool(row.get("tracked")) if "tracked" in row else None,
+                "deleted": bool(row.get("deleted")) if "deleted" in row else None,
+                "gitObjectId": row.get("gitObjectId"),
+                "byteSha256": row.get("byteSha256"),
+            }
+        )
+    return sorted(signature, key=lambda item: (str(item["path"]), str(item["status"])))
+
+
+def remediation_freeze_staleness(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    marker_payload = remediation_freeze_marker_payload(repo_root, config)
+    packet_info = remediation_freeze_packet_payload(repo_root, marker_payload)
+    packet = packet_info.get("packet") if isinstance(packet_info.get("packet"), dict) else None
+    reasons: List[Dict[str, Any]] = []
+
+    if marker_payload.get("_readError"):
+        reasons.append({"kind": "marker_unreadable", "error": marker_payload.get("_readError")})
+    if packet_info.get("readError"):
+        reasons.append({"kind": "packet_unreadable", "error": packet_info.get("readError"), "path": packet_info.get("packetPath")})
+
+    current_branch_name = current_branch(repo_root)
+    current_head = rev_parse(repo_root, "HEAD", required=False)
+    current_target = target_ref_for(repo_root, config)
+    current_dirty = remediation_dirty_path_fingerprints(repo_root, parse_status_paths(repo_root))
+    current_dirty_signature = remediation_freeze_dirty_signature(current_dirty)
+
+    packet_branch = packet.get("currentBranch") if packet else None
+    pinned_refs = packet.get("pinnedRefs") if packet and isinstance(packet.get("pinnedRefs"), dict) else {}
+    packet_feature = pinned_refs.get("feature") if isinstance(pinned_refs.get("feature"), dict) else {}
+    packet_target = pinned_refs.get("target") if isinstance(pinned_refs.get("target"), dict) else {}
+    packet_dirty_signature = remediation_freeze_dirty_signature(packet.get("dirtyPaths") or []) if packet else []
+
+    if packet and packet_branch != current_branch_name:
+        reasons.append({"kind": "branch_mismatch", "packet": packet_branch, "current": current_branch_name})
+    if packet and packet_feature.get("head") != current_head:
+        reasons.append({"kind": "feature_head_mismatch", "packet": packet_feature.get("head"), "current": current_head})
+    if packet and packet_target.get("head") != current_target.get("head"):
+        reasons.append({"kind": "target_head_mismatch", "packet": packet_target.get("head"), "current": current_target.get("head")})
+    if packet and packet_dirty_signature != current_dirty_signature:
+        reasons.append(
+            {
+                "kind": "dirty_state_mismatch",
+                "packetPaths": [str(item["path"]) for item in packet_dirty_signature],
+                "currentPaths": [str(item["path"]) for item in current_dirty_signature],
+            }
+        )
+
+    marker_hash = marker_payload.get("remediationPacketHash")
+    packet_hash = packet.get("remediationPacketHash") if packet else None
+    if marker_hash and packet_hash and marker_hash != packet_hash:
+        reasons.append({"kind": "packet_hash_mismatch", "marker": marker_hash, "packet": packet_hash})
+
+    marker_policy = marker_payload.get("policyHash")
+    packet_policy = packet.get("policyHash") if packet else None
+    current_policy = config.get("policyHash")
+    if marker_policy and marker_policy != current_policy:
+        reasons.append({"kind": "marker_policy_mismatch", "marker": marker_policy, "current": current_policy})
+    if packet_policy and packet_policy != current_policy:
+        reasons.append({"kind": "packet_policy_mismatch", "packet": packet_policy, "current": current_policy})
+
+    return {
+        "stale": bool(reasons),
+        "reasons": reasons,
+        "markerPayload": marker_payload,
+        "packetPath": packet_info.get("packetPath"),
+        "packetHash": packet_hash,
+        "current": {
+            "branch": current_branch_name,
+            "head": current_head,
+            "target": current_target,
+            "dirtyPaths": [str(item["path"]) for item in current_dirty_signature],
+        },
+    }
 
 
 def write_remediation_freeze_audit_packet(
@@ -1587,7 +1753,7 @@ def write_remediation_freeze_audit_packet(
     return {
         "packetType": packet_type,
         "auditHash": audit_hash,
-        "path": normalize_rel(str(target.relative_to(repo_root))),
+        "path": normalize_rel(str(target.resolve().relative_to(repo_root.resolve()))),
     }
 
 
@@ -1611,11 +1777,11 @@ def remediation_freeze_status(
         "active": bool(enabled and (marker_exists or env_active)),
         "enabled": enabled,
         "action": action,
-        "markerPath": normalize_rel(str(marker.relative_to(repo_root))),
+        "markerPath": normalize_rel(str(marker.resolve().relative_to(repo_root.resolve()))),
         "markerExists": marker_exists,
         "envVar": env_var,
         "envActive": env_active,
-        "generatedAuditRoot": normalize_rel(str(remediation_freeze_audit_root(repo_root, config).relative_to(repo_root))),
+        "generatedAuditRoot": normalize_rel(str(remediation_freeze_audit_root(repo_root, config).resolve().relative_to(repo_root.resolve()))),
         "clusterLedgerRoot": normalize_rel(str(policy.get("clusterLedgerRoot") or ".claude-state/closeout-log/remediation-clusters")),
         "blockedLifecycleActions": list(policy.get("blockedLifecycleActions") or []),
     }
@@ -1647,8 +1813,11 @@ def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[st
         write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="blocked")
         return result
 
+    stale_freeze = remediation_freeze_staleness(repo_root, config)
     postcondition = repo_closed_postcondition_state(repo_root, config, work_block_id=work_block_id, write_artifacts=True)
     thawable_blocker_kinds = {"remediation_freeze_active", "stale_transaction_branches"}
+    if stale_freeze["stale"]:
+        thawable_blocker_kinds.update({"non_exempt_dirty_files", "non_exempt_untracked_files"})
     non_thawable_blockers = [
         item for item in (postcondition.get("blockers") or []) if str(item.get("kind")) not in thawable_blocker_kinds
     ]
@@ -1657,6 +1826,7 @@ def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[st
             "status": "blocked",
             "reason": "repo_closed_postcondition_failed",
             "freeze": freeze,
+            "staleFreezeEvidence": stale_freeze,
             "postcondition": postcondition,
         }
         write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="blocked")
@@ -1666,6 +1836,7 @@ def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[st
     candidate_id = "candidate:remediation-freeze-removal:%s" % stable_hash(
         {
             "freeze": freeze,
+            "staleFreezeEvidence": stale_freeze,
             "postcondition": postcondition.get("closeoutCleanTruth"),
             "head": rev_parse(repo_root, "HEAD", required=False),
         },
@@ -1677,6 +1848,7 @@ def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[st
     )
     evidence = {
         "freeze": freeze,
+        "staleFreezeEvidence": stale_freeze,
         "postcondition": postcondition,
         "candidateId": candidate_id,
         "actionId": action_id,
@@ -1702,6 +1874,7 @@ def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[st
             "status": "blocked",
             "reason": quorum["quorum"]["reason"] or "review_quorum_blocked",
             "freeze": freeze,
+            "staleFreezeEvidence": stale_freeze,
             "quorum": quorum["quorum"],
             "quorumResult": quorum,
         }
@@ -1715,6 +1888,7 @@ def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[st
         "status": "success",
         "reason": "remediation_freeze_removed",
         "freeze": freeze,
+        "staleFreezeEvidence": stale_freeze,
         "postcondition": postcondition,
         "quorum": quorum["quorum"],
         "quorumResult": quorum,
@@ -1914,7 +2088,7 @@ def write_remediation_packet(repo_root: Path, config: Dict[str, Any], packet: Di
     target = remediation_freeze_audit_root(repo_root, config) / f"sha256-{packet_hash}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     write_json(target, packet)
-    return {"packetHash": packet_hash, "path": normalize_rel(str(target.relative_to(repo_root)))}
+    return {"packetHash": packet_hash, "path": normalize_rel(str(target.resolve().relative_to(repo_root.resolve())))}
 
 
 def enter_remediation_freeze(
@@ -1941,7 +2115,7 @@ def enter_remediation_freeze(
     return {
         "status": "frozen",
         "reason": reason,
-        "markerPath": normalize_rel(str(marker.relative_to(repo_root))),
+        "markerPath": normalize_rel(str(marker.resolve().relative_to(repo_root.resolve()))),
         "packet": packet_ref,
     }
 
@@ -3143,6 +3317,7 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
     all_claims = active_path_claims(repo_root, config)
     own_claims = set(manifest_path_claims(manifest))
     baseline_paths = manifest_dirty_baseline_paths(manifest)
+    baseline_entries = manifest_dirty_baseline_entries(manifest)
     baseline_available = manifest_has_dirty_baseline(manifest)
     protected_bootstrap = manifest.get("protectedBranchBootstrap") if isinstance(manifest.get("protectedBranchBootstrap"), dict) else {}
     protected_dirty_recovery = str(protected_bootstrap.get("reason") or "") == "protected_branch_dirty_recovery"
@@ -3165,6 +3340,8 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
         in_delta = path in delta_paths
         claimed_by_self = path in own_claims or owner == block_id
         dirty_at_baseline = path in baseline_paths
+        baseline_details = dirty_baseline_change_details(repo_root, entry, baseline_entries.get(path)) if dirty_at_baseline else {}
+        baseline_changed = bool(baseline_details.get("dirtyBaselineContentChanged"))
         generated = path_matches_any(path, generated_patterns)
         sensitive = path_matches_any(path, sensitive_patterns)
         enriched = {
@@ -3175,19 +3352,24 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
             "dirtyBaselineAvailable": baseline_available,
             "generated": generated,
             "sensitive": sensitive,
+            **baseline_details,
         }
-        if owner and owner != block_id:
+        if protected_dirty_recovery and path in protected_recovery_paths:
+            enriched["classificationReason"] = "protected target dirty recovery ownership proof"
+            enriched["protectedTargetDirtyRecovery"] = True
+            owned_dirty.append(enriched)
+        elif owner and owner != block_id:
             enriched["classificationReason"] = "path is claimed by another work block"
             foreign_dirty.append(enriched)
         elif generated:
             enriched["classificationReason"] = "generated closeout/runtime path is not owned source work"
             foreign_dirty.append(enriched)
-        elif protected_dirty_recovery and path in protected_recovery_paths:
-            enriched["classificationReason"] = "protected target dirty recovery ownership proof"
-            enriched["protectedTargetDirtyRecovery"] = True
-            owned_dirty.append(enriched)
-        elif dirty_at_baseline and (in_delta or claimed_by_self):
-            enriched["classificationReason"] = "baseline dirty path overlaps candidate delta or claim"
+        elif dirty_at_baseline and (baseline_changed or in_delta or claimed_by_self):
+            enriched["classificationReason"] = (
+                "baseline dirty path changed after broker start"
+                if baseline_changed and not (in_delta or claimed_by_self)
+                else "baseline dirty path overlaps candidate delta or claim"
+            )
             enriched["blocker"] = "baseline-dirty-overlaps-candidate"
             enriched["recoveryCommand"] = baseline_dirty_recovery_command([path])
             mixed_dirty.append(enriched)
@@ -3237,7 +3419,8 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
         "eligible": not owned_dirty and not unowned_dirty and not mixed_dirty,
         "workBlockSelection": manifest.get("workBlockSelection"),
     }
-    result["detectorHash"] = stable_hash(result)
+    detector_hash_payload = {key: value for key, value in result.items() if key != "workBlockSelection"}
+    result["detectorHash"] = stable_hash(detector_hash_payload)
     write_json(work_block_dir(repo_root, config, block_id) / "detector.json", result)
     append_event(repo_root, config, block_id, {"event": "detector_ran", "detectorHash": result["detectorHash"], "eligible": result["eligible"]})
     write_audit(repo_root, config, "detector", result, work_block_id=block_id, outcome="success" if result["eligible"] else "blocked")
@@ -6087,9 +6270,13 @@ def classify_dirty_entries_for_branch(
     manifest = work_block_for_branch(repo_root, config, branch)
     block_id = str(manifest.get("workBlockId")) if manifest else None
     own_claims = set(manifest_path_claims(manifest)) if manifest else set()
+    baseline_paths = manifest_dirty_baseline_paths(manifest) if manifest else set()
+    baseline_entries = manifest_dirty_baseline_entries(manifest) if manifest else {}
+    baseline_available = manifest_has_dirty_baseline(manifest) if manifest else False
     committed_delta = set(changed_paths_between(repo_root, target_head, branch_head))
     entries = parse_status_paths(worktree_path)
     owned_dirty: List[Dict[str, Any]] = []
+    mixed_dirty: List[Dict[str, Any]] = []
     unowned_dirty: List[Dict[str, Any]] = []
     foreign_dirty: List[Dict[str, Any]] = []
     unclaimed_default = str(config.get("dirty", {}).get("unclaimedOutsideDelta", "foreign"))
@@ -6101,26 +6288,41 @@ def classify_dirty_entries_for_branch(
         generated = path_matches_any(path, generated_patterns)
         in_delta = path in committed_delta
         claimed_by_self = bool(block_id and (path in own_claims or owner == block_id))
+        dirty_at_baseline = path in baseline_paths
+        baseline_details = dirty_baseline_change_details(worktree_path, entry, baseline_entries.get(path)) if dirty_at_baseline else {}
+        baseline_changed = bool(baseline_details.get("dirtyBaselineContentChanged"))
         enriched = {
             **entry,
             "ownerWorkBlockId": owner,
             "inCompletedBranchDelta": in_delta,
+            "dirtyAtBrokerStart": dirty_at_baseline,
+            "dirtyBaselineAvailable": baseline_available,
             "sensitive": sensitive,
             "generated": generated,
             "branch": branch,
+            **baseline_details,
         }
         if generated:
             enriched["classificationReason"] = "generated closeout/runtime path is not owned source work"
             foreign_dirty.append(enriched)
+        elif owner and owner != block_id:
+            enriched["classificationReason"] = "path is claimed by another work block"
+            foreign_dirty.append(enriched)
+        elif dirty_at_baseline and (baseline_changed or in_delta or claimed_by_self):
+            enriched["classificationReason"] = (
+                "baseline dirty path changed after broker start"
+                if baseline_changed and not (in_delta or claimed_by_self)
+                else "baseline dirty path overlaps branch delta or branch work-block claim"
+            )
+            enriched["blocker"] = "baseline-dirty-overlaps-candidate"
+            enriched["recoveryCommand"] = baseline_dirty_recovery_command([path])
+            mixed_dirty.append(enriched)
         elif in_delta or claimed_by_self:
             enriched["classificationReason"] = "path overlaps branch delta or branch work-block claim"
             owned_dirty.append(enriched)
         elif sensitive and bool(config.get("dirty", {}).get("sensitiveUnownedBlocks", True)):
             enriched["classificationReason"] = "sensitive path is unowned"
             unowned_dirty.append(enriched)
-        elif owner and owner != block_id:
-            enriched["classificationReason"] = "path is claimed by another work block"
-            foreign_dirty.append(enriched)
         elif unclaimed_default == "foreign":
             enriched["classificationReason"] = "path is outside completed branch delta"
             foreign_dirty.append(enriched)
@@ -6133,9 +6335,10 @@ def classify_dirty_entries_for_branch(
         "committedDeltaPaths": sorted(committed_delta),
         "dirtyPaths": sorted({entry["path"] for entry in entries}),
         "ownedDirty": owned_dirty,
+        "mixedDirty": mixed_dirty,
         "unownedDirty": unowned_dirty,
         "foreignDirty": foreign_dirty,
-        "eligible": not owned_dirty and not unowned_dirty,
+        "eligible": not owned_dirty and not mixed_dirty and not unowned_dirty,
     }
 
 
@@ -7640,7 +7843,12 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
             target_head=target_head,
             worktree_path=worktree_path,
         )
-        foreign_dirty_only = bool(dirty_classification["foreignDirty"]) and not dirty_classification["ownedDirty"] and not dirty_classification["unownedDirty"]
+        foreign_dirty_only = (
+            bool(dirty_classification["foreignDirty"])
+            and not dirty_classification["ownedDirty"]
+            and not dirty_classification.get("mixedDirty")
+            and not dirty_classification["unownedDirty"]
+        )
         target_delta_paths = ref_delta_paths(repo_root, branch_head, target_head) if item.get("ancestorOfTarget") else []
         dirty_target_overlap = sorted(set(dirty_classification["dirtyPaths"]) & set(target_delta_paths))
         scope["targetDeltaPaths"] = target_delta_paths
@@ -7655,6 +7863,11 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
             recommended_action = "switch_target_and_prune"
             action_class = "foreign_dirty_integrated_branch_prune"
             recovery_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
+        elif dirty_classification.get("mixedDirty"):
+            paths = [item["path"] for item in dirty_classification.get("mixedDirty", [])]
+            action_class = "dirty_worktree"
+            blockers.append("baseline-dirty-overlaps-candidate")
+            recovery_command = baseline_dirty_recovery_command(paths)
         elif dirty_classification["ownedDirty"] and dirty_classification.get("workBlockId"):
             recommended_action = "split_now"
             action_class = "dirty_split"
@@ -9113,7 +9326,7 @@ def cleanup_foreign_dirty_integrated_branch(repo_root: Path, config: Dict[str, A
         target_head=target_head,
         worktree_path=worktree_path,
     )
-    if classification["ownedDirty"] or classification["unownedDirty"]:
+    if classification["ownedDirty"] or classification.get("mixedDirty") or classification["unownedDirty"]:
         action = {"status": "blocked", "reason": "dirty_classification_changed", "classification": classification, "report": report}
         write_audit(repo_root, config, "blocked_repair", action, outcome="blocked")
         return action

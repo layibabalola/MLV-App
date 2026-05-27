@@ -61,6 +61,15 @@ When the repo-closed postcondition succeeds while `closeoutCleanTruth.rawGit`
 still shows dirty entries, the dashboard should explain that the dirty paths
 were retained and audited as foreign or exempt baseline state rather than
 describing the publish as failed.
+If a baseline-dirty path's status/content fingerprint changed after broker
+start, the dashboard should surface it as `mixedDirty` with
+`baseline-dirty-overlaps-candidate`, not as retained foreign dirty, so a partial
+promotion cannot hide current work inside an audited foreign-dirty allowance.
+When a remediation freeze is active, the dashboard should distinguish a fresh
+freeze from a stale marker by surfacing the actor's branch/head/policy/dirty-path
+fingerprint comparison. A stale marker can be requested for repo-owned removal
+through `remediation-freeze-remove`, but the dashboard still records intent only;
+the actor must revalidate and obtain quorum before mutating the marker.
 
 Historical browsing comes from the repo-state history directory and the durable
 audit log. The UI may summarize those artifacts, but the artifacts remain the

@@ -143,9 +143,10 @@ checkpointed through exact-tuple autonomous quorum using symbolic action
 `checkpoint-owned-dirty`; the checkpoint stages only the exact owned paths,
 commits through the broker, then reruns detection and finalize. Paths already
 dirty at the broker baseline are `mixedDirty`/`unownedDirty` when they overlap a
-claim or candidate delta and must block with
-`baseline-dirty-overlaps-candidate` plus exact recovery detail rather than being
-whole-file checkpointed. The narrow exception is
+claim or candidate delta, or when their status/content fingerprint changes after
+broker start, and must block with `baseline-dirty-overlaps-candidate` plus exact
+recovery detail rather than being retained as foreign dirt or whole-file
+checkpointed. The narrow exception is
 `protected_branch_dirty_recovery`: when finalize preserves exact dirty paths
 from a protected target onto a broker-created work-block branch, those exact
 preserved paths and claims are explicit ownership proof and may proceed through
@@ -388,7 +389,12 @@ finalize, auto-closeout, pre-commit, and pre-push paths must not mutate lifecycl
 state, and only generated-exempt content-addressed freeze audit packets may be
 written. The repo-owned thaw path is `tools\\repo_hygiene\\work_block_cli.py
 remediation-freeze-remove`, which revalidates repo-closed truth and clears the
-marker only after quorum. Dirty preservation/removal must use fresh target-pinned worktrees, exact
+marker only after quorum. If the marker's remediation packet no longer matches
+the current branch, feature head, target head, policy hash, or dirty-path
+fingerprints, that same actor may clear the stale marker after exact
+stale-evidence audit/quorum so closeout can re-evaluate current work; a fresh
+marker whose dirty evidence still matches remains blocked until preservation or
+repo closure. Dirty preservation/removal must use fresh target-pinned worktrees, exact
 allowlisted clusters, byte hashes, file modes, git object ids, remote-advertised
 pins, hook-guard proof, process quiescence evidence, recovery commands, and
 exact-tuple quorum from Codex/self plus two independent 10/10 reviewers. Freeze
