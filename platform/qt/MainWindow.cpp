@@ -278,6 +278,20 @@ static int lookAssistExposureForTarget( double sourceValue, double targetValue, 
     return (int)qRound( log( targetValue / sourceValue ) / log( 2.0 ) * 100.0 );
 }
 
+static bool lookAssistHasNeutralBalanceSamples( const LookAssistStats &stats )
+{
+    return stats.balanceSamples >= 32
+        && stats.balanceR > 0.0
+        && stats.balanceG > 0.0
+        && stats.balanceB > 0.0;
+}
+
+static int lookAssistAutoTintCap( LookAssistScene scene, bool processedFloorLiftedBalance )
+{
+    if( scene == LookAssistScene::BrightSun ) return 8;
+    return processedFloorLiftedBalance ? 12 : 22;
+}
+
 static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
                                                   const LookAssistStats &stats,
                                                   const LookAssistStats *colorStats = nullptr )
@@ -397,46 +411,49 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
         balanceStats.median < 32.0;
     const double magentaGreenAxis = balanceStats.balanceG - ( ( balanceStats.balanceR + balanceStats.balanceB ) * 0.5 );
     const double blueAmberAxis = balanceStats.balanceB - balanceStats.balanceR;
-    const int tintCap = ( scene == LookAssistScene::BrightSun )
-                      ? 8
-                      : ( processedFloorLiftedBalance ? 60 : 22 );
+    const bool hasNeutralBalance = lookAssistHasNeutralBalanceSamples( balanceStats );
+    const int tintCap = lookAssistAutoTintCap( scene, processedFloorLiftedBalance );
     const int tempCap = ( scene == LookAssistScene::BrightSun )
                       ? 250
                       : ( processedFloorLiftedBalance ? 220 : 500 );
-    const double tintThreshold = processedFloorLiftedBalance ? 4.0 : 10.0;
-    const double tintGain = processedFloorLiftedBalance ? 1.20 : 0.65;
+    const double tintThreshold = processedFloorLiftedBalance ? 6.0 : 10.0;
+    const double tintGain = processedFloorLiftedBalance ? 0.55 : 0.65;
     const double tempThreshold = processedFloorLiftedBalance ? 6.0 : 14.0;
     const double tempGain = processedFloorLiftedBalance ? 6.0 : 18.0;
 
-    if( fabs( magentaGreenAxis ) >= tintThreshold )
+    if( hasNeutralBalance && fabs( magentaGreenAxis ) >= tintThreshold )
     {
         // Positive tint counteracts green casts; negative tint counteracts magenta casts.
         preset.tintDelta = qBound( -tintCap, (int)qRound( magentaGreenAxis * tintGain ), tintCap );
     }
 
-    if( fabs( blueAmberAxis ) >= tempThreshold )
+    if( hasNeutralBalance && fabs( blueAmberAxis ) >= tempThreshold )
     {
         // Positive temperature warms blue-heavy clips; negative temperature cools amber-heavy clips.
         preset.temperatureDelta = qBound( -tempCap, (int)qRound( blueAmberAxis * tempGain ), tempCap );
     }
 
-    if( lowSignalFloorLiftedBalance )
+    if( hasNeutralBalance && lowSignalFloorLiftedBalance )
     {
         if( magentaGreenAxis > -4.0 )
             preset.tintDelta = qMax( preset.tintDelta, 4 );
         if( blueAmberAxis <= -6.0 )
             preset.temperatureDelta = qMin( preset.temperatureDelta, -48 );
     }
-    if( processedFloorLiftedBalance
+    if( hasNeutralBalance
+     && processedFloorLiftedBalance
+     && magentaGreenAxis > 2.0
      && balanceStats.greenArtifactRatio >= 0.004
      && balanceStats.greenArtifactMeanAxis >= 25.0 )
     {
-        const int artifactTintFloor =
+        const int artifactTintNudge =
             qBound( 0,
-                    (int)qRound( balanceStats.greenArtifactMeanAxis * 0.75
-                               + balanceStats.greenArtifactRatio * 420.0 ),
-                    tintCap );
-        preset.tintDelta = qMax( preset.tintDelta, artifactTintFloor );
+                    (int)qRound( balanceStats.greenArtifactMeanAxis * 0.18
+                               + balanceStats.greenArtifactRatio * 120.0 ),
+                    qMin( 6, tintCap ) );
+        preset.tintDelta = qBound( -tintCap,
+                                   preset.tintDelta + artifactTintNudge,
+                                   tintCap );
     }
 
     preset.contrast = qBound( -100, preset.contrast, 100 );
@@ -8928,6 +8945,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     if( canAnalyzeProcessedColor )
     {
         const int minColorBalanceSamples = qMax( 32, ( colorWidth * colorHeight ) / 100 );
+        const int postTintCap = lookAssistAutoTintCap( scene, useProcessedColorStats );
         auto analyzePostAppliedLook = [&]() -> bool
         {
             QByteArray postProcessedThumbnail;
@@ -8993,23 +9011,27 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 postColorStats.balanceB - postColorStats.balanceR;
             int passTintDelta = 0;
             int passTemperatureDelta = 0;
-            if( fabs( postGreenAxis ) >= 3.0 )
+            if( lookAssistHasNeutralBalanceSamples( postColorStats )
+             && fabs( postGreenAxis ) >= 4.0 )
             {
-                passTintDelta = qBound( -8,
-                                         (int)qRound( postGreenAxis * 0.80 ),
-                                         8 );
+                passTintDelta = qBound( -5,
+                                         (int)qRound( postGreenAxis * 0.55 ),
+                                         5 );
             }
-            if( postColorStats.greenArtifactRatio >= 0.004
+            if( lookAssistHasNeutralBalanceSamples( postColorStats )
+             && postGreenAxis > 2.0
+             && postColorStats.greenArtifactRatio >= 0.004
              && postColorStats.greenArtifactMeanAxis >= 25.0 )
             {
                 const int artifactTintDelta =
                     qBound( 2,
-                            (int)qRound( postColorStats.greenArtifactMeanAxis * 0.35
-                                       + postColorStats.greenArtifactRatio * 360.0 ),
-                            14 );
+                            (int)qRound( postColorStats.greenArtifactMeanAxis * 0.12
+                                       + postColorStats.greenArtifactRatio * 90.0 ),
+                            5 );
                 passTintDelta = qMax( passTintDelta, artifactTintDelta );
             }
-            if( fabs( postBlueAmberAxis ) >= 6.0 )
+            if( lookAssistHasNeutralBalanceSamples( postColorStats )
+             && fabs( postBlueAmberAxis ) >= 6.0 )
             {
                 passTemperatureDelta = qBound( -96,
                                                 (int)qRound( postBlueAmberAxis * 6.0 ),
@@ -9027,9 +9049,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         preset.temperatureDelta + passTemperatureDelta,
                         500 );
             preset.tintDelta =
-                qBound( -60,
+                qBound( -postTintCap,
                         preset.tintDelta + passTintDelta,
-                        60 );
+                        postTintCap );
             const int appliedTemperatureDelta =
                 preset.temperatureDelta - previousTemperatureDelta;
             const int appliedTintDelta =
@@ -9058,6 +9080,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             }
         }
         if( postColorStatsValid
+         && lookAssistHasNeutralBalanceSamples( postColorStats )
          && postColorStats.greenArtifactRatio >= 0.004
          && postColorStats.greenArtifactMeanAxis >= 30.0 )
         {
@@ -9065,14 +9088,15 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 postColorStats.visibleMeanG
                 - ( ( postColorStats.visibleMeanR
                     + postColorStats.visibleMeanB ) * 0.5 );
-            if( postVisibleGreenAxis > -4.5
-             || postColorStats.greenArtifactRatio >= 0.010 )
+            const int cleanupTintCeiling = qMin( postTintCap, 12 );
+            if( postVisibleGreenAxis > 3.0
+             && preset.tintDelta < cleanupTintCeiling )
             {
                 const int cleanupTintTarget =
                     qBound( preset.tintDelta,
-                            (int)qRound( postColorStats.greenArtifactMeanAxis * 0.85
-                                       + postColorStats.greenArtifactRatio * 900.0 ),
-                            48 );
+                            (int)qRound( postColorStats.greenArtifactMeanAxis * 0.18
+                                       + postColorStats.greenArtifactRatio * 120.0 ),
+                            cleanupTintCeiling );
                 if( cleanupTintTarget > preset.tintDelta )
                 {
                     preset.tintDelta = cleanupTintTarget;

@@ -916,6 +916,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_vibrance")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_temperature_delta")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_tint_delta")));
+    ASSERT_TRUE(std::abs(metadata.value(QStringLiteral("look_assist_tint_delta")).toInt()) <= 22);
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_source")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_green_axis")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_balance_blue_amber_axis")));
@@ -941,6 +942,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(std::isfinite(post_visible_green_axis));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_temperature_delta")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_tint_delta")));
+    ASSERT_TRUE(std::abs(metadata.value(QStringLiteral("look_assist_post_tint_delta")).toInt()) <= 22);
     const double look_assist_scale =
         std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);
     const double projected_p95 = metadata.value(QStringLiteral("look_assist_p95")).toDouble() * look_assist_scale;
