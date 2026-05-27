@@ -1,0 +1,29 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/work-block/wb-acdffe468c2b41f6",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-05-27T09:43:26+00:00",
+  "detectorHash": "dcb5d94d8286085ce10917aaa465464e",
+  "eligible": true,
+  "featureHead": "69e1f05df5326b3ab0949427a5f34264541fa6f6",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/work-block/wb-acdffe468c2b41f6",
+      "head": "69e1f05df5326b3ab0949427a5f34264541fa6f6"
+    },
+    "target": {
+      "branch": "master",
+      "head": "a40f844029b73f09873c11728837577ff9761b93",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "a40f844029b73f09873c11728837577ff9761b93",
+  "workBlockId": "wb-acdffe468c2b41f6"
+}

@@ -1434,9 +1434,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.gpuBilinearFallbackReason.clear();
     }
 
-    /* Read the requested scale factor. The MLV core can promote it to an
-     * effective scale after render (Dual ISO HQ keeps scale=2 on the safer
-     * scale=4 path), so request and active values are logged separately. */
+    /* Read the requested scale factor. The MLV core can still reject invalid
+     * alignment, so request and active values are logged separately. */
     const int playbackScaleFactor = m_activePresentationContext.playbackScaleFactor;
     int renderedImageWidth = m_imageWidth;
     int renderedImageHeight = m_imageHeight;
@@ -1643,19 +1642,22 @@ void RenderFrameThread::drawFrame( int slotIndex,
         const double playbackScaleStart = mlv_stage_timing_now();
 
         /* Phase 4D: when the render path returns a downsampled buffer
-         * (Phase 4B's scale=2/4 fast path), the source dimensions are smaller
-         * than the display target and nearest-neighbour upscale would produce
-         * visible jaggies / moire on diagonal edges.  Pick bilinear in that
-         * case; keep nearest for downscale (zoom > 100%) and for the
-         * scaleFactor==1 path so the existing default-on playback preview
-         * stays byte-identical until Phase 4B actually changes the source
-         * shape. */
+         * (Phase 4B's scale=2/4 path), nearest-neighbour presentation makes
+         * the lower-res preview look blocky and aliased. Use bilinear for any
+         * playback-scaled buffer that needs a final presentation resize; keep
+         * nearest only for the scaleFactor==1 path so full-res playback stays
+         * byte-identical. */
         const int sourceWidthForScaler = renderedImageWidth;
         const int sourceHeightForScaler = renderedImageHeight;
         const bool upscaling =
             playbackScaleFactorActive > 1
          && sourceWidthForScaler < m_activePresentationPreparationOptions.targetWidth
          && sourceHeightForScaler < m_activePresentationPreparationOptions.targetHeight;
+        const bool presentationResize =
+            sourceWidthForScaler != m_activePresentationPreparationOptions.targetWidth
+         || sourceHeightForScaler != m_activePresentationPreparationOptions.targetHeight;
+        const bool useBilinearPresentationScale =
+            playbackScaleFactorActive > 1 && presentationResize;
         slot.stageTimingTelemetry.insert(
             QStringLiteral("render_thread_playback_scale_target_width"),
             m_activePresentationPreparationOptions.targetWidth );
@@ -1667,7 +1669,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
             upscaling );
         bool bilinearUsed = false;
 
-        if( upscaling )
+        if( useBilinearPresentationScale )
         {
             slot.playbackFastScaleActive =
                 playbackBuildBilinearScaledRgb8( slot.rawImage8.data(),

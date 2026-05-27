@@ -2355,7 +2355,7 @@ TEST(DualIsoPipeline, Phase4A_TestProcessed8CacheScaleKeyIsolation)
     QString error_message;
     ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
     ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
-    fixture.receipt().setDualIso(0); /* non-dual-iso so scale=2 isn't forced up to 4. */
+    fixture.receipt().setDualIso(0); /* non-dual-iso keeps this cache-key test focused. */
     ASSERT_TRUE(fixture.applyReceipt(&error_message));
 
     /* Render frame 0 at scale=1 first. */
@@ -2857,7 +2857,7 @@ TEST(DualIsoPipeline, Phase4B_DownsampleProducesExpectedDimensions)
     QString error_message;
     ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
     ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
-    fixture.receipt().setDualIso(0); /* avoid scale=2 -> scale=4 forcing for this test. */
+    fixture.receipt().setDualIso(0); /* keep this path focused on the non-Dual-ISO downsample. */
     ASSERT_TRUE(fixture.applyReceipt(&error_message));
 
     const int full_w = fixture.width();
@@ -2925,8 +2925,10 @@ TEST(DualIsoPipeline, Phase4B_DownsampleScaleFourPSNRGoldenDualIso)
     ASSERT_TRUE(psnr > 16.0);
 }
 
-/* Test (c): dual ISO + scale=2 request must be coerced to scale=4. */
-TEST(DualIsoPipeline, Phase4B_DualIsoForcedToScaleFourEvenIfTwoRequested)
+/* Test (c): explicit dual ISO scale=2 must stay half-res. The unsafe fast
+ * pre-recon shortcut remains scale=4-only, but scale=2 falls back to full
+ * recon followed by post-recon downsample instead of silently becoming x4. */
+TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleTwoWithSafeFallback)
 {
     MlvPipelineFixture fixture;
     QString error_message;
@@ -2937,21 +2939,24 @@ TEST(DualIsoPipeline, Phase4B_DualIsoForcedToScaleFourEvenIfTwoRequested)
 
     const int full_w = fixture.width();
     const int full_h = fixture.height();
-    if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+    if ((full_w % 2) != 0 || (full_h % 2) != 0) {
         return;
     }
 
     int dim_w = 0, dim_h = 0;
     mlvFrameOutputDimensions(fixture.video(), 2, &dim_w, &dim_h);
-    /* Effective scale is forced from 2 -> 4. */
-    ASSERT_EQ(full_w / 4, dim_w);
-    ASSERT_EQ(full_h / 4, dim_h);
+    ASSERT_EQ(full_w / 2, dim_w);
+    ASSERT_EQ(full_h / 2, dim_h);
 
-    /* Render scale=2 — Phase 4B coerces to scale=4 internally. */
+    const std::vector<uint8_t> full = fixture.renderFrame8Scaled(0, 1, 1);
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
-    ASSERT_EQ(static_cast<std::size_t>(full_w / 4) * (full_h / 4) * 3u, got.size());
-    /* playback_scale_factor_active reflects the effective scale (4). */
-    ASSERT_EQ(4, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 2) * (full_h / 2) * 3u, got.size());
+    ASSERT_EQ(2, fixture.video()->playback_scale_factor_active);
+
+    const std::vector<uint8_t> golden = phase4b::buildBlockAveragedGoldenRgb8(full, full_w, full_h, 2);
+    ASSERT_EQ(golden.size(), got.size());
+    const double psnr = phase4b::psnrRgb8(got, golden);
+    ASSERT_TRUE(psnr > 16.0);
 }
 
 /* Test (d): non-dual-ISO scale=2 stays at scale=2. */

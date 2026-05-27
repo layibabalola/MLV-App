@@ -358,7 +358,9 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
         balanceStats.median < 32.0;
     const double magentaGreenAxis = balanceStats.balanceG - ( ( balanceStats.balanceR + balanceStats.balanceB ) * 0.5 );
     const double blueAmberAxis = balanceStats.balanceB - balanceStats.balanceR;
-    const int tintCap = ( scene == LookAssistScene::BrightSun ) ? 8 : 22;
+    const int tintCap = ( scene == LookAssistScene::BrightSun )
+                      ? 8
+                      : ( processedFloorLiftedBalance ? 36 : 22 );
     const int tempCap = ( scene == LookAssistScene::BrightSun )
                       ? 250
                       : ( processedFloorLiftedBalance ? 220 : 500 );
@@ -1966,10 +1968,9 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
             && mode == Qt::FastTransformation;
         if( useGpuImagePresentation )
         {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 );
+            displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                                  sourceWidth,
+                                                  sourceHeight );
             displayImageOwnsData = false;
         }
         else if( zoomFitEnabled && playbackFastScalingActive )
@@ -1988,10 +1989,9 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         }
         else if( zoomFitEnabled )
         {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 )
+            displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                                  sourceWidth,
+                                                  sourceHeight )
                                .scaled( sceneWidth * devicePixelRatio,
                                         sceneHeight * devicePixelRatio,
                                         Qt::IgnoreAspectRatio, mode);
@@ -1999,10 +1999,9 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         }
         else if( stretchY == 1.0 && stretchX == 1.0 )
         {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 );
+            displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                                  sourceWidth,
+                                                  sourceHeight );
             displayImageOwnsData = false;
         }
         else if( mode == Qt::SmoothTransformation && betterResizerEnabled )
@@ -2027,10 +2026,9 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         }
         else
         {
-            displayImage = QImage( const_cast<unsigned char *>( rgb8DisplaySource ),
-                                   sourceWidth,
-                                   sourceHeight,
-                                   QImage::Format_RGB888 )
+            displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                                  sourceWidth,
+                                                  sourceHeight )
                                .scaled( sceneWidth,
                                         sceneHeight,
                                         Qt::IgnoreAspectRatio, mode);
@@ -3182,6 +3180,9 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             state.insert( QStringLiteral("balance_source"), m_lastLookAssistBalanceSource );
             state.insert( QStringLiteral("temperature_delta"), m_lastLookAssistTemperatureDelta );
             state.insert( QStringLiteral("tint_delta"), m_lastLookAssistTintDelta );
+            state.insert( QStringLiteral("post_balance_valid"), m_lastLookAssistPostBalanceValid );
+            state.insert( QStringLiteral("post_temperature_delta"), m_lastLookAssistPostTemperatureDelta );
+            state.insert( QStringLiteral("post_tint_delta"), m_lastLookAssistPostTintDelta );
         }
         return state;
     };
@@ -3223,6 +3224,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             << QStringLiteral("render_thread_playback_scale_target_width")
             << QStringLiteral("render_thread_playback_scale_target_height")
             << QStringLiteral("render_thread_playback_scale_upscaling")
+            << QStringLiteral("render_thread_playback_scale_active")
+            << QStringLiteral("render_thread_playback_scale_bilinear")
             << QStringLiteral("prep_generation")
             << QStringLiteral("prep_active_generation")
             << QStringLiteral("prep_generation_drops")
@@ -3381,6 +3384,21 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             playbackScaleToggleAfterState = capturePlaybackScaleState();
 
             QStringList scaleMismatches;
+            if( playbackScaleToggleBeforeState.value(
+                    QStringLiteral("render_thread_playback_scale_factor_request") ).toInt( -1 ) != 2 )
+            {
+                scaleMismatches << QStringLiteral("requested_scale_before_not_2");
+            }
+            if( playbackScaleToggleBeforeState.value(
+                    QStringLiteral("render_thread_playback_scale_factor_effective") ).toInt( -1 ) != 2 )
+            {
+                scaleMismatches << QStringLiteral("effective_scale_before_not_2");
+            }
+            if( playbackScaleToggleBeforeState.value(
+                    QStringLiteral("render_thread_playback_scale_factor_clamped") ).toBool( true ) )
+            {
+                scaleMismatches << QStringLiteral("scale_before_was_clamped");
+            }
             if( playbackScaleToggleAfterState.value(
                     QStringLiteral("render_thread_playback_scale_factor_request") ).toInt( -1 ) != 1 )
             {
@@ -3776,6 +3794,27 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         metadata.insert( QStringLiteral("look_assist_preset_vibrance"), m_lastLookAssistVibrance );
         metadata.insert( QStringLiteral("look_assist_temperature_delta"), m_lastLookAssistTemperatureDelta );
         metadata.insert( QStringLiteral("look_assist_tint_delta"), m_lastLookAssistTintDelta );
+        metadata.insert( QStringLiteral("look_assist_post_balance_valid"),
+                         m_lastLookAssistPostBalanceValid );
+        metadata.insert( QStringLiteral("look_assist_post_balance_r"),
+                         m_lastLookAssistPostBalanceR );
+        metadata.insert( QStringLiteral("look_assist_post_balance_g"),
+                         m_lastLookAssistPostBalanceG );
+        metadata.insert( QStringLiteral("look_assist_post_balance_b"),
+                         m_lastLookAssistPostBalanceB );
+        metadata.insert( QStringLiteral("look_assist_post_balance_samples"),
+                         m_lastLookAssistPostBalanceSamples );
+        metadata.insert( QStringLiteral("look_assist_post_balance_green_axis"),
+                         m_lastLookAssistPostBalanceG
+                         - ( ( m_lastLookAssistPostBalanceR
+                             + m_lastLookAssistPostBalanceB ) * 0.5 ) );
+        metadata.insert( QStringLiteral("look_assist_post_balance_blue_amber_axis"),
+                         m_lastLookAssistPostBalanceB
+                         - m_lastLookAssistPostBalanceR );
+        metadata.insert( QStringLiteral("look_assist_post_temperature_delta"),
+                         m_lastLookAssistPostTemperatureDelta );
+        metadata.insert( QStringLiteral("look_assist_post_tint_delta"),
+                         m_lastLookAssistPostTintDelta );
     }
     metadata.insert( QStringLiteral("qt_opengl_environment"),
                     qEnvironmentVariable("QT_OPENGL") );
@@ -8621,6 +8660,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                            int analysisFrame )
 {
     m_lastLookAssistDiagnosticsValid = false;
+    m_lastLookAssistPostBalanceValid = false;
+    m_lastLookAssistPostBalanceR = 0.0;
+    m_lastLookAssistPostBalanceG = 0.0;
+    m_lastLookAssistPostBalanceB = 0.0;
+    m_lastLookAssistPostBalanceSamples = 0;
+    m_lastLookAssistPostTemperatureDelta = 0;
+    m_lastLookAssistPostTintDelta = 0;
     if( !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
     {
         logInteractionEvent(
@@ -8763,7 +8809,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
 
     const LookAssistStats &balanceStats =
         useProcessedColorStats ? processedColorStats : stats;
-    const LookAssistPreset preset = presetForLookAssistScene(
+    LookAssistPreset preset = presetForLookAssistScene(
                 scene,
                 stats,
                 useProcessedColorStats ? &processedColorStats : nullptr );
@@ -8771,21 +8817,163 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                               ? ui->horizontalSliderTemperature->value()
                               : receipt->temperature();
     const int baseTint = receipt->tint();
-    const int temperature = qBound( ui->horizontalSliderTemperature->minimum(),
-                                    baseTemperature + preset.temperatureDelta,
-                                    ui->horizontalSliderTemperature->maximum() );
-    const int tint = qBound( ui->horizontalSliderTint->minimum(),
-                             baseTint + preset.tintDelta,
-                             ui->horizontalSliderTint->maximum() );
+    int temperature = 0;
+    int tint = 0;
 
-    receipt->setExposure( preset.exposure );
-    receipt->setContrast( preset.contrast );
-    receipt->setPivot( preset.pivot );
-    receipt->setTemperature( temperature );
-    receipt->setTint( tint );
-    receipt->setVibrance( preset.vibrance );
-    receipt->setShadows( preset.shadows );
-    receipt->setHighlights( preset.highlights );
+    auto applyLookAssistValues = [&]()
+    {
+        temperature = qBound( ui->horizontalSliderTemperature->minimum(),
+                              baseTemperature + preset.temperatureDelta,
+                              ui->horizontalSliderTemperature->maximum() );
+        tint = qBound( ui->horizontalSliderTint->minimum(),
+                       baseTint + preset.tintDelta,
+                       ui->horizontalSliderTint->maximum() );
+
+        receipt->setExposure( preset.exposure );
+        receipt->setContrast( preset.contrast );
+        receipt->setPivot( preset.pivot );
+        receipt->setTemperature( temperature );
+        receipt->setTint( tint );
+        receipt->setVibrance( preset.vibrance );
+        receipt->setShadows( preset.shadows );
+        receipt->setHighlights( preset.highlights );
+
+        ui->horizontalSliderExposure->setValue( preset.exposure );
+        ui->horizontalSliderContrast->setValue( preset.contrast );
+        ui->horizontalSliderPivot->setValue( preset.pivot );
+        ui->horizontalSliderTemperature->setValue( temperature );
+        ui->horizontalSliderTint->setValue( tint );
+        ui->horizontalSliderVibrance->setValue( preset.vibrance );
+        ui->horizontalSliderShadows->setValue( preset.shadows );
+        ui->horizontalSliderHighlights->setValue( preset.highlights );
+    };
+
+    applyLookAssistValues();
+
+    LookAssistStats postColorStats;
+    bool postColorStatsValid = false;
+    const int initialTemperatureDelta = preset.temperatureDelta;
+    const int initialTintDelta = preset.tintDelta;
+    int postTemperatureDelta = 0;
+    int postTintDelta = 0;
+    if( floorLiftedNightThumbnail )
+    {
+        const int minColorBalanceSamples = qMax( 32, ( width * height ) / 100 );
+        auto analyzePostAppliedLook = [&]() -> bool
+        {
+            QByteArray postProcessedThumbnail;
+            postProcessedThumbnail.resize( width * height * 3 );
+            get_area_average_downscale_thumnail( m_pMlvObject,
+                                                 analysisFrame,
+                                                 downscaleFactor,
+                                                 qMax( 1, mlvappEffectiveWorkerThreadCount() ),
+                                                 reinterpret_cast<unsigned char *>( postProcessedThumbnail.data() ) );
+            postColorStats = analyzeLookAssistThumbnail(
+                        reinterpret_cast<const unsigned char *>( postProcessedThumbnail.constData() ),
+                        width,
+                        height );
+            return postColorStats.median > 0.0
+                && postColorStats.balanceSamples >= minColorBalanceSamples;
+        };
+        auto postBalanceScore = []( const LookAssistStats &candidate ) -> double
+        {
+            const double greenAxis =
+                candidate.balanceG
+                - ( ( candidate.balanceR + candidate.balanceB ) * 0.5 );
+            const double blueAmberAxis = candidate.balanceB - candidate.balanceR;
+            return fabs( greenAxis ) + ( fabs( blueAmberAxis ) * 0.5 );
+        };
+
+        bool adjustedPostBalance = false;
+        bool lastAcceptedPostBalanceValid = false;
+        double lastAcceptedPostBalanceScore = 1.0e9;
+        LookAssistPreset lastAcceptedPreset = preset;
+        LookAssistStats lastAcceptedPostColorStats;
+        for( int pass = 0; pass < 6; ++pass )
+        {
+            postColorStatsValid = analyzePostAppliedLook();
+            if( !postColorStatsValid ) break;
+
+            const double currentPostBalanceScore =
+                postBalanceScore( postColorStats );
+            if( lastAcceptedPostBalanceValid
+             && currentPostBalanceScore > lastAcceptedPostBalanceScore + 1.5 )
+            {
+                preset = lastAcceptedPreset;
+                postColorStats = lastAcceptedPostColorStats;
+                postColorStatsValid = true;
+                applyLookAssistValues();
+                break;
+            }
+            lastAcceptedPostBalanceValid = true;
+            lastAcceptedPostBalanceScore = currentPostBalanceScore;
+            lastAcceptedPreset = preset;
+            lastAcceptedPostColorStats = postColorStats;
+
+            const double postGreenAxis =
+                postColorStats.balanceG
+                - ( ( postColorStats.balanceR + postColorStats.balanceB ) * 0.5 );
+            const double postBlueAmberAxis =
+                postColorStats.balanceB - postColorStats.balanceR;
+            int passTintDelta = 0;
+            int passTemperatureDelta = 0;
+            if( fabs( postGreenAxis ) >= 3.0 )
+            {
+                passTintDelta = qBound( -8,
+                                         (int)qRound( postGreenAxis * 0.80 ),
+                                         8 );
+            }
+            if( fabs( postBlueAmberAxis ) >= 6.0 )
+            {
+                passTemperatureDelta = qBound( -96,
+                                                (int)qRound( postBlueAmberAxis * 6.0 ),
+                                                96 );
+            }
+            if( passTemperatureDelta == 0 && passTintDelta == 0 )
+            {
+                break;
+            }
+
+            const int previousTemperatureDelta = preset.temperatureDelta;
+            const int previousTintDelta = preset.tintDelta;
+            preset.temperatureDelta =
+                qBound( -500,
+                        preset.temperatureDelta + passTemperatureDelta,
+                        500 );
+            preset.tintDelta =
+                qBound( -36,
+                        preset.tintDelta + passTintDelta,
+                        36 );
+            const int appliedTemperatureDelta =
+                preset.temperatureDelta - previousTemperatureDelta;
+            const int appliedTintDelta =
+                preset.tintDelta - previousTintDelta;
+            if( appliedTemperatureDelta == 0 && appliedTintDelta == 0 )
+            {
+                break;
+            }
+            adjustedPostBalance = true;
+            applyLookAssistValues();
+        }
+        if( adjustedPostBalance )
+        {
+            postColorStatsValid = analyzePostAppliedLook();
+            if( postColorStatsValid && lastAcceptedPostBalanceValid )
+            {
+                const double finalPostBalanceScore =
+                    postBalanceScore( postColorStats );
+                if( finalPostBalanceScore > lastAcceptedPostBalanceScore + 1.5 )
+                {
+                    preset = lastAcceptedPreset;
+                    postColorStats = lastAcceptedPostColorStats;
+                    postColorStatsValid = true;
+                    applyLookAssistValues();
+                }
+            }
+        }
+        postTemperatureDelta = preset.temperatureDelta - initialTemperatureDelta;
+        postTintDelta = preset.tintDelta - initialTintDelta;
+    }
 
     m_lastLookAssistDiagnosticsValid = true;
     m_lastLookAssistScene = lookAssistSceneName( scene );
@@ -8811,15 +8999,15 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistVibrance = preset.vibrance;
     m_lastLookAssistTemperatureDelta = preset.temperatureDelta;
     m_lastLookAssistTintDelta = preset.tintDelta;
-
-    ui->horizontalSliderExposure->setValue( preset.exposure );
-    ui->horizontalSliderContrast->setValue( preset.contrast );
-    ui->horizontalSliderPivot->setValue( preset.pivot );
-    ui->horizontalSliderTemperature->setValue( temperature );
-    ui->horizontalSliderTint->setValue( tint );
-    ui->horizontalSliderVibrance->setValue( preset.vibrance );
-    ui->horizontalSliderShadows->setValue( preset.shadows );
-    ui->horizontalSliderHighlights->setValue( preset.highlights );
+    m_lastLookAssistPostBalanceValid = postColorStatsValid;
+    m_lastLookAssistPostBalanceR = postColorStatsValid ? postColorStats.balanceR : 0.0;
+    m_lastLookAssistPostBalanceG = postColorStatsValid ? postColorStats.balanceG : 0.0;
+    m_lastLookAssistPostBalanceB = postColorStatsValid ? postColorStats.balanceB : 0.0;
+    m_lastLookAssistPostBalanceSamples = postColorStatsValid
+                                      ? postColorStats.balanceSamples
+                                      : 0;
+    m_lastLookAssistPostTemperatureDelta = postTemperatureDelta;
+    m_lastLookAssistPostTintDelta = postTintDelta;
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.color_balance"),
@@ -8834,6 +9022,26 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( balanceStats.balanceB - balanceStats.balanceR, 0, 'f', 3 )
             .arg( processedColorStats.median, 0, 'f', 3 )
             .arg( processedColorStats.p95, 0, 'f', 3 ) );
+
+    logInteractionEvent(
+        QStringLiteral("look_assist.apply.post_balance"),
+        QStringLiteral("valid=%1 balance_r=%2 balance_g=%3 balance_b=%4 balance_samples=%5 green_axis=%6 blue_amber_axis=%7 post_temp_delta=%8 post_tint_delta=%9 final_temp_delta=%10 final_tint_delta=%11")
+            .arg( bool01( postColorStatsValid ) )
+            .arg( postColorStatsValid ? postColorStats.balanceR : 0.0, 0, 'f', 3 )
+            .arg( postColorStatsValid ? postColorStats.balanceG : 0.0, 0, 'f', 3 )
+            .arg( postColorStatsValid ? postColorStats.balanceB : 0.0, 0, 'f', 3 )
+            .arg( postColorStatsValid ? postColorStats.balanceSamples : 0 )
+            .arg( postColorStatsValid
+                  ? postColorStats.balanceG
+                    - ( ( postColorStats.balanceR + postColorStats.balanceB ) * 0.5 )
+                  : 0.0, 0, 'f', 3 )
+            .arg( postColorStatsValid
+                  ? postColorStats.balanceB - postColorStats.balanceR
+                  : 0.0, 0, 'f', 3 )
+            .arg( postTemperatureDelta )
+            .arg( postTintDelta )
+            .arg( preset.temperatureDelta )
+            .arg( preset.tintDelta ) );
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
