@@ -70,6 +70,66 @@ static void logInteractionEvent( const QString &event,
     qInfo().noquote() << message;
 }
 
+static int32_t clampDngInt32( double value )
+{
+    if( value > 2147483647.0 ) return 2147483647;
+    if( value < -2147483648.0 ) return (int32_t)-2147483647 - 1;
+    return (int32_t)llround( value );
+}
+
+static void setDngAsShotNeutralFromProcessing( dngExportOverrides_t *overrides,
+                                               const processingObject_t *processing )
+{
+    if( !overrides || !processing ) return;
+
+    const double scale = 1000000.0;
+    const double multipliers[3] =
+    {
+        processing->wb_multipliers[0],
+        processing->wb_multipliers[1],
+        processing->wb_multipliers[2]
+    };
+    for( int c = 0; c < 3; ++c )
+    {
+        if( !isfinite( multipliers[c] ) || multipliers[c] <= 0.0 )
+        {
+            return;
+        }
+    }
+
+    for( int c = 0; c < 3; ++c )
+    {
+        overrides->as_shot_neutral[c * 2] = 1000000;
+        overrides->as_shot_neutral[c * 2 + 1] =
+            qMax( 1, clampDngInt32( multipliers[c] * scale ) );
+    }
+    overrides->as_shot_neutral_enabled = 1;
+}
+
+static dngExportOverrides_t makeLookAssistDngOverrides( mlvObject_t *mlvObject,
+                                                        int exposureSlider )
+{
+    dngExportOverrides_t overrides = {};
+    if( !mlvObject ) return overrides;
+
+    overrides.enabled = 1;
+    if( mlvObject->llrawproc )
+    {
+        overrides.black_level_enabled = 1;
+        overrides.black_level = mlvObject->llrawproc->dng_black_level;
+        overrides.white_level_enabled = 1;
+        overrides.white_level = mlvObject->llrawproc->dng_white_level;
+    }
+    if( exposureSlider != 0 )
+    {
+        overrides.baseline_exposure_enabled = 1;
+        overrides.baseline_exposure[0] = exposureSlider;
+        overrides.baseline_exposure[1] = 100;
+    }
+    setDngAsShotNeutralFromProcessing( &overrides, mlvObject->processing );
+    return overrides;
+}
+
 enum class LookAssistScene
 {
     Night,
@@ -4790,10 +4850,6 @@ int MainWindow::openMlv( QString fileName )
     //Raw black & white level
     initRawBlackAndWhite();
 
-    //Set raw black level auto correct button
-    ui->toolButtonRawBlackAutoCorrect->setEnabled( isRawBlackLevelWrong() );
-    ui->toolButtonRawLevelsAutoFix->setEnabled( true );
-
     //Give curves GUI a link to processing object
     ui->labelCurves->setProcessingObject( m_pProcessingObject );
     ui->labelHueVsHue->setProcessingObject( m_pProcessingObject );
@@ -6629,7 +6685,9 @@ ProcessResult MainWindow::exportCdngSequence(
     double stretchY,
     bool audioExport,
     bool rawFixEnabled,
-    ProgressCallback progressCallback)
+    ProgressCallback progressCallback,
+    bool applyLookAssistDngDefaults,
+    int lookAssistExposure)
 {
     ProcessResult result;
     QElapsedTimer timer;
@@ -6642,7 +6700,10 @@ ProcessResult MainWindow::exportCdngSequence(
     llrpResetBpmStatus(mlvObject);
     llrpComputeStripesOn(mlvObject);
     mlvObject->current_cached_frame_active = 0;
-    if( rawFixEnabled ) mlvObject->llrawproc->fix_raw = 1;
+    if( rawFixEnabled || applyLookAssistDngDefaults )
+    {
+        mlvObject->llrawproc->fix_raw = 1;
+    }
 
     /* --- Build subfolder path and naming prefix --- */
     QString pathName = outDir;
@@ -6713,6 +6774,13 @@ ProcessResult MainWindow::exportCdngSequence(
     uint16_t *imgBuffer = (uint16_t *)malloc( frameSize * sizeof( uint16_t ) );
     getMlvProcessedFrame16( mlvObject, 0, imgBuffer, mlvappEffectiveWorkerThreadCount() );
     free( imgBuffer );
+
+    if( applyLookAssistDngDefaults )
+    {
+        const dngExportOverrides_t overrides =
+            makeLookAssistDngOverrides( mlvObject, lookAssistExposure );
+        setDngExportOverrides( cinemaDng, &overrides );
+    }
 
     /* --- Frame export loop (cutIn/cutOut are 1-based) --- */
     int totalFrames = cutOut - cutIn + 1;
@@ -6864,7 +6932,10 @@ void MainWindow::startExportCdng(QString fileName)
         m_exportQueue.first()->stretchFactorY(),
         m_audioExportEnabled,
         ui->checkBoxRawFixEnable->isChecked(),
-        guiProgress );
+        guiProgress,
+        m_exportQueue.first()->lookAssistEnabled()
+            && m_exportQueue.first()->lookAssistBaselineValid(),
+        m_exportQueue.first()->exposure() );
 
     //Enable GUI drawing
     m_dontDraw = false;
@@ -9200,7 +9271,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     // Keep the technical raw fix in sync with the auto look.
     const int beforeRawBlack = ui->horizontalSliderRawBlack->value();
     const int beforeRawWhite = ui->horizontalSliderRawWhite->value();
-    on_toolButtonRawLevelsAutoFix_clicked();
+    applyRawLevelsAutoFix();
     logInteractionEvent(
         QStringLiteral("look_assist.apply.raw_levels"),
         QStringLiteral("before_black=%1 before_white=%2 after_black=%3 after_white=%4 original_black=%5 original_white=%6 frame=%7")
@@ -15352,8 +15423,6 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     ui->toolButtonDarkFrameSubtractionFile->setEnabled( m_fileLoaded && checked );
     ui->lineEditDarkFrameFile->setEnabled( m_fileLoaded && checked );
 
-    ui->toolButtonRawBlackAutoCorrect->setEnabled( checked && isRawBlackLevelWrong() );
-    ui->toolButtonRawLevelsAutoFix->setEnabled( checked );
     ui->checkBoxLookAssistEnable->setEnabled( checked );
     ui->RawBlackLabel->setEnabled( checked );
     ui->horizontalSliderRawBlack->setEnabled( checked );
@@ -16808,29 +16877,6 @@ uint16_t MainWindow::restrictedLosslessDualIsoOutputWhiteLevel()
     return static_cast<uint16_t>( qBound( 0, qMax( originalWhite, scaledWhite ), 16383 ) );
 }
 
-//Get info, if RAW black level is wrong
-bool MainWindow::isRawBlackLevelWrong()
-{
-    if( !m_fileLoaded ) return false;
-
-    int factor = 1;
-    switch( getMlvBitdepth( m_pMlvObject ) )
-    {
-        case 10: factor = 16;
-            break;
-        case 12: factor = 4;
-            break;
-        default:
-            break;
-    }
-    //If already in range, go with it!
-    if( getMlvOriginalBlackLevel( m_pMlvObject ) >= (1700 / factor)
-     && getMlvOriginalBlackLevel( m_pMlvObject ) <= (2200 / factor) )
-        return false;
-    else
-        return true;
-}
-
 //Cut In button clicked
 void MainWindow::on_toolButtonCutIn_clicked(void)
 {
@@ -17239,16 +17285,7 @@ void MainWindow::on_lineEditLutName_textChanged(const QString &arg1)
     m_frameChanged = true;
 }
 
-//Auto correct RAW black level
-void MainWindow::on_toolButtonRawBlackAutoCorrect_clicked()
-{
-    int value = autoCorrectRawBlackLevel();
-    if( value != getMlvOriginalBlackLevel( m_pMlvObject ) )
-        ui->horizontalSliderRawBlack->setValue( value * 10 );
-}
-
-//Auto fix RAW black and white levels
-void MainWindow::on_toolButtonRawLevelsAutoFix_clicked()
+void MainWindow::applyRawLevelsAutoFix()
 {
     if( !m_fileLoaded ) return;
 

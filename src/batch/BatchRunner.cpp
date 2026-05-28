@@ -397,7 +397,10 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
         stretchX,             /* from receipt or STRETCH_H_100 */
         stretchY,             /* from receipt or STRETCH_V_100 */
         true,                 /* export audio if present */
-        receipt->rawFixesEnabled()  /* from receipt */
+        receipt->rawFixesEnabled(), /* from receipt */
+        nullptr,
+        receipt->lookAssistEnabled() && receipt->lookAssistBaselineValid(),
+        receipt->exposure()
     );
 
     /* Clean up */

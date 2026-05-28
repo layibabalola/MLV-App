@@ -311,6 +311,24 @@ static void get_white_balance(mlv_wbal_hdr_t wbal_hdr, int32_t *wbal, uint32_t c
 
 /*****************************************************************************************************/
 
+static int32_t dng_clamp_double_to_int32(double value)
+{
+    if (value > 2147483647.0) return 2147483647;
+    if (value < -2147483648.0) return (int32_t)-2147483647 - 1;
+    return (int32_t)lrint(value);
+}
+
+static void dng_add_srational(int32_t value[2], const int32_t add[2])
+{
+    const int32_t value_den = value[1] ? value[1] : 1;
+    const int32_t add_den = add[1] ? add[1] : 1;
+    const double combined =
+        ((double)value[0] / (double)value_den) +
+        ((double)add[0] / (double)add_den);
+    value[0] = dng_clamp_double_to_int32(combined * 10000.0);
+    value[1] = 10000;
+}
+
 
 static uint16_t tiff_header[] = { byteOrderII, magicTIFF, 8, 0};
 
@@ -544,6 +562,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
 
                 props_buffer = (char*)malloc(file_size + 1);
                 fread(props_buffer, file_size, 1, fd);
+                props_buffer[file_size] = '\0';
                 fclose(fd);
             }
         }
@@ -576,6 +595,17 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
         int white_level = mlv_data->llrawproc->dng_white_level;
         loadDngPropertiesInt(props_buffer, "WhiteLevel", &white_level);
 
+        if(dng_data->overrides.enabled)
+        {
+            if(dng_data->overrides.black_level_enabled)
+            {
+                black_level = dng_data->overrides.black_level;
+            }
+            if(dng_data->overrides.white_level_enabled)
+            {
+                white_level = dng_data->overrides.white_level;
+            }
+        }
 
         /* Focal resolution stuff */
         int32_t * focal_resolution_x = camid->focal_resolution_x;
@@ -670,6 +700,12 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             basline_exposure[0] = 0;
             basline_exposure[1] = 1;
         }
+        if(dng_data->overrides.enabled
+        && dng_data->overrides.baseline_exposure_enabled)
+        {
+            dng_add_srational(basline_exposure,
+                              dng_data->overrides.baseline_exposure);
+        }
 
         /* Time code stuff */
         //number of frames since midnight
@@ -678,6 +714,13 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
         /* White balance stuff */
         int32_t wbal[6];
         get_white_balance(mlv_data->WBAL, wbal, mlv_data->IDNT.cameraModel);
+        if(dng_data->overrides.enabled
+        && dng_data->overrides.as_shot_neutral_enabled)
+        {
+            memcpy(wbal,
+                   dng_data->overrides.as_shot_neutral,
+                   sizeof(wbal));
+        }
 
         uint32_t cfa_pattern = mlv_data->RAWI.raw_info.cfa_pattern;
         if (cfa_pattern == 0) {
@@ -1134,6 +1177,17 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
     dng_data->image_buf_unpacked = malloc(dng_data->image_size_unpacked);
 
     return dng_data;
+}
+
+void setDngExportOverrides(dngObject_t * dng_data, const dngExportOverrides_t * overrides)
+{
+    if(!dng_data) return;
+
+    memset(&dng_data->overrides, 0, sizeof(dng_data->overrides));
+    if(overrides)
+    {
+        dng_data->overrides = *overrides;
+    }
 }
 
 /* save DNG file */

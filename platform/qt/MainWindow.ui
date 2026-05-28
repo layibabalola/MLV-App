@@ -2681,11 +2681,17 @@ QGroupBox::indicator:checked:disabled {
                     </widget>
                    </item>
                    <item row="0" column="1">
-                    <widget class="QToolButton" name="toolButtonRawBlackAutoCorrect">
-                     <property name="text">
-                      <string>Repair</string>
+                    <spacer name="horizontalSpacerRawBlack">
+                     <property name="orientation">
+                      <enum>Qt::Horizontal</enum>
                      </property>
-                    </widget>
+                     <property name="sizeHint" stdset="0">
+                      <size>
+                       <width>40</width>
+                       <height>20</height>
+                      </size>
+                     </property>
+                    </spacer>
                    </item>
                   </layout>
                  </item>
@@ -2740,16 +2746,6 @@ QGroupBox::indicator:checked:disabled {
                      </property>
                      <property name="alignment">
                       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-                     </property>
-                    </widget>
-                   </item>
-                   <item row="0" column="3">
-                    <widget class="QToolButton" name="toolButtonRawLevelsAutoFix">
-                     <property name="text">
-                      <string>Auto Fix</string>
-                     </property>
-                     <property name="toolTip">
-                      <string>Auto-correct RAW Black Level and restore RAW White Level from metadata.</string>
                      </property>
                     </widget>
                    </item>

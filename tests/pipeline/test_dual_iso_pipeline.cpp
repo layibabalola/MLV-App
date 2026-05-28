@@ -15,7 +15,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <QFile>
 #include <QString>
+#include <QTemporaryDir>
 
 static void assert_fixture_ready(MlvPipelineFixture & fixture)
 {
@@ -56,6 +58,139 @@ static const llrawprocWorkerState_t * current_worker(MlvPipelineFixture & fixtur
     const llrawprocWorkerState_t * worker = fixture.currentLlrawprocWorker();
     ASSERT_TRUE(worker != nullptr);
     return worker;
+}
+
+static uint16_t dng_u16(const QByteArray &data, int offset)
+{
+    const unsigned char *bytes =
+        reinterpret_cast<const unsigned char *>(data.constData() + offset);
+    return static_cast<uint16_t>(bytes[0] | (bytes[1] << 8));
+}
+
+static uint32_t dng_u32(const QByteArray &data, int offset)
+{
+    const unsigned char *bytes =
+        reinterpret_cast<const unsigned char *>(data.constData() + offset);
+    return static_cast<uint32_t>(bytes[0]
+        | (bytes[1] << 8)
+        | (bytes[2] << 16)
+        | (bytes[3] << 24));
+}
+
+static int32_t dng_i32(const QByteArray &data, int offset)
+{
+    return static_cast<int32_t>(dng_u32(data, offset));
+}
+
+static bool dng_find_ifd0_entry(const QByteArray &data,
+                                uint16_t tag,
+                                uint16_t *type,
+                                uint32_t *count,
+                                uint32_t *value)
+{
+    if (data.size() < 10) return false;
+    const uint32_t ifd_offset = dng_u32(data, 4);
+    if (ifd_offset + 2 > static_cast<uint32_t>(data.size())) return false;
+    const uint16_t entries = dng_u16(data, static_cast<int>(ifd_offset));
+    const int first_entry = static_cast<int>(ifd_offset) + 2;
+    for (uint16_t i = 0; i < entries; ++i) {
+        const int offset = first_entry + i * 12;
+        if (offset + 12 > data.size()) return false;
+        if (dng_u16(data, offset) != tag) continue;
+        *type = dng_u16(data, offset + 2);
+        *count = dng_u32(data, offset + 4);
+        *value = dng_u32(data, offset + 8);
+        return true;
+    }
+    return false;
+}
+
+static double dng_read_rational_value(const QByteArray &data, uint32_t offset, bool signed_value)
+{
+    if (offset + 8 > static_cast<uint32_t>(data.size())) return 0.0;
+    const int32_t numerator = signed_value
+        ? dng_i32(data, static_cast<int>(offset))
+        : static_cast<int32_t>(dng_u32(data, static_cast<int>(offset)));
+    const int32_t denominator = signed_value
+        ? dng_i32(data, static_cast<int>(offset + 4))
+        : static_cast<int32_t>(dng_u32(data, static_cast<int>(offset + 4)));
+    if (denominator == 0) return 0.0;
+    return static_cast<double>(numerator) / static_cast<double>(denominator);
+}
+
+static uint32_t dng_read_long_tag(const QByteArray &data, uint16_t tag)
+{
+    uint16_t type = 0;
+    uint32_t count = 0;
+    uint32_t value = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(data, tag, &type, &count, &value));
+    ASSERT_EQ(4, type);
+    ASSERT_EQ(1u, count);
+    return value;
+}
+
+TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngExportOverrides_t overrides = {};
+    overrides.enabled = 1;
+    overrides.black_level_enabled = 1;
+    overrides.black_level = 1234;
+    overrides.white_level_enabled = 1;
+    overrides.white_level = 15000;
+    overrides.baseline_exposure_enabled = 1;
+    overrides.baseline_exposure[0] = 125;
+    overrides.baseline_exposure[1] = 100;
+    overrides.as_shot_neutral_enabled = 1;
+    overrides.as_shot_neutral[0] = 1000000;
+    overrides.as_shot_neutral[1] = 2000000;
+    overrides.as_shot_neutral[2] = 1000000;
+    overrides.as_shot_neutral[3] = 1000000;
+    overrides.as_shot_neutral[4] = 1000000;
+    overrides.as_shot_neutral[5] = 4000000;
+    setDngExportOverrides(dng, &overrides);
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString dng_path = temp_dir.filePath(QStringLiteral("look-assist-defaults.dng"));
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                              dng,
+                              0,
+                              dng_path_bytes.data(),
+                              nullptr));
+    freeDngObject(dng);
+
+    QFile file(dng_path);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    const QByteArray data = file.readAll();
+    ASSERT_TRUE(data.size() > 800);
+
+    ASSERT_EQ(1234u, dng_read_long_tag(data, 50714));
+    ASSERT_EQ(15000u, dng_read_long_tag(data, 50717));
+
+    uint16_t type = 0;
+    uint32_t count = 0;
+    uint32_t value = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(data, 50730, &type, &count, &value));
+    ASSERT_EQ(10, type);
+    ASSERT_EQ(1u, count);
+    ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value, true) - 1.25) < 0.0001);
+
+    ASSERT_TRUE(dng_find_ifd0_entry(data, 50728, &type, &count, &value));
+    ASSERT_EQ(5, type);
+    ASSERT_EQ(3u, count);
+    ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value, false) - 0.5) < 0.0001);
+    ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 8, false) - 1.0) < 0.0001);
+    ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 16, false) - 0.25) < 0.0001);
 }
 
 static void configure_direct_processed8_supported_subset(MlvPipelineFixture & fixture)

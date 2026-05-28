@@ -801,7 +801,9 @@ public:
         double stretchY,
         bool audioExport,
         bool rawFixEnabled,
-        ProgressCallback progressCallback = nullptr);
+        ProgressCallback progressCallback = nullptr,
+        bool applyLookAssistDngDefaults = false,
+        int lookAssistExposure = 0);
 
     int runHeadlessPlaybackProfile(const PlaybackProfileOptions &options);
 };
