@@ -286,6 +286,16 @@ static bool lookAssistIsFloorLiftedNightThumbnail( LookAssistScene scene, const 
            stats.dynamicRange <= 24.0;
 }
 
+static bool lookAssistIsFlatNoiseFloorThumbnail( LookAssistScene scene, const LookAssistStats &stats )
+{
+    return scene == LookAssistScene::Night
+        && stats.median <= 34.0
+        && stats.p05 <= 34.0
+        && stats.p95 <= 34.0
+        && stats.p99 <= 34.0
+        && ( stats.p99 - stats.p05 ) <= 2.0;
+}
+
 static int lookAssistExposureForTarget( double sourceValue, double targetValue, int fallback )
 {
     if( sourceValue <= 1.0 || targetValue <= 1.0 ) return fallback;
@@ -536,6 +546,8 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 
     const bool floorLiftedNightThumbnail =
         lookAssistIsFloorLiftedNightThumbnail( scene, stats );
+    const bool flatNoiseFloorThumbnail =
+        lookAssistIsFlatNoiseFloorThumbnail( scene, stats );
     const double sourceMedian = floorLiftedNightThumbnail
         ? qMax( 2.0, ( stats.median - stats.p05 ) + 2.0 )
         : qMax( 1.0, stats.median );
@@ -547,6 +559,8 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
     if( scene == LookAssistScene::Night )
     {
         maxExposure = ( stats.p99 < 55.0 ) ? 380 : 260;
+        if( flatNoiseFloorThumbnail )
+            maxExposure = qMin( maxExposure, 140 );
         minExposure = -40;
         p95Ceiling = floorLiftedNightThumbnail ? 108.0 : 142.0;
         p99Ceiling = floorLiftedNightThumbnail ? 140.0 : 188.0;
