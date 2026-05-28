@@ -2230,3 +2230,39 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / low effort: keep M16-1446 and M16-1243 paired in the optional local golden test so the flat-noise cap cannot silently spread to the clips that benefited from the stronger night rescue.
 2. Medium impact / medium effort: if more clips show non-representative first-frame analysis, add a small representative-frame sampler for Look Assist instead of tuning one more first-frame percentile threshold.
 3. Medium impact / low effort: keep profile/smoke launch recipes on `tools\profiling\run-release-playback-profile.ps1` unless the release folder is explicitly deployed with an offscreen platform plugin and a separate wrapper records that fact.
+
+## 2026-05-28 - x1 HQ playback scale-factor investigation
+
+### Verified locally
+
+- The user-facing release executable profiled for this pass was `platform/qt/build-release/release/MLVApp.exe`, timestamp `2026-05-28 13:18:30`, size `8223744`, SHA256 `6C37516650A8B9C24DBDF6EB75B6DADED4414CCC0DF6A95CB3B95627A97C8525`.
+- Scratch artifacts live under `.claude-state/profiling/20260528-x1-hq-playback-investigation/`.
+- On `tests/fixtures/clips/large_dual_iso.mlv` with `tests/fixtures/receipts/large_dual_iso_hq.marxml`, `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`, and warm frame `sample_index > 0`, x4 reduces presentation/copy work much more than it reduces the HQ engine work:
+  - `large_hq_x1_auto_threads.json`: median `latency_ms 180.373`, `engine_latency_ms 143.683`, `presentation_overhead_ms 32.691`, `draw_frame_ready_total_ms 31.000`, `llrawproc_ms 128.000`, `processed8_total_ms 143.000`.
+  - `large_hq_x4_auto_threads.json`: median `latency_ms 144.485`, `engine_latency_ms 141.251`, `presentation_overhead_ms 2.431`, `draw_frame_ready_total_ms 2.000`, `llrawproc_ms 136.000`, `processed8_total_ms 141.000`.
+  - x1 copied `12301632` owned RGB8 bytes per frame into playback prep, while x4 copied `768852`; output pixels dropped from `4100544` to `256284`.
+- Paint-aware runs show the same direction but with normal GUI variance:
+  - x1 wait-for-paint median `cadence_ms 219.664`, `paint_latency_ms 208.002`, `presentation_overhead_ms 58.908`, `draw_frame_ready_total_ms 56.000`.
+  - x4 wait-for-paint median `cadence_ms 199.290`, `paint_latency_ms 190.248`, `presentation_overhead_ms 20.483`, `draw_frame_ready_total_ms 19.000`.
+- The optional `MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ=1` run still reported `render_thread_phase4b_path_label = none-or-full-recon-fallback` on every warm frame, so it did not prove the fast pre-recon x4 path. The fixture receipt has `<focusPixels>1</focusPixels>`, and `mlv_phase4bv2_receipt_compatible()` rejects focus pixels, bad pixels, vertical stripes, and pattern noise before downsample-before-llrawproc can run.
+- The FPS counter in `MainWindow::timerFrameEvent()` reports GUI cadence from recent presentation timing, so it will not show a large x4 jump when the dominant `llrawproc` / processed8 work remains full-recon-bound.
+
+### Cross-checked from prior analysis
+
+- `platform/qt/PlaybackQualityPolicy.h` currently returns scale `4` for Fast, High Quality, Auto, Phase3Fast, and Phase3HQ unless overridden by `MLVAPP_PLAYBACK_SCALE_FACTOR`; Auto only drops to `Decision{ 1, false }` after it misses target, which means Fast preview rather than x1 HQ.
+- `src/mlv/video_mlv.c` only allows scale factors `1`, `2`, and `4`, and current HQ Dual ISO quality guards default x4 to the full-recon fallback unless a narrower fast path is explicitly allowed and the receipt is compatible.
+- `platform/qt/MainWindow.cpp` still copies the full ready-frame RGB8 payload into `PlaybackPrepTask::ownedSourceImage` before async prep. At x1 HQ this is a `12.3 MB` copy per frame even though the render slot is already pinned until the frame is released.
+- The GPU16 presentation path still has full-frame conversion/copy candidates (`gpu16FallbackRgb8`, viewport upload staging), so GL presentation alone should not be assumed to fix x1 HQ cadence without removing those copies.
+
+### Needs runtime profiling
+
+- The highest-confidence x1 HQ improvement target is the full-recon Dual ISO/processed8 engine path, not the scale factor. In this fixture the warm median `llrawproc_ms` alone is about `128-147 ms`, so true x1 HQ needs a faster HQ path or a carefully defined playback-quality tradeoff.
+- Next best x1-specific UI target: avoid or shrink full-frame playback-prep copies by borrowing pinned render-slot buffers across the async worker lifetime, with stale-serial/release safety. Expected benefit is presentation overhead, not the main HQ reconstruction time.
+- If explicit x4 is meant to buy a bigger FPS difference, design the tradeoff openly: either promote a focus-pixel-compatible fast pre-recon/downsample path, or label x4 HQ as primarily reducing presentation load while preserving full-recon quality.
+
+### Ranked next steps
+
+1. High impact / medium effort: profile and optimize the full-recon HQ Dual ISO/processed8 hot path at x1, starting from `llrawproc_ms` and `processed8_total_ms`, because scale cannot remove that cost.
+2. Medium impact / medium effort: prototype a borrowed-buffer async playback-prep handoff so x1 does not copy `12.3 MB` of RGB8 every frame before presentation.
+3. Medium impact / medium effort: evaluate a receipt-compatible fast pre-recon path for x4/HQ as an explicit speed/quality mode, especially with focus-pixel receipts that currently force fallback.
+4. Low-medium impact / low effort: clarify the toolbar/menu wording if users expect x4 to change HQ FPS dramatically; current behavior mainly reduces presentation work when full-recon remains active.
