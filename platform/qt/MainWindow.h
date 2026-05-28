@@ -806,6 +806,7 @@ private:
     double m_lastDrawFrameReadyOverlayMs = 0.0;
     double m_lastDrawFrameReadyTotalMs = 0.0;
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
+    bool m_headlessPlaybackProfileActive = false;
     uint64_t m_nextRenderRequestSerial = 1;
     uint64_t m_lastPresentedRequestSerial = 0;
     GpuPreviewProcessingBackendRequest m_gpuPreviewProcessingBackendRequest =
@@ -851,6 +852,7 @@ private:
     double m_lastPresentedDualIsoPreviewRegressionMs = 0.0;
     double m_lastPresentedDualIsoPreviewRowscaleMs = 0.0;
     QJsonObject m_lastPresentedStageTimingTelemetry;
+    QJsonObject m_lastPresentedFrameColorTelemetry;
     uint32_t m_displayPreviewCacheNextSlot;
     int m_lastDisplaySceneWidth = -1;
     int m_lastDisplaySceneHeight = -1;

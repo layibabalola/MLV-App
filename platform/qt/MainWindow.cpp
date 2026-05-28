@@ -679,6 +679,7 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 
 #include "SystemMemory.h"
 #include "DualIsoPlaybackPolicy.h"
+#include "DualIsoPatternMapping.h"
 #include "GpuDebayer.h"
 #include "GpuDisplayViewport.h"
 #include "MainWindowGpuPreviewPolicy.h"
@@ -3011,6 +3012,13 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     QTextStream out(stdout);
     QTextStream err(stderr);
     m_headlessPlaybackProfileUsePlaybackPolicy = false;
+    m_headlessPlaybackProfileActive = true;
+    struct HeadlessPlaybackProfileActiveGuard
+    {
+        bool &active;
+        ~HeadlessPlaybackProfileActiveGuard() { active = false; }
+    } headlessPlaybackProfileActiveGuard{ m_headlessPlaybackProfileActive };
+
     m_lookAssistUnsettledAnalysisCount = 0;
     m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
     m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
@@ -3396,6 +3404,15 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                 const QJsonObject stageTimingTelemetry = m_lastPresentedStageTimingTelemetry;
                 for( auto it = stageTimingTelemetry.constBegin();
                      it != stageTimingTelemetry.constEnd();
+                     ++it )
+                {
+                    sample.insert( it.key(), it.value() );
+                }
+            }
+            {
+                const QJsonObject frameColorTelemetry = m_lastPresentedFrameColorTelemetry;
+                for( auto it = frameColorTelemetry.constBegin();
+                     it != frameColorTelemetry.constEnd();
                      ++it )
                 {
                     sample.insert( it.key(), it.value() );
@@ -4509,6 +4526,7 @@ int MainWindow::openMlv( QString fileName )
     m_lastPresentedDualIsoPreviewRegressionMs = 0.0;
     m_lastPresentedDualIsoPreviewRowscaleMs = 0.0;
     m_lastPresentedStageTimingTelemetry = QJsonObject();
+    m_lastPresentedFrameColorTelemetry = QJsonObject();
 
     //Calculate shutter flavors :)
     float shutterSpeed = 1000000.0f / (float)(getMlvShutter( m_pMlvObject ));
@@ -14988,7 +15006,8 @@ void MainWindow::on_DualIsoPatternComboBox_currentIndexChanged(int index)
 {
     if( !m_fileLoaded || m_frameStillDrawing ) return;
 
-    m_pMlvObject->llrawproc->diso_pattern = index;
+    m_pMlvObject->llrawproc->diso_pattern =
+        dualIsoCorePatternFromUiIndex( index );
 
     if( m_pMlvObject->llrawproc->diso_validity == DISO_FORCED || m_pMlvObject->llrawproc->diso_auto_correction == 2 )
     {
@@ -15854,6 +15873,41 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                                        double displayStart )
 {
     recordPresentedFrame( readyFrame, requestContext );
+    m_lastPresentedFrameColorTelemetry = QJsonObject();
+    if( m_headlessPlaybackProfileActive
+     && rgb8DisplaySource
+     && readyFrame.renderedImageWidth > 0
+     && readyFrame.renderedImageHeight > 0 )
+    {
+        const LookAssistStats frameStats =
+            analyzeLookAssistThumbnail( rgb8DisplaySource,
+                                        readyFrame.renderedImageWidth,
+                                        readyFrame.renderedImageHeight );
+        const double visibleGreenAxis =
+            frameStats.visibleMeanG
+            - ( ( frameStats.visibleMeanR + frameStats.visibleMeanB ) * 0.5 );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("presented_green_artifact_ratio"),
+            frameStats.greenArtifactRatio );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("presented_green_artifact_mean_axis"),
+            frameStats.greenArtifactMeanAxis );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("presented_green_artifact_samples"),
+            frameStats.greenArtifactSamples );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("presented_visible_green_axis"),
+            visibleGreenAxis );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("presented_visible_samples"),
+            frameStats.visibleSamples );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("presented_dual_iso_core_pattern"),
+            readyFrame.dualIsoPattern );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("presented_dual_iso_ui_pattern"),
+            dualIsoUiPatternIndexFromCorePattern( readyFrame.dualIsoPattern ) );
+    }
     updatePlaybackQualityIndicator();
 
     if( ui->actionShowEditArea->isChecked() )
@@ -16162,9 +16216,12 @@ void MainWindow::drawFrameReady()
 
         if( readyFrame.dualIsoPattern < 0 )
         {
+            const int uiPattern =
+                dualIsoUiPatternIndexFromCorePattern( readyFrame.dualIsoPattern );
             ui->DualIsoPatternComboBox->blockSignals( true );
-            ui->DualIsoPatternComboBox->setCurrentIndex( -readyFrame.dualIsoPattern );
+            ui->DualIsoPatternComboBox->setCurrentIndex( uiPattern );
             ui->DualIsoPatternComboBox->blockSignals( false );
+            ACTIVE_RECEIPT->setDualIsoPattern( uiPattern );
         }
 
         if( toolButtonDualIsoCurrentIndex() == 1 && readyFrame.dualIsoAutoCorrection < 0 )
