@@ -1982,6 +1982,57 @@ TEST(DualIsoPipeline, HeadlessDualIsoAmazeAliasMapScratchReusesHelperBuffersAcro
     ASSERT_TRUE(first_alias_aux == scratch->alias_aux);
 }
 
+TEST(DualIsoPipeline, HeadlessDualIsoAmazeScratchGrowsAfterScaleFourToOne)
+{
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+
+    fixture.receipt().setDualIso(1);
+    fixture.receipt().setDualIsoInterpolation(0);
+    fixture.receipt().setDualIsoAliasMap(1);
+    fixture.receipt().setDualIsoFrBlending(1);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+        return;
+    }
+
+    const std::vector<uint8_t> scale4 = fixture.renderFrame8Scaled(0, 1, 4);
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 4) * static_cast<std::size_t>(full_h / 4) * 3u,
+              scale4.size());
+
+    const std::vector<uint8_t> scale1 = fixture.renderFrame8Scaled(0, 1, 1);
+    ASSERT_EQ(static_cast<std::size_t>(full_w) * static_cast<std::size_t>(full_h) * 3u,
+              scale1.size());
+    ASSERT_EQ(1, fixture.video()->playback_scale_factor_active);
+
+    const llrawprocWorkerState_t * worker = current_worker(fixture);
+    const dualiso_full20bit_scratch_t * scratch = &worker->diso_full20bit_scratch;
+    const size_t full_rows = static_cast<size_t>(full_h);
+    const size_t full_row_width = static_cast<size_t>(full_w + 16);
+    const size_t full_plane_cells = full_rows * full_row_width;
+    const size_t full_pixels = static_cast<size_t>(full_w) * static_cast<size_t>(full_h);
+
+    ASSERT_TRUE(scratch->amaze_squeezed_capacity >= full_rows);
+    ASSERT_TRUE(scratch->amaze_rawData_row_capacity >= full_rows);
+    ASSERT_TRUE(scratch->amaze_red_row_capacity >= full_rows);
+    ASSERT_TRUE(scratch->amaze_green_row_capacity >= full_rows);
+    ASSERT_TRUE(scratch->amaze_blue_row_capacity >= full_rows);
+    ASSERT_TRUE(scratch->amaze_rawData_plane_cell_capacity >= full_plane_cells);
+    ASSERT_TRUE(scratch->amaze_red_plane_cell_capacity >= full_plane_cells);
+    ASSERT_TRUE(scratch->amaze_green_plane_cell_capacity >= full_plane_cells);
+    ASSERT_TRUE(scratch->amaze_blue_plane_cell_capacity >= full_plane_cells);
+    ASSERT_TRUE(scratch->amaze_gray_capacity >= full_pixels);
+    ASSERT_TRUE(scratch->amaze_edge_direction_capacity >= full_pixels);
+    ASSERT_TRUE(scratch->amaze_row_capacity >= full_rows);
+    ASSERT_TRUE(scratch->amaze_plane_cell_capacity >= full_plane_cells);
+    ASSERT_TRUE(scratch->amaze_pixel_capacity >= full_pixels);
+}
+
 TEST(DualIsoPipeline, HeadlessDualIsoSolvedAutoMatchStateStaysStableAcrossFrames)
 {
     MlvPipelineFixture fixture;
