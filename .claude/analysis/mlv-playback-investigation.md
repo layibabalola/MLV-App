@@ -2161,3 +2161,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - Human GUI smoke is still the final judge for the exact tint amount on `M16-1243.MLV` and `M17-1152.MLV`, because dark Dual ISO scene content can make channel medians overstate red/magenta after green suppression.
+
+## 2026-05-28 - Restricted-lossless raw white and M17 balance follow-up
+
+### Verified locally
+
+- The green-pixel regression on `M15-1355.MLV` and `M16-1327.MLV` was a raw-white mismatch. Their headers report original RAW white `6000`, but HQ Dual ISO restricted-lossless decode expands that range to the effective DNG white (`15812` for these clips). Look Assist Auto Fix was restoring the UI slider to `6000`, so analysis and display could clip against a much-too-low white point.
+- `MainWindow::autoCorrectRawWhiteLevel()` now mirrors the restricted-lossless scaling rule for LJ92 Dual ISO clips and prefers a published llrawproc DNG white level when available. Final local profile smokes:
+  - `M15-1355.MLV`: original RAW white `6000`, auto/effective RAW white `15812`, post green artifact ratio `0.000006`.
+  - `M16-1327.MLV`: original RAW white `6000`, auto/effective RAW white `15812`, post green artifact ratio `0.002527`.
+- `M17-1152.MLV` did receive Auto WB, but the first accepted neutral patch stopped the later processed-color cleanup. That left a residual amber axis. Floor-lifted processed balance may now refine post-AWB temperature while preserving the accepted Auto WB tint. Final local profile smoke: temperature `5500 K`, tint `8`, temperature delta `-500`, post-AWB temperature correction `-280`, post-AWB tint correction `0`.
+- Scale-factor telemetry on `M16-1327.MLV` shows the current x4 UI request is honored geometrically (`1808x2268` -> `452x567`, pixel retention `0.0625`), but HQ mean23 playback still logs `HQ mean23 playback uses full-recon x4 fallback`, so the expensive Dual ISO recon remains near full-res cost. With the existing diagnostic `MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ=1`, x4 switches to `full-xy-pre-recon` and cadence improves substantially in the same profile harness.
+
+### Cross-checked from prior analysis
+
+- This keeps Look Assist in the appearance layer: raw levels, tone, temperature, and tint only. Geometry/stretch remains untouched.
+- The scale result is consistent with the earlier quality/speed split: x4 can only be a large FPS win when the pre-recon Phase4B path is allowed. HQ mean23 currently preserves quality by defaulting to full-recon fallback.
+
+### Needs runtime profiling
+
+- Human GUI smoke should verify that `M15-1355.MLV` and `M16-1327.MLV` no longer show neon green clipping with RAW White stuck at `6000`.
+- Human GUI smoke should judge whether `M17-1152.MLV` at about `5500 K` is cool enough, or whether floor-lifted warm scenes need a lower temperature cap.
+
+### Ranked next steps
+
+1. High impact / low effort: consider making explicit UI `Scale x4` opt into the existing fast pre-recon path, or expose the quality/speed tradeoff in the toolbar label, because users reasonably expect x4 to buy FPS.
+2. Medium impact / low effort: keep the local optional M16 profile test asserting RAW White `6000 -> >15000` so this regression cannot quietly reappear on machines with the clip fixture.

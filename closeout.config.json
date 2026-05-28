@@ -153,7 +153,11 @@
   "dirty": {
     "unclaimedOutsideDelta": "foreign",
     "sensitiveUnownedBlocks": true,
-    "autoClaimCleanAtStart": true
+    "autoClaimCleanAtStart": true,
+    "cleanAtStartSensitiveAutoClaim": [
+      ".claude/analysis/*.md",
+      ".claude/ANALYSIS_LOG.md"
+    ]
   },
   "dirtySplit": {
     "enabled": true,
@@ -423,6 +427,7 @@
       "powerShell.windowsPowerShellOnly",
       "powerShell.justification",
       "paths",
+      "dirty.cleanAtStartSensitiveAutoClaim",
       "dirtySplit",
       "toolingBaseline",
       "evidenceRepair",
@@ -487,6 +492,8 @@
       "test_repo_sweep_retained_terminal_outcomes_prove_remediation_attempted_or_excluded",
       "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
       "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
+      "test_existing_analysis_note_clean_at_start_is_auto_claimed_despite_sensitive_root",
+      "test_new_analysis_note_under_sensitive_root_still_blocks_as_unowned",
       "test_stale_integrated_claims_do_not_foreignize_clean_at_start_dirty",
       "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
       "test_baseline_dirty_changed_after_start_blocks_as_mixed_without_claim",

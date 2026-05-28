@@ -602,11 +602,11 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
     const int tintCap = lookAssistAutoTintCap( scene, processedFloorLiftedBalance );
     const int tempCap = ( scene == LookAssistScene::BrightSun )
                       ? 250
-                      : ( processedFloorLiftedBalance ? 220 : 500 );
+                      : ( processedFloorLiftedBalance ? 420 : 500 );
     const double tintThreshold = processedFloorLiftedBalance ? 6.0 : 10.0;
     const double tintGain = processedFloorLiftedBalance ? 0.55 : 0.65;
     const double tempThreshold = processedFloorLiftedBalance ? 6.0 : 14.0;
-    const double tempGain = processedFloorLiftedBalance ? 6.0 : 18.0;
+    const double tempGain = processedFloorLiftedBalance ? 16.0 : 18.0;
 
     if( hasNeutralBalance && fabs( magentaGreenAxis ) >= tintThreshold )
     {
@@ -625,7 +625,14 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
         if( magentaGreenAxis > -4.0 )
             preset.tintDelta = qMax( preset.tintDelta, 4 );
         if( blueAmberAxis <= -6.0 )
-            preset.temperatureDelta = qMin( preset.temperatureDelta, -48 );
+        {
+            const int warmCastTemperatureDelta =
+                qBound( -360,
+                        (int)qRound( blueAmberAxis * 22.0 ),
+                        -96 );
+            preset.temperatureDelta =
+                qMin( preset.temperatureDelta, warmCastTemperatureDelta );
+        }
     }
     if( hasNeutralBalance
      && processedFloorLiftedBalance
@@ -4017,6 +4024,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     m_pMlvObject ? (int)getMlvOriginalWhiteLevel( m_pMlvObject ) : -1 );
     metadata.insert( QStringLiteral("look_assist_auto_black_candidate"),
                     m_pMlvObject ? (int)autoCorrectRawBlackLevel() : -1 );
+    metadata.insert( QStringLiteral("look_assist_auto_white_candidate"),
+                    m_pMlvObject ? (int)autoCorrectRawWhiteLevel() : -1 );
     metadata.insert( QStringLiteral("look_assist_exposure"),
                     ui->horizontalSliderExposure->value() );
     metadata.insert( QStringLiteral("look_assist_contrast"),
@@ -9313,11 +9322,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
         };
 
         bool adjustedPostBalance = false;
-        if( autoWhiteBalanceValid )
-        {
-            postColorStatsValid = analyzePostAppliedLook();
-        }
-        else
+        const bool refinePostBalance =
+            !autoWhiteBalanceValid || useProcessedColorStats;
+        if( refinePostBalance )
         {
             bool lastAcceptedPostBalanceValid = false;
             double lastAcceptedPostBalanceScore = 1.0e9;
@@ -9351,14 +9358,16 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     postColorStats.balanceB - postColorStats.balanceR;
                 int passTintDelta = 0;
                 int passTemperatureDelta = 0;
-                if( lookAssistHasNeutralBalanceSamples( postColorStats )
+                if( !autoWhiteBalanceValid
+                 && lookAssistHasNeutralBalanceSamples( postColorStats )
                  && fabs( postGreenAxis ) >= 4.0 )
                 {
                     passTintDelta = qBound( -5,
                                              (int)qRound( postGreenAxis * 0.55 ),
                                              5 );
                 }
-                if( lookAssistHasNeutralBalanceSamples( postColorStats )
+                if( !autoWhiteBalanceValid
+                 && lookAssistHasNeutralBalanceSamples( postColorStats )
                  && postGreenAxis > 2.0
                  && postColorStats.greenArtifactRatio >= 0.004
                  && postColorStats.greenArtifactMeanAxis >= 25.0 )
@@ -9371,11 +9380,12 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     passTintDelta = qMax( passTintDelta, artifactTintDelta );
                 }
                 if( lookAssistHasNeutralBalanceSamples( postColorStats )
-                 && fabs( postBlueAmberAxis ) >= 6.0 )
+                 && fabs( postBlueAmberAxis ) >= ( useProcessedColorStats ? 3.0 : 6.0 ) )
                 {
-                    passTemperatureDelta = qBound( -96,
-                                                    (int)qRound( postBlueAmberAxis * 6.0 ),
-                                                    96 );
+                    passTemperatureDelta = qBound( useProcessedColorStats ? -140 : -96,
+                                                    (int)qRound( postBlueAmberAxis
+                                                               * ( useProcessedColorStats ? 14.0 : 6.0 ) ),
+                                                    useProcessedColorStats ? 140 : 96 );
                 }
                 if( passTemperatureDelta == 0 && passTintDelta == 0 )
                 {
@@ -9388,10 +9398,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     qBound( -500,
                             preset.temperatureDelta + passTemperatureDelta,
                             500 );
-                preset.tintDelta =
-                    qBound( -postTintCap,
-                            preset.tintDelta + passTintDelta,
-                            postTintCap );
+                if( passTintDelta != 0 )
+                {
+                    preset.tintDelta =
+                        qBound( -postTintCap,
+                                preset.tintDelta + passTintDelta,
+                                postTintCap );
+                }
                 const int appliedTemperatureDelta =
                     preset.temperatureDelta - previousTemperatureDelta;
                 const int appliedTintDelta =
@@ -9420,6 +9433,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 }
             }
             if( postColorStatsValid
+             && !autoWhiteBalanceValid
              && lookAssistHasNeutralBalanceSamples( postColorStats )
              && postColorStats.greenArtifactRatio >= 0.004
              && postColorStats.greenArtifactMeanAxis >= 30.0 )
@@ -9446,6 +9460,10 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     }
                 }
             }
+        }
+        else
+        {
+            postColorStatsValid = analyzePostAppliedLook();
         }
         postTemperatureDelta = preset.temperatureDelta - initialTemperatureDelta;
         postTintDelta = preset.tintDelta - initialTintDelta;
@@ -16415,6 +16433,48 @@ uint16_t MainWindow::autoCorrectRawBlackLevel()
         return 2048 / factor;
 }
 
+//Calculate correct RAW white level
+uint16_t MainWindow::autoCorrectRawWhiteLevel()
+{
+    if( !m_pMlvObject ) return 0;
+
+    const int originalWhite = getMlvOriginalWhiteLevel( m_pMlvObject );
+    int white = originalWhite;
+
+    if( !ui->checkBoxRawFixEnable->isChecked() )
+        return static_cast<uint16_t>( qBound( 0, white, 65535 ) );
+
+    const bool restrictedLossless =
+        ( m_pMlvObject->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92 )
+        && originalWhite > 0
+        && originalWhite < 15000;
+    const bool dualIsoEnabled =
+        llrpGetDualIsoValidity( m_pMlvObject ) != DISO_INVALID
+        && toolButtonDualIsoCurrentIndex() > 0;
+
+    if( restrictedLossless && dualIsoEnabled )
+    {
+        const int publishedWhite =
+            m_pMlvObject->llrawproc ? m_pMlvObject->llrawproc->dng_white_level : 0;
+        if( publishedWhite > originalWhite && publishedWhite <= 16383 )
+        {
+            white = publishedWhite;
+        }
+        else
+        {
+            const int black = autoCorrectRawBlackLevel();
+            const int range = qMax( 1, originalWhite - black );
+            const int bitDepth = qBound( 1, (int)ceil( log2( (double)range ) ), 14 );
+            const int shift = qMax( 0, 14 - bitDepth );
+            const int scaledWhite = range * ( 1 << shift );
+            if( scaledWhite > originalWhite )
+                white = qMin( 16383, scaledWhite );
+        }
+    }
+
+    return static_cast<uint16_t>( qBound( 0, white, 65535 ) );
+}
+
 //Get info, if RAW black level is wrong
 bool MainWindow::isRawBlackLevelWrong()
 {
@@ -16860,7 +16920,7 @@ void MainWindow::on_toolButtonRawLevelsAutoFix_clicked()
     if( !m_fileLoaded ) return;
 
     const uint16_t black = autoCorrectRawBlackLevel();
-    const uint16_t white = getMlvOriginalWhiteLevel( m_pMlvObject );
+    const uint16_t white = autoCorrectRawWhiteLevel();
 
     if( black != getMlvOriginalBlackLevel( m_pMlvObject ) )
         ui->horizontalSliderRawBlack->setValue( black * 10 );
