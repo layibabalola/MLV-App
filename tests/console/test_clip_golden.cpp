@@ -854,6 +854,7 @@ TEST(ClipGolden, LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable)
             << QStringLiteral("--output") << output_json
             << QStringLiteral("--threads") << QStringLiteral("1"),
         QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1"))
             << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
     process.start();
     ASSERT_TRUE(process.waitForStarted());
@@ -872,10 +873,23 @@ TEST(ClipGolden, LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable)
     ASSERT_TRUE(auto_wb_source == std::string("rejected-extreme-color-cast")
              || auto_wb_source == std::string("none"));
     ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_original_raw_white")).toInt());
-    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_white_candidate")).toInt() > 15000);
-    ASSERT_EQ(metadata.value(QStringLiteral("look_assist_auto_white_candidate")).toInt(),
-              metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
+    ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_auto_white_candidate")).toInt());
+    ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_restricted_lossless_output_white")).toInt() > 15000);
+    ASSERT_EQ(2, metadata.value(QStringLiteral("look_assist_chroma_smooth")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_chroma_smooth_auto_applied")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_tint")).toInt() > -20);
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_post_green_artifact_ratio")).toDouble() < 0.09);
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_post_visible_green_axis")).toDouble() < 12.0);
+    const double look_assist_scale =
+        std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);
+    const double projected_p95 =
+        metadata.value(QStringLiteral("look_assist_p95")).toDouble() * look_assist_scale;
+    const double projected_p99 =
+        metadata.value(QStringLiteral("look_assist_p99")).toDouble() * look_assist_scale;
+    ASSERT_TRUE(projected_p95 >= 95.0);
+    ASSERT_TRUE(projected_p95 <= 122.0);
+    ASSERT_TRUE(projected_p99 <= 152.0);
 }
 
 TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
@@ -909,6 +923,7 @@ TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
             << QStringLiteral("--output") << output_json
             << QStringLiteral("--threads") << QStringLiteral("1"),
         QList<QPair<QString, QString>>()
+            << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1"))
             << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
     process.start();
     ASSERT_TRUE(process.waitForStarted());
@@ -921,10 +936,25 @@ TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
     ASSERT_TRUE(document.isObject());
 
     const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
-    ASSERT_FALSE(metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool());
-    ASSERT_EQ(std::string("rejected-extreme-color-cast"),
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool());
+    ASSERT_EQ(std::string("processed-neutral-patch"),
               metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString());
+    ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_restricted_lossless_output_white")).toInt() > 15000);
+    ASSERT_EQ(2, metadata.value(QStringLiteral("look_assist_chroma_smooth")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_chroma_smooth_auto_applied")).toBool());
+    ASSERT_EQ(std::string("none"),
+              metadata.value(QStringLiteral("look_assist_color_cast_warning")).toString().toStdString());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_tint")).toInt() > -20);
+    const double look_assist_scale =
+        std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);
+    const double projected_p95 =
+        metadata.value(QStringLiteral("look_assist_p95")).toDouble() * look_assist_scale;
+    const double projected_p99 =
+        metadata.value(QStringLiteral("look_assist_p99")).toDouble() * look_assist_scale;
+    ASSERT_TRUE(projected_p95 >= 95.0);
+    ASSERT_TRUE(projected_p95 <= 122.0);
+    ASSERT_TRUE(projected_p99 <= 152.0);
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtRuntime)
@@ -1069,6 +1099,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_original_raw_black")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_original_raw_white")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_white_candidate")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_restricted_lossless_output_white")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_chroma_smooth")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_chroma_smooth_auto_applied")));
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_scene")).toString().size() > 0);
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_exposure")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_contrast")));
@@ -1132,8 +1165,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
         std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);
     const double projected_p95 = metadata.value(QStringLiteral("look_assist_p95")).toDouble() * look_assist_scale;
     const double projected_p99 = metadata.value(QStringLiteral("look_assist_p99")).toDouble() * look_assist_scale;
-    ASSERT_TRUE(projected_p95 <= 82.0);
-    ASSERT_TRUE(projected_p99 <= 104.0);
+    ASSERT_TRUE(projected_p95 >= 95.0);
+    ASSERT_TRUE(projected_p95 <= 122.0);
+    ASSERT_TRUE(projected_p99 <= 152.0);
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePlayActionAdvancesFrame)

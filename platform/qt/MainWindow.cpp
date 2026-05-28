@@ -302,8 +302,9 @@ static bool lookAssistHasNeutralBalanceSamples( const LookAssistStats &stats )
 
 static int lookAssistAutoTintCap( LookAssistScene scene, bool processedFloorLiftedBalance )
 {
+    (void)processedFloorLiftedBalance;
     if( scene == LookAssistScene::BrightSun ) return 8;
-    return processedFloorLiftedBalance ? 12 : 22;
+    return 22;
 }
 
 static LookAssistAutoWhiteBalancePatch findLookAssistAutoWhiteBalancePatch(
@@ -398,6 +399,17 @@ static bool lookAssistAutoWhiteBalanceSolutionIsStable(
         && patch.chroma <= 6.0
         && qAbs( temperatureDelta ) <= 1000;
     if( hardGreenClampFromBrightNeutralPatch )
+    {
+        return false;
+    }
+
+    const bool hardGreenClampFromLowChromaMidtonePatch =
+        candidateTint <= -34
+        && patch.luma >= 70.0
+        && patch.luma <= 160.0
+        && patch.chroma <= 8.0
+        && qAbs( temperatureDelta ) <= 1200;
+    if( hardGreenClampFromLowChromaMidtonePatch )
     {
         return false;
     }
@@ -536,8 +548,8 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
     {
         maxExposure = ( stats.p99 < 55.0 ) ? 380 : 260;
         minExposure = -40;
-        p95Ceiling = floorLiftedNightThumbnail ? 72.0 : 142.0;
-        p99Ceiling = floorLiftedNightThumbnail ? 94.0 : 188.0;
+        p95Ceiling = floorLiftedNightThumbnail ? 108.0 : 142.0;
+        p99Ceiling = floorLiftedNightThumbnail ? 140.0 : 188.0;
     }
     else if( scene == LookAssistScene::ArtificialLights )
     {
@@ -3425,6 +3437,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         state.insert( QStringLiteral("highlights"), ui->horizontalSliderHighlights->value() );
         state.insert( QStringLiteral("raw_black"), ui->horizontalSliderRawBlack->value() );
         state.insert( QStringLiteral("raw_white"), ui->horizontalSliderRawWhite->value() );
+        state.insert( QStringLiteral("chroma_smooth"), toolButtonChromaSmoothCurrentIndex() );
         state.insert( QStringLiteral("frame"), ui->horizontalSliderPosition->value() );
         state.insert( QStringLiteral("last_presented_request_serial"),
                       static_cast<double>( m_lastPresentedRequestSerial ) );
@@ -3525,7 +3538,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             << QStringLiteral("shadows")
             << QStringLiteral("highlights")
             << QStringLiteral("raw_black")
-            << QStringLiteral("raw_white");
+            << QStringLiteral("raw_white")
+            << QStringLiteral("chroma_smooth");
 
         for( const QString &field : integerFields )
         {
@@ -4018,6 +4032,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     ui->horizontalSliderRawBlack->value() );
     metadata.insert( QStringLiteral("look_assist_raw_white"),
                     ui->horizontalSliderRawWhite->value() );
+    metadata.insert( QStringLiteral("look_assist_chroma_smooth"),
+                    toolButtonChromaSmoothCurrentIndex() );
+    metadata.insert( QStringLiteral("look_assist_chroma_smooth_auto_applied"),
+                    m_lastLookAssistChromaSmoothAutoApplied );
     metadata.insert( QStringLiteral("look_assist_original_raw_black"),
                     m_pMlvObject ? (int)getMlvOriginalBlackLevel( m_pMlvObject ) : -1 );
     metadata.insert( QStringLiteral("look_assist_original_raw_white"),
@@ -4026,6 +4044,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     m_pMlvObject ? (int)autoCorrectRawBlackLevel() : -1 );
     metadata.insert( QStringLiteral("look_assist_auto_white_candidate"),
                     m_pMlvObject ? (int)autoCorrectRawWhiteLevel() : -1 );
+    metadata.insert( QStringLiteral("look_assist_restricted_lossless_output_white"),
+                    m_pMlvObject ? (int)restrictedLosslessDualIsoOutputWhiteLevel() : -1 );
     metadata.insert( QStringLiteral("look_assist_exposure"),
                     ui->horizontalSliderExposure->value() );
     metadata.insert( QStringLiteral("look_assist_contrast"),
@@ -7994,6 +8014,11 @@ void MainWindow::readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings
             receipt->setLookAssistBaselineRawWhite( Rxml->readElementText().toInt() );
             Rxml->readNext();
         }
+        else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineChromaSmooth" ) )
+        {
+            receipt->setLookAssistBaselineChromaSmooth( Rxml->readElementText().toInt() );
+            Rxml->readNext();
+        }
         else if( Rxml->isStartElement() && Rxml->name() == QString( "lookAssistBaselineStretchX" ) )
         {
             receipt->setLookAssistBaselineStretchX( Rxml->readElementText().toDouble() );
@@ -8216,6 +8241,7 @@ void MainWindow::writeXmlElementsToFile(QXmlStreamWriter *xmlWriter, ReceiptSett
     xmlWriter->writeTextElement( "lookAssistBaselineHighlights", QString( "%1" ).arg( receipt->lookAssistBaselineHighlights() ) );
     xmlWriter->writeTextElement( "lookAssistBaselineRawBlack", QString( "%1" ).arg( receipt->lookAssistBaselineRawBlack() ) );
     xmlWriter->writeTextElement( "lookAssistBaselineRawWhite", QString( "%1" ).arg( receipt->lookAssistBaselineRawWhite() ) );
+    xmlWriter->writeTextElement( "lookAssistBaselineChromaSmooth", QString( "%1" ).arg( receipt->lookAssistBaselineChromaSmooth() ) );
     xmlWriter->writeTextElement( "verticalStripes",         QString( "%1" ).arg( receipt->verticalStripes() ) );
     xmlWriter->writeTextElement( "focusPixels",             QString( "%1" ).arg( receipt->focusPixels() ) );
     xmlWriter->writeTextElement( "fpiMethod",               QString( "%1" ).arg( receipt->fpiMethod() ) );
@@ -8935,6 +8961,7 @@ void MainWindow::captureLookAssistBaseline( ReceiptSettings *receipt )
     else
         receipt->setLookAssistBaselineRawWhite( -1 );
 
+    receipt->setLookAssistBaselineChromaSmooth( toolButtonChromaSmoothCurrentIndex() );
     receipt->setLookAssistBaselineValid( true );
 }
 
@@ -8952,6 +8979,7 @@ void MainWindow::restoreLookAssistBaseline( ReceiptSettings *receipt )
     receipt->setHighlights( receipt->lookAssistBaselineHighlights() );
     receipt->setRawBlack( receipt->lookAssistBaselineRawBlack() );
     receipt->setRawWhite( receipt->lookAssistBaselineRawWhite() );
+    receipt->setChromaSmooth( qBound( 0, receipt->lookAssistBaselineChromaSmooth(), 3 ) );
 
     ui->horizontalSliderExposure->setValue( receipt->exposure() );
     ui->horizontalSliderContrast->setValue( receipt->contrast() );
@@ -8965,6 +8993,8 @@ void MainWindow::restoreLookAssistBaseline( ReceiptSettings *receipt )
         ui->horizontalSliderRawBlack->setValue( receipt->rawBlack() );
     if( receipt->rawWhite() != -1 )
         ui->horizontalSliderRawWhite->setValue( receipt->rawWhite() );
+    setToolButtonChromaSmooth( receipt->chromaSmooth() );
+    toolButtonChromaSmoothChanged();
 }
 
 void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
@@ -8994,6 +9024,8 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistAutoWhiteBalanceLuma = 0.0;
     m_lastLookAssistAutoWhiteBalanceChroma = 0.0;
     m_lastLookAssistColorCastWarning.clear();
+    m_lastLookAssistChromaSmooth = toolButtonChromaSmoothCurrentIndex();
+    m_lastLookAssistChromaSmoothAutoApplied = false;
     if( !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
     {
         logInteractionEvent(
@@ -9120,6 +9152,15 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     const int colorHeight = raw_h / colorDownscaleFactor;
     const bool canAnalyzeProcessedColor =
         floorLiftedNightThumbnail && colorWidth > 0 && colorHeight > 0;
+    if( canAnalyzeProcessedColor
+     && toolButtonChromaSmoothCurrentIndex() == 0
+     && restrictedLosslessDualIsoOutputWhiteLevel() > getMlvOriginalWhiteLevel( m_pMlvObject ) )
+    {
+        setToolButtonChromaSmooth( 2 );
+        toolButtonChromaSmoothChanged();
+        receipt->setChromaSmooth( 2 );
+        m_lastLookAssistChromaSmoothAutoApplied = true;
+    }
     LookAssistStats processedColorStats;
     bool useProcessedColorStats = false;
     QByteArray processedThumbnail;
@@ -9433,7 +9474,6 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 }
             }
             if( postColorStatsValid
-             && !autoWhiteBalanceValid
              && lookAssistHasNeutralBalanceSamples( postColorStats )
              && postColorStats.greenArtifactRatio >= 0.004
              && postColorStats.greenArtifactMeanAxis >= 30.0 )
@@ -9442,14 +9482,14 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     postColorStats.visibleMeanG
                     - ( ( postColorStats.visibleMeanR
                         + postColorStats.visibleMeanB ) * 0.5 );
-                const int cleanupTintCeiling = qMin( postTintCap, 12 );
+                const int cleanupTintCeiling = qMin( postTintCap, 22 );
                 if( postVisibleGreenAxis > 3.0
                  && preset.tintDelta < cleanupTintCeiling )
                 {
                     const int cleanupTintTarget =
                         qBound( preset.tintDelta,
-                                (int)qRound( postColorStats.greenArtifactMeanAxis * 0.18
-                                           + postColorStats.greenArtifactRatio * 120.0 ),
+                                (int)qRound( postColorStats.greenArtifactMeanAxis * 0.20
+                                           + postColorStats.greenArtifactRatio * 180.0 ),
                                 cleanupTintCeiling );
                     if( cleanupTintTarget > preset.tintDelta )
                     {
@@ -9458,6 +9498,112 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         applyLookAssistValues();
                         postColorStatsValid = analyzePostAppliedLook();
                     }
+                }
+            }
+            if( postColorStatsValid
+             && toolButtonChromaSmoothCurrentIndex() == 0
+             && restrictedLosslessDualIsoOutputWhiteLevel() > getMlvOriginalWhiteLevel( m_pMlvObject ) )
+            {
+                const double postVisibleGreenAxis =
+                    postColorStats.visibleMeanG
+                    - ( ( postColorStats.visibleMeanR
+                        + postColorStats.visibleMeanB ) * 0.5 );
+                const double postBlueAmberAxis =
+                    postColorStats.balanceB - postColorStats.balanceR;
+                const QString postWarning =
+                    lookAssistColorCastWarning( true,
+                                                postColorStats,
+                                                postVisibleGreenAxis,
+                                                temperature,
+                                                postBlueAmberAxis );
+                const bool dualIsoGreenArtifact =
+                    postWarning == QStringLiteral("localized-green-artifact")
+                    || postWarning == QStringLiteral("global-green-cast")
+                    || ( postColorStats.greenArtifactRatio >= 0.04
+                         && postColorStats.greenArtifactMeanAxis >= 20.0
+                         && postVisibleGreenAxis > 4.0 );
+                if( dualIsoGreenArtifact )
+                {
+                    setToolButtonChromaSmooth( 2 );
+                    toolButtonChromaSmoothChanged();
+                    receipt->setChromaSmooth( 2 );
+                    m_lastLookAssistChromaSmoothAutoApplied = true;
+                    postColorStatsValid = analyzePostAppliedLook();
+                }
+            }
+            if( postColorStatsValid
+             && restrictedLosslessDualIsoOutputWhiteLevel() > getMlvOriginalWhiteLevel( m_pMlvObject ) )
+            {
+                const double postVisibleGreenAxis =
+                    postColorStats.visibleMeanG
+                    - ( ( postColorStats.visibleMeanR
+                        + postColorStats.visibleMeanB ) * 0.5 );
+                const double postBlueAmberAxis =
+                    postColorStats.balanceB - postColorStats.balanceR;
+                const QString postWarning =
+                    lookAssistColorCastWarning( true,
+                                                postColorStats,
+                                                postVisibleGreenAxis,
+                                                temperature,
+                                                postBlueAmberAxis );
+                if( postWarning != QStringLiteral("none") )
+                {
+                    auto warningAwarePostBalanceScore =
+                        [&]( const LookAssistStats &candidate ) -> double
+                    {
+                        const double visibleGreenAxis =
+                            candidate.visibleMeanG
+                            - ( ( candidate.visibleMeanR
+                                + candidate.visibleMeanB ) * 0.5 );
+                        const double blueAmberAxis =
+                            candidate.balanceB - candidate.balanceR;
+                        const QString warning =
+                            lookAssistColorCastWarning( true,
+                                                        candidate,
+                                                        visibleGreenAxis,
+                                                        temperature,
+                                                        blueAmberAxis );
+                        return postBalanceScore( candidate )
+                            + ( warning == QStringLiteral("none") ? 0.0 : 1000.0 );
+                    };
+
+                    const LookAssistPreset startingPreset = preset;
+                    LookAssistPreset bestPreset = preset;
+                    LookAssistStats bestPostColorStats = postColorStats;
+                    double bestScore = warningAwarePostBalanceScore( postColorStats );
+                    const QPair<int, int> recoveryCandidates[] =
+                    {
+                        qMakePair( initialTemperatureDelta, initialTintDelta ),
+                        qMakePair( 500, -20 ),
+                        qMakePair( 500, -16 ),
+                        qMakePair( 500, -23 ),
+                        qMakePair( 250, 22 ),
+                        qMakePair( 300, 12 ),
+                        qMakePair( 0, 0 ),
+                        qMakePair( 0, -20 ),
+                        qMakePair( -500, -35 )
+                    };
+                    for( const QPair<int, int> &candidate : recoveryCandidates )
+                    {
+                        preset = startingPreset;
+                        preset.temperatureDelta = qBound( -1200, candidate.first, 1200 );
+                        preset.tintDelta = qBound( -35, candidate.second, postTintCap );
+                        applyLookAssistValues();
+                        if( !analyzePostAppliedLook() ) continue;
+
+                        const double candidateScore =
+                            warningAwarePostBalanceScore( postColorStats );
+                        if( candidateScore + 1.0 < bestScore )
+                        {
+                            bestScore = candidateScore;
+                            bestPreset = preset;
+                            bestPostColorStats = postColorStats;
+                        }
+                    }
+                    preset = bestPreset;
+                    postColorStats = bestPostColorStats;
+                    postColorStatsValid = true;
+                    applyLookAssistValues();
                 }
             }
         }
@@ -9533,6 +9679,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                          : 0.0;
     m_lastLookAssistPostTemperatureDelta = postTemperatureDelta;
     m_lastLookAssistPostTintDelta = postTintDelta;
+    m_lastLookAssistChromaSmooth = toolButtonChromaSmoothCurrentIndex();
     const double postBlueAmberAxis = postColorStatsValid
                                    ? postColorStats.balanceB - postColorStats.balanceR
                                    : 0.0;
@@ -9584,7 +9731,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.post_balance"),
-        QStringLiteral("valid=%1 warning=%2 balance_r=%3 balance_g=%4 balance_b=%5 balance_samples=%6 green_axis=%7 blue_amber_axis=%8 visible_green_axis=%9 green_artifact_ratio=%10 green_artifact_axis=%11 post_temp_delta=%12 post_tint_delta=%13 final_temp_delta=%14 final_tint_delta=%15")
+        QStringLiteral("valid=%1 warning=%2 balance_r=%3 balance_g=%4 balance_b=%5 balance_samples=%6 green_axis=%7 blue_amber_axis=%8 visible_green_axis=%9 green_artifact_ratio=%10 green_artifact_axis=%11 post_temp_delta=%12 post_tint_delta=%13 final_temp_delta=%14 final_tint_delta=%15 chroma_smooth=%16 chroma_auto=%17")
             .arg( bool01( postColorStatsValid ) )
             .arg( m_lastLookAssistColorCastWarning )
             .arg( postColorStatsValid ? postColorStats.balanceR : 0.0, 0, 'f', 3 )
@@ -9604,7 +9751,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( postTemperatureDelta )
             .arg( postTintDelta )
             .arg( preset.temperatureDelta )
-            .arg( preset.tintDelta ) );
+            .arg( preset.tintDelta )
+            .arg( m_lastLookAssistChromaSmooth )
+            .arg( bool01( m_lastLookAssistChromaSmoothAutoApplied ) ) );
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
@@ -9653,6 +9802,7 @@ void MainWindow::syncLookAssistDerivedUiToReceipt( ReceiptSettings *receipt )
     receipt->setRawFixesEnabled( ui->checkBoxRawFixEnable->isChecked() );
     receipt->setRawBlack( ui->horizontalSliderRawBlack->value() );
     receipt->setRawWhite( ui->horizontalSliderRawWhite->value() );
+    receipt->setChromaSmooth( toolButtonChromaSmoothCurrentIndex() );
 }
 
 void MainWindow::resetSliders( void )
@@ -16454,25 +16604,45 @@ uint16_t MainWindow::autoCorrectRawWhiteLevel()
 
     if( restrictedLossless && dualIsoEnabled )
     {
-        const int publishedWhite =
-            m_pMlvObject->llrawproc ? m_pMlvObject->llrawproc->dng_white_level : 0;
-        if( publishedWhite > originalWhite && publishedWhite <= 16383 )
-        {
-            white = publishedWhite;
-        }
-        else
-        {
-            const int black = autoCorrectRawBlackLevel();
-            const int range = qMax( 1, originalWhite - black );
-            const int bitDepth = qBound( 1, (int)ceil( log2( (double)range ) ), 14 );
-            const int shift = qMax( 0, 14 - bitDepth );
-            const int scaledWhite = range * ( 1 << shift );
-            if( scaledWhite > originalWhite )
-                white = qMin( 16383, scaledWhite );
-        }
+        // Keep RAWI/header white in the restricted-lossless input range.
+        // llrawproc uses white < 15000 as the signal to expand LJ92 Dual ISO
+        // frames; writing the post-expansion DNG white here disables that
+        // scaling and makes playback too dark/green.
+        white = originalWhite;
     }
 
     return static_cast<uint16_t>( qBound( 0, white, 65535 ) );
+}
+
+uint16_t MainWindow::restrictedLosslessDualIsoOutputWhiteLevel()
+{
+    if( !m_pMlvObject ) return 0;
+
+    const int originalWhite = getMlvOriginalWhiteLevel( m_pMlvObject );
+    const bool restrictedLossless =
+        ( m_pMlvObject->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92 )
+        && originalWhite > 0
+        && originalWhite < 15000;
+    const bool dualIsoEnabled =
+        llrpGetDualIsoValidity( m_pMlvObject ) != DISO_INVALID
+        && toolButtonDualIsoCurrentIndex() > 0;
+
+    if( !restrictedLossless || !dualIsoEnabled )
+        return static_cast<uint16_t>( qBound( 0, originalWhite, 65535 ) );
+
+    const int publishedWhite =
+        m_pMlvObject->llrawproc ? m_pMlvObject->llrawproc->dng_white_level : 0;
+    if( publishedWhite > originalWhite && publishedWhite <= 16383 )
+    {
+        return static_cast<uint16_t>( publishedWhite );
+    }
+
+    const int black = autoCorrectRawBlackLevel();
+    const int range = qMax( 1, originalWhite - black );
+    const int bitDepth = qBound( 1, (int)ceil( log2( (double)range ) ), 14 );
+    const int shift = qMax( 0, 14 - bitDepth );
+    const int scaledWhite = range * ( 1 << shift );
+    return static_cast<uint16_t>( qBound( 0, qMax( originalWhite, scaledWhite ), 16383 ) );
 }
 
 //Get info, if RAW black level is wrong
