@@ -728,6 +728,7 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 #include "batch/BatchPrompts.h"
 #include "batch/BatchLogger.h"
 #include "batch/ReceiptLoader.h"
+#include "batch/ReceiptSafety.h"
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -8565,6 +8566,8 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
         else setToolButtonVerticalStripes( 0 );
     }
     else setToolButtonVerticalStripes( receipt->verticalStripes() );
+
+    receiptSanitizeClipLocalDualIsoState( receipt, m_pMlvObject );
 
     //Init
     if( receipt->dualIsoForced() == -1 )

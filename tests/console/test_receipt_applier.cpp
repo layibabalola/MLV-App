@@ -33,6 +33,8 @@ static void seed_runtime_objects(mlvObject_t * video,
     video->RAWI.raw_info.bits_per_pixel = 14;
     video->RAWI.raw_info.black_level = 2048;
     video->RAWI.raw_info.white_level = 15000;
+    video->original_black_level = video->RAWI.raw_info.black_level;
+    video->original_white_level = video->RAWI.raw_info.white_level;
     video->IDNT.cameraModel = 0x80000285;
     video->frames = 4;
     video->cached_frames = static_cast<uint8_t *>(std::calloc(static_cast<std::size_t>(video->frames),
@@ -161,6 +163,101 @@ TEST(ReceiptApplier, PreviewDualIsoModeSurvivesWhenAutoCorrectionIsDisabled)
 
     ASSERT_EQ(2, llrawproc->dual_iso);
     ASSERT_EQ(0, llrawproc->diso_pattern);
+
+    destroy_runtime_objects(video.get());
+}
+
+TEST(ReceiptApplier, ValidDualIsoClipIgnoresCopiedCorrectionState)
+{
+    ReceiptSettings receipt;
+    receipt.setRawFixesEnabled(true);
+    receipt.setFocusPixels(1);
+    receipt.setBadPixels(0);
+    receipt.setDualIsoForced(DISO_VALID);
+    receipt.setDualIso(1);
+    receipt.setDualIsoAutoCorrected(1);
+    receipt.setDualIsoPattern(0);
+    receipt.setDualIsoEvCorrection(1);
+    receipt.setDualIsoBlackDelta(-1);
+    receipt.setDualIsoInterpolation(0);
+    receipt.setDualIsoAliasMap(1);
+    receipt.setDualIsoFrBlending(1);
+    receipt.setDualIsoWhite(64346);
+    receipt.setDualIsoBlack(8188);
+    receipt.setDarkFrameEnabled(0);
+    receipt.setRawBlack(12340);
+    receipt.setRawWhite(16200);
+
+    auto video = std::make_unique<mlvObject_t>();
+    auto llrawproc = std::make_unique<llrawprocObject_t>();
+    auto processing = std::make_unique<processingObject_t>();
+    seed_runtime_objects(video.get(), llrawproc.get(), processing.get());
+
+    llrawproc->diso_validity = DISO_VALID;
+    llrawproc->diso1 = 100;
+    llrawproc->diso2 = 6400;
+    llrawproc->diso_auto_correction = 2;
+    video->MLVI.videoClass = MLV_VIDEO_CLASS_FLAG_LJ92;
+    video->RAWI.raw_info.black_level = 2047;
+    video->RAWI.raw_info.white_level = 6000;
+    video->original_black_level = 2047;
+    video->original_white_level = 6000;
+
+    ReceiptApplier::applyToMlv(&receipt, video.get(), processing.get());
+
+    ASSERT_EQ(DISO_VALID, receipt.dualIsoForced());
+    ASSERT_EQ(1, receipt.dualIso());
+    ASSERT_EQ(0, receipt.dualIsoAutoCorrected());
+    ASSERT_EQ(0, receipt.dualIsoPattern());
+    ASSERT_EQ(1, receipt.dualIsoEvCorrection());
+    ASSERT_EQ(-1, receipt.dualIsoBlackDelta());
+    ASSERT_EQ(0u, receipt.dualIsoWhite());
+    ASSERT_EQ(0u, receipt.dualIsoBlack());
+    ASSERT_EQ(20470, receipt.rawBlack());
+    ASSERT_EQ(6000, receipt.rawWhite());
+
+    ASSERT_EQ(1, llrawproc->dual_iso);
+    ASSERT_EQ(0, llrawproc->diso_pattern);
+    ASSERT_EQ(-1, llrawproc->diso_auto_correction);
+    ASSERT_EQ(1.0, llrawproc->diso_ev_correction);
+    ASSERT_EQ(-1, llrawproc->diso_black_delta);
+    ASSERT_EQ(2047, video->RAWI.raw_info.black_level);
+    ASSERT_EQ(6000, video->RAWI.raw_info.white_level);
+
+    destroy_runtime_objects(video.get());
+}
+
+TEST(ReceiptApplier, NonDualIsoClipDoesNotInheritValidDualIsoReceipt)
+{
+    ReceiptSettings receipt;
+    receipt.setRawFixesEnabled(true);
+    receipt.setFocusPixels(1);
+    receipt.setBadPixels(0);
+    receipt.setDualIsoForced(DISO_VALID);
+    receipt.setDualIso(1);
+    receipt.setDualIsoAutoCorrected(1);
+    receipt.setDualIsoPattern(3);
+    receipt.setDualIsoEvCorrection(220);
+    receipt.setDualIsoBlackDelta(15);
+    receipt.setDualIsoInterpolation(0);
+    receipt.setDualIsoAliasMap(1);
+    receipt.setDualIsoFrBlending(1);
+    receipt.setDarkFrameEnabled(0);
+    receipt.setRawBlack(-1);
+    receipt.setRawWhite(-1);
+
+    auto video = std::make_unique<mlvObject_t>();
+    auto llrawproc = std::make_unique<llrawprocObject_t>();
+    auto processing = std::make_unique<processingObject_t>();
+    seed_runtime_objects(video.get(), llrawproc.get(), processing.get());
+    llrawproc->diso_validity = DISO_INVALID;
+
+    ReceiptApplier::applyToMlv(&receipt, video.get(), processing.get());
+
+    ASSERT_EQ(DISO_INVALID, receipt.dualIsoForced());
+    ASSERT_EQ(0, receipt.dualIso());
+    ASSERT_EQ(0, llrawproc->dual_iso);
+    ASSERT_EQ(DISO_INVALID, llrawproc->diso_validity);
 
     destroy_runtime_objects(video.get());
 }
