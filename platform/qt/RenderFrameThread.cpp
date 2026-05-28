@@ -50,6 +50,16 @@ bool phase3StageCsvSinkEnsureOpen()
     return true;
 }
 
+QString phase4bPathLabel( int path )
+{
+    switch( path )
+    {
+    case 3: return QStringLiteral("full-xy-pre-recon");
+    case 2: return QStringLiteral("x-only-pre-recon");
+    default: return QStringLiteral("none-or-full-recon-fallback");
+    }
+}
+
 } // namespace
 
 //Constructor
@@ -1606,6 +1616,38 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_playback_scale_factor_clamped"),
         playbackScaleFactorActive != playbackScaleFactor );
+    const int phase4bPath = playbackScaleFactorActive > 1
+                           ? mlv_phase4bv2_last_path_taken()
+                           : 0;
+    const int phase4bCropRows = playbackScaleFactorActive > 1
+                               ? mlv_phase4bv3_last_y_crop_rows()
+                               : 0;
+    const qint64 sourcePixels =
+        static_cast<qint64>( qMax( 0, m_imageWidth ) )
+        * static_cast<qint64>( qMax( 0, m_imageHeight ) );
+    const qint64 renderedPixels =
+        static_cast<qint64>( qMax( 0, renderedImageWidth ) )
+        * static_cast<qint64>( qMax( 0, renderedImageHeight ) );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_phase4b_path"),
+        phase4bPath );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_phase4b_path_label"),
+        phase4bPathLabel( phase4bPath ) );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_phase4b_y_crop_rows"),
+        phase4bCropRows );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_scale_sensor_pixels"),
+        sourcePixels );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_scale_output_pixels"),
+        renderedPixels );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_scale_pixel_retention_ratio"),
+        (sourcePixels > 0)
+            ? static_cast<double>( renderedPixels ) / static_cast<double>( sourcePixels )
+            : 0.0 );
     if( m_lastLoggedPlaybackScaleFactorRequest != playbackScaleFactor
      || m_lastLoggedPlaybackScaleFactorActive != playbackScaleFactorActive )
     {
@@ -1624,6 +1666,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
             << m_activePresentationPreparationOptions.targetHeight
             << " clamped="
             << (playbackScaleFactorActive != playbackScaleFactor)
+            << " phase4b_path="
+            << phase4bPath
             << " outputMode="
             << static_cast<int>( outputMode );
         m_lastLoggedPlaybackScaleFactorRequest = playbackScaleFactor;
@@ -1658,6 +1702,21 @@ void RenderFrameThread::drawFrame( int slotIndex,
          || sourceHeightForScaler != m_activePresentationPreparationOptions.targetHeight;
         const bool useBilinearPresentationScale =
             playbackScaleFactorActive > 1 && presentationResize;
+        const bool useCubicPresentationScale =
+            playbackScaleFactorActive >= 4
+            && phase4bPath == 0
+            && upscaling
+            && presentationResize;
+        const double stretchX =
+            (sourceWidthForScaler > 0)
+                ? static_cast<double>( m_activePresentationPreparationOptions.targetWidth )
+                  / static_cast<double>( sourceWidthForScaler )
+                : 0.0;
+        const double stretchY =
+            (sourceHeightForScaler > 0)
+                ? static_cast<double>( m_activePresentationPreparationOptions.targetHeight )
+                  / static_cast<double>( sourceHeightForScaler )
+                : 0.0;
         slot.stageTimingTelemetry.insert(
             QStringLiteral("render_thread_playback_scale_target_width"),
             m_activePresentationPreparationOptions.targetWidth );
@@ -1667,9 +1726,28 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.stageTimingTelemetry.insert(
             QStringLiteral("render_thread_playback_scale_upscaling"),
             upscaling );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_playback_scale_source_to_target_x"),
+            stretchX );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_playback_scale_source_to_target_y"),
+            stretchY );
         bool bilinearUsed = false;
+        bool cubicUsed = false;
 
-        if( useBilinearPresentationScale )
+        if( useCubicPresentationScale )
+        {
+            slot.playbackFastScaleActive =
+                playbackBuildCubicScaledRgb8( slot.rawImage8.data(),
+                                              sourceWidthForScaler,
+                                              sourceHeightForScaler,
+                                              m_activePresentationPreparationOptions.targetWidth,
+                                              m_activePresentationPreparationOptions.targetHeight,
+                                              slot.playbackScaledImage8,
+                                              m_playbackCubicScaleCache );
+            cubicUsed = slot.playbackFastScaleActive;
+        }
+        if( !slot.playbackFastScaleActive && useBilinearPresentationScale )
         {
             slot.playbackFastScaleActive =
                 playbackBuildBilinearScaledRgb8( slot.rawImage8.data(),
@@ -1681,7 +1759,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                                  m_playbackBilinearScaleCache );
             bilinearUsed = slot.playbackFastScaleActive;
         }
-        else
+        if( !slot.playbackFastScaleActive )
         {
             slot.playbackFastScaleActive =
                 playbackBuildFastScaledRgb8( slot.rawImage8.data(),
@@ -1701,6 +1779,16 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                           slot.playbackFastScaleActive );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_bilinear"),
                                           bilinearUsed );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_cubic"),
+                                          cubicUsed );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_resampler"),
+                                          cubicUsed
+                                              ? QStringLiteral("cubic")
+                                              : (bilinearUsed
+                                                     ? QStringLiteral("bilinear")
+                                                     : (slot.playbackFastScaleActive
+                                                            ? QStringLiteral("nearest")
+                                                            : QStringLiteral("none"))) );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_ms"),
                                           (mlv_stage_timing_now() - playbackScaleStart) * 1000.0 );
     }
@@ -1712,10 +1800,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                           0 );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_upscaling"),
                                           false );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_source_to_target_x"),
+                                          0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_source_to_target_y"),
+                                          0.0 );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_active"),
                                           false );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_bilinear"),
                                           false );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_cubic"),
+                                          false );
+        slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_resampler"),
+                                          QStringLiteral("none") );
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_ms"),
                                           0.0 );
     }

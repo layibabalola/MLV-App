@@ -410,6 +410,75 @@ static bool lookAssistAutoWhiteBalanceSolutionIsStable(
     return !implausibleDualAxisSwing;
 }
 
+static double lookAssistAutoWhiteBalanceDampingFactor(
+        const LookAssistAutoWhiteBalancePatch &patch,
+        int baseTemperature,
+        int baseTint,
+        int candidateTemperature,
+        int candidateTint,
+        LookAssistScene scene )
+{
+    if( !patch.valid ) return 1.0;
+
+    const int temperatureDelta = candidateTemperature - baseTemperature;
+    const int tintDelta = candidateTint - baseTint;
+    double factor = 1.0;
+
+    if( patch.chroma >= 14.0 && qAbs( temperatureDelta ) >= 900 )
+    {
+        factor = qMin( factor, 0.70 );
+    }
+    if( patch.chroma >= 10.0 && qAbs( temperatureDelta ) >= 1200 )
+    {
+        factor = qMin( factor, 0.65 );
+    }
+    if( patch.chroma >= 10.0 && qAbs( tintDelta ) >= 24 )
+    {
+        factor = qMin( factor, 0.75 );
+    }
+    if( scene == LookAssistScene::Night
+     && patch.luma < 150.0
+     && qAbs( temperatureDelta ) >= 1000 )
+    {
+        factor = qMin( factor, 0.70 );
+    }
+    return factor;
+}
+
+static QString lookAssistColorCastWarning(
+        bool postColorStatsValid,
+        const LookAssistStats &postColorStats,
+        double postVisibleGreenAxis,
+        int finalTemperature,
+        double postBlueAmberAxis )
+{
+    if( postColorStatsValid )
+    {
+        if( postColorStats.greenArtifactRatio >= 0.10
+         && postColorStats.greenArtifactMeanAxis >= 25.0 )
+        {
+            return QStringLiteral("localized-green-artifact");
+        }
+        if( postVisibleGreenAxis >= 8.0 )
+        {
+            return QStringLiteral("global-green-cast");
+        }
+        if( postVisibleGreenAxis <= -8.0 )
+        {
+            return QStringLiteral("global-magenta-cast");
+        }
+        if( finalTemperature <= 5200 && postBlueAmberAxis >= 4.0 )
+        {
+            return QStringLiteral("cool-blue-cast");
+        }
+        if( finalTemperature >= 6800 && postBlueAmberAxis <= -4.0 )
+        {
+            return QStringLiteral("warm-amber-cast");
+        }
+    }
+    return QStringLiteral("none");
+}
+
 static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
                                                   const LookAssistStats &stats,
                                                   const LookAssistStats *colorStats = nullptr )
@@ -1924,27 +1993,30 @@ bool MainWindow::consumePresentationRequest( uint64_t requestSerial,
 // Conflation is by request serial: only the latest requested serial can present.
 void MainWindow::enqueuePlaybackPrepTask( const PlaybackPrepTask &task )
 {
+    PlaybackPrepTask ownedTask = task;
+    ownedTask.rebindOwnedImagePointers();
+
     const uint64_t activeGeneration =
         m_playbackPresentationGeneration.load( std::memory_order_acquire );
-    if( task.presentationGeneration != activeGeneration )
+    if( ownedTask.presentationGeneration != activeGeneration )
     {
         m_playbackPrepStaleDropCount.fetch_add( 1, std::memory_order_acq_rel );
         m_playbackPrepGenerationDropCount.fetch_add( 1, std::memory_order_acq_rel );
         logInteractionEvent(
             QStringLiteral("playback_prep.drop_enqueue_generation"),
             QStringLiteral("serial=%1 task_generation=%2 active_generation=%3 requested_scale=%4 active_scale=%5")
-                .arg( static_cast<qulonglong>( task.requestSerial ) )
-                .arg( static_cast<qulonglong>( task.presentationGeneration ) )
+                .arg( static_cast<qulonglong>( ownedTask.requestSerial ) )
+                .arg( static_cast<qulonglong>( ownedTask.presentationGeneration ) )
                 .arg( static_cast<qulonglong>( activeGeneration ) )
-                .arg( task.requestContext.playbackScaleFactor )
-                .arg( task.readyFrame.playbackScaleFactorActive ),
+                .arg( ownedTask.requestContext.playbackScaleFactor )
+                .arg( ownedTask.readyFrame.playbackScaleFactorActive ),
             true );
         if( m_pRenderThread )
-            m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
+            m_pRenderThread->releasePresentedFrameForRequestSerial( ownedTask.requestSerial );
         return;
     }
 
-    m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
+    m_latestRequestedSerial.store( ownedTask.requestSerial, std::memory_order_release );
     {
         std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
         if( m_playbackPrepPendingValid )
@@ -1954,7 +2026,8 @@ void MainWindow::enqueuePlaybackPrepTask( const PlaybackPrepTask &task )
                 m_pRenderThread->releasePresentedFrameForRequestSerial(
                     m_playbackPrepPending.requestSerial );
         }
-        m_playbackPrepPending = task;
+        m_playbackPrepPending = ownedTask;
+        m_playbackPrepPending.rebindOwnedImagePointers();
         m_playbackPrepPendingValid = true;
     }
     m_playbackPrepCv.notify_one();
@@ -2024,6 +2097,7 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
 {
     PlaybackPrepResult result;
     result.task = task;
+    result.task.rebindOwnedImagePointers();
 
     const double image_start = mlv_stage_timing_now();
 
@@ -2063,9 +2137,6 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
          && task.sourceImageSize >= sourceImageBytes)
             ? task.sourceImage
             : task.readyFrame.rawImage8;
-    result.task.scopeSourceImage = task.scopeSourceImage;
-    result.task.scopeSourceImageSize = task.scopeSourceImageSize;
-
     const bool playbackProcessingSubsetActive =
         (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
         && gpuPreviewProcessingConfig.enabled;
@@ -2302,6 +2373,7 @@ void MainWindow::playbackPrepThreadLoop( void )
             } );
             if( m_playbackPrepStop.load( std::memory_order_acquire ) ) return;
             task = m_playbackPrepPending;
+            task.rebindOwnedImagePointers();
             m_playbackPrepPendingValid = false;
         }
 
@@ -2364,6 +2436,7 @@ void MainWindow::playbackPrepThreadLoop( void )
                 m_playbackPrepResults.clear();
             }
             m_playbackPrepResults.push_back( std::move( result ) );
+            m_playbackPrepResults.back().task.rebindOwnedImagePointers();
         }
         emit playbackPrepResultReady();
     }
@@ -2376,6 +2449,7 @@ void MainWindow::onPlaybackPrepResultReady( void )
         std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
         if( m_playbackPrepResults.empty() ) return;
         result = std::move( m_playbackPrepResults.front() );
+        result.task.rebindOwnedImagePointers();
         m_playbackPrepResults.pop_front();
     }
 
@@ -3994,10 +4068,18 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                          m_lastLookAssistAutoWhiteBalanceValid );
         metadata.insert( QStringLiteral("look_assist_auto_wb_source"),
                          m_lastLookAssistAutoWhiteBalanceSource );
+        metadata.insert( QStringLiteral("look_assist_auto_wb_decision"),
+                         m_lastLookAssistAutoWhiteBalanceDecision );
+        metadata.insert( QStringLiteral("look_assist_auto_wb_damping"),
+                         m_lastLookAssistAutoWhiteBalanceDamping );
         metadata.insert( QStringLiteral("look_assist_auto_wb_temperature"),
                          m_lastLookAssistAutoWhiteBalanceTemperature );
         metadata.insert( QStringLiteral("look_assist_auto_wb_tint"),
                          m_lastLookAssistAutoWhiteBalanceTint );
+        metadata.insert( QStringLiteral("look_assist_auto_wb_candidate_temperature"),
+                         m_lastLookAssistAutoWhiteBalanceCandidateTemperature );
+        metadata.insert( QStringLiteral("look_assist_auto_wb_candidate_tint"),
+                         m_lastLookAssistAutoWhiteBalanceCandidateTint );
         metadata.insert( QStringLiteral("look_assist_auto_wb_raw_x"),
                          m_lastLookAssistAutoWhiteBalanceRawX );
         metadata.insert( QStringLiteral("look_assist_auto_wb_raw_y"),
@@ -4033,6 +4115,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                          m_lastLookAssistPostTemperatureDelta );
         metadata.insert( QStringLiteral("look_assist_post_tint_delta"),
                          m_lastLookAssistPostTintDelta );
+        metadata.insert( QStringLiteral("look_assist_color_cast_warning"),
+                         m_lastLookAssistColorCastWarning );
     }
     metadata.insert( QStringLiteral("qt_opengl_environment"),
                     qEnvironmentVariable("QT_OPENGL") );
@@ -8890,12 +8974,17 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistPostTintDelta = 0;
     m_lastLookAssistAutoWhiteBalanceValid = false;
     m_lastLookAssistAutoWhiteBalanceSource.clear();
+    m_lastLookAssistAutoWhiteBalanceDecision.clear();
+    m_lastLookAssistAutoWhiteBalanceDamping = 1.0;
     m_lastLookAssistAutoWhiteBalanceTemperature = 0;
     m_lastLookAssistAutoWhiteBalanceTint = 0;
+    m_lastLookAssistAutoWhiteBalanceCandidateTemperature = 0;
+    m_lastLookAssistAutoWhiteBalanceCandidateTint = 0;
     m_lastLookAssistAutoWhiteBalanceRawX = -1;
     m_lastLookAssistAutoWhiteBalanceRawY = -1;
     m_lastLookAssistAutoWhiteBalanceLuma = 0.0;
     m_lastLookAssistAutoWhiteBalanceChroma = 0.0;
+    m_lastLookAssistColorCastWarning.clear();
     if( !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
     {
         logInteractionEvent(
@@ -9071,13 +9160,18 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                              raw_h );
     bool autoWhiteBalanceValid = false;
     QString autoWhiteBalanceSource = QStringLiteral("none");
+    QString autoWhiteBalanceDecision = QStringLiteral("none");
+    double autoWhiteBalanceDamping = 1.0;
     int autoWhiteBalanceTemperature = baseTemperature;
     int autoWhiteBalanceTint = baseTint;
+    int autoWhiteBalanceCandidateTemperature = baseTemperature;
+    int autoWhiteBalanceCandidateTint = baseTint;
     if( autoWbPatch.valid )
     {
         autoWhiteBalanceSource = useProcessedColorStats
                                ? QStringLiteral("processed-neutral-patch")
                                : QStringLiteral("raw-neutral-patch");
+        autoWhiteBalanceDecision = QStringLiteral("candidate");
         findMlvWhiteBalance( m_pMlvObject,
                              analysisFrame,
                              autoWbPatch.rawX,
@@ -9097,12 +9191,42 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             qBound( -35,
                     autoWhiteBalanceTint,
                     18 );
+        autoWhiteBalanceCandidateTemperature = autoWhiteBalanceTemperature;
+        autoWhiteBalanceCandidateTint = autoWhiteBalanceTint;
         if( lookAssistAutoWhiteBalanceSolutionIsStable( autoWbPatch,
                                                         baseTemperature,
                                                         baseTint,
                                                         autoWhiteBalanceTemperature,
                                                         autoWhiteBalanceTint ) )
         {
+            autoWhiteBalanceDamping =
+                lookAssistAutoWhiteBalanceDampingFactor(
+                    autoWbPatch,
+                    baseTemperature,
+                    baseTint,
+                    autoWhiteBalanceTemperature,
+                    autoWhiteBalanceTint,
+                    scene );
+            if( autoWhiteBalanceDamping < 0.999 )
+            {
+                autoWhiteBalanceTemperature =
+                    qBound( ui->horizontalSliderTemperature->minimum(),
+                            baseTemperature
+                            + qRound( (autoWhiteBalanceTemperature - baseTemperature)
+                                      * autoWhiteBalanceDamping ),
+                            ui->horizontalSliderTemperature->maximum() );
+                autoWhiteBalanceTint =
+                    qBound( ui->horizontalSliderTint->minimum(),
+                            baseTint
+                            + qRound( (autoWhiteBalanceTint - baseTint)
+                                      * autoWhiteBalanceDamping ),
+                            ui->horizontalSliderTint->maximum() );
+                autoWhiteBalanceDecision = QStringLiteral("accepted-damped");
+            }
+            else
+            {
+                autoWhiteBalanceDecision = QStringLiteral("accepted");
+            }
             preset.temperatureDelta = autoWhiteBalanceTemperature - baseTemperature;
             preset.tintDelta = autoWhiteBalanceTint - baseTint;
             autoWhiteBalanceValid = true;
@@ -9110,6 +9234,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
         else
         {
             autoWhiteBalanceSource = QStringLiteral("rejected-extreme-color-cast");
+            autoWhiteBalanceDecision = QStringLiteral("rejected-unstable");
         }
     }
     int temperature = 0;
@@ -9352,10 +9477,16 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistTintDelta = preset.tintDelta;
     m_lastLookAssistAutoWhiteBalanceValid = autoWhiteBalanceValid;
     m_lastLookAssistAutoWhiteBalanceSource = autoWhiteBalanceSource;
+    m_lastLookAssistAutoWhiteBalanceDecision = autoWhiteBalanceDecision;
+    m_lastLookAssistAutoWhiteBalanceDamping = autoWhiteBalanceDamping;
     m_lastLookAssistAutoWhiteBalanceTemperature =
         autoWbPatch.valid ? autoWhiteBalanceTemperature : 0;
     m_lastLookAssistAutoWhiteBalanceTint =
         autoWbPatch.valid ? autoWhiteBalanceTint : 0;
+    m_lastLookAssistAutoWhiteBalanceCandidateTemperature =
+        autoWbPatch.valid ? autoWhiteBalanceCandidateTemperature : 0;
+    m_lastLookAssistAutoWhiteBalanceCandidateTint =
+        autoWbPatch.valid ? autoWhiteBalanceCandidateTint : 0;
     m_lastLookAssistAutoWhiteBalanceRawX =
         autoWbPatch.valid ? autoWbPatch.rawX : -1;
     m_lastLookAssistAutoWhiteBalanceRawY =
@@ -9384,12 +9515,23 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                          : 0.0;
     m_lastLookAssistPostTemperatureDelta = postTemperatureDelta;
     m_lastLookAssistPostTintDelta = postTintDelta;
+    const double postBlueAmberAxis = postColorStatsValid
+                                   ? postColorStats.balanceB - postColorStats.balanceR
+                                   : 0.0;
+    m_lastLookAssistColorCastWarning =
+        lookAssistColorCastWarning( postColorStatsValid,
+                                    postColorStats,
+                                    m_lastLookAssistPostVisibleGreenAxis,
+                                    temperature,
+                                    postBlueAmberAxis );
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.auto_wb"),
-        QStringLiteral("valid=%1 source=%2 raw_x=%3 raw_y=%4 patch_luma=%5 patch_chroma=%6 patch_green_axis=%7 patch_blue_amber_axis=%8 base_temp=%9 base_tint=%10 awb_temp=%11 awb_tint=%12 final_temp_delta=%13 final_tint_delta=%14")
+        QStringLiteral("valid=%1 source=%2 decision=%3 damping=%4 raw_x=%5 raw_y=%6 patch_luma=%7 patch_chroma=%8 patch_green_axis=%9 patch_blue_amber_axis=%10 base_temp=%11 base_tint=%12 candidate_temp=%13 candidate_tint=%14 awb_temp=%15 awb_tint=%16 final_temp_delta=%17 final_tint_delta=%18")
             .arg( bool01( autoWhiteBalanceValid ) )
             .arg( m_lastLookAssistAutoWhiteBalanceSource )
+            .arg( m_lastLookAssistAutoWhiteBalanceDecision )
+            .arg( m_lastLookAssistAutoWhiteBalanceDamping, 0, 'f', 3 )
             .arg( autoWbPatch.valid ? autoWbPatch.rawX : -1 )
             .arg( autoWbPatch.valid ? autoWbPatch.rawY : -1 )
             .arg( autoWbPatch.valid ? autoWbPatch.luma : 0.0, 0, 'f', 3 )
@@ -9398,6 +9540,8 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( autoWbPatch.valid ? autoWbPatch.blueAmberAxis : 0.0, 0, 'f', 3 )
             .arg( baseTemperature )
             .arg( baseTint )
+            .arg( autoWbPatch.valid ? autoWhiteBalanceCandidateTemperature : 0 )
+            .arg( autoWbPatch.valid ? autoWhiteBalanceCandidateTint : 0 )
             .arg( autoWbPatch.valid ? autoWhiteBalanceTemperature : 0 )
             .arg( autoWbPatch.valid ? autoWhiteBalanceTint : 0 )
             .arg( preset.temperatureDelta )
@@ -9422,8 +9566,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.post_balance"),
-        QStringLiteral("valid=%1 balance_r=%2 balance_g=%3 balance_b=%4 balance_samples=%5 green_axis=%6 blue_amber_axis=%7 visible_green_axis=%8 green_artifact_ratio=%9 green_artifact_axis=%10 post_temp_delta=%11 post_tint_delta=%12 final_temp_delta=%13 final_tint_delta=%14")
+        QStringLiteral("valid=%1 warning=%2 balance_r=%3 balance_g=%4 balance_b=%5 balance_samples=%6 green_axis=%7 blue_amber_axis=%8 visible_green_axis=%9 green_artifact_ratio=%10 green_artifact_axis=%11 post_temp_delta=%12 post_tint_delta=%13 final_temp_delta=%14 final_tint_delta=%15")
             .arg( bool01( postColorStatsValid ) )
+            .arg( m_lastLookAssistColorCastWarning )
             .arg( postColorStatsValid ? postColorStats.balanceR : 0.0, 0, 'f', 3 )
             .arg( postColorStatsValid ? postColorStats.balanceG : 0.0, 0, 'f', 3 )
             .arg( postColorStatsValid ? postColorStats.balanceB : 0.0, 0, 'f', 3 )
@@ -15927,6 +16072,43 @@ void MainWindow::drawFrameReady()
     task.displayPreviewCachingAllowed = displayPreviewCachingAllowed;
     task.playbackFastScaleActive = readyFrame.playbackFastScaleActive;
     task.gpuPresentationOptions = gpuPresentationOptions;
+    if( sourceImageBytes > 0 && readyFrame.rawImage8 )
+    {
+        task.ownedSourceImage.assign( readyFrame.rawImage8,
+                                      readyFrame.rawImage8 + sourceImageBytes );
+    }
+    const bool needsOwnedRgb16 =
+        gpu16PreviewActive
+        || gpuPreviewProcessingActive
+        || cpuPreviewProcessingActive
+        || readyFrame.outputMode != RenderFrameThread::OutputProcessed8;
+    if( needsOwnedRgb16 && sourceImage16Bytes > 0 && readyFrame.rawImage16 )
+    {
+        const size_t sourceImage16Words = sourceImage16Bytes / sizeof( uint16_t );
+        task.ownedSourceImage16.assign( readyFrame.rawImage16,
+                                        readyFrame.rawImage16 + sourceImage16Words );
+    }
+    const size_t playbackScaledImageBytes =
+        (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
+            ? static_cast<size_t>( readyFrame.playbackScaledWidth )
+              * static_cast<size_t>( readyFrame.playbackScaledHeight ) * 3u
+            : 0;
+    if( playbackScaledImageBytes > 0 && readyFrame.playbackScaledImage8 )
+    {
+        task.ownedPlaybackScaledImage8.assign(
+            readyFrame.playbackScaledImage8,
+            readyFrame.playbackScaledImage8 + playbackScaledImageBytes );
+    }
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_owned_rgb8_bytes"),
+        static_cast<qint64>( task.ownedSourceImage.size() ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_owned_rgb16_bytes"),
+        static_cast<qint64>( task.ownedSourceImage16.size() * sizeof( uint16_t ) ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
+        static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );
+    task.rebindOwnedImagePointers();
 
     enqueuePlaybackPrepTask( task );
     return;

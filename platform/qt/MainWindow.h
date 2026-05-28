@@ -52,6 +52,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace Ui {
 class MainWindow;
@@ -601,6 +602,31 @@ private:
         bool displayPreviewCachingAllowed = false;
         bool playbackFastScaleActive = false;
         GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
+        std::vector<uint8_t> ownedSourceImage;
+        std::vector<uint16_t> ownedSourceImage16;
+        std::vector<uint8_t> ownedPlaybackScaledImage8;
+
+        void rebindOwnedImagePointers()
+        {
+            if( !ownedSourceImage.empty() )
+            {
+                sourceImage = ownedSourceImage.data();
+                sourceImageSize = ownedSourceImage.size();
+                scopeSourceImage = sourceImage;
+                scopeSourceImageSize = sourceImageSize;
+                readyFrame.rawImage8 = sourceImage;
+            }
+            if( !ownedSourceImage16.empty() )
+            {
+                sourceImage16 = ownedSourceImage16.data();
+                sourceImage16Size = ownedSourceImage16.size() * sizeof( uint16_t );
+                readyFrame.rawImage16 = sourceImage16;
+            }
+            if( !ownedPlaybackScaledImage8.empty() )
+            {
+                readyFrame.playbackScaledImage8 = ownedPlaybackScaledImage8.data();
+            }
+        }
     };
 
     // Worker output. Composes the originating Task so the presenter has the
@@ -732,10 +758,15 @@ private:
     QString m_lastLookAssistAutoWhiteBalanceSource;
     int m_lastLookAssistAutoWhiteBalanceTemperature = 0;
     int m_lastLookAssistAutoWhiteBalanceTint = 0;
+    QString m_lastLookAssistAutoWhiteBalanceDecision;
+    double m_lastLookAssistAutoWhiteBalanceDamping = 1.0;
+    int m_lastLookAssistAutoWhiteBalanceCandidateTemperature = 0;
+    int m_lastLookAssistAutoWhiteBalanceCandidateTint = 0;
     int m_lastLookAssistAutoWhiteBalanceRawX = -1;
     int m_lastLookAssistAutoWhiteBalanceRawY = -1;
     double m_lastLookAssistAutoWhiteBalanceLuma = 0.0;
     double m_lastLookAssistAutoWhiteBalanceChroma = 0.0;
+    QString m_lastLookAssistColorCastWarning;
     bool m_lastLookAssistPostBalanceValid = false;
     double m_lastLookAssistPostBalanceR = 0.0;
     double m_lastLookAssistPostBalanceG = 0.0;

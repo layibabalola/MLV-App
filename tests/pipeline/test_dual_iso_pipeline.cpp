@@ -3327,6 +3327,56 @@ TEST(DualIsoPipeline, Phase4Bv3_NonAlignedYClipsToFullXYPath)
               scaled.size());
 }
 
+TEST(DualIsoPipeline, Phase4Bv3_HqMean23PlaybackUsesFullReconFallbackByDefault)
+{
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    {
+        MlvPipelineFixture fixture;
+        QString error_message;
+        ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+        ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+        fixture.receipt().setFocusPixels(0);
+        ASSERT_TRUE(fixture.applyReceipt(&error_message));
+        llrpSetDualIsoPlaybackForceMean23(fixture.video(), 1);
+        const int full_w = fixture.width();
+        const int full_h = fixture.height();
+        if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+            return;
+        }
+
+        const std::vector<uint8_t> scaled = fixture.renderFrame8Scaled(0, 1, 4);
+        ASSERT_FALSE(scaled.empty());
+        ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+    }
+
+    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ", "1");
+    mlv_phase4bv_reset_env_cache_for_testing();
+    {
+        MlvPipelineFixture fixture;
+        QString error_message;
+        ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+        ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+        fixture.receipt().setFocusPixels(0);
+        ASSERT_TRUE(fixture.applyReceipt(&error_message));
+        llrpSetDualIsoPlaybackForceMean23(fixture.video(), 1);
+        const int full_w = fixture.width();
+        const int full_h = fixture.height();
+        if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+            MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+            mlv_phase4bv_reset_env_cache_for_testing();
+            return;
+        }
+
+        const std::vector<uint8_t> scaled = fixture.renderFrame8Scaled(0, 1, 4);
+        ASSERT_FALSE(scaled.empty());
+        ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
+    }
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+    mlv_phase4bv_reset_env_cache_for_testing();
+}
+
 /* Phase4Bv3 (b): kill-switch routes back to the v2 X-only path; both paths
  * produce close-enough output (PSNR > 18 dB on the tiny dual-iso fixture).
  * v3 is the default when full_h >= 16 — when MLVAPP_DISABLE_PHASE4BV3=1 is

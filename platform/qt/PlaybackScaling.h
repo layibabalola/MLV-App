@@ -4,7 +4,9 @@
 #include <QImage>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cmath>
 #include <vector>
 
 struct FastPlaybackScaleCache
@@ -44,6 +46,45 @@ struct BilinearPlaybackScaleCache
     std::vector<int> y1RowOffsets;
     std::vector<int16_t> yWeights;
 };
+
+struct CubicPlaybackScaleCache
+{
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    int targetWidth = 0;
+    int targetHeight = 0;
+    std::vector<std::array<int, 4>> xSourceOffsets;
+    std::vector<std::array<int, 4>> yRowOffsets;
+    std::vector<std::array<float, 4>> xWeights;
+    std::vector<std::array<float, 4>> yWeights;
+};
+
+inline float playbackCubicWeight(float x)
+{
+    const float a = -0.5f;
+    x = std::fabs(x);
+    if( x <= 1.0f )
+    {
+        return (a + 2.0f) * x * x * x
+             - (a + 3.0f) * x * x
+             + 1.0f;
+    }
+    if( x < 2.0f )
+    {
+        return a * x * x * x
+             - 5.0f * a * x * x
+             + 8.0f * a * x
+             - 4.0f * a;
+    }
+    return 0.0f;
+}
+
+inline uint8_t playbackClampFloatToByte(float value)
+{
+    if( value <= 0.0f ) return 0;
+    if( value >= 255.0f ) return 255;
+    return static_cast<uint8_t>( value + 0.5f );
+}
 
 inline bool playbackBuildFastScaledRgb8(const uint8_t *source,
                                         int sourceWidth,
@@ -307,6 +348,125 @@ inline bool playbackBuildBilinearScaledRgb8(const uint8_t *source,
             const int bottom2 = p01[2] * fxComp + p11[2] * fx;
             dstPixel[2] = static_cast<uint8_t>(
                 ( top2 * fyComp + bottom2 * fy + 32768 ) >> 16 );
+        }
+    }
+
+    return true;
+}
+
+/* HQ playback upscale path. Catmull-Rom cubic interpolation keeps diagonals
+ * and fine detail less blocky than bilinear when a very small x4 Dual ISO
+ * preview is stretched to the viewport. It is intentionally used only for
+ * high-quality upscales; Fast playback keeps the cheaper bilinear/nearest
+ * paths. */
+inline bool playbackBuildCubicScaledRgb8(const uint8_t *source,
+                                         int sourceWidth,
+                                         int sourceHeight,
+                                         int targetWidth,
+                                         int targetHeight,
+                                         std::vector<uint8_t> &scaledBuffer,
+                                         CubicPlaybackScaleCache &cache)
+{
+    if( !source
+     || sourceWidth <= 0
+     || sourceHeight <= 0
+     || targetWidth <= 0
+     || targetHeight <= 0 )
+    {
+        scaledBuffer.clear();
+        return false;
+    }
+
+    const size_t targetPixels =
+        static_cast<size_t>( targetWidth ) * static_cast<size_t>( targetHeight );
+    scaledBuffer.resize( targetPixels * 3u );
+
+    if( cache.sourceWidth != sourceWidth
+     || cache.sourceHeight != sourceHeight
+     || cache.targetWidth != targetWidth
+     || cache.targetHeight != targetHeight )
+    {
+        cache.sourceWidth = sourceWidth;
+        cache.sourceHeight = sourceHeight;
+        cache.targetWidth = targetWidth;
+        cache.targetHeight = targetHeight;
+        cache.xSourceOffsets.resize( static_cast<size_t>( targetWidth ) );
+        cache.xWeights.resize( static_cast<size_t>( targetWidth ) );
+        cache.yRowOffsets.resize( static_cast<size_t>( targetHeight ) );
+        cache.yWeights.resize( static_cast<size_t>( targetHeight ) );
+
+        for( int x = 0; x < targetWidth; ++x )
+        {
+            const float srcX =
+                (static_cast<float>( x ) + 0.5f)
+                * static_cast<float>( sourceWidth )
+                / static_cast<float>( targetWidth )
+                - 0.5f;
+            const int baseX = static_cast<int>( std::floor( srcX ) );
+            for( int tap = 0; tap < 4; ++tap )
+            {
+                const int sampleX = std::max( 0, std::min( sourceWidth - 1, baseX + tap - 1 ) );
+                cache.xSourceOffsets[static_cast<size_t>( x )][static_cast<size_t>( tap )] =
+                    sampleX * 3;
+                cache.xWeights[static_cast<size_t>( x )][static_cast<size_t>( tap )] =
+                    playbackCubicWeight( srcX - static_cast<float>( baseX + tap - 1 ) );
+            }
+        }
+
+        for( int y = 0; y < targetHeight; ++y )
+        {
+            const float srcY =
+                (static_cast<float>( y ) + 0.5f)
+                * static_cast<float>( sourceHeight )
+                / static_cast<float>( targetHeight )
+                - 0.5f;
+            const int baseY = static_cast<int>( std::floor( srcY ) );
+            for( int tap = 0; tap < 4; ++tap )
+            {
+                const int sampleY = std::max( 0, std::min( sourceHeight - 1, baseY + tap - 1 ) );
+                cache.yRowOffsets[static_cast<size_t>( y )][static_cast<size_t>( tap )] =
+                    sampleY * sourceWidth * 3;
+                cache.yWeights[static_cast<size_t>( y )][static_cast<size_t>( tap )] =
+                    playbackCubicWeight( srcY - static_cast<float>( baseY + tap - 1 ) );
+            }
+        }
+    }
+
+    #pragma omp parallel for if(targetPixels >= 262144u)
+    for( int y = 0; y < targetHeight; ++y )
+    {
+        uint8_t *dstRow =
+            scaledBuffer.data() + static_cast<size_t>( y ) * static_cast<size_t>( targetWidth ) * 3u;
+        const std::array<int, 4> &yOffsets = cache.yRowOffsets[static_cast<size_t>( y )];
+        const std::array<float, 4> &wy = cache.yWeights[static_cast<size_t>( y )];
+
+        for( int x = 0; x < targetWidth; ++x )
+        {
+            const std::array<int, 4> &xOffsets = cache.xSourceOffsets[static_cast<size_t>( x )];
+            const std::array<float, 4> &wx = cache.xWeights[static_cast<size_t>( x )];
+            float accumR = 0.0f;
+            float accumG = 0.0f;
+            float accumB = 0.0f;
+
+            for( int yy = 0; yy < 4; ++yy )
+            {
+                const uint8_t *srcRow = source + static_cast<size_t>( yOffsets[static_cast<size_t>( yy )] );
+                const float rowWeight = wy[static_cast<size_t>( yy )];
+                for( int xx = 0; xx < 4; ++xx )
+                {
+                    const uint8_t *srcPixel =
+                        srcRow + static_cast<size_t>( xOffsets[static_cast<size_t>( xx )] );
+                    const float weight = rowWeight * wx[static_cast<size_t>( xx )];
+                    accumR += static_cast<float>( srcPixel[0] ) * weight;
+                    accumG += static_cast<float>( srcPixel[1] ) * weight;
+                    accumB += static_cast<float>( srcPixel[2] ) * weight;
+                }
+            }
+
+            uint8_t *dstPixel = dstRow + static_cast<size_t>( x ) * 3u;
+            dstPixel[0] = playbackClampFloatToByte( accumR );
+            dstPixel[1] = playbackClampFloatToByte( accumG );
+            dstPixel[2] = playbackClampFloatToByte( accumB );
         }
     }
 

@@ -1073,8 +1073,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_tint_delta")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_valid")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_source")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_decision")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_damping")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_temperature")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_tint")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_candidate_temperature")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_candidate_tint")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_raw_x")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_raw_y")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_wb_patch_luma")));
@@ -1115,6 +1119,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_TRUE(std::isfinite(post_visible_green_axis));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_temperature_delta")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_post_tint_delta")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_color_cast_warning")));
     ASSERT_TRUE(std::abs(metadata.value(QStringLiteral("look_assist_post_tint_delta")).toInt()) <= 22);
     const double look_assist_scale =
         std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);

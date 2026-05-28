@@ -2648,6 +2648,37 @@ static int mlv_phase4bv3_disabled_via_env(void)
     return g_mlv_phase4bv3_disabled_env_cache;
 }
 
+static void mlv_phase4bv2_log_rejection(const char * reason);
+
+/* Phase 4B quality guard: HQ playback should favor the full post-recon
+ * downsample unless explicitly opted back into the fast pre-recon shortcut.
+ * The shortcut is useful for speed, but on Dual ISO x4 it can look harsh
+ * when the tiny 1/16-pixel preview is stretched to the viewport. */
+static int g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
+
+static int mlv_phase4bv2_allow_fast_hq_via_env(void)
+{
+    if (g_mlv_phase4bv2_allow_fast_hq_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+        g_mlv_phase4bv2_allow_fast_hq_env_cache =
+            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+    }
+    return g_mlv_phase4bv2_allow_fast_hq_env_cache;
+}
+
+static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video)
+{
+    if (video && video->llrawproc
+     && video->llrawproc->diso_playback_force_mean23 != 0
+     && !mlv_phase4bv2_allow_fast_hq_via_env())
+    {
+        mlv_phase4bv2_log_rejection("HQ mean23 playback uses full-recon x4 fallback");
+        return 0;
+    }
+    return 1;
+}
+
 /* Phase 4B-v3: telemetry — counts which path the most recent v2 entry took.
  * 3 = full XY (v3, Y-cropped or natively aligned); 2 = X-only fallback;
  * 0 = v2 entry not invoked / rejected before path selection.
@@ -2675,6 +2706,7 @@ void mlv_phase4bv_reset_env_cache_for_testing(void)
 {
     g_mlv_phase4bv2_disabled_env_cache = -1;
     g_mlv_phase4bv3_disabled_env_cache = -1;
+    g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
 }
 
 /* Phase 4B-v2: returns 1 if the receipt's llrawproc options are compatible
@@ -2892,6 +2924,10 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     if (mlv_phase4bv2_disabled_via_env())
     {
         mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV2 set");
+        return 0;
+    }
+    if (!mlv_phase4bv2_quality_allows_pre_recon(video))
+    {
         return 0;
     }
     if (!mlv_phase4bv2_receipt_compatible(video))
@@ -3123,6 +3159,7 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
 
     if (!mlv_phase4bv2_disabled_via_env()
      && llrpHQDualIso(video)
+     && mlv_phase4bv2_quality_allows_pre_recon(video)
      && mlv_phase4bv2_receipt_compatible(video)
      && scaleFactor == 4)
     {

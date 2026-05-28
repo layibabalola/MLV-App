@@ -534,6 +534,51 @@ TEST(PlaybackScaling, BilinearVsNearestOnDiagonalLine)
     ASSERT_TRUE(bilinearSmoothed > nearestSmoothed * 10);
 }
 
+TEST(PlaybackScaling, CubicPreservesFlatFieldsAndProducesValidUpscale)
+{
+    const int sourceWidth = 32;
+    const int sourceHeight = 24;
+    const int targetWidth = 128;
+    const int targetHeight = 96;
+
+    const std::vector<uint8_t> flat =
+        make_flat_rgb8(sourceWidth, sourceHeight, 12, 128, 240);
+    CubicPlaybackScaleCache cubicCache;
+    std::vector<uint8_t> cubicFlat;
+    ASSERT_TRUE(playbackBuildCubicScaledRgb8(flat.data(),
+                                             sourceWidth,
+                                             sourceHeight,
+                                             targetWidth,
+                                             targetHeight,
+                                             cubicFlat,
+                                             cubicCache));
+    ASSERT_EQ(static_cast<std::size_t>(targetWidth) * targetHeight * 3u,
+              cubicFlat.size());
+    for( std::size_t i = 0; i + 2 < cubicFlat.size(); i += 3 )
+    {
+        ASSERT_TRUE(std::abs(static_cast<int>(cubicFlat[i + 0]) - 12) <= 1);
+        ASSERT_TRUE(std::abs(static_cast<int>(cubicFlat[i + 1]) - 128) <= 1);
+        ASSERT_TRUE(std::abs(static_cast<int>(cubicFlat[i + 2]) - 240) <= 1);
+    }
+
+    const std::vector<uint8_t> line =
+        make_diagonal_line_rgb8(sourceWidth, sourceHeight);
+    std::vector<uint8_t> cubicLine;
+    ASSERT_TRUE(playbackBuildCubicScaledRgb8(line.data(),
+                                             sourceWidth,
+                                             sourceHeight,
+                                             targetWidth,
+                                             targetHeight,
+                                             cubicLine,
+                                             cubicCache));
+    const int cubicSmoothed = count_intermediate_grey_pixels(cubicLine,
+                                                             targetWidth,
+                                                             targetHeight,
+                                                             16,
+                                                             239);
+    ASSERT_TRUE(cubicSmoothed > std::min(targetWidth, targetHeight) * 2);
+}
+
 TEST(PlaybackScaling, BilinearPerformance)
 {
     if( omp_get_max_threads() <= 1 )
