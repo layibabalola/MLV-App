@@ -1,6 +1,7 @@
 #include "ReceiptApplier.h"
 #include "BatchContext.h"
 #include "BatchLogger.h"
+#include "ReceiptSafety.h"
 
 #include "../../platform/qt/ReceiptSettings.h"
 
@@ -82,6 +83,8 @@ void ReceiptApplier::applyToMlv(ReceiptSettings *receipt,
     llrpResetBpmStatus( mlvObject );
 
     /* ==== Dual ISO — complex logic faithfully extracted from setSliders() ==== */
+
+    receiptSanitizeClipLocalDualIsoState( receipt, mlvObject );
 
     /* Step 1: Resolve dualIsoForced (-1 = uninitialized) */
     if( receipt->dualIsoForced() == -1 )
