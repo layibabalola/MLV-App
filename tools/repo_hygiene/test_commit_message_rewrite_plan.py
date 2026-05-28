@@ -71,7 +71,7 @@ class CommitMessageRewritePlanTests(unittest.TestCase):
         proposal = subject_from_delta(Path("."), row, ["platform/qt/MainWindow.cpp", "platform/qt/MainWindow.h"])
 
         self.assertEqual(proposal["status"], "delta_generated")
-        self.assertEqual(proposal["subject"], "qt: update Qt playback controls")
+        self.assertEqual(proposal["subject"], "qt: refine playback controls and scaling behavior")
 
     def test_multiple_human_side_branch_subjects_are_drafted(self) -> None:
         row = parse_log_rows(

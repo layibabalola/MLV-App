@@ -89,8 +89,9 @@ an immediate history rewrite. Generate the map with:
 py -3 -m tools.repo_hygiene.commit_message_rewrite_plan --repo-root . --ref master
 ```
 
-Inspect the delta-generated subjects under `.claude-state/commit-message-rewrite/`
-before any rewrite or force-push.
+Inspect the delta-generated full messages (`proposal.subject`,
+`proposal.bodyLines`, and `proposal.message`) under
+`.claude-state/commit-message-rewrite/` before any rewrite or force-push.
 
 If the start command begins on a clean protected target branch and
 `workBlockBootstrap.autoBranchFromProtectedTarget=true`, the broker creates an

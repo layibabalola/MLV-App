@@ -231,6 +231,11 @@ def path_scope(paths: Sequence[str]) -> str:
     return normalized[0].split("/", 1)[0] if "/" in normalized[0] else "repo"
 
 
+def has_any_path(paths: Sequence[str], *needles: str) -> bool:
+    normalized = [path.replace("\\", "/") for path in paths]
+    return any(any(needle in path for needle in needles) for path in normalized)
+
+
 def summarize_path_delta(paths: Sequence[str]) -> str:
     normalized = [path.replace("\\", "/") for path in paths]
     filenames = {Path(path).name for path in normalized}
@@ -266,6 +271,61 @@ def summarize_path_delta(paths: Sequence[str]) -> str:
     return "repo-managed files"
 
 
+def detailed_subject_from_paths(paths: Sequence[str], *, family: str = "") -> Optional[str]:
+    normalized = [path.replace("\\", "/") for path in paths]
+    subject_paths = [path for path in normalized if not path.startswith(".closeout-evidence/")] or normalized
+    filenames = {Path(path).name for path in normalized}
+    subject_filenames = {Path(path).name for path in subject_paths}
+    closeout_core = {
+        "brokered_closeout.py",
+        "test_brokered_closeout.py",
+        "work_block_cli.py",
+        "closeout.config.json",
+    }
+    if "commit_message_rewrite_plan.py" in filenames:
+        return "closeout: generate detailed rewrite map from commit deltas"
+    if closeout_core & filenames and any(path.startswith("tools/closeout/") for path in normalized):
+        return "closeout: wire brokered work-block scripts into closeout tooling"
+    if closeout_core & filenames and {"AGENTS.md", "CLAUDE.md"} & filenames:
+        return "closeout: update broker policy, tests, and agent guidance"
+    if closeout_core & filenames:
+        return "closeout: harden brokered closeout workflow and tests"
+    if any(path.startswith("tools/repo-hygiene/") for path in normalized):
+        return "closeout: add repo hygiene policy, CLI, and tests"
+    if any(path.startswith("tools/agent-bridge/") for path in normalized):
+        if any("watcher" in path or "bridge" in path for path in normalized):
+            return "bridge: harden agent bridge watcher and lifecycle scripts"
+        return "bridge: update agent bridge workflow scripts"
+    if {"MainWindow.cpp", "MainWindow.h", "MainWindow.ui"} & filenames and has_any_path(normalized, "ReceiptApplier", "ReceiptSafety"):
+        return "qt: apply receipt safeguards to playback controls"
+    if {"MainWindow.cpp", "MainWindow.h", "MainWindow.ui"} & filenames and ("dng.c" in filenames or "dng.h" in filenames):
+        return "qt: align playback controls with DNG export metadata"
+    if {"MainWindow.cpp", "MainWindow.h", "MainWindow.ui"} & filenames:
+        return "qt: refine playback controls and scaling behavior"
+    if "dualiso.c" in filenames or "dualiso.h" in filenames:
+        return "tests: add dual ISO pipeline coverage"
+    if "dng.c" in filenames or "dng.h" in filenames:
+        return "dng: update export metadata and raw-level handling"
+    if family == "work-block merge" and {"AGENTS.md", "CLAUDE.md"} & subject_filenames:
+        return "closeout: integrate agent closeout guidance"
+    if family == "work-block merge" and any(path.startswith("docs/") or path.startswith("CLOSEOUT-") for path in subject_paths):
+        if {"AGENTS.md", "CLAUDE.md"} & subject_filenames:
+            return "closeout: integrate dashboard docs and agent guidance"
+        return "closeout: integrate closeout reference documentation"
+    if any(path.startswith(".github/workflows/") for path in normalized) and any(path.startswith("tests/") for path in normalized):
+        return "tests: add CI coverage for repo test scaffold"
+    if any(path.startswith("tests/") for path in normalized):
+        return "tests: expand targeted regression coverage"
+    if filenames and filenames.issubset({"AGENTS.md", "CLAUDE.md"}):
+        return "docs: update agent closeout guidance"
+    if all(path.startswith("docs/") or path.startswith(".claude/analysis/") for path in normalized):
+        return "docs: update closeout and playback investigation notes"
+    if family == "work-block merge":
+        summary = summarize_path_delta(paths)
+        return "%s: integrate %s" % (path_scope(paths), summary)
+    return None
+
+
 def evidence_subject(label: str) -> str:
     clean_label = label.strip() or "closeout"
     if clean_label.endswith(" evidence"):
@@ -274,8 +334,16 @@ def evidence_subject(label: str) -> str:
 
 
 def content_subject_from_paths(paths: Sequence[str], *, family: str = "") -> Dict[str, str]:
-    scope = path_scope(paths)
-    summary = summarize_path_delta(paths)
+    subject_paths = [path for path in paths if not path.replace("\\", "/").startswith(".closeout-evidence/")] or list(paths)
+    scope = path_scope(subject_paths)
+    summary = summarize_path_delta(subject_paths)
+    detailed_subject = detailed_subject_from_paths(paths, family=family)
+    if detailed_subject:
+        return {
+            "subject": detailed_subject,
+            "confidence": "medium" if paths else "low",
+            "reason": "generated from detailed path delta",
+        }
     if family == "work-block merge":
         return {
             "subject": "%s: integrate %s" % (scope, summary),
@@ -311,6 +379,73 @@ def content_subject_from_feature_head(repo_root: Path, feature_head: str, *, dep
             return content_subject_from_feature_head(repo_root, nested_head, depth=depth + 1)
     classified = classify_vague_subject(row.subject) or {}
     return content_subject_from_paths(paths, family=str(classified.get("family") or ""))
+
+
+def path_detail_groups(paths: Sequence[str]) -> List[str]:
+    normalized = [path.replace("\\", "/") for path in paths]
+    groups: List[str] = []
+    def add(label: str, selected: Sequence[str]) -> None:
+        if not selected:
+            return
+        shown = list(selected)[:4]
+        suffix = "" if len(selected) <= 4 else " and %d more" % (len(selected) - 4)
+        groups.append("%s: %s%s" % (label, ", ".join(shown), suffix))
+
+    add("Closeout evidence", [path for path in normalized if path.startswith(".closeout-evidence/")])
+    add("Closeout broker/tooling", [path for path in normalized if path.startswith("tools/closeout/") or path.startswith("tools/repo_hygiene/") or path == "closeout.config.json"])
+    add("Agent guidance", [path for path in normalized if path in {"AGENTS.md", "CLAUDE.md"}])
+    add("Agent bridge", [path for path in normalized if path.startswith("tools/agent-bridge/")])
+    add("Qt UI/playback", [path for path in normalized if path.startswith("platform/qt/")])
+    add("Raw/DNG pipeline", [path for path in normalized if path.startswith("src/")])
+    add("Tests/CI", [path for path in normalized if path.startswith("tests/") or path.startswith(".github/workflows/")])
+    add("Docs/analysis", [path for path in normalized if path.startswith("docs/") or path.startswith(".claude/analysis/")])
+    covered_prefixes = (
+        ".closeout-evidence/",
+        "tools/closeout/",
+        "tools/repo_hygiene/",
+        "tools/agent-bridge/",
+        "platform/qt/",
+        "src/",
+        "tests/",
+        ".github/workflows/",
+        "docs/",
+        ".claude/analysis/",
+    )
+    covered_exact = {"AGENTS.md", "CLAUDE.md", "closeout.config.json"}
+    other = [path for path in normalized if path not in covered_exact and not any(path.startswith(prefix) for prefix in covered_prefixes)]
+    add("Other changed paths", other)
+    return groups
+
+
+def detailed_body_lines(row: CommitRow, paths: Sequence[str], proposal: Dict[str, Any], work_block_id: Optional[str]) -> List[str]:
+    lines = [
+        "Replaces generated subject: %s" % row.subject,
+        "Inference source: %s." % str(proposal.get("reason") or "commit history and changed paths"),
+    ]
+    if work_block_id:
+        lines.append("Work block: %s." % work_block_id)
+    source = proposal.get("source") if isinstance(proposal.get("source"), dict) else {}
+    if source:
+        if source.get("branch"):
+            lines.append("Source branch: %s." % source["branch"])
+        if source.get("featureHead"):
+            lines.append("Feature head: %s." % str(source["featureHead"])[:12])
+        if source.get("targetHead"):
+            lines.append("Target head: %s." % str(source["targetHead"])[:12])
+    lines.append(closeout_detail_for_subject(row.subject))
+    groups = path_detail_groups(paths)
+    if groups:
+        lines.append("Changed areas:")
+        lines.extend("- %s" % group for group in groups[:8])
+    return lines
+
+
+def proposal_with_message(row: CommitRow, paths: Sequence[str], proposal: Dict[str, Any], work_block_id: Optional[str]) -> Dict[str, Any]:
+    detailed = dict(proposal)
+    body = detailed_body_lines(row, paths, detailed, work_block_id)
+    detailed["bodyLines"] = body
+    detailed["message"] = str(detailed.get("subject") or "").strip() + "\n\n" + "\n".join(body)
+    return detailed
 
 
 def subject_from_delta(repo_root: Path, row: CommitRow, paths: Sequence[str]) -> Dict[str, Any]:
@@ -463,11 +598,9 @@ def build_rewrite_plan(repo_root: Path, ref: str) -> Dict[str, Any]:
     for row in sorted(vague_rows, key=lambda item: item.date):
         classified = classify_vague_subject(row.subject) or {}
         paths = changed_paths_for_row(repo_root, row)
-        proposal = proposed_subject_for_commit(row, merge_context, repo_root=repo_root, paths=paths)
         work_block_id = extract_work_block_id(row.subject)
-        body = [closeout_detail_for_subject(row.subject)]
-        if work_block_id:
-            body.append("Work block: %s." % work_block_id)
+        proposal = proposed_subject_for_commit(row, merge_context, repo_root=repo_root, paths=paths)
+        proposal = proposal_with_message(row, paths, proposal, work_block_id)
         entries.append(
             {
                 "hash": row.hash,
@@ -478,10 +611,24 @@ def build_rewrite_plan(repo_root: Path, ref: str) -> Dict[str, Any]:
                 "currentSubject": row.subject,
                 "changedPaths": paths,
                 "proposal": proposal,
-                "proposedBodyLines": body,
+                "proposedBodyLines": proposal["bodyLines"],
             }
         )
     harmonize_work_block_subjects(entries)
+    for entry in entries:
+        row = CommitRow(
+            hash=str(entry["hash"]),
+            parents=[str(parent) for parent in entry.get("parents", [])],
+            date=str(entry["date"]),
+            subject=str(entry["currentSubject"]),
+        )
+        entry["proposal"] = proposal_with_message(
+            row,
+            [str(path) for path in entry.get("changedPaths", [])],
+            entry["proposal"],
+            str(entry.get("workBlockId") or "") or None,
+        )
+        entry["proposedBodyLines"] = entry["proposal"]["bodyLines"]
     family_counts: Dict[str, int] = {}
     status_counts: Dict[str, int] = {}
     for entry in entries:
@@ -534,15 +681,14 @@ def markdown_summary(plan: Dict[str, Any]) -> str:
             "",
             "## Review Notes",
             "",
-            "Every entry has a generated `proposal.subject`. Review low-confidence `delta_generated` and `multi_subject_draft` entries before feeding the JSON to a rewrite actor.",
+            "Every entry has a generated full commit message: `proposal.subject`, `proposal.bodyLines`, and `proposal.message`.",
+            "Review low-confidence `delta_generated` and `multi_subject_draft` entries before feeding the JSON to a rewrite actor.",
             "Do not rewrite or force-push `master` until the generated mapping is approved.",
             "",
         ]
     )
     for entry in plan["entries"]:
         proposal = entry["proposal"]
-        if proposal["status"] == "candidate":
-            continue
         lines.extend(
             [
                 "### `%s`" % entry["hash"][:12],
@@ -551,11 +697,17 @@ def markdown_summary(plan: Dict[str, Any]) -> str:
                 "- Current: %s" % entry["currentSubject"],
                 "- Proposed: %s" % proposal.get("subject"),
                 "- Status: `%s`" % proposal["status"],
+                "- Confidence: `%s`" % proposal.get("confidence"),
                 "- Reason: %s" % proposal["reason"],
                 "- Changed paths: %s" % (", ".join(entry["changedPaths"][:8]) if entry["changedPaths"] else "(none listed)"),
                 "",
+                "Proposed body:",
+                "",
             ]
         )
+        for body_line in proposal.get("bodyLines") or []:
+            lines.append("- %s" % body_line)
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -569,7 +721,18 @@ def write_plan(plan: Dict[str, Any], output_root: Path) -> Dict[str, str]:
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["hash", "date", "family", "currentSubject", "proposedSubject", "status", "confidence", "reason"],
+            fieldnames=[
+                "hash",
+                "date",
+                "family",
+                "currentSubject",
+                "proposedSubject",
+                "proposedBody",
+                "proposedMessage",
+                "status",
+                "confidence",
+                "reason",
+            ],
         )
         writer.writeheader()
         for entry in plan["entries"]:
@@ -581,6 +744,8 @@ def write_plan(plan: Dict[str, Any], output_root: Path) -> Dict[str, str]:
                     "family": entry.get("family"),
                     "currentSubject": entry.get("currentSubject"),
                     "proposedSubject": proposal.get("subject"),
+                    "proposedBody": "\n".join(proposal.get("bodyLines") or []),
+                    "proposedMessage": proposal.get("message"),
                     "status": proposal.get("status"),
                     "confidence": proposal.get("confidence"),
                     "reason": proposal.get("reason"),
