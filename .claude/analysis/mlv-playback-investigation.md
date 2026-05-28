@@ -2210,7 +2210,9 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `M29-1756.MLV`: `p99 = 37`, exposure `+1.63 EV`, RAW White `6000`, Chroma Smooth auto-applied to `2`, warning `none`.
 - The longer `M16-1446.MLV` frame-369 profile after the cap reported exposure `+1.40 EV`, frame 369 green artifact ratio `0.0031`, mean green axis `29.62`, and visible green axis `3.84`.
 - The local release build only deploys the `windows` Qt platform plugin. GUI/profile smokes should use `QT_QPA_PLATFORM=windows`; forcing `offscreen` against this release tree can show the Qt platform plugin popup even though the normal GUI launch path is valid.
-- Regression coverage: `ClipGolden.LocalM16LookAssistCapsOnlyFlatNoiseFloorNightWhenAvailable` asserts the flat M16-1446 case is capped while M16-1243 remains above `+1.50 EV`. The related local M16 Look Assist tests passed: `3` tests, `58` assertions, `0` failures.
+- Workflow hardening for that plugin failure now lives in `tools\profiling\run-release-playback-profile.ps1`. The wrapper pins `QT_QPA_PLATFORM=windows`, points `QT_QPA_PLATFORM_PLUGIN_PATH` at the release `platforms\qwindows.dll` directory, and offers `-DryRun` so agents can verify the launch environment before running a clip.
+- A wrapper smoke on `tests\fixtures\clips\tiny_dual_iso.mlv` measured `1` frame and profile metadata reported `qt_qpa_platform_environment = windows`; the trace ended with `profile-complete`.
+- Regression coverage: `ClipGolden.LocalM16LookAssistCapsOnlyFlatNoiseFloorNightWhenAvailable` asserts the flat M16-1446 case is capped while M16-1243 remains above `+1.50 EV`. The related local M16 Look Assist tests passed: `3` tests, `58` assertions, `0` failures. Repo-hygiene coverage also asserts the release playback profile wrapper remains pinned to the Windows platform plugin.
 
 ### Cross-checked from prior analysis
 
@@ -2227,4 +2229,4 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 1. High impact / low effort: keep M16-1446 and M16-1243 paired in the optional local golden test so the flat-noise cap cannot silently spread to the clips that benefited from the stronger night rescue.
 2. Medium impact / medium effort: if more clips show non-representative first-frame analysis, add a small representative-frame sampler for Look Assist instead of tuning one more first-frame percentile threshold.
-3. Medium impact / low effort: keep profile/smoke launch recipes on the `windows` Qt platform unless the release folder is explicitly deployed with an offscreen platform plugin.
+3. Medium impact / low effort: keep profile/smoke launch recipes on `tools\profiling\run-release-playback-profile.ps1` unless the release folder is explicitly deployed with an offscreen platform plugin and a separate wrapper records that fact.

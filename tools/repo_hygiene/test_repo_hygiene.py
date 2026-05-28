@@ -200,6 +200,18 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("osx_installer/BuildInstaller.sh", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn(".claude-state/probe.tmp", load_config(ROOT)["required_ignore_samples"]["must_be_ignored"])
 
+    def test_release_playback_profile_wrapper_pins_windows_qpa(self) -> None:
+        script = ROOT / "tools" / "profiling" / "run-release-playback-profile.ps1"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn('$env:QT_QPA_PLATFORM = "windows"', text)
+        self.assertIn("QT_QPA_PLATFORM_PLUGIN_PATH", text)
+        self.assertIn("qwindows.dll", text)
+        self.assertIn("platform\\qt\\build-release\\release\\MLVApp.exe", text)
+        self.assertIn('[Alias("Input")]', text)
+        self.assertIn("[string]$ClipPath", text)
+        self.assertNotIn("[string]$Input", text)
+        self.assertNotIn('$env:QT_QPA_PLATFORM = "offscreen"', text)
+
     def test_policy_verifier_catches_runtime_auto_trigger_signal_drift(self) -> None:
         repo = self.init_repo()
         package_dir = repo / "tools" / "repo_hygiene"

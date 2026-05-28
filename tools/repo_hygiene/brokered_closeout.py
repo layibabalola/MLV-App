@@ -742,6 +742,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_remediation_hard_clean_blocks_remaining_freeze_marker",
             "test_remediation_freeze_remove_blocks_fresh_dirty_marker",
             "test_remediation_freeze_remove_allows_stale_dirty_marker_after_quorum",
+            "test_remediation_freeze_remove_allows_wrong_work_block_marker_after_quorum",
             "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
             "test_dirty_split_stale_tuple_is_rejected_before_mutation",
             "test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes",
@@ -1717,7 +1718,12 @@ def remediation_freeze_dirty_signature(rows: Sequence[Dict[str, Any]]) -> List[D
     return sorted(signature, key=lambda item: (str(item["path"]), str(item["status"])))
 
 
-def remediation_freeze_staleness(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+def remediation_freeze_staleness(
+    repo_root: Path,
+    config: Dict[str, Any],
+    *,
+    work_block_id: Optional[str] = None,
+) -> Dict[str, Any]:
     marker_payload = remediation_freeze_marker_payload(repo_root, config)
     packet_info = remediation_freeze_packet_payload(repo_root, marker_payload)
     packet = packet_info.get("packet") if isinstance(packet_info.get("packet"), dict) else None
@@ -1735,6 +1741,8 @@ def remediation_freeze_staleness(repo_root: Path, config: Dict[str, Any]) -> Dic
     current_dirty_signature = remediation_freeze_dirty_signature(current_dirty)
 
     packet_branch = packet.get("currentBranch") if packet else None
+    packet_detection = packet.get("detection") if packet and isinstance(packet.get("detection"), dict) else {}
+    packet_work_block_id = packet_detection.get("workBlockId") if isinstance(packet_detection, dict) else None
     pinned_refs = packet.get("pinnedRefs") if packet and isinstance(packet.get("pinnedRefs"), dict) else {}
     packet_feature = pinned_refs.get("feature") if isinstance(pinned_refs.get("feature"), dict) else {}
     packet_target = pinned_refs.get("target") if isinstance(pinned_refs.get("target"), dict) else {}
@@ -1742,6 +1750,8 @@ def remediation_freeze_staleness(repo_root: Path, config: Dict[str, Any]) -> Dic
 
     if packet and packet_branch != current_branch_name:
         reasons.append({"kind": "branch_mismatch", "packet": packet_branch, "current": current_branch_name})
+    if work_block_id and packet_work_block_id and packet_work_block_id != work_block_id:
+        reasons.append({"kind": "work_block_id_mismatch", "packet": packet_work_block_id, "current": work_block_id})
     if packet and packet_feature.get("head") != current_head:
         reasons.append({"kind": "feature_head_mismatch", "packet": packet_feature.get("head"), "current": current_head})
     if packet and packet_target.get("head") != current_target.get("head"):
@@ -1866,7 +1876,7 @@ def remove_remediation_freeze(repo_root_arg: Path, *, work_block_id: Optional[st
         write_audit(repo_root, config, "remediation_freeze_removed", result, work_block_id=work_block_id, outcome="blocked")
         return result
 
-    stale_freeze = remediation_freeze_staleness(repo_root, config)
+    stale_freeze = remediation_freeze_staleness(repo_root, config, work_block_id=work_block_id)
     postcondition = repo_closed_postcondition_state(repo_root, config, work_block_id=work_block_id, write_artifacts=True)
     thawable_blocker_kinds = {"remediation_freeze_active", "stale_transaction_branches"}
     if stale_freeze["stale"]:

@@ -130,6 +130,10 @@ suite. The `perf_tests` workflow specifically is documented separately in
   this seam in this workspace. If Linux CI is added later, this seam will
   need either an `xvfb`-backed run or explicit offscreen-plugin deployment
   there.
+- Manual release-tree playback profiles should use
+  `tools\profiling\run-release-playback-profile.ps1`, which pins
+  `QT_QPA_PLATFORM=windows` and `QT_QPA_PLATFORM_PLUGIN_PATH` to the deployed
+  `platforms\qwindows.dll` directory.
 
 ## CI invocation (`tests.yml`)
 
