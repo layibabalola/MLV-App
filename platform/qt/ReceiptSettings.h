@@ -82,6 +82,7 @@ public:
     void setLookAssistBaselineHighlights( int value )   {m_lookAssistBaselineHighlights = value;}
     void setLookAssistBaselineRawBlack( int value )     {m_lookAssistBaselineRawBlack = value;}
     void setLookAssistBaselineRawWhite( int value )     {m_lookAssistBaselineRawWhite = value;}
+    void setLookAssistBaselineChromaSmooth( int value ) {m_lookAssistBaselineChromaSmooth = value;}
     void setLookAssistBaselineStretchX( double value )  {m_lookAssistBaselineStretchX = value;}
     void setLookAssistBaselineStretchY( double value )  {m_lookAssistBaselineStretchY = value;}
     void setTone( uint8_t value )             {m_tone = value;}
@@ -254,6 +255,7 @@ public:
     int lookAssistBaselineHighlights( void ) {return m_lookAssistBaselineHighlights;}
     int lookAssistBaselineRawBlack( void ) {return m_lookAssistBaselineRawBlack;}
     int lookAssistBaselineRawWhite( void ) {return m_lookAssistBaselineRawWhite;}
+    int lookAssistBaselineChromaSmooth( void ) {return m_lookAssistBaselineChromaSmooth;}
     double lookAssistBaselineStretchX( void ) {return m_lookAssistBaselineStretchX;}
     double lookAssistBaselineStretchY( void ) {return m_lookAssistBaselineStretchY;}
     uint8_t tone( void ) {return m_tone;}
@@ -380,6 +382,7 @@ private:
     int m_lookAssistBaselineHighlights;
     int m_lookAssistBaselineRawBlack;
     int m_lookAssistBaselineRawWhite;
+    int m_lookAssistBaselineChromaSmooth;
     double m_lookAssistBaselineStretchX;
     double m_lookAssistBaselineStretchY;
     uint8_t m_tone;

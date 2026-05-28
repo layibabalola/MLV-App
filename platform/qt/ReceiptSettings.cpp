@@ -122,6 +122,7 @@ ReceiptSettings::ReceiptSettings()
     m_lookAssistBaselineHighlights = 0;
     m_lookAssistBaselineRawBlack = -1;
     m_lookAssistBaselineRawWhite = -1;
+    m_lookAssistBaselineChromaSmooth = 0;
     m_lookAssistBaselineStretchX = 1.0;
     m_lookAssistBaselineStretchY = 1.0;
     m_tone = 0;

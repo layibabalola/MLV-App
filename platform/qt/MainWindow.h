@@ -777,6 +777,8 @@ private:
     double m_lastLookAssistPostVisibleGreenAxis = 0.0;
     int m_lastLookAssistPostTemperatureDelta = 0;
     int m_lastLookAssistPostTintDelta = 0;
+    int m_lastLookAssistChromaSmooth = 0;
+    bool m_lastLookAssistChromaSmoothAutoApplied = false;
     int m_lookAssistUnsettledAnalysisCount = 0;
     QString m_phase3ClipPlaytimeFingerprint;
     qint64 m_phase3ClipPlaytimePendingMs = 0;
@@ -1011,6 +1013,7 @@ private:
     void setGradientMask( void );
     uint16_t autoCorrectRawBlackLevel( void );
     uint16_t autoCorrectRawWhiteLevel( void );
+    uint16_t restrictedLosslessDualIsoOutputWhiteLevel( void );
     bool isRawBlackLevelWrong( void );
     QRecentFilesMenu *m_pRecentFilesMenu;
     void selectDebayerAlgorithm( void );
