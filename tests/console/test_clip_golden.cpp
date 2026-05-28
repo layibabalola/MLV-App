@@ -739,6 +739,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileScaleToggleToOneSettles)
     ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_ran")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_stable")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_failure")).toString().isEmpty());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_inflight_smoke_ran")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_inflight_smoke_stable")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_inflight_smoke_failure")).toString().isEmpty());
 
     const QJsonObject before =
         metadata.value(QStringLiteral("playback_scale_toggle_before_state")).toObject();
@@ -814,6 +817,7 @@ TEST(ClipGolden, LocalM16ScaleFourToOneWithHistogramSettlesWhenAvailable)
     const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
     ASSERT_EQ(4, metadata.value(QStringLiteral("playback_scale_toggle_from")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_smoke_stable")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_scale_toggle_inflight_smoke_stable")).toBool());
     const QJsonObject before =
         metadata.value(QStringLiteral("playback_scale_toggle_before_state")).toObject();
     const QJsonObject after =

@@ -2128,6 +2128,42 @@ void MainWindow::invalidatePlaybackPrepForDisplayChange( const char *reason )
     m_playbackPrepCv.notify_all();
 }
 
+void MainWindow::waitForRenderThreadIdleBeforeCoreMutation( const char *reason )
+{
+    const QString reasonText =
+        reason && *reason ? QString::fromLatin1( reason ) : QStringLiteral("unspecified");
+    const bool renderBusy = m_pRenderThread && !m_pRenderThread->isIdle();
+
+    if( renderBusy )
+    {
+        logInteractionEvent(
+            QStringLiteral("render_core_mutation.wait.begin"),
+            QStringLiteral("reason=%1 play_checked=%2 position=%3")
+                .arg( reasonText )
+                .arg( bool01( ui->actionPlay->isChecked() ) )
+                .arg( ui->horizontalSliderPosition->value() ),
+            true );
+        m_pRenderThread->lock();
+        m_pRenderThread->unlock();
+    }
+
+    if( m_pMlvObject )
+    {
+        mlvCancelPreviewPrefetch( m_pMlvObject );
+    }
+
+    m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+    if( renderBusy )
+    {
+        logInteractionEvent(
+            QStringLiteral("render_core_mutation.wait.end"),
+            QStringLiteral("reason=%1 still_drawing=%2")
+                .arg( reasonText )
+                .arg( bool01( m_frameStillDrawing ) ),
+            true );
+    }
+}
+
 MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const PlaybackPrepTask &task )
 {
     PlaybackPrepResult result;
@@ -3207,6 +3243,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     QString playbackScaleToggleSmokeFailure;
     QJsonObject playbackScaleToggleBeforeState;
     QJsonObject playbackScaleToggleAfterState;
+    bool playbackScaleToggleInflightSmokeRan = false;
+    bool playbackScaleToggleInflightSmokeStable = true;
+    QString playbackScaleToggleInflightSmokeFailure;
+    QJsonObject playbackScaleToggleInflightState;
     bool playbackProcessingSubsetObserved = false;
     bool playbackProcessingSupported = false;
     QString playbackProcessingReason;
@@ -3760,6 +3800,47 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
 
             playbackScaleToggleSmokeFailure = scaleMismatches.join( QStringLiteral(",") );
             playbackScaleToggleSmokeStable = playbackScaleToggleSmokeFailure.isEmpty();
+
+            if( playbackScaleToggleSmokeStable )
+            {
+                playbackScaleToggleInflightSmokeRan = true;
+                trace(QStringLiteral("playback-scale-toggle-inflight-smoke-begin"));
+                applyPlaybackScaleFactorOverride( toggleFromScale, /*persist*/false );
+                qApp->processEvents( QEventLoop::AllEvents );
+                drawFrame();
+                applyPlaybackScaleFactorOverride( 1, /*persist*/false );
+                qApp->processEvents( QEventLoop::AllEvents );
+                trace(QStringLiteral("playback-scale-toggle-inflight-smoke-settle-begin"));
+                if( !renderFrameIndex( startFrame, -1, true, &scaleSettleFailure ) )
+                {
+                    playbackScaleToggleInflightSmokeStable = false;
+                    playbackScaleToggleInflightSmokeFailure = scaleSettleFailure;
+                }
+                else
+                {
+                    playbackScaleToggleInflightState = capturePlaybackScaleState();
+                    QStringList inflightMismatches;
+                    if( playbackScaleToggleInflightState.value(
+                            QStringLiteral("render_thread_playback_scale_factor_request") ).toInt( -1 ) != 1 )
+                    {
+                        inflightMismatches << QStringLiteral("requested_scale_after_inflight_not_1");
+                    }
+                    if( playbackScaleToggleInflightState.value(
+                            QStringLiteral("last_presented_generation") ).toDouble()
+                     != playbackScaleToggleInflightState.value(
+                            QStringLiteral("presentation_generation") ).toDouble() )
+                    {
+                        inflightMismatches << QStringLiteral("inflight_presented_generation_not_current");
+                    }
+                    playbackScaleToggleInflightSmokeFailure =
+                        inflightMismatches.join( QStringLiteral(",") );
+                    playbackScaleToggleInflightSmokeStable =
+                        playbackScaleToggleInflightSmokeFailure.isEmpty();
+                }
+                trace(QStringLiteral("playback-scale-toggle-inflight-smoke-complete stable=%1 mismatch=%2")
+                        .arg( bool01( playbackScaleToggleInflightSmokeStable ) )
+                        .arg( playbackScaleToggleInflightSmokeFailure ));
+            }
         }
 
         trace(QStringLiteral("playback-scale-toggle-smoke-complete stable=%1 mismatch=%2")
@@ -3770,6 +3851,12 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             err << "[PROFILE] ERROR: Playback Scale x2->x1 toggle smoke failed: "
                 << playbackScaleToggleSmokeFailure << "\n";
             return 11;
+        }
+        if( !playbackScaleToggleInflightSmokeStable )
+        {
+            err << "[PROFILE] ERROR: Playback Scale in-flight toggle smoke failed: "
+                << playbackScaleToggleInflightSmokeFailure << "\n";
+            return 12;
         }
         previousCompletionNs = -1;
     }
@@ -3990,6 +4077,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("playback_scale_toggle_smoke_failure"), playbackScaleToggleSmokeFailure );
     metadata.insert( QStringLiteral("playback_scale_toggle_before_state"), playbackScaleToggleBeforeState );
     metadata.insert( QStringLiteral("playback_scale_toggle_after_state"), playbackScaleToggleAfterState );
+    metadata.insert( QStringLiteral("playback_scale_toggle_inflight_smoke_ran"), playbackScaleToggleInflightSmokeRan );
+    metadata.insert( QStringLiteral("playback_scale_toggle_inflight_smoke_stable"), playbackScaleToggleInflightSmokeStable );
+    metadata.insert( QStringLiteral("playback_scale_toggle_inflight_smoke_failure"), playbackScaleToggleInflightSmokeFailure );
+    metadata.insert( QStringLiteral("playback_scale_toggle_inflight_state"), playbackScaleToggleInflightState );
     metadata.insert( QStringLiteral("look_assist_frame_settle_policy"),
                      QStringLiteral("analysis waits for frameReady with request serial floor, exact presented frame match, and current presentation generation") );
     metadata.insert( QStringLiteral("look_assist_unsettled_analysis_count"),
@@ -14708,6 +14799,8 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
 
     if( !changed ) return;
 
+    waitForRenderThreadIdleBeforeCoreMutation( "dual-iso-playback-settings" );
+
     llrpSetDualIsoMode( m_pMlvObject, settings.mode );
     llrpSetDualIsoInterpolationMethod( m_pMlvObject, settings.interpolation );
     llrpSetDualIsoAliasMapMode( m_pMlvObject, settings.aliasMap );
@@ -14804,17 +14897,13 @@ void MainWindow::on_actionPlay_toggled(bool checked)
         m_playToFirstFrameTargetFrame = -1;
         m_lastPlayStartPrerollRequested = false;
     }
-    else
-    {
-        beginPlayToFirstFrameMeasurement();
-        requestFrameRefresh( true, "play-start" );
-        m_playbackFrameAdvancePending = true;
-    }
-
     selectDebayerAlgorithm();
     applyEffectiveDualIsoPlaybackSettings();
     if( checked )
     {
+        beginPlayToFirstFrameMeasurement();
+        requestFrameRefresh( true, "play-start" );
+        m_playbackFrameAdvancePending = true;
         m_lastPlayStartPrerollRequested = primePlaybackCacheOnPlayStart();
     }
 
@@ -17342,6 +17431,8 @@ void MainWindow::selectDebayerAlgorithm()
     //Do nothing while preview pics are rendered when importing
     if( m_inOpeningProcess ) return;
 
+    waitForRenderThreadIdleBeforeCoreMutation( "select-debayer-algorithm" );
+
     //If no playback active change debayer to receipt settings
     if( !playbackPolicyActive() || ui->actionDontSwitchDebayerForPlayback->isChecked() )
     {
@@ -17386,7 +17477,6 @@ void MainWindow::selectDebayerAlgorithm()
         applyPlaybackDebayerSelection();
         ///@todo: ADD HERE OTHER CACHED DEBAYERS! AND ADD SOME SPECIAL TRICK FOR CACHING
     }
-    while( !m_pRenderThread->isIdle() ) QThread::msleep(1);
     llrpResetFpmStatus(m_pMlvObject);
     llrpResetBpmStatus(m_pMlvObject);
     llrpComputeStripesOn(m_pMlvObject);
