@@ -30,6 +30,19 @@
 #define UNCOMPRESSED_ORIG 2
 #define COMPRESSED_ORIG 3
 
+typedef struct
+{
+    int enabled;
+    int black_level_enabled;
+    int black_level;
+    int white_level_enabled;
+    int white_level;
+    int baseline_exposure_enabled;
+    int32_t baseline_exposure[2];
+    int as_shot_neutral_enabled;
+    int32_t as_shot_neutral[6];
+} dngExportOverrides_t;
+
 /* dngObject struct consists of DNG header and image buffers and their sizes */
 typedef struct
 {
@@ -47,6 +60,7 @@ typedef struct
     uint16_t * image_buf;           // pointer to image buffer
     uint16_t * image_buf2;          // pointer to image buffer for temporary decompression
     uint16_t * image_buf_unpacked;  // pointer to bit packed image buffer
+    dngExportOverrides_t overrides; // optional metadata defaults for export
 
 } dngObject_t;
 
@@ -58,6 +72,7 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
 
 /* routines to initialize, save and free DNG exporting struct */
 dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, int32_t par[4]);
+void setDngExportOverrides(dngObject_t * dng_data, const dngExportOverrides_t * overrides);
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 void freeDngObject(dngObject_t * dng_data);
 

@@ -149,7 +149,9 @@ public:
         double stretchY,
         bool audioExport,
         bool rawFixEnabled,
-        ProgressCallback progressCallback = nullptr);
+        ProgressCallback progressCallback = nullptr,
+        bool applyLookAssistDngDefaults = false,
+        int lookAssistExposure = 0);
 
     int runHeadlessPlaybackProfile(const PlaybackProfileOptions & options);
 
@@ -510,9 +512,6 @@ private slots:
     void on_toolButtonNextLut_clicked();
     void on_toolButtonPrevLut_clicked();
     void on_lineEditLutName_textChanged(const QString &arg1);
-
-    void on_toolButtonRawBlackAutoCorrect_clicked();
-    void on_toolButtonRawLevelsAutoFix_clicked();
 
     void on_actionPlaybackScaleAuto_triggered();
     void on_actionPlaybackScale1_triggered();
@@ -1017,7 +1016,7 @@ private:
     uint16_t autoCorrectRawBlackLevel( void );
     uint16_t autoCorrectRawWhiteLevel( void );
     uint16_t restrictedLosslessDualIsoOutputWhiteLevel( void );
-    bool isRawBlackLevelWrong( void );
+    void applyRawLevelsAutoFix( void );
     QRecentFilesMenu *m_pRecentFilesMenu;
     void selectDebayerAlgorithm( void );
     void enableCreativeAdjustments( bool enable );
