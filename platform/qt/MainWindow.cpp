@@ -16472,11 +16472,8 @@ void MainWindow::drawFrameReady()
     task.displayPreviewCachingAllowed = displayPreviewCachingAllowed;
     task.playbackFastScaleActive = readyFrame.playbackFastScaleActive;
     task.gpuPresentationOptions = gpuPresentationOptions;
-    if( sourceImageBytes > 0 && readyFrame.rawImage8 )
-    {
-        task.ownedSourceImage.assign( readyFrame.rawImage8,
-                                      readyFrame.rawImage8 + sourceImageBytes );
-    }
+    const size_t borrowedSourceImageBytes =
+        (sourceImageBytes > 0 && readyFrame.rawImage8) ? sourceImageBytes : 0;
     const bool needsOwnedRgb16 =
         gpu16PreviewActive
         || gpuPreviewProcessingActive
@@ -16493,12 +16490,10 @@ void MainWindow::drawFrameReady()
             ? static_cast<size_t>( readyFrame.playbackScaledWidth )
               * static_cast<size_t>( readyFrame.playbackScaledHeight ) * 3u
             : 0;
-    if( playbackScaledImageBytes > 0 && readyFrame.playbackScaledImage8 )
-    {
-        task.ownedPlaybackScaledImage8.assign(
-            readyFrame.playbackScaledImage8,
-            readyFrame.playbackScaledImage8 + playbackScaledImageBytes );
-    }
+    const size_t borrowedPlaybackScaledImageBytes =
+        (playbackScaledImageBytes > 0 && readyFrame.playbackScaledImage8)
+            ? playbackScaledImageBytes
+            : 0;
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_rgb8_bytes"),
         static_cast<qint64>( task.ownedSourceImage.size() ) );
@@ -16508,6 +16503,12 @@ void MainWindow::drawFrameReady()
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
         static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_borrowed_rgb8_bytes"),
+        static_cast<qint64>( borrowedSourceImageBytes ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_borrowed_scaled_rgb8_bytes"),
+        static_cast<qint64>( borrowedPlaybackScaledImageBytes ) );
     task.rebindOwnedImagePointers();
 
     enqueuePlaybackPrepTask( task );

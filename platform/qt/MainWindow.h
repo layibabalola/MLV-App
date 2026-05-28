@@ -564,10 +564,9 @@ private:
 
     using PresentationRequestContext = RenderFrameThread::ReadyFrame::PresentationContext;
 
-    // Immutable inputs to the playback-prep worker. Non-owning views
-    // (`scopeSourceImage` / `sourceImage`) point into this task for the
-    // background copy path when needed, and fall back to ready-slot data
-    // otherwise.
+    // Immutable inputs to the playback-prep worker. Non-owning views point
+    // into the ready render slot while it is pinned as presenting; owned
+    // vectors remain available for fallback paths that must detach storage.
     struct PlaybackPrepTask
     {
         RenderFrameThread::ReadyFrame readyFrame;
