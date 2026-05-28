@@ -437,6 +437,27 @@ class BrokeredCloseoutTests(unittest.TestCase):
         manifest_path = repo / ".claude-state" / "closeout" / "work-blocks" / "wb-protected-start" / "manifest.json"
         self.assertTrue(manifest_path.exists())
 
+    def test_start_work_block_records_human_commit_subject(self) -> None:
+        repo = self.init_repo()
+
+        result = start_work_block(
+            repo,
+            work_block_id="wb-subject-start",
+            actor="local-test",
+            summary="closeout: require human commit subjects",
+        )
+
+        self.assertEqual(result["manifest"]["commitSubject"], "closeout: require human commit subjects")
+        manifest_path = repo / ".claude-state" / "closeout" / "work-blocks" / "wb-subject-start" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["commitSubject"], "closeout: require human commit subjects")
+
+    def test_start_work_block_rejects_generic_commit_subject(self) -> None:
+        repo = self.init_repo()
+
+        with self.assertRaisesRegex(HygieneError, "work block summary must be a human-readable commit subject"):
+            start_work_block(repo, work_block_id="wb-generic-subject", actor="local-test", summary="brokered closeout checkpoint")
+
     def test_start_work_block_blocks_dirty_protected_target_before_auto_branch(self) -> None:
         repo = self.init_repo()
         (repo / "dirty.txt").write_text("dirty target state\n", encoding="utf-8")
@@ -3172,7 +3193,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(decision["symbolicRepairAttempted"], "rerun_validation_smoke")
         self.assertIsNone(decision["terminalReason"])
 
-    def test_evidence_repair_commit_message_is_human_readable(self) -> None:
+    def test_evidence_repair_commit_message_falls_back_to_generated_detail(self) -> None:
         config = load_closeout_config(ROOT)
         message = evidence_repair_commit_message(
             config,
@@ -3189,11 +3210,45 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "chore(closeout): repair closeout.json, metrics.json, and session.json for wb-demo before final push",
         )
 
-    def test_checkpoint_commit_message_is_human_readable(self) -> None:
+    def test_evidence_repair_commit_message_uses_work_block_subject(self) -> None:
+        config = load_closeout_config(ROOT)
+        message = evidence_repair_commit_message(
+            config,
+            reason="final_push",
+            work_block_id="wb-demo",
+            paths=[
+                ".closeout-evidence/wb-demo/closeout.json",
+                ".closeout-evidence/wb-demo/metrics.json",
+                ".closeout-evidence/wb-demo/session.json",
+            ],
+            work_summary="export: apply Auto Look Assist raw defaults",
+        )
+        self.assertEqual(
+            message,
+            "export: apply Auto Look Assist raw defaults\n\n"
+            "Closeout: repair closeout.json, metrics.json, and session.json before final push.\n"
+            "Work block: wb-demo.",
+        )
+
+    def test_checkpoint_commit_message_falls_back_to_generated_detail(self) -> None:
         message = checkpoint_commit_message("wb-demo", ["tools/repo_hygiene/brokered_closeout.py", "closeout.config.json"])
         self.assertEqual(
             message,
             "chore(closeout): checkpoint brokered_closeout.py, and closeout.config.json for wb-demo",
+        )
+
+    def test_checkpoint_commit_message_appends_work_block_detail_to_subject(self) -> None:
+        message = checkpoint_commit_message(
+            "wb-demo",
+            ["tools/repo_hygiene/brokered_closeout.py", "closeout.config.json"],
+            explicit_message="brokered closeout checkpoint",
+            work_summary="closeout: require human commit subjects",
+        )
+        self.assertEqual(
+            message,
+            "closeout: require human commit subjects\n\n"
+            "Closeout: checkpoint brokered_closeout.py, and closeout.config.json.\n"
+            "Work block: wb-demo.",
         )
 
     def test_dirty_split_commit_message_is_human_readable(self) -> None:
@@ -3203,11 +3258,23 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "chore(closeout): preserve split-owned changes for wb-demo (closeout.config.json, and 19-closeout-dashboard-spec.md)",
         )
 
-    def test_closeout_merge_commit_message_is_human_readable(self) -> None:
+    def test_closeout_merge_commit_message_falls_back_to_generated_detail(self) -> None:
         work_block_merge = closeout_merge_commit_message("codex/work-block/wb-demo", "master")
         split_merge = closeout_merge_commit_message("closeout/split/wb-demo", "master")
         self.assertEqual(work_block_merge, "merge(closeout): integrate wb-demo closeout hardening into master")
         self.assertEqual(split_merge, "merge(closeout): integrate preserved split changes from wb-demo into master")
+
+    def test_closeout_merge_commit_message_appends_work_block_detail_to_subject(self) -> None:
+        message = closeout_merge_commit_message(
+            "codex/work-block/wb-demo",
+            "master",
+            work_summary="closeout: require human commit subjects",
+        )
+        self.assertEqual(
+            message,
+            "closeout: require human commit subjects\n\n"
+            "Closeout: integrate work block wb-demo into master after clean validation.",
+        )
 
     def test_completion_without_explicit_work_block_id_reports_deterministic_selection_reason(self) -> None:
         repo = self.init_repo(remote=False)
@@ -3230,6 +3297,23 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["workBlockId"], "wb-z-new")
         self.assertEqual(result["workBlockSelection"]["reason"], "selected_by_branch_state_updated_workBlockId")
         self.assertEqual(result["workBlockSelection"]["candidateCount"], 2)
+
+    def test_complete_work_block_can_update_human_commit_subject(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/subject-complete")
+        start_work_block(repo, work_block_id="wb-subject-complete", actor="local-test")
+
+        result = complete_work_block(
+            repo,
+            work_block_id="wb-subject-complete",
+            finalize=False,
+            summary="closeout: require human commit subjects",
+        )
+
+        self.assertEqual(result["status"], "completed")
+        manifest_path = repo / ".claude-state" / "closeout" / "work-blocks" / "wb-subject-complete" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["commitSubject"], "closeout: require human commit subjects")
 
     def test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree(self) -> None:
         repo = self.init_repo(remote=False)

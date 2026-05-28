@@ -91,6 +91,11 @@ LEGACY_GENERIC_CHECKPOINT_MESSAGES = {
     "brokered closeout checkpoint",
     "chore(closeout): checkpoint owned work",
 }
+GENERIC_CLOSEOUT_SUBJECT_PATTERNS = [
+    re.compile(r"^chore\(closeout\): checkpoint .+ for [^ ]+$"),
+    re.compile(r"^chore\(closeout\): repair .+ for [^ ]+ before .+$"),
+    re.compile(r"^merge\(closeout\): integrate wb-[^ ]+ closeout hardening into .+$"),
+]
 BOUNDED_RUNNER_EXIT_CODE_DEFAULTS = {
     "timeout": 124,
     "outputCap": 125,
@@ -155,10 +160,53 @@ def evidence_repair_reason_label(reason: str) -> str:
     return mapping.get(reason, reason.replace("_", " "))
 
 
-def evidence_repair_commit_message(config: Dict[str, Any], *, reason: str, work_block_id: str, paths: Sequence[str]) -> str:
+def normalize_commit_subject(value: Optional[str]) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return ""
+    if text in LEGACY_GENERIC_EVIDENCE_REPAIR_MESSAGES or text in LEGACY_GENERIC_CHECKPOINT_MESSAGES:
+        return ""
+    if any(pattern.match(text) for pattern in GENERIC_CLOSEOUT_SUBJECT_PATTERNS):
+        return ""
+    return text
+
+
+def closeout_commit_message_with_details(subject: str, details: Sequence[str]) -> str:
+    clean_subject = normalize_commit_subject(subject)
+    if not clean_subject:
+        raise HygieneError("closeout commit subject must describe the user-visible work")
+    clean_details = [str(detail).strip() for detail in details if str(detail).strip()]
+    if not clean_details:
+        return clean_subject
+    return clean_subject + "\n\n" + "\n".join(clean_details)
+
+
+def work_block_commit_subject(manifest: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(manifest, dict):
+        return ""
+    for key in ("commitSubject", "summary", "objective"):
+        subject = normalize_commit_subject(manifest.get(key))
+        if subject:
+            return subject
+    return ""
+
+
+def evidence_repair_commit_message(
+    config: Dict[str, Any],
+    *,
+    reason: str,
+    work_block_id: str,
+    paths: Sequence[str],
+    work_summary: Optional[str] = None,
+) -> str:
     configured = str(config.get("evidenceRepair", {}).get("commitMessage") or "").strip()
-    if configured and configured not in LEGACY_GENERIC_EVIDENCE_REPAIR_MESSAGES:
-        return configured
+    generated_detail = "Closeout: repair %s before %s." % (
+        summarize_commit_paths(paths),
+        evidence_repair_reason_label(reason),
+    )
+    summary = normalize_commit_subject(work_summary) or normalize_commit_subject(configured)
+    if summary:
+        return closeout_commit_message_with_details(summary, [generated_detail, "Work block: %s." % work_block_id])
     return "chore(closeout): repair %s for %s before %s" % (
         summarize_commit_paths(paths),
         work_block_id,
@@ -166,10 +214,20 @@ def evidence_repair_commit_message(config: Dict[str, Any], *, reason: str, work_
     )
 
 
-def checkpoint_commit_message(work_block_id: str, paths: Sequence[str], *, explicit_message: Optional[str] = None) -> str:
-    configured = str(explicit_message or "").strip()
-    if configured and configured not in LEGACY_GENERIC_CHECKPOINT_MESSAGES:
-        return configured
+def checkpoint_commit_message(
+    work_block_id: str,
+    paths: Sequence[str],
+    *,
+    explicit_message: Optional[str] = None,
+    work_summary: Optional[str] = None,
+) -> str:
+    configured = normalize_commit_subject(explicit_message)
+    summary = configured or normalize_commit_subject(work_summary)
+    if summary:
+        return closeout_commit_message_with_details(
+            summary,
+            ["Closeout: checkpoint %s." % summarize_commit_paths(paths), "Work block: %s." % work_block_id],
+        )
     return "chore(closeout): checkpoint %s for %s" % (summarize_commit_paths(paths), work_block_id)
 
 
@@ -180,10 +238,17 @@ def dirty_split_commit_message(work_block_id: str, paths: Sequence[str]) -> str:
     )
 
 
-def closeout_merge_commit_message(branch: str, target_branch: str) -> str:
+def closeout_merge_commit_message(branch: str, target_branch: str, *, work_summary: Optional[str] = None) -> str:
     if branch.startswith("codex/work-block/"):
         work_block_id = branch.rsplit("/", 1)[-1]
-        return "merge(closeout): integrate %s closeout hardening into %s" % (work_block_id, target_branch)
+        fallback = "merge(closeout): integrate %s closeout hardening into %s" % (work_block_id, target_branch)
+        summary = normalize_commit_subject(work_summary)
+        if summary:
+            return closeout_commit_message_with_details(
+                summary,
+                ["Closeout: integrate work block %s into %s after clean validation." % (work_block_id, target_branch)],
+            )
+        return fallback
     if branch.startswith("closeout/split/"):
         work_block_id = branch.rsplit("/", 1)[-1]
         return "merge(closeout): integrate preserved split changes from %s into %s" % (work_block_id, target_branch)
@@ -1021,6 +1086,16 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
         "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
         "commitMessage": "chore(closeout): repair closeout evidence artifacts",
+    },
+    "commitMessages": {
+        "humanSummaryField": "commitSubject",
+        "appendGeneratedWorkBlockDetails": True,
+        "rejectGenericSubjects": True,
+        "genericSubjectExamples": [
+            "brokered closeout checkpoint",
+            "brokered closeout evidence repair",
+            "merge(closeout): integrate <workBlockId> closeout hardening into <target>",
+        ],
     },
     "reviewQuorum": {
         "requiredApprovals": 3,
@@ -2994,11 +3069,15 @@ def start_work_block(
     actor: str = "codex",
     path_claims: Optional[Sequence[str]] = None,
     lease_seconds: int = 3600,
+    summary: Optional[str] = None,
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
     assert_remediation_freeze_not_active(repo_root, config, action="start-work-block")
     block_id = work_block_id or ("wb-%s" % uuid.uuid4().hex[:16])
+    commit_subject = normalize_commit_subject(summary)
+    if summary and not commit_subject:
+        raise HygieneError("work block summary must be a human-readable commit subject")
     branch = current_branch(repo_root)
     if not branch:
         raise HygieneError("work block start requires a named branch")
@@ -3033,6 +3112,8 @@ def start_work_block(
             "startHead": head,
             "dirtyBaseline": dirty_baseline,
         }
+        if commit_subject:
+            manifest["commitSubject"] = commit_subject
         if protected_bootstrap:
             manifest["protectedBranchBootstrap"] = protected_bootstrap
         write_json(block_dir / "manifest.json", manifest)
@@ -3046,6 +3127,7 @@ def start_work_block(
                 "head": head,
                 "pathClaims": claims,
                 "dirtyBaselinePaths": dirty_baseline["paths"],
+                "commitSubject": commit_subject or None,
                 "protectedBranchBootstrap": protected_bootstrap,
             },
         )
@@ -3643,7 +3725,13 @@ def repair_missing_evidence(repo_root_arg: Path, config: Dict[str, Any], detecti
         result = {"status": "blocked", "reason": "evidence_git_add_failed", "paths": paths, "stderr": add.stderr[-3000:]}
         write_audit(repo_root, config, "evidence_repair_blocked", result, work_block_id=work_block_id, outcome="blocked")
         return result
-    commit_message = evidence_repair_commit_message(config, reason=reason, work_block_id=work_block_id, paths=paths)
+    commit_message = evidence_repair_commit_message(
+        config,
+        reason=reason,
+        work_block_id=work_block_id,
+        paths=paths,
+        work_summary=work_block_commit_subject(manifest),
+    )
     commit = run_git(repo_root, ["commit", "-m", commit_message])
     if commit.returncode != 0:
         result = {"status": "blocked", "reason": "evidence_commit_failed", "paths": paths, "stdout": commit.stdout[-3000:], "stderr": commit.stderr[-3000:]}
@@ -5607,6 +5695,8 @@ def _finalize_work_block_once(
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
     block_id = detection["workBlockId"]
     update_manifest(repo_root, config, block_id, {"state": "finalizing", "completedAt": utc_now()})
+    manifest = load_manifest(repo_root, config, block_id)
+    commit_subject = work_block_commit_subject(manifest)
     if expected_pinned_refs is not None and expected_pinned_refs != detection["pinnedRefs"]:
         payload = {"expectedPinnedRefs": expected_pinned_refs, "actualPinnedRefs": detection["pinnedRefs"]}
         write_audit(repo_root, config, "stale_refs", payload, work_block_id=block_id, outcome="blocked")
@@ -5694,7 +5784,13 @@ def _finalize_work_block_once(
             return {"status": "blocked", "reason": "integration_worktree_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
         merge = run_git(
             integration_path,
-            ["merge", "--no-ff", "-m", closeout_merge_commit_message(current_branch(repo_root) or block_id, target_branch), feature_head],
+            [
+                "merge",
+                "--no-ff",
+                "-m",
+                closeout_merge_commit_message(current_branch(repo_root) or block_id, target_branch, work_summary=commit_subject),
+                feature_head,
+            ],
         )
         if merge.returncode != 0:
             payload = {"operation": "merge", "returncode": merge.returncode, "stdout": merge.stdout[-4000:], "stderr": merge.stderr[-4000:]}
@@ -5891,6 +5987,7 @@ def complete_work_block(
     finalize: bool = False,
     auto_approve: bool = False,
     require_repo_closed: bool = False,
+    summary: Optional[str] = None,
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
@@ -5964,8 +6061,19 @@ def complete_work_block(
         return result
     manifest = ensure_work_block_for_current_branch(repo_root, config, work_block_id)
     block_id = str(manifest["workBlockId"])
-    update_manifest(repo_root, config, block_id, {"state": "completed", "completedAt": utc_now()})
-    append_event(repo_root, config, block_id, {"event": "work_block_completed", "finalizeRequested": bool(finalize)})
+    commit_subject = normalize_commit_subject(summary)
+    if summary and not commit_subject:
+        raise HygieneError("work block summary must be a human-readable commit subject")
+    manifest_updates: Dict[str, Any] = {"state": "completed", "completedAt": utc_now()}
+    if commit_subject:
+        manifest_updates["commitSubject"] = commit_subject
+    update_manifest(repo_root, config, block_id, manifest_updates)
+    append_event(
+        repo_root,
+        config,
+        block_id,
+        {"event": "work_block_completed", "finalizeRequested": bool(finalize), "commitSubject": commit_subject or manifest.get("commitSubject")},
+    )
     detection = detect_work_block(repo_root, work_block_id=block_id)
     if not finalize:
         return {"status": "completed", "workBlockId": block_id, "workBlockSelection": manifest.get("workBlockSelection"), "detector": detection}
@@ -6042,6 +6150,7 @@ def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] =
         return {"status": "blocked", "reason": "remediation_freeze", "freeze": freeze}
     detection = detect_work_block(repo_root, work_block_id=work_block_id)
     block_id = detection["workBlockId"]
+    manifest = load_manifest(repo_root, config, block_id)
     if detection.get("mixedDirty"):
         paths = [item["path"] for item in detection["mixedDirty"]]
         payload = {
@@ -6112,7 +6221,10 @@ def checkpoint_owned_work(repo_root_arg: Path, *, work_block_id: Optional[str] =
         }
         write_audit(repo_root, config, "checkpoint_owned_dirty_blocked", payload, work_block_id=block_id, outcome="blocked")
         return {"status": "blocked", "reason": "checkpoint_stage_scope_mismatch", **payload}
-    commit = run_git(repo_root, ["commit", "-m", checkpoint_commit_message(block_id, paths, explicit_message=message)])
+    commit = run_git(
+        repo_root,
+        ["commit", "-m", checkpoint_commit_message(block_id, paths, explicit_message=message, work_summary=work_block_commit_subject(manifest))],
+    )
     payload = {
         "candidateId": candidate["candidateId"],
         "actionId": candidate["actionId"],
