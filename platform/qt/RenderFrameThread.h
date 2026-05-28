@@ -288,6 +288,7 @@ private:
     std::array<FrameSlot, kFrameSlotCount> m_frameSlots;
     FastPlaybackScaleCache m_playbackScaleCache;
     BilinearPlaybackScaleCache m_playbackBilinearScaleCache;
+    CubicPlaybackScaleCache m_playbackCubicScaleCache;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
     DecodeWorker *m_decodeWorker;
     ReconWorker *m_reconWorker;

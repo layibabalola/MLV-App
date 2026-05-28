@@ -175,9 +175,9 @@ int mlv_phase4bv2_last_path_taken(void);
  * wasn't taken or if the clip was already 16-Y-aligned. */
 int mlv_phase4bv3_last_y_crop_rows(void);
 
-/* Test-only hook: clear the cached env-var values for MLVAPP_DISABLE_PHASE4BV2
- * and MLVAPP_DISABLE_PHASE4BV3 so subsequent calls re-read getenv(). Used by
- * parity tests that flip the kill switches mid-process. */
+/* Test-only hook: clear cached Phase 4B env-var values so subsequent calls
+ * re-read getenv(). Used by parity tests that flip the kill switches or HQ
+ * fast-path override mid-process. */
 void mlv_phase4bv_reset_env_cache_for_testing(void);
 
 /* Unpacks the bits of a frame to get a bayer B&W image (without black level correction)
