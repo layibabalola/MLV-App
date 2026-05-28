@@ -852,45 +852,54 @@ static int ensure_amaze_interpolation_scratch(dualiso_full20bit_scratch_t * scra
     const size_t plane_cell_count = row_count * row_width;
 
     if (!ensure_reusable_scratch_buffer((void **)&scratch->amaze_squeezed,
-                                        &scratch->amaze_row_capacity,
+                                        &scratch->amaze_squeezed_capacity,
                                         row_count,
                                         sizeof(int))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_rawData_rows,
-                                           &scratch->amaze_row_capacity,
+                                           &scratch->amaze_rawData_row_capacity,
                                            row_count,
                                            sizeof(float *))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_red_rows,
-                                           &scratch->amaze_row_capacity,
+                                           &scratch->amaze_red_row_capacity,
                                            row_count,
                                            sizeof(float *))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_green_rows,
-                                           &scratch->amaze_row_capacity,
+                                           &scratch->amaze_green_row_capacity,
                                            row_count,
                                            sizeof(float *))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_blue_rows,
-                                           &scratch->amaze_row_capacity,
+                                           &scratch->amaze_blue_row_capacity,
                                            row_count,
                                            sizeof(float *))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_rawData_storage,
-                                           &scratch->amaze_plane_cell_capacity,
+                                           &scratch->amaze_rawData_plane_cell_capacity,
                                            plane_cell_count,
                                            sizeof(float))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_red_storage,
-                                           &scratch->amaze_plane_cell_capacity,
+                                           &scratch->amaze_red_plane_cell_capacity,
                                            plane_cell_count,
                                            sizeof(float))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_green_storage,
-                                           &scratch->amaze_plane_cell_capacity,
+                                           &scratch->amaze_green_plane_cell_capacity,
                                            plane_cell_count,
                                            sizeof(float))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_blue_storage,
-                                           &scratch->amaze_plane_cell_capacity,
+                                           &scratch->amaze_blue_plane_cell_capacity,
                                            plane_cell_count,
                                            sizeof(float)))
     {
         return 0;
     }
 
+    scratch->amaze_row_capacity = MAX(scratch->amaze_squeezed_capacity,
+                                      MAX(scratch->amaze_rawData_row_capacity,
+                                      MAX(scratch->amaze_red_row_capacity,
+                                      MAX(scratch->amaze_green_row_capacity,
+                                          scratch->amaze_blue_row_capacity))));
+    scratch->amaze_plane_cell_capacity = MAX(scratch->amaze_rawData_plane_cell_capacity,
+                                             MAX(scratch->amaze_red_plane_cell_capacity,
+                                             MAX(scratch->amaze_green_plane_cell_capacity,
+                                                 scratch->amaze_blue_plane_cell_capacity)));
     scratch->amaze_row_width = MAX(scratch->amaze_row_width, row_width);
     assign_amaze_plane_rows(scratch->amaze_rawData_rows, scratch->amaze_rawData_storage, row_count, row_width);
     assign_amaze_plane_rows(scratch->amaze_red_rows, scratch->amaze_red_storage, row_count, row_width);
@@ -898,36 +907,44 @@ static int ensure_amaze_interpolation_scratch(dualiso_full20bit_scratch_t * scra
     assign_amaze_plane_rows(scratch->amaze_blue_rows, scratch->amaze_blue_storage, row_count, row_width);
 
     if (!ensure_reusable_scratch_buffer((void **)&scratch->amaze_gray,
-                                        &scratch->amaze_pixel_capacity,
+                                        &scratch->amaze_gray_capacity,
                                         pixel_count,
                                         sizeof(uint32_t))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_edge_direction,
-                                           &scratch->amaze_pixel_capacity,
+                                           &scratch->amaze_edge_direction_capacity,
                                            pixel_count,
                                            sizeof(uint8_t)))
     {
         return 0;
     }
 
+    scratch->amaze_pixel_capacity = MAX(scratch->amaze_gray_capacity,
+                                        scratch->amaze_edge_direction_capacity);
+
     if (!ensure_reusable_scratch_buffer((void **)&scratch->amaze_startchunk_y,
-                                        &scratch->amaze_thread_capacity,
+                                        &scratch->amaze_startchunk_y_capacity,
                                         thread_count,
                                         sizeof(int))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_endchunk_y,
-                                           &scratch->amaze_thread_capacity,
+                                           &scratch->amaze_endchunk_y_capacity,
                                            thread_count,
                                            sizeof(int))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_thread_id,
-                                           &scratch->amaze_thread_capacity,
+                                           &scratch->amaze_thread_id_capacity,
                                            thread_count,
                                            sizeof(pthread_t))
         || !ensure_reusable_scratch_buffer((void **)&scratch->amaze_arguments,
-                                           &scratch->amaze_thread_capacity,
+                                           &scratch->amaze_arguments_capacity,
                                            thread_count,
                                            sizeof(amazeinfo_t)))
     {
         return 0;
     }
+
+    scratch->amaze_thread_capacity = MAX(scratch->amaze_startchunk_y_capacity,
+                                         MAX(scratch->amaze_endchunk_y_capacity,
+                                         MAX(scratch->amaze_thread_id_capacity,
+                                             scratch->amaze_arguments_capacity)));
 
     return 1;
 }

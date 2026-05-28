@@ -82,10 +82,25 @@ typedef struct
     int * amaze_endchunk_y;
     void * amaze_thread_id;
     void * amaze_arguments;
+    size_t amaze_squeezed_capacity;
+    size_t amaze_rawData_row_capacity;
+    size_t amaze_red_row_capacity;
+    size_t amaze_green_row_capacity;
+    size_t amaze_blue_row_capacity;
     size_t amaze_row_capacity;
     size_t amaze_row_width;
+    size_t amaze_rawData_plane_cell_capacity;
+    size_t amaze_red_plane_cell_capacity;
+    size_t amaze_green_plane_cell_capacity;
+    size_t amaze_blue_plane_cell_capacity;
     size_t amaze_plane_cell_capacity;
+    size_t amaze_gray_capacity;
+    size_t amaze_edge_direction_capacity;
     size_t amaze_pixel_capacity;
+    size_t amaze_startchunk_y_capacity;
+    size_t amaze_endchunk_y_capacity;
+    size_t amaze_thread_id_capacity;
+    size_t amaze_arguments_capacity;
     size_t amaze_thread_capacity;
 
     uint16_t * alias_aux;
