@@ -2192,3 +2192,39 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / low effort: consider making explicit UI `Scale x4` opt into the existing fast pre-recon path, or expose the quality/speed tradeoff in the toolbar label, because users reasonably expect x4 to buy FPS.
 2. High impact / low effort: keep the local optional M16 profile tests asserting RAW White stays `6000`, restricted output white stays `>15000`, Chroma Smooth is auto-applied for the affected HQ clips, and exposure places projected `p95` back near the midtone target.
 3. Medium impact / medium effort: if `M15-1355.MLV` or `M16-1327.MLV` still look too green in GUI smoke, tune a second-pass localized artifact cleanup rather than changing the RAW White split.
+
+## 2026-05-28 - M16-1446 flat-noise-floor Look Assist cap
+
+### Verified locally
+
+- `M16-1446.MLV` was not a recurrence of the Dual ISO pattern mapping bug. A post-fix profile from frame 0 through frame 371 reported frame 369 with `presented_dual_iso_core_pattern = -4` and `presented_dual_iso_ui_pattern = 3`, which is the expected UI/core pair for `HIGH-low-low-HIGH`.
+- The clip-specific regression came from Look Assist analyzing a non-representative load frame. The initial analysis thumbnail was a flat lifted noise floor: `p05 = 32`, `median = 32`, `p95 = 32`, and `p99 = 32`. The previous broad night rescue treated that as a very dark scene needing the full `+1.75 EV` lift, then that static lift was still applied when scrubbing to the brighter frame 369 screenshot.
+- Chroma Smooth was not the primary fix. A frame-369 A/B with Chroma Smooth off versus `2x2` only nudged the localized artifact sample count; it did not address the over-lifted look caused by the flat load frame.
+- `MainWindow.cpp` now detects the extreme flat-noise-floor night thumbnail shape and caps that case at `+1.40 EV`. The gate requires night classification plus `median`, `p05`, `p95`, and `p99` all at or below `34`, with `p99 - p05 <= 2`.
+- Post-fix local profiles with `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`:
+  - `M16-1446.MLV`: `p99 = 32`, exposure `+1.40 EV`, RAW White `16200`, Chroma Smooth `0`, warning `none`.
+  - `M16-1243.MLV`: `p99 = 39`, exposure `+1.58 EV`, RAW White `6000`, Chroma Smooth auto-applied to `2`, warning `none`.
+  - `M16-1327.MLV`: `p99 = 36`, exposure `+1.67 EV`, RAW White `6000`, Chroma Smooth auto-applied to `2`, warning `global-green-cast`.
+  - `M16-1347.MLV`: `p99 = 45`, exposure `+1.33 EV`, RAW White `6000`, Chroma Smooth auto-applied to `2`, warning `none`.
+  - `M17-1152.MLV`: `p99 = 36`, exposure `+1.67 EV`, RAW White `16200`, Chroma Smooth `0`, warning `none`.
+  - `M29-1756.MLV`: `p99 = 37`, exposure `+1.63 EV`, RAW White `6000`, Chroma Smooth auto-applied to `2`, warning `none`.
+- The longer `M16-1446.MLV` frame-369 profile after the cap reported exposure `+1.40 EV`, frame 369 green artifact ratio `0.0031`, mean green axis `29.62`, and visible green axis `3.84`.
+- The local release build only deploys the `windows` Qt platform plugin. GUI/profile smokes should use `QT_QPA_PLATFORM=windows`; forcing `offscreen` against this release tree can show the Qt platform plugin popup even though the normal GUI launch path is valid.
+- Regression coverage: `ClipGolden.LocalM16LookAssistCapsOnlyFlatNoiseFloorNightWhenAvailable` asserts the flat M16-1446 case is capped while M16-1243 remains above `+1.50 EV`. The related local M16 Look Assist tests passed: `3` tests, `58` assertions, `0` failures.
+
+### Cross-checked from prior analysis
+
+- The restricted-lossless RAW White split still stands: affected restricted clips keep editable RAW White at `6000` while diagnostics expose the expanded output white separately. This M16-1446 change does not touch that path.
+- `M17-1152.MLV` remains a white-balance control clip for this investigation, not a green-pixel-pattern regression clip. Auto Look Assist is deliberately more conservative than the manual picker because it only applies a detected neutral patch when the patch passes stability and green-clamp guards.
+- The fix narrows the previous strong night rescue rather than reverting it globally. Clips with slightly wider load-frame percentiles (`p99 > 34`) keep their prior rescue exposure.
+
+### Needs runtime profiling
+
+- Human GUI smoke should verify the M16-1446 frame-369 screenshot area after the cap, because the automated guard measures the representative exposure and artifact telemetry but not subjective scene intent.
+- If M16-1446 still feels too green after the exposure cap, the next candidate should be a localized artifact cleanup or per-frame representative Look Assist sampling, not another global night exposure change.
+
+### Ranked next steps
+
+1. High impact / low effort: keep M16-1446 and M16-1243 paired in the optional local golden test so the flat-noise cap cannot silently spread to the clips that benefited from the stronger night rescue.
+2. Medium impact / medium effort: if more clips show non-representative first-frame analysis, add a small representative-frame sampler for Look Assist instead of tuning one more first-frame percentile threshold.
+3. Medium impact / low effort: keep profile/smoke launch recipes on the `windows` Qt platform unless the release folder is explicitly deployed with an offscreen platform plugin.

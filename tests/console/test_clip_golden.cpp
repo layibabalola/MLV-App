@@ -957,6 +957,67 @@ TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
     ASSERT_TRUE(projected_p99 <= 152.0);
 }
 
+TEST(ClipGolden, LocalM16LookAssistCapsOnlyFlatNoiseFloorNightWhenAvailable)
+{
+    const QString flat_fixture_path = QStringLiteral("C:/temp/MLV/M16-1446.MLV");
+    const QString control_fixture_path = QStringLiteral("C:/temp/MLV/M16-1243.MLV");
+    if (!QFileInfo::exists(flat_fixture_path) || !QFileInfo::exists(control_fixture_path)) {
+        SKIP_TEST("Missing local regression clips C:/temp/MLV/M16-1446.MLV or C:/temp/MLV/M16-1243.MLV");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const auto run_profile = [&](const QString &fixture_path, const QString &name) -> QJsonObject {
+        const QString output_json = temp_dir.filePath(name + QStringLiteral(".json"));
+        QProcess process;
+        configure_playback_profile_process(
+            &process,
+            app_exe,
+            repo_root,
+            QStringList()
+                << QStringLiteral("--profile-playback")
+                << QStringLiteral("--input") << fixture_path
+                << QStringLiteral("--frames") << QStringLiteral("3")
+                << QStringLiteral("--output") << output_json
+                << QStringLiteral("--threads") << QStringLiteral("1"),
+            QList<QPair<QString, QString>>()
+                << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1"))
+                << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
+        process.start();
+        ASSERT_TRUE(process.waitForStarted());
+        ASSERT_TRUE(process.waitForFinished(-1));
+        ASSERT_EQ(0, process.exitCode());
+
+        QFile json_file(output_json);
+        ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+        ASSERT_TRUE(document.isObject());
+        return document.object().value(QStringLiteral("metadata")).toObject();
+    };
+
+    const QJsonObject flat_metadata =
+        run_profile(flat_fixture_path, QStringLiteral("m16-1446-look-assist"));
+    ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_diagnostics_valid")).toBool());
+    ASSERT_EQ(std::string("night"),
+              flat_metadata.value(QStringLiteral("look_assist_scene")).toString().toStdString());
+    ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_p99")).toDouble() <= 34.0);
+    ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_exposure")).toInt() <= 145);
+
+    const QJsonObject control_metadata =
+        run_profile(control_fixture_path, QStringLiteral("m16-1243-look-assist"));
+    ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_diagnostics_valid")).toBool());
+    ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_p99")).toDouble() > 34.0);
+    ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_exposure")).toInt() > 150);
+}
+
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtRuntime)
 {
     const QString fixture_path = clip_fixture_path();
