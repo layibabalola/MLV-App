@@ -774,6 +774,16 @@
     "requiredFor": ["publish_missing_upstream", "publish_ahead_only", "final_push"],
     "commitMessage": "chore(closeout): repair closeout evidence artifacts"
   },
+  "commitMessages": {
+    "humanSummaryField": "commitSubject",
+    "appendGeneratedWorkBlockDetails": true,
+    "rejectGenericSubjects": true,
+    "genericSubjectExamples": [
+      "brokered closeout checkpoint",
+      "brokered closeout evidence repair",
+      "merge(closeout): integrate <workBlockId> closeout hardening into <target>"
+    ]
+  },
   "closeoutAddendumPersistence": {
     "enabled": true,
     "sameTurnRequired": true,

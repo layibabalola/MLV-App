@@ -4,12 +4,16 @@ param(
     [switch]$Finalize,
     [switch]$NoFinalize,
     [switch]$AutoApprove,
-    [switch]$RequireRepoClosed
+    [switch]$RequireRepoClosed,
+    [string]$Summary
 )
 
 $argsList = @("complete")
 if ($WorkBlockId) {
     $argsList += @("--work-block-id", $WorkBlockId)
+}
+if ($Summary) {
+    $argsList += @("--summary", $Summary)
 }
 if ($Finalize -or -not $NoFinalize) {
     $argsList += "--finalize"

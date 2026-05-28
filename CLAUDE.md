@@ -74,8 +74,13 @@ shared `powershell_runtime.powershell_cim_command()` policy helper.
 For non-trivial work, start a brokered block with:
 
 ```powershell
-pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot .
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot . -Summary "<human commit subject>"
 ```
+
+Use a subject that describes the user-visible purpose of the change, for
+example `export: apply Auto Look Assist raw defaults to DNG metadata`.
+Broker-generated work-block, checkpoint, evidence, and merge details belong in
+the commit body after that subject.
 
 If the start command begins on a clean protected target branch and
 `workBlockBootstrap.autoBranchFromProtectedTarget=true`, the broker creates an

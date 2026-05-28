@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--work-block-id")
     start.add_argument("--actor", default="codex")
     start.add_argument("--claim", action="append", default=[], help="Repo-relative path claim. May be repeated.")
+    start.add_argument("--summary", help="Human commit subject for this work block; generated closeout detail is appended after it.")
 
     bootstrap = sub.add_parser("bootstrap-response", help="Create or refresh the response-hook broker manifest.")
     bootstrap.add_argument("--hook-phase", default="response")
@@ -59,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--finalize", action="store_true")
     complete.add_argument("--auto-approve", action="store_true")
     complete.add_argument("--require-repo-closed", action="store_true")
+    complete.add_argument("--summary", help="Human commit subject to store before checkpoint/evidence/merge commits.")
 
     detect = sub.add_parser("detect", help="Classify dirty state against the completed branch delta.")
     detect.add_argument("--work-block-id")
@@ -171,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repo_root = resolve_repo_root(Path(args.repo_root))
         if args.command == "start":
-            result = start_work_block(repo_root, work_block_id=args.work_block_id, actor=args.actor, path_claims=args.claim)
+            result = start_work_block(repo_root, work_block_id=args.work_block_id, actor=args.actor, path_claims=args.claim, summary=args.summary)
         elif args.command == "bootstrap-response":
             result = bootstrap_response_broker_manifest(repo_root, hook_phase=args.hook_phase, actor=args.actor, path_claims=args.claim)
         elif args.command == "complete":
@@ -181,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
                 finalize=args.finalize,
                 auto_approve=args.auto_approve,
                 require_repo_closed=args.require_repo_closed,
+                summary=args.summary,
             )
         elif args.command == "detect":
             result = detect_work_block(repo_root, work_block_id=args.work_block_id)

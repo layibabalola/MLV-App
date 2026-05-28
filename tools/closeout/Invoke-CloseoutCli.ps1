@@ -46,7 +46,21 @@ raise SystemExit(bounded_closeout_cli_main(sys.argv[1:]))
         $processArgs = @($runnerPath) + $runnerArgs
     }
     try {
-        $process = Start-Process -FilePath $exe -ArgumentList $processArgs -WorkingDirectory $resolvedRepo -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -WindowStyle Hidden
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $exe
+        $startInfo.WorkingDirectory = $resolvedRepo
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        foreach ($item in $processArgs) {
+            [void]$startInfo.ArgumentList.Add([string]$item)
+        }
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        [void]$process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         if ($heartbeatSeconds -gt 0) {
             $heartbeatMs = [Math]::Max(1000, $heartbeatSeconds * 1000)
             while (-not $process.WaitForExit($heartbeatMs)) {
@@ -57,14 +71,20 @@ raise SystemExit(bounded_closeout_cli_main(sys.argv[1:]))
             $process.WaitForExit()
         }
         $process.WaitForExit()
-        if (Test-Path -LiteralPath $stdoutPath) {
-            [Console]::Out.Write((Get-Content -LiteralPath $stdoutPath -Raw))
+        $stdoutText = $stdoutTask.GetAwaiter().GetResult()
+        $stderrText = $stderrTask.GetAwaiter().GetResult()
+        Set-Content -LiteralPath $stdoutPath -Value $stdoutText -Encoding UTF8
+        Set-Content -LiteralPath $stderrPath -Value $stderrText -Encoding UTF8
+        if ($stdoutText) {
+            [Console]::Out.Write($stdoutText)
         }
-        if (Test-Path -LiteralPath $stderrPath) {
-            [Console]::Error.Write((Get-Content -LiteralPath $stderrPath -Raw))
+        if ($stderrText) {
+            [Console]::Error.Write($stderrText)
         }
         $process.Refresh()
-        exit ([int]$process.ExitCode)
+        if ([int]$process.ExitCode -ne 0) {
+            throw "closeout CLI failed with exit code $($process.ExitCode)"
+        }
     } finally {
         Remove-Item -LiteralPath $runnerPath, $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
     }
