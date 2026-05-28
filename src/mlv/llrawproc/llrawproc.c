@@ -1237,9 +1237,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 worker->dng_bit_depth = 16;
             }
 
-            llrawproc_worker_ensure_luts(worker, worker->dng_black_level);
-
             const double refine_lock_start = mlv_stage_timing_now();
+            int post_recon_luts_active = 0;
             focus_status_snapshot = 0;
             bad_status_snapshot = 0;
             focus_interpolate_outside_lock = 0;
@@ -1247,6 +1246,11 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             bad_force_reset_after_interpolation = 0;
             focus_map_for_interpolation = NULL;
             bad_map_for_interpolation = NULL;
+            if (bad_pixels)
+            {
+                llrawproc_worker_ensure_luts(worker, worker->dng_black_level);
+                post_recon_luts_active = 1;
+            }
             pthread_mutex_lock(&video->llrawproc_mutex);
             if (focus_pixels)
             {
@@ -1303,11 +1307,16 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             g_llrawproc_last_dualiso_refine_lock_ms += (mlv_stage_timing_now() - refine_lock_start) * 1000.0;
             g_llrawproc_last_shared_lock_ms += g_llrawproc_last_dualiso_refine_lock_ms;
 
-                if (focus_pixels && focus_interpolate_outside_lock && focus_status_snapshot == 2 && focus_map_for_interpolation)
+            if (focus_pixels && focus_interpolate_outside_lock && focus_status_snapshot == 2 && focus_map_for_interpolation)
+            {
+                if (!post_recon_luts_active)
                 {
-                    const double focus_pixels_start = mlv_stage_timing_now();
-                    interpolate_focus_pixel_map(focus_map_for_interpolation,
-                                                raw_image_buff,
+                    llrawproc_worker_ensure_luts(worker, worker->dng_black_level);
+                    post_recon_luts_active = 1;
+                }
+                const double focus_pixels_start = mlv_stage_timing_now();
+                interpolate_focus_pixel_map(focus_map_for_interpolation,
+                                            raw_image_buff,
                                             x_res,
                                             y_res,
                                             pan_pos_x,
@@ -1316,14 +1325,19 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                             0,
                                             worker->raw2ev,
                                             worker->ev2raw);
-                    focus_pixels_ms += (mlv_stage_timing_now() - focus_pixels_start) * 1000.0;
+                focus_pixels_ms += (mlv_stage_timing_now() - focus_pixels_start) * 1000.0;
             }
 
-                if (bad_pixels && bad_interpolate_outside_lock && bad_status_snapshot == 2 && bad_map_for_interpolation)
+            if (bad_pixels && bad_interpolate_outside_lock && bad_status_snapshot == 2 && bad_map_for_interpolation)
+            {
+                if (!post_recon_luts_active)
                 {
-                    const double bad_pixels_start = mlv_stage_timing_now();
-                    interpolate_bad_pixel_map(bad_map_for_interpolation,
-                                              raw_image_buff,
+                    llrawproc_worker_ensure_luts(worker, worker->dng_black_level);
+                    post_recon_luts_active = 1;
+                }
+                const double bad_pixels_start = mlv_stage_timing_now();
+                interpolate_bad_pixel_map(bad_map_for_interpolation,
+                                          raw_image_buff,
                                           x_res,
                                           y_res,
                                           pan_pos_x,
@@ -1332,14 +1346,17 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                           0,
                                           worker->raw2ev,
                                           worker->ev2raw);
-                    if (bad_force_reset_after_interpolation)
-                    {
-                        llrawproc_reset_force_bad_pixel_search(video, bad_pixels);
-                    }
-                    bad_pixels_ms += (mlv_stage_timing_now() - bad_pixels_start) * 1000.0;
+                if (bad_force_reset_after_interpolation)
+                {
+                    llrawproc_reset_force_bad_pixel_search(video, bad_pixels);
+                }
+                bad_pixels_ms += (mlv_stage_timing_now() - bad_pixels_start) * 1000.0;
             }
 
-            llrawproc_worker_ensure_luts(worker, raw_info.black_level);
+            if (post_recon_luts_active)
+            {
+                llrawproc_worker_ensure_luts(worker, raw_info.black_level);
+            }
         }
         else if (dual_iso_mode == 2)
         {

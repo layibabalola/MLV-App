@@ -2266,3 +2266,43 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / medium effort: prototype a borrowed-buffer async playback-prep handoff so x1 does not copy `12.3 MB` of RGB8 every frame before presentation.
 3. Medium impact / medium effort: evaluate a receipt-compatible fast pre-recon path for x4/HQ as an explicit speed/quality mode, especially with focus-pixel receipts that currently force fallback.
 4. Low-medium impact / low effort: clarify the toolbar/menu wording if users expect x4 to change HQ FPS dramatically; current behavior mainly reduces presentation work when full-recon remains active.
+
+## 2026-05-28 - x1 HQ CPU iteration 1
+
+### Verified locally
+
+- The first CPU-focused x1 HQ implementation keeps the user-visible scale factor at `x1` and targets two costs that still matter when scale cannot remove full-recon Dual ISO work:
+  - playback-prep no longer deep-copies the ready RGB8 frame into `PlaybackPrepTask::ownedSourceImage`; `platform/qt/MainWindow.cpp:16475` borrows the pinned render-slot buffer and records borrowed-byte telemetry.
+  - full HQ Dual ISO no longer rebuilds post-reconstruction EV LUTs unless post-recon focus/bad-pixel interpolation will actually use them; `src/mlv/llrawproc/llrawproc.c:1241` tracks `post_recon_luts_active` and restores the original LUT only when it was switched.
+- The render-slot lifetime audit found the borrowed RGB8 handoff safe for the current async prep path: `RenderFrameThread::acquireLatestReadyFrame()` pins a slot as presenting, free-slot selection skips presenting slots, and existing release-by-serial paths release the slot after stale/drop/present decisions.
+- Regression coverage now asserts the profile telemetry for borrowed versus owned prep bytes in `tests/console/test_clip_golden.cpp:337`; warm x1 HQ profiles report owned RGB8 bytes at `0` and borrowed RGB8 bytes at `12301632`.
+- Focused correctness checks passed after the lazy-LUT change:
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+  - `ClipGolden.TinyDualIsoBatchExportMatchesGolden`
+  - `DualIsoPipeline.TinyDualIsoFullFramesMatchGolden`
+  - `DualIsoPipeline.StablePixelMaps*`
+  - `DualIsoPipeline.ForcedReEntryFullDualIsoStabilizesFromFirstRender`
+  - `DualIsoPipeline.DualIsoPlaybackForcesMean23WhenOverrideActive`
+- `tests/fixtures/clips/large_dual_iso.mlv` with `tests/fixtures/receipts/large_dual_iso_hq.marxml`, x1 HQ, auto worker threads, warm frames only:
+  - Previous x1 baseline: `latency_ms 176.415`, `engine_latency_ms 143.318`, `presentation_overhead_ms 31.892`, `draw_frame_ready_total_ms 31.000`, `llrawproc_ms 127.000`, `llrawproc_other_ms 48.000`, owned RGB8 bytes `12301632`.
+  - Borrowed-prep run: `latency_ms 136.971`, `engine_latency_ms 122.876`, `presentation_overhead_ms 14.178`, `draw_frame_ready_total_ms 14.000`, `llrawproc_ms 108.000`, `llrawproc_other_ms 41.000`, owned RGB8 bytes `0`, borrowed RGB8 bytes `12301632`.
+  - Lazy-LUT run 1: `latency_ms 89.985`, `engine_latency_ms 76.003`, `presentation_overhead_ms 14.239`, `draw_frame_ready_total_ms 14.000`, `llrawproc_ms 65.000`, `llrawproc_other_ms 0.000`.
+  - Lazy-LUT run 2: `latency_ms 126.109`, `engine_latency_ms 110.827`, `presentation_overhead_ms 14.763`, `draw_frame_ready_total_ms 15.000`, `llrawproc_ms 92.000`, `llrawproc_other_ms 0.000`.
+- The release executable rebuilt successfully after the GUI/playback changes: `platform/qt/build-release/release/MLVApp.exe`, timestamp `2026-05-28 17:18:57`, size `8224768`, SHA256 `25835782478349E8ED1E8A8F9143B78A8BE948AFAF8820F192EB61887B76CD6F`.
+
+### Cross-checked from prior analysis
+
+- The scale-factor investigation remains valid: x4 mostly reduced presentation/copy work while the full HQ engine path stayed dominant. These iteration-1 changes improve x1 without relying on the x4 pre-recon fast path.
+- The hidden `llrawproc_other_ms` slice matched the suspected EV LUT rebuild work around the full HQ Dual ISO post-recon path. The repeated lazy-LUT profile kept that slice at `0.000 ms`, which is stronger evidence than total FPS on this noisy CPU-bound VM.
+- This change is not playback-only inside `llrawproc`; export/full-render correctness is covered by the tiny Dual ISO batch golden, but wider Dual ISO exports should remain part of future validation if the LUT gating is broadened.
+
+### Needs runtime profiling
+
+- The VM timing still varies materially between runs. Treat the stable findings as owned RGB8 copy removal and `llrawproc_other_ms` elimination, not as a precise FPS promise.
+- If more headroom is needed at x1 HQ, the next measured target is the remaining `llrawproc_dual_iso_ms` / `processed8_total_ms` slice; after lazy LUTs, that is the dominant CPU work again.
+
+### Ranked next steps
+
+1. High impact / medium effort: profile the remaining full HQ Dual ISO reconstruction slice after lazy LUTs, especially `diso_get_full20bit()` and direct processed8 conversion.
+2. Medium impact / medium effort: add finer `llrawproc` telemetry for LUT rebuild time and Dual ISO subphases so future improvements are attributable without inference.
+3. Medium impact / low effort: run a human GUI smoke on the user VM with the rebuilt release executable and compare FPS/cadence at x1 HQ before chasing further presentation-side copies.
