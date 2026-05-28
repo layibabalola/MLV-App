@@ -867,8 +867,14 @@ TEST(ClipGolden, LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable)
 
     const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
     ASSERT_FALSE(metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool());
-    ASSERT_EQ(std::string("rejected-extreme-color-cast"),
-              metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString());
+    const std::string auto_wb_source =
+        metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString();
+    ASSERT_TRUE(auto_wb_source == std::string("rejected-extreme-color-cast")
+             || auto_wb_source == std::string("none"));
+    ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_original_raw_white")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_white_candidate")).toInt() > 15000);
+    ASSERT_EQ(metadata.value(QStringLiteral("look_assist_auto_white_candidate")).toInt(),
+              metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_tint")).toInt() > -20);
 }
 
@@ -1062,6 +1068,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRestoresLookAssistBaselineAtR
     ASSERT_NE(2840, metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_original_raw_black")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_original_raw_white")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_auto_white_candidate")));
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_scene")).toString().size() > 0);
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_exposure")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("look_assist_preset_contrast")));

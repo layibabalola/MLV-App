@@ -1010,6 +1010,7 @@ private:
     void syncLookAssistDerivedUiToReceipt( ReceiptSettings *receipt );
     void setGradientMask( void );
     uint16_t autoCorrectRawBlackLevel( void );
+    uint16_t autoCorrectRawWhiteLevel( void );
     bool isRawBlackLevelWrong( void );
     QRecentFilesMenu *m_pRecentFilesMenu;
     void selectDebayerAlgorithm( void );

@@ -203,7 +203,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "sensitive": [".claude/**", ".claude", ".git/**", ".git"],
                 "state": ".claude-state/closeout",
             },
-            "dirty": {"unclaimedOutsideDelta": "foreign", "sensitiveUnownedBlocks": True, "autoClaimCleanAtStart": True},
+            "dirty": {
+                "unclaimedOutsideDelta": "foreign",
+                "sensitiveUnownedBlocks": True,
+                "autoClaimCleanAtStart": True,
+                "cleanAtStartSensitiveAutoClaim": [".claude/analysis/*.md", ".claude/ANALYSIS_LOG.md"],
+            },
             "dirtySplit": {
                 "enabled": True,
                 "autoRepairOwnedDirty": True,
@@ -616,10 +621,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("webDashboardSpec.preserveClientStateAcrossRefresh", contract["requiredConfigKeys"])
         self.assertIn("webDashboardSpec.rollbackForbiddenActions", contract["requiredConfigKeys"])
         self.assertIn("rollbackPolicy", contract["requiredConfigKeys"])
+        self.assertIn("dirty.cleanAtStartSensitiveAutoClaim", contract["requiredConfigKeys"])
+        self.assertIn("dirty.cleanAtStartSensitiveAutoClaim", config["toolingBaseline"]["requiredConfigKeys"])
         self.assertIn("foreign_dirty_integrated_branch_prune", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("detached_dirty_preserve", config["autoQuorum"]["autonomousActionClasses"])
         self.assertIn("owned_dirty_checkpoint", config["autoQuorum"]["autonomousActionClasses"])
         self.assertTrue(config["dirty"]["autoClaimCleanAtStart"])
+        self.assertIn(".claude/analysis/*.md", config["dirty"]["cleanAtStartSensitiveAutoClaim"])
         self.assertEqual(config["powerShell"]["preferredExecutable"], "pwsh.exe")
         self.assertEqual(config["powerShell"]["fallbackExecutable"], "powershell.exe")
         self.assertIn("-NoProfile", config["powerShell"]["requiredArgs"])
@@ -644,6 +652,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             bridge_validation["argv"],
         )
         self.assertIn(".codex-state/**", config["paths"]["generated"])
+        self.assertIn("test_existing_analysis_note_clean_at_start_is_auto_claimed_despite_sensitive_root", config["toolingBaseline"]["requiredTests"])
+        self.assertIn("test_new_analysis_note_under_sensitive_root_still_blocks_as_unowned", config["toolingBaseline"]["requiredTests"])
         self.assertTrue(config["repoSweep"]["retainedBlockerAutoRemediation"]["enabled"])
         self.assertEqual(config["repoSweep"]["recoveryBranchPrefix"], "closeout/recovery/detached")
         self.assertTrue(config["repoSweep"]["allowForeignDirtyIntegratedBranchPrune"])
@@ -3480,6 +3490,43 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "show", "master:new-owned.txt").stdout, "owned after baseline\n")
         self.assertIn("checkpoint_owned_dirty", self.audit_types(repo))
         self.assertIn("auto_quorum", self.audit_types(repo))
+
+    def test_existing_analysis_note_clean_at_start_is_auto_claimed_despite_sensitive_root(self) -> None:
+        repo = self.init_repo(remote=False)
+        note = repo / ".claude" / "analysis" / "mlv-playback-investigation.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("# Existing note\n", encoding="utf-8")
+        git(repo, "add", ".claude/analysis/mlv-playback-investigation.md")
+        git(repo, "commit", "-m", "add curated analysis note")
+        git(repo, "checkout", "-b", "codex/analysis-note-update")
+        start_work_block(repo, work_block_id="wb-analysis-note", actor="local-test")
+        note.write_text("# Existing note\n\nFollow-up finding.\n", encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-analysis-note")
+
+        self.assertEqual([item["path"] for item in detection["ownedDirty"]], [".claude/analysis/mlv-playback-investigation.md"])
+        self.assertFalse(detection["unownedDirty"], detection)
+        self.assertTrue(detection["ownedDirty"][0]["sensitive"])
+        self.assertTrue(detection["ownedDirty"][0]["cleanAtStartSensitiveAutoClaimAllowed"])
+        self.assertEqual(
+            detection["ownedDirty"][0]["classificationReason"],
+            "tracked sensitive note was clean or absent at broker dirty baseline",
+        )
+
+    def test_new_analysis_note_under_sensitive_root_still_blocks_as_unowned(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/new-analysis-note")
+        start_work_block(repo, work_block_id="wb-new-analysis-note", actor="local-test")
+        note = repo / ".claude" / "analysis" / "new-note.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("new ad-hoc note\n", encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-new-analysis-note")
+
+        self.assertFalse(detection["ownedDirty"], detection)
+        self.assertEqual([item["path"] for item in detection["unownedDirty"]], [".claude/analysis/new-note.md"])
+        self.assertTrue(detection["unownedDirty"][0]["sensitive"])
+        self.assertFalse(detection["unownedDirty"][0]["cleanAtStartSensitiveAutoClaimAllowed"])
 
     def test_stale_integrated_claims_do_not_foreignize_clean_at_start_dirty(self) -> None:
         repo = self.init_repo(remote=False)

@@ -383,6 +383,10 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "unclaimedOutsideDelta": "foreign",
         "sensitiveUnownedBlocks": True,
         "autoClaimCleanAtStart": True,
+        "cleanAtStartSensitiveAutoClaim": [
+            ".claude/analysis/*.md",
+            ".claude/ANALYSIS_LOG.md",
+        ],
     },
     "dirtySplit": {
         "enabled": True,
@@ -679,6 +683,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "powerShell.windowsPowerShellOnly",
             "powerShell.justification",
             "paths",
+            "dirty.cleanAtStartSensitiveAutoClaim",
             "dirtySplit",
             "toolingBaseline",
             "evidenceRepair",
@@ -753,6 +758,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_retained_terminal_outcomes_prove_remediation_attempted_or_excluded",
             "test_pre_response_broker_bootstrap_records_dirty_baseline_without_worktree",
             "test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum",
+            "test_existing_analysis_note_clean_at_start_is_auto_claimed_despite_sensitive_root",
+            "test_new_analysis_note_under_sensitive_root_still_blocks_as_unowned",
             "test_stale_integrated_claims_do_not_foreignize_clean_at_start_dirty",
             "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
             "test_baseline_dirty_changed_after_start_blocks_as_mixed_without_claim",
@@ -1211,6 +1218,25 @@ def locks_root(repo_root: Path, config: Dict[str, Any]) -> Path:
 def path_matches_any(path: str, patterns: Iterable[str]) -> bool:
     value = normalize_rel(path)
     return any(fnmatch.fnmatch(value, normalize_rel(pattern)) for pattern in patterns)
+
+
+def clean_at_start_sensitive_auto_claim_allowed(
+    repo_root: Path,
+    config: Dict[str, Any],
+    path: str,
+    entry: Optional[Dict[str, Any]] = None,
+) -> bool:
+    patterns = config.get("dirty", {}).get("cleanAtStartSensitiveAutoClaim", [])
+    if not path_matches_any(path, patterns):
+        return False
+    status = str((entry or {}).get("status") or "")
+    if status.strip() == "??":
+        return False
+    if any(marker in status for marker in ("A", "D", "R", "C")):
+        return False
+    if (entry or {}).get("originalPath"):
+        return False
+    return git_path_tracked(repo_root, path)
 
 
 def current_branch(repo_root: Path) -> Optional[str]:
@@ -3384,6 +3410,13 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
         baseline_changed = bool(baseline_details.get("dirtyBaselineContentChanged"))
         generated = path_matches_any(path, generated_patterns)
         sensitive = path_matches_any(path, sensitive_patterns)
+        sensitive_auto_claim_allowed = (
+            sensitive
+            and auto_claim_clean
+            and baseline_available
+            and not dirty_at_baseline
+            and clean_at_start_sensitive_auto_claim_allowed(repo_root, config, path, entry)
+        )
         enriched = {
             **entry,
             "ownerWorkBlockId": owner,
@@ -3392,6 +3425,7 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
             "dirtyBaselineAvailable": baseline_available,
             "generated": generated,
             "sensitive": sensitive,
+            "cleanAtStartSensitiveAutoClaimAllowed": sensitive_auto_claim_allowed,
             **baseline_details,
         }
         if protected_dirty_recovery and path in protected_recovery_paths:
@@ -3415,6 +3449,10 @@ def detect_work_block(repo_root_arg: Path, *, work_block_id: Optional[str] = Non
             mixed_dirty.append(enriched)
         elif in_delta or claimed_by_self:
             enriched["classificationReason"] = "path overlaps completed branch delta or block claim"
+            owned_dirty.append(enriched)
+        elif sensitive_auto_claim_allowed:
+            enriched["classificationReason"] = "tracked sensitive note was clean or absent at broker dirty baseline"
+            enriched["autoClaimedByDirtyBaseline"] = True
             owned_dirty.append(enriched)
         elif sensitive and bool(config.get("dirty", {}).get("sensitiveUnownedBlocks", True)):
             enriched["classificationReason"] = "unclaimed sensitive path"
@@ -6320,6 +6358,7 @@ def classify_dirty_entries_for_branch(
     unowned_dirty: List[Dict[str, Any]] = []
     foreign_dirty: List[Dict[str, Any]] = []
     unclaimed_default = str(config.get("dirty", {}).get("unclaimedOutsideDelta", "foreign"))
+    auto_claim_clean = bool(config.get("dirty", {}).get("autoClaimCleanAtStart", True))
     generated_patterns = config.get("paths", {}).get("generated", [])
     for entry in entries:
         path = str(entry["path"])
@@ -6331,6 +6370,13 @@ def classify_dirty_entries_for_branch(
         dirty_at_baseline = path in baseline_paths
         baseline_details = dirty_baseline_change_details(worktree_path, entry, baseline_entries.get(path)) if dirty_at_baseline else {}
         baseline_changed = bool(baseline_details.get("dirtyBaselineContentChanged"))
+        sensitive_auto_claim_allowed = (
+            sensitive
+            and auto_claim_clean
+            and baseline_available
+            and not dirty_at_baseline
+            and clean_at_start_sensitive_auto_claim_allowed(worktree_path, config, path, entry)
+        )
         enriched = {
             **entry,
             "ownerWorkBlockId": owner,
@@ -6340,6 +6386,7 @@ def classify_dirty_entries_for_branch(
             "sensitive": sensitive,
             "generated": generated,
             "branch": branch,
+            "cleanAtStartSensitiveAutoClaimAllowed": sensitive_auto_claim_allowed,
             **baseline_details,
         }
         if generated:
@@ -6359,6 +6406,10 @@ def classify_dirty_entries_for_branch(
             mixed_dirty.append(enriched)
         elif in_delta or claimed_by_self:
             enriched["classificationReason"] = "path overlaps branch delta or branch work-block claim"
+            owned_dirty.append(enriched)
+        elif sensitive_auto_claim_allowed:
+            enriched["classificationReason"] = "tracked sensitive note was clean or absent at broker dirty baseline"
+            enriched["autoClaimedByDirtyBaseline"] = True
             owned_dirty.append(enriched)
         elif sensitive and bool(config.get("dirty", {}).get("sensitiveUnownedBlocks", True)):
             enriched["classificationReason"] = "sensitive path is unowned"
@@ -10422,6 +10473,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
         "powerShell.windowsPowerShellOnly",
         "powerShell.justification",
         "paths",
+        "dirty.cleanAtStartSensitiveAutoClaim",
         "dirtySplit",
         "toolingBaseline",
         "evidenceRepair",
