@@ -257,21 +257,21 @@ That mode steps frames through the real
 apply a receipt, enable scopes/zebras, leave raw caching on, and capture a
 stage-timing log.
 
-Capture the real Qt playback path instead of the engine-only perf harness:
+Capture the real Qt playback path instead of the engine-only perf harness. On
+the Windows release tree, prefer the repo wrapper because it pins
+`QT_QPA_PLATFORM=windows` and the deployed `platforms\qwindows.dll` path; do
+not force `offscreen` unless you have explicitly deployed an offscreen platform
+plugin:
 
 ```powershell
-$env:PATH='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;' + $env:PATH
-$env:QT_OPENGL='desktop'
-.\platform\qt\build-headless\release\MLVApp.exe `
-  --profile-playback `
-  --input tests/fixtures/clips/large_dual_iso.mlv `
-  --receipt tests/fixtures/receipts/large_dual_iso_hq.marxml `
-  --frames 8 `
-  --output .claude/profiling/playback-ui/large-step-cache.json `
-  --stage-log .claude/profiling/playback-ui/large-step-cache-stage.log `
-  --threads 1 `
-  --raw-cache-mb 128 `
-  --cache-cpu-cores 4
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\run-release-playback-profile.ps1 `
+  -RepoRoot . `
+  -Input tests\fixtures\clips\large_dual_iso.mlv `
+  -Receipt tests\fixtures\receipts\large_dual_iso_hq.marxml `
+  -Frames 8 `
+  -Output .claude-state\profiling\playback-ui\large-step-cache.json `
+  -AdditionalArgs @('--stage-log', '.claude-state\profiling\playback-ui\large-step-cache-stage.log', '--raw-cache-mb', '128', '--cache-cpu-cores', '4')
 ```
 
 ### Selectors and processing controls

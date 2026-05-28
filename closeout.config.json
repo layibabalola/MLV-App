@@ -614,6 +614,7 @@
       "test_remediation_freeze_remove_allows_stale_transaction_branches_after_revalidation",
       "test_remediation_freeze_remove_blocks_fresh_dirty_marker",
       "test_remediation_freeze_remove_allows_stale_dirty_marker_after_quorum",
+      "test_remediation_freeze_remove_allows_wrong_work_block_marker_after_quorum",
       "test_remediation_hard_clean_blocks_remaining_freeze_marker"
     ],
     "requiredSymbols": [

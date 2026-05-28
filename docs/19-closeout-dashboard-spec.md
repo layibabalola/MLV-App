@@ -66,10 +66,11 @@ start, the dashboard should surface it as `mixedDirty` with
 `baseline-dirty-overlaps-candidate`, not as retained foreign dirty, so a partial
 promotion cannot hide current work inside an audited foreign-dirty allowance.
 When a remediation freeze is active, the dashboard should distinguish a fresh
-freeze from a stale marker by surfacing the actor's branch/head/policy/dirty-path
-fingerprint comparison. A stale marker can be requested for repo-owned removal
-through `remediation-freeze-remove`, but the dashboard still records intent only;
-the actor must revalidate and obtain quorum before mutating the marker.
+freeze from a stale marker by surfacing the actor's requested work block,
+branch/head/policy/dirty-path fingerprint comparison. A stale marker can be
+requested for repo-owned removal through `remediation-freeze-remove`, but the
+dashboard still records intent only; the actor must revalidate and obtain quorum
+before mutating the marker.
 
 Historical browsing comes from the repo-state history directory and the durable
 audit log. The UI may summarize those artifacts, but the artifacts remain the

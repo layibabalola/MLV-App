@@ -3474,6 +3474,33 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertFalse(remediation_freeze_status(repo, load_closeout_config(repo))["active"])
         self.assertTrue(result["quorum"]["ok"])
 
+    def test_remediation_freeze_remove_allows_wrong_work_block_marker_after_quorum(self) -> None:
+        repo = self.init_repo(remote=False)
+        config = load_closeout_config(repo)
+        git(repo, "checkout", "-b", "codex/wrong-freeze-owner")
+        start_work_block(repo, work_block_id="wb-right", actor="local-test")
+        (repo / "dirty.txt").write_text("current dirty state\n", encoding="utf-8")
+        detection = detect_work_block(repo, work_block_id="wb-right")
+        detection["workBlockId"] = "wb-wrong"
+        enter_remediation_freeze(
+            repo,
+            config,
+            reason="dirty_state_remediation_required",
+            detection=detection,
+        )
+
+        stale = remediation_freeze_staleness(repo, config, work_block_id="wb-right")
+        result = remove_remediation_freeze(repo, work_block_id="wb-right")
+
+        self.assertTrue(stale["stale"], stale)
+        self.assertIn("work_block_id_mismatch", [item["kind"] for item in stale["reasons"]])
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["reason"], "remediation_freeze_removed")
+        self.assertTrue(result["staleFreezeEvidence"]["stale"], result)
+        self.assertIn("work_block_id_mismatch", [item["kind"] for item in result["staleFreezeEvidence"]["reasons"]])
+        self.assertFalse((repo / ".claude-state" / "closeout-remediation.freeze").exists())
+        self.assertFalse(remediation_freeze_status(repo, config)["active"])
+
     def test_clean_at_start_new_dirty_paths_auto_claimed_and_checkpointed_through_quorum(self) -> None:
         repo = self.init_repo(remote=False)
         git(repo, "checkout", "-b", "codex/clean-at-start")

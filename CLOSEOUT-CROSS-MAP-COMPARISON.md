@@ -19,9 +19,9 @@ Principle:
 
 This round-delta note converted the cross-repo comparison idea into a durable contract and keeps the current round's delta visible beside the comparison rules:
 
-Freshness marker: Last updated: 2026-05-27 00:00 -05:00
+Freshness marker: Last updated: 2026-05-28 10:35 -05:00
 
-- Remediation-freeze thaw now distinguishes fresh freeze packets from stale markers by comparing branch, feature head, target head, policy hash, and dirty-path fingerprints before allowing quorum-backed marker removal.
+- Remediation-freeze thaw now distinguishes fresh freeze packets from stale markers by comparing requested work block id, branch, feature head, target head, policy hash, and dirty-path fingerprints before allowing quorum-backed marker removal.
 - `workflow-comparison` is now treated as a baseline-checked dashboard surface, not just a descriptive label.
 - The canonical dashboard spec at `docs/19-closeout-dashboard-spec.md` is now part of the machine-checked baseline.
 - The canonical hybrid closeout block now lives in `CLOSEOUT-CANONICAL-CONTRACT.md` with a drift sentinel in `CLOSEOUT-CANONICAL-CONTRACT.sha256`, so future repos can copy one verbatim block instead of reconciling several near-matches.
