@@ -82,6 +82,16 @@ example `export: apply Auto Look Assist raw defaults to DNG metadata`.
 Broker-generated work-block, checkpoint, evidence, and merge details belong in
 the commit body after that subject.
 
+Retroactive commit-message repair must start with a reviewed rewrite map, not
+an immediate history rewrite. Generate the map with:
+
+```powershell
+py -3 -m tools.repo_hygiene.commit_message_rewrite_plan --repo-root . --ref master
+```
+
+Review every `needs_subject` entry under `.claude-state/commit-message-rewrite/`
+before any rewrite or force-push.
+
 If the start command begins on a clean protected target branch and
 `workBlockBootstrap.autoBranchFromProtectedTarget=true`, the broker creates an
 allowed `workBlockBootstrap.branchPrefix/<workBlockId>` branch, records
