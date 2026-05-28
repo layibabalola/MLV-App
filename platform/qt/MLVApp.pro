@@ -294,6 +294,7 @@ HEADERS += MainWindow.h \
            ../../src/debug/ForceSingleThread.h \
            ../../src/debug/FrameChecksum.h \
            ../../src/debug/StageTimingCsvSink.h \
+           DualIsoPatternMapping.h \
            GpuDebayer.h \
            GpuPreviewProcessing.h \
     GpuDisplayViewport.h \

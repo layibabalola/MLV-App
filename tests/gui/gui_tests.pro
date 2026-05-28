@@ -22,6 +22,7 @@ SOURCES += \
 HEADERS += \
     $$REPO_ROOT/platform/qt/ColorToolButton.h \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
+    $$REPO_ROOT/platform/qt/DualIsoPatternMapping.h \
     $$REPO_ROOT/platform/qt/GpuDisplayViewport.h \
     $$REPO_ROOT/platform/qt/Histogram.h \
     $$REPO_ROOT/platform/qt/MainWindowGpuPreviewPolicy.h \

@@ -1,5 +1,6 @@
 #include "../../platform/qt/ColorToolButton.h"
 #include "../../platform/qt/DualIsoPlaybackPolicy.h"
+#include "../../platform/qt/DualIsoPatternMapping.h"
 #include "../../platform/qt/GpuDisplayViewport.h"
 #include "../../platform/qt/GpuPreviewProcessing.h"
 #include "../../platform/qt/Histogram.h"
@@ -491,6 +492,7 @@ private slots:
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
+    void dualIsoPatternMappingKeepsUiAndCoreConventionsAligned();
     void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
     void gpuViewportZebraProcessingMatchesCpuReference();
     void gpuViewportPreviewProcessingMatchesCpuReference();
@@ -737,6 +739,20 @@ void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideS
     QCOMPARE(settings.aliasMap, 1);
     QCOMPARE(settings.fullResBlending, 1);
     QVERIFY(!settings.previewOverrideActive);
+}
+
+void GuiSmokeTest::dualIsoPatternMappingKeepsUiAndCoreConventionsAligned()
+{
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(-1), 0);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(-4), 3);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(1), 0);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(4), 3);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(0), 0);
+
+    QCOMPARE(dualIsoCorePatternFromUiIndex(0), 1);
+    QCOMPARE(dualIsoCorePatternFromUiIndex(3), 4);
+    QCOMPARE(dualIsoCorePatternFromUiIndex(-1), 0);
+    QCOMPARE(dualIsoCorePatternFromUiIndex(4), 0);
 }
 
 void GuiSmokeTest::gpuViewportFallsBackToPixmapWhenNotInstalled()
