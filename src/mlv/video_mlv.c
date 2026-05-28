@@ -737,7 +737,6 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
 static void mlv_reset_raw_uint16_prefetch_locked(mlvObject_t * video)
 {
     video->raw_uint16_prefetch_request_pending = 0;
-    video->raw_uint16_prefetch_worker_busy = 0;
     memset(video->raw_uint16_prefetch_slot_state, 0, sizeof(video->raw_uint16_prefetch_slot_state));
     memset(video->raw_uint16_prefetch_slot_frame, 0, sizeof(video->raw_uint16_prefetch_slot_frame));
     memset(video->raw_uint16_prefetch_slot_generation, 0, sizeof(video->raw_uint16_prefetch_slot_generation));
@@ -1649,7 +1648,6 @@ static int mlv_processed_frame_8bit_cache_try_copy(mlvObject_t * video,
 static void mlv_reset_processed8_prefetch_locked(mlvObject_t * video)
 {
     video->processed8_prefetch_request_pending = 0;
-    video->processed8_prefetch_worker_busy = 0;
     video->processed8_prefetch_request_frame = 0;
     video->processed8_prefetch_request_threads = 0;
     video->processed8_prefetch_request_scale = 0;
@@ -1662,6 +1660,7 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
                                                               uint64_t frameIndex,
                                                               uint8_t * outputFrame,
                                                               int threads,
+                                                              int scaleFactor,
                                                               int recordTelemetry);
 static int mlv_start_processed8_prefetch_thread(mlvObject_t * video);
 
@@ -1788,15 +1787,6 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             continue;
         }
 
-        /* Phase E6: the direct render reads playback_scale_factor_active
-         * from the video object to decide whether to invoke the fused
-         * downsample. The render thread sets this before calling the
-         * direct path (line ~3499). When the worker pre-renders we must
-         * mirror that contract — without it the worker would render at
-         * full resolution but store under the scale-N cache lane (or vice
-         * versa), invalidating any byte-identity assumption. */
-        const int saved_scale = task->video->playback_scale_factor_active;
-        task->video->playback_scale_factor_active = task->scaleFactor;
         int renderOk = mlv_render_processed_frame8_direct_with_processing(
             task->video,
             task->processing,
@@ -1804,8 +1794,8 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             targetFrame,
             prefetchBuffer,
             task->threads,
+            task->scaleFactor,
             0);
-        task->video->playback_scale_factor_active = saved_scale;
 
         pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
         if (renderOk
@@ -1935,6 +1925,42 @@ static int mlv_start_processed8_prefetch_thread(mlvObject_t * video)
     }
 
     return 1;
+}
+
+void mlvCancelPreviewPrefetch(mlvObject_t * video)
+{
+    if (!video)
+    {
+        return;
+    }
+
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    ++video->processed8_prefetch_generation;
+    mlv_reset_processed8_prefetch_locked(video);
+    int processed8_busy = video->processed8_prefetch_worker_busy;
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+
+    while (processed8_busy)
+    {
+        usleep(1000);
+        pthread_mutex_lock(&video->processed8_prefetch_mutex);
+        processed8_busy = video->processed8_prefetch_worker_busy;
+        pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+    }
+
+    pthread_mutex_lock(&video->raw_uint16_prefetch_mutex);
+    ++video->raw_uint16_prefetch_generation;
+    mlv_reset_raw_uint16_prefetch_locked(video);
+    int raw_busy = video->raw_uint16_prefetch_worker_busy;
+    pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
+
+    while (raw_busy)
+    {
+        usleep(1000);
+        pthread_mutex_lock(&video->raw_uint16_prefetch_mutex);
+        raw_busy = video->raw_uint16_prefetch_worker_busy;
+        pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
+    }
 }
 
 static float * mlv_ensure_float_buffer(float ** buffer, uint64_t * capacity_pixels, uint64_t required_pixels)
@@ -3454,12 +3480,10 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
                                                               uint64_t frameIndex,
                                                               uint8_t * outputFrame,
                                                               int threads,
+                                                              int scaleFactor,
                                                               int recordTelemetry)
 {
-    /* Phase 4B: scale resolution. video->playback_scale_factor_active is
-     * the *effective* scale set by the *_with_scale entry points. */
-    const int scaleFactor = video ? video->playback_scale_factor_active : 1;
-    const int eff_scale = (scaleFactor > 1) ? scaleFactor : 1;
+    const int eff_scale = mlv_normalize_playback_scale_factor(scaleFactor);
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
     const int out_w = (eff_scale > 1) ? (full_w / eff_scale) : full_w;
@@ -3543,12 +3567,12 @@ static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject
                                                                        const uint16_t * decodedRawFrame,
                                                                        uint8_t * outputFrame,
                                                                        int threads,
+                                                                       int scaleFactor,
                                                                        int recordTelemetry)
 {
     if (!video || !decodedRawFrame || !outputFrame || !processing) return 0;
 
-    const int scaleFactor = video ? video->playback_scale_factor_active : 1;
-    const int eff_scale = (scaleFactor > 1) ? scaleFactor : 1;
+    const int eff_scale = mlv_normalize_playback_scale_factor(scaleFactor);
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
     const int out_w = (eff_scale > 1) ? (full_w / eff_scale) : full_w;
@@ -3620,12 +3644,12 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
                                                                                 const uint16_t * reconnedRawFrame,
                                                                                 uint8_t * outputFrame,
                                                                                 int threads,
+                                                                                int scaleFactor,
                                                                                 int recordTelemetry)
 {
     if (!video || !reconnedRawFrame || !outputFrame || !processing) return 0;
 
-    const int scaleFactor = video ? video->playback_scale_factor_active : 1;
-    const int eff_scale = (scaleFactor > 1) ? scaleFactor : 1;
+    const int eff_scale = mlv_normalize_playback_scale_factor(scaleFactor);
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
     const int out_w = (eff_scale > 1) ? (full_w / eff_scale) : full_w;
@@ -3691,21 +3715,6 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     }
 
     return 1;
-}
-
-static int mlv_render_processed_frame8_direct(mlvObject_t * video,
-                                              uint64_t frameIndex,
-                                              uint8_t * outputFrame,
-                                              int threads,
-                                              int recordTelemetry)
-{
-    return mlv_render_processed_frame8_direct_with_processing(video,
-                                                              video ? video->processing : NULL,
-                                                              1,
-                                                              frameIndex,
-                                                              outputFrame,
-                                                              threads,
-                                                              recordTelemetry);
 }
 
 /* Get a processed frame in 16 bit, only use more than one thread for preview as
@@ -3986,7 +3995,14 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
 
     if (direct8PathActive)
     {
-        if (!mlv_render_processed_frame8_direct(video, frameIndex, outputFrame, threads, 1))
+        if (!mlv_render_processed_frame8_direct_with_processing(video,
+                                                                video->processing,
+                                                                1,
+                                                                frameIndex,
+                                                                outputFrame,
+                                                                threads,
+                                                                normalizedScale,
+                                                                1))
         {
             pthread_mutex_lock(&video->processed8_prefetch_mutex);
             video->current_processed_frame_8bit_active = 0;
@@ -4196,6 +4212,7 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
                                                                      decodedRawFrame,
                                                                      outputFrame,
                                                                      threads,
+                                                                     normalizedScale,
                                                                      1))
     {
         pthread_mutex_lock(&video->processed8_prefetch_mutex);
@@ -4271,6 +4288,7 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                                               reconnedRawFrame,
                                                                               outputFrame,
                                                                               threads,
+                                                                              normalizedScale,
                                                                               1))
     {
         pthread_mutex_lock(&video->processed8_prefetch_mutex);

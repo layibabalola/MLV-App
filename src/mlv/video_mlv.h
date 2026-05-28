@@ -47,6 +47,7 @@ void enableMlvCaching(mlvObject_t * video);
 /* Reset cache, to recache all frames, clears simgle frame cache too */
 void resetMlvCache(mlvObject_t * video);
 void invalidateMlvProcessedPreviewCache(mlvObject_t * video);
+void mlvCancelPreviewPrefetch(mlvObject_t * video);
 /* For setting how much can be cached - "MegaBytes" == MebiBytes (thanks dmilligan) */
 void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit);
 void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit);

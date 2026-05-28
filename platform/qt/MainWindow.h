@@ -889,6 +889,7 @@ private:
                                     uint64_t requestSerialFloor ) const;
     void enqueuePlaybackPrepTask( const PlaybackPrepTask &task );
     void invalidatePlaybackPrepForDisplayChange( const char *reason );
+    void waitForRenderThreadIdleBeforeCoreMutation( const char *reason );
     PlaybackPrepResult buildPlaybackPrepResult( const PlaybackPrepTask &task );
     void playbackPrepThreadLoop( void );
     void presentPlaybackPreparedFrame( const PlaybackPrepResult &result );
