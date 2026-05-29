@@ -2306,3 +2306,43 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium effort: profile the remaining full HQ Dual ISO reconstruction slice after lazy LUTs, especially `diso_get_full20bit()` and direct processed8 conversion.
 2. Medium impact / medium effort: add finer `llrawproc` telemetry for LUT rebuild time and Dual ISO subphases so future improvements are attributable without inference.
 3. Medium impact / low effort: run a human GUI smoke on the user VM with the rebuilt release executable and compare FPS/cadence at x1 HQ before chasing further presentation-side copies.
+
+## 2026-05-28 - additional no-regression speed audit
+
+### Verified locally
+
+- A full audit is useful only if it stays playback-hot-path and profile-led. A broad repo sweep will find ideas, but the no-regression path is: measure the remaining slice, add missing telemetry, then implement one byte-identical or policy-only change at a time.
+- Fresh x1 HQ profile after the prior copy/LUT fixes on `tests/fixtures/clips/large_dual_iso.mlv` with `tests/fixtures/receipts/large_dual_iso_hq.marxml`, `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`, and auto worker threads:
+  - `latency_ms 142.720`, `engine_latency_ms 125.920`, `cadence_ms 143.930`, `presentation_overhead_ms 14.300`
+  - `render_thread_work_ms 126.000`, `processed8_total_ms 126.000`, `llrawproc_ms 102.000`, `llrawproc_dual_iso_ms 102.000`
+  - `processing_ms 8.000`, `raw_uint16_ms 1.000`, `raw_uint16_prefetch_hit 15/15`
+- Worker thread count is a real low-risk lever on this CPU-bound VM. With the same x1 HQ fixture:
+  - `threads=2`: median `latency_ms 125.084`, `engine_latency_ms 109.222`, `llrawproc_ms 87.000`
+  - `threads=4`: median `latency_ms 116.862`, `engine_latency_ms 101.998`, `llrawproc_ms 85.000`
+  - `threads=8`/auto: median `latency_ms ~141-143`, `engine_latency_ms ~126-127`, `llrawproc_ms 102.000`
+  - This suggests auto chose too many workers for the VM's contention profile; a production policy should be adaptive or user-controlled, not a hard global cap.
+- Raw uint16 prefetch should stay enabled for this fixture. Disabling it at `threads=4` changed raw hits from `15/15` to `0/15`, raised median raw decode from `1 ms` to `17 ms`, and slightly worsened median latency despite lower-looking `llrawproc_ms` in that single run.
+- Experimental processed8 prefetch produced only `3/15` warm hits. Hit frames were very fast, but the median barely moved, so it is not ready as a default-on feature without better scheduling/state snapshotting.
+- `MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1` is worth controlled benchmarking, but not a conclusion yet. One run improved total timing, but it also lowered `llrawproc_ms`, which the direct8 flag should not directly affect. The processing/color slice itself moved only about `1 ms`.
+
+### Cross-checked from prior analysis
+
+- Remaining x1 HQ engine work is dominated by full HQ Dual ISO reconstruction in `diso_get_full20bit()` (`src/mlv/llrawproc/dualiso.c:3468`) called from `applyLLRawProcObjectWorker()` (`src/mlv/llrawproc/llrawproc.c:1210`). Any math change there needs byte-identity or very explicit quality tradeoff coverage.
+- The current profile lacks Dual ISO substage timing inside `diso_get_full20bit()`. The high-confidence next instrumentation points are around noise/pattern identification, `convert_to_20bit`, exposure matching, interpolation, `mix_images`, `final_blend`, and `convert_20_to_16bit`.
+- The remaining Qt-side presentation overhead is about `14-15 ms` in headless profiles. A read-only audit points at `drawFrameReady()` calling `timerFrameEvent()` before current-frame presentation (`platform/qt/MainWindow.cpp:16341`) as a likely unbucketed chunk, but this needs telemetry before behavior changes.
+- Stage telemetry itself is inserted into a `QJsonObject` every render (`platform/qt/RenderFrameThread.cpp:1980` through `platform/qt/RenderFrameThread.cpp:2142`). Gating rich telemetry outside profile/debug mode could help normal GUI playback, but profile golden tests must continue to see every field.
+
+### Needs runtime profiling
+
+- Repeat the thread-count sweep on the user's actual VM and clips. The fixture strongly favors `4` over auto/`8`, but the best cap may differ with CPU topology, clip resolution, and whether background prefetch/cache workers are active.
+- Add Dual ISO substage telemetry before optimizing `dualiso.c`; otherwise improvements inside the largest slice remain hard to attribute.
+- Add `draw_frame_ready_advance_ms` or equivalent around the current `timerFrameEvent()` call before splitting/slimming the presentation path.
+- Benchmark direct8 AVX2 intrinsics with parity tests and repeated A/B profiles. Do not default it on from a single noisy VM run.
+
+### Ranked next steps
+
+1. High impact / low risk: expose or auto-tune a playback worker-thread cap for CPU-bound VMs, starting from a profile-proven `4` worker default/candidate rather than auto `8`.
+2. High diagnostic value / low risk: add Dual ISO substage telemetry inside `diso_get_full20bit()` so future engine changes are measured and byte-identity guarded.
+3. Medium impact / low risk: add Qt presentation telemetry around the `timerFrameEvent()` advance work, disabled interaction-trace string construction, and timecode/status updates.
+4. Medium impact / medium risk: improve processed8 prefetch scheduling/state snapshots only if profiles show consistent hit rates above the current `3/15`.
+5. Low-medium impact / low-medium risk: controlled direct8 AVX2-intrinsics default evaluation after parity and repeated A/B runs.
