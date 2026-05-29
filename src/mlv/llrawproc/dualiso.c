@@ -1516,7 +1516,7 @@ static void compute_black_noise(struct raw_info raw_info, uint16_t * image_data,
     long long black = 0;
     int num = 0;
     /* compute average level */
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) reduction(+:black,num)
     for (int y = y1; y < y2; y += dy)
     {
         for (int x = x1; x < x2; x += dx)
@@ -1530,7 +1530,7 @@ static void compute_black_noise(struct raw_info raw_info, uint16_t * image_data,
     
     /* compute standard deviation */
     double stdev = 0;
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) reduction(+:stdev)
     for (int y = y1; y < y2; y += dy)
     {
         for (int x = x1; x < x2; x += dx)
