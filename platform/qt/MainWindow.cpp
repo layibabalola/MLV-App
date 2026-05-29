@@ -3351,7 +3351,9 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         return 6;
     }
 
-    const int measuredFrames = std::min( options.frameCount, totalFrames - startFrame );
+    const int frameStep = std::max( 1, options.frameStep );
+    const int availableFrames = 1 + ((totalFrames - 1 - startFrame) / frameStep);
+    const int measuredFrames = std::min( options.frameCount, availableFrames );
     QJsonArray frameSamples;
     bool playActionSmokeStarted = false;
     bool playActionSmokeFrameAdvanced = false;
@@ -4117,14 +4119,15 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
 
     for( int i = 0; i < measuredFrames; ++i )
     {
-        trace(QStringLiteral("render-begin frame=%1").arg(startFrame + i));
-        if( !renderFrameIndex( startFrame + i, i, false, &renderFailure ) )
+        const int frameIndex = startFrame + (i * frameStep);
+        trace(QStringLiteral("render-begin frame=%1").arg(frameIndex));
+        if( !renderFrameIndex( frameIndex, i, false, &renderFailure ) )
         {
             err << "[PROFILE] ERROR: " << renderFailure << "\n";
             trace(QStringLiteral("render-failed: ") + renderFailure);
             return 7;
         }
-        trace(QStringLiteral("render-complete frame=%1").arg(startFrame + i));
+        trace(QStringLiteral("render-complete frame=%1").arg(frameIndex));
     }
 
     double latencySumMs = 0.0;
@@ -4166,6 +4169,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("output"), outputInfo.absoluteFilePath() );
     metadata.insert( QStringLiteral("total_frames"), totalFrames );
     metadata.insert( QStringLiteral("start_frame"), startFrame );
+    metadata.insert( QStringLiteral("frame_step"), frameStep );
     metadata.insert( QStringLiteral("measured_frames"), measuredFrames );
     metadata.insert( QStringLiteral("worker_threads_request"),
                      options.forceWorkerThreads

@@ -534,13 +534,19 @@ void applyProcessingObject( processingObject_t * processing,
     /* Resize image buffer to make sure its right size */
     if (imageChanged) buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
 
-    if (imageChanged) memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
-
     /* If shadows/highlights off don't do anything. Maybe this blurring bit could b multithreaded I need to think */
     const double shadows_highlights_start = omp_get_wtime();
-    if( ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
+    const int shadows_highlights_active =
+        ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
      || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
-     || ( processing->clarity <= -0.01 || processing->clarity >= 0.01 ) )
+     || ( processing->clarity <= -0.01 || processing->clarity >= 0.01 );
+
+    if (imageChanged && !shadows_highlights_active)
+    {
+        memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
+    }
+
+    if( shadows_highlights_active )
     {
 
         /* Blur diameter depends on image diagonal */

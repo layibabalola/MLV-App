@@ -6,6 +6,7 @@ param(
     [string]$Output = "",
     [int]$Frames = 3,
     [int]$StartFrame = 0,
+    [int]$FrameStep = 1,
     [string]$Threads = "1",
     [string]$Receipt = "",
     [switch]$ShowWindow,
@@ -71,6 +72,7 @@ try {
         "--input", $inputPath,
         "--frames", [string]$Frames,
         "--start-frame", [string]$StartFrame,
+        "--frame-step", [string]$FrameStep,
         "--output", $outputPath,
         "--threads", $Threads
     )

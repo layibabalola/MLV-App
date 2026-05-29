@@ -2572,3 +2572,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / low risk: inspect the user's next smoke log before adding more code; this fix specifically targets the observed instability rather than a synthetic-only path.
 2. Medium impact / medium effort: if `mix_ms` remains dominant, add internal `mix_images()` telemetry around half-res blend, alias-map filtering, overexposure map, and chroma smooth before changing math.
 3. Medium impact / higher risk: prototype alias-map filtering or overexposure-map AVX2 only behind byte-identity pipeline coverage, because these touch visible HQ reconstruction details.
+
+## 2026-05-29 - skipped-frame raw prefetch and x1 processing cleanup
+
+### Verified locally
+
+- The latest normal GUI smoke found before this batch was still the `2026-05-29T10:43:27Z` release GUI launch in `mlvapp-20260529.log`; its Quality x1 session ended at `presented_fps=3.886`, `avg_render_total_ms=255.000`, `avg_processed8_ms=253.726`, `avg_llrawproc_ms=105.077`, and every sampled frame had `raw_prefetch=0`.
+- Controlled sequential `--profile-playback` runs did get raw prefetch hits, so the miss pattern was specific to real GUI playback skipping ahead by several timeline frames at low FPS.
+- Implemented stride-aware raw uint16 prefetch in `src/mlv/video_mlv.c`: forward jumps up to 32 frames no longer invalidate the prefetch generation, and the worker predicts `base + stride` / `base + 2*stride` instead of only `base + 1` / `base + 2`.
+- Added profiler-only `--frame-step` support so the release harness can reproduce dropped-frame request patterns. With `--frame-step 6`, requests `0,6,12` produced `raw_uint16_ms=0,30,0`; frame `12` was a raw-prefetch hit. The old sequential-only prefetch policy would have invalidated at frame `6` and prefetched `7/8`, missing frame `12`.
+- Removed a redundant full-frame copy in the active Shadows/Highlights/clarity path; `recursive_bf_wrap()` overwrites `blur_image`, so the pre-copy is only kept for inactive tone-local paths.
+- Visible release x1 profile, `large_dual_iso.mlv`, 6 threads, histogram:
+  - Earlier profile baseline in this thread: warm `render_thread_total_ms=242.7`, `processing_ms=109.1`, `processing_shadows_highlights_prep_ms=72.7`.
+  - Latest comparable profile after this batch: warm `render_thread_total_ms=238.1`, `processing_ms=98.7`, `processing_shadows_highlights_prep_ms=61.1`. VM noise still moves Dual ISO timing, but the S/H prep bucket remains below the original baseline.
+- Regression checks passed for focused pipeline coverage (`ProcessingFilters.*`, `TinyDualIsoFullFramesMatchGolden`, `HQ_FullBlendAvx2ByteIdentity`, `HQ_AliasMapAvx2ByteIdentity`, `PhaseE1_AMaZEEdgeDirectionAvx2ByteIdentity`) and the full console harness (`81` tests, `301` assertions, `26` expected external-exe skips, `0` failures).
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`; timestamp `2026-05-29 06:35:41`, size `8292864`, SHA256 `B80881193C5E3FD04ED439A818B6D214ECFF83794ED8D7EA32542819568B255E`.
+
+### Cross-checked from prior analysis
+
+- This batch targets CPU-bound GUI playback without changing scale factor or authored quality policy.
+- The raw prefetch change does not serve approximate frames; cached slots are still keyed by exact frame and generation. The new behavior only avoids throwing away valid future work during ordinary forward playback skips.
+
+### Needs runtime profiling
+
+- Have the user smoke the rebuilt normal GUI again with the same environment. Success should show `raw_prefetch=1` after the first skipped-frame miss in `playback_smoke.cpu_frame` samples and a lower `avg_raw_uint16_ms` contribution.
+- If FPS remains around `3-4`, judge the next target from the new smoke buckets: `avg_llrawproc_ms`/Dual ISO mix versus `avg_processing_ms`/S-H prep versus draw/scopes.
+
+### Ranked next steps
+
+1. High impact / low risk: inspect the next manual smoke for `raw_prefetch` hits and `avg_raw_uint16_ms`; if they remain zero, add request-frame/stride telemetry to the smoke log.
+2. Medium impact / medium effort: if processing remains above `~90 ms`, split Shadows/Highlights core timing further around recursive BF versus curve application.
+3. Medium impact / higher risk: if Dual ISO mix remains dominant, continue with byte-identity-guarded AVX2/filter optimizations rather than changing reconstruction math.

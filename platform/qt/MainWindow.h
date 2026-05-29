@@ -105,6 +105,7 @@ public:
         QString outputPath;
         int startFrame = 0;
         int frameCount = 0;
+        int frameStep = 1;
         int workerThreads = 1;
         bool forceWorkerThreads = true;
         uint64_t rawCacheMB = 0;
