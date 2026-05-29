@@ -1345,14 +1345,17 @@ void MainWindow::timerFrameEvent( void )
 
     if( m_frameStillDrawing )
     {
-        logInteractionEvent(
-            QStringLiteral("timer_frame.busy"),
-            QStringLiteral("play_checked=%1 frame_changed=%2 pending_advance=%3 position=%4")
-                .arg( bool01( ui->actionPlay->isChecked() ) )
-                .arg( bool01( m_frameChanged ) )
-                .arg( bool01( m_playbackFrameAdvancePending ) )
-                .arg( ui->horizontalSliderPosition->value() ),
-            true );
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("timer_frame.busy"),
+                QStringLiteral("play_checked=%1 frame_changed=%2 pending_advance=%3 position=%4")
+                    .arg( bool01( ui->actionPlay->isChecked() ) )
+                    .arg( bool01( m_frameChanged ) )
+                    .arg( bool01( m_playbackFrameAdvancePending ) )
+                    .arg( ui->horizontalSliderPosition->value() ),
+                true );
+        }
         //On setup slider priority
         if( !ui->actionPlay->isChecked() )
         {
@@ -1373,24 +1376,28 @@ void MainWindow::timerFrameEvent( void )
     //Playback
     const int positionBeforePlayback = ui->horizontalSliderPosition->value();
     playbackHandling( timeDiff );
-    logInteractionEvent(
-        QStringLiteral("timer_frame.playback_handled"),
-        QStringLiteral("play_checked=%1 time_diff_ms=%2 position_before=%3 position_after=%4 frame_changed=%5 dont_draw=%6 opening=%7")
-            .arg( bool01( ui->actionPlay->isChecked() ) )
-            .arg( timeDiff )
-            .arg( positionBeforePlayback )
-            .arg( ui->horizontalSliderPosition->value() )
-            .arg( bool01( m_frameChanged ) )
-            .arg( bool01( m_dontDraw ) )
-            .arg( bool01( m_inOpeningProcess ) ),
-        true );
+    if( interactiveTraceEnabled() )
+    {
+        logInteractionEvent(
+            QStringLiteral("timer_frame.playback_handled"),
+            QStringLiteral("play_checked=%1 time_diff_ms=%2 position_before=%3 position_after=%4 frame_changed=%5 dont_draw=%6 opening=%7")
+                .arg( bool01( ui->actionPlay->isChecked() ) )
+                .arg( timeDiff )
+                .arg( positionBeforePlayback )
+                .arg( ui->horizontalSliderPosition->value() )
+                .arg( bool01( m_frameChanged ) )
+                .arg( bool01( m_dontDraw ) )
+                .arg( bool01( m_inOpeningProcess ) ),
+            true );
+    }
 
     //Give free one core for responsive GUI
     if( m_frameChanged )
     {
         m_countTimeDown = 3; //3 secs
-        int cores = QThread::idealThreadCount();
-        //if( cores > 1 ) cores -= 1; // -1 for the processing
+        const int cores = ui->actionPlay->isChecked()
+            ? mlvappEffectivePlaybackWorkerThreadCount()
+            : mlvappEffectiveWorkerThreadCount();
         setMlvCpuCores( m_pMlvObject, cores );
     }
 
@@ -1398,13 +1405,16 @@ void MainWindow::timerFrameEvent( void )
     if( m_frameChanged && !m_dontDraw && !m_inOpeningProcess )
     {
         m_frameChanged = false; //first do this, if there are changes between rendering
-        logInteractionEvent(
-            QStringLiteral("timer_frame.draw"),
-            QStringLiteral("play_checked=%1 position=%2 time_diff_ms=%3")
-                .arg( bool01( ui->actionPlay->isChecked() ) )
-                .arg( ui->horizontalSliderPosition->value() )
-                .arg( timeDiff ),
-            true );
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("timer_frame.draw"),
+                QStringLiteral("play_checked=%1 position=%2 time_diff_ms=%3")
+                    .arg( bool01( ui->actionPlay->isChecked() ) )
+                    .arg( ui->horizontalSliderPosition->value() )
+                    .arg( timeDiff ),
+                true );
+        }
         drawFrame( !m_skipImmediateTimecodeLabel );
         //Allow interaction while playback
         //qApp->processEvents();
@@ -1462,15 +1472,18 @@ void MainWindow::timerFrameEvent( void )
     }
     else
     {
-        logInteractionEvent(
-            QStringLiteral("timer_frame.idle"),
-            QStringLiteral("play_checked=%1 frame_changed=%2 dont_draw=%3 opening=%4 position=%5")
-                .arg( bool01( ui->actionPlay->isChecked() ) )
-                .arg( bool01( m_frameChanged ) )
-                .arg( bool01( m_dontDraw ) )
-                .arg( bool01( m_inOpeningProcess ) )
-                .arg( ui->horizontalSliderPosition->value() ),
-            true );
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("timer_frame.idle"),
+                QStringLiteral("play_checked=%1 frame_changed=%2 dont_draw=%3 opening=%4 position=%5")
+                    .arg( bool01( ui->actionPlay->isChecked() ) )
+                    .arg( bool01( m_frameChanged ) )
+                    .arg( bool01( m_dontDraw ) )
+                    .arg( bool01( m_inOpeningProcess ) )
+                    .arg( ui->horizontalSliderPosition->value() ),
+                true );
+        }
         m_pFpsStatus->setText( tr( "Playback: 0 fps" ) );
         lastTime = QTime::currentTime(); //do that for calculation of timeDiff for DropFrameMode;
 
@@ -1502,7 +1515,13 @@ void MainWindow::timerEvent(QTimerEvent *t)
         if( m_fileLoaded )
         {
             //get all cores again
-            if( m_countTimeDown == 0 ) setMlvCpuCores( m_pMlvObject, QThread::idealThreadCount() );
+            if( m_countTimeDown == 0 )
+            {
+                const int cores = ui->actionPlay->isChecked()
+                    ? mlvappEffectivePlaybackWorkerThreadCount()
+                    : mlvappEffectiveWorkerThreadCount();
+                setMlvCpuCores( m_pMlvObject, cores );
+            }
             if( m_countTimeDown >= 0 ) m_countTimeDown--;
         }
     }
@@ -3066,24 +3085,27 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) ) );
     }
 
-    logInteractionEvent(
-        QStringLiteral("draw_frame.request"),
-        QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 frame_changed=%10 requested_scale=%11 generation=%12 target=%13x%14")
-            .arg( static_cast<qulonglong>( requestSerial ) )
-            .arg( requestedFrame )
-            .arg( bool01( ui->actionPlay->isChecked() ) )
-            .arg( bool01( ui->actionDropFrameMode->isChecked() ) )
-            .arg( static_cast<int>( renderOutputMode ) )
-            .arg( bool01( m_renderThreadUsing16BitPreview ) )
-            .arg( bool01( m_renderThreadUsingGpuPreviewProcessing ) )
-            .arg( bool01( m_renderThreadUsingCpuPreviewProcessing ) )
-            .arg( bool01( m_renderThreadUsingGpuBilinearDebayer ) )
-            .arg( bool01( m_frameChanged ) )
-            .arg( requestContext.playbackScaleFactor )
-            .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
-            .arg( requestContext.imageWidth )
-            .arg( requestContext.imageHeight ),
-        true );
+    if( interactiveTraceEnabled() )
+    {
+        logInteractionEvent(
+            QStringLiteral("draw_frame.request"),
+            QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 frame_changed=%10 requested_scale=%11 generation=%12 target=%13x%14")
+                .arg( static_cast<qulonglong>( requestSerial ) )
+                .arg( requestedFrame )
+                .arg( bool01( ui->actionPlay->isChecked() ) )
+                .arg( bool01( ui->actionDropFrameMode->isChecked() ) )
+                .arg( static_cast<int>( renderOutputMode ) )
+                .arg( bool01( m_renderThreadUsing16BitPreview ) )
+                .arg( bool01( m_renderThreadUsingGpuPreviewProcessing ) )
+                .arg( bool01( m_renderThreadUsingCpuPreviewProcessing ) )
+                .arg( bool01( m_renderThreadUsingGpuBilinearDebayer ) )
+                .arg( bool01( m_frameChanged ) )
+                .arg( requestContext.playbackScaleFactor )
+                .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
+                .arg( requestContext.imageWidth )
+                .arg( requestContext.imageHeight ),
+            true );
+    }
 
     //Get frame from library
     if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
@@ -3495,6 +3517,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                            static_cast<double>( completionNs - effectiveEngineNs ) / 1000000.0 );
             sample.insert( QStringLiteral("draw_frame_ready_queue_ms"),
                            m_lastDrawFrameReadyQueueMs );
+            sample.insert( QStringLiteral("draw_frame_ready_advance_ms"),
+                           m_lastDrawFrameReadyAdvanceMs );
             sample.insert( QStringLiteral("draw_frame_ready_scene_ms"),
                            m_lastDrawFrameReadySceneMs );
             sample.insert( QStringLiteral("draw_frame_ready_image_ms"),
@@ -4084,6 +4108,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     const bool dualIsoPreviewRuntimeActive = (dualIsoPlaybackSettings.mode == 2);
     const bool dualIsoPreviewOverrideActive =
         dualIsoPreviewRuntimeActive && selectedDualIsoMode != 2;
+    const int profileWorkerThreads = mlvappEffectiveWorkerThreadCount();
+    const int profilePlaybackWorkerThreads = mlvappEffectivePlaybackWorkerThreadCount();
 
     QJsonObject metadata;
     metadata.insert( QStringLiteral("captured_at_utc"), QDateTime::currentDateTimeUtc().toString( Qt::ISODate ) );
@@ -4098,7 +4124,13 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                          ? QString::number( std::max( 1, options.workerThreads ) )
                          : QStringLiteral("auto") );
     metadata.insert( QStringLiteral("worker_threads_effective"),
-                     mlvappEffectiveWorkerThreadCount() );
+                     profilePlaybackWorkerThreads );
+    metadata.insert( QStringLiteral("worker_threads_general_effective"),
+                     profileWorkerThreads );
+    metadata.insert( QStringLiteral("playback_worker_threads_effective"),
+                     profilePlaybackWorkerThreads );
+    metadata.insert( QStringLiteral("playback_worker_thread_cap_active"),
+                     profilePlaybackWorkerThreads < profileWorkerThreads );
     metadata.insert( QStringLiteral("raw_cache_mb"), static_cast<qint64>( options.rawCacheMB ) );
     metadata.insert( QStringLiteral("cache_cpu_cores"), options.rawCacheMB > 0 ? std::max( 1, options.cacheCpuCores ) : 0 );
     metadata.insert( QStringLiteral("zebras"), options.zebras );
@@ -4381,7 +4413,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         << ( options.forceWorkerThreads
                  ? QString::number( std::max( 1, options.workerThreads ) )
                  : QStringLiteral("auto") )
-        << " worker_threads_effective=" << mlvappEffectiveWorkerThreadCount()
+        << " worker_threads_effective=" << profilePlaybackWorkerThreads
         << " avg_latency_ms=" << QString::number( metadata.value( QStringLiteral("average_latency_ms") ).toDouble(), 'f', 3 )
         << " avg_cadence_ms=" << QString::number( metadata.value( QStringLiteral("average_cadence_ms") ).toDouble(), 'f', 3 )
         << " scope=" << playback_profile_scope_name( options.scope )
@@ -13060,8 +13092,14 @@ void MainWindow::updatePlaybackQualityIndicator( void )
      * visibility/text writes when the indicator is hidden. */
     if ( m_pPlaybackQualityIndicator )
     {
-        if ( m_playbackQualityIndicatorVisible ) m_pPlaybackQualityIndicator->show();
-        else m_pPlaybackQualityIndicator->hide();
+        if ( m_playbackQualityIndicatorVisible && m_pPlaybackQualityIndicator->isHidden() )
+        {
+            m_pPlaybackQualityIndicator->show();
+        }
+        else if ( !m_playbackQualityIndicatorVisible && !m_pPlaybackQualityIndicator->isHidden() )
+        {
+            m_pPlaybackQualityIndicator->hide();
+        }
     }
 
     /* The indicator must reflect what is ACTUALLY happening, not what is
@@ -13201,9 +13239,16 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     }
     if ( m_pPlaybackQualityIndicator && m_playbackQualityIndicatorVisible )
     {
-        m_pPlaybackQualityIndicator->setText( text );
-        m_pPlaybackQualityIndicator->setStyleSheet(
-            QStringLiteral( "QLabel { color: %1; padding: 0 6px; }" ).arg( color ) );
+        if( m_pPlaybackQualityIndicator->text() != text )
+        {
+            m_pPlaybackQualityIndicator->setText( text );
+        }
+        const QString indicatorStyle =
+            QStringLiteral( "QLabel { color: %1; padding: 0 6px; }" ).arg( color );
+        if( m_pPlaybackQualityIndicator->styleSheet() != indicatorStyle )
+        {
+            m_pPlaybackQualityIndicator->setStyleSheet( indicatorStyle );
+        }
     }
 
     //Phase 4F-toolbar: mirror the same text/color into the toolbar dropdown
@@ -13217,12 +13262,16 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         /* Append ▾ glyph so users see this is a dropdown control. The status
          * bar QLabel doesn't need it (it's a readout, not a control), so we
          * append the glyph here only on the toolbar button. */
-        m_pPlaybackQualityToolButton->setText( text + QStringLiteral( " ▾" ) );
+        const QString toolButtonText = text + QStringLiteral( " ▾" );
+        if( m_pPlaybackQualityToolButton->text() != toolButtonText )
+        {
+            m_pPlaybackQualityToolButton->setText( toolButtonText );
+        }
         /* Stylesheet gives the button a visible border, hover highlight, and
          * pressed/menu-open state — matching the visual weight of the
          * icon-buttons (skip-back, play, etc.) next to it on the toolbar.
          * Color is the same accent used by the status-bar indicator. */
-        m_pPlaybackQualityToolButton->setStyleSheet( QStringLiteral(
+        const QString toolButtonStyle = QStringLiteral(
             "QToolButton {"
             "  color: %1;"
             "  padding: 4px 10px;"
@@ -13238,7 +13287,11 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             "  background: rgba(255,255,255,0.16);"
             "  border: 1px solid %1;"
             "}"
-        ).arg( color ) );
+        ).arg( color );
+        if( m_pPlaybackQualityToolButton->styleSheet() != toolButtonStyle )
+        {
+            m_pPlaybackQualityToolButton->setStyleSheet( toolButtonStyle );
+        }
     }
 }
 
@@ -16208,17 +16261,20 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     if( m_pRenderThread )
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
-    logInteractionEvent(
-        QStringLiteral("draw_frame_ready.end"),
-        QStringLiteral("serial=%1 display_frame=%2 play_checked=%3 position=%4 still_drawing=%5 pending_advance=%6 total_ms=%7")
-            .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
-            .arg( static_cast<qulonglong>( displayFrame ) )
-            .arg( bool01( ui->actionPlay->isChecked() ) )
-            .arg( ui->horizontalSliderPosition->value() )
-            .arg( bool01( m_frameStillDrawing ) )
-            .arg( bool01( m_playbackFrameAdvancePending ) )
-            .arg( m_lastDrawFrameReadyTotalMs, 0, 'f', 3 ),
-        true );
+    if( interactiveTraceEnabled() )
+    {
+        logInteractionEvent(
+            QStringLiteral("draw_frame_ready.end"),
+            QStringLiteral("serial=%1 display_frame=%2 play_checked=%3 position=%4 still_drawing=%5 pending_advance=%6 total_ms=%7")
+                .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                .arg( static_cast<qulonglong>( displayFrame ) )
+                .arg( bool01( ui->actionPlay->isChecked() ) )
+                .arg( ui->horizontalSliderPosition->value() )
+                .arg( bool01( m_frameStillDrawing ) )
+                .arg( bool01( m_playbackFrameAdvancePending ) )
+                .arg( m_lastDrawFrameReadyTotalMs, 0, 'f', 3 ),
+            true );
+    }
     emit frameReady();
 }
 
@@ -16232,14 +16288,17 @@ void MainWindow::drawFrameReady()
     if( !haveReadyFrame )
     {
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
-        logInteractionEvent(
-            QStringLiteral("draw_frame_ready.empty"),
-            QStringLiteral("still_drawing=%1 render_idle=%2 play_checked=%3 position=%4")
-                .arg( bool01( m_frameStillDrawing ) )
-                .arg( bool01( m_pRenderThread && m_pRenderThread->isIdle() ) )
-                .arg( bool01( ui->actionPlay->isChecked() ) )
-                .arg( ui->horizontalSliderPosition->value() ),
-            true );
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("draw_frame_ready.empty"),
+                QStringLiteral("still_drawing=%1 render_idle=%2 play_checked=%3 position=%4")
+                    .arg( bool01( m_frameStillDrawing ) )
+                    .arg( bool01( m_pRenderThread && m_pRenderThread->isIdle() ) )
+                    .arg( bool01( ui->actionPlay->isChecked() ) )
+                    .arg( ui->horizontalSliderPosition->value() ),
+                true );
+        }
         return;
     }
 
@@ -16251,20 +16310,23 @@ void MainWindow::drawFrameReady()
     {
         m_playbackPrepStaleDropCount.fetch_add( 1, std::memory_order_acq_rel );
         m_playbackPrepGenerationDropCount.fetch_add( 1, std::memory_order_acq_rel );
-        logInteractionEvent(
-            QStringLiteral("draw_frame_ready.drop_generation"),
-            QStringLiteral("serial=%1 display_frame=%2 request_generation=%3 active_generation=%4 requested_scale=%5 active_scale=%6 rendered=%7x%8 scaled=%9x%10")
-                .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
-                .arg( static_cast<qulonglong>( readyFrame.frameNumber ) )
-                .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
-                .arg( static_cast<qulonglong>( activeGeneration ) )
-                .arg( requestContext.playbackScaleFactor )
-                .arg( readyFrame.playbackScaleFactorActive )
-                .arg( readyFrame.renderedImageWidth )
-                .arg( readyFrame.renderedImageHeight )
-                .arg( readyFrame.playbackScaledWidth )
-                .arg( readyFrame.playbackScaledHeight ),
-            true );
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("draw_frame_ready.drop_generation"),
+                QStringLiteral("serial=%1 display_frame=%2 request_generation=%3 active_generation=%4 requested_scale=%5 active_scale=%6 rendered=%7x%8 scaled=%9x%10")
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                    .arg( static_cast<qulonglong>( readyFrame.frameNumber ) )
+                    .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
+                    .arg( static_cast<qulonglong>( activeGeneration ) )
+                    .arg( requestContext.playbackScaleFactor )
+                    .arg( readyFrame.playbackScaleFactorActive )
+                    .arg( readyFrame.renderedImageWidth )
+                    .arg( readyFrame.renderedImageHeight )
+                    .arg( readyFrame.playbackScaledWidth )
+                    .arg( readyFrame.playbackScaledHeight ),
+                true );
+        }
         if( m_pRenderThread )
             m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
@@ -16274,23 +16336,27 @@ void MainWindow::drawFrameReady()
 
     const uint64_t display_frame = readyFrame.frameNumber;
     const double display_start = mlv_stage_timing_now();
-    logInteractionEvent(
-        QStringLiteral("draw_frame_ready.begin"),
-        QStringLiteral("serial=%1 display_frame=%2 play_checked=%3 position=%4 render_idle=%5 requested_scale=%6 active_scale=%7 generation=%8 rendered=%9x%10 scaled=%11x%12")
-            .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
-            .arg( static_cast<qulonglong>( display_frame ) )
-            .arg( bool01( ui->actionPlay->isChecked() ) )
-            .arg( ui->horizontalSliderPosition->value() )
-            .arg( bool01( m_pRenderThread && m_pRenderThread->isIdle() ) )
-            .arg( requestContext.playbackScaleFactor )
-            .arg( readyFrame.playbackScaleFactorActive )
-            .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
-            .arg( readyFrame.renderedImageWidth )
-            .arg( readyFrame.renderedImageHeight )
-            .arg( readyFrame.playbackScaledWidth )
-            .arg( readyFrame.playbackScaledHeight ),
-        true );
+    if( interactiveTraceEnabled() )
+    {
+        logInteractionEvent(
+            QStringLiteral("draw_frame_ready.begin"),
+            QStringLiteral("serial=%1 display_frame=%2 play_checked=%3 position=%4 render_idle=%5 requested_scale=%6 active_scale=%7 generation=%8 rendered=%9x%10 scaled=%11x%12")
+                .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                .arg( static_cast<qulonglong>( display_frame ) )
+                .arg( bool01( ui->actionPlay->isChecked() ) )
+                .arg( ui->horizontalSliderPosition->value() )
+                .arg( bool01( m_pRenderThread && m_pRenderThread->isIdle() ) )
+                .arg( requestContext.playbackScaleFactor )
+                .arg( readyFrame.playbackScaleFactorActive )
+                .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
+                .arg( readyFrame.renderedImageWidth )
+                .arg( readyFrame.renderedImageHeight )
+                .arg( readyFrame.playbackScaledWidth )
+                .arg( readyFrame.playbackScaledHeight ),
+            true );
+    }
     m_lastDrawFrameReadyQueueMs = 0.0;
+    m_lastDrawFrameReadyAdvanceMs = 0.0;
     m_lastDrawFrameReadySceneMs = 0.0;
     m_lastDrawFrameReadyImageMs = 0.0;
     m_lastDrawFrameReadyPresentMs = 0.0;
@@ -16345,7 +16411,13 @@ void MainWindow::drawFrameReady()
     {
         m_skipImmediateTimecodeLabel = true;
         m_frameStillDrawing = false;
+        const double advance_start = mlv_stage_timing_now();
         timerFrameEvent();
+        m_lastDrawFrameReadyAdvanceMs =
+            (mlv_stage_timing_now() - advance_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("drawFrameReady.advance",
+                                      display_frame,
+                                      m_lastDrawFrameReadyAdvanceMs);
         m_frameStillDrawing = true;
         m_skipImmediateTimecodeLabel = false;
     }

@@ -2346,3 +2346,49 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 3. Medium impact / low risk: add Qt presentation telemetry around the `timerFrameEvent()` advance work, disabled interaction-trace string construction, and timecode/status updates.
 4. Medium impact / medium risk: improve processed8 prefetch scheduling/state snapshots only if profiles show consistent hit rates above the current `3/15`.
 5. Low-medium impact / low-medium risk: controlled direct8 AVX2-intrinsics default evaluation after parity and repeated A/B runs.
+
+## 2026-05-29 - visible GUI playback CPU optimizations
+
+### Verified locally
+
+- Implemented the low-regression CPU-side playback optimizations identified by the audit:
+  - GUI render/playback calls now use `mlvappEffectivePlaybackWorkerThreadCount()` from `src/batch/WorkerThreadCount.h`, preserving `MLVAPP_FORCE_THREADS` and `MLVAPP_FORCE_SINGLETHREAD` as exact overrides while capping auto playback workers by default.
+  - The default cap was tuned from a sequential visible sweep on this VM; cap `6` beat cap `4`, cap `8`, and uncapped auto for the large x1 HQ fixture.
+  - Hot trace-only playback logs in `timerFrameEvent()`, `drawFrame()`, and `drawFrameReady()` now guard `QString::arg()` construction behind `interactiveTraceEnabled()`.
+  - `updatePlaybackQualityIndicator()` no longer re-applies identical text/style/visibility every presented frame.
+  - Profile telemetry now records `render_thread_worker_threads`, `render_thread_worker_thread_cap_active`, and `draw_frame_ready_advance_ms`.
+- Benchmark artifacts live under `.claude-state/profiling/20260529-visible-gui-playback/`.
+- Non-headless user-facing release profiling used `tools/profiling/run-release-playback-profile.ps1 -WaitForPaint` against `platform/qt/build-release/release/MLVApp.exe`; the wrapper pins the normal Windows Qt platform plugin, not offscreen.
+- Baseline release before this work block, `large_dual_iso.mlv` + `large_dual_iso_hq.marxml`, `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`, auto threads:
+  - `baseline_auto_waitpaint.json`: average `latency_ms 231.152`, median `latency_ms 195.893`, average `cadence_ms 231.361`, median paint latency `198.131`, median `llrawproc_ms 138`, `worker_threads_effective 8`.
+  - `baseline_auto_waitpaint_playaction.json`: average `latency_ms 228.191`, average `cadence_ms 247.370`, Play-action smoke elapsed `674 ms`, `worker_threads_effective 8`.
+- Final release after the patch, same visible wait-for-paint setup, default auto playback cap:
+  - `final_default_waitpaint.json`: average `latency_ms 136.329`, median `latency_ms 118.918`, average `cadence_ms 135.029`, median paint latency `121.032`, median `llrawproc_ms 76`, `worker_threads_effective 6`, cap active.
+  - `final_default_waitpaint_playaction.json`: average `latency_ms 214.822`, average `cadence_ms 237.346`, Play-action smoke elapsed `454 ms`, `worker_threads_effective 6`, cap active.
+- Sequential cap sweep on the final code before changing the default confirmed the VM-specific ordering:
+  - cap `4`: average `latency_ms 191.138`, average `cadence_ms 189.900`
+  - cap `6`: average `latency_ms 176.207`, average `cadence_ms 174.495`
+  - cap `8`: average `latency_ms 226.214`, average `cadence_ms 201.610`
+  - disabled cap: average `latency_ms 213.233`, average `cadence_ms 205.223`
+- Final user-facing release executable after the cap-6 rebuild: `platform/qt/build-release/release/MLVApp.exe`, timestamp `2026-05-28 19:42:35`, size `8230400`, SHA256 `CEC020199674A0C0DCCA27AFF67C12D12C714094E8306A716FC50274F0F33EA4`.
+- Regression coverage passed:
+  - `WorkerThreadCount.*`
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson` against the rebuilt release exe
+  - full console golden suite against the rebuilt release exe: `81` tests, `1178` assertions, `1` expected skip for missing `MLVAPP_BATCH_EXE`, `0` failures.
+
+### Cross-checked from prior analysis
+
+- The worker-count cap is a policy/control change, not a Dual ISO math change. Explicit `--threads N` profiles and `MLVAPP_FORCE_THREADS=N` still bypass the cap.
+- The final default differs from the earlier read-only audit's `4`-worker candidate because the required non-headless GUI sweep showed `6` workers winning on the user-facing release path.
+- The remaining biggest CPU slice is still full HQ Dual ISO reconstruction; the cap reduces contention around that work but does not replace the need for future Dual ISO substage telemetry.
+
+### Needs runtime profiling
+
+- Repeat the visible sweep on the user's real clips if they differ materially from `large_dual_iso.mlv`; the cap is overrideable with `MLVAPP_PLAYBACK_MAX_THREADS=<n>` and disableable with `MLVAPP_DISABLE_PLAYBACK_THREAD_CAP=1`.
+- Add Dual ISO substage telemetry before changing `dualiso.c` math or quality policy.
+
+### Ranked next steps
+
+1. High impact / medium effort: add Dual ISO substage telemetry inside `diso_get_full20bit()` so future engine work can target the largest remaining slice without guessing.
+2. Medium impact / low effort: if the user's own clips favor another cap, promote a small adaptive chooser or GUI preference using the existing environment override behavior as the safety valve.
+3. Medium impact / medium risk: revisit processed8 prefetch only after its hit rate is high enough to move median visible cadence, not just isolated frames.

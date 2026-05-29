@@ -1471,12 +1471,25 @@ void RenderFrameThread::drawFrame( int slotIndex,
         QStringLiteral("render_thread_rendered_height"),
         renderedImageHeight );
 
+    const int generalWorkerThreads = mlvappEffectiveWorkerThreadCount();
+    const int workerThreads = mlvappEffectivePlaybackWorkerThreadCount();
+    if( m_pMlvObject )
+    {
+        setMlvCpuCores( m_pMlvObject, workerThreads );
+    }
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_worker_threads"),
+        workerThreads );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_worker_thread_cap_active"),
+        workerThreads < generalWorkerThreads );
+
     if ( outputMode == OutputProcessed16 && !slot.rawImage16.empty() )
     {
         getMlvProcessedFrame16Scaled( m_pMlvObject,
                                       frameNumber,
                                       slot.rawImage16.data(),
-                                      mlvappEffectiveWorkerThreadCount(),
+                                      workerThreads,
                                       playbackScaleFactor );
         slot.dualIsoPreviewHistogramMs = llrpGetLastDualIsoPreviewHistogramMilliseconds();
         slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
@@ -1565,7 +1578,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
                         frameNumber,
                         decodedRawFrame,
                         slot.rawImage8.data(),
-                        mlvappEffectiveWorkerThreadCount(),
+                        workerThreads,
                         playbackScaleFactor ) != 0;
             }
             else
@@ -1575,7 +1588,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                                           frameNumber,
                                                           decodedRawFrame,
                                                           slot.rawImage8.data(),
-                                                          mlvappEffectiveWorkerThreadCount(),
+                                                          workerThreads,
                                                           playbackScaleFactor ) != 0;
             }
         }
@@ -1584,7 +1597,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
             getMlvProcessedFrame8Scaled( m_pMlvObject,
                                          frameNumber,
                                          slot.rawImage8.data(),
-                                         mlvappEffectiveWorkerThreadCount(),
+                                         workerThreads,
                                          playbackScaleFactor );
         }
         slot.stageTimingTelemetry.insert(
