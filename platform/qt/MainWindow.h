@@ -804,6 +804,40 @@ private:
     double m_lastDrawFrameReadyScopesMs = 0.0;
     double m_lastDrawFrameReadyOverlayMs = 0.0;
     double m_lastDrawFrameReadyTotalMs = 0.0;
+    bool m_playbackSmokeActive = false;
+    bool m_playbackSmokeFrameTelemetry = false;
+    uint64_t m_playbackSmokeSessionId = 0;
+    int m_playbackSmokeStartPosition = 0;
+    int m_playbackSmokeStartCutIn = 0;
+    int m_playbackSmokeStartCutOut = 0;
+    int m_playbackSmokeStartScaleRequest = 1;
+    int m_playbackSmokeStartQualityMode = 0;
+    int m_playbackSmokeStartWorkerThreads = 0;
+    int m_playbackSmokePresentedFrames = 0;
+    int m_playbackSmokeFirstPresentedFrame = -1;
+    int m_playbackSmokeLastPresentedFrame = -1;
+    uint64_t m_playbackSmokeStartRequestSerial = 0;
+    uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
+    uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;
+    uint64_t m_playbackSmokeStartPrepReplacedBefore = 0;
+    uint64_t m_playbackSmokeStartPrepReplacedAfter = 0;
+    double m_playbackSmokeStartTime = 0.0;
+    double m_playbackSmokeLastPresentedTime = 0.0;
+    double m_playbackSmokeFirstPresentMs = 0.0;
+    double m_playbackSmokePresentedIntervalSumMs = 0.0;
+    double m_playbackSmokePresentedIntervalMaxMs = 0.0;
+    double m_playbackSmokeRenderTotalSumMs = 0.0;
+    double m_playbackSmokeRenderTotalMaxMs = 0.0;
+    double m_playbackSmokeRenderWorkSumMs = 0.0;
+    double m_playbackSmokeQueueWaitSumMs = 0.0;
+    double m_playbackSmokeLlrawprocSumMs = 0.0;
+    double m_playbackSmokeProcessed8SumMs = 0.0;
+    double m_playbackSmokeDrawTotalSumMs = 0.0;
+    double m_playbackSmokeDrawTotalMaxMs = 0.0;
+    int m_playbackSmokeLastWorkerThreads = 0;
+    bool m_playbackSmokeLastWorkerThreadCapActive = false;
+    int m_playbackSmokeLastScaleRequest = 1;
+    int m_playbackSmokeLastScaleActive = 1;
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
     bool m_headlessPlaybackProfileActive = false;
     uint64_t m_nextRenderRequestSerial = 1;
@@ -886,6 +920,11 @@ private:
                                const PresentationRequestContext &requestContext );
     bool isFrameSettledForAnalysis( int frameIndex,
                                     uint64_t requestSerialFloor ) const;
+    void beginPlaybackSmokeTelemetry( void );
+    void notePlaybackSmokePresentedFrame( uint64_t displayFrame,
+                                          const RenderFrameThread::ReadyFrame &readyFrame,
+                                          const PresentationRequestContext &requestContext );
+    void finishPlaybackSmokeTelemetry( const char *reason );
     void enqueuePlaybackPrepTask( const PlaybackPrepTask &task );
     void invalidatePlaybackPrepForDisplayChange( const char *reason );
     void waitForRenderThreadIdleBeforeCoreMutation( const char *reason );
