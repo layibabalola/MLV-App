@@ -459,6 +459,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("engine_latency_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("presentation_overhead_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_queue_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_advance_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_scene_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_image_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("draw_frame_ready_present_ms")));
@@ -468,6 +469,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_histogram_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_regression_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_rowscale_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_worker_threads")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_worker_thread_cap_active")));
         ASSERT_TRUE(sample.contains(QStringLiteral("raw_uint16_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("raw_uint16_disk_read_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("raw_uint16_decompress_ms")));
@@ -560,6 +563,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("processed16_to_8bit_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("processed8_total_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_queue_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_advance_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_scene_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_image_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("draw_frame_ready_present_ms")).toDouble() >= 0.0);
@@ -571,6 +575,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_queue_wait_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_work_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_total_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_worker_threads")).toInt() > 0);
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_worker_thread_cap_active")).isBool());
         ASSERT_EQ(0.0, sample.value(QStringLiteral("playback_prep_owned_rgb8_bytes")).toDouble());
         ASSERT_TRUE(sample.value(QStringLiteral("playback_prep_borrowed_rgb8_bytes")).toDouble() > 0.0);
         ASSERT_EQ(0.0, sample.value(QStringLiteral("playback_prep_owned_scaled_rgb8_bytes")).toDouble());
