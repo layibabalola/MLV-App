@@ -138,6 +138,47 @@ TEST(ProcessingFilters, RbfFilterReuseStaysStableAfterStateChanges)
     ASSERT_EQ(hash_image(expected_output), hash_image(second_actual_output));
 }
 
+TEST(ProcessingFilters, RbfFilterOutputLutMatchesSeparateLevelsPass)
+{
+    const int width = 22;
+    const int height = 18;
+    const float sigma_spatial = 0.0005f;
+    const float sigma_range = 0.165f;
+
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+    std::vector<uint16_t> expected_output(input.size(), 0);
+    std::vector<uint16_t> actual_output(input.size(), 0);
+    std::vector<uint16_t> levels_lut(65536);
+    for( std::size_t i = 0; i < levels_lut.size(); ++i )
+    {
+        const uint32_t value = static_cast<uint32_t>(i);
+        levels_lut[i] = static_cast<uint16_t>((value * 257u + (value >> 3) + 19u) & 0xffffu);
+    }
+
+    recursive_bf_wrap(input.data(),
+                      expected_output.data(),
+                      sigma_spatial,
+                      sigma_range,
+                      width,
+                      height,
+                      3);
+    for( uint16_t & pixel : expected_output )
+    {
+        pixel = levels_lut[pixel];
+    }
+
+    recursive_bf_wrap_with_output_lut(input.data(),
+                                      actual_output.data(),
+                                      sigma_spatial,
+                                      sigma_range,
+                                      width,
+                                      height,
+                                      3,
+                                      levels_lut.data());
+
+    ASSERT_EQ(hash_image(expected_output), hash_image(actual_output));
+}
+
 TEST(ProcessingFilters, SobelScratchReuseMatchesFreshResultAfterResize)
 {
     const int target_width = 18;

@@ -55,6 +55,87 @@ static void convert_to_20bit_avx2(uint32_t * out, const uint16_t * src, size_t t
     }
 }
 
+__attribute__((target("avx2,fma")))
+static inline __m256i dualiso_load8_u16_as_i32_avx2(const uint16_t * src)
+{
+    return _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)src));
+}
+
+__attribute__((target("avx2,fma")))
+static inline void dualiso_store8_i32_as_u16_avx2(uint16_t * dst, __m256i value)
+{
+    __m128i lo = _mm256_castsi256_si128(value);
+    __m128i hi = _mm256_extracti128_si256(value, 1);
+    __m128i packed = _mm_packus_epi32(lo, hi);
+    _mm_storeu_si128((__m128i*)dst, packed);
+}
+
+__attribute__((target("avx2,fma")))
+static void overexposed_mark_row_avx2(uint16_t * overexposed,
+                                      const uint32_t * bright,
+                                      const uint32_t * dark,
+                                      uint32_t white_darkened,
+                                      uint32_t white,
+                                      int w)
+{
+    const int32_t bright_limit = white_darkened > 0 ? (int32_t)(white_darkened - 1u) : -1;
+    const int32_t dark_limit = white > 0 ? (int32_t)(white - 1u) : -1;
+    const __m256i bright_threshold = _mm256_set1_epi32(bright_limit);
+    const __m256i dark_threshold = _mm256_set1_epi32(dark_limit);
+    const __m256i hundred = _mm256_set1_epi32(100);
+
+    int x = 0;
+    for (; x + 8 <= w; x += 8) {
+        __m256i b = _mm256_loadu_si256((const __m256i*)(bright + x));
+        __m256i d = _mm256_loadu_si256((const __m256i*)(dark + x));
+        __m256i b_over = _mm256_cmpgt_epi32(b, bright_threshold);
+        __m256i d_over = _mm256_cmpgt_epi32(d, dark_threshold);
+        __m256i value = _mm256_and_si256(_mm256_or_si256(b_over, d_over), hundred);
+        dualiso_store8_i32_as_u16_avx2(overexposed + x, value);
+    }
+    for (; x < w; x++) {
+        overexposed[x] = bright[x] >= white_darkened || dark[x] >= white ? 100 : 0;
+    }
+}
+
+__attribute__((target("avx2,fma")))
+static void overexposed_blur_row_avx2(uint16_t * overexposed,
+                                      const uint16_t * prev,
+                                      const uint16_t * curr,
+                                      const uint16_t * next,
+                                      int w)
+{
+    const __m256i weight_cardinal = _mm256_set1_epi32(820);
+    const __m256i weight_diagonal = _mm256_set1_epi32(657);
+
+    int x = 3;
+    const int x_end = w - 3;
+    for (; x + 8 <= x_end; x += 8) {
+        __m256i center = dualiso_load8_u16_as_i32_avx2(curr + x);
+        __m256i cardinal = _mm256_add_epi32(
+            _mm256_add_epi32(dualiso_load8_u16_as_i32_avx2(prev + x),
+                             dualiso_load8_u16_as_i32_avx2(curr + x - 1)),
+            _mm256_add_epi32(dualiso_load8_u16_as_i32_avx2(curr + x + 1),
+                             dualiso_load8_u16_as_i32_avx2(next + x)));
+        __m256i diagonal = _mm256_add_epi32(
+            _mm256_add_epi32(dualiso_load8_u16_as_i32_avx2(prev + x - 1),
+                             dualiso_load8_u16_as_i32_avx2(prev + x + 1)),
+            _mm256_add_epi32(dualiso_load8_u16_as_i32_avx2(next + x - 1),
+                             dualiso_load8_u16_as_i32_avx2(next + x + 1)));
+        cardinal = _mm256_srai_epi32(_mm256_mullo_epi32(cardinal, weight_cardinal), 10);
+        diagonal = _mm256_srai_epi32(_mm256_mullo_epi32(diagonal, weight_diagonal), 10);
+        dualiso_store8_i32_as_u16_avx2(overexposed + x,
+                                       _mm256_add_epi32(center,
+                                                        _mm256_add_epi32(cardinal, diagonal)));
+    }
+    for (; x < x_end; x++) {
+        overexposed[x] =
+            (curr[x])+
+            (prev[x] + curr[x-1] + curr[x+1] + next[x]) * 820 / 1024 +
+            (prev[x-1] + prev[x+1] + next[x-1] + next[x+1]) * 657 / 1024;
+    }
+}
+
 /* ====================================================================== *
  * B1.2 — fullres_reconstruction inner row.
  * For BRIGHT rows: fullres[i] = (bright[i] < white_darkened) ? bright[i]

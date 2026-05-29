@@ -845,6 +845,12 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 #include <algorithm>
 #include <atomic>
 #include <vector>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 static uint8_t scanZebrasRgb8(const uint8_t *rgbData, int width, int height);
 static uint8_t applyZebrasToImage( QImage *image, bool enableZebras );
@@ -864,6 +870,43 @@ static bool receiptFileDeclaresLookAssistEnabled( const QString &path )
         }
     }
     return false;
+}
+
+static double currentProcessCpuSeconds()
+{
+#ifdef Q_OS_WIN
+    FILETIME createTime;
+    FILETIME exitTime;
+    FILETIME kernelTime;
+    FILETIME userTime;
+    if( !GetProcessTimes( GetCurrentProcess(),
+                          &createTime,
+                          &exitTime,
+                          &kernelTime,
+                          &userTime ) )
+    {
+        return -1.0;
+    }
+
+    ULARGE_INTEGER kernel;
+    kernel.LowPart = kernelTime.dwLowDateTime;
+    kernel.HighPart = kernelTime.dwHighDateTime;
+    ULARGE_INTEGER user;
+    user.LowPart = userTime.dwLowDateTime;
+    user.HighPart = userTime.dwHighDateTime;
+    return static_cast<double>( kernel.QuadPart + user.QuadPart ) / 10000000.0;
+#else
+    return -1.0;
+#endif
+}
+
+static double normalizedProcessCpuPercent( double cpuSecondsDelta,
+                                           qint64 wallMsDelta )
+{
+    if( cpuSecondsDelta < 0.0 || wallMsDelta <= 0 ) return -1.0;
+    const int cores = qMax( 1, QThread::idealThreadCount() );
+    return ( cpuSecondsDelta / ( static_cast<double>( wallMsDelta ) / 1000.0 ) )
+        * ( 100.0 / static_cast<double>( cores ) );
 }
 
 /* spaceTag argument options: ffmpeg color space tag number compliant */
@@ -4473,6 +4516,233 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         << " raw_cache_mb=" << options.rawCacheMB
         << "\n";
     trace(QStringLiteral("profile-complete"));
+
+    return 0;
+}
+
+int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
+{
+    QTextStream out(stdout);
+    QTextStream err(stderr);
+
+    if( options.inputPath.isEmpty() )
+    {
+        err << "[GUI-SMOKE] ERROR: --input is required.\n";
+        return 2;
+    }
+
+    const QFileInfo inputInfo(options.inputPath);
+    if( !inputInfo.exists() || !inputInfo.isFile() )
+    {
+        err << "[GUI-SMOKE] ERROR: input clip does not exist: "
+            << options.inputPath << "\n";
+        return 3;
+    }
+
+    show();
+    qApp->processEvents( QEventLoop::AllEvents );
+
+    openMlvSet( QStringList() << inputInfo.absoluteFilePath() );
+    if( !m_pMlvObject || !m_fileLoaded )
+    {
+        err << "[GUI-SMOKE] ERROR: failed to open clip: "
+            << inputInfo.absoluteFilePath() << "\n";
+        return 4;
+    }
+
+    if( !options.receiptPath.isEmpty() )
+    {
+        ReceiptSettings receipt;
+        QString receiptError;
+        if( !ReceiptLoader::loadFromFile( options.receiptPath, &receipt, &receiptError ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to load receipt: "
+                << options.receiptPath << "\n";
+            if( !receiptError.isEmpty() )
+                err << "[GUI-SMOKE] DETAIL: " << receiptError << "\n";
+            return 5;
+        }
+
+        if( ACTIVE_RECEIPT )
+        {
+            *ACTIVE_RECEIPT = receipt;
+            setSliders( ACTIVE_RECEIPT, false );
+        }
+        else
+        {
+            setSliders( &receipt, false );
+        }
+        qApp->processEvents( QEventLoop::AllEvents );
+        m_frameChanged = true;
+    }
+
+    if( options.forceScope )
+    {
+        const bool scopesEnabled = options.scope != PlaybackProfileScope::None;
+        ui->actionShowEditArea->setChecked( scopesEnabled );
+        ui->actionShowHistogram->setChecked( options.scope == PlaybackProfileScope::Histogram );
+        ui->actionShowWaveFormMonitor->setChecked( options.scope == PlaybackProfileScope::Waveform );
+        ui->actionShowParade->setChecked( options.scope == PlaybackProfileScope::Parade );
+        ui->actionShowVectorScope->setChecked( options.scope == PlaybackProfileScope::Vectorscope );
+        m_frameChanged = true;
+    }
+    if( options.forceZebras )
+    {
+        ui->actionShowZebras->setChecked( options.zebras );
+        m_frameChanged = true;
+    }
+
+    const int totalFrames = getMlvFrames( m_pMlvObject );
+    if( totalFrames < 2 )
+    {
+        err << "[GUI-SMOKE] ERROR: playback smoke requires at least two frames.\n";
+        return 6;
+    }
+
+    const bool lookAssistEnabledForSmoke =
+        ACTIVE_RECEIPT
+        && ACTIVE_RECEIPT->lookAssistEnabled()
+        && ui->checkBoxLookAssistEnable->isChecked();
+    int lookAssistWaitMs = 0;
+    if( lookAssistEnabledForSmoke && !m_lastLookAssistDiagnosticsValid )
+    {
+        QElapsedTimer lookAssistClock;
+        lookAssistClock.start();
+        requestFrameRefresh( true, "gui-smoke-look-assist-settle" );
+        while( lookAssistClock.elapsed() < 8000
+            && m_fileLoaded
+            && ACTIVE_RECEIPT
+            && ACTIVE_RECEIPT->lookAssistEnabled()
+            && ui->checkBoxLookAssistEnable->isChecked()
+            && !m_lastLookAssistDiagnosticsValid )
+        {
+            qApp->processEvents( QEventLoop::AllEvents );
+            if( m_pRenderThread && m_pRenderThread->isIdle()
+             && !m_lastLookAssistDiagnosticsValid )
+            {
+                requestFrameRefresh( true, "gui-smoke-look-assist-settle" );
+            }
+            QThread::msleep( 25 );
+        }
+        lookAssistWaitMs = static_cast<int>( lookAssistClock.elapsed() );
+    }
+
+    logInteractionEvent(
+        QStringLiteral("gui_smoke.look_assist_settle"),
+        QStringLiteral("enabled=%1 diagnostics_valid=%2 wait_ms=%3 position=%4 scene=%5")
+            .arg( bool01( lookAssistEnabledForSmoke ) )
+            .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
+            .arg( lookAssistWaitMs )
+            .arg( ui->horizontalSliderPosition->value() )
+            .arg( m_lastLookAssistDiagnosticsValid
+                  ? m_lastLookAssistScene
+                  : QStringLiteral("none") ) );
+
+    const int settleMs = qMax( 0, options.settleMs );
+    const int settleCpuStableMs = qMax( 0, options.settleCpuStableMs );
+    const int settleCpuMaxMs = qMax( settleMs, options.settleCpuMaxMs );
+    int cpuStableMs = 0;
+    double lastMeasuredCpuPercent = -1.0;
+    double lastCpuSeconds = currentProcessCpuSeconds();
+    QElapsedTimer settleClock;
+    QElapsedTimer cpuSampleClock;
+    settleClock.start();
+    cpuSampleClock.start();
+    while( settleClock.elapsed() < settleMs
+        || ( options.settleCpuPercent >= 0.0
+          && lastCpuSeconds >= 0.0
+          && cpuStableMs < settleCpuStableMs
+          && settleClock.elapsed() < settleCpuMaxMs ) )
+    {
+        qApp->processEvents( QEventLoop::AllEvents );
+        QThread::msleep( 25 );
+
+        if( options.settleCpuPercent >= 0.0
+         && lastCpuSeconds >= 0.0
+         && cpuSampleClock.elapsed() >= 250 )
+        {
+            const qint64 sampleMs = cpuSampleClock.elapsed();
+            const double cpuSeconds = currentProcessCpuSeconds();
+            const double cpuPercent = normalizedProcessCpuPercent(
+                cpuSeconds - lastCpuSeconds,
+                sampleMs );
+            lastMeasuredCpuPercent = cpuPercent;
+            lastCpuSeconds = cpuSeconds;
+            cpuSampleClock.restart();
+
+            if( settleClock.elapsed() >= settleMs
+             && cpuPercent >= 0.0
+             && cpuPercent <= options.settleCpuPercent )
+            {
+                cpuStableMs += static_cast<int>( sampleMs );
+            }
+            else if( settleClock.elapsed() >= settleMs )
+            {
+                cpuStableMs = 0;
+            }
+        }
+    }
+    const bool cpuSettleRequested =
+        options.settleCpuPercent >= 0.0 && lastCpuSeconds >= 0.0;
+    const bool cpuSettled =
+        !cpuSettleRequested || cpuStableMs >= settleCpuStableMs;
+    logInteractionEvent(
+        QStringLiteral("gui_smoke.cpu_settle"),
+        QStringLiteral("requested=%1 settled=%2 elapsed_ms=%3 stable_ms=%4 required_stable_ms=%5 threshold_percent=%6 last_percent=%7 max_ms=%8")
+            .arg( bool01( cpuSettleRequested ) )
+            .arg( bool01( cpuSettled ) )
+            .arg( settleClock.elapsed() )
+            .arg( cpuStableMs )
+            .arg( settleCpuStableMs )
+            .arg( options.settleCpuPercent, 0, 'f', 3 )
+            .arg( lastMeasuredCpuPercent, 0, 'f', 3 )
+            .arg( settleCpuMaxMs ) );
+    for( int attempt = 0; attempt < 400 && m_pRenderThread && !m_pRenderThread->isIdle(); ++attempt )
+    {
+        qApp->processEvents( QEventLoop::AllEvents );
+        QThread::msleep( 5 );
+    }
+
+    QElapsedTimer playbackClock;
+    playbackClock.start();
+    ui->actionPlay->trigger();
+    qApp->processEvents( QEventLoop::AllEvents );
+    if( !ui->actionPlay->isChecked() )
+    {
+        err << "[GUI-SMOKE] ERROR: Play action did not enter checked state.\n";
+        return 7;
+    }
+
+    const int durationMs = qMax( 100, options.durationMs );
+    while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )
+    {
+        qApp->processEvents( QEventLoop::AllEvents );
+        QThread::msleep( 10 );
+    }
+
+    if( ui->actionPlay->isChecked() )
+    {
+        ui->actionPlay->setChecked( false );
+        qApp->processEvents( QEventLoop::AllEvents );
+    }
+    for( int attempt = 0; attempt < 400 && m_pRenderThread && !m_pRenderThread->isIdle(); ++attempt )
+    {
+        qApp->processEvents( QEventLoop::AllEvents );
+        QThread::msleep( 5 );
+    }
+    m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+
+    out << "[GUI-SMOKE] DONE clip=" << inputInfo.absoluteFilePath()
+        << " duration_ms=" << durationMs
+        << " settle_ms=" << settleMs
+        << " settle_cpu_percent=" << options.settleCpuPercent
+        << " settle_cpu_stable_ms=" << settleCpuStableMs
+        << " settle_cpu_settled=" << bool01( cpuSettled )
+        << " settle_cpu_stable_elapsed_ms=" << cpuStableMs
+        << " settle_cpu_last_percent=" << QString::number( lastMeasuredCpuPercent, 'f', 3 )
+        << " settle_cpu_elapsed_ms=" << settleClock.elapsed()
+        << " diagnostic_log_file=" << CrashForensics::currentLogFilePath()
+        << "\n";
 
     return 0;
 }
@@ -15077,6 +15347,14 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDualIsoFull20InterpSumMs = 0.0;
     m_playbackSmokeDualIsoFull20FullresSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixCurveSelectSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixCurveBuildSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixCurveFloatSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixEvLutSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixHalfresSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;
     m_playbackSmokeDualIsoFull20Convert16SumMs = 0.0;
     m_playbackSmokeDualIsoFull20OtherSumMs = 0.0;
@@ -15085,6 +15363,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDebayeredFrameSumMs = 0.0;
     m_playbackSmokeDebayerExclusiveSumMs = 0.0;
     m_playbackSmokeProcessingSumMs = 0.0;
+    m_playbackSmokeProcessingSetupSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsPrepSumMs = 0.0;
+    m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
     m_playbackSmokeProcessingCoreSumMs = 0.0;
     m_playbackSmokeProcessingChromaSumMs = 0.0;
     m_playbackSmokeProcessingSharpenSumMs = 0.0;
@@ -15230,6 +15511,22 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_fullres_ms" );
     const double dualIsoFull20MixMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_ms" );
+    const double dualIsoFull20MixCurveSelectMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_curve_select_ms" );
+    const double dualIsoFull20MixCurveBuildMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_curve_build_ms" );
+    const double dualIsoFull20MixCurveFloatMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_curve_float_ms" );
+    const double dualIsoFull20MixEvLutMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_ev_lut_ms" );
+    const double dualIsoFull20MixHalfresMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_halfres_ms" );
+    const double dualIsoFull20MixChromaMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_ms" );
+    const double dualIsoFull20MixAliasMapMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_alias_map_ms" );
+    const double dualIsoFull20MixOverexposedMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_overexposed_ms" );
     const double dualIsoFull20FinalBlendMs =
         telemetryDoubleValue( timing, "dual_iso_full20_final_blend_ms" );
     const double dualIsoFull20Convert16Ms =
@@ -15254,6 +15551,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "debayer_exclusive_ms" );
     const double processingMs =
         telemetryDoubleValue( timing, "processing_ms" );
+    const double processingSetupMs =
+        telemetryDoubleValue( timing, "processing_setup_ms" );
+    const double processingShadowsHighlightsPrepMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_prep_ms" );
+    const double processingHighestGreenMs =
+        telemetryDoubleValue( timing, "processing_highest_green_ms" );
     const double processingCoreMs =
         telemetryDoubleValue( timing, "processing_core_ms" );
     const double processingChromaMs =
@@ -15306,6 +15609,14 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         m_playbackSmokeDualIsoFull20InterpSumMs += dualIsoFull20InterpMs;
         m_playbackSmokeDualIsoFull20FullresSumMs += dualIsoFull20FullresMs;
         m_playbackSmokeDualIsoFull20MixSumMs += dualIsoFull20MixMs;
+        m_playbackSmokeDualIsoFull20MixCurveSelectSumMs += dualIsoFull20MixCurveSelectMs;
+        m_playbackSmokeDualIsoFull20MixCurveBuildSumMs += dualIsoFull20MixCurveBuildMs;
+        m_playbackSmokeDualIsoFull20MixCurveFloatSumMs += dualIsoFull20MixCurveFloatMs;
+        m_playbackSmokeDualIsoFull20MixEvLutSumMs += dualIsoFull20MixEvLutMs;
+        m_playbackSmokeDualIsoFull20MixHalfresSumMs += dualIsoFull20MixHalfresMs;
+        m_playbackSmokeDualIsoFull20MixChromaSumMs += dualIsoFull20MixChromaMs;
+        m_playbackSmokeDualIsoFull20MixAliasMapSumMs += dualIsoFull20MixAliasMapMs;
+        m_playbackSmokeDualIsoFull20MixOverexposedSumMs += dualIsoFull20MixOverexposedMs;
         m_playbackSmokeDualIsoFull20FinalBlendSumMs += dualIsoFull20FinalBlendMs;
         m_playbackSmokeDualIsoFull20Convert16SumMs += dualIsoFull20Convert16Ms;
         m_playbackSmokeDualIsoFull20OtherSumMs += dualIsoFull20OtherMs;
@@ -15320,6 +15631,9 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeDebayeredFrameSumMs += debayeredFrameMs;
     m_playbackSmokeDebayerExclusiveSumMs += debayerExclusiveMs;
     m_playbackSmokeProcessingSumMs += processingMs;
+    m_playbackSmokeProcessingSetupSumMs += processingSetupMs;
+    m_playbackSmokeProcessingShadowsHighlightsPrepSumMs += processingShadowsHighlightsPrepMs;
+    m_playbackSmokeProcessingHighestGreenSumMs += processingHighestGreenMs;
     m_playbackSmokeProcessingCoreSumMs += processingCoreMs;
     m_playbackSmokeProcessingChromaSumMs += processingChromaMs;
     m_playbackSmokeProcessingSharpenSumMs += processingSharpenMs;
@@ -15444,8 +15758,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        "playback_smoke.dual_iso_full20_frame session=%1 index=%2 "
                        "total_ms=%3 pattern_ms=%4 noise_ms=%5 scratch_ms=%6 "
                        "convert20_ms=%7 match_ms=%8 interp_ms=%9 fullres_ms=%10 "
-                       "mix_ms=%11 final_blend_ms=%12 convert16_ms=%13 other_ms=%14 "
-                       "interp_method=%15 alias_map=%16 fullres=%17 threads=%18" )
+                       "mix_ms=%11 mix_curve_select_ms=%12 mix_curve_build_ms=%13 "
+                       "mix_curve_float_ms=%14 mix_ev_lut_ms=%15 mix_halfres_ms=%16 "
+                       "mix_chroma_ms=%17 mix_alias_map_ms=%18 mix_overexposed_ms=%19 "
+                       "final_blend_ms=%20 convert16_ms=%21 other_ms=%22 "
+                       "interp_method=%23 alias_map=%24 fullres=%25 threads=%26" )
                        .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                        .arg( m_playbackSmokePresentedFrames )
                        .arg( dualIsoFull20TotalMs, 0, 'f', 3 )
@@ -15457,6 +15774,14 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        .arg( dualIsoFull20InterpMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FullresMs, 0, 'f', 3 )
                        .arg( dualIsoFull20MixMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixCurveSelectMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixCurveBuildMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixCurveFloatMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixEvLutMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixHalfresMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixChromaMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixAliasMapMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixOverexposedMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendMs, 0, 'f', 3 )
                        .arg( dualIsoFull20Convert16Ms, 0, 'f', 3 )
                        .arg( dualIsoFull20OtherMs, 0, 'f', 3 )
@@ -15642,7 +15967,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "raw_prefetch_hits=%29 queued_playback_drops=%30 "
                "max_queued_playback_drops=%31 scope_updates=%32 scope_skips=%33 "
                "audio_sync_requests=%34 audio_sync_applied=%35 "
-               "audio_sync_skipped=%36" )
+               "audio_sync_skipped=%36 avg_processing_setup_ms=%37 "
+               "avg_processing_shadows_highlights_prep_ms=%38 "
+               "avg_processing_highest_green_ms=%39" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -15683,7 +16010,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( deltaCounter( m_playbackAudioSyncAppliedCount,
                                     m_playbackSmokeStartAudioSyncApplied ) )
                .arg( deltaCounter( m_playbackAudioSyncSkippedCount,
-                                    m_playbackSmokeStartAudioSyncSkipped ) );
+                                    m_playbackSmokeStartAudioSyncSkipped ) )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingSetupSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsPrepSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingHighestGreenSumMs ), 0, 'f', 3 );
 
     if( m_playbackSmokeDualIsoFull20ValidFrames > 0 )
     {
@@ -15693,9 +16023,13 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "avg_total_ms=%3 avg_pattern_ms=%4 avg_noise_ms=%5 "
                    "avg_scratch_ms=%6 avg_convert20_ms=%7 avg_match_ms=%8 "
                    "avg_interp_ms=%9 avg_fullres_ms=%10 avg_mix_ms=%11 "
-                   "avg_final_blend_ms=%12 avg_convert16_ms=%13 avg_other_ms=%14 "
-                   "last_interp_method=%15 last_alias_map=%16 last_fullres=%17 "
-                   "last_threads=%18" )
+                   "avg_mix_curve_select_ms=%12 avg_mix_curve_build_ms=%13 "
+                   "avg_mix_curve_float_ms=%14 avg_mix_ev_lut_ms=%15 "
+                   "avg_mix_halfres_ms=%16 avg_mix_chroma_ms=%17 "
+                   "avg_mix_alias_map_ms=%18 avg_mix_overexposed_ms=%19 "
+                   "avg_final_blend_ms=%20 avg_convert16_ms=%21 avg_other_ms=%22 "
+                   "last_interp_method=%23 last_alias_map=%24 last_fullres=%25 "
+                   "last_threads=%26" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokeDualIsoFull20ValidFrames )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20TotalSumMs ), 0, 'f', 3 )
@@ -15707,6 +16041,14 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20InterpSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20FullresSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixCurveSelectSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixCurveBuildSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixCurveFloatSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixEvLutSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixHalfresSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixAliasMapSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixOverexposedSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20FinalBlendSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20Convert16SumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20OtherSumMs ), 0, 'f', 3 )

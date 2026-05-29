@@ -1565,6 +1565,9 @@ static void mlv_copy_processed8_prefetch_processing_state(processingObject_t * d
     dst->shadows_highlights.shadows = src->shadows_highlights.shadows;
     dst->contrast = src->contrast;
     dst->clarity = src->clarity;
+    dst->saturation = src->saturation;
+    dst->vibrance = src->vibrance;
+    dst->pivot = src->pivot;
     dst->transformation = src->transformation;
     dst->denoiserStrength = src->denoiserStrength;
     dst->rbfDenoiserLuma = src->rbfDenoiserLuma;
@@ -1593,6 +1596,18 @@ static void mlv_copy_processed8_prefetch_processing_state(processingObject_t * d
     memcpy(dst->pre_calc_curve_r,
            src->pre_calc_curve_r,
            sizeof(dst->pre_calc_curve_r));
+    memcpy(dst->contrast_curve,
+           src->contrast_curve,
+           sizeof(dst->contrast_curve));
+    memcpy(dst->shadows_highlights.shadow_highlight_curve,
+           src->shadows_highlights.shadow_highlight_curve,
+           sizeof(dst->shadows_highlights.shadow_highlight_curve));
+    memcpy(dst->pre_calc_sat,
+           src->pre_calc_sat,
+           sizeof(dst->pre_calc_sat));
+    memcpy(dst->pre_calc_vibrance,
+           src->pre_calc_vibrance,
+           sizeof(dst->pre_calc_vibrance));
     memcpy(dst->gcurve_y, src->gcurve_y, sizeof(dst->gcurve_y));
     memcpy(dst->gcurve_r, src->gcurve_r, sizeof(dst->gcurve_r));
     memcpy(dst->gcurve_g, src->gcurve_g, sizeof(dst->gcurve_g));

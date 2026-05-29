@@ -21,24 +21,47 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                                       int rowStart,
                                       int rowEnd,
                                       uint16_t * __restrict inputImage,
+                                      uint16_t * __restrict blurImage,
                                       uint8_t * __restrict outputImage,
                                       processing_direct8_kernel_timing_t * timing)
 {
     int32_t ** pm = processing->pre_calc_matrix;
     const int row_stride = imageX * 3;
     uint16_t * pix = inputImage + ( rowStart * row_stride );
+    uint16_t * bpix = blurImage ? blurImage + ( rowStart * row_stride ) : pix;
     uint8_t * out = outputImage + ( rowStart * row_stride );
     uint16_t * pix_end = inputImage + ( rowEnd * row_stride );
+    uint16_t * pre_calc_levels = processing->pre_calc_levels;
     uint16_t * pre_calc_curve = processing->pre_calc_curve_r;
     uint16_t * gcurve_y = processing->gcurve_y;
     uint16_t * gcurve_r = processing->gcurve_r;
     uint16_t * gcurve_g = processing->gcurve_g;
     uint16_t * gcurve_b = processing->gcurve_b;
     const int apply_creative_curves = processing->allow_creative_adjustments != 0;
+    const int apply_contrast =
+        processing->allow_creative_adjustments != 0
+        && ( processing->contrast <= -0.01 || processing->contrast >= 0.01 );
+    const int apply_shadows_highlights =
+        processing->allow_creative_adjustments != 0
+        && ( ( processing->shadows_highlights.shadows <= -0.01
+            || processing->shadows_highlights.shadows >= 0.01 )
+          || ( processing->shadows_highlights.highlights <= -0.01
+            || processing->shadows_highlights.highlights >= 0.01 ) );
+    const int apply_local_tone = apply_contrast || apply_shadows_highlights;
+    const int apply_vibrance =
+        processing->allow_creative_adjustments != 0
+        && ( processing->vibrance <= 0.99 || processing->vibrance >= 1.01 );
+    const int apply_saturation =
+        processing->allow_creative_adjustments != 0
+        && ( processing->saturation <= 0.99 || processing->saturation >= 1.01 );
 
     int32_t * pm0 = pm[0];
     int32_t * pm4 = pm[4];
     int32_t * pm8 = pm[8];
+    double * contrast_curve = processing->contrast_curve;
+    double * shadow_highlight_curve = processing->shadows_highlights.shadow_highlight_curve;
+    int32_t * pre_calc_vibrance = processing->pre_calc_vibrance;
+    int32_t * pre_calc_sat = processing->pre_calc_sat;
     uint16_t * pre_calc_gamma = processing->pre_calc_gamma;
     float rgb_to_Y[3] = {0.0f, 0.0f, 0.0f};
     double inverse_mat[9];
@@ -108,13 +131,10 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
     const double agx_inv_7 = apply_agx ? agx_inverse_matrix[7] : 0.0;
     const double agx_inv_8 = apply_agx ? agx_inverse_matrix[8] : 0.0;
 
-    /* When AgX is enabled the parity reference is the indirect-SLOW path,
-     * which holds the WB matrix and accumulators in double. For non-AgX the
-     * reference is the indirect-FAST branch, which uses float. We pre-load
-     * a double copy of the WB matrix unconditionally and select based on
-     * apply_agx in the hot loop -- the compiler hoists the apply_agx
-     * branch out of the per-pixel test, so the cost is at most a few extra
-     * register loads, not a per-pixel double multiply. */
+    /* AgX and local-tone contrast both use the generic 16-bit reference path,
+     * whose WB matrix multiply promotes the matrix coefficients to double
+     * before narrowing back to float. Keep a double copy for those parity
+     * cases while preserving the older float fast branch for neutral receipts. */
     const double proper_wb_d0 = processing->proper_wb_matrix[0];
     const double proper_wb_d1 = processing->proper_wb_matrix[1];
     const double proper_wb_d2 = processing->proper_wb_matrix[2];
@@ -127,22 +147,40 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
 
     if( timing == NULL )
     {
-        for( ; pix < pix_end; pix += 3, out += 3 )
+        for( ; pix < pix_end; pix += 3, bpix += 3, out += 3 )
         {
-            float pix0 = (float)pm0[pix[0]];
-            float pix1 = (float)pm4[pix[1]];
-            float pix2 = (float)pm8[pix[2]];
-            /* Phase E7: indirect-SLOW path (the AgX reference, raw_processing.c
-             * lines 1356/1405) clamps the pre-WB matrix LUT lookups via
-             * LIMIT16 before applying the WB matrix multiply. The non-AgX
-             * indirect-FAST path skips this clamp; reproducing the SLOW
-             * path's clamp here keeps AgX direct8 byte-identical to the
-             * SLOW reference, which is the path that AgX-enabled receipts
-             * take today through apply_processing_object.  LIMIT16 expands
-             * to MAX(MIN(X, 65535), 0) which is type-safe on float; the
-             * subsequent cast to uint16 truncates toward zero, matching the
-             * implicit `pix[i] = LIMIT16(pix0)` write at line 1405. */
-            if( apply_agx )
+            const uint16_t pix0_level = pre_calc_levels[pix[0]];
+            const uint16_t pix1_level = pre_calc_levels[pix[1]];
+            const uint16_t pix2_level = pre_calc_levels[pix[2]];
+            const int32_t pix0_lut = pm0[pix0_level];
+            const int32_t pix1_lut = pm4[pix1_level];
+            const int32_t pix2_lut = pm8[pix2_level];
+            double expo_correction = 1.0;
+            if( apply_shadows_highlights )
+            {
+                const uint16_t bpix0_level = blurImage ? bpix[0] : pix0_level;
+                const uint16_t bpix1_level = blurImage ? bpix[1] : pix1_level;
+                const uint16_t bpix2_level = blurImage ? bpix[2] : pix2_level;
+                const int32_t bval = ( ( pm0[bpix0_level] << 2 )
+                                     + ( pm4[bpix1_level] * 11 )
+                                     +   pm8[bpix2_level] ) >> 4;
+                expo_correction *= shadow_highlight_curve[LIMIT16(bval)];
+            }
+            if( apply_contrast )
+            {
+                const int32_t cval = ( ( pix0_lut << 2 )
+                                     + ( pix1_lut * 11 )
+                                     +   pix2_lut ) >> 4;
+                expo_correction *= contrast_curve[LIMIT16(cval)];
+            }
+
+            float pix0 = (float)( pix0_lut * expo_correction );
+            float pix1 = (float)( pix1_lut * expo_correction );
+            float pix2 = (float)( pix2_lut * expo_correction );
+            /* The generic 16-bit path quantizes local-tone-adjusted values
+             * before WB. AgX also routes through that generic path. Mirror
+             * that store-to-uint16 behaviour for byte identity. */
+            if( apply_agx || apply_local_tone )
             {
                 pix0 = (float)(uint16_t)LIMIT16(pix0);
                 pix1 = (float)(uint16_t)LIMIT16(pix1);
@@ -151,10 +189,8 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
             float result0;
             float result1;
             float result2;
-            if( apply_agx )
+            if( apply_agx || apply_local_tone )
             {
-                /* Indirect-SLOW WB matrix multiply is float * double = double,
-                 * sum in double, narrowed to float result[]. */
                 result0 = (float)((double)pix0 * proper_wb_d0 + (double)pix1 * proper_wb_d1 + (double)pix2 * proper_wb_d2);
                 result1 = (float)((double)pix0 * proper_wb_d3 + (double)pix1 * proper_wb_d4 + (double)pix2 * proper_wb_d5);
                 result2 = (float)((double)pix0 * proper_wb_d6 + (double)pix1 * proper_wb_d7 + (double)pix2 * proper_wb_d8);
@@ -166,25 +202,46 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                 result2 = pix0 * proper_wb_6 + pix1 * proper_wb_7 + pix2 * proper_wb_8;
             }
 
-            const float Y = rgb_to_y0 * result0
-                          + rgb_to_y1 * result1
-                          + rgb_to_y2 * result2;
-            if( !processing->exr_mode && Y > 0.0f )
+            if( !processing->exr_mode && apply_local_tone )
             {
+                const float Y = rgb_to_y0 * result0
+                              + rgb_to_y1 * result1
+                              + rgb_to_y2 * result2;
                 const float min_channel = MIN(MIN(result0, result1), result2);
-                const float y_minus_min_channel = Y - min_channel;
-                if( fabsf(y_minus_min_channel) > FLT_MIN )
-                {
-                    const float inv_y = 1.0f / Y;
-                    const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
-                    const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
-                    const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
-                    const float desaturate_factor =
-                        (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
+                const float result2_0 = -(Reinhard_for_colour((Y - result0) / Y) * Y) + Y;
+                const float result2_1 = -(Reinhard_for_blue((Y - result1) / Y) * Y) + Y;
+                const float result2_2 = -(Reinhard_for_blue((Y - result2) / Y) * Y) + Y;
+                float desaturate_factor =
+                    (Y - MIN(MIN(result2_0, result2_1), result2_2)) / (Y - min_channel);
 
-                    result0 = (result0 - Y) * desaturate_factor + Y;
-                    result1 = (result1 - Y) * desaturate_factor + Y;
-                    result2 = (result2 - Y) * desaturate_factor + Y;
+                if( Y <= 0.0f ) desaturate_factor = 1.0f;
+
+                result0 = (result0 - Y) * desaturate_factor + Y;
+                result1 = (result1 - Y) * desaturate_factor + Y;
+                result2 = (result2 - Y) * desaturate_factor + Y;
+            }
+            else
+            {
+                const float Y = rgb_to_y0 * result0
+                              + rgb_to_y1 * result1
+                              + rgb_to_y2 * result2;
+                if( !processing->exr_mode && Y > 0.0f )
+                {
+                    const float min_channel = MIN(MIN(result0, result1), result2);
+                    const float y_minus_min_channel = Y - min_channel;
+                    if( fabsf(y_minus_min_channel) > FLT_MIN )
+                    {
+                        const float inv_y = 1.0f / Y;
+                        const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
+                        const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
+                        const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
+                        const float desaturate_factor =
+                            (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
+
+                        result0 = (result0 - Y) * desaturate_factor + Y;
+                        result1 = (result1 - Y) * desaturate_factor + Y;
+                        result2 = (result2 - Y) * desaturate_factor + Y;
+                    }
                 }
             }
 
@@ -213,9 +270,62 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                 result2 = (float)(uint16_t)LIMIT16(ab);
             }
 
-            uint16_t mapped0 = pre_calc_gamma[LIMIT16((uint32_t)result0)];
-            uint16_t mapped1 = pre_calc_gamma[LIMIT16((uint32_t)result1)];
-            uint16_t mapped2 = pre_calc_gamma[LIMIT16((uint32_t)result2)];
+            uint16_t mapped0;
+            uint16_t mapped1;
+            uint16_t mapped2;
+            if( apply_local_tone && !apply_agx )
+            {
+                mapped0 = pre_calc_gamma[(uint16_t)LIMIT16(result0)];
+                mapped1 = pre_calc_gamma[(uint16_t)LIMIT16(result1)];
+                mapped2 = pre_calc_gamma[(uint16_t)LIMIT16(result2)];
+            }
+            else
+            {
+                mapped0 = pre_calc_gamma[LIMIT16((uint32_t)result0)];
+                mapped1 = pre_calc_gamma[LIMIT16((uint32_t)result1)];
+                mapped2 = pre_calc_gamma[LIMIT16((uint32_t)result2)];
+            }
+            if( apply_vibrance )
+            {
+                const int32_t y1 = ( ( mapped0 << 2 ) + ( mapped1 * 11 ) + mapped2 ) >> 4;
+                const int32_t y2 = y1 - 65536;
+                const int32_t vib0 = pre_calc_vibrance[mapped0 - y2] + y1;
+                const int32_t vib1 = pre_calc_vibrance[mapped1 - y2] + y1;
+                const int32_t vib2 = pre_calc_vibrance[mapped2 - y2] + y1;
+                if( processing->vibrance > 1.0 )
+                {
+                    double sat = 0.0;
+                    if( !( mapped0 == 0 && mapped1 == 0 && mapped2 == 0 ) )
+                    {
+                        uint16_t biggest = mapped0;
+                        uint16_t smallest = mapped0;
+                        if( mapped1 > biggest ) biggest = mapped1;
+                        if( mapped2 > biggest ) biggest = mapped2;
+                        if( mapped1 < smallest ) smallest = mapped1;
+                        if( mapped2 < smallest ) smallest = mapped2;
+                        sat = ((double)biggest - (double)smallest) / (double)biggest;
+                    }
+                    sat = 2.0 * sat / ( sat * sat + 1.0 );
+                    if( sat > 1.0 ) sat = 1.0;
+                    mapped0 = (uint16_t)LIMIT16( mapped0 * sat + vib0 * ( 1.0 - sat ) );
+                    mapped1 = (uint16_t)LIMIT16( mapped1 * sat + vib1 * ( 1.0 - sat ) );
+                    mapped2 = (uint16_t)LIMIT16( mapped2 * sat + vib2 * ( 1.0 - sat ) );
+                }
+                else
+                {
+                    mapped0 = (uint16_t)LIMIT16(vib0);
+                    mapped1 = (uint16_t)LIMIT16(vib1);
+                    mapped2 = (uint16_t)LIMIT16(vib2);
+                }
+            }
+            if( apply_saturation )
+            {
+                const int32_t y1 = ( ( mapped0 << 2 ) + ( mapped1 * 11 ) + mapped2 ) >> 4;
+                const int32_t y2 = y1 - 65536;
+                mapped0 = (uint16_t)LIMIT16(pre_calc_sat[mapped0 - y2] + y1);
+                mapped1 = (uint16_t)LIMIT16(pre_calc_sat[mapped1 - y2] + y1);
+                mapped2 = (uint16_t)LIMIT16(pre_calc_sat[mapped2 - y2] + y1);
+            }
             if( apply_creative_curves )
             {
                 mapped0 = pre_calc_curve[mapped0];
@@ -262,13 +372,38 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
     double matrix_profile_start = omp_get_wtime();
     double gamma_profile_start = 0.0;
     double curves_profile_start = 0.0;
-    for( ; pix < pix_end; pix += 3, out += 3 )
+    for( ; pix < pix_end; pix += 3, bpix += 3, out += 3 )
     {
-        float pix0 = (float)pm0[pix[0]];
-        float pix1 = (float)pm4[pix[1]];
-        float pix2 = (float)pm8[pix[2]];
+        const uint16_t pix0_level = pre_calc_levels[pix[0]];
+        const uint16_t pix1_level = pre_calc_levels[pix[1]];
+        const uint16_t pix2_level = pre_calc_levels[pix[2]];
+        const int32_t pix0_lut = pm0[pix0_level];
+        const int32_t pix1_lut = pm4[pix1_level];
+        const int32_t pix2_lut = pm8[pix2_level];
+        double expo_correction = 1.0;
+        if( apply_shadows_highlights )
+        {
+            const uint16_t bpix0_level = blurImage ? bpix[0] : pix0_level;
+            const uint16_t bpix1_level = blurImage ? bpix[1] : pix1_level;
+            const uint16_t bpix2_level = blurImage ? bpix[2] : pix2_level;
+            const int32_t bval = ( ( pm0[bpix0_level] << 2 )
+                                 + ( pm4[bpix1_level] * 11 )
+                                 +   pm8[bpix2_level] ) >> 4;
+            expo_correction *= shadow_highlight_curve[LIMIT16(bval)];
+        }
+        if( apply_contrast )
+        {
+            const int32_t cval = ( ( pix0_lut << 2 )
+                                 + ( pix1_lut * 11 )
+                                 +   pix2_lut ) >> 4;
+            expo_correction *= contrast_curve[LIMIT16(cval)];
+        }
+
+        float pix0 = (float)( pix0_lut * expo_correction );
+        float pix1 = (float)( pix1_lut * expo_correction );
+        float pix2 = (float)( pix2_lut * expo_correction );
         /* See note in the non-timing branch above. */
-        if( apply_agx )
+        if( apply_agx || apply_local_tone )
         {
             pix0 = (float)(uint16_t)LIMIT16(pix0);
             pix1 = (float)(uint16_t)LIMIT16(pix1);
@@ -277,7 +412,7 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
         float result0;
         float result1;
         float result2;
-        if( apply_agx )
+        if( apply_agx || apply_local_tone )
         {
             result0 = (float)((double)pix0 * proper_wb_d0 + (double)pix1 * proper_wb_d1 + (double)pix2 * proper_wb_d2);
             result1 = (float)((double)pix0 * proper_wb_d3 + (double)pix1 * proper_wb_d4 + (double)pix2 * proper_wb_d5);
@@ -290,25 +425,46 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
             result2 = pix0 * proper_wb_6 + pix1 * proper_wb_7 + pix2 * proper_wb_8;
         }
 
-        const float Y = rgb_to_y0 * result0
-                      + rgb_to_y1 * result1
-                      + rgb_to_y2 * result2;
-        if( !processing->exr_mode && Y > 0.0f )
+        if( !processing->exr_mode && apply_local_tone )
         {
+            const float Y = rgb_to_y0 * result0
+                          + rgb_to_y1 * result1
+                          + rgb_to_y2 * result2;
             const float min_channel = MIN(MIN(result0, result1), result2);
-            const float y_minus_min_channel = Y - min_channel;
-            if( fabsf(y_minus_min_channel) > FLT_MIN )
-            {
-                const float inv_y = 1.0f / Y;
-                const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
-                const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
-                const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
-                const float desaturate_factor =
-                    (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
+            const float result2_0 = -(Reinhard_for_colour((Y - result0) / Y) * Y) + Y;
+            const float result2_1 = -(Reinhard_for_blue((Y - result1) / Y) * Y) + Y;
+            const float result2_2 = -(Reinhard_for_blue((Y - result2) / Y) * Y) + Y;
+            float desaturate_factor =
+                (Y - MIN(MIN(result2_0, result2_1), result2_2)) / (Y - min_channel);
 
-                result0 = (result0 - Y) * desaturate_factor + Y;
-                result1 = (result1 - Y) * desaturate_factor + Y;
-                result2 = (result2 - Y) * desaturate_factor + Y;
+            if( Y <= 0.0f ) desaturate_factor = 1.0f;
+
+            result0 = (result0 - Y) * desaturate_factor + Y;
+            result1 = (result1 - Y) * desaturate_factor + Y;
+            result2 = (result2 - Y) * desaturate_factor + Y;
+        }
+        else
+        {
+            const float Y = rgb_to_y0 * result0
+                          + rgb_to_y1 * result1
+                          + rgb_to_y2 * result2;
+            if( !processing->exr_mode && Y > 0.0f )
+            {
+                const float min_channel = MIN(MIN(result0, result1), result2);
+                const float y_minus_min_channel = Y - min_channel;
+                if( fabsf(y_minus_min_channel) > FLT_MIN )
+                {
+                    const float inv_y = 1.0f / Y;
+                    const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
+                    const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
+                    const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
+                    const float desaturate_factor =
+                        (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
+
+                    result0 = (result0 - Y) * desaturate_factor + Y;
+                    result1 = (result1 - Y) * desaturate_factor + Y;
+                    result2 = (result2 - Y) * desaturate_factor + Y;
+                }
             }
         }
 
@@ -337,9 +493,62 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
             matrix_profile_counter = 0;
         }
 
-        uint16_t mapped0 = pre_calc_gamma[LIMIT16((uint32_t)result0)];
-        uint16_t mapped1 = pre_calc_gamma[LIMIT16((uint32_t)result1)];
-        uint16_t mapped2 = pre_calc_gamma[LIMIT16((uint32_t)result2)];
+        uint16_t mapped0;
+        uint16_t mapped1;
+        uint16_t mapped2;
+        if( apply_local_tone && !apply_agx )
+        {
+            mapped0 = pre_calc_gamma[(uint16_t)LIMIT16(result0)];
+            mapped1 = pre_calc_gamma[(uint16_t)LIMIT16(result1)];
+            mapped2 = pre_calc_gamma[(uint16_t)LIMIT16(result2)];
+        }
+        else
+        {
+            mapped0 = pre_calc_gamma[LIMIT16((uint32_t)result0)];
+            mapped1 = pre_calc_gamma[LIMIT16((uint32_t)result1)];
+            mapped2 = pre_calc_gamma[LIMIT16((uint32_t)result2)];
+        }
+        if( apply_vibrance )
+        {
+            const int32_t y1 = ( ( mapped0 << 2 ) + ( mapped1 * 11 ) + mapped2 ) >> 4;
+            const int32_t y2 = y1 - 65536;
+            const int32_t vib0 = pre_calc_vibrance[mapped0 - y2] + y1;
+            const int32_t vib1 = pre_calc_vibrance[mapped1 - y2] + y1;
+            const int32_t vib2 = pre_calc_vibrance[mapped2 - y2] + y1;
+            if( processing->vibrance > 1.0 )
+            {
+                double sat = 0.0;
+                if( !( mapped0 == 0 && mapped1 == 0 && mapped2 == 0 ) )
+                {
+                    uint16_t biggest = mapped0;
+                    uint16_t smallest = mapped0;
+                    if( mapped1 > biggest ) biggest = mapped1;
+                    if( mapped2 > biggest ) biggest = mapped2;
+                    if( mapped1 < smallest ) smallest = mapped1;
+                    if( mapped2 < smallest ) smallest = mapped2;
+                    sat = ((double)biggest - (double)smallest) / (double)biggest;
+                }
+                sat = 2.0 * sat / ( sat * sat + 1.0 );
+                if( sat > 1.0 ) sat = 1.0;
+                mapped0 = (uint16_t)LIMIT16( mapped0 * sat + vib0 * ( 1.0 - sat ) );
+                mapped1 = (uint16_t)LIMIT16( mapped1 * sat + vib1 * ( 1.0 - sat ) );
+                mapped2 = (uint16_t)LIMIT16( mapped2 * sat + vib2 * ( 1.0 - sat ) );
+            }
+            else
+            {
+                mapped0 = (uint16_t)LIMIT16(vib0);
+                mapped1 = (uint16_t)LIMIT16(vib1);
+                mapped2 = (uint16_t)LIMIT16(vib2);
+            }
+        }
+        if( apply_saturation )
+        {
+            const int32_t y1 = ( ( mapped0 << 2 ) + ( mapped1 * 11 ) + mapped2 ) >> 4;
+            const int32_t y2 = y1 - 65536;
+            mapped0 = (uint16_t)LIMIT16(pre_calc_sat[mapped0 - y2] + y1);
+            mapped1 = (uint16_t)LIMIT16(pre_calc_sat[mapped1 - y2] + y1);
+            mapped2 = (uint16_t)LIMIT16(pre_calc_sat[mapped2 - y2] + y1);
+        }
 
         if( gamma_profile_counter == 0 )
         {

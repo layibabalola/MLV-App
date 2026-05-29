@@ -129,6 +129,21 @@ public:
             GpuBilinearDebayerBackendRequest::Auto;
     };
 
+    struct GuiPlaybackSmokeOptions
+    {
+        QString inputPath;
+        QString receiptPath;
+        int durationMs = 8000;
+        int settleMs = 2500;
+        double settleCpuPercent = -1.0;
+        int settleCpuStableMs = 1000;
+        int settleCpuMaxMs = 45000;
+        PlaybackProfileScope scope = PlaybackProfileScope::None;
+        bool forceScope = false;
+        bool zebras = false;
+        bool forceZebras = false;
+    };
+
     /* Progress-only callback for exportCdngSequence.
      * framesDone:   frames completed so far (exported + skipped)
      * totalFrames:  total frames to export
@@ -155,6 +170,7 @@ public:
         int lookAssistExposure = 0);
 
     int runHeadlessPlaybackProfile(const PlaybackProfileOptions & options);
+    int runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options);
 
 protected:
     void timerEvent( QTimerEvent *t );
@@ -860,6 +876,14 @@ private:
     double m_playbackSmokeDualIsoFull20InterpSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20FullresSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixCurveSelectSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixCurveBuildSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixCurveFloatSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixEvLutSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixHalfresSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20Convert16SumMs = 0.0;
     double m_playbackSmokeDualIsoFull20OtherSumMs = 0.0;
@@ -868,6 +892,9 @@ private:
     double m_playbackSmokeDebayeredFrameSumMs = 0.0;
     double m_playbackSmokeDebayerExclusiveSumMs = 0.0;
     double m_playbackSmokeProcessingSumMs = 0.0;
+    double m_playbackSmokeProcessingSetupSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsPrepSumMs = 0.0;
+    double m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
     double m_playbackSmokeProcessingCoreSumMs = 0.0;
     double m_playbackSmokeProcessingChromaSumMs = 0.0;
     double m_playbackSmokeProcessingSharpenSumMs = 0.0;

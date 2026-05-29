@@ -17,10 +17,11 @@ namespace
 thread_local CRBFilterPlain g_rbf_filter;
 }
 
-void recursive_bf_wrap(uint16_t * img_in,
+void recursive_bf_wrap_with_output_lut(uint16_t * img_in,
         uint16_t * img_out,
         float sigma_spatial, float sigma_range,
-        int width, int height, int channel)
+        int width, int height, int channel,
+        const uint16_t * output_lut)
 {
     if( 0 )
     {
@@ -36,8 +37,24 @@ void recursive_bf_wrap(uint16_t * img_in,
     {
         //Ming version with better right boarder
         g_rbf_filter.reserveMemory( width, height, channel );
-        g_rbf_filter.filter( img_in, img_out, sigma_spatial, sigma_range, width, height, channel );
+        g_rbf_filter.filter( img_in, img_out, sigma_spatial, sigma_range, width, height, channel, output_lut );
     }
+}
+
+void recursive_bf_wrap(uint16_t * img_in,
+        uint16_t * img_out,
+        float sigma_spatial, float sigma_range,
+        int width, int height, int channel)
+{
+    recursive_bf_wrap_with_output_lut(
+        img_in,
+        img_out,
+        sigma_spatial,
+        sigma_range,
+        width,
+        height,
+        channel,
+        nullptr);
 }
 
 #ifdef __cplusplus

@@ -2084,8 +2084,6 @@ static void match_by_histogram(struct raw_info raw_info,
 
     int * dark = scratch->histogram_match_dark;
     int * bright = scratch->histogram_match_bright;
-    memset(dark, 0, w * h * sizeof(dark[0]));
-    memset(bright, 0, w * h * sizeof(bright[0]));
 
     //#pragma omp parallel for
     for (int y = y0; y < h-2; y += 3)
@@ -3521,6 +3519,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     int mix_curve_slot = 0;
     int mix_curve_needs_rebuild = 0;
     int mix_curve_global_hit = 0;
+    double mix_stage_start = mlv_stage_timing_now();
     double * mix_curve = select_mix_curve_cache_slot(scratch,
                                                      mix_curve_required,
                                                      black,
@@ -3530,6 +3529,8 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
                                                      &mix_curve_slot,
                                                      &mix_curve_needs_rebuild,
                                                      &mix_curve_global_hit);
+    g_dualiso_full20bit_timing.mix_curve_select_ms +=
+        dualiso_debug_elapsed_ms(mix_stage_start);
     if (!mix_curve)
     {
         return 0;
@@ -3540,6 +3541,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     g_dualiso_full20bit_timing.mix_curve_global_hit = mix_curve_global_hit;
     if (mix_curve_needs_rebuild)
     {
+        mix_stage_start = mlv_stage_timing_now();
         #pragma omp parallel for
         for (int i = 0; i < 1<<20; i++)
         {
@@ -3550,29 +3552,40 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
         }
         scratch->mix_curve_valid[mix_curve_slot] = 1;
         publish_mix_curve_to_global_cache(mix_curve, mix_curve_required, black, white, corr_ev, overlap);
+        g_dualiso_full20bit_timing.mix_curve_build_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
     }
 
 
     int * raw2ev = NULL;
     int * ev2raw = NULL;
+    mix_stage_start = mlv_stage_timing_now();
     if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &ev2raw))
     {
+        g_dualiso_full20bit_timing.mix_ev_lut_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
         return 0;
     }
+    g_dualiso_full20bit_timing.mix_ev_lut_ms +=
+        dualiso_debug_elapsed_ms(mix_stage_start);
 
 #ifdef DUALISO_AVX2_AVAILABLE
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
     if (g_dualiso_hq_use_avx2)
     {
+        mix_stage_start = mlv_stage_timing_now();
         float * mix_curve_float = ensure_mix_curve_float_cache_slot(scratch,
                                                                     mix_curve_slot,
                                                                     mix_curve,
                                                                     mix_curve_required);
+        g_dualiso_full20bit_timing.mix_curve_float_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
         if (!mix_curve_float)
         {
             return 0;
         }
 
+        mix_stage_start = mlv_stage_timing_now();
         #pragma omp parallel for
         for (int y = 0; y < h; y ++) {
             mix_images_row_avx2(&halfres[(size_t)y*w],
@@ -3591,10 +3604,13 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
                 halfres[x + y*w] = ev2raw[mixed];
             }
         }
+        g_dualiso_full20bit_timing.mix_halfres_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
     }
     else
 #endif
     {
+        mix_stage_start = mlv_stage_timing_now();
         #pragma omp parallel for collapse(2)
         for (int y = 0; y < h; y ++)
         {
@@ -3618,58 +3634,136 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
                 halfres[x + y*w] = ev2raw[mixed];
             }
         }
+        g_dualiso_full20bit_timing.mix_halfres_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
     }
     if (chroma_smooth_method)
     {
 #ifndef STDOUT_SILENT
         printf("Chroma smoothing...\n");
 #endif
+        mix_stage_start = mlv_stage_timing_now();
         memcpy(fullres_smooth, fullres, w * h * sizeof(uint32_t));
         memcpy(halfres_smooth, halfres, w * h * sizeof(uint32_t));
         hdr_chroma_smooth(raw_info, fullres, fullres_smooth, chroma_smooth_method, raw2ev, ev2raw);
         hdr_chroma_smooth(raw_info, halfres, halfres_smooth, chroma_smooth_method, raw2ev, ev2raw);
+        g_dualiso_full20bit_timing.mix_chroma_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
     }
     if(alias_map)
     {
+        mix_stage_start = mlv_stage_timing_now();
         build_alias_map(raw_info, alias_map, fullres_smooth, halfres_smooth, bright, dark_noise, black, raw2ev, scratch);
+        g_dualiso_full20bit_timing.mix_alias_map_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
     }
     
-    #pragma omp parallel for collapse(2)
-    for (int y = 0; y < h; y ++)
-    {
-        for (int x = 0; x < w; x ++)
-        {
-            overexposed[x + y * w] = bright[x + y * w] >= white_darkened || dark[x + y * w] >= white ? 100 : 0;
-        }
-    }
-    
-    /* "blur" the overexposed map */
+    const double overexposed_start = mlv_stage_timing_now();
+    /* "Blur" reads the unblurred overexposure map from over_aux and writes the
+     * interior result to overexposed. Write the mark pass directly to over_aux
+     * and copy only the boundary pixels that the blur leaves unchanged. */
     uint16_t* over_aux = scratch ? scratch->over_aux : NULL;
     if (!over_aux)
     {
         return 0;
     }
-    memcpy(over_aux, overexposed, w * h * sizeof(uint16_t));
-    
-    #pragma omp parallel for collapse(2)
-    for (int y = 3; y < h-3; y ++)
+
+    int overexposed_avx2 = 0;
+#ifdef DUALISO_AVX2_AVAILABLE
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    if (g_dualiso_hq_use_avx2)
     {
-        for (int x = 3; x < w-3; x ++)
+        overexposed_avx2 = 1;
+        #pragma omp parallel for
+        for (int y = 0; y < h; y ++)
         {
-            overexposed[x + y * w] =
-            (over_aux[x+0 + (y+0) * w])+
-            (over_aux[x+0 + (y-1) * w] + over_aux[x-1 + (y+0) * w] + over_aux[x+1 + (y+0) * w] + over_aux[x+0 + (y+1) * w]) * 820 / 1024 +
-            (over_aux[x-1 + (y-1) * w] + over_aux[x+1 + (y-1) * w] + over_aux[x-1 + (y+1) * w] + over_aux[x+1 + (y+1) * w]) * 657 / 1024 +
-            //~ (over_aux[x+0 + (y-2) * w] + over_aux[x-2 + (y+0) * w] + over_aux[x+2 + (y+0) * w] + over_aux[x+0 + (y+2) * w]) * 421 / 1024 +
-            //~ (over_aux[x-1 + (y-2) * w] + over_aux[x+1 + (y-2) * w] + over_aux[x-2 + (y-1) * w] + over_aux[x+2 + (y-1) * w] + over_aux[x-2 + (y+1) * w] + over_aux[x+2 + (y+1) * w] + over_aux[x-1 + (y+2) * w] + over_aux[x+1 + (y+2) * w]) * 337 / 1024 +
-            //~ (over_aux[x-2 + (y-2) * w] + over_aux[x+2 + (y-2) * w] + over_aux[x-2 + (y+2) * w] + over_aux[x+2 + (y+2) * w]) * 173 / 1024 +
-            //~ (over_aux[x+0 + (y-3) * w] + over_aux[x-3 + (y+0) * w] + over_aux[x+3 + (y+0) * w] + over_aux[x+0 + (y+3) * w]) * 139 / 1024 +
-            //~ (over_aux[x-1 + (y-3) * w] + over_aux[x+1 + (y-3) * w] + over_aux[x-3 + (y-1) * w] + over_aux[x+3 + (y-1) * w] + over_aux[x-3 + (y+1) * w] + over_aux[x+3 + (y+1) * w] + over_aux[x-1 + (y+3) * w] + over_aux[x+1 + (y+3) * w]) * 111 / 1024 +
-            //~ (over_aux[x-2 + (y-3) * w] + over_aux[x+2 + (y-3) * w] + over_aux[x-3 + (y-2) * w] + over_aux[x+3 + (y-2) * w] + over_aux[x-3 + (y+2) * w] + over_aux[x+3 + (y+2) * w] + over_aux[x-2 + (y+3) * w] + over_aux[x+2 + (y+3) * w]) * 57 / 1024;
-            0;
+            overexposed_mark_row_avx2(&over_aux[(size_t)y * w],
+                                      &bright[(size_t)y * w],
+                                      &dark[(size_t)y * w],
+                                      white_darkened,
+                                      white,
+                                      w);
         }
     }
-    
+#endif
+    if (!overexposed_avx2)
+    {
+        #pragma omp parallel for collapse(2)
+        for (int y = 0; y < h; y ++)
+        {
+            for (int x = 0; x < w; x ++)
+            {
+                over_aux[x + y * w] = bright[x + y * w] >= white_darkened || dark[x + y * w] >= white ? 100 : 0;
+            }
+        }
+    }
+
+    if (w > 6 && h > 6)
+    {
+        #pragma omp parallel for
+        for (int y = 0; y < h; ++y)
+        {
+            uint16_t * dst_row = &overexposed[(size_t)y * w];
+            const uint16_t * src_row = &over_aux[(size_t)y * w];
+            if (y < 3 || y >= h - 3)
+            {
+                memcpy(dst_row, src_row, (size_t)w * sizeof(uint16_t));
+            }
+            else
+            {
+                dst_row[0] = src_row[0];
+                dst_row[1] = src_row[1];
+                dst_row[2] = src_row[2];
+                dst_row[w - 3] = src_row[w - 3];
+                dst_row[w - 2] = src_row[w - 2];
+                dst_row[w - 1] = src_row[w - 1];
+            }
+        }
+    }
+    else
+    {
+        memcpy(overexposed, over_aux, (size_t)w * h * sizeof(uint16_t));
+    }
+
+    int overexposed_blur_avx2 = 0;
+#ifdef DUALISO_AVX2_AVAILABLE
+    if (g_dualiso_hq_use_avx2)
+    {
+        overexposed_blur_avx2 = 1;
+        #pragma omp parallel for
+        for (int y = 3; y < h-3; y ++)
+        {
+            overexposed_blur_row_avx2(&overexposed[(size_t)y * w],
+                                      &over_aux[(size_t)(y - 1) * w],
+                                      &over_aux[(size_t)y * w],
+                                      &over_aux[(size_t)(y + 1) * w],
+                                      w);
+        }
+    }
+#endif
+    if (!overexposed_blur_avx2)
+    {
+        #pragma omp parallel for collapse(2)
+        for (int y = 3; y < h-3; y ++)
+        {
+            for (int x = 3; x < w-3; x ++)
+            {
+                overexposed[x + y * w] =
+                (over_aux[x+0 + (y+0) * w])+
+                (over_aux[x+0 + (y-1) * w] + over_aux[x-1 + (y+0) * w] + over_aux[x+1 + (y+0) * w] + over_aux[x+0 + (y+1) * w]) * 820 / 1024 +
+                (over_aux[x-1 + (y-1) * w] + over_aux[x+1 + (y-1) * w] + over_aux[x-1 + (y+1) * w] + over_aux[x+1 + (y+1) * w]) * 657 / 1024 +
+                //~ (over_aux[x+0 + (y-2) * w] + over_aux[x-2 + (y+0) * w] + over_aux[x+2 + (y+0) * w] + over_aux[x+0 + (y+2) * w]) * 421 / 1024 +
+                //~ (over_aux[x-1 + (y-2) * w] + over_aux[x+1 + (y-2) * w] + over_aux[x-2 + (y-1) * w] + over_aux[x+2 + (y-1) * w] + over_aux[x-2 + (y+1) * w] + over_aux[x+2 + (y+1) * w] + over_aux[x-1 + (y+2) * w] + over_aux[x+1 + (y+2) * w]) * 337 / 1024 +
+                //~ (over_aux[x-2 + (y-2) * w] + over_aux[x+2 + (y-2) * w] + over_aux[x-2 + (y+2) * w] + over_aux[x+2 + (y+2) * w]) * 173 / 1024 +
+                //~ (over_aux[x+0 + (y-3) * w] + over_aux[x-3 + (y+0) * w] + over_aux[x+3 + (y+0) * w] + over_aux[x+0 + (y+3) * w]) * 139 / 1024 +
+                //~ (over_aux[x-1 + (y-3) * w] + over_aux[x+1 + (y-3) * w] + over_aux[x-3 + (y-1) * w] + over_aux[x+3 + (y-1) * w] + over_aux[x-3 + (y+1) * w] + over_aux[x+3 + (y+1) * w] + over_aux[x-1 + (y+3) * w] + over_aux[x+1 + (y+3) * w]) * 111 / 1024 +
+                //~ (over_aux[x-2 + (y-3) * w] + over_aux[x+2 + (y-3) * w] + over_aux[x-3 + (y-2) * w] + over_aux[x+3 + (y-2) * w] + over_aux[x-3 + (y+2) * w] + over_aux[x+3 + (y+2) * w] + over_aux[x-2 + (y+3) * w] + over_aux[x+2 + (y+3) * w]) * 57 / 1024;
+                0;
+            }
+        }
+    }
+    g_dualiso_full20bit_timing.mix_overexposed_ms += dualiso_debug_elapsed_ms(overexposed_start);
+
     return 1;
 }
 
@@ -4009,17 +4103,26 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     }
 
     const int pixel_count = w * h;
-#pragma omp parallel for
-    for (int i = 0; i < pixel_count; i++)
+    const int clear_interpolation_buffers = (interp_method == 0);
+    const int clear_fullres_buffer = !use_fullres;
+    if (clear_interpolation_buffers || clear_fullres_buffer || alias_map)
     {
-        dark[i] = 0;
-        bright[i] = 0;
-        fullres[i] = 0;
-        halfres[i] = 0;
-        overexposed[i] = 0;
-        if (alias_map)
+        #pragma omp parallel for
+        for (int i = 0; i < pixel_count; i++)
         {
-            alias_map[i] = 0;
+            if (clear_interpolation_buffers)
+            {
+                dark[i] = 0;
+                bright[i] = 0;
+            }
+            if (clear_fullres_buffer)
+            {
+                fullres[i] = 0;
+            }
+            if (alias_map)
+            {
+                alias_map[i] = 0;
+            }
         }
     }
     g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
