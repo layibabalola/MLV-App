@@ -2140,6 +2140,22 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.fullres_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_ms"),
                                       dualIsoFull20.mix_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_curve_select_ms"),
+                                      dualIsoFull20.mix_curve_select_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_curve_build_ms"),
+                                      dualIsoFull20.mix_curve_build_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_curve_float_ms"),
+                                      dualIsoFull20.mix_curve_float_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_ev_lut_ms"),
+                                      dualIsoFull20.mix_ev_lut_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_halfres_ms"),
+                                      dualIsoFull20.mix_halfres_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_ms"),
+                                      dualIsoFull20.mix_chroma_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_alias_map_ms"),
+                                      dualIsoFull20.mix_alias_map_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_overexposed_ms"),
+                                      dualIsoFull20.mix_overexposed_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_final_blend_ms"),
                                       dualIsoFull20.final_blend_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_convert16_ms"),

@@ -11,6 +11,7 @@
 #include "../../src/debayer/debayer.h"
 #include "../../src/batch/ReceiptLoader.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -58,6 +59,60 @@ static const llrawprocWorkerState_t * current_worker(MlvPipelineFixture & fixtur
     const llrawprocWorkerState_t * worker = fixture.currentLlrawprocWorker();
     ASSERT_TRUE(worker != nullptr);
     return worker;
+}
+
+static llrawprocWorkerState_t * mutable_current_worker(MlvPipelineFixture & fixture)
+{
+    return const_cast<llrawprocWorkerState_t *>(current_worker(fixture));
+}
+
+static void poison_full20_outer_scratch(dualiso_full20bit_scratch_t * scratch)
+{
+    ASSERT_TRUE(scratch != nullptr);
+    const size_t n = scratch->pixel_capacity;
+    ASSERT_TRUE(n > 0);
+    if (scratch->dark) std::fill(scratch->dark, scratch->dark + n, 0x13579bdfu);
+    if (scratch->bright) std::fill(scratch->bright, scratch->bright + n, 0x2468ace0u);
+    if (scratch->fullres) std::fill(scratch->fullres, scratch->fullres + n, 0x1badb002u);
+    if (scratch->halfres) std::fill(scratch->halfres, scratch->halfres + n, 0x0ddc0ffeu);
+    if (scratch->fullres_smooth) std::fill(scratch->fullres_smooth, scratch->fullres_smooth + n, 0xfeed1234u);
+    if (scratch->halfres_smooth) std::fill(scratch->halfres_smooth, scratch->halfres_smooth + n, 0xabcdef12u);
+    if (scratch->overexposed) std::fill(scratch->overexposed, scratch->overexposed + n, static_cast<uint16_t>(0xa55au));
+    if (scratch->over_aux) std::fill(scratch->over_aux, scratch->over_aux + n, static_cast<uint16_t>(0x5aa5u));
+    if (scratch->alias_map) std::fill(scratch->alias_map, scratch->alias_map + n, static_cast<uint16_t>(0x3333u));
+}
+
+static void poison_histogram_match_scratch(dualiso_full20bit_scratch_t * scratch)
+{
+    ASSERT_TRUE(scratch != nullptr);
+    ASSERT_TRUE(scratch->histogram_match_pixel_capacity > 0);
+    ASSERT_TRUE(scratch->histogram_match_sample_capacity > 0);
+    ASSERT_TRUE(scratch->histogram_match_highlight_capacity > 0);
+    if (scratch->histogram_match_dark) {
+        std::fill(scratch->histogram_match_dark,
+                  scratch->histogram_match_dark + scratch->histogram_match_pixel_capacity,
+                  0x13579bdf);
+    }
+    if (scratch->histogram_match_bright) {
+        std::fill(scratch->histogram_match_bright,
+                  scratch->histogram_match_bright + scratch->histogram_match_pixel_capacity,
+                  0x2468ace0);
+    }
+    if (scratch->histogram_match_tmp) {
+        std::fill(scratch->histogram_match_tmp,
+                  scratch->histogram_match_tmp + scratch->histogram_match_sample_capacity,
+                  0x11223344);
+    }
+    if (scratch->histogram_match_hi_dark) {
+        std::fill(scratch->histogram_match_hi_dark,
+                  scratch->histogram_match_hi_dark + scratch->histogram_match_highlight_capacity,
+                  0x55667788);
+    }
+    if (scratch->histogram_match_hi_bright) {
+        std::fill(scratch->histogram_match_hi_bright,
+                  scratch->histogram_match_hi_bright + scratch->histogram_match_highlight_capacity,
+                  0x99aabbcc);
+    }
 }
 
 static uint16_t dng_u16(const QByteArray &data, int offset)
@@ -1021,6 +1076,164 @@ TEST(DualIsoPipeline, PhaseE7_NonAgxReceiptUnaffectedByDirect8AgxBranch)
     ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
 }
 
+TEST(DualIsoPipeline, PhaseE8_Direct8SimpleContrastMatchesIndirectPathByteIdentity)
+{
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    reference_fixture.processing()->allow_creative_adjustments = 1;
+    processingSetSimpleContrast(reference_fixture.processing(), 0.22);
+
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 1);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    direct_fixture.processing()->allow_creative_adjustments = 1;
+    processingSetSimpleContrast(direct_fixture.processing(), 0.22);
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(direct_fixture.processing()) != 0);
+
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    std::printf("PhaseE8_Direct8SimpleContrast: %llu/%zu pixels differ, max|d|=%u, mean|d|=%g\n",
+                static_cast<unsigned long long>(compare.pixels_exceeding_tolerance),
+                expected_frame8.size(),
+                static_cast<unsigned>(compare.max_abs_diff),
+                compare.mean_abs_diff);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, PhaseE9_Direct8LookAssistToneSubsetMatchesIndirectPathByteIdentity)
+{
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    reference_fixture.processing()->allow_creative_adjustments = 1;
+    processingSetSimpleContrast(reference_fixture.processing(), 0.14);
+    processingSetShadows(reference_fixture.processing(), 0.36);
+    processingSetHighlights(reference_fixture.processing(), -0.27);
+    processingSetVibrance(reference_fixture.processing(), 1.06);
+
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 1);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    direct_fixture.processing()->allow_creative_adjustments = 1;
+    processingSetSimpleContrast(direct_fixture.processing(), 0.14);
+    processingSetShadows(direct_fixture.processing(), 0.36);
+    processingSetHighlights(direct_fixture.processing(), -0.27);
+    processingSetVibrance(direct_fixture.processing(), 1.06);
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(direct_fixture.processing()) != 0);
+
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 1);
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    std::printf("PhaseE9_Direct8LookAssistToneSubset: %llu/%zu pixels differ, max|d|=%u, mean|d|=%g\n",
+                static_cast<unsigned long long>(compare.pixels_exceeding_tolerance),
+                expected_frame8.size(),
+                static_cast<unsigned>(compare.max_abs_diff),
+                compare.mean_abs_diff);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, PhaseE9_Direct8LookAssistToneSubsetWithAgxAndThreadsMatchesIndirectPathByteIdentity)
+{
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(reference_fixture);
+    reference_fixture.processing()->allow_creative_adjustments = 1;
+    reference_fixture.processing()->AgX = 1;
+    processingSetSimpleContrast(reference_fixture.processing(), 0.14);
+    processingSetShadows(reference_fixture.processing(), 0.36);
+    processingSetHighlights(reference_fixture.processing(), -0.27);
+    processingSetVibrance(reference_fixture.processing(), 1.06);
+
+    const std::vector<uint16_t> reference_frame16 = reference_fixture.renderFrame16(0, 3);
+    std::vector<uint8_t> expected_frame8(reference_frame16.size(), 0);
+    for (std::size_t index = 0; index < reference_frame16.size(); ++index)
+    {
+        expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
+    }
+
+    MlvPipelineFixture direct_fixture;
+    ASSERT_TRUE(direct_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(direct_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(direct_fixture.applyReceipt(&error_message));
+    configure_direct_processed8_supported_subset(direct_fixture);
+    direct_fixture.processing()->allow_creative_adjustments = 1;
+    direct_fixture.processing()->AgX = 1;
+    processingSetSimpleContrast(direct_fixture.processing(), 0.14);
+    processingSetShadows(direct_fixture.processing(), 0.36);
+    processingSetHighlights(direct_fixture.processing(), -0.27);
+    processingSetVibrance(direct_fixture.processing(), 1.06);
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(direct_fixture.processing()) != 0);
+
+    const std::vector<uint8_t> actual_frame8 = direct_fixture.renderFrame8(0, 3);
+    ASSERT_TRUE(getMlvLastProcessed8DirectPathActive() != 0);
+
+    const frame_compare_result_t compare = compare_frames_u8(expected_frame8.data(),
+                                                             actual_frame8.data(),
+                                                             direct_fixture.width(),
+                                                             direct_fixture.height(),
+                                                             3,
+                                                             0);
+    std::printf("PhaseE9_Direct8LookAssistToneSubsetAgxThreads: %llu/%zu pixels differ, max|d|=%u, mean|d|=%g\n",
+                static_cast<unsigned long long>(compare.pixels_exceeding_tolerance),
+                expected_frame8.size(),
+                static_cast<unsigned>(compare.max_abs_diff),
+                compare.mean_abs_diff);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
 /* Forward decl of a test-only hook implemented in raw_processing.c. Re-runs
  * the runtime dispatch from the current env so the AVX2 intrinsics variant
  * can be activated mid-test-suite (production code latches once via
@@ -1395,6 +1608,76 @@ TEST(DualIsoPipeline, HeadlessDualIsoFull20BitReusesOuterScratchAcrossFrames)
     ASSERT_TRUE(first_overexposed == scratch->overexposed);
     ASSERT_TRUE(first_alias_map == scratch->alias_map);
     ASSERT_TRUE(first_over_aux == scratch->over_aux);
+}
+
+TEST(DualIsoPipeline, Full20Mean23OutputIgnoresPoisonedOuterScratch)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    fixture.receipt().setDualIso(1);
+    fixture.receipt().setDualIsoInterpolation(1);
+    fixture.receipt().setDualIsoAliasMap(0);
+    fixture.receipt().setDualIsoFrBlending(1);
+    fixture.receipt().setChromaSmooth(2);
+
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const std::vector<uint16_t> reference = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!reference.empty());
+
+    llrawprocWorkerState_t * worker = mutable_current_worker(fixture);
+    poison_full20_outer_scratch(&worker->diso_full20bit_scratch);
+    resetMlvCachedFrame(fixture.video());
+    invalidateMlvProcessedPreviewCache(fixture.video());
+
+    const std::vector<uint16_t> poisoned = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!poisoned.empty());
+
+    const frame_compare_result_t compare = compare_frames_u16(reference.data(),
+                                                              poisoned.data(),
+                                                              fixture.width(),
+                                                              fixture.height(),
+                                                              3,
+                                                              0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, Full20FrOffStillClearsFullresAfterScratchPoison)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    fixture.receipt().setDualIso(1);
+    fixture.receipt().setDualIsoInterpolation(1);
+    fixture.receipt().setDualIsoAliasMap(0);
+    fixture.receipt().setDualIsoFrBlending(0);
+    fixture.receipt().setChromaSmooth(0);
+
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const std::vector<uint16_t> reference = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!reference.empty());
+
+    llrawprocWorkerState_t * worker = mutable_current_worker(fixture);
+    poison_full20_outer_scratch(&worker->diso_full20bit_scratch);
+    resetMlvCachedFrame(fixture.video());
+    invalidateMlvProcessedPreviewCache(fixture.video());
+
+    const std::vector<uint16_t> poisoned = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!poisoned.empty());
+
+    const frame_compare_result_t compare = compare_frames_u16(reference.data(),
+                                                              poisoned.data(),
+                                                              fixture.width(),
+                                                              fixture.height(),
+                                                              3,
+                                                              0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
 }
 
 TEST(DualIsoPipeline, StablePixelMapsSkipWorkerMemcpyAfterInitialCopy)
@@ -1985,6 +2268,48 @@ TEST(DualIsoPipeline, HeadlessDualIsoHistogramMatchScratchReusesHelperBuffersAcr
     ASSERT_TRUE(first_tmp == scratch->histogram_match_tmp);
     ASSERT_TRUE(first_hi_dark == scratch->histogram_match_hi_dark);
     ASSERT_TRUE(first_hi_bright == scratch->histogram_match_hi_bright);
+}
+
+TEST(DualIsoPipeline, HistogramMatchOutputIgnoresPoisonedScratchBuffers)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    fixture.receipt().setDualIso(1);
+    fixture.receipt().setDualIsoInterpolation(1);
+    fixture.receipt().setDualIsoAliasMap(0);
+    fixture.receipt().setDualIsoFrBlending(0);
+    fixture.receipt().setChromaSmooth(0);
+
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    fixture.video()->llrawproc->diso_auto_correction = -2;
+    fixture.video()->llrawproc->diso_ev_correction = 1;
+    fixture.video()->llrawproc->diso_black_delta = -1;
+
+    const std::vector<uint16_t> reference = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!reference.empty());
+
+    llrawprocWorkerState_t * worker = mutable_current_worker(fixture);
+    poison_histogram_match_scratch(&worker->diso_full20bit_scratch);
+    fixture.video()->llrawproc->diso_auto_correction = -2;
+    fixture.video()->llrawproc->diso_ev_correction = 1;
+    fixture.video()->llrawproc->diso_black_delta = -1;
+    resetMlvCachedFrame(fixture.video());
+    invalidateMlvProcessedPreviewCache(fixture.video());
+
+    const std::vector<uint16_t> poisoned = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!poisoned.empty());
+
+    const frame_compare_result_t compare = compare_frames_u16(reference.data(),
+                                                              poisoned.data(),
+                                                              fixture.width(),
+                                                              fixture.height(),
+                                                              3,
+                                                              0);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
 }
 
 TEST(DualIsoPipeline, HeadlessDualIsoFieldIdentifyScratchReusesHistogramBuffersAcrossFrames)

@@ -52,6 +52,15 @@ static bool hasPlaybackProfileFlag(int argc, char *argv[])
     return false;
 }
 
+static bool hasGuiPlaybackSmokeFlag(int argc, char *argv[])
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--gui-smoke-playback") == 0) return true;
+    }
+    return false;
+}
+
 static bool hasGpuRelatedFlag(int argc, char *argv[])
 {
     for (int i = 1; i < argc; ++i)
@@ -703,6 +712,179 @@ static int runPlaybackProfile(QApplication &app)
     return window.runHeadlessPlaybackProfile(options);
 }
 
+static int runGuiPlaybackSmoke(QApplication &app)
+{
+    QCommandLineParser parser;
+    parser.setApplicationDescription(
+        QStringLiteral("MLVApp visible GUI playback smoke test - opens a clip, lets the normal GUI settle, then toggles the real Play action."));
+
+    QCommandLineOption helpOpt(
+        QStringList() << QStringLiteral("h") << QStringLiteral("help"),
+        QStringLiteral("Show this help text and exit."));
+    parser.addOption(helpOpt);
+
+    parser.addOption(QCommandLineOption(
+        QStringLiteral("gui-smoke-playback"),
+        QStringLiteral("Run in visible GUI playback smoke mode.")));
+
+    const QCommandLineOption inputOpt(
+        QStringList() << QStringLiteral("i") << QStringLiteral("input"),
+        QStringLiteral("Input MLV file path."),
+        QStringLiteral("path"));
+    parser.addOption(inputOpt);
+
+    const QCommandLineOption receiptOpt(
+        QStringList() << QStringLiteral("r") << QStringLiteral("receipt"),
+        QStringLiteral("Optional .marxml receipt to apply before playback."),
+        QStringLiteral("file"));
+    parser.addOption(receiptOpt);
+
+    const QCommandLineOption secondsOpt(
+        QStringLiteral("seconds"),
+        QStringLiteral("Seconds to play the clip after settling."),
+        QStringLiteral("seconds"),
+        QStringLiteral("8"));
+    parser.addOption(secondsOpt);
+
+    const QCommandLineOption settleOpt(
+        QStringLiteral("settle-ms"),
+        QStringLiteral("Milliseconds to let the GUI settle after opening the clip and before pressing Play."),
+        QStringLiteral("milliseconds"),
+        QStringLiteral("2500"));
+    parser.addOption(settleOpt);
+
+    const QCommandLineOption settleCpuOpt(
+        QStringLiteral("settle-cpu-percent"),
+        QStringLiteral("After --settle-ms, keep waiting until MLVApp CPU stays at or below this percent of total system CPU. Use a negative value to disable."),
+        QStringLiteral("percent"),
+        QStringLiteral("10"));
+    parser.addOption(settleCpuOpt);
+
+    const QCommandLineOption settleCpuStableOpt(
+        QStringLiteral("settle-cpu-stable-ms"),
+        QStringLiteral("CPU-settle duration required after --settle-ms."),
+        QStringLiteral("milliseconds"),
+        QStringLiteral("1000"));
+    parser.addOption(settleCpuStableOpt);
+
+    const QCommandLineOption settleCpuMaxOpt(
+        QStringLiteral("settle-cpu-max-ms"),
+        QStringLiteral("Maximum total settle wait before playback starts."),
+        QStringLiteral("milliseconds"),
+        QStringLiteral("45000"));
+    parser.addOption(settleCpuMaxOpt);
+
+    const QCommandLineOption scopeOpt(
+        QStringLiteral("scope"),
+        QStringLiteral("Force a live scope during the smoke: none, histogram, waveform, parade, vectorscope. If omitted, the user's persisted GUI state is used."),
+        QStringLiteral("mode"));
+    parser.addOption(scopeOpt);
+
+    const QCommandLineOption zebrasOpt(
+        QStringLiteral("zebras"),
+        QStringLiteral("Force zebra overlay on during the smoke."));
+    parser.addOption(zebrasOpt);
+
+    const QCommandLineOption noZebrasOpt(
+        QStringLiteral("no-zebras"),
+        QStringLiteral("Force zebra overlay off during the smoke."));
+    parser.addOption(noZebrasOpt);
+
+    parser.process(app);
+
+    QTextStream out(stdout);
+    QTextStream err(stderr);
+
+    if (parser.isSet(helpOpt))
+    {
+        out << parser.helpText() << "\n";
+        return 0;
+    }
+
+    if (!parser.isSet(inputOpt))
+    {
+        err << "[GUI-SMOKE] ERROR: --input is required.\n\n";
+        err << parser.helpText() << "\n";
+        return 2;
+    }
+
+    bool ok = false;
+    const double seconds = parser.value(secondsOpt).toDouble(&ok);
+    if (!ok || seconds <= 0.0)
+    {
+        err << "[GUI-SMOKE] ERROR: --seconds must be greater than 0.\n";
+        return 2;
+    }
+
+    const int settleMs = parser.value(settleOpt).toInt(&ok);
+    if (!ok || settleMs < 0)
+    {
+        err << "[GUI-SMOKE] ERROR: --settle-ms must be 0 or greater.\n";
+        return 2;
+    }
+
+    const double settleCpuPercent = parser.value(settleCpuOpt).toDouble(&ok);
+    if (!ok)
+    {
+        err << "[GUI-SMOKE] ERROR: --settle-cpu-percent must be numeric.\n";
+        return 2;
+    }
+
+    const int settleCpuStableMs = parser.value(settleCpuStableOpt).toInt(&ok);
+    if (!ok || settleCpuStableMs < 0)
+    {
+        err << "[GUI-SMOKE] ERROR: --settle-cpu-stable-ms must be 0 or greater.\n";
+        return 2;
+    }
+
+    const int settleCpuMaxMs = parser.value(settleCpuMaxOpt).toInt(&ok);
+    if (!ok || settleCpuMaxMs < settleMs)
+    {
+        err << "[GUI-SMOKE] ERROR: --settle-cpu-max-ms must be at least --settle-ms.\n";
+        return 2;
+    }
+
+    MainWindow::PlaybackProfileScope scope = MainWindow::PlaybackProfileScope::None;
+    bool scopeOk = true;
+    if (parser.isSet(scopeOpt))
+    {
+        scope = parsePlaybackProfileScope(parser.value(scopeOpt), &scopeOk);
+    }
+    if (!scopeOk)
+    {
+        err << "[GUI-SMOKE] ERROR: --scope must be one of none, histogram, waveform, parade, vectorscope.\n";
+        return 2;
+    }
+
+    if (parser.isSet(zebrasOpt) && parser.isSet(noZebrasOpt))
+    {
+        err << "[GUI-SMOKE] ERROR: use only one of --zebras or --no-zebras.\n";
+        return 2;
+    }
+
+    MainWindow::GuiPlaybackSmokeOptions options;
+    options.inputPath = QFileInfo(parser.value(inputOpt)).absoluteFilePath();
+    options.receiptPath = parser.value(receiptOpt).isEmpty()
+        ? QString()
+        : QFileInfo(parser.value(receiptOpt)).absoluteFilePath();
+    options.durationMs = qRound(seconds * 1000.0);
+    options.settleMs = settleMs;
+    options.settleCpuPercent = settleCpuPercent;
+    options.settleCpuStableMs = settleCpuStableMs;
+    options.settleCpuMaxMs = settleCpuMaxMs;
+    options.scope = scope;
+    options.forceScope = parser.isSet(scopeOpt);
+    options.zebras = parser.isSet(zebrasOpt);
+    options.forceZebras = parser.isSet(zebrasOpt) || parser.isSet(noZebrasOpt);
+
+    QByteArray appName = QCoreApplication::applicationFilePath().toLocal8Bit();
+    char *smokeArgv[] = { appName.data(), nullptr };
+    int smokeArgc = 1;
+
+    MainWindow window(smokeArgc, smokeArgv);
+    return window.runGuiPlaybackSmoke(options);
+}
+
 int main(int argc, char *argv[])
 {
     /* Crash forensics initialization runs BEFORE QApplication so the
@@ -724,6 +906,7 @@ int main(int argc, char *argv[])
     bool batch = hasBatchFlag(argc, argv);
     bool trim_mlv = hasTrimMlvFlag(argc, argv);
     bool profile_playback = hasPlaybackProfileFlag(argc, argv);
+    bool gui_playback_smoke = hasGuiPlaybackSmokeFlag(argc, argv);
 
     if (shouldPreferDesktopOpenGl(argc, argv, batch, trim_mlv, profile_playback))
     {
@@ -756,6 +939,12 @@ int main(int argc, char *argv[])
     {
         a.setQuitOnLastWindowClosed(false);
         return runPlaybackProfile(a);
+    }
+
+    if (gui_playback_smoke)
+    {
+        a.setQuitOnLastWindowClosed(false);
+        return runGuiPlaybackSmoke(a);
     }
 
     /* Normal GUI mode — unchanged */

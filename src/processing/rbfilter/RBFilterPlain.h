@@ -71,5 +71,6 @@ public:
 	// channel count must be 3 or 4 (alpha not used)
     void filter(uint16_t* img_src, uint16_t* img_dst,
 		float sigma_spatial, float sigma_range,
-		int width, int height, int channel);
+		int width, int height, int channel,
+        const uint16_t * output_lut = nullptr);
 };

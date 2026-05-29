@@ -47,9 +47,12 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                                       int rowStart,
                                       int rowEnd,
                                       uint16_t * __restrict inputImage,
+                                      uint16_t * __restrict blurImage,
                                       uint8_t * __restrict outputImage,
                                       processing_direct8_kernel_timing_t * timing)
 {
+    (void)blurImage;
+
     int32_t ** pm = processing->pre_calc_matrix;
     const int row_stride = imageX * 3;
     uint16_t * pre_calc_curve = processing->pre_calc_curve_r;

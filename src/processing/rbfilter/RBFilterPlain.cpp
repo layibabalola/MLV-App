@@ -33,6 +33,13 @@ using namespace std;
 
 #define QX_DEF_U16_MAX 65535
 
+static inline int getDiffFactorRgb3(const uint16_t *color1, const uint16_t *color2)
+{
+    const int dr = abs((int)color1[0] - (int)color2[0]);
+    const int dg = abs((int)color1[1] - (int)color2[1]);
+    const int db = abs((int)color1[2] - (int)color2[2]);
+    return ((dr + db) >> 2) + (dg >> 1);
+}
 
 CRBFilterPlain::CRBFilterPlain()
 {
@@ -216,7 +223,8 @@ int CRBFilterPlain::getDiffFactor(const uint16_t *color1, const uint16_t *color2
 // channel count must be 3 or 4 (alpha not used)
 void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
 	float sigma_spatial, float sigma_range,
-	int width, int height, int channel)
+	int width, int height, int channel,
+    const uint16_t * output_lut)
 {
     if(!img_src) return;
     if(!img_dst) return;
@@ -286,220 +294,289 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
     }
     const float * range_table_f = m_range_table;
 
-    // Horizontal rows are independent; process the left and right scans row-parallel.
-#pragma omp parallel for
-    for (int y = 0; y < height-1; y++)
+    #pragma omp parallel
     {
-        const int row_color_offset = y * width * channel;
-        const int row_factor_offset = y * width;
-        const uint16_t* src_color = img_src + row_color_offset;
-        float* left_pass_color = m_left_pass_color + row_color_offset;
-        float* left_pass_factor = m_left_pass_factor + row_factor_offset;
-        const uint16_t* src_prev = src_color;
-        const float* prev_factor = left_pass_factor;
-        const float* prev_color = left_pass_color;
-
-        // process 1st pixel separately since it has no previous
-        *left_pass_factor++ = 1.f;
-        for (int c = 0; c < channel; c++)
+        // Horizontal rows are independent; process the left and right scans row-parallel.
+        #pragma omp for
+        for (int y = 0; y < height-1; y++)
         {
-            *left_pass_color++ = *src_color++;
-        }
-
-        // handle other pixels
-        for (int x = 1; x < width; x++)
-        {
-            // determine difference in pixel color between current and previous
-            // calculation is different depending on number of channels
-            int diff = getDiffFactor(src_color, src_prev);
-            src_prev = src_color;
-
-            float alpha_f = range_table_f[diff];
-
-            *left_pass_factor++ = inv_alpha_f + alpha_f * (*prev_factor++);
-
-            for (int c = 0; c < channel; c++)
-            {
-                *left_pass_color++ = inv_alpha_f * (*src_color++) + alpha_f * (*prev_color++);
-            }
-        }
-    }
-
-#pragma omp parallel for
-    for (int reverse_y = 0; reverse_y < height-1; reverse_y++)
-    {
-        const int y = height - 1 - reverse_y;
-        const int row_color_end = ((y + 1) * width * channel) - 1;
-        const int row_factor_end = ((y + 1) * width) - 1;
-        const uint16_t* src_color = img_src + row_color_end;
-        float* right_pass_color = m_right_pass_color + row_color_end;
-        float* right_pass_factor = m_right_pass_factor + row_factor_end;
-        const float* prev_factor = right_pass_factor;
-        const float* prev_color = right_pass_color;
-
-        // process 1st pixel separately since it has no previous
-        *right_pass_factor-- = 1.f;
-        for (int c = 0; c < channel; c++)
-        {
-            *right_pass_color-- = *src_color--;
-        }
-
-        // handle other pixels
-        for (int x = 1; x < width; x++)
-        {
-            // Preserve the original pointer arithmetic, including the hard-coded
-            // neighbor stride used by this legacy filter.
-            int diff = getDiffFactor(src_color, src_color - 3);
-
-            float alpha_f = range_table_f[diff];
-
-            *right_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
-
-            for (int c = 0; c < channel; c++)
-            {
-                *right_pass_color-- = inv_alpha_f * (*src_color--) + alpha_f * (*prev_color--);
-            }
-        }
-    }
-
-    // vertical pass will be applied on top on horizontal pass, while using pixel differences from original image
-    // result color stored in 'm_left_pass_color' and vertical pass will use it as source color
-    {
-        float* img_out = m_left_pass_color; // use as temporary buffer
-        const float* left_pass_color = m_left_pass_color;
-        const float* left_pass_factor = m_left_pass_factor;
-        const float* right_pass_color = m_right_pass_color;
-        const float* right_pass_factor = m_right_pass_factor;
-
-#pragma omp parallel for
-        for (int i = 0; i < width_height; i++)
-        {
-            // average color divided by average factor
-            float factor = 1.f / ((left_pass_factor[i]) + (right_pass_factor[i]));
-            for (int c = 0; c < channel; c++)
-            {
-                int idx = i + i + i + c;
-                img_out[idx] = (factor * ((left_pass_color[idx]) + (right_pass_color[idx])));
-            }
-        }
-    }
-
-#pragma omp parallel for
-    for( int par = 0; par < 2; par++ )
-    {
-        ///////////////
-        // Down pass
-        if( !par )
-        {
-            const float* src_color_hor = m_left_pass_color; // result of horizontal pass filter
-
-            const uint16_t* src_color = img_src;
-            float* down_pass_color = m_down_pass_color;
-            float* down_pass_factor = m_down_pass_factor;
-
+            const int row_color_offset = y * width * channel;
+            const int row_factor_offset = y * width;
+            const uint16_t* src_color = img_src + row_color_offset;
+            float* left_pass_color = m_left_pass_color + row_color_offset;
+            float* left_pass_factor = m_left_pass_factor + row_factor_offset;
             const uint16_t* src_prev = src_color;
-            const float* prev_color = down_pass_color;
-            const float* prev_factor = down_pass_factor;
+            const float* prev_factor = left_pass_factor;
+            const float* prev_color = left_pass_color;
 
-            // 1st line done separately because no previous line
-            for (int x = 0; x < width; x++)
-            {
-                *down_pass_factor++ = 1.f;
-                for (int c = 0; c < channel; c++)
-                {
-                    *down_pass_color++ = *src_color_hor++;
-                }
-                src_color += channel;
-            }
-
-            // handle other lines
-            for (int y = 1; y < height; y++)
-            {
-                for (int x = 0; x < width-1; x++)
-                {
-                    // determine difference in pixel color between current and previous
-                    // calculation is different depending on number of channels
-                    int diff = getDiffFactor(src_color, src_prev);
-                    src_prev += channel;
-                    src_color += channel;
-
-                    float alpha_f = range_table_f[diff];
-
-                    *down_pass_factor++ = inv_alpha_f + alpha_f * (*prev_factor++);
-
-                    for (int c = 0; c < channel; c++)
-                    {
-                        *down_pass_color++ = inv_alpha_f * (*src_color_hor++) + alpha_f * (*prev_color++);
-                    }
-                }
-            }
-        }
-        else
-        ///////////////
-        // Up pass
-        {
-            // start from end and then go up to begining
-            int last_index = width * height * channel - 1;
-            const uint16_t* src_color = img_src + last_index;
-            const float* src_color_hor = m_left_pass_color + last_index; // result of horizontal pass filter
-            float* up_pass_color = m_up_pass_color + last_index;
-            float* up_pass_factor = m_up_pass_factor + (width * height - 1);
-
-            //	const uint16_t* src_prev = src_color;
-            const float* prev_color = up_pass_color;
-            const float* prev_factor = up_pass_factor;
-
-            // 1st line done separately because no previous line
-            for (int x = 0; x < width; x++)
-            {
-                *up_pass_factor-- = 1.f;
-                for (int c = 0; c < channel; c++)
-                {
-                    *up_pass_color-- = *src_color_hor--;
-                }
-                src_color -= channel;
-            }
-
-            // handle other lines
-            for (int y = 1; y < height; y++)
-            {
-                for (int x = 0; x < width-1; x++)
-                {
-                    // determine difference in pixel color between current and previous
-                    // calculation is different depending on number of channels
-                    src_color -= channel;
-                    int diff = getDiffFactor(src_color, src_color + width * channel);
-
-                    float alpha_f = range_table_f[diff];
-
-                    *up_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
-
-                    for (int c = 0; c < channel; c++)
-                    {
-                        *up_pass_color-- = inv_alpha_f * (*src_color_hor--) + alpha_f * (*prev_color--);
-                    }
-                }
-            }
-        }
-    }
-
-    ///////////////
-    // average result of vertical pass is written to output buffer
-    {
-        const float* down_pass_color = m_down_pass_color;
-        const float* down_pass_factor = m_down_pass_factor;
-        const float* up_pass_color = m_up_pass_color;
-        const float* up_pass_factor = m_up_pass_factor;
-
-#pragma omp parallel for
-        for (int i = 0; i < width_height; i++)
-        {
-            // average color divided by average factor
-            float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
+            // process 1st pixel separately since it has no previous
+            *left_pass_factor++ = 1.f;
             for (int c = 0; c < channel; c++)
             {
-                int idx = i + i + i + c;
-                img_dst[idx] = (uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])));
+                *left_pass_color++ = *src_color++;
+            }
+
+            // handle other pixels
+            for (int x = 1; x < width; x++)
+            {
+                // determine difference in pixel color between current and previous
+                // calculation is different depending on number of channels
+                int diff = channel == 3
+                    ? getDiffFactorRgb3(src_color, src_prev)
+                    : getDiffFactor(src_color, src_prev);
+                src_prev = src_color;
+
+                float alpha_f = range_table_f[diff];
+
+                *left_pass_factor++ = inv_alpha_f + alpha_f * (*prev_factor++);
+
+                for (int c = 0; c < channel; c++)
+                {
+                    *left_pass_color++ = inv_alpha_f * (*src_color++) + alpha_f * (*prev_color++);
+                }
+            }
+        }
+
+        #pragma omp for
+        for (int reverse_y = 0; reverse_y < height-1; reverse_y++)
+        {
+            const int y = height - 1 - reverse_y;
+            const int row_color_end = ((y + 1) * width * channel) - 1;
+            const int row_factor_end = ((y + 1) * width) - 1;
+            const uint16_t* src_color = img_src + row_color_end;
+            float* right_pass_color = m_right_pass_color + row_color_end;
+            float* right_pass_factor = m_right_pass_factor + row_factor_end;
+            const float* prev_factor = right_pass_factor;
+            const float* prev_color = right_pass_color;
+
+            // process 1st pixel separately since it has no previous
+            *right_pass_factor-- = 1.f;
+            for (int c = 0; c < channel; c++)
+            {
+                *right_pass_color-- = *src_color--;
+            }
+
+            // handle other pixels
+            for (int x = 1; x < width; x++)
+            {
+                // Preserve the original pointer arithmetic, including the hard-coded
+                // neighbor stride used by this legacy filter.
+                int diff = channel == 3
+                    ? getDiffFactorRgb3(src_color, src_color - 3)
+                    : getDiffFactor(src_color, src_color - 3);
+
+                float alpha_f = range_table_f[diff];
+
+                *right_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
+
+                for (int c = 0; c < channel; c++)
+                {
+                    *right_pass_color-- = inv_alpha_f * (*src_color--) + alpha_f * (*prev_color--);
+                }
+            }
+        }
+
+        // vertical pass will be applied on top on horizontal pass, while using pixel differences from original image
+        // result color stored in 'm_left_pass_color' and vertical pass will use it as source color
+        {
+            float* img_out = m_left_pass_color; // use as temporary buffer
+            const float* left_pass_color = m_left_pass_color;
+            const float* left_pass_factor = m_left_pass_factor;
+            const float* right_pass_color = m_right_pass_color;
+            const float* right_pass_factor = m_right_pass_factor;
+
+            #pragma omp for
+            for (int i = 0; i < width_height; i++)
+            {
+                // average color divided by average factor
+                float factor = 1.f / ((left_pass_factor[i]) + (right_pass_factor[i]));
+                for (int c = 0; c < channel; c++)
+                {
+                    int idx = i + i + i + c;
+                    img_out[idx] = (factor * ((left_pass_color[idx]) + (right_pass_color[idx])));
+                }
+            }
+        }
+
+        #pragma omp for
+        for( int par = 0; par < 2; par++ )
+        {
+            ///////////////
+            // Down pass
+            if( !par )
+            {
+                const float* src_color_hor = m_left_pass_color; // result of horizontal pass filter
+
+                const uint16_t* src_color = img_src;
+                float* down_pass_color = m_down_pass_color;
+                float* down_pass_factor = m_down_pass_factor;
+
+                const uint16_t* src_prev = src_color;
+                const float* prev_color = down_pass_color;
+                const float* prev_factor = down_pass_factor;
+
+                // 1st line done separately because no previous line
+                for (int x = 0; x < width; x++)
+                {
+                    *down_pass_factor++ = 1.f;
+                    for (int c = 0; c < channel; c++)
+                    {
+                        *down_pass_color++ = *src_color_hor++;
+                    }
+                    src_color += channel;
+                }
+
+                // handle other lines
+                for (int y = 1; y < height; y++)
+                {
+                    for (int x = 0; x < width-1; x++)
+                    {
+                        // determine difference in pixel color between current and previous
+                        // calculation is different depending on number of channels
+                        int diff = channel == 3
+                            ? getDiffFactorRgb3(src_color, src_prev)
+                            : getDiffFactor(src_color, src_prev);
+                        src_prev += channel;
+                        src_color += channel;
+
+                        float alpha_f = range_table_f[diff];
+
+                        *down_pass_factor++ = inv_alpha_f + alpha_f * (*prev_factor++);
+
+                        for (int c = 0; c < channel; c++)
+                        {
+                            *down_pass_color++ = inv_alpha_f * (*src_color_hor++) + alpha_f * (*prev_color++);
+                        }
+                    }
+                }
+            }
+            else
+            ///////////////
+            // Up pass
+            {
+                // start from end and then go up to begining
+                int last_index = width * height * channel - 1;
+                const uint16_t* src_color = img_src + last_index;
+                const float* src_color_hor = m_left_pass_color + last_index; // result of horizontal pass filter
+                float* up_pass_color = m_up_pass_color + last_index;
+                float* up_pass_factor = m_up_pass_factor + (width * height - 1);
+
+                //	const uint16_t* src_prev = src_color;
+                const float* prev_color = up_pass_color;
+                const float* prev_factor = up_pass_factor;
+
+                // 1st line done separately because no previous line
+                for (int x = 0; x < width; x++)
+                {
+                    *up_pass_factor-- = 1.f;
+                    for (int c = 0; c < channel; c++)
+                    {
+                        *up_pass_color-- = *src_color_hor--;
+                    }
+                    src_color -= channel;
+                }
+
+                // handle other lines
+                for (int y = 1; y < height; y++)
+                {
+                    for (int x = 0; x < width-1; x++)
+                    {
+                        // determine difference in pixel color between current and previous
+                        // calculation is different depending on number of channels
+                        src_color -= channel;
+                        int diff = channel == 3
+                            ? getDiffFactorRgb3(src_color, src_color + width * channel)
+                            : getDiffFactor(src_color, src_color + width * channel);
+
+                        float alpha_f = range_table_f[diff];
+
+                        *up_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
+
+                        for (int c = 0; c < channel; c++)
+                        {
+                            *up_pass_color-- = inv_alpha_f * (*src_color_hor--) + alpha_f * (*prev_color--);
+                        }
+                    }
+                }
+            }
+        }
+
+        ///////////////
+        // average result of vertical pass is written to output buffer
+        {
+            const float* down_pass_color = m_down_pass_color;
+            const float* down_pass_factor = m_down_pass_factor;
+            const float* up_pass_color = m_up_pass_color;
+            const float* up_pass_factor = m_up_pass_factor;
+
+            if (output_lut)
+            {
+                if (channel == 3)
+                {
+                    #pragma omp for
+                    for (int i = 0; i < width_height; i++)
+                    {
+                        // average color divided by average factor
+                        float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
+                        int idx = i + i + i;
+                        img_dst[idx] =
+                            output_lut[(uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])))];
+                        img_dst[idx + 1] =
+                            output_lut[(uint16_t)(factor * ((up_pass_color[idx + 1]) + (down_pass_color[idx + 1])))];
+                        img_dst[idx + 2] =
+                            output_lut[(uint16_t)(factor * ((up_pass_color[idx + 2]) + (down_pass_color[idx + 2])))];
+                    }
+                }
+                else
+                {
+                    #pragma omp for
+                    for (int i = 0; i < width_height; i++)
+                    {
+                        // average color divided by average factor
+                        float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
+                        for (int c = 0; c < channel; c++)
+                        {
+                            int idx = i + i + i + c;
+                            const uint16_t filtered =
+                                (uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])));
+                            img_dst[idx] = output_lut[filtered];
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (channel == 3)
+                {
+                    #pragma omp for
+                    for (int i = 0; i < width_height; i++)
+                    {
+                        // average color divided by average factor
+                        float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
+                        int idx = i + i + i;
+                        img_dst[idx] =
+                            (uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])));
+                        img_dst[idx + 1] =
+                            (uint16_t)(factor * ((up_pass_color[idx + 1]) + (down_pass_color[idx + 1])));
+                        img_dst[idx + 2] =
+                            (uint16_t)(factor * ((up_pass_color[idx + 2]) + (down_pass_color[idx + 2])));
+                    }
+                }
+                else
+                {
+                    #pragma omp for
+                    for (int i = 0; i < width_height; i++)
+                    {
+                        // average color divided by average factor
+                        float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
+                        for (int c = 0; c < channel; c++)
+                        {
+                            int idx = i + i + i + c;
+                            img_dst[idx] =
+                                (uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])));
+                        }
+                    }
+                }
             }
         }
     }

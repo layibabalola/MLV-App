@@ -559,17 +559,12 @@ void applyProcessingObject( processingObject_t * processing,
             //blur_image(get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, 1, 1, 1, 0, imageY-1);
             if(0) blur_image_threaded( get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, threads );
             else
-                recursive_bf_wrap(
+                recursive_bf_wrap_with_output_lut(
                         inputImage,
                         get_buffer(processing->shadows_highlights.blur_image),
                         0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
-                        imageX, imageY, 3);
-
-            /* Apply basic levels */
-            int img_s = imageX * imageY * 3;
-            uint16_t * img = get_buffer(processing->shadows_highlights.blur_image);
-            #pragma omp parallel for
-            for (int i = 0; i < img_s; ++i) img[i] = processing->pre_calc_levels[ img[i] ];
+                        imageX, imageY, 3,
+                        processing->pre_calc_levels);
         }
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
@@ -953,6 +948,30 @@ static int processing_has_neutral_creative_adjustments(const processingObject_t 
     return 1;
 }
 
+static int processing_has_direct8_supported_creative_adjustments(const processingObject_t * processing)
+{
+    if( !processing ) return 0;
+    if( !processing->allow_creative_adjustments ) return 1;
+
+    if( processing->hue_vs_luma_used
+     || processing->hue_vs_saturation_used
+     || processing->hue_vs_hue_used
+     || processing->luma_vs_saturation_used )
+    {
+        return 0;
+    }
+
+    if( processing->toning_dry < 0.998f ) return 0;
+    if( fabsf(processing->toning_wet[0]) > 0.0005f
+     || fabsf(processing->toning_wet[1]) > 0.0005f
+     || fabsf(processing->toning_wet[2]) > 0.0005f )
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
 static int processing_has_neutral_local_tone_adjustments(const processingObject_t * processing)
 {
     if( !processing ) return 0;
@@ -961,6 +980,21 @@ static int processing_has_neutral_local_tone_adjustments(const processingObject_
         && fabs(processing->clarity) < 0.01
         && fabs(processing->shadows_highlights.shadows) < 0.01
         && fabs(processing->shadows_highlights.highlights) < 0.01;
+}
+
+static int processing_has_direct8_supported_local_tone_adjustments(const processingObject_t * processing)
+{
+    if( !processing ) return 0;
+
+    return fabs(processing->clarity) < 0.01;
+}
+
+static int processing_has_direct8_shadow_highlight_adjustments(const processingObject_t * processing)
+{
+    if( !processing || !processing->allow_creative_adjustments ) return 0;
+
+    return fabs(processing->shadows_highlights.shadows) >= 0.01
+        || fabs(processing->shadows_highlights.highlights) >= 0.01;
 }
 
 /* A private part of the processing machine.
@@ -992,7 +1026,12 @@ static int processing_can_use_direct_8bit_output(const processingObject_t * proc
 {
     if( !processing ) return 0;
 
-    return processing_can_use_basic_matrix_fast_path(processing)
+    return processing->use_cam_matrix > 0
+        && processing_has_direct8_supported_creative_adjustments(processing)
+        && processing_has_direct8_supported_local_tone_adjustments(processing)
+        && !processing->highlight_reconstruction
+        && !processing->gradient_enable
+        && processing->vignette_strength == 0
         && !processing->lut_on
         && !processing->filter_on
         && processing->denoiserStrength <= 0
@@ -1007,6 +1046,21 @@ static int processing_can_use_direct_8bit_output(const processingObject_t * proc
 int processingCanUseDirect8BitOutput(const processingObject_t * processing)
 {
     return processing_can_use_direct_8bit_output(processing);
+}
+
+static int processing_direct8_requires_shared_kernel(const processingObject_t * processing)
+{
+    return processing
+        && ( processing->AgX
+          || processing_has_direct8_shadow_highlight_adjustments(processing)
+          || ( processing->allow_creative_adjustments
+            && ( processing->vibrance <= 0.99
+              || processing->vibrance >= 1.01
+              || processing->saturation <= 0.99
+              || processing->saturation >= 1.01 ) )
+          || ( processing->allow_creative_adjustments
+            && ( processing->contrast <= -0.01
+              || processing->contrast >= 0.01 ) ) );
 }
 
 /*
@@ -1045,6 +1099,7 @@ typedef void (*apply_processing_object_8bit_fast_rows_fn_t)(
     int,
     int,
     int,
+    uint16_t * __restrict,
     uint16_t * __restrict,
     uint8_t * __restrict,
     processing_direct8_kernel_timing_t *);
@@ -1171,17 +1226,18 @@ static void apply_processing_object_8bit_fast_rows(processingObject_t * processi
                                                    int rowStart,
                                                    int rowEnd,
                                                    uint16_t * __restrict inputImage,
+                                                   uint16_t * __restrict blurImage,
                                                    uint8_t * __restrict outputImage,
                                                    processing_direct8_kernel_timing_t * timing)
 {
     pthread_once(&g_apply_processing_object_8bit_fast_rows_dispatch_once,
                  apply_processing_object_8bit_fast_rows_dispatch_init);
-    /* Phase E7: the AVX2 intrinsics variant does not know about AgX. When the
-     * receipt has AgX enabled, route to the autovec or scalar variant which
-     * handles AgX via the shared .inc kernel. The autovec variant is preferred
-     * when available; otherwise scalar. */
+    /* The hand-tuned AVX2 intrinsics variant handles only the neutral direct8
+     * subset. Route AgX and local/creative tone cases through the shared C
+     * kernel, where scalar and autovec stay byte-identical to the 16-bit
+     * reference path. */
 #ifdef MLVAPP_AVX2_DISPATCH_AVAILABLE
-    if( processing->AgX
+    if( processing_direct8_requires_shared_kernel(processing)
      && g_apply_processing_object_8bit_fast_rows_use_avx2_intrin )
     {
         if( g_apply_processing_object_8bit_fast_rows_use_avx2 )
@@ -1191,6 +1247,7 @@ static void apply_processing_object_8bit_fast_rows(processingObject_t * processi
                                                         rowStart,
                                                         rowEnd,
                                                         inputImage,
+                                                        blurImage,
                                                         outputImage,
                                                         timing);
         }
@@ -1201,6 +1258,7 @@ static void apply_processing_object_8bit_fast_rows(processingObject_t * processi
                                                           rowStart,
                                                           rowEnd,
                                                           inputImage,
+                                                          blurImage,
                                                           outputImage,
                                                           timing);
         }
@@ -1212,6 +1270,7 @@ static void apply_processing_object_8bit_fast_rows(processingObject_t * processi
                                                 rowStart,
                                                 rowEnd,
                                                 inputImage,
+                                                blurImage,
                                                 outputImage,
                                                 timing);
 }
@@ -1220,6 +1279,7 @@ static void apply_processing_object_8bit_fast(processingObject_t * processing,
                                               int imageX,
                                               int imageY,
                                               uint16_t * __restrict inputImage,
+                                              uint16_t * __restrict blurImage,
                                               uint8_t * __restrict outputImage,
                                               processing_direct8_kernel_timing_t * timing)
 {
@@ -1228,6 +1288,7 @@ static void apply_processing_object_8bit_fast(processingObject_t * processing,
                                            0,
                                            imageY,
                                            inputImage,
+                                           blurImage,
                                            outputImage,
                                            timing);
 }
@@ -1872,15 +1933,24 @@ void applyProcessingObject8( processingObject_t * processing,
     get_frame_transformed(processing, inputImage, imageX, imageY);
     g_processing_last_setup_ms = (omp_get_wtime() - setup_start) * 1000.0;
 
-    const int img_s = imageX * imageY * 3;
-    const double core_start = omp_get_wtime();
-    const double levels_start = omp_get_wtime();
-    #pragma omp parallel for
-    for( int i = 0; i < img_s; ++i )
+    if (imageChanged) buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+
+    const double shadows_highlights_start = omp_get_wtime();
+    const int shadows_highlights_active =
+        processing_has_direct8_shadow_highlight_adjustments(processing);
+    if( shadows_highlights_active && imageChanged )
     {
-        inputImage[i] = processing->pre_calc_levels[inputImage[i]];
+        recursive_bf_wrap_with_output_lut(
+                inputImage,
+                get_buffer(processing->shadows_highlights.blur_image),
+                0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
+                imageX, imageY, 3,
+                processing->pre_calc_levels);
     }
-    g_processing_last_core_levels_ms = (omp_get_wtime() - levels_start) * 1000.0;
+    g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
+
+    const double core_start = omp_get_wtime();
+    g_processing_last_core_levels_ms = 0.0;
 
     const double color_start = omp_get_wtime();
     const int direct8_profile_subloops =
@@ -1892,6 +1962,9 @@ void applyProcessingObject8( processingObject_t * processing,
                                           imageX,
                                           imageY,
                                           inputImage,
+                                          shadows_highlights_active
+                                              ? get_buffer(processing->shadows_highlights.blur_image)
+                                              : NULL,
                                           outputImage,
                                           direct8_profile_subloops ? &direct8_timing : NULL);
     }
@@ -1910,6 +1983,9 @@ void applyProcessingObject8( processingObject_t * processing,
                                                        row_start,
                                                        row_end,
                                                        inputImage,
+                                                       shadows_highlights_active
+                                                           ? get_buffer(processing->shadows_highlights.blur_image)
+                                                           : NULL,
                                                        outputImage,
                                                        NULL);
             }

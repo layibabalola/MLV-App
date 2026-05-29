@@ -20,6 +20,13 @@ extern void recursive_bf_wrap(
         float sigma_spatial, float sigma_range,
         int width, int height, int channel);
 
+extern void recursive_bf_wrap_with_output_lut(
+        uint16_t * img_in,
+        uint16_t * img_out,
+        float sigma_spatial, float sigma_range,
+        int width, int height, int channel,
+        const uint16_t * output_lut);
+
 #ifdef __cplusplus
 }
 #endif

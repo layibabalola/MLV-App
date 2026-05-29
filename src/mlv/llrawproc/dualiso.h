@@ -140,6 +140,14 @@ typedef struct
     double interp_ms;
     double fullres_ms;
     double mix_ms;
+    double mix_curve_select_ms;
+    double mix_curve_build_ms;
+    double mix_curve_float_ms;
+    double mix_ev_lut_ms;
+    double mix_halfres_ms;
+    double mix_chroma_ms;
+    double mix_alias_map_ms;
+    double mix_overexposed_ms;
     double final_blend_ms;
     double convert16_ms;
     double other_ms;
