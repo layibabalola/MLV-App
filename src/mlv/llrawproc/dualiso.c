@@ -1027,7 +1027,10 @@ void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
     free(scratch->overexposed);
     free(scratch->alias_map);
     free(scratch->over_aux);
-    free(scratch->mix_curve);
+    for (int i = 0; i < DUALISO_MIX_CURVE_CACHE_SLOTS; i++)
+    {
+        free(scratch->mix_curve[i]);
+    }
     free(scratch->histogram_match_dark);
     free(scratch->histogram_match_bright);
     free(scratch->histogram_match_tmp);
@@ -3147,6 +3150,88 @@ static inline void hdr_chroma_smooth(struct raw_info raw_info, uint32_t * input,
     }
 }
 
+static inline int mix_curve_key_matches(const dualiso_full20bit_scratch_t * scratch,
+                                        int slot,
+                                        size_t required_count,
+                                        uint32_t black,
+                                        uint32_t white,
+                                        double corr_ev,
+                                        double lowiso_dr)
+{
+    return scratch->mix_curve_valid[slot]
+        && scratch->mix_curve_capacity[slot] >= required_count
+        && scratch->mix_curve_last_black[slot] == black
+        && scratch->mix_curve_last_white[slot] == white
+        && scratch->mix_curve_last_corr_ev[slot] == corr_ev
+        && scratch->mix_curve_last_lowiso_dr[slot] == lowiso_dr;
+}
+
+static inline double * select_mix_curve_cache_slot(dualiso_full20bit_scratch_t * scratch,
+                                                   size_t required_count,
+                                                   uint32_t black,
+                                                   uint32_t white,
+                                                   double corr_ev,
+                                                   double lowiso_dr,
+                                                   int * selected_slot_out,
+                                                   int * needs_rebuild)
+{
+    if (!scratch || !selected_slot_out || !needs_rebuild)
+    {
+        return NULL;
+    }
+
+    scratch->mix_curve_use_counter++;
+    if (!scratch->mix_curve_use_counter)
+    {
+        scratch->mix_curve_use_counter = 1;
+    }
+
+    for (int slot = 0; slot < DUALISO_MIX_CURVE_CACHE_SLOTS; slot++)
+    {
+        if (mix_curve_key_matches(scratch, slot, required_count, black, white, corr_ev, lowiso_dr))
+        {
+            scratch->mix_curve_last_used[slot] = scratch->mix_curve_use_counter;
+            *selected_slot_out = slot;
+            *needs_rebuild = 0;
+            return scratch->mix_curve[slot];
+        }
+    }
+
+    int selected_slot = 0;
+    uint64_t oldest_use = UINT64_MAX;
+    for (int slot = 0; slot < DUALISO_MIX_CURVE_CACHE_SLOTS; slot++)
+    {
+        if (!scratch->mix_curve_valid[slot])
+        {
+            selected_slot = slot;
+            break;
+        }
+        if (scratch->mix_curve_last_used[slot] < oldest_use)
+        {
+            oldest_use = scratch->mix_curve_last_used[slot];
+            selected_slot = slot;
+        }
+    }
+
+    double * mix_curve = ensure_double_scratch_buffer(&scratch->mix_curve[selected_slot],
+                                                      &scratch->mix_curve_capacity[selected_slot],
+                                                      required_count);
+    if (!mix_curve)
+    {
+        return NULL;
+    }
+
+    scratch->mix_curve_valid[selected_slot] = 0;
+    scratch->mix_curve_last_used[selected_slot] = scratch->mix_curve_use_counter;
+    scratch->mix_curve_last_black[selected_slot] = black;
+    scratch->mix_curve_last_white[selected_slot] = white;
+    scratch->mix_curve_last_corr_ev[selected_slot] = corr_ev;
+    scratch->mix_curve_last_lowiso_dr[selected_slot] = lowiso_dr;
+    *selected_slot_out = selected_slot;
+    *needs_rebuild = 1;
+    return mix_curve;
+}
+
 static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres, uint32_t* halfres_smooth, uint16_t* alias_map, uint32_t* dark, uint32_t* bright, uint16_t * overexposed, int dark_noise, uint32_t white_darkened, double corr_ev, double lowiso_dr, uint32_t black, uint32_t white, int chroma_smooth_method, dualiso_full20bit_scratch_t * scratch)
 {
     int w = raw_info.width;
@@ -3191,24 +3276,21 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     /* mixing curve */
     double max_ev = log2(white/64 - black/64);
     const size_t mix_curve_required = (size_t)(1u << 20);
-    const size_t previous_mix_curve_capacity = scratch ? scratch->mix_curve_capacity : 0;
-    double * mix_curve = scratch
-        ? ensure_double_scratch_buffer(&scratch->mix_curve, &scratch->mix_curve_capacity, mix_curve_required)
-        : NULL;
+    int mix_curve_slot = 0;
+    int mix_curve_needs_rebuild = 0;
+    double * mix_curve = select_mix_curve_cache_slot(scratch,
+                                                     mix_curve_required,
+                                                     black,
+                                                     white,
+                                                     corr_ev,
+                                                     lowiso_dr,
+                                                     &mix_curve_slot,
+                                                     &mix_curve_needs_rebuild);
     if (!mix_curve)
     {
         return 0;
     }
-
-    const int mix_curve_reusable =
-        scratch->mix_curve_valid
-        && previous_mix_curve_capacity >= mix_curve_required
-        && scratch->mix_curve_last_black == black
-        && scratch->mix_curve_last_white == white
-        && scratch->mix_curve_last_corr_ev == corr_ev
-        && scratch->mix_curve_last_lowiso_dr == lowiso_dr;
-
-    if (!mix_curve_reusable)
+    if (mix_curve_needs_rebuild)
     {
         #pragma omp parallel for
         for (int i = 0; i < 1<<20; i++)
@@ -3218,11 +3300,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
             double k = (c+1) / 2;
             mix_curve[i] = k;
         }
-        scratch->mix_curve_valid = 1;
-        scratch->mix_curve_last_black = black;
-        scratch->mix_curve_last_white = white;
-        scratch->mix_curve_last_corr_ev = corr_ev;
-        scratch->mix_curve_last_lowiso_dr = lowiso_dr;
+        scratch->mix_curve_valid[mix_curve_slot] = 1;
     }
 
 

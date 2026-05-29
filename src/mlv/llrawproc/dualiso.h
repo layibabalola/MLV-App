@@ -26,6 +26,11 @@
 #include <stdint.h>
 #include "../raw.h"
 
+enum
+{
+    DUALISO_MIX_CURVE_CACHE_SLOTS = 4
+};
+
 typedef struct
 {
     int * data_x;
@@ -51,14 +56,16 @@ typedef struct
     uint16_t * overexposed;
     uint16_t * alias_map;
     uint16_t * over_aux;
-    double * mix_curve;
+    double * mix_curve[DUALISO_MIX_CURVE_CACHE_SLOTS];
     size_t pixel_capacity;
-    size_t mix_curve_capacity;
-    int mix_curve_valid;
-    uint32_t mix_curve_last_black;
-    uint32_t mix_curve_last_white;
-    double mix_curve_last_corr_ev;
-    double mix_curve_last_lowiso_dr;
+    size_t mix_curve_capacity[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    int mix_curve_valid[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    uint32_t mix_curve_last_black[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    uint32_t mix_curve_last_white[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    double mix_curve_last_corr_ev[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    double mix_curve_last_lowiso_dr[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    uint64_t mix_curve_last_used[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    uint64_t mix_curve_use_counter;
 
     int * histogram_match_dark;
     int * histogram_match_bright;

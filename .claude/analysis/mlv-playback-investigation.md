@@ -2506,3 +2506,33 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium effort: use the new smoke buckets from the user's real clip to choose the next target automatically; do not guess from the fixture if the bucket mix differs.
 2. Medium impact / low risk: if mix remains dominant, add internal `mix_images()` telemetry around LUT, blend loop, chroma smooth, and alias map.
 3. Medium impact / medium risk: if interpolation remains dominant, split AMaZE timing and only then consider deeper interpolation reuse or thread-scheduling changes.
+
+## 2026-05-29 - manual smoke follow-up: Dual ISO mix curve alternation
+
+### Verified locally
+
+- The latest interactive GUI smoke found in `C:\Users\obabalola\AppData\Roaming\magiclantern\MLVApp\logs\mlvapp-20260528.log` is process `0xe78c`, launched as the normal release GUI at `2026-05-29T04:41:18Z`.
+- Later entries in `mlvapp-20260529.log` are automated `--profile-playback` or `--batch` launches from this investigation, not a newer manual GUI smoke.
+- The long `0xe78c` x1 Quality smoke ended at `2026-05-29T04:46:16Z` with `presented_fps=3.715`, `avg_present_interval_ms=264.514`, `avg_render_total_ms=263.830`, `avg_processed8_ms=262.689`, `avg_llrawproc_ms=102.906`, and `avg_draw_total_ms=16.085`.
+- The same smoke's Dual ISO substage summary was dominated by `mix_images`: `avg_total_ms=100.840`, `avg_mix_ms=69.811`, `avg_interp_ms=7.632`, `avg_final_blend_ms=6.274`, `last_fullres=1`, `last_threads=6`.
+- Shorter earlier sessions in the same process reached `presented_fps=4.871` and `4.699` while `avg_mix_ms` was only `13.225` and `12.000`, so the practical regression inside the smoke is the mix-curve cost returning later in playback.
+- Implemented an exact four-slot LRU mix-curve cache in `src/mlv/llrawproc/dualiso.c` and `src/mlv/llrawproc/dualiso.h`. It reuses a 1M-entry curve only when `black`, `white`, `corr_ev`, and `lowiso_dr` match exactly; otherwise it rebuilds the selected slot with the existing math.
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`; timestamp `2026-05-29 00:22:19`, size `8288768`, SHA256 `37FD598F9B38DD7F4491D9491CCD1C9AFCA7AB9C7EC12CFF61BD46EFF65F596F`.
+- Regression checks after the final rebuild passed for the full app-backed console suite (`81` tests, `1210` assertions, `0` failures) and focused Dual ISO pipeline checks. The broader pipeline suite still has four failures, but those same failures reproduce at base commit `cb618210ab81df8df23bb77f762a4f78f7d9acae`, so they are not introduced by this change.
+
+### Cross-checked from prior analysis
+
+- This change does not alter Dual ISO blend math or quality policy. It is a reuse/cache change for exact repeated curve inputs.
+- The local visible fixture remains noisy under VM load; the exact-cache profile is therefore diagnostic rather than proof of user-visible speedup. The user's real smoke is the better judge because it already showed `avg_mix_ms` alternating between about `12 ms` and `70 ms`.
+
+### Needs runtime profiling
+
+- Rerun the real clip in the normal GUI release with `MLVAPP_PLAYBACK_SMOKE_TELEMETRY=1`, x1 scale, and Quality mode.
+- Judge the next run primarily by `playback_smoke.dual_iso_full20_summary avg_mix_ms`; success means it stays closer to the earlier `12-13 ms` sessions instead of returning to about `70 ms`.
+- If `avg_mix_ms` remains high, add hit/miss and key-drift telemetry to the mix-curve cache before widening the cache or changing curve representation.
+
+### Ranked next steps
+
+1. High impact / low risk: after the user's next smoke, compare `avg_mix_ms`, `avg_llrawproc_dual_iso_ms`, and `presented_fps` against the `0xe78c` session.
+2. Medium impact / low risk: if the cache misses, instrument exact mix-curve keys and hit/miss counters in smoke logs.
+3. Medium impact / medium risk: if mix improves but FPS remains about `4`, target the remaining `avg_processing_ms` and `avg_processing_core_ms` buckets next.
