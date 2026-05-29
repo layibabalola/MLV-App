@@ -1930,6 +1930,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const double llrawprocBadPixelsMs = llrpGetLastBadPixelsMilliseconds();
     const double llrawprocPatternNoiseMs = llrpGetLastPatternNoiseMilliseconds();
     const double llrawprocDualIsoMs = llrpGetLastDualIsoMilliseconds();
+    dualiso_full20bit_timing_t dualIsoFull20 = {};
+    llrpGetLastDualIsoFull20bitTiming( &dualIsoFull20 );
     const double llrawprocChromaSmoothMs = llrpGetLastChromaSmoothMilliseconds();
     const double llrawprocKnownMs =
         llrawprocDarkFrameMs +
@@ -2114,6 +2116,40 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       llrawprocPatternNoiseMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_dual_iso_ms"),
                                       llrawprocDualIsoMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_total_ms"),
+                                      dualIsoFull20.total_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_pattern_ms"),
+                                      dualIsoFull20.pattern_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_noise_ms"),
+                                      dualIsoFull20.noise_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_scratch_ms"),
+                                      dualIsoFull20.scratch_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_convert20_ms"),
+                                      dualIsoFull20.convert20_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_match_ms"),
+                                      dualIsoFull20.match_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_ms"),
+                                      dualIsoFull20.interp_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_fullres_ms"),
+                                      dualIsoFull20.fullres_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_ms"),
+                                      dualIsoFull20.mix_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_final_blend_ms"),
+                                      dualIsoFull20.final_blend_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_convert16_ms"),
+                                      dualIsoFull20.convert16_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_other_ms"),
+                                      dualIsoFull20.other_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_method"),
+                                      dualIsoFull20.interp_method );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_use_alias_map"),
+                                      dualIsoFull20.use_alias_map != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_use_fullres"),
+                                      dualIsoFull20.use_fullres != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_threads"),
+                                      dualIsoFull20.threads );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_valid"),
+                                      dualIsoFull20.valid != 0 );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_chroma_smooth_ms"),
                                       llrawprocChromaSmoothMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_other_ms"),
