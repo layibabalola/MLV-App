@@ -54,6 +54,11 @@ typedef struct
     double * mix_curve;
     size_t pixel_capacity;
     size_t mix_curve_capacity;
+    int mix_curve_valid;
+    uint32_t mix_curve_last_black;
+    uint32_t mix_curve_last_white;
+    double mix_curve_last_corr_ev;
+    double mix_curve_last_lowiso_dr;
 
     int * histogram_match_dark;
     int * histogram_match_bright;

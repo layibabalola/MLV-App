@@ -51,6 +51,9 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_denoise_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_rbf_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_ca_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_chroma_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_sharpen_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_grain_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_levels_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
@@ -75,6 +78,9 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_denoise_ms = 0.0;
     g_processing_last_rbf_ms = 0.0;
     g_processing_last_ca_ms = 0.0;
+    g_processing_last_chroma_ms = 0.0;
+    g_processing_last_sharpen_ms = 0.0;
+    g_processing_last_grain_ms = 0.0;
     g_processing_last_core_levels_ms = 0.0;
     g_processing_last_core_color_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
@@ -717,24 +723,27 @@ void applyProcessingObject( processingObject_t * processing,
     /* enter YCbCr world - https://en.wikipedia.org/wiki/YCbCr (I used the 'JPEG Transform') */
     if (doChromaSeperation)
     {
+        const double chroma_start = omp_get_wtime();
         convert_rgb_to_YCbCr_omp(inputImage, img_s, processing->cs_zone.pre_calc_rgb_to_YCbCr);
 
         sharp_start = 0; /* Start at 0 - Luma/Y channel */
         sharp_skip = 3; /* Only sharpen every third (Y/luma) pixel */
-    }
 
-    /* Basic box blur */
-    if (processingGetChromaBlurRadius(processing) > 0 && doChromaSeperation)
-    {
-        memcpy(outputImage, inputImage, img_s * sizeof(uint16_t));
-        blur_image( inputImage, outputImage,
-                    imageX, imageY, processingGetChromaBlurRadius(processing),
-                    0,1,1,
-                    0,0 );
+        /* Basic box blur */
+        if (processingGetChromaBlurRadius(processing) > 0)
+        {
+            memcpy(outputImage, inputImage, img_s * sizeof(uint16_t));
+            blur_image( inputImage, outputImage,
+                        imageX, imageY, processingGetChromaBlurRadius(processing),
+                        0,1,1,
+                        0,0 );
+        }
+        g_processing_last_chroma_ms += (omp_get_wtime() - chroma_start) * 1000.0;
     }
 
     if( doSharpening )
     {
+        const double sharpen_start = omp_get_wtime();
         /* Use sobel filter to create a edge mask */
         uint16_t *gray,
              *sobel_h_res,
@@ -843,6 +852,7 @@ void applyProcessingObject( processingObject_t * processing,
             if( sobel_v_res ) free( sobel_v_res );
             if( contour_img ) free( contour_img );
         }
+        g_processing_last_sharpen_ms = (omp_get_wtime() - sharpen_start) * 1000.0;
     }
     else
     {
@@ -852,12 +862,15 @@ void applyProcessingObject( processingObject_t * processing,
     /* Leave Y-Cb-Cr world */
     if (doChromaSeperation)
     {
+        const double chroma_start = omp_get_wtime();
         convert_YCbCr_to_rgb_omp(outputImage, img_s, processing->cs_zone.pre_calc_YCbCr_to_rgb);
+        g_processing_last_chroma_ms += (omp_get_wtime() - chroma_start) * 1000.0;
     }
 
     /* Grain (simple monochrome noise) generator - must be applied after denoiser */
     if( doGrain ) //Switch on/off
     {
+        const double grain_start = omp_get_wtime();
         int strength = 50 * processing->grainStrength;
 #pragma omp parallel for
         for( int i = 0; i < img_s; i+=3 )
@@ -877,6 +890,7 @@ void applyProcessingObject( processingObject_t * processing,
             outputImage[i+1] = LIMIT16( outputImage[i+1] + grain );
             outputImage[i+2] = LIMIT16( outputImage[i+2] + grain );
         }
+        g_processing_last_grain_ms = (omp_get_wtime() - grain_start) * 1000.0;
     }
 
     /* S4_processing capture: post processing core (matrix + levels + gamma +
@@ -1945,6 +1959,21 @@ double processingGetLastRbfMilliseconds(void)
 double processingGetLastCaMilliseconds(void)
 {
     return g_processing_last_ca_ms;
+}
+
+double processingGetLastChromaMilliseconds(void)
+{
+    return g_processing_last_chroma_ms;
+}
+
+double processingGetLastSharpenMilliseconds(void)
+{
+    return g_processing_last_sharpen_ms;
+}
+
+double processingGetLastGrainMilliseconds(void)
+{
+    return g_processing_last_grain_ms;
 }
 
 double processingGetLastCoreLevelsMilliseconds(void)
