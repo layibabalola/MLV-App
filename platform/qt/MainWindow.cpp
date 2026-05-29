@@ -68,6 +68,15 @@ static bool playbackSmokeFrameTelemetryEnabled()
     return enabled;
 }
 
+static int playbackScopeUpdateIntervalMs()
+{
+    bool ok = false;
+    const int value =
+        qEnvironmentVariableIntValue( "MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS", &ok );
+    if( ok ) return qBound( 0, value, 1000 );
+    return 150;
+}
+
 static QString envValueForLog( const char *name )
 {
     QString value = qEnvironmentVariable( name );
@@ -87,6 +96,12 @@ static int telemetryIntValue( const QJsonObject &telemetry,
                               const char *key )
 {
     return telemetry.value( QString::fromLatin1( key ) ).toInt();
+}
+
+static bool telemetryBoolValue( const QJsonObject &telemetry,
+                                const char *key )
+{
+    return telemetry.value( QString::fromLatin1( key ) ).toBool();
 }
 
 static void logInteractionEvent( const QString &event,
@@ -3054,6 +3069,9 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.gpuPresentationOptions = m_lastQueuedGpuPresentationOptions;
     requestContext.gpuPreviewProcessingConfig = m_lastQueuedGpuPreviewProcessingConfig;
     requestContext.playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
+    requestContext.playbackActive = ui->actionPlay->isChecked();
+    requestContext.dropFramePlaybackActive =
+        ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked();
 
     RenderFrameThread::OutputMode renderOutputMode = RenderFrameThread::OutputProcessed8;
     if( m_renderThreadUsingGpuPreviewProcessing || m_renderThreadUsingCpuPreviewProcessing )
@@ -15025,6 +15043,11 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
         m_playbackPrepReplacedBeforeComputeCount.load( std::memory_order_acquire );
     m_playbackSmokeStartPrepReplacedAfter =
         m_playbackPrepReplacedAfterComputeCount.load( std::memory_order_acquire );
+    m_playbackSmokeStartScopeUpdates = m_playbackScopeUpdateCount;
+    m_playbackSmokeStartScopeSkips = m_playbackScopeSkipCount;
+    m_playbackSmokeStartAudioSyncRequests = m_playbackAudioSyncRequestCount;
+    m_playbackSmokeStartAudioSyncApplied = m_playbackAudioSyncAppliedCount;
+    m_playbackSmokeStartAudioSyncSkipped = m_playbackAudioSyncSkippedCount;
     m_playbackSmokeStartTime = mlv_stage_timing_now();
     m_playbackSmokeLastPresentedTime = 0.0;
     m_playbackSmokeFirstPresentMs = 0.0;
@@ -15036,8 +15059,35 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeQueueWaitSumMs = 0.0;
     m_playbackSmokeLlrawprocSumMs = 0.0;
     m_playbackSmokeProcessed8SumMs = 0.0;
+    m_playbackSmokeRawUint16SumMs = 0.0;
+    m_playbackSmokeRawUint16DecompressSumMs = 0.0;
+    m_playbackSmokeRawUint16UnpackSumMs = 0.0;
+    m_playbackSmokeLlrawprocTotalSumMs = 0.0;
+    m_playbackSmokeLlrawprocDualIsoSumMs = 0.0;
+    m_playbackSmokeLlrawprocChromaSmoothSumMs = 0.0;
+    m_playbackSmokeLlrawprocOtherSumMs = 0.0;
+    m_playbackSmokeDebayeredFrameSumMs = 0.0;
+    m_playbackSmokeDebayerExclusiveSumMs = 0.0;
+    m_playbackSmokeProcessingSumMs = 0.0;
+    m_playbackSmokeProcessingCoreSumMs = 0.0;
+    m_playbackSmokeProcessingDirect8MatrixSumMs = 0.0;
+    m_playbackSmokeProcessingDirect8GammaSumMs = 0.0;
+    m_playbackSmokeProcessingDirect8CurvesSumMs = 0.0;
+    m_playbackSmokeProcessed16SumMs = 0.0;
+    m_playbackSmokeProcessed16For8BitSumMs = 0.0;
+    m_playbackSmokeProcessed16To8BitSumMs = 0.0;
+    m_playbackSmokePlaybackScaleSumMs = 0.0;
+    m_playbackSmokeDrawImageSumMs = 0.0;
+    m_playbackSmokeDrawPresentSumMs = 0.0;
+    m_playbackSmokeDrawAdvanceSumMs = 0.0;
+    m_playbackSmokeDrawScopesSumMs = 0.0;
     m_playbackSmokeDrawTotalSumMs = 0.0;
     m_playbackSmokeDrawTotalMaxMs = 0.0;
+    m_playbackSmokeProcessed8DirectPathFrames = 0;
+    m_playbackSmokeProcessed8PrefetchHits = 0;
+    m_playbackSmokeRawPrefetchHits = 0;
+    m_playbackSmokeQueuedPlaybackDropSum = 0;
+    m_playbackSmokeQueuedPlaybackDropMax = 0;
     m_playbackSmokeLastWorkerThreads = m_playbackSmokeStartWorkerThreads;
     m_playbackSmokeLastWorkerThreadCapActive = false;
     m_playbackSmokeLastScaleRequest = m_playbackSmokeStartScaleRequest;
@@ -15051,7 +15101,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                "file_loaded=%14 env_force_threads=%15 env_force_singlethread=%16 "
                "env_playback_max_threads=%17 env_disable_playback_thread_cap=%18 "
                "env_playback_scale=%19 env_hq_mean23=%20 "
-               "env_playback_smoke_telemetry=%21" )
+               "env_playback_smoke_telemetry=%21 "
+               "env_playback_scope_interval_ms=%22" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( m_playbackSmokeStartPosition )
                .arg( m_playbackSmokeStartCutIn )
@@ -15072,7 +15123,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                .arg( envValueForLog( "MLVAPP_DISABLE_PLAYBACK_THREAD_CAP" ) )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_SCALE_FACTOR" ) )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_PREFER_HQ_MEAN23" ) )
-               .arg( envValueForLog( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" ) );
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" ) )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS" ) );
 }
 
 void MainWindow::notePlaybackSmokePresentedFrame(
@@ -15124,14 +15176,95 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "llrawproc_ms" );
     const double processed8Ms =
         telemetryDoubleValue( timing, "processed8_total_ms" );
+    const double rawUint16Ms =
+        telemetryDoubleValue( timing, "raw_uint16_ms" );
+    const double rawUint16DecompressMs =
+        telemetryDoubleValue( timing, "raw_uint16_decompress_ms" );
+    const double rawUint16UnpackMs =
+        telemetryDoubleValue( timing, "raw_uint16_unpack_ms" );
+    const double llrawprocTotalMs =
+        telemetryDoubleValue( timing, "llrawproc_total_ms" );
+    const double llrawprocDualIsoMs =
+        telemetryDoubleValue( timing, "llrawproc_dual_iso_ms" );
+    const double llrawprocChromaSmoothMs =
+        telemetryDoubleValue( timing, "llrawproc_chroma_smooth_ms" );
+    const double llrawprocOtherMs =
+        telemetryDoubleValue( timing, "llrawproc_other_ms" );
+    const double debayeredFrameMs =
+        telemetryDoubleValue( timing, "debayered_frame_ms" );
+    const double debayerExclusiveMs =
+        telemetryDoubleValue( timing, "debayer_exclusive_ms" );
+    const double processingMs =
+        telemetryDoubleValue( timing, "processing_ms" );
+    const double processingCoreMs =
+        telemetryDoubleValue( timing, "processing_core_ms" );
+    const double direct8MatrixMs =
+        telemetryDoubleValue( timing, "processing_direct8_matrix_ms" );
+    const double direct8GammaMs =
+        telemetryDoubleValue( timing, "processing_direct8_gamma_ms" );
+    const double direct8CurvesMs =
+        telemetryDoubleValue( timing, "processing_direct8_curves_ms" );
+    const double processed16Ms =
+        telemetryDoubleValue( timing, "processed16_total_ms" );
+    const double processed16For8BitMs =
+        telemetryDoubleValue( timing, "processed16_for_8bit_ms" );
+    const double processed16To8BitMs =
+        telemetryDoubleValue( timing, "processed16_to_8bit_ms" );
+    const double playbackScaleMs =
+        telemetryDoubleValue( timing, "render_thread_playback_scale_ms" );
+    const int queuedPlaybackDrops =
+        telemetryIntValue( timing, "render_thread_queued_playback_drops_before_start" );
     const double drawTotalMs = m_lastDrawFrameReadyTotalMs;
+    const double drawImageMs = m_lastDrawFrameReadyImageMs;
+    const double drawPresentMs = m_lastDrawFrameReadyPresentMs;
+    const double drawAdvanceMs = m_lastDrawFrameReadyAdvanceMs;
+    const double drawScopesMs = m_lastDrawFrameReadyScopesMs;
 
     m_playbackSmokeQueueWaitSumMs += queueWaitMs;
     m_playbackSmokeRenderWorkSumMs += renderWorkMs;
     m_playbackSmokeRenderTotalSumMs += renderTotalMs;
     m_playbackSmokeLlrawprocSumMs += llrawprocMs;
     m_playbackSmokeProcessed8SumMs += processed8Ms;
+    m_playbackSmokeRawUint16SumMs += rawUint16Ms;
+    m_playbackSmokeRawUint16DecompressSumMs += rawUint16DecompressMs;
+    m_playbackSmokeRawUint16UnpackSumMs += rawUint16UnpackMs;
+    m_playbackSmokeLlrawprocTotalSumMs += llrawprocTotalMs;
+    m_playbackSmokeLlrawprocDualIsoSumMs += llrawprocDualIsoMs;
+    m_playbackSmokeLlrawprocChromaSmoothSumMs += llrawprocChromaSmoothMs;
+    m_playbackSmokeLlrawprocOtherSumMs += llrawprocOtherMs;
+    m_playbackSmokeDebayeredFrameSumMs += debayeredFrameMs;
+    m_playbackSmokeDebayerExclusiveSumMs += debayerExclusiveMs;
+    m_playbackSmokeProcessingSumMs += processingMs;
+    m_playbackSmokeProcessingCoreSumMs += processingCoreMs;
+    m_playbackSmokeProcessingDirect8MatrixSumMs += direct8MatrixMs;
+    m_playbackSmokeProcessingDirect8GammaSumMs += direct8GammaMs;
+    m_playbackSmokeProcessingDirect8CurvesSumMs += direct8CurvesMs;
+    m_playbackSmokeProcessed16SumMs += processed16Ms;
+    m_playbackSmokeProcessed16For8BitSumMs += processed16For8BitMs;
+    m_playbackSmokeProcessed16To8BitSumMs += processed16To8BitMs;
+    m_playbackSmokePlaybackScaleSumMs += playbackScaleMs;
+    m_playbackSmokeDrawImageSumMs += drawImageMs;
+    m_playbackSmokeDrawPresentSumMs += drawPresentMs;
+    m_playbackSmokeDrawAdvanceSumMs += drawAdvanceMs;
+    m_playbackSmokeDrawScopesSumMs += drawScopesMs;
     m_playbackSmokeDrawTotalSumMs += drawTotalMs;
+    if( telemetryBoolValue( timing, "processed8_direct_path_active" ) )
+        ++m_playbackSmokeProcessed8DirectPathFrames;
+    if( telemetryBoolValue( timing, "processed8_prefetch_hit" ) )
+        ++m_playbackSmokeProcessed8PrefetchHits;
+    if( telemetryBoolValue( timing, "raw_uint16_prefetch_hit" ) )
+        ++m_playbackSmokeRawPrefetchHits;
+    if( queuedPlaybackDrops > 0 )
+    {
+        m_playbackSmokeQueuedPlaybackDropSum +=
+            static_cast<uint64_t>( queuedPlaybackDrops );
+        if( static_cast<uint64_t>( queuedPlaybackDrops )
+            > m_playbackSmokeQueuedPlaybackDropMax )
+        {
+            m_playbackSmokeQueuedPlaybackDropMax =
+                static_cast<uint64_t>( queuedPlaybackDrops );
+        }
+    }
     if( renderTotalMs > m_playbackSmokeRenderTotalMaxMs )
         m_playbackSmokeRenderTotalMaxMs = renderTotalMs;
     if( drawTotalMs > m_playbackSmokeDrawTotalMaxMs )
@@ -15150,7 +15283,7 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "worker_thread_cap_active=%11 render_total_ms=%12 "
                    "render_work_ms=%13 queue_wait_ms=%14 llrawproc_ms=%15 "
                    "processed8_ms=%16 draw_total_ms=%17 still_drawing=%18 "
-                   "pending_advance=%19" )
+                   "pending_advance=%19 queued_playback_drops=%20" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( elapsedMs, 0, 'f', 3 )
@@ -15169,7 +15302,48 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( processed8Ms, 0, 'f', 3 )
                    .arg( drawTotalMs, 0, 'f', 3 )
                    .arg( bool01( m_frameStillDrawing ) )
-                   .arg( bool01( m_playbackFrameAdvancePending ) );
+                   .arg( bool01( m_playbackFrameAdvancePending ) )
+                   .arg( queuedPlaybackDrops );
+        qInfo().noquote()
+            << QStringLiteral(
+                   "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
+                   "raw_decompress_ms=%4 raw_unpack_ms=%5 llrawproc_total_ms=%6 "
+                   "llrawproc_dual_iso_ms=%7 llrawproc_chroma_smooth_ms=%8 "
+                   "llrawproc_other_ms=%9 debayered_frame_ms=%10 "
+                   "debayer_exclusive_ms=%11 processing_ms=%12 processing_core_ms=%13 "
+                   "direct8_matrix_ms=%14 direct8_gamma_ms=%15 direct8_curves_ms=%16 "
+                   "processed16_ms=%17 processed16_for_8bit_ms=%18 "
+                   "processed16_to_8bit_ms=%19 playback_scale_ms=%20 "
+                   "draw_image_ms=%21 draw_present_ms=%22 draw_advance_ms=%23 "
+                   "draw_scopes_ms=%24 direct8=%25 processed8_prefetch=%26 "
+                   "raw_prefetch=%27" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( rawUint16Ms, 0, 'f', 3 )
+                   .arg( rawUint16DecompressMs, 0, 'f', 3 )
+                   .arg( rawUint16UnpackMs, 0, 'f', 3 )
+                   .arg( llrawprocTotalMs, 0, 'f', 3 )
+                   .arg( llrawprocDualIsoMs, 0, 'f', 3 )
+                   .arg( llrawprocChromaSmoothMs, 0, 'f', 3 )
+                   .arg( llrawprocOtherMs, 0, 'f', 3 )
+                   .arg( debayeredFrameMs, 0, 'f', 3 )
+                   .arg( debayerExclusiveMs, 0, 'f', 3 )
+                   .arg( processingMs, 0, 'f', 3 )
+                   .arg( processingCoreMs, 0, 'f', 3 )
+                   .arg( direct8MatrixMs, 0, 'f', 3 )
+                   .arg( direct8GammaMs, 0, 'f', 3 )
+                   .arg( direct8CurvesMs, 0, 'f', 3 )
+                   .arg( processed16Ms, 0, 'f', 3 )
+                   .arg( processed16For8BitMs, 0, 'f', 3 )
+                   .arg( processed16To8BitMs, 0, 'f', 3 )
+                   .arg( playbackScaleMs, 0, 'f', 3 )
+                   .arg( drawImageMs, 0, 'f', 3 )
+                   .arg( drawPresentMs, 0, 'f', 3 )
+                   .arg( drawAdvanceMs, 0, 'f', 3 )
+                   .arg( drawScopesMs, 0, 'f', 3 )
+                   .arg( bool01( telemetryBoolValue( timing, "processed8_direct_path_active" ) ) )
+                   .arg( bool01( telemetryBoolValue( timing, "processed8_prefetch_hit" ) ) )
+                   .arg( bool01( telemetryBoolValue( timing, "raw_uint16_prefetch_hit" ) ) );
     }
 }
 
@@ -15235,6 +15409,12 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             ? m_playbackSmokeDrawTotalSumMs
               / static_cast<double>( m_playbackSmokePresentedFrames )
             : 0.0;
+    const auto avgSmokeMs = [this]( double sum ) -> double
+    {
+        return m_playbackSmokePresentedFrames > 0
+            ? sum / static_cast<double>( m_playbackSmokePresentedFrames )
+            : 0.0;
+    };
 
     const uint64_t currentStaleDrops =
         m_playbackPrepStaleDropCount.load( std::memory_order_acquire );
@@ -15315,6 +15495,63 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( bool01( m_lastPlayToFirstFrameValid ) )
                .arg( m_lastPlayToFirstFrameMs, 0, 'f', 3 )
                .arg( bool01( m_playbackSmokeFrameTelemetry ) );
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.cpu_summary session=%1 avg_raw_uint16_ms=%2 "
+               "avg_raw_decompress_ms=%3 avg_raw_unpack_ms=%4 "
+               "avg_llrawproc_total_ms=%5 avg_llrawproc_dual_iso_ms=%6 "
+               "avg_llrawproc_chroma_smooth_ms=%7 avg_llrawproc_other_ms=%8 "
+               "avg_debayered_frame_ms=%9 avg_debayer_exclusive_ms=%10 "
+               "avg_processing_ms=%11 avg_processing_core_ms=%12 "
+               "avg_direct8_matrix_ms=%13 avg_direct8_gamma_ms=%14 "
+               "avg_direct8_curves_ms=%15 avg_processed16_ms=%16 "
+               "avg_processed16_for_8bit_ms=%17 avg_processed16_to_8bit_ms=%18 "
+               "avg_playback_scale_ms=%19 avg_draw_image_ms=%20 "
+               "avg_draw_present_ms=%21 avg_draw_advance_ms=%22 "
+               "avg_draw_scopes_ms=%23 processed8_direct_path_frames=%24 "
+               "processed8_prefetch_hits=%25 raw_prefetch_hits=%26 "
+               "queued_playback_drops=%27 max_queued_playback_drops=%28 "
+               "scope_updates=%29 scope_skips=%30 audio_sync_requests=%31 "
+               "audio_sync_applied=%32 audio_sync_skipped=%33" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeRawUint16UnpackSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeLlrawprocTotalSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeLlrawprocDualIsoSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeLlrawprocChromaSmoothSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeLlrawprocOtherSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayeredFrameSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayerExclusiveSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingDirect8MatrixSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingDirect8GammaSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingDirect8CurvesSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16SumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16For8BitSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16To8BitSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePlaybackScaleSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDrawImageSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDrawPresentSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDrawAdvanceSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDrawScopesSumMs ), 0, 'f', 3 )
+               .arg( m_playbackSmokeProcessed8DirectPathFrames )
+               .arg( m_playbackSmokeProcessed8PrefetchHits )
+               .arg( m_playbackSmokeRawPrefetchHits )
+               .arg( static_cast<qulonglong>( m_playbackSmokeQueuedPlaybackDropSum ) )
+               .arg( static_cast<qulonglong>( m_playbackSmokeQueuedPlaybackDropMax ) )
+               .arg( deltaCounter( m_playbackScopeUpdateCount,
+                                    m_playbackSmokeStartScopeUpdates ) )
+               .arg( deltaCounter( m_playbackScopeSkipCount,
+                                    m_playbackSmokeStartScopeSkips ) )
+               .arg( deltaCounter( m_playbackAudioSyncRequestCount,
+                                    m_playbackSmokeStartAudioSyncRequests ) )
+               .arg( deltaCounter( m_playbackAudioSyncAppliedCount,
+                                    m_playbackSmokeStartAudioSyncApplied ) )
+               .arg( deltaCounter( m_playbackAudioSyncSkippedCount,
+                                    m_playbackSmokeStartAudioSyncSkipped ) );
 }
 
 bool MainWindow::primePlaybackCacheOnPlayStart( void )
@@ -15371,6 +15608,9 @@ void MainWindow::on_actionPlay_toggled(bool checked)
         m_playToFirstFrameTargetFrameValid = false;
         m_playToFirstFrameTargetFrame = -1;
         m_lastPlayStartPrerollRequested = false;
+        m_playbackScopeLastUpdateTime = 0.0;
+        m_lastPlaybackAudioSyncFrame = -1;
+        m_lastPlaybackAudioSyncTime = 0.0;
     }
     selectDebayerAlgorithm();
     applyEffectiveDualIsoPlaybackSettings();
@@ -15378,6 +15618,7 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     {
         beginPlaybackSmokeTelemetry();
         beginPlayToFirstFrameMeasurement();
+        m_playbackScopeLastUpdateTime = 0.0;
         requestFrameRefresh( true, "play-start" );
         m_playbackFrameAdvancePending = true;
         m_lastPlayStartPrerollRequested = primePlaybackCacheOnPlayStart();
@@ -16490,61 +16731,104 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     }
     updatePlaybackQualityIndicator();
 
+    m_lastDrawFrameReadyScopesMs = 0.0;
     if( ui->actionShowEditArea->isChecked() )
     {
         const double scopes_start = mlv_stage_timing_now();
-        bool under = false;
-        bool over = false;
-        if( ( underOver & 0x01 ) == 0x01 ) under = true;
-        if( ( underOver & 0x02 ) == 0x02 ) over = true;
+        bool updateScopesNow = true;
+        if( ui->actionPlay->isChecked() )
+        {
+            const int intervalMs = playbackScopeUpdateIntervalMs();
+            updateScopesNow =
+                intervalMs <= 0
+             || m_playbackScopeLastUpdateTime <= 0.0
+             || ( scopes_start - m_playbackScopeLastUpdateTime ) * 1000.0
+                >= static_cast<double>( intervalMs );
+        }
 
-        if( ui->actionShowHistogram->isChecked() )
+        if( updateScopesNow )
         {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
-                                      readyFrame.renderedImageWidth,
-                                      readyFrame.renderedImageHeight,
-                                      under,
-                                      over,
-                                      ScopesLabel::ScopeHistogram );
+            bool under = false;
+            bool over = false;
+            if( ( underOver & 0x01 ) == 0x01 ) under = true;
+            if( ( underOver & 0x02 ) == 0x02 ) over = true;
+
+            if( ui->actionShowHistogram->isChecked() )
+            {
+                ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                          readyFrame.renderedImageWidth,
+                                          readyFrame.renderedImageHeight,
+                                          under,
+                                          over,
+                                          ScopesLabel::ScopeHistogram );
+            }
+            else if( ui->actionShowWaveFormMonitor->isChecked() )
+            {
+                ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                          readyFrame.renderedImageWidth,
+                                          readyFrame.renderedImageHeight,
+                                          under,
+                                          over,
+                                          ScopesLabel::ScopeWaveForm );
+            }
+            else if( ui->actionShowParade->isChecked() )
+            {
+                ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                          readyFrame.renderedImageWidth,
+                                          readyFrame.renderedImageHeight,
+                                          under,
+                                          over,
+                                          ScopesLabel::ScopeRgbParade);
+            }
+            else if( ui->actionShowVectorScope->isChecked() )
+            {
+                ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
+                                          readyFrame.renderedImageWidth,
+                                          readyFrame.renderedImageHeight,
+                                          under,
+                                          over,
+                                          ScopesLabel::ScopeVectorScope );
+            }
+            m_playbackScopeLastUpdateTime = mlv_stage_timing_now();
+            ++m_playbackScopeUpdateCount;
+            m_lastDrawFrameReadyScopesMs =
+                (m_playbackScopeLastUpdateTime - scopes_start) * 1000.0;
+            mlv_stage_timing_note_elapsed("drawFrameReady.scopes", displayFrame, m_lastDrawFrameReadyScopesMs);
         }
-        else if( ui->actionShowWaveFormMonitor->isChecked() )
+        else
         {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
-                                      readyFrame.renderedImageWidth,
-                                      readyFrame.renderedImageHeight,
-                                      under,
-                                      over,
-                                      ScopesLabel::ScopeWaveForm );
+            ++m_playbackScopeSkipCount;
         }
-        else if( ui->actionShowParade->isChecked() )
-        {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
-                                      readyFrame.renderedImageWidth,
-                                      readyFrame.renderedImageHeight,
-                                      under,
-                                      over,
-                                      ScopesLabel::ScopeRgbParade);
-        }
-        else if( ui->actionShowVectorScope->isChecked() )
-        {
-            ui->labelScope->setScope( const_cast<uint8_t *>( rgb8DisplaySource ),
-                                      readyFrame.renderedImageWidth,
-                                      readyFrame.renderedImageHeight,
-                                      under,
-                                      over,
-                                      ScopesLabel::ScopeVectorScope );
-        }
-        m_lastDrawFrameReadyScopesMs = (mlv_stage_timing_now() - scopes_start) * 1000.0;
-        mlv_stage_timing_note_elapsed("drawFrameReady.scopes", displayFrame, m_lastDrawFrameReadyScopesMs);
+    }
+    else
+    {
+        m_playbackScopeLastUpdateTime = 0.0;
     }
 
     const double overlay_start = mlv_stage_timing_now();
-    if( m_tryToSyncAudio && ui->actionAudioOutput->isChecked() && ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
+    if( m_tryToSyncAudio && m_pAudioPlayback && ui->actionAudioOutput->isChecked() && ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
     {
         m_tryToSyncAudio = false;
-        m_pAudioPlayback->stop();
-        m_pAudioPlayback->jumpToPos( m_newPosDropMode );
-        m_pAudioPlayback->play();
+        ++m_playbackAudioSyncRequestCount;
+        const double syncNow = mlv_stage_timing_now();
+        const int syncFrame = m_newPosDropMode;
+        const bool duplicateRecentSync =
+            m_lastPlaybackAudioSyncFrame == syncFrame
+         && m_lastPlaybackAudioSyncTime > 0.0
+         && ( syncNow - m_lastPlaybackAudioSyncTime ) * 1000.0 < 100.0;
+        if( duplicateRecentSync )
+        {
+            ++m_playbackAudioSyncSkippedCount;
+        }
+        else
+        {
+            m_lastPlaybackAudioSyncFrame = syncFrame;
+            m_lastPlaybackAudioSyncTime = syncNow;
+            ++m_playbackAudioSyncAppliedCount;
+            m_pAudioPlayback->stop();
+            m_pAudioPlayback->jumpToPos( syncFrame );
+            m_pAudioPlayback->play();
+        }
     }
 
     drawFrameNumberLabel( static_cast<int>(displayFrame) );
