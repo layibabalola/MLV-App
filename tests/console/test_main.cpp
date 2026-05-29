@@ -2,11 +2,16 @@
 #include "../common/repo_paths.h"
 #include "../common/test_artifacts.h"
 #include "../common/test_runtime.h"
+#include "../../platform/qt/PlaybackQualityPolicy.h"
 
 #include <QCoreApplication>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
+#include <QSettings>
+#include <QStringList>
+#include <QVariant>
 
 #include <iostream>
 #include <map>
@@ -46,10 +51,45 @@ static bool compare_against_golden(const QString & golden_path, std::string * er
     return true;
 }
 
+class PlaybackSettingsSnapshot
+{
+public:
+    PlaybackSettingsSnapshot()
+    {
+        QSettings set( QSettings::UserScope,
+                       PlaybackQualitySettings::kOrganization(),
+                       PlaybackQualitySettings::kApplication() );
+        set.beginGroup(QStringLiteral("Playback"));
+        const QStringList keys = set.allKeys();
+        for (const QString & key : keys) {
+            m_values.insert(key, set.value(key));
+        }
+        set.endGroup();
+    }
+
+    ~PlaybackSettingsSnapshot()
+    {
+        QSettings set( QSettings::UserScope,
+                       PlaybackQualitySettings::kOrganization(),
+                       PlaybackQualitySettings::kApplication() );
+        set.beginGroup(QStringLiteral("Playback"));
+        set.remove(QString());
+        for (auto it = m_values.constBegin(); it != m_values.constEnd(); ++it) {
+            set.setValue(it.key(), it.value());
+        }
+        set.endGroup();
+        set.sync();
+    }
+
+private:
+    QMap<QString, QVariant> m_values;
+};
+
 int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
     QCoreApplication app(argc, argv);
+    PlaybackSettingsSnapshot playback_settings_snapshot;
 
     std::string hash_output_path;
     std::string test_filter;

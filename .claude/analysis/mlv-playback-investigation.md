@@ -2536,3 +2536,39 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / low risk: after the user's next smoke, compare `avg_mix_ms`, `avg_llrawproc_dual_iso_ms`, and `presented_fps` against the `0xe78c` session.
 2. Medium impact / low risk: if the cache misses, instrument exact mix-curve keys and hit/miss counters in smoke logs.
 3. Medium impact / medium risk: if mix improves but FPS remains about `4`, target the remaining `avg_processing_ms` and `avg_processing_core_ms` buckets next.
+
+## 2026-05-29 - manual smoke follow-up: noise reduction determinism
+
+### Verified locally
+
+- The latest normal GUI smoke in `C:\Users\obabalola\AppData\Roaming\magiclantern\MLVApp\logs\mlvapp-20260529.log` is process `0x1f1f4`, launched at `2026-05-29T05:47:14Z` from `platform\qt\build-release\release\MLVApp.exe`.
+- The smoke used `MLVAPP_PLAYBACK_MAX_THREADS=6`, `MLVAPP_PLAYBACK_SMOKE_TELEMETRY=1`, x1 scale, scopes on, and later Quality mode (`quality_mode=1`).
+- Quality-mode sessions showed the mix-cache win was unstable:
+  - sessions `8-10`: `presented_fps=4.689-4.832`, `avg_mix_ms=12.027-12.115`.
+  - final session `11`: `presented_fps=3.945`, `avg_mix_ms=63.316`, `avg_llrawproc_dual_iso_ms=95.842`.
+- `compute_black_noise()` had OpenMP loops updating shared `black`, `num`, and `stdev` accumulators without reductions. Added explicit OpenMP reductions for those accumulators so the noise estimate feeding full20 reconstruction is deterministic under multi-threaded playback.
+- Added a console-suite `PlaybackSettingsSnapshot` guard so automated console tests no longer leave the user's GUI `Playback/QualityMode` and `Playback/ScaleFactorOverride` registry settings changed.
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`.
+- Visible release profile, x1 Quality, 6 threads, `large_dual_iso.mlv` + `large_dual_iso_hq.marxml`:
+  - no scope: `7.497 fps` including cold first frame; warm frames `8.666 fps`, warm `dual_iso_full20_total_ms=65.600`, warm `mix_ms=38.467`.
+  - histogram requested: `7.194 fps` including cold first frame; warm frames `8.482 fps`, warm `dual_iso_full20_total_ms=66.067`, warm `mix_ms=36.600`.
+- Regression checks:
+  - `git diff --check` reports no whitespace errors, only Git CRLF checkout notices.
+  - full console suite passed: `81` tests, `301` assertions, `26` expected profile/batch-exe skips, `0` failures; registry before/after stayed `QualityMode=1`, `ScaleFactorOverride=1`.
+  - focused Dual ISO pipeline checks passed individually: `TinyDualIsoFullFramesMatchGolden`, `HQ_FullBlendAvx2ByteIdentity`, `HQ_AliasMapAvx2ByteIdentity`, and `PhaseE1_AMaZEEdgeDirectionAvx2ByteIdentity`.
+
+### Cross-checked from prior analysis
+
+- This is both a correctness and performance fix: the old shared accumulators could change `dark_noise_ev` / `lowiso_dr` from frame to frame on a CPU-bound VM, which can defeat exact mix-curve reuse and produce unstable HQ playback cost.
+- A float32 mix-curve prototype was measured and reverted because repeat profiles did not show a clear average speedup over the reduction-only fix.
+
+### Needs runtime profiling
+
+- Have the user rerun the normal GUI smoke from the rebuilt release with `MLVAPP_PLAYBACK_SMOKE_TELEMETRY=1`, x1 scale, and Quality mode.
+- Judge success by whether `playback_smoke.dual_iso_full20_summary avg_mix_ms` stays below the old `~63-83 ms` fallback band and whether `presented_fps` stays above the prior `3-4 fps` range.
+
+### Ranked next steps
+
+1. High impact / low risk: inspect the user's next smoke log before adding more code; this fix specifically targets the observed instability rather than a synthetic-only path.
+2. Medium impact / medium effort: if `mix_ms` remains dominant, add internal `mix_images()` telemetry around half-res blend, alias-map filtering, overexposure map, and chroma smooth before changing math.
+3. Medium impact / higher risk: prototype alias-map filtering or overexposure-map AVX2 only behind byte-identity pipeline coverage, because these touch visible HQ reconstruction details.
