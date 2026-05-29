@@ -500,6 +500,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("debayer_wb_undo_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("debayer_pipeline_other_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processing_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("processing_chroma_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("processing_sharpen_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("processing_grain_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processing_other_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processing_core_other_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("processed16_total_ms")));
@@ -597,6 +600,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         require_processing_timing_field(sample, "processing_denoise_ms", &processing_max_substage_ms);
         require_processing_timing_field(sample, "processing_rbf_ms", &processing_max_substage_ms);
         require_processing_timing_field(sample, "processing_ca_ms", &processing_max_substage_ms);
+        require_processing_timing_field(sample, "processing_chroma_ms", &processing_max_substage_ms);
+        require_processing_timing_field(sample, "processing_sharpen_ms", &processing_max_substage_ms);
+        require_processing_timing_field(sample, "processing_grain_ms", &processing_max_substage_ms);
         require_processing_timing_field(sample, "processing_core_levels_ms", &processing_max_substage_ms);
         require_processing_timing_field(sample, "processing_core_color_ms", &processing_max_substage_ms);
         require_processing_timing_field(sample, "processing_core_creative_ms", &processing_max_substage_ms);

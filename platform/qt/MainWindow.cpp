@@ -15082,6 +15082,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDebayerExclusiveSumMs = 0.0;
     m_playbackSmokeProcessingSumMs = 0.0;
     m_playbackSmokeProcessingCoreSumMs = 0.0;
+    m_playbackSmokeProcessingChromaSumMs = 0.0;
+    m_playbackSmokeProcessingSharpenSumMs = 0.0;
+    m_playbackSmokeProcessingGrainSumMs = 0.0;
     m_playbackSmokeProcessingDirect8MatrixSumMs = 0.0;
     m_playbackSmokeProcessingDirect8GammaSumMs = 0.0;
     m_playbackSmokeProcessingDirect8CurvesSumMs = 0.0;
@@ -15249,6 +15252,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_ms" );
     const double processingCoreMs =
         telemetryDoubleValue( timing, "processing_core_ms" );
+    const double processingChromaMs =
+        telemetryDoubleValue( timing, "processing_chroma_ms" );
+    const double processingSharpenMs =
+        telemetryDoubleValue( timing, "processing_sharpen_ms" );
+    const double processingGrainMs =
+        telemetryDoubleValue( timing, "processing_grain_ms" );
     const double direct8MatrixMs =
         telemetryDoubleValue( timing, "processing_direct8_matrix_ms" );
     const double direct8GammaMs =
@@ -15308,6 +15317,9 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeDebayerExclusiveSumMs += debayerExclusiveMs;
     m_playbackSmokeProcessingSumMs += processingMs;
     m_playbackSmokeProcessingCoreSumMs += processingCoreMs;
+    m_playbackSmokeProcessingChromaSumMs += processingChromaMs;
+    m_playbackSmokeProcessingSharpenSumMs += processingSharpenMs;
+    m_playbackSmokeProcessingGrainSumMs += processingGrainMs;
     m_playbackSmokeProcessingDirect8MatrixSumMs += direct8MatrixMs;
     m_playbackSmokeProcessingDirect8GammaSumMs += direct8GammaMs;
     m_playbackSmokeProcessingDirect8CurvesSumMs += direct8CurvesMs;
@@ -15383,12 +15395,14 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "llrawproc_dual_iso_ms=%7 llrawproc_chroma_smooth_ms=%8 "
                    "llrawproc_other_ms=%9 debayered_frame_ms=%10 "
                    "debayer_exclusive_ms=%11 processing_ms=%12 processing_core_ms=%13 "
-                   "direct8_matrix_ms=%14 direct8_gamma_ms=%15 direct8_curves_ms=%16 "
-                   "processed16_ms=%17 processed16_for_8bit_ms=%18 "
-                   "processed16_to_8bit_ms=%19 playback_scale_ms=%20 "
-                   "draw_image_ms=%21 draw_present_ms=%22 draw_advance_ms=%23 "
-                   "draw_scopes_ms=%24 direct8=%25 processed8_prefetch=%26 "
-                   "raw_prefetch=%27" )
+                   "processing_chroma_ms=%14 processing_sharpen_ms=%15 "
+                   "processing_grain_ms=%16 direct8_matrix_ms=%17 "
+                   "direct8_gamma_ms=%18 direct8_curves_ms=%19 "
+                   "processed16_ms=%20 processed16_for_8bit_ms=%21 "
+                   "processed16_to_8bit_ms=%22 playback_scale_ms=%23 "
+                   "draw_image_ms=%24 draw_present_ms=%25 draw_advance_ms=%26 "
+                   "draw_scopes_ms=%27 direct8=%28 processed8_prefetch=%29 "
+                   "raw_prefetch=%30" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( rawUint16Ms, 0, 'f', 3 )
@@ -15402,6 +15416,9 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( debayerExclusiveMs, 0, 'f', 3 )
                    .arg( processingMs, 0, 'f', 3 )
                    .arg( processingCoreMs, 0, 'f', 3 )
+                   .arg( processingChromaMs, 0, 'f', 3 )
+                   .arg( processingSharpenMs, 0, 'f', 3 )
+                   .arg( processingGrainMs, 0, 'f', 3 )
                    .arg( direct8MatrixMs, 0, 'f', 3 )
                    .arg( direct8GammaMs, 0, 'f', 3 )
                    .arg( direct8CurvesMs, 0, 'f', 3 )
@@ -15610,16 +15627,18 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_llrawproc_chroma_smooth_ms=%7 avg_llrawproc_other_ms=%8 "
                "avg_debayered_frame_ms=%9 avg_debayer_exclusive_ms=%10 "
                "avg_processing_ms=%11 avg_processing_core_ms=%12 "
-               "avg_direct8_matrix_ms=%13 avg_direct8_gamma_ms=%14 "
-               "avg_direct8_curves_ms=%15 avg_processed16_ms=%16 "
-               "avg_processed16_for_8bit_ms=%17 avg_processed16_to_8bit_ms=%18 "
-               "avg_playback_scale_ms=%19 avg_draw_image_ms=%20 "
-               "avg_draw_present_ms=%21 avg_draw_advance_ms=%22 "
-               "avg_draw_scopes_ms=%23 processed8_direct_path_frames=%24 "
-               "processed8_prefetch_hits=%25 raw_prefetch_hits=%26 "
-               "queued_playback_drops=%27 max_queued_playback_drops=%28 "
-               "scope_updates=%29 scope_skips=%30 audio_sync_requests=%31 "
-               "audio_sync_applied=%32 audio_sync_skipped=%33" )
+               "avg_processing_chroma_ms=%13 avg_processing_sharpen_ms=%14 "
+               "avg_processing_grain_ms=%15 avg_direct8_matrix_ms=%16 "
+               "avg_direct8_gamma_ms=%17 avg_direct8_curves_ms=%18 "
+               "avg_processed16_ms=%19 avg_processed16_for_8bit_ms=%20 "
+               "avg_processed16_to_8bit_ms=%21 avg_playback_scale_ms=%22 "
+               "avg_draw_image_ms=%23 avg_draw_present_ms=%24 "
+               "avg_draw_advance_ms=%25 avg_draw_scopes_ms=%26 "
+               "processed8_direct_path_frames=%27 processed8_prefetch_hits=%28 "
+               "raw_prefetch_hits=%29 queued_playback_drops=%30 "
+               "max_queued_playback_drops=%31 scope_updates=%32 scope_skips=%33 "
+               "audio_sync_requests=%34 audio_sync_applied=%35 "
+               "audio_sync_skipped=%36" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -15632,6 +15651,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeDebayerExclusiveSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingChromaSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingSharpenSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingGrainSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingDirect8MatrixSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingDirect8GammaSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingDirect8CurvesSumMs ), 0, 'f', 3 )

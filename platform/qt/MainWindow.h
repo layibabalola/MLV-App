@@ -868,6 +868,9 @@ private:
     double m_playbackSmokeDebayerExclusiveSumMs = 0.0;
     double m_playbackSmokeProcessingSumMs = 0.0;
     double m_playbackSmokeProcessingCoreSumMs = 0.0;
+    double m_playbackSmokeProcessingChromaSumMs = 0.0;
+    double m_playbackSmokeProcessingSharpenSumMs = 0.0;
+    double m_playbackSmokeProcessingGrainSumMs = 0.0;
     double m_playbackSmokeProcessingDirect8MatrixSumMs = 0.0;
     double m_playbackSmokeProcessingDirect8GammaSumMs = 0.0;
     double m_playbackSmokeProcessingDirect8CurvesSumMs = 0.0;

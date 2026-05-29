@@ -2459,7 +2459,8 @@ static inline void amaze_interpolate(struct raw_info raw_info,
     float** red = scratch->amaze_red_rows;
     float** green = scratch->amaze_green_rows;
     float** blue = scratch->amaze_blue_rows;
-    memset(squeezed, 0, h * sizeof(int));
+    for (int y = 0; y < h; y++)
+        squeezed[y] = -1;
     memset(scratch->amaze_rawData_storage, 0, (size_t)h * (size_t)wx * sizeof(float));
     
     /* squeeze the dark image by deleting fields from the bright exposure */
@@ -2471,19 +2472,8 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         
         if (yh < 0) /* make sure we start at the same parity (RGGB cell) */
             yh = y;
-        
-        for (int x = 0; x < w; x++)
-        {
-            int p = raw_get_pixel32(x, y);
-            
-            if (x%2 != y%2) /* divide green channel by 2 to approximate the final WB better */
-                p = (p - black) / 2 + black;
-            
-            rawData[yh][x] = p;
-        }
-        
+
         squeezed[y] = yh;
-        
         yh++;
     }
     
@@ -2496,21 +2486,36 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         
         if (yh < 0) /* make sure we start with the same parity (RGGB cell) */
             yh = h/4*2 + y;
-        
-        for (int x = 0; x < w; x++)
-        {
-            int p = raw_get_pixel32(x, y);
-            
-            if (x%2 != y%2) /* divide green channel by 2 to approximate the final WB better */
-                p = (p - black) / 2 + black;
-            
-            rawData[yh][x] = p;
-        }
-        
+
         squeezed[y] = yh;
-        
         yh++;
         if (yh >= h) break; /* just in case */
+    }
+
+    #pragma omp parallel for
+    for (int y = 0; y < h; y ++)
+    {
+        if (squeezed[y] < 0)
+            continue;
+
+        const uint32_t * src_row = raw_buffer_32 + (size_t)y * (size_t)w;
+        float * raw_row = rawData[squeezed[y]];
+        for (int x = 0; x < w; x++)
+        {
+            int p = src_row[x];
+
+            if (x%2 != y%2) /* divide green channel by 2 to approximate the final WB better */
+                p = (p - black) / 2 + black;
+
+            raw_row[x] = p;
+        }
+    }
+
+    #pragma omp parallel for
+    for (int y = 0; y < h; y ++)
+    {
+        if (squeezed[y] < 0)
+            squeezed[y] = 0;
     }
 
     // Multithreaded debayer
@@ -3185,21 +3190,39 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
 #endif
     /* mixing curve */
     double max_ev = log2(white/64 - black/64);
+    const size_t mix_curve_required = (size_t)(1u << 20);
+    const size_t previous_mix_curve_capacity = scratch ? scratch->mix_curve_capacity : 0;
     double * mix_curve = scratch
-        ? ensure_double_scratch_buffer(&scratch->mix_curve, &scratch->mix_curve_capacity, (1u << 20))
+        ? ensure_double_scratch_buffer(&scratch->mix_curve, &scratch->mix_curve_capacity, mix_curve_required)
         : NULL;
     if (!mix_curve)
     {
         return 0;
     }
-    
-    #pragma omp parallel for
-    for (int i = 0; i < 1<<20; i++)
+
+    const int mix_curve_reusable =
+        scratch->mix_curve_valid
+        && previous_mix_curve_capacity >= mix_curve_required
+        && scratch->mix_curve_last_black == black
+        && scratch->mix_curve_last_white == white
+        && scratch->mix_curve_last_corr_ev == corr_ev
+        && scratch->mix_curve_last_lowiso_dr == lowiso_dr;
+
+    if (!mix_curve_reusable)
     {
-        double ev = log2(MAX(i/64.0 - black/64.0, 1)) + corr_ev;
-        double c = -cos(MAX(MIN(ev-(max_ev-overlap),overlap),0)*M_PI/overlap);
-        double k = (c+1) / 2;
-        mix_curve[i] = k;
+        #pragma omp parallel for
+        for (int i = 0; i < 1<<20; i++)
+        {
+            double ev = log2(MAX(i/64.0 - black/64.0, 1)) + corr_ev;
+            double c = -cos(MAX(MIN(ev-(max_ev-overlap),overlap),0)*M_PI/overlap);
+            double k = (c+1) / 2;
+            mix_curve[i] = k;
+        }
+        scratch->mix_curve_valid = 1;
+        scratch->mix_curve_last_black = black;
+        scratch->mix_curve_last_white = white;
+        scratch->mix_curve_last_corr_ev = corr_ev;
+        scratch->mix_curve_last_lowiso_dr = lowiso_dr;
     }
 
 
@@ -3643,17 +3666,13 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     stage_start = mlv_stage_timing_now();
     uint32_t* dark = scratch->dark;
     uint32_t* bright = scratch->bright;
-    memset(dark, 0, w * h * sizeof(uint32_t));
-    memset(bright, 0, w * h * sizeof(uint32_t));
     
     /* fullres image (minimizes aliasing) */
     uint32_t* fullres = scratch->fullres;
-    memset(fullres, 0, w * h * sizeof(uint32_t));
     uint32_t* fullres_smooth = fullres;
     
     /* halfres image (minimizes noise and banding) */
     uint32_t* halfres = scratch->halfres;
-    memset(halfres, 0, w * h * sizeof(uint32_t));
     uint32_t* halfres_smooth = halfres;
     
     if (chroma_smooth_method)
@@ -3667,14 +3686,27 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     
     /* overexposure map */
     uint16_t * overexposed = scratch->overexposed;
-    memset(overexposed, 0, w * h * sizeof(uint16_t));
     
     uint16_t* alias_map = NULL;
     if (use_alias_map)
     {
         alias_map = scratch->alias_map;
-        memset(alias_map, 0, w * h * sizeof(uint16_t));
         g_dualiso_alias_map_taken_count++;
+    }
+
+    const int pixel_count = w * h;
+#pragma omp parallel for
+    for (int i = 0; i < pixel_count; i++)
+    {
+        dark[i] = 0;
+        bright[i] = 0;
+        fullres[i] = 0;
+        halfres[i] = 0;
+        overexposed[i] = 0;
+        if (alias_map)
+        {
+            alias_map[i] = 0;
+        }
     }
     g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
     

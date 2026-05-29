@@ -1995,6 +1995,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const double processingDenoiseMs = processingGetLastDenoiseMilliseconds();
     const double processingRbfMs = processingGetLastRbfMilliseconds();
     const double processingCaMs = processingGetLastCaMilliseconds();
+    const double processingChromaMs = processingGetLastChromaMilliseconds();
+    const double processingSharpenMs = processingGetLastSharpenMilliseconds();
+    const double processingGrainMs = processingGetLastGrainMilliseconds();
     const double processingKnownMs =
         processingSetupMs +
         processingShadowsHighlightsPrepMs +
@@ -2002,7 +2005,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
         processingCoreMs +
         processingDenoiseMs +
         processingRbfMs +
-        processingCaMs;
+        processingCaMs +
+        processingChromaMs +
+        processingSharpenMs +
+        processingGrainMs;
     const double processingOtherMs = qMax( 0.0, processingMs - processingKnownMs );
     const double processingCoreLevelsMs =
         processingGetLastCoreLevelsMilliseconds();
@@ -2194,6 +2200,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingRbfMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_ca_ms"),
                                       processingCaMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_chroma_ms"),
+                                      processingChromaMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_sharpen_ms"),
+                                      processingSharpenMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_grain_ms"),
+                                      processingGrainMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_other_ms"),
                                       processingOtherMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_levels_ms"),

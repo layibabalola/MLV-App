@@ -2467,3 +2467,42 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: inspect and optimize `mix_images()` first; it is the largest warm Dual ISO substage on the visible fixture.
 2. Medium impact / low-to-medium risk: reduce scratch clear cost by narrowing `memset` scope or reusing known-overwritten buffers, guarded by pixel parity tests.
 3. Medium impact / medium risk: split `mix_images()` into internal timing buckets before changing math if the user's real clip shows different dominance than the fixture.
+
+## 2026-05-29 - x1 Quality CPU playback optimizations
+
+### Verified locally
+
+- Implemented the next x1 Quality CPU-side optimization batch:
+  - `mix_images()` now reuses its 1M-entry blend curve when the exact black/white/correction/DR inputs match the prior call on the same worker scratch.
+  - AMaZE squeeze input preparation now computes the same squeeze mapping first, then copies mapped rows in parallel without remapping skipped fallback rows.
+  - Dual ISO full20 scratch clears now zero the active per-pixel buffers in one parallel pass.
+  - The recursive bilateral filter horizontal passes now run per-row in parallel, and its range-table setup no longer races on a shared loop temporary.
+  - Processing telemetry now splits chroma, sharpen, and grain timing out of the previous `processing_other_ms` bucket and includes those fields in profile/smoke JSON.
+- Visible, non-headless release profile artifacts live under `.claude-state/profiling/20260529-x1-quality-rbf-row-parallel/`.
+- Baseline for this pass, `large_dual_iso.mlv` + `large_dual_iso_hq.marxml`, x1 Quality, full Dual ISO enabled with `MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE=1`, 6 threads:
+  - `large_dual_iso_hq_x1_threads6_full_dual_iso_visible.json`: average `latency_ms 279.641`, average `cadence_ms 257.702`, warm `render_thread_total_ms 219.000`, warm `dual_iso_full20_total_ms 200.556`, warm `mix_images_ms 45.111`, warm paint latency `243.630`.
+- Final release after this batch, same visible setup:
+  - `large_dual_iso_hq_x1_threads6_full_dual_iso_final_visible.json`: average `latency_ms 229.433`, average `cadence_ms 212.648`, warm `render_thread_total_ms 178.222`, warm `dual_iso_full20_total_ms 163.556`, warm `mix_images_ms 28.444`, warm paint latency `201.236`.
+  - This is about `3.88 fps` to `4.70 fps` by cadence, a roughly `21%` GUI-playback cadence improvement on the same x1 full-quality fixture.
+- App-backed and targeted regression coverage after the final rebuild:
+  - `tests\build-ci-console\release\console_tests.exe` with `MLVAPP_PROFILE_EXE` and `MLVAPP_BATCH_EXE` pointed at the rebuilt release app: `81` tests, `1210` assertions, `0` skips, `0` failures.
+  - Targeted pipeline checks passed for `ProcessingFilters.RbfFilterReuseMatchesFreshResultAfterResize`, `ProcessingFilters.RbfFilterReuseStaysStableAfterStateChanges`, `DualIsoPipeline.TinyDualIsoFullFramesMatchGolden`, `DualIsoPipeline.HQ_FullBlendAvx2ByteIdentity`, `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity`, and `DualIsoPipeline.PhaseE1_AMaZEEdgeDirectionAvx2ByteIdentity`.
+- Release executable after rebuild: `platform/qt/build-release/release/MLVApp.exe`, timestamp `2026-05-28 23:35:49`, size `8288768`, SHA256 `152F87FC6306014405C8A023A2A48ABB9C1A93110FE4A9C4430192D29DE477D4`.
+
+### Cross-checked from prior analysis
+
+- The x1 Quality bottleneck is still CPU-side full Dual ISO and processing work, not GUI paint or scale-factor logic.
+- The current batch keeps authored quality policy intact. It changes reuse and scheduling of existing work, and adds telemetry; it does not intentionally change Dual ISO output.
+- A temporary regression in the AMaZE row-copy prototype was caught by the app-backed DNG golden and fixed before final profiling. The fix preserves the old fallback behavior for unmapped squeeze rows.
+
+### Needs runtime profiling
+
+- After the next user smoke, inspect `playback_smoke.cpu_summary`, `playback_smoke.dual_iso_full20_summary`, and the new `avg_processing_chroma_ms`, `avg_processing_sharpen_ms`, and `avg_processing_grain_ms` fields.
+- If the real clip still shows high `avg_processing_total_ms` with low direct8 usage, profile the Look Assist/RBF path next.
+- If the real clip still shows high `avg_dual_iso_full20_interp_ms`, add finer AMaZE substage timing before changing interpolation internals.
+
+### Ranked next steps
+
+1. High impact / medium effort: use the new smoke buckets from the user's real clip to choose the next target automatically; do not guess from the fixture if the bucket mix differs.
+2. Medium impact / low risk: if mix remains dominant, add internal `mix_images()` telemetry around LUT, blend loop, chroma smooth, and alias map.
+3. Medium impact / medium risk: if interpolation remains dominant, split AMaZE timing and only then consider deeper interpolation reuse or thread-scheduling changes.
