@@ -241,7 +241,7 @@ static void mix_images_row_avx2(uint32_t * halfres,
                                  const uint32_t * dark,
                                  const int * raw2ev_lut,
                                  const int * ev2raw_lut,
-                                 const double * mix_curve,
+                                 const float * mix_curve,
                                  int total)
 {
     const __m256i mask20 = _mm256_set1_epi32(0xFFFFF);
@@ -261,13 +261,7 @@ static void mix_images_row_avx2(uint32_t * halfres,
         __m256 dev = _mm256_cvtepi32_ps(dev_i);
 
         __m256i b_idx = _mm256_and_si256(b, mask20);
-        __m128i b_idx_lo = _mm256_castsi256_si128(b_idx);
-        __m128i b_idx_hi = _mm256_extracti128_si256(b_idx, 1);
-        __m256d k_lo_d = _mm256_i32gather_pd(mix_curve, b_idx_lo, 8);
-        __m256d k_hi_d = _mm256_i32gather_pd(mix_curve, b_idx_hi, 8);
-        __m128 k_lo = _mm256_cvtpd_ps(k_lo_d);
-        __m128 k_hi = _mm256_cvtpd_ps(k_hi_d);
-        __m256 k = _mm256_insertf128_ps(_mm256_castps128_ps256(k_lo), k_hi, 1);
+        __m256 k = _mm256_i32gather_ps(mix_curve, b_idx, 4);
         k = _mm256_min_ps(_mm256_max_ps(k, v_zero), v_one);
 
         /* mixed = bev*(1-k) + dev*k = bev + k*(dev - bev) */

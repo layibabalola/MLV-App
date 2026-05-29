@@ -120,6 +120,7 @@ static uint64_t file_get_pos(FILE *stream)
 #define MLV_RAW_UINT16_PREFETCH_READY 1
 #define MLV_RAW_UINT16_PREFETCH_DECODING 2
 #define MLV_RAW_UINT16_PREFETCH_LOOKAHEAD 2
+#define MLV_RAW_UINT16_PREFETCH_MAX_PREDICTIVE_STRIDE 32
 #define MLV_PROCESSED_8BIT_PREFETCH_EMPTY 0
 #define MLV_PROCESSED_8BIT_PREFETCH_READY 1
 #define MLV_PROCESSED_8BIT_PREFETCH_RENDERING 2
@@ -737,6 +738,7 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
 static void mlv_reset_raw_uint16_prefetch_locked(mlvObject_t * video)
 {
     video->raw_uint16_prefetch_request_pending = 0;
+    video->raw_uint16_prefetch_request_stride = 1;
     memset(video->raw_uint16_prefetch_slot_state, 0, sizeof(video->raw_uint16_prefetch_slot_state));
     memset(video->raw_uint16_prefetch_slot_frame, 0, sizeof(video->raw_uint16_prefetch_slot_frame));
     memset(video->raw_uint16_prefetch_slot_generation, 0, sizeof(video->raw_uint16_prefetch_slot_generation));
@@ -877,15 +879,29 @@ static void mlv_raw_uint16_prefetch_note_request(mlvObject_t * video, uint64_t f
         pthread_mutex_lock(&video->raw_uint16_prefetch_mutex);
     }
 
-    if (video->raw_uint16_prefetch_last_request_frame + 1 != frameIndex
-        && video->raw_uint16_prefetch_last_request_frame != frameIndex)
+    uint32_t requestStride = 1;
+    if (frameIndex < video->raw_uint16_prefetch_last_request_frame)
     {
         ++video->raw_uint16_prefetch_generation;
         mlv_reset_raw_uint16_prefetch_locked(video);
     }
+    else if (frameIndex > video->raw_uint16_prefetch_last_request_frame)
+    {
+        uint64_t delta = frameIndex - video->raw_uint16_prefetch_last_request_frame;
+        if (delta > MLV_RAW_UINT16_PREFETCH_MAX_PREDICTIVE_STRIDE)
+        {
+            ++video->raw_uint16_prefetch_generation;
+            mlv_reset_raw_uint16_prefetch_locked(video);
+        }
+        else
+        {
+            requestStride = (uint32_t)MAX(delta, 1);
+        }
+    }
 
     video->raw_uint16_prefetch_last_request_frame = frameIndex;
     video->raw_uint16_prefetch_request_frame = frameIndex;
+    video->raw_uint16_prefetch_request_stride = requestStride;
     video->raw_uint16_prefetch_request_pending = 1;
     pthread_cond_signal(&video->raw_uint16_prefetch_cond);
     pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
@@ -918,14 +934,20 @@ static void * mlv_raw_uint16_prefetch_thread_main(void * opaque)
         }
 
         uint64_t baseFrame = video->raw_uint16_prefetch_request_frame;
+        uint32_t requestStride = video->raw_uint16_prefetch_request_stride;
         uint32_t generation = video->raw_uint16_prefetch_generation;
         video->raw_uint16_prefetch_request_pending = 0;
         video->raw_uint16_prefetch_worker_busy = 1;
         pthread_mutex_unlock(&video->raw_uint16_prefetch_mutex);
 
+        if (requestStride == 0)
+        {
+            requestStride = 1;
+        }
+
         for (uint32_t offset = 1; offset <= MLV_RAW_UINT16_PREFETCH_LOOKAHEAD; ++offset)
         {
-            uint64_t targetFrame = baseFrame + offset;
+            uint64_t targetFrame = baseFrame + ((uint64_t)offset * requestStride);
             if (targetFrame >= getMlvFrames(video))
             {
                 break;
@@ -4646,6 +4668,7 @@ mlvObject_t * initMlvObject()
     video->raw_uint16_prefetch_worker_busy = 0;
     video->raw_uint16_prefetch_request_frame = 0;
     video->raw_uint16_prefetch_last_request_frame = 0;
+    video->raw_uint16_prefetch_request_stride = 1;
     video->raw_uint16_prefetch_generation = 1;
     video->raw_uint16_prefetch_cache = NULL;
     video->raw_uint16_prefetch_cache_words = 0;

@@ -50,6 +50,10 @@ class CRBFilterPlain
 
 	float*		m_up_pass_color = nullptr;
 	float*		m_up_pass_factor = nullptr;
+	float*		m_range_table = nullptr;
+	float		m_range_table_alpha = 0.0f;
+	float		m_range_table_inv_sigma = 0.0f;
+	bool		m_range_table_valid = false;
 
     int getDiffFactor(const uint16_t* color1, const uint16_t* color2) const;
 

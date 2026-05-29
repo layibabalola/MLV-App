@@ -392,6 +392,13 @@ static int runPlaybackProfile(QApplication &app)
         QStringLiteral("0"));
     parser.addOption(startFrameOpt);
 
+    const QCommandLineOption frameStepOpt(
+        QStringLiteral("frame-step"),
+        QStringLiteral("Frame increment between profiled samples."),
+        QStringLiteral("count"),
+        QStringLiteral("1"));
+    parser.addOption(frameStepOpt);
+
     const QCommandLineOption scopeOpt(
         QStringLiteral("scope"),
         QStringLiteral("Optional live scope during profiling: none, histogram, waveform, parade, vectorscope."),
@@ -534,6 +541,13 @@ static int runPlaybackProfile(QApplication &app)
         return 2;
     }
 
+    const int frameStep = parser.value(frameStepOpt).toInt(&ok);
+    if (!ok || frameStep <= 0)
+    {
+        err << "[PROFILE] ERROR: --frame-step must be greater than 0.\n";
+        return 2;
+    }
+
     const uint64_t rawCacheMB = parser.value(rawCacheOpt).toULongLong(&ok);
     if (!ok)
     {
@@ -661,6 +675,7 @@ static int runPlaybackProfile(QApplication &app)
     options.outputPath = outputPath;
     options.startFrame = startFrame;
     options.frameCount = frameCount;
+    options.frameStep = frameStep;
     options.workerThreads = forcedThreads;
     options.forceWorkerThreads = !autoThreads;
     options.rawCacheMB = rawCacheMB;

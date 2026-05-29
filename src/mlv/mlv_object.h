@@ -259,6 +259,7 @@ typedef struct {
     int raw_uint16_prefetch_worker_busy;
     uint64_t raw_uint16_prefetch_request_frame;
     uint64_t raw_uint16_prefetch_last_request_frame;
+    uint32_t raw_uint16_prefetch_request_stride;
     uint32_t raw_uint16_prefetch_generation;
     uint16_t * raw_uint16_prefetch_cache;
     uint64_t raw_uint16_prefetch_cache_words;

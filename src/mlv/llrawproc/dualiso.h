@@ -56,14 +56,24 @@ typedef struct
     uint16_t * overexposed;
     uint16_t * alias_map;
     uint16_t * over_aux;
+    int * ev_raw2ev;
+    int * ev2raw_0;
     double * mix_curve[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    float * mix_curve_float[DUALISO_MIX_CURVE_CACHE_SLOTS];
     size_t pixel_capacity;
+    size_t ev_raw2ev_capacity;
+    size_t ev2raw_capacity;
+    int ev_lut_valid;
+    int ev_lut_black;
+    int ev_lut_white;
     size_t mix_curve_capacity[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    size_t mix_curve_float_capacity[DUALISO_MIX_CURVE_CACHE_SLOTS];
     int mix_curve_valid[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    int mix_curve_float_valid[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint32_t mix_curve_last_black[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint32_t mix_curve_last_white[DUALISO_MIX_CURVE_CACHE_SLOTS];
     double mix_curve_last_corr_ev[DUALISO_MIX_CURVE_CACHE_SLOTS];
-    double mix_curve_last_lowiso_dr[DUALISO_MIX_CURVE_CACHE_SLOTS];
+    double mix_curve_last_overlap[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint64_t mix_curve_last_used[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint64_t mix_curve_use_counter;
 
@@ -133,6 +143,10 @@ typedef struct
     double final_blend_ms;
     double convert16_ms;
     double other_ms;
+    double mix_curve_corr_ev;
+    double mix_curve_overlap;
+    int mix_curve_rebuilt;
+    int mix_curve_global_hit;
     int interp_method;
     int use_alias_map;
     int use_fullres;

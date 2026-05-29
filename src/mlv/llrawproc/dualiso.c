@@ -37,6 +37,8 @@
 #include "../../debug/StageTiming.h"
 
 #define EV_RESOLUTION 65536
+#define DUALISO_RAW2EV_LUT_COUNT (1u << 20)
+#define DUALISO_EV2RAW_LUT_COUNT (24u * EV_RESOLUTION)
 #ifndef M_PI
 #define M_PI 3.14159265358979323846 /* pi */
 #endif
@@ -64,6 +66,27 @@ static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_mean23_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_alias_map_taken_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_fullres_blend_taken_count = 0;
 static DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing = {0};
+
+enum
+{
+    DUALISO_GLOBAL_MIX_CURVE_CACHE_SLOTS = 4
+};
+
+typedef struct
+{
+    double * curve;
+    size_t capacity;
+    int valid;
+    uint32_t black;
+    uint32_t white;
+    double corr_ev;
+    double overlap;
+    uint64_t last_used;
+} dualiso_mix_curve_cache_entry_t;
+
+static dualiso_mix_curve_cache_entry_t g_mix_curve_cache[DUALISO_GLOBAL_MIX_CURVE_CACHE_SLOTS];
+static uint64_t g_mix_curve_cache_use_counter = 0;
+static pthread_mutex_t g_mix_curve_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void dualiso_debug_note_hq_path(int which)
 {
@@ -787,6 +810,13 @@ static double * ensure_double_scratch_buffer(double ** buffer, size_t * capacity
         : NULL;
 }
 
+static float * ensure_float_scratch_buffer(float ** buffer, size_t * capacity, size_t required_count)
+{
+    return ensure_reusable_scratch_buffer((void **)buffer, capacity, required_count, sizeof(float))
+        ? *buffer
+        : NULL;
+}
+
 static uint16_t * ensure_preview_output_buffer(dualiso_preview_scratch_t * scratch, size_t required_count)
 {
     return ensure_reusable_scratch_buffer((void **)&scratch->output_image,
@@ -1027,9 +1057,12 @@ void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
     free(scratch->overexposed);
     free(scratch->alias_map);
     free(scratch->over_aux);
+    free(scratch->ev_raw2ev);
+    free(scratch->ev2raw_0);
     for (int i = 0; i < DUALISO_MIX_CURVE_CACHE_SLOTS; i++)
     {
         free(scratch->mix_curve[i]);
+        free(scratch->mix_curve_float[i]);
     }
     free(scratch->histogram_match_dark);
     free(scratch->histogram_match_bright);
@@ -2343,6 +2376,47 @@ static inline void build_ev2raw_lut(int * raw2ev, int * ev2raw_0, int black, int
     //~ printf("%d %d %d %d %d %d %d *%d* %d %d %d %d %d\n", ev2raw[raw2ev[0]], ev2raw[raw2ev[16000]], ev2raw[raw2ev[32000]], ev2raw[raw2ev[131068]], ev2raw[raw2ev[131069]], ev2raw[raw2ev[131070]], ev2raw[raw2ev[131071]], ev2raw[raw2ev[131072]], ev2raw[raw2ev[131073]], ev2raw[raw2ev[131074]], ev2raw[raw2ev[131075]], ev2raw[raw2ev[131076]], ev2raw[raw2ev[132000]]);
 }
 
+static int ensure_scratch_ev_lut(dualiso_full20bit_scratch_t * scratch,
+                                 int black,
+                                 int white,
+                                 int ** raw2ev_out,
+                                 int ** ev2raw_out)
+{
+    if (!scratch || !raw2ev_out || !ev2raw_out)
+    {
+        return 0;
+    }
+
+    int * raw2ev = ensure_reusable_scratch_buffer((void **)&scratch->ev_raw2ev,
+                                                  &scratch->ev_raw2ev_capacity,
+                                                  DUALISO_RAW2EV_LUT_COUNT,
+                                                  sizeof(*scratch->ev_raw2ev))
+        ? scratch->ev_raw2ev
+        : NULL;
+    int * ev2raw_0 = ensure_reusable_scratch_buffer((void **)&scratch->ev2raw_0,
+                                                    &scratch->ev2raw_capacity,
+                                                    DUALISO_EV2RAW_LUT_COUNT,
+                                                    sizeof(*scratch->ev2raw_0))
+        ? scratch->ev2raw_0
+        : NULL;
+    if (!raw2ev || !ev2raw_0)
+    {
+        return 0;
+    }
+
+    if (!scratch->ev_lut_valid || scratch->ev_lut_black != black)
+    {
+        build_ev2raw_lut(raw2ev, ev2raw_0, black, white);
+        scratch->ev_lut_black = black;
+        scratch->ev_lut_white = white;
+        scratch->ev_lut_valid = 1;
+    }
+
+    *raw2ev_out = raw2ev;
+    *ev2raw_out = ev2raw_0 + 10 * EV_RESOLUTION;
+    return 1;
+}
+
 static inline double compute_noise(struct raw_info raw_info, uint16_t * image_data, double * noise_std, double * dark_noise, double * bright_noise, double * dark_noise_ev, double * bright_noise_ev)
 {
     double noise_avg = 0.0;
@@ -3156,14 +3230,133 @@ static inline int mix_curve_key_matches(const dualiso_full20bit_scratch_t * scra
                                         uint32_t black,
                                         uint32_t white,
                                         double corr_ev,
-                                        double lowiso_dr)
+                                        double overlap)
 {
     return scratch->mix_curve_valid[slot]
         && scratch->mix_curve_capacity[slot] >= required_count
         && scratch->mix_curve_last_black[slot] == black
         && scratch->mix_curve_last_white[slot] == white
         && scratch->mix_curve_last_corr_ev[slot] == corr_ev
-        && scratch->mix_curve_last_lowiso_dr[slot] == lowiso_dr;
+        && scratch->mix_curve_last_overlap[slot] == overlap;
+}
+
+static inline int global_mix_curve_key_matches(const dualiso_mix_curve_cache_entry_t * entry,
+                                               size_t required_count,
+                                               uint32_t black,
+                                               uint32_t white,
+                                               double corr_ev,
+                                               double overlap)
+{
+    return entry->valid
+        && entry->curve
+        && entry->capacity >= required_count
+        && entry->black == black
+        && entry->white == white
+        && entry->corr_ev == corr_ev
+        && entry->overlap == overlap;
+}
+
+static uint64_t next_global_mix_curve_use_locked(void)
+{
+    g_mix_curve_cache_use_counter++;
+    if (!g_mix_curve_cache_use_counter)
+    {
+        g_mix_curve_cache_use_counter = 1;
+    }
+    return g_mix_curve_cache_use_counter;
+}
+
+static int copy_mix_curve_from_global_cache(double * mix_curve,
+                                            size_t required_count,
+                                            uint32_t black,
+                                            uint32_t white,
+                                            double corr_ev,
+                                            double overlap)
+{
+    int copied = 0;
+    if (!mix_curve)
+    {
+        return 0;
+    }
+
+    pthread_mutex_lock(&g_mix_curve_cache_mutex);
+    const uint64_t use_counter = next_global_mix_curve_use_locked();
+    for (int slot = 0; slot < DUALISO_GLOBAL_MIX_CURVE_CACHE_SLOTS; slot++)
+    {
+        dualiso_mix_curve_cache_entry_t * entry = &g_mix_curve_cache[slot];
+        if (global_mix_curve_key_matches(entry, required_count, black, white, corr_ev, overlap))
+        {
+            memcpy(mix_curve, entry->curve, required_count * sizeof(*mix_curve));
+            entry->last_used = use_counter;
+            copied = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_mix_curve_cache_mutex);
+    return copied;
+}
+
+static void publish_mix_curve_to_global_cache(const double * mix_curve,
+                                              size_t required_count,
+                                              uint32_t black,
+                                              uint32_t white,
+                                              double corr_ev,
+                                              double overlap)
+{
+    if (!mix_curve)
+    {
+        return;
+    }
+
+    pthread_mutex_lock(&g_mix_curve_cache_mutex);
+    const uint64_t use_counter = next_global_mix_curve_use_locked();
+    int selected_slot = -1;
+    uint64_t oldest_use = UINT64_MAX;
+    for (int slot = 0; slot < DUALISO_GLOBAL_MIX_CURVE_CACHE_SLOTS; slot++)
+    {
+        dualiso_mix_curve_cache_entry_t * entry = &g_mix_curve_cache[slot];
+        if (global_mix_curve_key_matches(entry, required_count, black, white, corr_ev, overlap))
+        {
+            selected_slot = slot;
+            break;
+        }
+        if (!entry->valid)
+        {
+            selected_slot = slot;
+            break;
+        }
+        if (entry->last_used < oldest_use)
+        {
+            oldest_use = entry->last_used;
+            selected_slot = slot;
+        }
+    }
+
+    if (selected_slot >= 0)
+    {
+        dualiso_mix_curve_cache_entry_t * entry = &g_mix_curve_cache[selected_slot];
+        if (entry->capacity < required_count)
+        {
+            double * resized = realloc(entry->curve, required_count * sizeof(*entry->curve));
+            if (!resized)
+            {
+                pthread_mutex_unlock(&g_mix_curve_cache_mutex);
+                return;
+            }
+            entry->curve = resized;
+            entry->capacity = required_count;
+        }
+
+        entry->valid = 0;
+        memcpy(entry->curve, mix_curve, required_count * sizeof(*mix_curve));
+        entry->black = black;
+        entry->white = white;
+        entry->corr_ev = corr_ev;
+        entry->overlap = overlap;
+        entry->last_used = use_counter;
+        entry->valid = 1;
+    }
+    pthread_mutex_unlock(&g_mix_curve_cache_mutex);
 }
 
 static inline double * select_mix_curve_cache_slot(dualiso_full20bit_scratch_t * scratch,
@@ -3171,14 +3364,16 @@ static inline double * select_mix_curve_cache_slot(dualiso_full20bit_scratch_t *
                                                    uint32_t black,
                                                    uint32_t white,
                                                    double corr_ev,
-                                                   double lowiso_dr,
+                                                   double overlap,
                                                    int * selected_slot_out,
-                                                   int * needs_rebuild)
+                                                   int * needs_rebuild,
+                                                   int * global_hit)
 {
-    if (!scratch || !selected_slot_out || !needs_rebuild)
+    if (!scratch || !selected_slot_out || !needs_rebuild || !global_hit)
     {
         return NULL;
     }
+    *global_hit = 0;
 
     scratch->mix_curve_use_counter++;
     if (!scratch->mix_curve_use_counter)
@@ -3188,7 +3383,7 @@ static inline double * select_mix_curve_cache_slot(dualiso_full20bit_scratch_t *
 
     for (int slot = 0; slot < DUALISO_MIX_CURVE_CACHE_SLOTS; slot++)
     {
-        if (mix_curve_key_matches(scratch, slot, required_count, black, white, corr_ev, lowiso_dr))
+        if (mix_curve_key_matches(scratch, slot, required_count, black, white, corr_ev, overlap))
         {
             scratch->mix_curve_last_used[slot] = scratch->mix_curve_use_counter;
             *selected_slot_out = slot;
@@ -3222,15 +3417,62 @@ static inline double * select_mix_curve_cache_slot(dualiso_full20bit_scratch_t *
     }
 
     scratch->mix_curve_valid[selected_slot] = 0;
+    scratch->mix_curve_float_valid[selected_slot] = 0;
     scratch->mix_curve_last_used[selected_slot] = scratch->mix_curve_use_counter;
     scratch->mix_curve_last_black[selected_slot] = black;
     scratch->mix_curve_last_white[selected_slot] = white;
     scratch->mix_curve_last_corr_ev[selected_slot] = corr_ev;
-    scratch->mix_curve_last_lowiso_dr[selected_slot] = lowiso_dr;
+    scratch->mix_curve_last_overlap[selected_slot] = overlap;
     *selected_slot_out = selected_slot;
-    *needs_rebuild = 1;
+    if (copy_mix_curve_from_global_cache(mix_curve, required_count, black, white, corr_ev, overlap))
+    {
+        scratch->mix_curve_valid[selected_slot] = 1;
+        *needs_rebuild = 0;
+        *global_hit = 1;
+    }
+    else
+    {
+        *needs_rebuild = 1;
+    }
     return mix_curve;
 }
+
+#ifdef DUALISO_AVX2_AVAILABLE
+static inline float * ensure_mix_curve_float_cache_slot(dualiso_full20bit_scratch_t * scratch,
+                                                        int slot,
+                                                        const double * mix_curve,
+                                                        size_t required_count)
+{
+    if (!scratch || slot < 0 || slot >= DUALISO_MIX_CURVE_CACHE_SLOTS || !mix_curve)
+    {
+        return NULL;
+    }
+
+    if (scratch->mix_curve_float_valid[slot]
+        && scratch->mix_curve_float_capacity[slot] >= required_count
+        && scratch->mix_curve_float[slot])
+    {
+        return scratch->mix_curve_float[slot];
+    }
+
+    float * mix_curve_float = ensure_float_scratch_buffer(&scratch->mix_curve_float[slot],
+                                                          &scratch->mix_curve_float_capacity[slot],
+                                                          required_count);
+    if (!mix_curve_float)
+    {
+        return NULL;
+    }
+
+    #pragma omp parallel for
+    for (int i = 0; i < (int)required_count; i++)
+    {
+        mix_curve_float[i] = (float)mix_curve[i];
+    }
+
+    scratch->mix_curve_float_valid[slot] = 1;
+    return mix_curve_float;
+}
+#endif
 
 static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres, uint32_t* halfres_smooth, uint16_t* alias_map, uint32_t* dark, uint32_t* bright, uint16_t * overexposed, int dark_noise, uint32_t white_darkened, double corr_ev, double lowiso_dr, uint32_t black, uint32_t white, int chroma_smooth_method, dualiso_full20bit_scratch_t * scratch)
 {
@@ -3253,7 +3495,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     
     /* you get better colors, less noise, but a little more jagged edges if we underestimate the overlap amount */
     /* maybe expose a tuning factor? (preference towards resolution or colors) */
-    overlap -= MIN(3, overlap - 3);
+    overlap = (overlap < 6.0) ? 3.0 : overlap - 3.0;
 #ifndef STDOUT_SILENT
     printf("ISO overlap     : %.1f EV (approx)\n", overlap);
 #endif
@@ -3278,18 +3520,24 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     const size_t mix_curve_required = (size_t)(1u << 20);
     int mix_curve_slot = 0;
     int mix_curve_needs_rebuild = 0;
+    int mix_curve_global_hit = 0;
     double * mix_curve = select_mix_curve_cache_slot(scratch,
                                                      mix_curve_required,
                                                      black,
                                                      white,
                                                      corr_ev,
-                                                     lowiso_dr,
+                                                     overlap,
                                                      &mix_curve_slot,
-                                                     &mix_curve_needs_rebuild);
+                                                     &mix_curve_needs_rebuild,
+                                                     &mix_curve_global_hit);
     if (!mix_curve)
     {
         return 0;
     }
+    g_dualiso_full20bit_timing.mix_curve_corr_ev = corr_ev;
+    g_dualiso_full20bit_timing.mix_curve_overlap = overlap;
+    g_dualiso_full20bit_timing.mix_curve_rebuilt = mix_curve_needs_rebuild;
+    g_dualiso_full20bit_timing.mix_curve_global_hit = mix_curve_global_hit;
     if (mix_curve_needs_rebuild)
     {
         #pragma omp parallel for
@@ -3301,91 +3549,90 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
             mix_curve[i] = k;
         }
         scratch->mix_curve_valid[mix_curve_slot] = 1;
+        publish_mix_curve_to_global_cache(mix_curve, mix_curve_required, black, white, corr_ev, overlap);
     }
 
 
-    /* for fast EV - raw conversion */
-    static int raw2ev[1<<20];   /* EV x EV_RESOLUTION */
-    static int ev2raw_0[24*EV_RESOLUTION];
-    static uint32_t previous_black = -1;
-    
-    /* handle sub-black values (negative EV) */
-    int* ev2raw = ev2raw_0 + 10*EV_RESOLUTION;
-    
-    LOCK(ev2raw_mutex)
+    int * raw2ev = NULL;
+    int * ev2raw = NULL;
+    if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &ev2raw))
     {
-        if(black != previous_black)
-        {
-            build_ev2raw_lut(raw2ev, ev2raw_0, black, white);
-            previous_black = black;
-        }
-        
+        return 0;
+    }
+
 #ifdef DUALISO_AVX2_AVAILABLE
-        pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
-        if (g_dualiso_hq_use_avx2)
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    if (g_dualiso_hq_use_avx2)
+    {
+        float * mix_curve_float = ensure_mix_curve_float_cache_slot(scratch,
+                                                                    mix_curve_slot,
+                                                                    mix_curve,
+                                                                    mix_curve_required);
+        if (!mix_curve_float)
         {
-            #pragma omp parallel for
-            for (int y = 0; y < h; y ++) {
-                mix_images_row_avx2(&halfres[(size_t)y*w],
-                                    &bright[(size_t)y*w],
-                                    &dark[(size_t)y*w],
-                                    raw2ev, ev2raw, mix_curve, w);
-                /* tail: pixels not covered by SIMD bulk */
-                int x_start = (w / 8) * 8;
-                for (int x = x_start; x < w; x ++) {
-                    int b = bright[x + y*w];
-                    int d = dark[x + y*w];
-                    int bev = raw2ev[b];
-                    int dev = raw2ev[d];
-                    double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
-                    int mixed = bev * (1-k) + dev * k;
-                    halfres[x + y*w] = ev2raw[mixed];
-                }
+            return 0;
+        }
+
+        #pragma omp parallel for
+        for (int y = 0; y < h; y ++) {
+            mix_images_row_avx2(&halfres[(size_t)y*w],
+                                &bright[(size_t)y*w],
+                                &dark[(size_t)y*w],
+                                raw2ev, ev2raw, mix_curve_float, w);
+            /* tail: pixels not covered by SIMD bulk */
+            int x_start = (w / 8) * 8;
+            for (int x = x_start; x < w; x ++) {
+                int b = bright[x + y*w];
+                int d = dark[x + y*w];
+                int bev = raw2ev[b];
+                int dev = raw2ev[d];
+                double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
+                int mixed = bev * (1-k) + dev * k;
+                halfres[x + y*w] = ev2raw[mixed];
             }
-        }
-        else
-#endif
-        {
-            #pragma omp parallel for collapse(2)
-            for (int y = 0; y < h; y ++)
-            {
-                for (int x = 0; x < w; x ++)
-                {
-                    /* bright and dark source pixels  */
-                    /* they may be real or interpolated */
-                    /* they both have the same brightness (they were adjusted before this loop), so we are ready to mix them */
-                    int b = bright[x + y*w];
-                    int d = dark[x + y*w];
-
-                    /* go from linear to EV space */
-                    int bev = raw2ev[b];
-                    int dev = raw2ev[d];
-
-                    /* blending factor */
-                    double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
-
-                    /* mix bright and dark exposures */
-                    int mixed = bev * (1-k) + dev * k;
-                    halfres[x + y*w] = ev2raw[mixed];
-                }
-            }
-        }
-        if (chroma_smooth_method)
-        {
-#ifndef STDOUT_SILENT
-            printf("Chroma smoothing...\n");
-#endif
-            memcpy(fullres_smooth, fullres, w * h * sizeof(uint32_t));
-            memcpy(halfres_smooth, halfres, w * h * sizeof(uint32_t));
-            hdr_chroma_smooth(raw_info, fullres, fullres_smooth, chroma_smooth_method, raw2ev, ev2raw);
-            hdr_chroma_smooth(raw_info, halfres, halfres_smooth, chroma_smooth_method, raw2ev, ev2raw);
-        }
-        if(alias_map)
-        {
-            build_alias_map(raw_info, alias_map, fullres_smooth, halfres_smooth, bright, dark_noise, black, raw2ev, scratch);
         }
     }
-    UNLOCK(ev2raw_mutex)
+    else
+#endif
+    {
+        #pragma omp parallel for collapse(2)
+        for (int y = 0; y < h; y ++)
+        {
+            for (int x = 0; x < w; x ++)
+            {
+                /* bright and dark source pixels  */
+                /* they may be real or interpolated */
+                /* they both have the same brightness (they were adjusted before this loop), so we are ready to mix them */
+                int b = bright[x + y*w];
+                int d = dark[x + y*w];
+
+                /* go from linear to EV space */
+                int bev = raw2ev[b];
+                int dev = raw2ev[d];
+
+                /* blending factor */
+                double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
+
+                /* mix bright and dark exposures */
+                int mixed = bev * (1-k) + dev * k;
+                halfres[x + y*w] = ev2raw[mixed];
+            }
+        }
+    }
+    if (chroma_smooth_method)
+    {
+#ifndef STDOUT_SILENT
+        printf("Chroma smoothing...\n");
+#endif
+        memcpy(fullres_smooth, fullres, w * h * sizeof(uint32_t));
+        memcpy(halfres_smooth, halfres, w * h * sizeof(uint32_t));
+        hdr_chroma_smooth(raw_info, fullres, fullres_smooth, chroma_smooth_method, raw2ev, ev2raw);
+        hdr_chroma_smooth(raw_info, halfres, halfres_smooth, chroma_smooth_method, raw2ev, ev2raw);
+    }
+    if(alias_map)
+    {
+        build_alias_map(raw_info, alias_map, fullres_smooth, halfres_smooth, bright, dark_noise, black, raw2ev, scratch);
+    }
     
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
@@ -3426,7 +3673,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     return 1;
 }
 
-static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres_smooth, uint32_t* dark, uint32_t* bright, uint16_t* overexposed, uint16_t* alias_map, int black, int white, int dark_noise)
+static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres_smooth, uint32_t* dark, uint32_t* bright, uint16_t* overexposed, uint16_t* alias_map, int black, int white, int dark_noise, dualiso_full20bit_scratch_t * scratch)
 {
     /* fullres mixing curve */
     double * fullres_curve = build_fullres_curve(black);
@@ -3434,145 +3681,134 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
     int w = raw_info.width;
     int h = raw_info.height;
     
-    /* for fast EV - raw conversion */
-    static int raw2ev[1<<20];   /* EV x EV_RESOLUTION */
-    static int ev2raw_0[24*EV_RESOLUTION];
-    static int previous_black = -1;
-    
-    /* handle sub-black values (negative EV) */
-    int* ev2raw = ev2raw_0 + 10*EV_RESOLUTION;
-    
-    LOCK(ev2raw_mutex)
+    int * raw2ev = NULL;
+    int * ev2raw = NULL;
+    if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &ev2raw))
     {
-        if(black != previous_black)
-        {
-            build_ev2raw_lut(raw2ev, ev2raw_0, black, white);
-            previous_black = black;
-        }
+        return;
+    }
 #ifndef STDOUT_SILENT
-        printf("Final blending...\n");
+    printf("Final blending...\n");
 #endif
 
 #ifdef DUALISO_AVX2_AVAILABLE
-        pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
-        if (g_dualiso_hq_use_avx2)
-        {
-            #pragma omp parallel for
-            for (int y = 0; y < h; y ++) {
-                final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
-                                     &fullres[(size_t)y*w],
-                                     &fullres_smooth[(size_t)y*w],
-                                     &halfres_smooth[(size_t)y*w],
-                                     &dark[(size_t)y*w],
-                                     &bright[(size_t)y*w],
-                                     &overexposed[(size_t)y*w],
-                                     alias_map ? &alias_map[(size_t)y*w] : NULL,
-                                     raw2ev, ev2raw, fullres_curve,
-                                     black, dark_noise, w);
-                /* tail: pixels not covered by SIMD bulk */
-                int x_start = (w / 8) * 8;
-                for (int x = x_start; x < w; x ++) {
-                    int b = bright[x + y*w];
-                    int hr = halfres_smooth[x + y*w];
-                    int fr = fullres[x + y*w];
-                    int frs = fullres_smooth[x + y*w];
-                    int hrev = raw2ev[hr];
-                    int frev = raw2ev[fr];
-                    int frsev = raw2ev[frs];
-                    double f = fullres_curve[b & 0xFFFFF];
-                    double c = 0;
-                    if (alias_map) {
-                        int co = alias_map[x + y*w];
-                        c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
-                    }
-                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
-                    c = MAX(c, ovf);
-                    double noisy_or_overexposed = MAX(ovf, 1-f);
-                    f = MAX(f, c);
-                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
-                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
-                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
-                    int output = hrev * (1-f) + fev * f;
-                    output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
-                    raw_set_pixel32(x, y, ev2raw[output]);
+    pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
+    if (g_dualiso_hq_use_avx2)
+    {
+        #pragma omp parallel for
+        for (int y = 0; y < h; y ++) {
+            final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
+                                 &fullres[(size_t)y*w],
+                                 &fullres_smooth[(size_t)y*w],
+                                 &halfres_smooth[(size_t)y*w],
+                                 &dark[(size_t)y*w],
+                                 &bright[(size_t)y*w],
+                                 &overexposed[(size_t)y*w],
+                                 alias_map ? &alias_map[(size_t)y*w] : NULL,
+                                 raw2ev, ev2raw, fullres_curve,
+                                 black, dark_noise, w);
+            /* tail: pixels not covered by SIMD bulk */
+            int x_start = (w / 8) * 8;
+            for (int x = x_start; x < w; x ++) {
+                int b = bright[x + y*w];
+                int hr = halfres_smooth[x + y*w];
+                int fr = fullres[x + y*w];
+                int frs = fullres_smooth[x + y*w];
+                int hrev = raw2ev[hr];
+                int frev = raw2ev[fr];
+                int frsev = raw2ev[frs];
+                double f = fullres_curve[b & 0xFFFFF];
+                double c = 0;
+                if (alias_map) {
+                    int co = alias_map[x + y*w];
+                    c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
                 }
-            }
-        }
-        else
-#endif
-        {
-            #pragma omp parallel for collapse(2)
-            for (int y = 0; y < h; y ++)
-            {
-                for (int x = 0; x < w; x ++)
-                {
-                    /* high-iso image (for measuring signal level) */
-                    int b = bright[x + y*w];
-
-                    /* half-res image (interpolated and chroma filtered, best for low-contrast shadows) */
-                    int hr = halfres_smooth[x + y*w];
-
-                    /* full-res image (non-interpolated, except where one ISO is blown out) */
-                    int fr = fullres[x + y*w];
-
-                    /* full res with some smoothing applied to hide aliasing artifacts */
-                    int frs = fullres_smooth[x + y*w];
-
-                    /* go from linear to EV space */
-                    int hrev = raw2ev[hr];
-                    int frev = raw2ev[fr];
-                    int frsev = raw2ev[frs];
-
-                    int output = 0;
-
-                    /* blending factor */
-                    double f = fullres_curve[b & 0xFFFFF];
-
-                    double c = 0;
-
-                    if (alias_map)
-                    {
-                        int co = alias_map[x + y*w];
-                        c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
-                    }
-
-                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
-                    c = MAX(c, ovf);
-
-                    double noisy_or_overexposed = MAX(ovf, 1-f);
-
-                    /* use data from both ISOs in high-detail areas, even if it's noisier (less aliasing) */
-                    f = MAX(f, c);
-
-                    /* use smoothing in noisy near-overexposed areas to hide color artifacts */
-                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
-
-                    /* limit the use of fullres in dark areas (fixes some black spots, but may increase aliasing) */
-                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
-                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
-
-                    /* blend "half-res" and "full-res" images smoothly to avoid banding*/
-                    output = hrev * (1-f) + fev * f;
-
-                    /* show full-res map (for debugging) */
-                    //~ output = f * 14*EV_RESOLUTION;
-
-                    /* show alias map (for debugging) */
-                    //~ output = c * 14*EV_RESOLUTION;
-
-                    //~ output = hotpixel[x+y*w] ? 14*EV_RESOLUTION : 0;
-                    //~ output = raw2ev[dark[x+y*w]];
-                    /* safeguard */
-                    output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
-
-
-                    /* back to linear space and commit */
-                    raw_set_pixel32(x, y, ev2raw[output]);
-                }
+                double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                c = MAX(c, ovf);
+                double noisy_or_overexposed = MAX(ovf, 1-f);
+                f = MAX(f, c);
+                double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+                int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+                int output = hrev * (1-f) + fev * f;
+                output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
+                raw_set_pixel32(x, y, ev2raw[output]);
             }
         }
     }
-    UNLOCK(ev2raw_mutex)
+    else
+#endif
+    {
+        #pragma omp parallel for collapse(2)
+        for (int y = 0; y < h; y ++)
+        {
+            for (int x = 0; x < w; x ++)
+            {
+                /* high-iso image (for measuring signal level) */
+                int b = bright[x + y*w];
+
+                /* half-res image (interpolated and chroma filtered, best for low-contrast shadows) */
+                int hr = halfres_smooth[x + y*w];
+
+                /* full-res image (non-interpolated, except where one ISO is blown out) */
+                int fr = fullres[x + y*w];
+
+                /* full res with some smoothing applied to hide aliasing artifacts */
+                int frs = fullres_smooth[x + y*w];
+
+                /* go from linear to EV space */
+                int hrev = raw2ev[hr];
+                int frev = raw2ev[fr];
+                int frsev = raw2ev[frs];
+
+                int output = 0;
+
+                /* blending factor */
+                double f = fullres_curve[b & 0xFFFFF];
+
+                double c = 0;
+
+                if (alias_map)
+                {
+                    int co = alias_map[x + y*w];
+                    c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
+                }
+
+                double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                c = MAX(c, ovf);
+
+                double noisy_or_overexposed = MAX(ovf, 1-f);
+
+                /* use data from both ISOs in high-detail areas, even if it's noisier (less aliasing) */
+                f = MAX(f, c);
+
+                /* use smoothing in noisy near-overexposed areas to hide color artifacts */
+                double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+
+                /* limit the use of fullres in dark areas (fixes some black spots, but may increase aliasing) */
+                int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+
+                /* blend "half-res" and "full-res" images smoothly to avoid banding*/
+                output = hrev * (1-f) + fev * f;
+
+                /* show full-res map (for debugging) */
+                //~ output = f * 14*EV_RESOLUTION;
+
+                /* show alias map (for debugging) */
+                //~ output = c * 14*EV_RESOLUTION;
+
+                //~ output = hotpixel[x+y*w] ? 14*EV_RESOLUTION : 0;
+                //~ output = raw2ev[dark[x+y*w]];
+                /* safeguard */
+                output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
+
+
+                /* back to linear space and commit */
+                raw_set_pixel32(x, y, ev2raw[output]);
+            }
+        }
+    }
 }
 
 static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * image_data, uint32_t * raw_buffer_32)
@@ -3858,7 +4094,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         double ideal_noise_std = noise_std[0];
 #endif
         stage_start = mlv_stage_timing_now();
-        final_blend(raw_info, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise);
+        final_blend(raw_info, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, scratch);
         g_dualiso_full20bit_timing.final_blend_ms += dualiso_debug_elapsed_ms(stage_start);
 
         /* let's see how much dynamic range we actually got */

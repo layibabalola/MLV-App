@@ -159,6 +159,15 @@ void CRBFilterPlain::releaseMemory()
 		delete[] m_up_pass_factor;
 		m_up_pass_factor = nullptr;
 	}
+
+	if (m_range_table)
+	{
+		delete[] m_range_table;
+		m_range_table = nullptr;
+	}
+	m_range_table_valid = false;
+	m_range_table_alpha = 0.0f;
+	m_range_table_inv_sigma = 0.0f;
 }
 
 int CRBFilterPlain::getDiffFactor(const uint16_t *color1, const uint16_t *color2) const
@@ -218,36 +227,64 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
     const int width_height = width * height;
     const int width_height_channel = width_height * channel;
 
-#pragma omp parallel for
-    for( int i = 0; i < width_height_channel; i++ )
-    {
-        m_left_pass_color[i] = 0.f;
-        m_right_pass_color[i] = 0.f;
-        m_down_pass_color[i] = 0.f;
-        m_up_pass_color[i] = 0.f;
-    }
-#pragma omp parallel for
-    for( int i = 0; i < width_height; i++ )
-    {
-        m_left_pass_factor[i] = 0.f;
-        m_right_pass_factor[i] = 0.f;
-        m_down_pass_factor[i] = 0.f;
-        m_up_pass_factor[i] = 0.f;
-    }
+    const int last_row_color_offset = (height - 1) * width * channel;
+    const int down_written_pixels = width + (height - 1) * (width - 1);
+    const int up_unwritten_pixels = height - 1;
+
+    std::fill(m_left_pass_color + last_row_color_offset,
+              m_left_pass_color + width_height_channel,
+              0.0f);
+    std::fill(m_left_pass_factor + (height - 1) * width,
+              m_left_pass_factor + width_height,
+              0.0f);
+
+    std::fill(m_right_pass_color,
+              m_right_pass_color + width * channel,
+              0.0f);
+    std::fill(m_right_pass_factor,
+              m_right_pass_factor + width,
+              0.0f);
+
+    std::fill(m_down_pass_color + down_written_pixels * channel,
+              m_down_pass_color + width_height_channel,
+              0.0f);
+    std::fill(m_down_pass_factor + down_written_pixels,
+              m_down_pass_factor + width_height,
+              0.0f);
+
+    std::fill(m_up_pass_color,
+              m_up_pass_color + up_unwritten_pixels * channel,
+              0.0f);
+    std::fill(m_up_pass_factor,
+              m_up_pass_factor + up_unwritten_pixels,
+              0.0f);
 
     // compute a lookup table
     float alpha_f = static_cast<float>(exp(-sqrt(2.0) / (sigma_spatial * QX_DEF_U16_MAX)));
     float inv_alpha_f = 1.f - alpha_f;
-
-
-    float range_table_f[QX_DEF_U16_MAX + 1];
     float inv_sigma_range = 1.0f / (sigma_range * QX_DEF_U16_MAX);
-#pragma omp parallel for
-    for (int i = 0; i <= QX_DEF_U16_MAX; i++)
+
+    if (!m_range_table)
     {
-        const float ii = static_cast<float>(-i);
-        range_table_f[i] = alpha_f * exp(ii * inv_sigma_range);
+        m_range_table = new float[QX_DEF_U16_MAX + 1];
+        m_range_table_valid = false;
     }
+    if (!m_range_table_valid
+        || m_range_table_alpha != alpha_f
+        || m_range_table_inv_sigma != inv_sigma_range)
+    {
+        float * range_table_f = m_range_table;
+#pragma omp parallel for
+        for (int i = 0; i <= QX_DEF_U16_MAX; i++)
+        {
+            const float ii = static_cast<float>(-i);
+            range_table_f[i] = alpha_f * exp(ii * inv_sigma_range);
+        }
+        m_range_table_alpha = alpha_f;
+        m_range_table_inv_sigma = inv_sigma_range;
+        m_range_table_valid = true;
+    }
+    const float * range_table_f = m_range_table;
 
     // Horizontal rows are independent; process the left and right scans row-parallel.
 #pragma omp parallel for

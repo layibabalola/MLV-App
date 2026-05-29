@@ -2146,6 +2146,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.convert16_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_other_ms"),
                                       dualIsoFull20.other_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_curve_corr_ev"),
+                                      dualIsoFull20.mix_curve_corr_ev );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_curve_overlap"),
+                                      dualIsoFull20.mix_curve_overlap );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_curve_rebuilt"),
+                                      dualIsoFull20.mix_curve_rebuilt != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_curve_global_hit"),
+                                      dualIsoFull20.mix_curve_global_hit != 0 );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_method"),
                                       dualIsoFull20.interp_method );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_use_alias_map"),
