@@ -2392,3 +2392,40 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium effort: add Dual ISO substage telemetry inside `diso_get_full20bit()` so future engine work can target the largest remaining slice without guessing.
 2. Medium impact / low effort: if the user's own clips favor another cap, promote a small adaptive chooser or GUI preference using the existing environment override behavior as the safety valve.
 3. Medium impact / medium risk: revisit processed8 prefetch only after its hit rate is high enough to move median visible cadence, not just isolated frames.
+
+## 2026-05-29 - manual smoke follow-up: stale work, scopes, audio, and CPU buckets
+
+### Verified locally
+
+- The user's manual smoke from `C:\Users\obabalola\AppData\Roaming\magiclantern\MLVApp\logs\mlvapp-20260528.log` used `MLVAPP_PLAYBACK_MAX_THREADS=4`, `quality_mode=1`, audio on, scopes on, zebras off, and no per-frame smoke telemetry.
+- Manual x1 HQ remained CPU-bound: representative x1 sessions presented about `2.4 fps`, timeline advanced about `23.6 fps`, average render was `399-406 ms`, average `processed8_total_ms` was `396-404 ms`, average `llrawproc_ms` was `173-185 ms`, and GUI draw total was only `17-18 ms`.
+- Implemented the next low-regression GUI playback batch:
+  - queued drop-frame playback requests now coalesce older queued drop-frame requests from the same presentation generation before the render thread starts them, with `render_thread_queued_playback_drops_before_start` telemetry;
+  - active playback scopes update at a default `150 ms` cadence (`MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS=0` disables the throttle), leaving paused/scrubbed scope updates immediate;
+  - audio playback no longer suspends a freshly initialized sink, no longer calls `start()` again when already running, and duplicate same-frame audio syncs within `100 ms` are coalesced;
+  - smoke logs now emit `playback_smoke.cpu_summary` with raw decode, Dual ISO/llrawproc, debayer, processing, presentation, scope, audio-sync, and stale-queue counters.
+- Rebuilt the user-facing release tree successfully after these source changes.
+- Non-headless release profiles in `.claude-state/profiling/20260529-cpu-playback-optimizations/` used `tools/profiling/run-release-playback-profile.ps1 -ShowWindow -WaitForPaint` against `platform/qt/build-release/release/MLVApp.exe`.
+- Fixture profiles confirm the remaining hot path is still engine CPU, not paint:
+  - `large_hq_scope_cap4.json`: average `latency_ms 118.4`, `render_thread_total_ms 95.4`, `processed8_total_ms 88.9`, `llrawproc_ms 72.1`, `draw_frame_ready_total_ms 21.6`.
+  - `large_hq_histogram_cap4.json`: average `latency_ms 133.2`, `render_thread_total_ms 104.6`, `processed8_total_ms 97.8`, `llrawproc_ms 78.2`, `draw_frame_ready_total_ms 26.7`.
+  - The play-action smoke for the histogram cap-4 run reported first-frame `llrawproc_dual_iso_ms 374`, `processed8_total_ms 432`, and `draw_scopes_ms 5`.
+- `tests\build-ci-console\release\console_tests.exe --check-golden` passed with Qt/MinGW on PATH: `78` tests, `298` assertions, `26` expected profile/batch-exe skips, `0` failures.
+
+### Cross-checked from prior analysis
+
+- This batch intentionally avoids Dual ISO math or quality-policy changes. The x1 HQ quality path still spends most of its time in full HQ Dual ISO reconstruction and processed8 generation.
+- The user's forced `MLVAPP_PLAYBACK_MAX_THREADS=4` is still a key runtime variable. Earlier visible profiles showed cap `6` winning on the release fixture, while this later fixture sample favored cap `4` slightly in steady-state JSON; the safest user-facing posture remains overrideable caps plus per-clip measurement.
+- Scope and audio changes reduce GUI-side jank and warnings, but they cannot by themselves turn a `~400 ms` full-HQ render into real-time playback on a CPU-bound VM.
+
+### Needs runtime profiling
+
+- Have the user rerun the real clip with the rebuilt release and `MLVAPP_PLAYBACK_SMOKE_TELEMETRY=1`; judge `playback_smoke.cpu_summary` for `llrawproc_dual_iso_ms`, `processed8_total_ms`, scope skips/updates, and audio-sync counters.
+- Compare `MLVAPP_PLAYBACK_MAX_THREADS=4` versus unset/default cap `6` on the user's real clip; their last manual x1 run used cap `4`, but prior release profiles sometimes favored `6`.
+- If x1 HQ still needs a large step-change, the next no-regression investigation must split `diso_get_full20bit()` telemetry before optimizing reconstruction internals.
+
+### Ranked next steps
+
+1. High impact / low risk: run the user's manual smoke again with `MLVAPP_PLAYBACK_SMOKE_TELEMETRY=1`, once with `MLVAPP_PLAYBACK_MAX_THREADS=4` and once with the variable unset/default cap `6`.
+2. High diagnostic value / low risk: add Dual ISO substage telemetry inside `diso_get_full20bit()` to break down pattern/noise, exposure match, interpolation, mix/final blend, and 20-to-16 conversion.
+3. High impact / higher risk: prototype an x1 Phase 3 reconned-raw consumer only after parity tests, because it touches pixel/state semantics even though it could reduce duplicate work in future pipelined playback modes.

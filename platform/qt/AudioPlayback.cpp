@@ -70,9 +70,9 @@ void AudioPlayback::initAudioEngine( mlvObject_t *pMlvObject )
     m_pAudioOutput->setBufferSize( 524288 );
 #endif
     m_pAudioOutput->setVolume( 1.0 );
-    m_pAudioOutput->suspend();
 
     m_audioEngineInitialized = true;
+    m_audioEngineRunning = false;
 }
 
 //Unload the audio of a mlv
@@ -103,6 +103,12 @@ void AudioPlayback::play()
 {
     if( !m_audioEngineInitialized ) return;
 
+    if( m_audioEngineRunning )
+    {
+        m_pAudioOutput->resume();
+        return;
+    }
+
     m_pAudioOutput->start( m_pAudioStream->device() );
     m_pAudioOutput->resume();
     m_audioEngineRunning = true;
@@ -114,7 +120,6 @@ void AudioPlayback::stop()
     if( !m_audioEngineInitialized ) return;
 
     if( !m_audioEngineRunning ) return;
-    m_pAudioOutput->suspend();
     m_pAudioOutput->stop();
     m_pAudioOutput->reset();
     m_audioEngineRunning = false;

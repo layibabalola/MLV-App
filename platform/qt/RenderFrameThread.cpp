@@ -77,6 +77,7 @@ RenderFrameThread::RenderFrameThread()
     m_activeFrameRequestSerial = 0;
     m_activePresentationContext = ReadyFrame::PresentationContext();
     m_activePresentationPreparationOptions = PresentationPreparationOptions();
+    m_activeQueuedPlaybackDropCount = 0;
     m_loggedGpuBilinearSuccess = false;
     m_lastFrameUsedGpuBilinearDebayer = false;
     m_lastDualIsoPreviewHistogramMs = 0.0;
@@ -136,6 +137,8 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     m_activeFrameRequestSerial = 0;
     m_activeOutputMode = OutputProcessed8;
     m_activePresentationContext = ReadyFrame::PresentationContext();
+    m_activePresentationPreparationOptions = PresentationPreparationOptions();
+    m_activeQueuedPlaybackDropCount = 0;
     m_renderingSlotIndex = -1;
     m_presentingSlotIndex = -1;
     m_lastFrameUsedGpuBilinearDebayer = false;
@@ -171,21 +174,41 @@ void RenderFrameThread::renderFrame(uint32_t frameNumber,
                                     const PresentationPreparationOptions &presentationPreparation)
 {
     QMutexLocker locker(&m_mutex);
+    RenderRequest request;
+    request.frameNumber = frameNumber;
+    request.outputMode = outputMode;
+    request.useGpuBilinearDebayer = useGpuBilinearDebayer;
+    request.requestSerial = requestSerial;
+    request.requestStageTime = mlv_stage_timing_now();
+    request.phase3Mode = phase3Mode();
+    request.presentationContext = presentationContext;
+    request.presentationPreparationOptions = presentationPreparation;
+
+    if( request.presentationContext.dropFramePlaybackActive )
+    {
+        for( auto it = m_renderRequests.begin(); it != m_renderRequests.end(); )
+        {
+            if( it->presentationContext.dropFramePlaybackActive
+             && it->presentationContext.presentationGeneration
+                == request.presentationContext.presentationGeneration )
+            {
+                it = m_renderRequests.erase( it );
+                ++request.queuedPlaybackDropCount;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
     if( static_cast<int>(m_renderRequests.size()) >= kRenderRequestQueueDepth )
     {
+        if( request.presentationContext.dropFramePlaybackActive )
+            ++request.queuedPlaybackDropCount;
         m_renderRequests.pop_front();
     }
-    m_renderRequests.push_back(
-        {
-            frameNumber,
-            outputMode,
-            useGpuBilinearDebayer,
-            requestSerial,
-            mlv_stage_timing_now(),
-            phase3Mode(),
-            presentationContext,
-            presentationPreparation
-        } );
+    m_renderRequests.push_back( request );
     m_renderFrame = true;
     m_waitCondition.wakeOne();
 }
@@ -703,6 +726,7 @@ void RenderFrameThread::setupActiveRequestLocked( const RenderRequest &request, 
     m_activeFrameRequestStageTime = request.requestStageTime;
     m_activePresentationContext = request.presentationContext;
     m_activePresentationPreparationOptions = request.presentationPreparationOptions;
+    m_activeQueuedPlaybackDropCount = request.queuedPlaybackDropCount;
     m_renderingFrame = true;
     m_renderingSlotIndex = slotIndex;
 }
@@ -1150,6 +1174,7 @@ void RenderFrameThread::runSerial(void)
         m_activeFrameRequestStageTime = request.requestStageTime;
         m_activePresentationContext = request.presentationContext;
         m_activePresentationPreparationOptions = request.presentationPreparationOptions;
+        m_activeQueuedPlaybackDropCount = request.queuedPlaybackDropCount;
         m_renderingFrame = true;
         m_renderingSlotIndex = slotIndex;
 
@@ -1464,6 +1489,15 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_playback_scale_factor_request"),
         playbackScaleFactor );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_active"),
+        m_activePresentationContext.playbackActive );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_drop_frame_playback_active"),
+        m_activePresentationContext.dropFramePlaybackActive );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_queued_playback_drops_before_start"),
+        m_activeQueuedPlaybackDropCount );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_rendered_width"),
         renderedImageWidth );

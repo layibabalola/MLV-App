@@ -74,6 +74,8 @@ public:
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
             GpuPreviewProcessingConfig gpuPreviewProcessingConfig;
             QString playbackProcessingReason;
+            bool playbackActive = false;
+            bool dropFramePlaybackActive = false;
             bool renderThreadUsing16BitPreview = false;
             bool renderThreadUsingGpuPreviewProcessing = false;
             bool renderThreadUsingGpuBilinearDebayer = false;
@@ -128,6 +130,7 @@ public:
         Phase3Mode phase3Mode = Phase3Mode::Disabled;
         ReadyFrame::PresentationContext presentationContext;
         PresentationPreparationOptions presentationPreparationOptions;
+        int queuedPlaybackDropCount = 0;
     };
 
     struct DecodeQueueEntry
@@ -265,6 +268,7 @@ private:
     uint64_t m_activeFrameRequestSerial;
     ReadyFrame::PresentationContext m_activePresentationContext;
     PresentationPreparationOptions m_activePresentationPreparationOptions;
+    int m_activeQueuedPlaybackDropCount;
     bool m_loggedGpuBilinearSuccess;
     bool m_lastFrameUsedGpuBilinearDebayer;
     QString m_lastGpuBilinearFallbackReason;
