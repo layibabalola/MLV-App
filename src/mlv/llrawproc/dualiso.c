@@ -63,6 +63,7 @@ static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_amaze_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_mean23_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_alias_map_taken_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_fullres_blend_taken_count = 0;
+static DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing = {0};
 
 void dualiso_debug_note_hq_path(int which)
 {
@@ -96,6 +97,51 @@ unsigned long long dualiso_debug_alias_map_taken_count(void)
 unsigned long long dualiso_debug_fullres_blend_taken_count(void)
 {
     return g_dualiso_fullres_blend_taken_count;
+}
+
+void dualiso_debug_reset_full20bit_timing(void)
+{
+    memset(&g_dualiso_full20bit_timing, 0, sizeof(g_dualiso_full20bit_timing));
+    g_dualiso_full20bit_timing.interp_method = -1;
+}
+
+void dualiso_debug_get_full20bit_timing(dualiso_full20bit_timing_t * timing)
+{
+    if (!timing) return;
+    *timing = g_dualiso_full20bit_timing;
+}
+
+static void dualiso_debug_set_full20bit_path(int interp_method, int use_alias_map, int use_fullres, int threads)
+{
+    g_dualiso_full20bit_timing.interp_method = interp_method;
+    g_dualiso_full20bit_timing.use_alias_map = use_alias_map != 0;
+    g_dualiso_full20bit_timing.use_fullres = use_fullres != 0;
+    g_dualiso_full20bit_timing.threads = threads;
+    g_dualiso_full20bit_timing.valid = 1;
+}
+
+static double dualiso_debug_elapsed_ms(double start)
+{
+    return (mlv_stage_timing_now() - start) * 1000.0;
+}
+
+static void dualiso_debug_finish_full20bit_timing(double start)
+{
+    g_dualiso_full20bit_timing.total_ms = dualiso_debug_elapsed_ms(start);
+
+    const double known_ms =
+        g_dualiso_full20bit_timing.pattern_ms +
+        g_dualiso_full20bit_timing.noise_ms +
+        g_dualiso_full20bit_timing.scratch_ms +
+        g_dualiso_full20bit_timing.convert20_ms +
+        g_dualiso_full20bit_timing.match_ms +
+        g_dualiso_full20bit_timing.interp_ms +
+        g_dualiso_full20bit_timing.fullres_ms +
+        g_dualiso_full20bit_timing.mix_ms +
+        g_dualiso_full20bit_timing.final_blend_ms +
+        g_dualiso_full20bit_timing.convert16_ms;
+    g_dualiso_full20bit_timing.other_ms =
+        MAX(0.0, g_dualiso_full20bit_timing.total_ms - known_ms);
 }
 
 /* ------------------------------------------------------------------------
@@ -3467,10 +3513,15 @@ static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * imag
 
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch)
 {
+    const double full20_start = mlv_stage_timing_now();
+    dualiso_debug_reset_full20bit_timing();
+    dualiso_debug_set_full20bit_path(interp_method, use_alias_map, use_fullres, threads);
+#define DUALISO_FULL20_RETURN(value) do { dualiso_debug_finish_full20bit_timing(full20_start); return (value); } while (0)
+
     int w = raw_info.width;
     int h = raw_info.height;
     
-    if (w <= 0 || h <= 0) return 0;
+    if (w <= 0 || h <= 0) DUALISO_FULL20_RETURN(0);
 
     /* RGGB or GBRG? */
     //int rggb = identify_rggb_or_gbrg(raw_info, image_data, scratch);
@@ -3488,10 +3539,15 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     const int iso_patterns[4][4] = {{1, 1, 0, 0}, {1, 0, 0, 1}, {0, 0, 1, 1}, {0, 1, 1, 0}};
 
     int is_bright[4];
+    double stage_start = mlv_stage_timing_now();
 
     if (!*iso_pattern)
     {
-        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch)) return 0;
+        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch))
+        {
+            g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
+            DUALISO_FULL20_RETURN(0);
+        }
 
         for (int i = 0; i < 4; i++)
         {
@@ -3502,7 +3558,11 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
             }
         }
 
-        if (!*iso_pattern) return 0;
+        if (!*iso_pattern)
+        {
+            g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
+            DUALISO_FULL20_RETURN(0);
+        }
     }
     else if (*iso_pattern > 0 && *iso_pattern <= 4)
     {
@@ -3530,8 +3590,10 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     }
     else
     {
-        return 0;
+        g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
+        DUALISO_FULL20_RETURN(0);
     }
+    g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
     
     int ret = 0;
     
@@ -3550,18 +3612,25 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     
     double noise_std[4];
     double dark_noise, bright_noise, dark_noise_ev, bright_noise_ev;
+    stage_start = mlv_stage_timing_now();
     double noise_avg = compute_noise(raw_info, image_data, noise_std, &dark_noise, &bright_noise, &dark_noise_ev, &bright_noise_ev);
+    g_dualiso_full20bit_timing.noise_ms += dualiso_debug_elapsed_ms(stage_start);
 
+    stage_start = mlv_stage_timing_now();
     if (!ensure_full20bit_pixel_capacity(scratch, (size_t)w * (size_t)h))
     {
-        return 0;
+        g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
+        DUALISO_FULL20_RETURN(0);
     }
+    g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
     
     /* promote from 14 to 20 bits (original raw buffer holds 14-bit values stored as uint16_t) */
+    stage_start = mlv_stage_timing_now();
     uint32_t * raw_buffer_32 = convert_to_20bit(raw_info, image_data, scratch->raw_buffer_32);
+    g_dualiso_full20bit_timing.convert20_ms += dualiso_debug_elapsed_ms(stage_start);
     if (!raw_buffer_32)
     {
-        return 0;
+        DUALISO_FULL20_RETURN(0);
     }
     
     /* we have now switched to 20-bit, update noise numbers */
@@ -3571,6 +3640,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     bright_noise_ev += 6;
     
     /* dark and bright exposures, interpolated */
+    stage_start = mlv_stage_timing_now();
     uint32_t* dark = scratch->dark;
     uint32_t* bright = scratch->bright;
     memset(dark, 0, w * h * sizeof(uint32_t));
@@ -3606,12 +3676,15 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         memset(alias_map, 0, w * h * sizeof(uint16_t));
         g_dualiso_alias_map_taken_count++;
     }
+    g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
     
     //~ printf("Exposure matching...\n");
     /* estimate ISO difference between bright and dark exposures */
     int white_darkened = white_bright;
+    stage_start = mlv_stage_timing_now();
     int expo_matched = match_exposures(raw_info, raw_buffer_32, dark_frame, iso1, iso2, auto_correction, ev_correction, black_delta, &white_darkened, is_bright, scratch);
     double corr_ev = ABS(*ev_correction);
+    g_dualiso_full20bit_timing.match_ms += dualiso_debug_elapsed_ms(stage_start);
 
 #ifndef STDOUT_SILENT
     if (expo_matched)
@@ -3636,6 +3709,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     //bright_noise /= factor;
     //bright_noise_ev -= corr_ev;
 
+    stage_start = mlv_stage_timing_now();
     if (interp_method == 0)
     {
         dualiso_debug_note_hq_path(0);
@@ -3648,14 +3722,20 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     }
 
     border_interpolate(raw_info, raw_buffer_32, dark, bright, is_bright);
+    g_dualiso_full20bit_timing.interp_ms += dualiso_debug_elapsed_ms(stage_start);
 
     if (use_fullres)
     {
         g_dualiso_fullres_blend_taken_count++;
+        stage_start = mlv_stage_timing_now();
         fullres_reconstruction(raw_info, fullres, dark, bright, white_darkened, is_bright);
+        g_dualiso_full20bit_timing.fullres_ms += dualiso_debug_elapsed_ms(stage_start);
     }
 
-    if (mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, chroma_smooth_method, scratch))
+    stage_start = mlv_stage_timing_now();
+    int mix_ok = mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, chroma_smooth_method, scratch);
+    g_dualiso_full20bit_timing.mix_ms += dualiso_debug_elapsed_ms(stage_start);
+    if (mix_ok)
     {
         /* let's check the ideal noise levels (on the halfres image, which in black areas is identical to the bright one) */
 #ifndef STDOUT_SILENT
@@ -3667,7 +3747,9 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         compute_black_noise(raw_info, image_data, 8, raw_info.active_area.x1 - 8, raw_info.active_area.y1 + 20, raw_info.active_area.y2 - 20, 1, 1, &noise_avg, &noise_std[0]);
         double ideal_noise_std = noise_std[0];
 #endif
+        stage_start = mlv_stage_timing_now();
         final_blend(raw_info, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise);
+        g_dualiso_full20bit_timing.final_blend_ms += dualiso_debug_elapsed_ms(stage_start);
 
         /* let's see how much dynamic range we actually got */
 #ifndef STDOUT_SILENT
@@ -3675,7 +3757,9 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         printf("Noise level     : %.02f (20-bit), ideally %.02f\n", noise_std[0], ideal_noise_std);
         printf("Dynamic range   : %.02f EV (cooked)\n", log2(white - black) - log2(noise_std[0]));
 #endif
+        stage_start = mlv_stage_timing_now();
         convert_20_to_16bit(raw_info, image_data, raw_buffer_32);
+        g_dualiso_full20bit_timing.convert16_ms += dualiso_debug_elapsed_ms(stage_start);
         ret = 1;
     }
     
@@ -3687,5 +3771,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         h++;
     }
     
+    dualiso_debug_finish_full20bit_timing(full20_start);
+#undef DUALISO_FULL20_RETURN
     return ret;
 }

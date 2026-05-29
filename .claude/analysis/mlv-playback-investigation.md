@@ -2429,3 +2429,41 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / low risk: run the user's manual smoke again with `MLVAPP_PLAYBACK_SMOKE_TELEMETRY=1`, once with `MLVAPP_PLAYBACK_MAX_THREADS=4` and once with the variable unset/default cap `6`.
 2. High diagnostic value / low risk: add Dual ISO substage telemetry inside `diso_get_full20bit()` to break down pattern/noise, exposure match, interpolation, mix/final blend, and 20-to-16 conversion.
 3. High impact / higher risk: prototype an x1 Phase 3 reconned-raw consumer only after parity tests, because it touches pixel/state semantics even though it could reduce duplicate work in future pipelined playback modes.
+
+## 2026-05-29 - Dual ISO full20 substage telemetry
+
+### Verified locally
+
+- Added coarse, low-overhead timing around the full HQ Dual ISO path in `diso_get_full20bit()`:
+  - pattern/field identification, noise measurement, scratch allocation/clears, 14-to-20 promotion, exposure match, interpolation+border, full-res reconstruction, `mix_images`, `final_blend`, 20-to-16 conversion, and residual `other`.
+  - The timing is stored thread-locally in `dualiso.c`, copied through `llrawproc` after the call, then surfaced in render telemetry as `dual_iso_full20_*`.
+  - Smoke logs now emit `playback_smoke.dual_iso_full20_frame` when per-frame smoke telemetry is enabled and `playback_smoke.dual_iso_full20_summary` at play-stop.
+- Rebuilt the user-facing release tree at `platform/qt/build-release/release/MLVApp.exe`.
+- Visible release profile artifacts live under `.claude-state/profiling/20260529-dualiso-substage/`.
+- `large_hq_cap6.json`, visible `--profile-playback`, `MLVAPP_PLAYBACK_MAX_THREADS=6`, x1 HQ fixture:
+  - all frames: average `latency_ms 128.028`, `render_thread_total_ms 104.562`, `processed8_total_ms 103.000`, `llrawproc_dual_iso_ms 86.875`, `dual_iso_full20_total_ms 86.375`.
+  - warm frames excluding first cold frame: average `render_thread_total_ms 85.000`, `processed8_total_ms 83.600`, `dual_iso_full20_total_ms 69.867`.
+  - warm Dual ISO substages: `mix_images 42.333 ms`, scratch `9.533 ms`, interpolation+border `5.067 ms`, final blend `4.200 ms`.
+- `large_hq_histogram_cap6_playaction.json`, visible play-action smoke, cap 6:
+  - average `latency_ms 129.596`, `render_thread_total_ms 105.500`, `processed8_total_ms 99.125`, `dual_iso_full20_total_ms 79.813`.
+  - the app log emitted `playback_smoke.dual_iso_full20_summary`; the first presented play-action frame was cold and showed `mix_images 132 ms`, interpolation `96 ms`, final blend `75 ms`.
+- Regression coverage:
+  - `git diff --check` clean except Git's CRLF checkout notices.
+  - `tests\build-ci-console\release\console_tests.exe --check-golden`: `78` tests, `298` assertions, `26` expected profile/batch-exe skips, `0` failures.
+- Release executable after rebuild: `platform/qt/build-release/release/MLVApp.exe`, timestamp `2026-05-28 22:04:23`, size `8286208`, SHA256 `47D358965693994D0CF0D2BA3499F38AC75E7B1214A67587D0395E77C9A46004`.
+
+### Cross-checked from prior analysis
+
+- The remaining x1 HQ cost is still engine CPU, not GUI paint. This pass does not change pixel math or quality policy; it only reveals where the CPU is going.
+- Previous smoke logs that showed `llrawproc_dual_iso_ms ~108 ms` are consistent with the new breakdown: the cold/warm mix varies, but `mix_images` is now the largest steady substage on the visible fixture.
+
+### Needs runtime profiling
+
+- Have the user rerun the real clip with the rebuilt release and `MLVAPP_PLAYBACK_SMOKE_TELEMETRY=1`; the new `playback_smoke.dual_iso_full20_summary` line will rank the same substage buckets on their actual x1 Quality-mode smoke.
+- Re-check cap `4` versus cap `6` with the new substage summary, because `mix_images` and scratch clears may respond differently to worker count than interpolation.
+
+### Ranked next steps
+
+1. High impact / medium risk: inspect and optimize `mix_images()` first; it is the largest warm Dual ISO substage on the visible fixture.
+2. Medium impact / low-to-medium risk: reduce scratch clear cost by narrowing `memset` scope or reusing known-overwritten buffers, guarded by pixel parity tests.
+3. Medium impact / medium risk: split `mix_images()` into internal timing buckets before changing math if the user's real clip shows different dominance than the fixture.

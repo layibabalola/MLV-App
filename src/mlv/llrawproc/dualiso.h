@@ -107,6 +107,27 @@ typedef struct
     size_t alias_aux_capacity;
 } dualiso_full20bit_scratch_t;
 
+typedef struct
+{
+    double total_ms;
+    double pattern_ms;
+    double noise_ms;
+    double scratch_ms;
+    double convert20_ms;
+    double match_ms;
+    double interp_ms;
+    double fullres_ms;
+    double mix_ms;
+    double final_blend_ms;
+    double convert16_ms;
+    double other_ms;
+    int interp_method;
+    int use_alias_map;
+    int use_fullres;
+    int threads;
+    int valid;
+} dualiso_full20bit_timing_t;
+
 int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch);
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch);
 void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch);
@@ -128,5 +149,7 @@ unsigned long long dualiso_debug_hq_mean23_count(void);
  * having to diff pixels against an alias_map-on reference. */
 unsigned long long dualiso_debug_alias_map_taken_count(void);
 unsigned long long dualiso_debug_fullres_blend_taken_count(void);
+void dualiso_debug_reset_full20bit_timing(void);
+void dualiso_debug_get_full20bit_timing(dualiso_full20bit_timing_t * timing);
 
 #endif

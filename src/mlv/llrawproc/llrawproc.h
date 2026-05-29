@@ -79,6 +79,7 @@ double llrpGetLastBadPixelsMilliseconds(void);
 double llrpGetLastPatternNoiseMilliseconds(void);
 double llrpGetLastDualIsoMilliseconds(void);
 double llrpGetLastChromaSmoothMilliseconds(void);
+void llrpGetLastDualIsoFull20bitTiming(dualiso_full20bit_timing_t * timing);
 double llrpGetLastDualIsoPreviewHistogramMilliseconds(void);
 double llrpGetLastDualIsoPreviewRegressionMilliseconds(void);
 double llrpGetLastDualIsoPreviewRowscaleMilliseconds(void);
