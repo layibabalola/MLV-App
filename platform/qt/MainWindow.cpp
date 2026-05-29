@@ -59,6 +59,36 @@ static bool interactiveTraceEnabled()
     return enabled;
 }
 
+static bool playbackSmokeFrameTelemetryEnabled()
+{
+    static const bool enabled =
+        qEnvironmentVariableIsSet( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" )
+        && qEnvironmentVariable( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" )
+           != QStringLiteral("0");
+    return enabled;
+}
+
+static QString envValueForLog( const char *name )
+{
+    QString value = qEnvironmentVariable( name );
+    if( value.isEmpty() ) return QStringLiteral("unset");
+    value.replace( QLatin1Char(' '), QLatin1Char('_') );
+    value.replace( QLatin1Char('\t'), QLatin1Char('_') );
+    return value;
+}
+
+static double telemetryDoubleValue( const QJsonObject &telemetry,
+                                    const char *key )
+{
+    return telemetry.value( QString::fromLatin1( key ) ).toDouble();
+}
+
+static int telemetryIntValue( const QJsonObject &telemetry,
+                              const char *key )
+{
+    return telemetry.value( QString::fromLatin1( key ) ).toInt();
+}
+
 static void logInteractionEvent( const QString &event,
                                  const QString &details = QString(),
                                  bool traceOnly = false )
@@ -14967,6 +14997,326 @@ void MainWindow::notePlayToFirstFramePresentation( int presentedFrame )
     m_playToFirstFrameTargetFrame = -1;
 }
 
+void MainWindow::beginPlaybackSmokeTelemetry( void )
+{
+    if( m_playbackSmokeActive )
+        finishPlaybackSmokeTelemetry( "play-restart" );
+
+    ++m_playbackSmokeSessionId;
+    if( m_playbackSmokeSessionId == 0 ) ++m_playbackSmokeSessionId;
+
+    m_playbackSmokeActive = true;
+    m_playbackSmokeFrameTelemetry = playbackSmokeFrameTelemetryEnabled();
+    m_playbackSmokeStartPosition = ui->horizontalSliderPosition->value();
+    m_playbackSmokeStartCutIn = ui->spinBoxCutIn->value();
+    m_playbackSmokeStartCutOut = ui->spinBoxCutOut->value();
+    m_playbackSmokeStartScaleRequest = effectivePlaybackScaleFactorForRequest();
+    m_playbackSmokeStartQualityMode = m_playbackQualityMode;
+    m_playbackSmokeStartWorkerThreads = mlvappEffectivePlaybackWorkerThreadCount();
+    m_playbackSmokePresentedFrames = 0;
+    m_playbackSmokeFirstPresentedFrame = -1;
+    m_playbackSmokeLastPresentedFrame = -1;
+    m_playbackSmokeStartRequestSerial = m_nextRenderRequestSerial;
+    m_playbackSmokeStartPrepStaleDrops =
+        m_playbackPrepStaleDropCount.load( std::memory_order_acquire );
+    m_playbackSmokeStartPrepGenerationDrops =
+        m_playbackPrepGenerationDropCount.load( std::memory_order_acquire );
+    m_playbackSmokeStartPrepReplacedBefore =
+        m_playbackPrepReplacedBeforeComputeCount.load( std::memory_order_acquire );
+    m_playbackSmokeStartPrepReplacedAfter =
+        m_playbackPrepReplacedAfterComputeCount.load( std::memory_order_acquire );
+    m_playbackSmokeStartTime = mlv_stage_timing_now();
+    m_playbackSmokeLastPresentedTime = 0.0;
+    m_playbackSmokeFirstPresentMs = 0.0;
+    m_playbackSmokePresentedIntervalSumMs = 0.0;
+    m_playbackSmokePresentedIntervalMaxMs = 0.0;
+    m_playbackSmokeRenderTotalSumMs = 0.0;
+    m_playbackSmokeRenderTotalMaxMs = 0.0;
+    m_playbackSmokeRenderWorkSumMs = 0.0;
+    m_playbackSmokeQueueWaitSumMs = 0.0;
+    m_playbackSmokeLlrawprocSumMs = 0.0;
+    m_playbackSmokeProcessed8SumMs = 0.0;
+    m_playbackSmokeDrawTotalSumMs = 0.0;
+    m_playbackSmokeDrawTotalMaxMs = 0.0;
+    m_playbackSmokeLastWorkerThreads = m_playbackSmokeStartWorkerThreads;
+    m_playbackSmokeLastWorkerThreadCapActive = false;
+    m_playbackSmokeLastScaleRequest = m_playbackSmokeStartScaleRequest;
+    m_playbackSmokeLastScaleActive = 1;
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.start session=%1 position=%2 cut_in=%3 cut_out=%4 "
+               "scale_request=%5 quality_mode=%6 worker_threads=%7 start_serial=%8 "
+               "frame_telemetry=%9 drop_frame=%10 audio=%11 scopes=%12 zebras=%13 "
+               "file_loaded=%14 env_force_threads=%15 env_force_singlethread=%16 "
+               "env_playback_max_threads=%17 env_disable_playback_thread_cap=%18 "
+               "env_playback_scale=%19 env_hq_mean23=%20 "
+               "env_playback_smoke_telemetry=%21" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( m_playbackSmokeStartPosition )
+               .arg( m_playbackSmokeStartCutIn )
+               .arg( m_playbackSmokeStartCutOut )
+               .arg( m_playbackSmokeStartScaleRequest )
+               .arg( m_playbackSmokeStartQualityMode )
+               .arg( m_playbackSmokeStartWorkerThreads )
+               .arg( static_cast<qulonglong>( m_playbackSmokeStartRequestSerial ) )
+               .arg( bool01( m_playbackSmokeFrameTelemetry ) )
+               .arg( bool01( ui->actionDropFrameMode->isChecked() ) )
+               .arg( bool01( ui->actionAudioOutput->isChecked() ) )
+               .arg( bool01( ui->actionShowEditArea->isChecked() ) )
+               .arg( bool01( ui->actionShowZebras->isChecked() ) )
+               .arg( bool01( m_fileLoaded ) )
+               .arg( envValueForLog( "MLVAPP_FORCE_THREADS" ) )
+               .arg( envValueForLog( "MLVAPP_FORCE_SINGLETHREAD" ) )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_MAX_THREADS" ) )
+               .arg( envValueForLog( "MLVAPP_DISABLE_PLAYBACK_THREAD_CAP" ) )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_SCALE_FACTOR" ) )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_PREFER_HQ_MEAN23" ) )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" ) );
+}
+
+void MainWindow::notePlaybackSmokePresentedFrame(
+    uint64_t displayFrame,
+    const RenderFrameThread::ReadyFrame &readyFrame,
+    const PresentationRequestContext &requestContext )
+{
+    if( !m_playbackSmokeActive ) return;
+
+    const double now = mlv_stage_timing_now();
+    const double elapsedMs = ( now - m_playbackSmokeStartTime ) * 1000.0;
+    double intervalMs = 0.0;
+    if( m_playbackSmokeLastPresentedTime > 0.0
+     && now >= m_playbackSmokeLastPresentedTime )
+    {
+        intervalMs = ( now - m_playbackSmokeLastPresentedTime ) * 1000.0;
+        m_playbackSmokePresentedIntervalSumMs += intervalMs;
+        if( intervalMs > m_playbackSmokePresentedIntervalMaxMs )
+            m_playbackSmokePresentedIntervalMaxMs = intervalMs;
+    }
+    else
+    {
+        m_playbackSmokeFirstPresentMs = elapsedMs;
+        m_playbackSmokeFirstPresentedFrame = static_cast<int>( displayFrame );
+    }
+
+    m_playbackSmokeLastPresentedTime = now;
+    m_playbackSmokeLastPresentedFrame = static_cast<int>( displayFrame );
+    ++m_playbackSmokePresentedFrames;
+
+    const QJsonObject &timing = readyFrame.stageTimingTelemetry;
+    int workerThreads = telemetryIntValue( timing, "render_thread_worker_threads" );
+    if( workerThreads <= 0 )
+        workerThreads = qRound(
+            telemetryDoubleValue( timing, "render_thread_worker_threads" ) );
+    if( workerThreads > 0 )
+        m_playbackSmokeLastWorkerThreads = workerThreads;
+    m_playbackSmokeLastWorkerThreadCapActive =
+        timing.value( QStringLiteral("render_thread_worker_thread_cap_active") )
+              .toBool( m_playbackSmokeLastWorkerThreadCapActive );
+
+    const double queueWaitMs =
+        telemetryDoubleValue( timing, "render_thread_queue_wait_ms" );
+    const double renderWorkMs =
+        telemetryDoubleValue( timing, "render_thread_work_ms" );
+    const double renderTotalMs =
+        telemetryDoubleValue( timing, "render_thread_total_ms" );
+    const double llrawprocMs =
+        telemetryDoubleValue( timing, "llrawproc_ms" );
+    const double processed8Ms =
+        telemetryDoubleValue( timing, "processed8_total_ms" );
+    const double drawTotalMs = m_lastDrawFrameReadyTotalMs;
+
+    m_playbackSmokeQueueWaitSumMs += queueWaitMs;
+    m_playbackSmokeRenderWorkSumMs += renderWorkMs;
+    m_playbackSmokeRenderTotalSumMs += renderTotalMs;
+    m_playbackSmokeLlrawprocSumMs += llrawprocMs;
+    m_playbackSmokeProcessed8SumMs += processed8Ms;
+    m_playbackSmokeDrawTotalSumMs += drawTotalMs;
+    if( renderTotalMs > m_playbackSmokeRenderTotalMaxMs )
+        m_playbackSmokeRenderTotalMaxMs = renderTotalMs;
+    if( drawTotalMs > m_playbackSmokeDrawTotalMaxMs )
+        m_playbackSmokeDrawTotalMaxMs = drawTotalMs;
+
+    m_playbackSmokeLastScaleRequest = requestContext.playbackScaleFactor;
+    m_playbackSmokeLastScaleActive = readyFrame.playbackScaleFactorActive;
+
+    if( m_playbackSmokeFrameTelemetry )
+    {
+        qInfo().noquote()
+            << QStringLiteral(
+                   "playback_smoke.frame session=%1 index=%2 elapsed_ms=%3 "
+                   "interval_ms=%4 display_frame=%5 position=%6 serial=%7 "
+                   "scale_request=%8 scale_active=%9 worker_threads=%10 "
+                   "worker_thread_cap_active=%11 render_total_ms=%12 "
+                   "render_work_ms=%13 queue_wait_ms=%14 llrawproc_ms=%15 "
+                   "processed8_ms=%16 draw_total_ms=%17 still_drawing=%18 "
+                   "pending_advance=%19" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( elapsedMs, 0, 'f', 3 )
+                   .arg( intervalMs, 0, 'f', 3 )
+                   .arg( static_cast<qulonglong>( displayFrame ) )
+                   .arg( ui->horizontalSliderPosition->value() )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( requestContext.playbackScaleFactor )
+                   .arg( readyFrame.playbackScaleFactorActive )
+                   .arg( m_playbackSmokeLastWorkerThreads )
+                   .arg( bool01( m_playbackSmokeLastWorkerThreadCapActive ) )
+                   .arg( renderTotalMs, 0, 'f', 3 )
+                   .arg( renderWorkMs, 0, 'f', 3 )
+                   .arg( queueWaitMs, 0, 'f', 3 )
+                   .arg( llrawprocMs, 0, 'f', 3 )
+                   .arg( processed8Ms, 0, 'f', 3 )
+                   .arg( drawTotalMs, 0, 'f', 3 )
+                   .arg( bool01( m_frameStillDrawing ) )
+                   .arg( bool01( m_playbackFrameAdvancePending ) );
+    }
+}
+
+void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
+{
+    if( !m_playbackSmokeActive ) return;
+
+    const double now = mlv_stage_timing_now();
+    const double elapsedMs = ( now - m_playbackSmokeStartTime ) * 1000.0;
+    const double elapsedSeconds = elapsedMs > 0.0 ? elapsedMs / 1000.0 : 0.0;
+    const int currentPosition = ui->horizontalSliderPosition->value();
+    const int timelineDelta = currentPosition - m_playbackSmokeStartPosition;
+    const int timelineDeltaAbs = timelineDelta >= 0
+        ? timelineDelta
+        : -timelineDelta;
+    const int skippedOrUnpresented =
+        qMax( 0, timelineDeltaAbs - m_playbackSmokePresentedFrames );
+    const double presentedFps =
+        elapsedSeconds > 0.0
+            ? static_cast<double>( m_playbackSmokePresentedFrames )
+              / elapsedSeconds
+            : 0.0;
+    const double timelineFps =
+        elapsedSeconds > 0.0
+            ? static_cast<double>( timelineDeltaAbs ) / elapsedSeconds
+            : 0.0;
+    const int intervals =
+        m_playbackSmokePresentedFrames > 1
+            ? m_playbackSmokePresentedFrames - 1
+            : 0;
+    const double avgIntervalMs =
+        intervals > 0
+            ? m_playbackSmokePresentedIntervalSumMs
+              / static_cast<double>( intervals )
+            : 0.0;
+    const double avgRenderTotalMs =
+        m_playbackSmokePresentedFrames > 0
+            ? m_playbackSmokeRenderTotalSumMs
+              / static_cast<double>( m_playbackSmokePresentedFrames )
+            : 0.0;
+    const double avgRenderWorkMs =
+        m_playbackSmokePresentedFrames > 0
+            ? m_playbackSmokeRenderWorkSumMs
+              / static_cast<double>( m_playbackSmokePresentedFrames )
+            : 0.0;
+    const double avgQueueWaitMs =
+        m_playbackSmokePresentedFrames > 0
+            ? m_playbackSmokeQueueWaitSumMs
+              / static_cast<double>( m_playbackSmokePresentedFrames )
+            : 0.0;
+    const double avgLlrawprocMs =
+        m_playbackSmokePresentedFrames > 0
+            ? m_playbackSmokeLlrawprocSumMs
+              / static_cast<double>( m_playbackSmokePresentedFrames )
+            : 0.0;
+    const double avgProcessed8Ms =
+        m_playbackSmokePresentedFrames > 0
+            ? m_playbackSmokeProcessed8SumMs
+              / static_cast<double>( m_playbackSmokePresentedFrames )
+            : 0.0;
+    const double avgDrawTotalMs =
+        m_playbackSmokePresentedFrames > 0
+            ? m_playbackSmokeDrawTotalSumMs
+              / static_cast<double>( m_playbackSmokePresentedFrames )
+            : 0.0;
+
+    const uint64_t currentStaleDrops =
+        m_playbackPrepStaleDropCount.load( std::memory_order_acquire );
+    const uint64_t currentGenerationDrops =
+        m_playbackPrepGenerationDropCount.load( std::memory_order_acquire );
+    const uint64_t currentReplacedBefore =
+        m_playbackPrepReplacedBeforeComputeCount.load( std::memory_order_acquire );
+    const uint64_t currentReplacedAfter =
+        m_playbackPrepReplacedAfterComputeCount.load( std::memory_order_acquire );
+    auto deltaCounter = []( uint64_t current, uint64_t start ) -> qulonglong
+    {
+        return static_cast<qulonglong>( current >= start ? current - start : 0 );
+    };
+
+    m_playbackSmokeActive = false;
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.summary session=%1 reason=%2 elapsed_ms=%3 "
+               "presented_frames=%4 presented_fps=%5 timeline_delta=%6 "
+               "timeline_delta_abs=%7 timeline_fps=%8 skipped_or_unpresented_frames=%9 "
+               "first_present_ms=%10 avg_present_interval_ms=%11 "
+               "max_present_interval_ms=%12 avg_render_total_ms=%13 "
+               "max_render_total_ms=%14 avg_render_work_ms=%15 avg_queue_wait_ms=%16 "
+               "avg_llrawproc_ms=%17 avg_processed8_ms=%18 avg_draw_total_ms=%19 "
+               "max_draw_total_ms=%20 worker_threads_start=%21 worker_threads_last=%22 "
+               "worker_thread_cap_active_last=%23 scale_request_start=%24 "
+               "scale_request_last=%25 scale_active_last=%26 quality_mode=%27 "
+               "start_position=%28 current_position=%29 first_presented_frame=%30 "
+               "last_presented_frame=%31 start_serial=%32 prep_stale_drops=%33 "
+               "prep_generation_drops=%34 prep_replaced_before=%35 "
+               "prep_replaced_after=%36 still_drawing=%37 pending_advance=%38 "
+               "preroll_requested=%39 play_to_first_valid=%40 play_to_first_ms=%41 "
+               "frame_telemetry=%42" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
+               .arg( elapsedMs, 0, 'f', 3 )
+               .arg( m_playbackSmokePresentedFrames )
+               .arg( presentedFps, 0, 'f', 3 )
+               .arg( timelineDelta )
+               .arg( timelineDeltaAbs )
+               .arg( timelineFps, 0, 'f', 3 )
+               .arg( skippedOrUnpresented )
+               .arg( m_playbackSmokeFirstPresentMs, 0, 'f', 3 )
+               .arg( avgIntervalMs, 0, 'f', 3 )
+               .arg( m_playbackSmokePresentedIntervalMaxMs, 0, 'f', 3 )
+               .arg( avgRenderTotalMs, 0, 'f', 3 )
+               .arg( m_playbackSmokeRenderTotalMaxMs, 0, 'f', 3 )
+               .arg( avgRenderWorkMs, 0, 'f', 3 )
+               .arg( avgQueueWaitMs, 0, 'f', 3 )
+               .arg( avgLlrawprocMs, 0, 'f', 3 )
+               .arg( avgProcessed8Ms, 0, 'f', 3 )
+               .arg( avgDrawTotalMs, 0, 'f', 3 )
+               .arg( m_playbackSmokeDrawTotalMaxMs, 0, 'f', 3 )
+               .arg( m_playbackSmokeStartWorkerThreads )
+               .arg( m_playbackSmokeLastWorkerThreads )
+               .arg( bool01( m_playbackSmokeLastWorkerThreadCapActive ) )
+               .arg( m_playbackSmokeStartScaleRequest )
+               .arg( m_playbackSmokeLastScaleRequest )
+               .arg( m_playbackSmokeLastScaleActive )
+               .arg( m_playbackSmokeStartQualityMode )
+               .arg( m_playbackSmokeStartPosition )
+               .arg( currentPosition )
+               .arg( m_playbackSmokeFirstPresentedFrame )
+               .arg( m_playbackSmokeLastPresentedFrame )
+               .arg( static_cast<qulonglong>( m_playbackSmokeStartRequestSerial ) )
+               .arg( deltaCounter( currentStaleDrops,
+                                    m_playbackSmokeStartPrepStaleDrops ) )
+               .arg( deltaCounter( currentGenerationDrops,
+                                    m_playbackSmokeStartPrepGenerationDrops ) )
+               .arg( deltaCounter( currentReplacedBefore,
+                                    m_playbackSmokeStartPrepReplacedBefore ) )
+               .arg( deltaCounter( currentReplacedAfter,
+                                    m_playbackSmokeStartPrepReplacedAfter ) )
+               .arg( bool01( m_frameStillDrawing ) )
+               .arg( bool01( m_playbackFrameAdvancePending ) )
+               .arg( bool01( m_lastPlayStartPrerollRequested ) )
+               .arg( bool01( m_lastPlayToFirstFrameValid ) )
+               .arg( m_lastPlayToFirstFrameMs, 0, 'f', 3 )
+               .arg( bool01( m_playbackSmokeFrameTelemetry ) );
+}
+
 bool MainWindow::primePlaybackCacheOnPlayStart( void )
 {
     if( !m_fileLoaded || !m_pMlvObject ) return false;
@@ -15015,6 +15365,7 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     //When stopping, debayer selection has to come in right order from render thread (extra-invitation)
     if( !checked )
     {
+        finishPlaybackSmokeTelemetry( "play-stop" );
         m_playbackStopped = true;
         m_playToFirstFramePending = false;
         m_playToFirstFrameTargetFrameValid = false;
@@ -15025,6 +15376,7 @@ void MainWindow::on_actionPlay_toggled(bool checked)
     applyEffectiveDualIsoPlaybackSettings();
     if( checked )
     {
+        beginPlaybackSmokeTelemetry();
         beginPlayToFirstFrameMeasurement();
         requestFrameRefresh( true, "play-start" );
         m_playbackFrameAdvancePending = true;
@@ -16261,6 +16613,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     if( m_pRenderThread )
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+    notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );
     if( interactiveTraceEnabled() )
     {
         logInteractionEvent(
