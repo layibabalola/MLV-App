@@ -55,6 +55,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
     #pragma omp parallel for
     for (y = 4; y < h-5; y += 2)
     {
+        const int black_thr = black + 64;
+        const unsigned int white_u = (unsigned int)white;
         const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m2 = inp + (size_t)(y - 2) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m1 = inp + (size_t)(y - 1) * (size_t)w;
@@ -68,6 +70,13 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
         for (x = 4; x < w-4; x += 2)
         {
+            int r0 = row_y[x];
+            int b0 = row_y_p1[x + 1];
+            if ((unsigned int)r0 >= white_u && (unsigned int)b0 >= white_u)
+            {
+                continue;
+            }
+
             int med_r[5];
             int med_b[5];
             int eh = 0;
@@ -140,11 +149,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
             int dr = ev < eh ? drv : drh;
             int db = ev < eh ? dbv : dbh;
 
-            int r0 = row_y[x];
-            int b0 = row_y_p1[x+1];
-
             int thr = 64;
-            if (r0 < black+thr || b0 < black+thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr)
+            if (r0 < black_thr || b0 < black_thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr)
             {
                 dr = (drv+drh)/2;
                 db = (dbv+dbh)/2;
@@ -152,10 +158,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 gb = (g1+g2+g5+g6)/4;
             }
 
-            if (r0 < white)
+            if ((unsigned int)r0 < white_u)
                 out_y[x] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
 
-            if (b0 < white)
+            if ((unsigned int)b0 < white_u)
                 out_y_p1[x + 1] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
         }
     }

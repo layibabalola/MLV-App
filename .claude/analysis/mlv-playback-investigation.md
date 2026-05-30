@@ -4550,6 +4550,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: look for a deeper structural reduction in the Dual ISO blend stack instead of another narrow aliasing hint.
 2. Medium impact / low risk: keep the direct8 guard in place while the fallback path remains the active safety rail.
 3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback work.
+## 2026-05-30 - accepted early overexposed skip in chroma_smooth 2x2
+
+### Verified locally
+
+- I kept the structural early-exit in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c): the 2x2 chroma-smooth loop now skips the expensive median/interpolation work when both center pixels are already overexposed, which avoids burning cycles on cells that would not be written anyway.
+- The rebuilt user-facing release exe is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 4:33:51 PM`, `Length=8793088`, `SHA256=757E8E39C3E4E82EE4E98950493AAB21BB103815756E3FD897F4AE899428F6E4`.
+- The sequential visible GUI smoke trio stayed valid with x1 Quality and settled Auto Look Assist preserved, and the fallback path remained active with `processed8_direct_path_frames=0` on all three clips:
+  - `M16-1327`: `presented_fps=4.748`, `avg_render_total_ms=196.211`, `avg_processed16_to_8bit_ms=2.526`, `avg_mix_chroma_ms=25.763`
+  - `M16-1347`: `presented_fps=5.000`, `avg_render_total_ms=186.346`, `avg_processed16_to_8bit_ms=2.053`, `avg_mix_chroma_ms=27.500`
+  - `M16-1446`: `presented_fps=5.731`, `avg_render_total_ms=164.370`, `avg_processed16_to_8bit_ms=2.152`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- Compared with the last accepted fallback baseline, all three clips improved on presented FPS and average render time, which is the first stable end-to-end gain in this retained path since the earlier direct8 guard work.
+- The direct8 guard and x1 Quality visual state stayed intact, so this is a safe fallback-path improvement rather than a preview-color workaround.
+- The earlier rejected literal-hoist probes in `chroma_smooth.c` remain rejected; this new early-exit is different because it avoids work on fully clipped cells instead of just moving constants around.
+
+### Needs runtime profiling
+
+- The dominant retained cost is still in `dualiso.c` / `avg_mix_chroma_ms` for the chroma-heavy clips, so there is still headroom if we want to keep iterating.
+- The same sequential three-clip visible smoke set remains the acceptance gate for future playback-speed changes.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for another structural reduction inside `hdr_chroma_smooth()` that preserves the current visual state, because that is still the main remaining bucket on the chroma-heavy clips.
+2. Medium impact / low risk: keep the new early overexposed skip in place and continue using the three-clip smoke set as the regression gate.
+3. Low impact / low risk: avoid restarting the rejected constant-hoist style probes in `chroma_smooth.c`.
+
 ## 2026-05-30 - rejected dualiso_avx2 restrict hint pass
 
 - Probe: add `__restrict` qualifiers to the AVX2 row-kernel signatures in `src/mlv/llrawproc/dualiso_avx2.inc`.
