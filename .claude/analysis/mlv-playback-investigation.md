@@ -4444,3 +4444,31 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: profile the shared `processed16_to_8bit` route and the Dual ISO blend buckets next, because that is where the retained fallback cost is concentrated.
 2. Medium impact / low risk: keep the current direct8 guard in place for non-neutral local-tone playback preview.
 3. Low impact / low risk: preserve the same three-clip visible smoke gate for any future playback-speed change.
+
+## 2026-05-30 - accepted row-local processed16 packdown in the fallback preview path
+
+### Verified locally
+
+- Reworked the fallback `processed16_to_8bit` conversion in [`src/mlv/video_mlv.c`](C:\!Layi Wkspc\MLV-App\src\mlv\video_mlv.c) so it runs as a row-local packdown loop with precomputed row pointers instead of a single flat byte-indexed `parallel for`.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 3:19:43 PM`, `Length=8793088`, `SHA256=E227C3FBB06D48DD65C29B015A24EFC73581F036D064A69F910BDC190D354320`.
+- Re-ran the visible GUI smoke gate sequentially with x1 Quality and settled Auto Look Assist preserved. The new packdown loop stayed visually correct and produced a small net improvement in the overall fallback render path on this clip trio:
+  - `M16-1327`: `presented_fps=4.624`, `avg_render_total_ms=206.189`, `avg_processed16_to_8bit_ms=2.243`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.736`, `avg_render_total_ms=203.447`, `avg_processed16_to_8bit_ms=2.342`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=4.999`, `avg_render_total_ms=188.025`, `avg_processed16_to_8bit_ms=2.675`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The row-local packdown is a fallback-path-only change; it does not touch the direct8 preview guard that keeps the pink wash contained.
+- The earlier overlapped smoke attempt was discarded as contaminated by contention; the sequential rerun above is the authoritative result.
+- The overall render total improved a little across the three-clip gate, which is enough to keep the change even though the packdown sub-timing itself remains close to the prior baseline.
+
+### Needs runtime profiling
+
+- The `processed16_to_8bit` stage is still small compared with the heavier fallback work, so the next meaningful gain is more likely in the Dual ISO blend stack than in further packdown micro-tuning.
+- Keep the same sequential three-clip smoke gate for future fallback-path changes so contention cannot blur the result again.
+
+### Ranked next steps
+
+1. High impact / medium risk: profile the remaining Dual ISO blend buckets now that the packdown loop is in a better shape.
+2. Medium impact / low risk: keep the direct8 guard in place for non-neutral local-tone playback preview.
+3. Low impact / low risk: keep the sequential three-clip smoke gate for any future playback-speed change.
