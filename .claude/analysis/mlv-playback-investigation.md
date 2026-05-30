@@ -4255,3 +4255,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: keep the aliasing hints and continue looking for a deeper structural reduction inside `mix_chroma`.
 2. Medium impact / low risk: preserve the current smoke harness and visual-state gate for apples-to-apples comparisons.
 3. Low impact / low risk: leave export untouched as the control path.
+
+## 2026-05-30 - reverted processed16-to-8bit packdown probe after mixed visible results
+
+### Verified locally
+
+- Reverted the AVX2 `processed16_to_8bit` packdown probe in [`src/mlv/video_mlv.c`](C:\!Layi%20Wkspc\MLV-App\src\mlv\video_mlv.c) after the visible smoke set failed to show a clean enough improvement to keep it.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 1:48:13 PM`, `Length=8792576`, `SHA256=46242867030C819E426A8C831AE5210114C093835A3BA3929C3080056C0B8633`.
+- Re-ran the visible GUI smoke set with x1 Quality and settled Auto Look Assist preserved. The gate stayed valid, `processed8_direct_path_frames=0` throughout, and the fallback path remained the active path:
+  - `M16-1327`: `presented_fps=4.872`, `avg_render_total_ms=192.949`, `avg_processed16_to_8bit_ms=2.231`
+  - `M16-1347`: `presented_fps=4.748`, `avg_render_total_ms=198.605`, `avg_processed16_to_8bit_ms=2.579`
+  - `M16-1446`: `presented_fps=5.373`, `avg_render_total_ms=175.209`, `avg_processed16_to_8bit_ms=2.140`
+
+### Cross-checked from prior analysis
+
+- The revert restored the earlier baseline behavior for the fallback packdown step, and the current smoke results are consistent with that baseline rather than a meaningful regression or breakthrough.
+- The color issue remains a separate preview-path problem; this probe only touched the 16-bit-to-8-bit packdown stage in the fallback flow.
+
+### Needs runtime profiling
+
+- The current fallback path still deserves a narrower optimization attempt, but only if the visible smoke gate remains stable and the measured gain is clearly directional.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for a different fallback-path hotspot than the packdown stage if we want a meaningful speedup.
+2. Medium impact / low risk: keep comparing the same three clips under the same x1 Quality visual state.
+3. Low impact / low risk: leave the direct8 preview gate unchanged until the color path is proven safe.
