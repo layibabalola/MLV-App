@@ -4587,3 +4587,30 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `M16-1347`: `presented_fps=4.752`, `avg_render_total_ms=198.259`, `avg_processed16_to_8bit_ms=1.924`, `avg_mix_chroma_ms=30.664`
   - `M16-1446`: `presented_fps=5.121`, `avg_render_total_ms=182.537`, `avg_processed16_to_8bit_ms=2.098`, `avg_mix_chroma_ms=0.000`
 - Decision: reject and revert; the path-selection guard stayed stable, but the net render trend was worse than the prior accepted baseline.
+
+## 2026-05-30 - rejected 2x2 chroma_smooth branch split on clipped paths
+
+### Verified locally
+
+- I tried a larger structural split in the 2x2 [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) fallback path so fully clipped cells would skip, fully writable cells would keep the existing full blend, and partially clipped cells would take reduced red-only or blue-only branches.
+- The source was restored back to the accepted baseline before closeout, so there is no net code change from the branch-split attempt.
+- The rebuilt user-facing release exe after the restore is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 4:46:19 PM`, `Length=8793088`, `SHA256=EF1FBD9A169D531C71DF713116C658316C33FCBA5CCF917E59334522C93C9E1A`.
+- The sequential visible GUI smoke trio stayed valid with x1 Quality and settled Auto Look Assist preserved, but the fallback path regressed versus the accepted early-skip baseline:
+  - `M16-1327`: `presented_fps=4.356`, `avg_render_total_ms=218.400`, `avg_processed16_to_8bit_ms=2.829`, `avg_mix_chroma_ms=30.286`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.489`, `avg_render_total_ms=213.667`, `avg_processed16_to_8bit_ms=2.167`, `avg_mix_chroma_ms=30.083`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.123`, `avg_render_total_ms=184.024`, `avg_processed16_to_8bit_ms=2.244`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- Compared with the accepted early overexposed-cell skip baseline, this branch split was slower on the two chroma-heavy clips and is not worth keeping.
+- The direct8 guard stayed inactive on the smoke clips, so the regression is confined to the retained fallback path rather than the pink preview path returning.
+
+### Needs runtime profiling
+
+- If the next `chroma_smooth` iteration stays in this area, it needs to be a smaller structural change that beats the accepted early-skip baseline on all three clips, not another branch split.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the accepted early overexposed-cell skip baseline and look for a different retained-path reduction if we revisit `chroma_smooth.c`.
+2. Medium impact / low risk: keep the current direct8 gate and main-render preview scope fix in place while the visual path stays under scrutiny.
+3. Low impact / low risk: continue using the sequential three-clip visible smoke set as the acceptance gate for future playback-speed changes.
