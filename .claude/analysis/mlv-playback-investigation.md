@@ -1,3 +1,14 @@
+## 2026-05-30 - rejected chroma_smooth invariant hoist probe
+- I tried a small invariant-hoist cleanup in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) to lift the `thr`/clamp constants out of the hot branches, but the experiment did not survive the shared-template instantiations cleanly enough to keep.
+- The source was restored to the accepted baseline before final verification, so the tree is clean again and there is no net code change from the attempt.
+- The rebuilt user-facing release exe is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 4:03:23 PM`, `Length=8793088`, `SHA256=44E99A8292AA7F4B653027B8963DD27348E397E7B2FE113F9CE4532D87849A0B`.
+- The visible GUI smoke trio remained valid with x1 Quality and settled Auto Look Assist preserved, and the direct8 guard stayed inactive on the smoke clips:
+  - `M16-1327`: `presented_fps=4.747`, `avg_render_total_ms=201.947`, `avg_processed16_to_8bit_ms=2.158`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.102`, `avg_render_total_ms=186.732`, `avg_processed16_to_8bit_ms=2.098`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.373`, `avg_render_total_ms=177.605`, `avg_processed16_to_8bit_ms=2.070`, `processed8_direct_path_frames=0`
+- This probe did not produce a durable fallback-path improvement, so it is safer to leave the accepted `chroma_smooth` baseline untouched and look elsewhere for the next gain.
+- The current fallback stack still appears to be dominated by `dualiso.c` and the shared 16-bit preview route rather than another tiny `chroma_smooth` invariant hoist.
+
 ## 2026-05-30 - accepted Dual ISO aliasing hints and x-start hoist in the fallback blend path
 
 ### Verified locally
