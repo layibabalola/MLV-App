@@ -4308,3 +4308,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: inspect `hdr_chroma_smooth()` for one more inner-loop reduction now that the copy prelude has been trimmed.
 2. Medium impact / low risk: preserve the current smoke harness and visual-state gate for apples-to-apples comparisons.
 3. Low impact / low risk: keep the direct8 preview gate unchanged until the color path is proven safe.
+
+## 2026-05-30 - rejected scalar median-candidate rewrite in 2x2 chroma smoother
+
+### Verified locally
+
+- Prototyped a scalar rewrite of the fixed-size median-candidate staging in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi%20Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) so the 2x2 kernel used scalar locals instead of the small `med_r[]` / `med_b[]` arrays.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe) and reran the same three-clip visible GUI smoke gate with x1 Quality and settled Auto Look Assist preserved.
+- The smoke gate stayed visually valid and kept `processed8_direct_path_frames=0`, but the optimization regressed the shared fallback path badly enough to reject it:
+  - `M16-1327`: `presented_fps=4.865`, `avg_render_total_ms=195.795`, `avg_mix_chroma_ms=26.282`, `avg_chroma_copy_ms=6.128`, `avg_chroma_fullres_ms=11.205`, `avg_chroma_halfres_ms=8.949`
+  - `M16-1347`: `presented_fps=4.122`, `avg_render_total_ms=225.788`, `avg_mix_chroma_ms=31.061`, `avg_chroma_copy_ms=6.303`, `avg_chroma_fullres_ms=12.727`, `avg_chroma_halfres_ms=12.030`
+  - `M16-1446`: `presented_fps=4.867`, `avg_render_total_ms=192.692`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The scalar-local rewrite was too much register pressure for this kernel shape on the current build, so it lost the visible baseline even though the direct8 guard remained intact.
+- The evidence says the copy-prelude `memcpy` change is the better keep, while the median staging should stay on the array form for now.
+
+### Needs runtime profiling
+
+- The next safe attempt should stay around `hdr_chroma_smooth()` but avoid changing the kernel’s local-value shape unless there is a stronger proof of improvement.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for another stable reduction in `hdr_chroma_smooth()` that does not rework the local candidate storage shape.
+2. Medium impact / low risk: keep the same x1 Quality three-clip smoke gate as the acceptance test.
+3. Low impact / low risk: leave export and the direct8 preview guard untouched while the fallback path is still the target.
