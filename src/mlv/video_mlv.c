@@ -4149,10 +4149,18 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
 
     /* Copy (and 8-bitize) */
     const double convert_start = mlv_stage_timing_now();
-    #pragma omp parallel for
-    for (uint64_t i = 0; i < rgb_frame_size; ++i)
+    const size_t row_words = (size_t)out_w * 3u;
+    #pragma omp parallel for schedule(static)
+    for (int y = 0; y < out_h; ++y)
     {
-        outputFrame[i] = processed_frame[i] >> 8;
+        const uint16_t * __restrict src_row =
+            processed_frame + ((size_t)y * row_words);
+        uint8_t * __restrict dst_row =
+            outputFrame + ((size_t)y * row_words);
+        for (size_t x = 0; x < row_words; ++x)
+        {
+            dst_row[x] = (uint8_t)(src_row[x] >> 8);
+        }
     }
     g_mlv_last_processed16_to_8bit_ms = (mlv_stage_timing_now() - convert_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed16_to_8bit", frameIndex, g_mlv_last_processed16_to_8bit_ms);
