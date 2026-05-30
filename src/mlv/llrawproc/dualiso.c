@@ -3527,7 +3527,23 @@ static inline float * ensure_mix_curve_float_cache_slot(dualiso_full20bit_scratc
 }
 #endif
 
-static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres, uint32_t* halfres_smooth, uint16_t* alias_map, uint32_t* dark, uint32_t* bright, uint16_t * overexposed, int dark_noise, uint32_t white_darkened, double corr_ev, double lowiso_dr, uint32_t black, uint32_t white, int chroma_smooth_method, dualiso_full20bit_scratch_t * scratch)
+static inline int mix_images(struct raw_info raw_info,
+                             uint32_t * __restrict fullres,
+                             uint32_t * __restrict fullres_smooth,
+                             uint32_t * __restrict halfres,
+                             uint32_t * __restrict halfres_smooth,
+                             uint16_t * __restrict alias_map,
+                             uint32_t * __restrict dark,
+                             uint32_t * __restrict bright,
+                             uint16_t * __restrict overexposed,
+                             int dark_noise,
+                             uint32_t white_darkened,
+                             double corr_ev,
+                             double lowiso_dr,
+                             uint32_t black,
+                             uint32_t white,
+                             int chroma_smooth_method,
+                             dualiso_full20bit_scratch_t * scratch)
 {
     int w = raw_info.width;
     int h = raw_info.height;
@@ -3628,6 +3644,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
     if (g_dualiso_hq_use_avx2)
     {
+        const int x_start = w & ~7;
         mix_stage_start = mlv_stage_timing_now();
         float * mix_curve_float = ensure_mix_curve_float_cache_slot(scratch,
                                                                     mix_curve_slot,
@@ -3653,7 +3670,6 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
                                 dark_row,
                                 raw2ev, ev2raw, mix_curve_float, w);
             /* tail: pixels not covered by SIMD bulk */
-            const int x_start = w & ~7;
             for (int x = x_start; x < w; x ++) {
                 int b = bright_row[x];
                 int d = dark_row[x];
@@ -3847,7 +3863,19 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
     return 1;
 }
 
-static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32, uint32_t* fullres, uint32_t* fullres_smooth, uint32_t* halfres_smooth, uint32_t* dark, uint32_t* bright, uint16_t* overexposed, uint16_t* alias_map, int black, int white, int dark_noise, dualiso_full20bit_scratch_t * scratch)
+static inline void final_blend(struct raw_info raw_info,
+                               uint32_t * __restrict raw_buffer_32,
+                               uint32_t * __restrict fullres,
+                               uint32_t * __restrict fullres_smooth,
+                               uint32_t * __restrict halfres_smooth,
+                               uint32_t * __restrict dark,
+                               uint32_t * __restrict bright,
+                               uint16_t * __restrict overexposed,
+                               uint16_t * __restrict alias_map,
+                               int black,
+                               int white,
+                               int dark_noise,
+                               dualiso_full20bit_scratch_t * scratch)
 {
     /* fullres mixing curve */
     double * fullres_curve = build_fullres_curve(black);
@@ -3869,6 +3897,7 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
     if (g_dualiso_hq_use_avx2)
     {
+        const int x_start = w & ~7;
         if (alias_map)
         {
             #pragma omp parallel for
@@ -3894,7 +3923,6 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
                                      raw2ev, ev2raw, fullres_curve,
                                      black, dark_noise, w);
                 /* tail: pixels not covered by SIMD bulk */
-                const int x_start = w & ~7;
                 for (int x = x_start; x < w; x ++) {
                     int b = bright_row[x];
                     int hr = halfres_smooth_row[x];
@@ -3943,7 +3971,6 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
                                      raw2ev, ev2raw, fullres_curve,
                                      black, dark_noise, w);
                 /* tail: pixels not covered by SIMD bulk */
-                const int x_start = w & ~7;
                 for (int x = x_start; x < w; x ++) {
                     int b = bright_row[x];
                     int hr = halfres_smooth_row[x];

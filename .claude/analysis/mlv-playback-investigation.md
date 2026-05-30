@@ -1,3 +1,31 @@
+## 2026-05-30 - accepted Dual ISO aliasing hints and x-start hoist in the fallback blend path
+
+### Verified locally
+
+- I kept the in-flight cleanup in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c): the hot `mix_images()` and `final_blend()` pointers now carry `__restrict`, and the AVX2 tail bound `x_start = w & ~7` is hoisted once per function instead of being rebuilt in each tail loop.
+- The user-facing release exe was rebuilt at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 3:30:54 PM`, `Length=8793088`, `SHA256=29F4BE9A31EAB7D69DB349402E9C9CB9CA6EAF8AF59BD66F327DEE19B513F7C9`.
+- The sequential visible GUI smoke set stayed valid with x1 Quality and settled Auto Look Assist preserved, and the fallback path remained active with `processed8_direct_path_frames=0` on all three clips:
+  - `M16-1327`: `presented_fps=4.623`, `avg_render_total_ms=207.189`, `avg_processed16_to_8bit_ms=2.243`, `avg_mix_chroma_ms=28.243`
+  - `M16-1347`: `presented_fps=4.626`, `avg_render_total_ms=203.811`, `avg_processed16_to_8bit_ms=1.919`, `avg_mix_chroma_ms=29.189`
+  - `M16-1446`: `presented_fps=5.366`, `avg_render_total_ms=174.349`, `avg_processed16_to_8bit_ms=3.000`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- This remains a fallback-path improvement rather than a direct8 visual-path change; the direct8 gate is still held off for the non-neutral local-tone preview state that produced the pink wash.
+- Compared with the prior sequential baseline after the row-local `processed16_to_8bit` packdown, the overall three-clip render average improved while keeping the x1 Quality visual state intact.
+- The fallback cost is still concentrated in `dualiso.c`, especially `avg_mix_chroma_ms` on the chroma-heavy clips, so the current change is a reasonable structural reduction in the retained path rather than a color-path workaround.
+
+### Needs runtime profiling
+
+- If the next iteration stays in `dualiso.c`, the most promising follow-up is a more structural cut inside `mix_chroma` or `final_blend` rather than another tiny tail cleanup.
+- The visible three-clip smoke set should remain the acceptance gate for any future fallback-path optimization.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for a deeper `mix_chroma` reduction in `dualiso.c`, because that is still the dominant retained bucket on the chroma-heavy clips.
+2. Medium impact / low risk: keep the current row-local packdown and direct8 guard in place while the fallback path stays under scrutiny.
+3. Low impact / low risk: continue using the sequential three-clip visible smoke set as the acceptance gate for future playback-speed changes.
+
 ## 2026-05-30 - main render thread now carries the playback-preview gate
 
 ### Verified locally
