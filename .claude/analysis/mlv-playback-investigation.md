@@ -15,6 +15,7 @@
 - The pink wash is still not fixed by the GUI layer or export path; the working control remains the preview-only direct8 boundary.
 - The earlier `MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1` control still showed the same pink wash, so the bug was broader than the AVX2 body.
 - The current fallback remains the correct visual safeguard for this look state, and the new loop cleanup is a safe perf-only follow-on to that gate.
+- Clarification: the current rebuilt release smoke for this state still reports `processed8_direct_path_frames=0`, so the app is taking the shared 16-bit route, but that path choice alone does **not** prove the pink is gone. The stage captures in the bandprobe set still show the wash already present at `S5_processed8` and surviving into `S6_displayImage`, which means the visible artifact is still a preview-color problem, not a GUI paint problem.
 
 ### Needs runtime profiling
 
