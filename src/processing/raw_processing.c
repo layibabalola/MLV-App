@@ -1105,7 +1105,13 @@ static int processing_has_direct8_supported_local_tone_adjustments(const process
 
     if( processingPlaybackPreviewModeEnabled() )
     {
-        return 1;
+        /* Playback-preview direct8 is only safe when local tone stays
+         * neutral. The current broad pink wash comes from letting the fast
+         * preview path claim support for non-neutral contrast / shadows /
+         * highlights, which the visible smoke set shows as a color
+         * regression. Fall back to the shared reference path until the fast
+         * route proves parity for those settings. */
+        return processing_has_neutral_local_tone_adjustments(processing);
     }
 
     return fabs(processing->clarity) < 0.01;

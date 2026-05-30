@@ -1,3 +1,33 @@
+## 2026-05-30 - direct8 preview was over-claiming support for non-neutral local tone
+
+### Verified locally
+
+- The broad pink wash is still a direct8 preview-path problem, but it is **not** AVX2-intrinsics-specific. Disabling the intrinsics dispatch still produced the same pink wash in the direct8 stage capture, while `S2_post_dualiso` remained neutral.
+- The current visible smoke set on the rebuilt release exe now routes this look-assist state away from direct8 entirely: `processed8_direct_path_frames=0` on all three clips in `.claude-state/profiling/20260530-direct8-fallback-gui-smoke/`, while `avg_processed16_to_8bit_ms` is non-zero.
+- The code change is in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c#L1102): `processing_has_direct8_supported_local_tone_adjustments()` now returns the neutral local-tone check during playback preview instead of automatically claiming support for contrast / shadows / highlights.
+- Rebuilt user-facing release exe: [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 12:38:24 PM`, `Length=8792576`, `SHA256=0C2F930BA89FEC9CBAF58EDDF493B35ACDB9F2493D26DF3B2D0F8FA10BDDC7FA`.
+- Visible GUI smoke on the rebuilt release binary stayed valid for x1 Quality and settled Auto Look Assist, with the direct8 preview path disabled for this look state:
+  - [`M16-1327`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-direct8-fallback-gui-smoke/M16-1327.json): `presented_fps=4.621`, `avg_render_total_ms=199.811`, `processed8_direct_path_frames=0`
+  - [`M16-1347`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-direct8-fallback-gui-smoke/M16-1347.json): `presented_fps=4.617`, `avg_render_total_ms=201.730`, `processed8_direct_path_frames=0`
+  - [`M16-1446`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-direct8-fallback-gui-smoke/M16-1446.json): `presented_fps=5.374`, `avg_render_total_ms=170.814`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The earlier blur-prep/shadow-highlight hypothesis is still rejected; the pink was present before the GUI paint layer and persisted even when the intrinsics variant was disabled.
+- The earlier direct8-kernel parity work on `raw_processing_8bit_kernel.inc` / `raw_processing_8bit_kernel_avx2_intrin.inc` was not sufficient for this playback-preview look state, because the visual regression also appears in the scalar direct8 route.
+- The stage-capture evidence from `.claude-state/profiling/20260530-disable-intrin-profile-capture/disableintrin_S5_processed8_f1.png` and `.claude-state/profiling/20260530-disable-intrin-profile-capture/disableintrin_S6_displayImage_f1.png` still shows the pink entering at `S5_processed8` and surviving into display when direct8 is allowed.
+
+### Needs runtime profiling
+
+- The current fallback is correct but expensive: the visible smoke set now pays the `processed16_to_8bit` cost instead of the direct8 path, so the next safe optimization should target the shared 16-bit preview route for this look-assist state.
+- We still need a smaller, verified subset for direct8 playback preview if we want to regain performance without reintroducing the pink wash.
+
+### Ranked next steps
+
+1. High impact / medium risk: profile the shared `processed16_to_8bit` path on the same three clips now that direct8 is gated out, then look for the highest-return cleanup there.
+2. Medium impact / low risk: add a focused parity test for playback-preview local-tone cases so the direct8 gate cannot regress silently again.
+3. Low impact / low risk: keep the direct8 preview path available only for neutral local-tone receipts until we can prove broader parity.
+
 ## Direct-8 Loop Profiling (2026-04-24)
 
 ## 2026-05-30 - AVX2 direct8 skipped vibrance/saturation
