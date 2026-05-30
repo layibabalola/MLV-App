@@ -26,6 +26,33 @@
 2. Medium impact / low risk: keep the new preview-flag scope fix in place while the visual proof is refreshed.
 3. Low impact / low risk: if the pink is still visible, profile the shared `processed16_to_8bit` path next because that is now the remaining likely preview-color boundary.
 
+## 2026-05-30 - rejected RBFilter vertical stride/output hoist
+
+### Verified locally
+
+- I tried a narrow perf-only cleanup in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc/MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) that hoisted one repeated row-stride calculation out of the hot vertical down/up path and simplified the output pass to walk row pointers directly.
+- The change was reverted after the three-clip visible smoke rerun on the rebuilt user-facing release exe showed no meaningful gain on the current shared 16-bit fallback path. The rebuilt executable remained [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 2:33:00 PM`, `Length=8793600`, with the latest hash to be re-read if we need to report it again.
+- The reverted smoke set stayed visually valid with x1 Quality and settled Auto Look Assist preserved, and `processed8_direct_path_frames=0` remained true on the visible clips:
+  - `M16-1327`: `presented_fps=4.748`, `avg_render_total_ms=199.684`, `avg_llrawproc_ms=66.316`, `avg_processing_shadows_highlights_prep_ms=57.564`, `rbfDetailSummary.avg_vertical_down_ms=23.667`, `rbfDetailSummary.avg_vertical_up_ms=23.205`, `rbfDetailSummary.avg_output_ms=8.615`
+  - `M16-1347`: `presented_fps=4.866`, `avg_render_total_ms=193.846`, `avg_llrawproc_ms=67.564`, `avg_processing_shadows_highlights_prep_ms=60.947`, `rbfDetailSummary.avg_vertical_down_ms=24.342`, `rbfDetailSummary.avg_vertical_up_ms=24.789`, `rbfDetailSummary.avg_output_ms=9.737`
+  - `M16-1446`: `presented_fps=5.124`, `avg_render_total_ms=182.000`, `avg_llrawproc_ms=45.805`, `avg_processing_shadows_highlights_prep_ms=59.390`, `rbfDetailSummary.avg_vertical_down_ms=22.878`, `rbfDetailSummary.avg_vertical_up_ms=25.122`, `rbfDetailSummary.avg_output_ms=9.659`
+
+### Cross-checked from prior analysis
+
+- The probe was perf-only and did not touch the preview-color boundary where the pink wash still localizes to `S5_processed8`.
+- The visible gate remained intact, which means the patch was safe to reject on correctness grounds even before the timing data showed it was not a worthwhile speedup.
+
+### Needs runtime profiling
+
+- If we revisit `RBFilterPlain` again, the next candidate needs to beat the current fallback baseline clearly enough to justify keeping it.
+- The remaining higher-value targets are still the shared `processed16_to_8bit` route and the Dual ISO blend buckets, not more branch-splitting around the vertical recurrence.
+
+### Ranked next steps
+
+1. High impact / medium risk: profile the shared `processed16_to_8bit` path and Dual ISO blend buckets next, because that is where the retained fallback cost is concentrated.
+2. Medium impact / low risk: keep the current direct8 guard in place for non-neutral local-tone playback preview.
+3. Low impact / low risk: preserve the three-clip visible smoke set as the acceptance gate for any future playback-speed change.
+
 ## 2026-05-30 - rejected RBF vertical branch hoist
 
 ### Verified locally
