@@ -4738,3 +4738,36 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: keep the accepted early overexposed-cell skip baseline and look for a different retained-path reduction if we revisit `chroma_smooth.c`.
 2. Medium impact / low risk: keep the current direct8 gate and main-render preview scope fix in place while the visual path stays under scrutiny.
 3. Low impact / low risk: continue using the sequential three-clip visible smoke set as the acceptance gate for future playback-speed changes.
+
+## 2026-05-30 - rejected alias-map grayscale row-pointer locality probe in dualiso.c
+
+### Verified locally
+
+- Probed the alias-map grayscale pass in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) by hoisting row pointers inside `build_alias_map()` instead of re-indexing each access with `x + y*w`.
+- Built the user-facing release executable from the probe state at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 5:57:56 PM`, `Length=8794112`, `SHA256=2CC282330F73B62DE658EB5239153CB119EAC36E1E97FBEA6BA0BC5D9218C839`.
+- The sequential visible GUI smoke gate stayed visually valid with x1 Quality and settled Auto Look Assist preserved, but the probe was slower than the accepted nearby fallback baseline on the chroma-heavy clips:
+  - `M16-1327`: `presented_fps=5.606`, `avg_render_total_ms=166.933`, `avg_llrawproc_ms=50.422`, `avg_mix_chroma_ms=22.022`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.491`, `avg_render_total_ms=170.909`, `avg_llrawproc_ms=56.932`, `avg_mix_chroma_ms=23.591`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.114`, `avg_render_total_ms=152.327`, `avg_llrawproc_ms=28.571`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+- I reverted the change, rebuilt the user-facing release executable, and reran the same smoke gate to confirm the restored source shape remained visually safe:
+  - `M16-1327`: `presented_fps=5.996`, `avg_render_total_ms=158.000`, `avg_llrawproc_ms=48.000`, `avg_mix_chroma_ms=21.125`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.621`, `avg_render_total_ms=168.489`, `avg_llrawproc_ms=55.956`, `avg_mix_chroma_ms=23.933`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.117`, `avg_render_total_ms=131.596`, `avg_llrawproc_ms=23.281`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+- The restored release executable is now [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 6:01:19 PM`, `Length=8793088`, `SHA256=0D23F8CE186A5711B5E272CFE0033B18E4699D58ABAB47AB2E81D5373D0719C4`.
+
+### Cross-checked from prior analysis
+
+- The accepted raw-lookup hoist baseline in `chroma_smooth.c` was still stronger on the same three-clip gate (`6.101 / 5.983 / 6.865 fps`) than this row-pointer probe, so the locality rewrite does not displace the current keep.
+- The direct8 preview guard stayed intact throughout: `processed8_direct_path_frames=0` on every smoke run.
+- The x1 Quality visual state and settled Auto Look Assist state remained stable; the probe was rejected strictly on throughput, not on color or launch-state drift.
+
+### Needs runtime profiling
+
+- If we keep exploring `dualiso.c`, the next candidate needs to be more structural than a pointer-locality cleanup and must beat the accepted baseline clearly on the same three clips.
+- The chroma-heavy clips still point at `avg_mix_chroma_ms` as the hottest retained bucket, so that remains the most likely place for any future gain.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the accepted `chroma_smooth.c` baseline and look for a deeper structural reduction in the retained Dual ISO blend stack.
+2. Medium impact / low risk: preserve the sequential three-clip visible smoke gate as the acceptance test for future playback-speed work.
+3. Low impact / low risk: leave the direct8 preview guard untouched while the fallback path remains the active safety rail.
