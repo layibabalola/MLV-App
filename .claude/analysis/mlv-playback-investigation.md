@@ -1,5 +1,34 @@
 ## Direct-8 Loop Profiling (2026-04-24)
 
+## 2026-05-30 - pink enters at S5_processed8, not in the GUI
+
+### Verified locally
+
+- The captured stage images from `.claude-state/profiling/20260530-bandprobe/pngs/` show the frame stays neutral through [`S1_pre_dualiso`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-bandprobe/pngs/S1_pre_dualiso_f1.png) and [`S2_post_dualiso`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-bandprobe/pngs/S2_post_dualiso_f1.png).
+- The pink wash first appears at [`S5_processed8`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-bandprobe/pngs/S5_processed8_f1.png) and is still present at [`S6_displayImage`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-bandprobe/pngs/S6_displayImage_f1.png).
+- That places the color break in the direct8 preview generation path, after Dual ISO reconstruction and before the GUI presentation layer.
+- The current visible smoke gate on the rebuilt release exe at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) remains green after the source revert, with x1 Quality and settled Auto Look Assist preserved:
+  - `M16-1327`: `presented_fps=9.359`, `avg_render_total_ms=196.773`, `avg_queue_wait_ms=91.507`, `avg_mix_chroma_ms=24.213`
+  - `M16-1347`: `presented_fps=7.491`, `avg_render_total_ms=122.683`, `avg_queue_wait_ms=0.083`, `avg_mix_chroma_ms=28.783`
+  - `M16-1446`: `presented_fps=9.240`, `avg_render_total_ms=96.284`, `avg_queue_wait_ms=0.027`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- Export remained clean in earlier comparisons, so the pink wash is preview-only, not a raw-source corruption.
+- The direct8 gate in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) still allows the fast preview kernel to run in playback preview mode, which is the right place to focus next.
+- The earlier blur-prep/shadow-highlights hypothesis is still rejected; the artifact appears later than that stage.
+
+### Needs runtime profiling
+
+- Compare the direct8 preview path with the same clip under the AVX2 intrinsics toggle so we can prove whether the fast kernel or the scalar/autovec fallback is responsible for the magenta cast.
+- If the color stays pink even with intrinsics disabled, the next suspect is the preview-side matrix/gamma branch rather than the low-level SIMD body.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep chasing the direct8 preview kernel boundary where `S5_processed8` diverges from `S2_post_dualiso`.
+2. Medium impact / low risk: continue using the stage-image captures as the primary color oracle instead of GUI screenshots alone.
+3. Low impact / low risk: leave export and the earlier decode stages untouched while preview-only debugging continues.
+
 ## 2026-05-30 - chroma row reuse trims the visible playback hot loop
 
 ### Verified locally
