@@ -59,6 +59,7 @@
 - To advance the retained-candidate remediation queue one safe candidate at a time, run:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\remediate-retained-closeout.ps1 -RepoRoot . -Apply`
 - The trigger must run even when mutation will be blocked. The repo detector/auditor may retain or block, but final responses should not silently skip the closeout path.
+- The shared bridge reminder now runs dirty-state remediation triage on every response and final hook before the rest of the turn digest is emitted. That preflight may checkpoint or split owned dirty work when policy allows, but mixed or foreign dirty paths must stay visible and untouched.
 - Do not stash, commit, delete, or reset dirty paths classified as `foreignDirty`; they are retained and audited for their owning session or for later attribution.
 - High-impact mutation, including repo-sweep pruning, is allowed only after the exact closeout tuple passes review quorum: candidate id, action id, evidence hash, policy hash, and pinned refs.
 - For eligible symbolic actions, the repo auto-quorum actor may generate Codex/self plus independent policy-review artifacts and continue without user intervention. Manual-only, dirty, locked, protected, stale, or ambiguous candidates must print recoverable unblock detail instead.

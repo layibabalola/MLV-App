@@ -43,6 +43,7 @@ weaker. Their enforcement gaps are roadmap work.
 | Explicit receipt lifecycle | `read` is not the same as handled; collapsing them loses work. | Tier 1 receipt fields/tools; Tier 2 agent follow-through. | Add stop-time guard for surfaced substantive rows lacking `handled_at`. |
 | `ACTION_REQUEST` disposition gate | Action requests must become acting, parked, blocked, displaced, or rejected. | Tier 2/Tier 3 via heuristics and final reminders. | Add stop-time disposition guard keyed by message id. |
 | Outbound reply-debt persistence | A blocked send can be forgotten across compaction if only remembered in chat. | Tier 2 pending ledger exists. | Add guard requiring queued id or full pending body ledger entry before closeout. |
+| Dirty-state remediation before and after each turn | Dirty paths can compound if they are only classified after the turn is over. | Tier 2: `codex_pre_response.ps1` and `codex_pre_final.ps1` now run brokered repair triage through the shared bridge reminder. | Keep the hook-backed repair pass visible, and leave mixed or foreign dirty paths untouched. |
 | No silent inbox failure | A quiet no-op looks like an empty inbox and hides broken communication. | Tier 1 local CLI/MCP result contracts and hook canaries. | Keep probes in pre-response/pre-final hooks; failures must remain loud. |
 | No silent consumption | Watcher, bootstrap, compaction, and hooks must not mark unread work read. | Tier 1 protocol invariant and tests in key paths. | Extend tests as new consumers are added. |
 | Wrong-thread wake prevention | A wake into the wrong chat corrupts the user's work context. | Tier 1 targeted SendKeys thread id, breadcrumb, stale-context, and preflight gates. Read-only UIA sidebar/title enumeration is the preferred non-intrusive Desktop identity primitive where available. | Keep live Desktop stale-context certification in release checklist, including active chat title/project evidence before UI write paths. |
@@ -145,6 +146,9 @@ that promotes the most dangerous Tier 2 items toward Tier 1:
 7. Warn when a turn is about to close while an active task is still open and the
    interrupt has not been classified as resumed, completed, blocked, parked, or
    displaced.
+8. Run dirty-state remediation triage before the turn starts and again after the
+   turn ends so owned dirty work is handled before it compounds, while mixed and
+   foreign paths remain visible and untouched.
 
 These guards should be fail-visible first. Once false positives are understood,
 they may become blocking for Agent Bridge implementation sessions.

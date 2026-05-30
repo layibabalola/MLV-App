@@ -107,6 +107,8 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\
 
 The completion wrapper finalizes by default, so ordinary substantive replies should be treated as closeout events rather than deferred checkpoints.
 
+The shared bridge reminder also runs dirty-state remediation triage on every response and final hook before the rest of the turn digest is emitted. That preflight may checkpoint or split owned dirty work when policy allows, but mixed or foreign dirty paths must stay visible and untouched.
+
 To audit cross-branch cleanup, run:
 
 ```powershell

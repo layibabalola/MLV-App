@@ -145,6 +145,32 @@ function Read-JsonObject {
     }
 }
 
+function Invoke-DirtyStateRemediation {
+    param(
+        [string]$RepoRoot,
+        [string]$HookPhase
+    )
+
+    $closeoutCli = Join-Path $RepoRoot "tools\closeout\Invoke-CloseoutCli.ps1"
+    if (-not (Test-Path $closeoutCli)) {
+        return $null
+    }
+
+    try {
+        $repairJson = & $closeoutCli -RepoRoot $RepoRoot -Arguments @("repair") 2>$null
+        $repairText = ($repairJson | Out-String).Trim()
+        if (-not $repairText) {
+            return $null
+        }
+        $repair = $repairText | ConvertFrom-Json
+        $repair | Add-Member -NotePropertyName hookPhase -NotePropertyValue $HookPhase -Force
+        return $repair
+    } catch {
+        Write-Output "Dirty-state remediation ($HookPhase) skipped: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 function Write-ReminderLog {
     param(
         [string]$Path,
@@ -1224,6 +1250,29 @@ if (-not $Force -and -not (Test-IsUnderPath -Path $cwd -Root $WorkspaceRoot)) {
 }
 
 $resolvedPrivateBucket = Resolve-ActivePrivateBucket -RegistryPath $SessionRegistryPath -ProjectName $ProjectBucket -Fallback $PrivateBucket
+$watchModeActive = Test-Path $BridgeWatchFlagPath
+$toastEnabled = Get-ReminderToastsEnabled -Path $SettingsPath
+$toastSettings = Get-ToastSettings -Path $SettingsPath
+$bridgeState = Get-BridgeRuntimeState -RegistryPath $SessionRegistryPath -WatcherConfigPath $WatcherConfigPath -WatcherPidPath $WatcherPidPath -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket
+$resolvedBridgeRoot = Resolve-BridgeRoot -CandidatePaths @($SessionRegistryPath, $WatcherConfigPath, $WatcherPidPath, $SettingsPath, $BridgeWatchFlagPath, $LogPath) -Fallback $bridgeRoot
+$resolvedStateDir = Join-Path $resolvedBridgeRoot "state"
+$dirtyStateRemediation = Invoke-DirtyStateRemediation -RepoRoot $WorkspaceRoot -HookPhase $HookPhase
+$dirtyStateRemediationSummary = $null
+if ($null -ne $dirtyStateRemediation) {
+    if ($dirtyStateRemediation.status -eq "blocked") {
+        $dirtyStateRemediationSummary = "dirty_repair=blocked reason=$($dirtyStateRemediation.reason)"
+        if ($dirtyStateRemediation.blockers) {
+            $dirtyStateRemediationSummary += " blockers=$([string]::Join(',', @($dirtyStateRemediation.blockers)))"
+        }
+    } elseif ($dirtyStateRemediation.status -eq "repaired") {
+        $dirtyStateRemediationSummary = "dirty_repair=repaired"
+    } elseif ($dirtyStateRemediation.status -eq "noop") {
+        $dirtyStateRemediationSummary = "dirty_repair=noop"
+    } else {
+        $dirtyStateRemediationSummary = "dirty_repair=$($dirtyStateRemediation.status)"
+    }
+    Write-Output ("Dirty-state remediation ($HookPhase): " + $dirtyStateRemediationSummary)
+}
 $recentDuplicate = $null
 $duplicateToastSuppressed = $false
 if (-not $Force) {
@@ -1238,12 +1287,6 @@ if ($recentDuplicate) {
     # deduplicated; otherwise newly-created debt can be hidden for DedupSeconds.
     $duplicateToastSuppressed = $true
 }
-$watchModeActive = Test-Path $BridgeWatchFlagPath
-$toastEnabled = Get-ReminderToastsEnabled -Path $SettingsPath
-$toastSettings = Get-ToastSettings -Path $SettingsPath
-$bridgeState = Get-BridgeRuntimeState -RegistryPath $SessionRegistryPath -WatcherConfigPath $WatcherConfigPath -WatcherPidPath $WatcherPidPath -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket
-$resolvedBridgeRoot = Resolve-BridgeRoot -CandidatePaths @($SessionRegistryPath, $WatcherConfigPath, $WatcherPidPath, $SettingsPath, $BridgeWatchFlagPath, $LogPath) -Fallback $bridgeRoot
-$resolvedStateDir = Join-Path $resolvedBridgeRoot "state"
 if ($HookPhase -eq "response") {
     Set-ResponseDebtTurnStart -StateDir $resolvedStateDir -ProjectName $ProjectBucket -PrivateSession $resolvedPrivateBucket -Timestamp $timestamp
 }
@@ -1265,6 +1308,9 @@ $executionHasActiveTask = $executionDigest.banner.StartsWith("active_task=")
 $stateLine = "Bridge state: $bridgeState"
 $message = "Bridge hygiene: check Codex private bucket $resolvedPrivateBucket and project bucket $ProjectBucket. Continuous monitoring is NOT active unless this thread is currently blocked inside wait_inbox."
 $digestLine = "Bridge digest: $heuristicsDigest ; $($executionDigest.banner) ; $ledgerDigest ; $($responseDebtDigest.banner) ; $($reviewCloseoutDebtDigest.banner) ; $($reviewerWaitDebtDigest.banner) ; $($guardrailDebtDigest.banner)"
+if ($dirtyStateRemediationSummary) {
+    $digestLine += " ; $dirtyStateRemediationSummary"
+}
 Write-Output $stateLine
 if ($SkipSessionWorktree) {
     Write-Output "Session worktree bootstrap: skipped"
@@ -1310,7 +1356,7 @@ if ($watchModeActive) {
 }
 
 $sessionWorktreeBootstrapField = if ($SkipSessionWorktree) { "session_worktree_bootstrap=skipped" } else { "session_worktree_bootstrap=unspecified" }
-Write-ReminderLog -Path $LogPath -Line "$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState $sessionWorktreeBootstrapField watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest' response_debt='$($responseDebtDigest.banner)' review_closeout='$($reviewCloseoutDebtDigest.banner)' reviewer_wait='$($reviewerWaitDebtDigest.banner)' guardrail_debt='$($guardrailDebtDigest.banner)' final_guard=$($HookPhase -eq "final" -and (($executionIdle -and $ledgerHasPending) -or $executionHasActiveTask -or $responseDebtHasPending -or $reviewCloseoutHasPending -or $reviewerWaitHasPending -or $guardrailDebtHasPending))" | Out-Null
+Write-ReminderLog -Path $LogPath -Line "$timestamp reminded phase=$HookPhase project=$ProjectBucket private=$resolvedPrivateBucket bridge_state=$bridgeState $sessionWorktreeBootstrapField watch_mode=$watchModeActive toast_enabled=$toastEnabled heuristics='$heuristicsDigest' execution='$($executionDigest.banner)' ledger='$ledgerDigest' response_debt='$($responseDebtDigest.banner)' review_closeout='$($reviewCloseoutDebtDigest.banner)' reviewer_wait='$($reviewerWaitDebtDigest.banner)' guardrail_debt='$($guardrailDebtDigest.banner)' dirty_repair='$dirtyStateRemediationSummary' final_guard=$($HookPhase -eq 'final' -and (($executionIdle -and $ledgerHasPending) -or $executionHasActiveTask -or $responseDebtHasPending -or $reviewCloseoutHasPending -or $reviewerWaitHasPending -or $guardrailDebtHasPending))" | Out-Null
 
 if ($NoToast -or -not $toastEnabled -or $duplicateToastSuppressed) {
     exit 0
