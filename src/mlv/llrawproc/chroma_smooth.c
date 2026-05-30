@@ -121,12 +121,15 @@ static void CHROMA_SMOOTH_FUNC(int w,
             const int drv = chroma_smooth_med5(med_r[0], med_r[1], med_r[2], med_r[3], med_r[4]);
             const int dbv = chroma_smooth_med5(med_b[0], med_b[1], med_b[2], med_b[3], med_b[4]);
 
-            int g1 = raw2ev[inp[x+1 +     y * w]];
-            int g2 = raw2ev[inp[x   + (y+1) * w]];
-            int g3 = raw2ev[inp[x-1 +     y * w]];
-            int g4 = raw2ev[inp[x   + (y-1) * w]];
-            int g5 = raw2ev[inp[x+2 + (y+1) * w]];
-            int g6 = raw2ev[inp[x+1 + (y+2) * w]];
+            /* Reuse the row pointers already prepared for this pass so the
+             * center-pixel blend does not keep rebuilding the same y*w
+             * address arithmetic inside the hot inner loop. */
+            int g1 = raw2ev[row_y[x+1]];
+            int g2 = raw2ev[row_y_p1[x]];
+            int g3 = raw2ev[row_y[x-1]];
+            int g4 = raw2ev[row_y_m1[x]];
+            int g5 = raw2ev[row_y_p1[x+2]];
+            int g6 = raw2ev[row_y_p2[x+1]];
 
             int grv = (g2+g4)/2;
             int grh = (g1+g3)/2;
@@ -137,8 +140,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
             int dr = ev < eh ? drv : drh;
             int db = ev < eh ? dbv : dbh;
 
-            int r0 = inp[x   +     y * w];
-            int b0 = inp[x+1 + (y+1) * w];
+            int r0 = row_y[x];
+            int b0 = row_y_p1[x+1];
 
             int thr = 64;
             if (r0 < black+thr || b0 < black+thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr)
