@@ -1,5 +1,34 @@
 ## Direct-8 Loop Profiling (2026-04-24)
 
+## 2026-05-30 - AVX2 direct8 skipped vibrance/saturation
+
+### Verified locally
+
+- The broad pink wash was caused by the hand-tuned AVX2 direct8 preview kernel in [`src/processing/raw_processing_8bit_kernel_avx2_intrin.inc`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing_8bit_kernel_avx2_intrin.inc), not by the GUI paint layer or the earlier decode stages.
+- The scalar reference kernel in [`src/processing/raw_processing_8bit_kernel.inc`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing_8bit_kernel.inc) still applies `apply_vibrance` and `apply_saturation` after gamma; the AVX2 intrinsics body did not mirror those passes, so preview RGB8 could drift magenta while export stayed clean.
+- I patched the AVX2 fast path to run the same scalar vibrance/saturation math before creative curves, then rebuilt the user-facing release exe at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe). The rebuilt binary is now `LastWriteTime=5/30/2026 12:01:01 PM`, `Length=8793088`, `SHA256=EBFE10A960ABC87900DC83350D39496D1F6B7F55E1FC873E0DC65900955A30FE`.
+- The visible GUI smoke trio on the rebuilt release binary stayed green with x1 Quality and settled Auto Look Assist preserved:
+  - `M16-1327`: `presented_fps=7.359`, `avg_render_total_ms=124.966`, `avg_processed8_ms=123.559`
+  - `M16-1347`: `presented_fps=7.841`, `avg_render_total_ms=119.000`, `avg_processed8_ms=117.651`
+  - `M16-1446`: `presented_fps=8.734`, `avg_render_total_ms=104.514`, `avg_processed8_ms=102.857`
+
+### Cross-checked from prior analysis
+
+- The stage-capture chain still says the pink appears at `S5_processed8`, which matches a preview-kernel bug rather than a GUI or export bug.
+- The earlier blur-prep/shadow-highlights hypothesis remains rejected; it did not move the color break.
+- The `MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1` comparison remained the clean control path and confirmed the fast AVX2 body was the source of the pink drift.
+
+### Needs runtime profiling
+
+- If we keep tuning direct8, compare the rebuilt intrinsics path against the scalar fallback on the same clip so we can measure the perf cost of any future parity fix.
+- Keep the stage-image captures in `.claude-state/profiling/20260530-disable-intrin-profile-capture/` as the current visual control set for the fast-path A/B.
+
+### Ranked next steps
+
+1. High impact / low risk: keep the new vibrance/saturation parity fix and watch for any new color drift on the direct8 path.
+2. Medium impact / low risk: use the existing visible smoke trio as the acceptance gate for any future preview-kernel cleanup.
+3. Low impact / low risk: leave export and the earlier decode stages untouched while the direct8 path stays under watch.
+
 ## 2026-05-30 - pink enters at S5_processed8, not in the GUI
 
 ### Verified locally

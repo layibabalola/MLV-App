@@ -41,6 +41,56 @@
 
 #include <immintrin.h>
 
+static inline void direct8_apply_vibrance_saturation(processingObject_t * processing,
+                                                     uint16_t * mapped0,
+                                                     uint16_t * mapped1,
+                                                     uint16_t * mapped2,
+                                                     const int apply_vibrance,
+                                                     const int apply_saturation)
+{
+    if( apply_vibrance )
+    {
+        const int32_t y1 = ( ( (*mapped0) << 2 ) + ( (*mapped1) * 11 ) + (*mapped2) ) >> 4;
+        const int32_t y2 = y1 - 65536;
+        const int32_t vib0 = processing->pre_calc_vibrance[(*mapped0) - y2] + y1;
+        const int32_t vib1 = processing->pre_calc_vibrance[(*mapped1) - y2] + y1;
+        const int32_t vib2 = processing->pre_calc_vibrance[(*mapped2) - y2] + y1;
+        if( processing->vibrance > 1.0 )
+        {
+            double sat = 0.0;
+            if( !( *mapped0 == 0 && *mapped1 == 0 && *mapped2 == 0 ) )
+            {
+                uint16_t biggest = *mapped0;
+                uint16_t smallest = *mapped0;
+                if( *mapped1 > biggest ) biggest = *mapped1;
+                if( *mapped2 > biggest ) biggest = *mapped2;
+                if( *mapped1 < smallest ) smallest = *mapped1;
+                if( *mapped2 < smallest ) smallest = *mapped2;
+                sat = ((double)biggest - (double)smallest) / (double)biggest;
+            }
+            sat = 2.0 * sat / ( sat * sat + 1.0 );
+            if( sat > 1.0 ) sat = 1.0;
+            *mapped0 = (uint16_t)LIMIT16( (*mapped0) * sat + vib0 * ( 1.0 - sat ) );
+            *mapped1 = (uint16_t)LIMIT16( (*mapped1) * sat + vib1 * ( 1.0 - sat ) );
+            *mapped2 = (uint16_t)LIMIT16( (*mapped2) * sat + vib2 * ( 1.0 - sat ) );
+        }
+        else
+        {
+            *mapped0 = (uint16_t)LIMIT16(vib0);
+            *mapped1 = (uint16_t)LIMIT16(vib1);
+            *mapped2 = (uint16_t)LIMIT16(vib2);
+        }
+    }
+    if( apply_saturation )
+    {
+        const int32_t y1 = ( ( (*mapped0) << 2 ) + ( (*mapped1) * 11 ) + (*mapped2) ) >> 4;
+        const int32_t y2 = y1 - 65536;
+        *mapped0 = (uint16_t)LIMIT16(processing->pre_calc_sat[(*mapped0) - y2] + y1);
+        *mapped1 = (uint16_t)LIMIT16(processing->pre_calc_sat[(*mapped1) - y2] + y1);
+        *mapped2 = (uint16_t)LIMIT16(processing->pre_calc_sat[(*mapped2) - y2] + y1);
+    }
+}
+
 APPLY_8BIT_FAST_ROWS_ATTRS
 static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                                       int imageX,
@@ -61,6 +111,12 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
     uint16_t * gcurve_g = processing->gcurve_g;
     uint16_t * gcurve_b = processing->gcurve_b;
     const int apply_creative_curves = processing->allow_creative_adjustments != 0;
+    const int apply_vibrance =
+        processing->allow_creative_adjustments != 0
+        && ( processing->vibrance <= 0.99 || processing->vibrance >= 1.01 );
+    const int apply_saturation =
+        processing->allow_creative_adjustments != 0
+        && ( processing->saturation <= 0.99 || processing->saturation >= 1.01 );
     const int exr_mode = processing->exr_mode != 0;
 
     int32_t * pm0 = pm[0];
@@ -353,6 +409,12 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                 mapped0_a[k] = pre_calc_gamma[r0_idx[k]];
                 mapped1_a[k] = pre_calc_gamma[r1_idx[k]];
                 mapped2_a[k] = pre_calc_gamma[r2_idx[k]];
+                direct8_apply_vibrance_saturation(processing,
+                                                  &mapped0_a[k],
+                                                  &mapped1_a[k],
+                                                  &mapped2_a[k],
+                                                  apply_vibrance,
+                                                  apply_saturation);
             }
 
             if( timing != NULL )
@@ -449,6 +511,12 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
             uint16_t mapped0 = pre_calc_gamma[LIMIT16((uint32_t)result0)];
             uint16_t mapped1 = pre_calc_gamma[LIMIT16((uint32_t)result1)];
             uint16_t mapped2 = pre_calc_gamma[LIMIT16((uint32_t)result2)];
+            direct8_apply_vibrance_saturation(processing,
+                                              &mapped0,
+                                              &mapped1,
+                                              &mapped2,
+                                              apply_vibrance,
+                                              apply_saturation);
             if( apply_creative_curves )
             {
                 mapped0 = pre_calc_curve[mapped0];
