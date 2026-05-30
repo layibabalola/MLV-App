@@ -994,7 +994,8 @@ static QImage build_fast_playback_scaled_image(const uint8_t * source,
                                                int sourceHeight,
                                                int targetWidth,
                                                int targetHeight,
-                                               std::vector<uint8_t> & scaledBuffer)
+                                               std::vector<uint8_t> & scaledBuffer,
+                                               int targetBytesPerLine = 0)
 {
     static thread_local FastPlaybackScaleCache cache;
     return playbackBuildFastScaledImage( source,
@@ -1003,7 +1004,8 @@ static QImage build_fast_playback_scaled_image(const uint8_t * source,
                                          targetWidth,
                                          targetHeight,
                                          scaledBuffer,
-                                         cache );
+                                         cache,
+                                         targetBytesPerLine );
 }
 
 static const char * playback_profile_scope_name(MainWindow::PlaybackProfileScope scope)
@@ -2143,7 +2145,9 @@ QString MainWindow::playbackProcessingLabel( void ) const
     {
         return QStringLiteral("receipt");
     }
-    return (m_renderThreadUsingCpuPreviewProcessing || m_renderThreadUsingGpuPreviewProcessing)
+    return (m_renderThreadUsingPlaybackPreviewProcessing
+            || m_renderThreadUsingCpuPreviewProcessing
+            || m_renderThreadUsingGpuPreviewProcessing)
         ? QStringLiteral("subset")
         : QStringLiteral("receipt");
 }
@@ -2448,9 +2452,14 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
 
     if( preScaledPlaybackImageAvailable )
     {
+        const int playbackScaledBytesPerLine =
+            (task.readyFrame.playbackScaledBytesPerLine > 0)
+                ? task.readyFrame.playbackScaledBytesPerLine
+                : task.readyFrame.playbackScaledWidth * 3;
         displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( task.readyFrame.playbackScaledImage8 ),
                                               task.readyFrame.playbackScaledWidth,
-                                              task.readyFrame.playbackScaledHeight );
+                                              task.readyFrame.playbackScaledHeight,
+                                              playbackScaledBytesPerLine );
         displayImageOwnsData = false;
     }
 
@@ -2473,12 +2482,14 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
                 std::max( 1, qRound( sceneWidth * devicePixelRatio ) );
             const int scaledHeight =
                 std::max( 1, qRound( sceneHeight * devicePixelRatio ) );
+            const int scaledBytesPerLine = ((scaledWidth * 3) + 3) & ~3;
             displayImage = build_fast_playback_scaled_image( rgb8DisplaySource,
                                                              sourceWidth,
                                                              sourceHeight,
                                                              scaledWidth,
                                                              scaledHeight,
-                                                             displayImageBacking );
+                                                             displayImageBacking,
+                                                             scaledBytesPerLine );
             displayImageOwnsData = false;
         }
         else if( zoomFitEnabled )
@@ -2559,20 +2570,66 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         result.preparedBytesPerLine = alignedBytesPerLine;
         const size_t preparedSize = static_cast<size_t>( alignedBytesPerLine )
             * static_cast<size_t>( result.preparedHeight );
-        result.preparedImage.resize( preparedSize );
-        if( displayImage.bytesPerLine() == alignedBytesPerLine )
+        const uint8_t *displayBits = displayImage.constBits();
+        const bool canBorrowPinnedPlaybackScaledImage =
+            preScaledPlaybackImageAvailable
+            && !displayImageOwnsData
+            && task.readyFrame.playbackScaledImage8
+            && result.preparedWidth == task.readyFrame.playbackScaledWidth
+            && result.preparedHeight == task.readyFrame.playbackScaledHeight
+            && displayImage.bytesPerLine() == alignedBytesPerLine;
+        if( canBorrowPinnedPlaybackScaledImage )
         {
-            memcpy( result.preparedImage.data(), displayImage.constBits(), preparedSize );
+            result.preparedBorrowedImage = task.readyFrame.playbackScaledImage8;
+            result.preparedBorrowedImageSize = preparedSize;
+        }
+        else if( displayImageOwnsData )
+        {
+            result.preparedOwnedImage = displayImage;
+        }
+        else if( !displayImageBacking.empty()
+              && displayImageBacking.size() == preparedSize
+              && displayImage.bytesPerLine() == alignedBytesPerLine )
+        {
+            result.preparedImage = std::move( displayImageBacking );
+            result.preparedImageMoved = true;
         }
         else
         {
-            for( int y = 0; y < result.preparedHeight; ++y )
+            result.preparedImage.resize( preparedSize );
+            if( displayImage.bytesPerLine() == alignedBytesPerLine )
             {
-                memcpy( result.preparedImage.data() + static_cast<size_t>( y ) * alignedBytesPerLine,
-                        displayImage.constScanLine( y ),
-                        static_cast<size_t>( rowContentBytes ) );
+                memcpy( result.preparedImage.data(), displayBits, preparedSize );
+            }
+            else
+            {
+                for( int y = 0; y < result.preparedHeight; ++y )
+                {
+                    memcpy( result.preparedImage.data() + static_cast<size_t>( y ) * alignedBytesPerLine,
+                            displayImage.constScanLine( y ),
+                            static_cast<size_t>( rowContentBytes ) );
+                }
             }
         }
+        result.task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_borrowed_prepared_rgb8_bytes"),
+            static_cast<qint64>( result.preparedBorrowedImageSize ) );
+        result.task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_owned_prepared_rgb8_bytes"),
+            static_cast<qint64>( result.preparedImage.size() ) );
+        result.task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_moved_prepared_rgb8_bytes"),
+            result.preparedImageMoved
+                ? static_cast<qint64>( result.preparedImage.size() )
+                : 0 );
+        const qint64 qimagePreparedBytes =
+            result.preparedOwnedImage.isNull()
+                ? 0
+                : static_cast<qint64>( result.preparedOwnedImage.bytesPerLine() )
+                  * static_cast<qint64>( result.preparedOwnedImage.height() );
+        result.task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_qimage_prepared_rgb8_bytes"),
+            qimagePreparedBytes );
     }
     result.underOver = underOver;
     result.imageBuildMs = (mlv_stage_timing_now() - image_start) * 1000.0;
@@ -2813,9 +2870,29 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
 
     if( displayImage.isNull() && !framePresentedByViewport )
     {
+        if( !result.preparedOwnedImage.isNull() )
+        {
+            displayImage = result.preparedOwnedImage;
+            displayImageOwnsData = true;
+        }
+    }
+
+    if( displayImage.isNull() && !framePresentedByViewport )
+    {
+        const uint8_t *preparedImageData = nullptr;
         if( !result.preparedImage.empty() )
         {
-            displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( result.preparedImage.data() ),
+            preparedImageData = result.preparedImage.data();
+        }
+        else if( result.preparedBorrowedImage
+              && result.preparedBorrowedImageSize > 0 )
+        {
+            preparedImageData = result.preparedBorrowedImage;
+        }
+
+        if( preparedImageData )
+        {
+            displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( preparedImageData ),
                                                 result.preparedWidth,
                                                 result.preparedHeight,
                                                 result.preparedBytesPerLine );
@@ -3048,6 +3125,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     m_renderThreadUsingGpuPreviewProcessing = shouldUseGpuPreviewProcessingPath();
     m_renderThreadUsingGpuBilinearDebayer = shouldUseGpuBilinearDebayerPath();
     m_renderThreadUsingCpuPreviewProcessing = false;
+    const bool playbackProcessingSelected =
+        playbackPolicyActive() && ui->actionUseFastProcessingForPlayback->isChecked();
     renderPolicy.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
     renderPolicy.renderThreadUsingGpuProcessingPreview = m_renderThreadUsingGpuPreviewProcessing;
     renderPolicy.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
@@ -3056,8 +3135,6 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         mainWindowBuildGpuPresentationOptions( renderPolicy );
     m_lastQueuedGpuPreviewProcessingConfig = GpuPreviewProcessingConfig();
     m_lastQueuedPlaybackProcessingReason.clear();
-    const bool playbackProcessingSelected =
-        playbackPolicyActive() && ui->actionUseFastProcessingForPlayback->isChecked();
     if( m_renderThreadUsingGpuPreviewProcessing || playbackProcessingSelected )
     {
         m_lastQueuedGpuPreviewProcessingConfig =
@@ -3108,6 +3185,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
     requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
     requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
+    requestContext.renderThreadUsingPlaybackPreviewProcessing =
+        playbackProcessingSelected;
     requestContext.gpuPreviewPolicy = renderPolicy;
     requestContext.gpuPresentationOptions = m_lastQueuedGpuPresentationOptions;
     requestContext.gpuPreviewProcessingConfig = m_lastQueuedGpuPreviewProcessingConfig;
@@ -3363,6 +3442,14 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     setPlaybackProfileDebayerRequest( options.playbackDebayer );
     ui->actionUseFastProcessingForPlayback->setChecked( false );
     setPlaybackProfileProcessingRequest( options.playbackProcessing );
+    if( options.playbackProcessing == PlaybackProfileProcessingRequest::Subset )
+    {
+        /* The GUI smoke benchmark is meant to measure playback, not receipt
+         * fallback. When the profile explicitly asks for the fast subset,
+         * let the headless playback policy participate so the benchmark
+         * exercises the same preview lane that real GUI playback uses. */
+        m_headlessPlaybackProfileUsePlaybackPolicy = true;
+    }
     selectDebayerAlgorithm();
     if( playbackDebayerLabel() == QStringLiteral("amaze-cached") )
     {
@@ -4198,7 +4285,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             selectedDualIsoMode,
             toolButtonDualIsoInterpolationCurrentIndex(),
             toolButtonDualIsoAliasMapCurrentIndex(),
-            toolButtonDualIsoFullresBlendingCurrentIndex() );
+            toolButtonDualIsoFullresBlendingCurrentIndex(),
+            ui->actionUseFastProcessingForPlayback->isChecked() );
     const bool dualIsoPreviewRuntimeActive = (dualIsoPlaybackSettings.mode == 2);
     const bool dualIsoPreviewOverrideActive =
         dualIsoPreviewRuntimeActive && selectedDualIsoMode != 2;
@@ -4592,6 +4680,13 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         m_frameChanged = true;
     }
 
+    /* Visible GUI smoke is supposed to exercise the real playback lane, not
+     * the receipt-only fallback. Opt the smoke into the playback policy so
+     * the fast-processing subset can participate while we benchmark. */
+    m_headlessPlaybackProfileUsePlaybackPolicy = true;
+    ui->actionUseFastProcessingForPlayback->setChecked( true );
+    applyEffectiveDualIsoPlaybackSettings();
+
     const int totalFrames = getMlvFrames( m_pMlvObject );
     if( totalFrames < 2 )
     {
@@ -4637,6 +4732,50 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             .arg( m_lastLookAssistDiagnosticsValid
                   ? m_lastLookAssistScene
                   : QStringLiteral("none") ) );
+
+    logInteractionEvent(
+        QStringLiteral("gui_smoke.visual_state"),
+        QStringLiteral(
+            "look_assist_enabled=%1 look_assist_diagnostics_valid=%2 "
+            "look_assist_scene=%3 exposure=%4 contrast=%5 pivot=%6 shadows=%7 "
+            "highlights=%8 vibrance=%9 temperature=%10 tint=%11 raw_black=%12 "
+            "raw_white=%13 chroma_smooth=%14 stretch_x=%15 stretch_y=%16 "
+            "h_stretch_index=%17 v_stretch_index=%18 dual_iso_mode=%19 "
+            "dual_iso_interp=%20 dual_iso_alias_map=%21 dual_iso_fullres=%22 "
+            "drop_frame=%23 audio=%24 scopes=%25 zebras=%26 scale_request=%27 "
+            "quality_mode=%28 receipt_supplied=%29" )
+            .arg( bool01( ACTIVE_RECEIPT && ACTIVE_RECEIPT->lookAssistEnabled()
+                          && ui->checkBoxLookAssistEnable->isChecked() ) )
+            .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
+            .arg( m_lastLookAssistDiagnosticsValid
+                  ? m_lastLookAssistScene
+                  : QStringLiteral("none") )
+            .arg( ui->horizontalSliderExposure->value() )
+            .arg( ui->horizontalSliderContrast->value() )
+            .arg( ui->horizontalSliderPivot->value() )
+            .arg( ui->horizontalSliderShadows->value() )
+            .arg( ui->horizontalSliderHighlights->value() )
+            .arg( ui->horizontalSliderVibrance->value() )
+            .arg( ui->horizontalSliderTemperature->value() )
+            .arg( ui->horizontalSliderTint->value() )
+            .arg( ui->horizontalSliderRawBlack->value() )
+            .arg( ui->horizontalSliderRawWhite->value() )
+            .arg( toolButtonChromaSmoothCurrentIndex() )
+            .arg( getHorizontalStretchFactor( false ), 0, 'f', 6 )
+            .arg( getVerticalStretchFactor( false ), 0, 'f', 6 )
+            .arg( ui->comboBoxHStretch->currentIndex() )
+            .arg( ui->comboBoxVStretch->currentIndex() )
+            .arg( toolButtonDualIsoCurrentIndex() )
+            .arg( toolButtonDualIsoInterpolationCurrentIndex() )
+            .arg( toolButtonDualIsoAliasMapCurrentIndex() )
+            .arg( toolButtonDualIsoFullresBlendingCurrentIndex() )
+            .arg( bool01( ui->actionDropFrameMode->isChecked() ) )
+            .arg( bool01( ui->actionAudioOutput->isChecked() ) )
+            .arg( bool01( ui->actionShowEditArea->isChecked() ) )
+            .arg( bool01( ui->actionShowZebras->isChecked() ) )
+            .arg( effectivePlaybackScaleFactorForRequest() )
+            .arg( m_playbackQualityMode )
+            .arg( bool01( !options.receiptPath.isEmpty() ) ) );
 
     const int settleMs = qMax( 0, options.settleMs );
     const int settleCpuStableMs = qMax( 0, options.settleCpuStableMs );
@@ -4712,6 +4851,12 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         err << "[GUI-SMOKE] ERROR: Play action did not enter checked state.\n";
         return 7;
     }
+
+    /* The play transition is where the normal GUI turns the policy on for
+     * real, so reapply once the action is live to avoid a stale receipt-path
+     * frame sneaking into the measured window. */
+    applyEffectiveDualIsoPlaybackSettings();
+    qApp->processEvents( QEventLoop::AllEvents );
 
     const int durationMs = qMax( 100, options.durationMs );
     while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )
@@ -10308,7 +10453,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
-        QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_temp_delta=%12 preset_tint_delta=%13 final_temp=%14 final_tint=%15 thumb=%16x%17 downscale=%18 color_thumb=%19x%20 color_downscale=%21 frame=%22 last_serial=%23 last_frame=%24 next_serial=%25")
+        QStringLiteral("analysis=raw scene=%1 median=%2 p05=%3 p95=%4 p99=%5 clip_low=%6 clip_high=%7 balance_samples=%8 preset_exp=%9 preset_contrast=%10 preset_pivot=%11 preset_shadows=%12 preset_highlights=%13 preset_vibrance=%14 preset_temp_delta=%15 preset_tint_delta=%16 final_temp=%17 final_tint=%18 thumb=%19x%20 downscale=%21 color_thumb=%22x%23 color_downscale=%24 frame=%25 last_serial=%26 last_frame=%27 next_serial=%28")
             .arg( m_lastLookAssistScene )
             .arg( stats.median, 0, 'f', 3 )
             .arg( stats.p05, 0, 'f', 3 )
@@ -10320,6 +10465,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( preset.exposure )
             .arg( preset.contrast )
             .arg( preset.pivot )
+            .arg( preset.shadows )
+            .arg( preset.highlights )
+            .arg( preset.vibrance )
             .arg( preset.temperatureDelta )
             .arg( preset.tintDelta )
             .arg( temperature )
@@ -15221,7 +15369,8 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
                 toolButtonDualIsoCurrentIndex(),
                 toolButtonDualIsoInterpolationCurrentIndex(),
                 toolButtonDualIsoAliasMapCurrentIndex(),
-                toolButtonDualIsoFullresBlendingCurrentIndex() );
+                toolButtonDualIsoFullresBlendingCurrentIndex(),
+                ui->actionUseFastProcessingForPlayback->isChecked() );
 
     const int mean23OverrideValue = settings.playbackForceMean23 ? 1 : 0;
 
@@ -15353,6 +15502,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDualIsoFull20MixEvLutSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixHalfresSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaCopySumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaFullresSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaHalfresSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;
@@ -15365,6 +15517,18 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingSumMs = 0.0;
     m_playbackSmokeProcessingSetupSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsPrepSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsResizeSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsCopySumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsFilterSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfBoundarySumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfRangeTableSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfLeftSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfRightSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfHorizontalAverageSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs = 0.0;
     m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
     m_playbackSmokeProcessingCoreSumMs = 0.0;
     m_playbackSmokeProcessingChromaSumMs = 0.0;
@@ -15384,6 +15548,14 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDrawTotalSumMs = 0.0;
     m_playbackSmokeDrawTotalMaxMs = 0.0;
     m_playbackSmokeProcessed8DirectPathFrames = 0;
+    m_playbackSmokeBorrowedPreparedRgb8Frames = 0;
+    m_playbackSmokeOwnedPreparedRgb8Frames = 0;
+    m_playbackSmokeMovedPreparedRgb8Frames = 0;
+    m_playbackSmokeQImagePreparedRgb8Frames = 0;
+    m_playbackSmokeBorrowedPreparedRgb8Bytes = 0;
+    m_playbackSmokeOwnedPreparedRgb8Bytes = 0;
+    m_playbackSmokeMovedPreparedRgb8Bytes = 0;
+    m_playbackSmokeQImagePreparedRgb8Bytes = 0;
     m_playbackSmokeDualIsoFull20ValidFrames = 0;
     m_playbackSmokeDualIsoFull20LastInterpMethod = -1;
     m_playbackSmokeDualIsoFull20LastThreads = 0;
@@ -15395,6 +15567,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeQueuedPlaybackDropMax = 0;
     m_playbackSmokeLastWorkerThreads = m_playbackSmokeStartWorkerThreads;
     m_playbackSmokeLastWorkerThreadCapActive = false;
+    m_playbackSmokeLastOpenMpThreads = 0;
+    m_playbackSmokeLastOpenMpThreadCapActive = false;
     m_playbackSmokeLastScaleRequest = m_playbackSmokeStartScaleRequest;
     m_playbackSmokeLastScaleActive = 1;
 
@@ -15407,7 +15581,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                "env_playback_max_threads=%17 env_disable_playback_thread_cap=%18 "
                "env_playback_scale=%19 env_hq_mean23=%20 "
                "env_playback_smoke_telemetry=%21 "
-               "env_playback_scope_interval_ms=%22" )
+               "env_playback_scope_interval_ms=%22 env_omp_num_threads=%23 "
+               "env_disable_raw_uint16_prefetch=%24 "
+               "env_disable_play_start_preroll=%25" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( m_playbackSmokeStartPosition )
                .arg( m_playbackSmokeStartCutIn )
@@ -15429,7 +15605,10 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_SCALE_FACTOR" ) )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_PREFER_HQ_MEAN23" ) )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" ) )
-               .arg( envValueForLog( "MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS" ) );
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS" ) )
+               .arg( envValueForLog( "OMP_NUM_THREADS" ) )
+               .arg( envValueForLog( "MLVAPP_DISABLE_RAW_UINT16_PREFETCH" ) )
+               .arg( envValueForLog( "MLVAPP_DISABLE_PLAY_START_PREROLL" ) );
 }
 
 void MainWindow::notePlaybackSmokePresentedFrame(
@@ -15470,6 +15649,15 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeLastWorkerThreadCapActive =
         timing.value( QStringLiteral("render_thread_worker_thread_cap_active") )
               .toBool( m_playbackSmokeLastWorkerThreadCapActive );
+    int openMpThreads = telemetryIntValue( timing, "render_thread_openmp_threads" );
+    if( openMpThreads <= 0 )
+        openMpThreads = qRound(
+            telemetryDoubleValue( timing, "render_thread_openmp_threads" ) );
+    if( openMpThreads > 0 )
+        m_playbackSmokeLastOpenMpThreads = openMpThreads;
+    m_playbackSmokeLastOpenMpThreadCapActive =
+        timing.value( QStringLiteral("render_thread_openmp_thread_cap_active") )
+              .toBool( m_playbackSmokeLastOpenMpThreadCapActive );
 
     const double queueWaitMs =
         telemetryDoubleValue( timing, "render_thread_queue_wait_ms" );
@@ -15523,6 +15711,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_mix_halfres_ms" );
     const double dualIsoFull20MixChromaMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_ms" );
+    const double dualIsoFull20MixChromaCopyMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_copy_ms" );
+    const double dualIsoFull20MixChromaFullresMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_fullres_ms" );
+    const double dualIsoFull20MixChromaHalfresMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_ms" );
     const double dualIsoFull20MixAliasMapMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_alias_map_ms" );
     const double dualIsoFull20MixOverexposedMs =
@@ -15555,6 +15749,30 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_setup_ms" );
     const double processingShadowsHighlightsPrepMs =
         telemetryDoubleValue( timing, "processing_shadows_highlights_prep_ms" );
+    const double processingShadowsHighlightsResizeMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_resize_ms" );
+    const double processingShadowsHighlightsCopyMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_copy_ms" );
+    const double processingShadowsHighlightsFilterMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_filter_ms" );
+    const double processingShadowsHighlightsRbfTotalMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_total_ms" );
+    const double processingShadowsHighlightsRbfBoundaryMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_boundary_ms" );
+    const double processingShadowsHighlightsRbfRangeTableMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_range_table_ms" );
+    const double processingShadowsHighlightsRbfLeftMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_left_ms" );
+    const double processingShadowsHighlightsRbfRightMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_right_ms" );
+    const double processingShadowsHighlightsRbfHorizontalAverageMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_horizontal_average_ms" );
+    const double processingShadowsHighlightsRbfVerticalDownMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_down_ms" );
+    const double processingShadowsHighlightsRbfVerticalUpMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_ms" );
+    const double processingShadowsHighlightsRbfOutputMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_output_ms" );
     const double processingHighestGreenMs =
         telemetryDoubleValue( timing, "processing_highest_green_ms" );
     const double processingCoreMs =
@@ -15581,6 +15799,14 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "render_thread_playback_scale_ms" );
     const int queuedPlaybackDrops =
         telemetryIntValue( timing, "render_thread_queued_playback_drops_before_start" );
+    const double borrowedPreparedRgb8Bytes =
+        telemetryDoubleValue( timing, "playback_prep_borrowed_prepared_rgb8_bytes" );
+    const double ownedPreparedRgb8Bytes =
+        telemetryDoubleValue( timing, "playback_prep_owned_prepared_rgb8_bytes" );
+    const double movedPreparedRgb8Bytes =
+        telemetryDoubleValue( timing, "playback_prep_moved_prepared_rgb8_bytes" );
+    const double qimagePreparedRgb8Bytes =
+        telemetryDoubleValue( timing, "playback_prep_qimage_prepared_rgb8_bytes" );
     const double drawTotalMs = m_lastDrawFrameReadyTotalMs;
     const double drawImageMs = m_lastDrawFrameReadyImageMs;
     const double drawPresentMs = m_lastDrawFrameReadyPresentMs;
@@ -15615,6 +15841,9 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         m_playbackSmokeDualIsoFull20MixEvLutSumMs += dualIsoFull20MixEvLutMs;
         m_playbackSmokeDualIsoFull20MixHalfresSumMs += dualIsoFull20MixHalfresMs;
         m_playbackSmokeDualIsoFull20MixChromaSumMs += dualIsoFull20MixChromaMs;
+        m_playbackSmokeDualIsoFull20MixChromaCopySumMs += dualIsoFull20MixChromaCopyMs;
+        m_playbackSmokeDualIsoFull20MixChromaFullresSumMs += dualIsoFull20MixChromaFullresMs;
+        m_playbackSmokeDualIsoFull20MixChromaHalfresSumMs += dualIsoFull20MixChromaHalfresMs;
         m_playbackSmokeDualIsoFull20MixAliasMapSumMs += dualIsoFull20MixAliasMapMs;
         m_playbackSmokeDualIsoFull20MixOverexposedSumMs += dualIsoFull20MixOverexposedMs;
         m_playbackSmokeDualIsoFull20FinalBlendSumMs += dualIsoFull20FinalBlendMs;
@@ -15633,6 +15862,18 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeProcessingSumMs += processingMs;
     m_playbackSmokeProcessingSetupSumMs += processingSetupMs;
     m_playbackSmokeProcessingShadowsHighlightsPrepSumMs += processingShadowsHighlightsPrepMs;
+    m_playbackSmokeProcessingShadowsHighlightsResizeSumMs += processingShadowsHighlightsResizeMs;
+    m_playbackSmokeProcessingShadowsHighlightsCopySumMs += processingShadowsHighlightsCopyMs;
+    m_playbackSmokeProcessingShadowsHighlightsFilterSumMs += processingShadowsHighlightsFilterMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs += processingShadowsHighlightsRbfTotalMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfBoundarySumMs += processingShadowsHighlightsRbfBoundaryMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfRangeTableSumMs += processingShadowsHighlightsRbfRangeTableMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfLeftSumMs += processingShadowsHighlightsRbfLeftMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfRightSumMs += processingShadowsHighlightsRbfRightMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfHorizontalAverageSumMs += processingShadowsHighlightsRbfHorizontalAverageMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs += processingShadowsHighlightsRbfVerticalDownMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs += processingShadowsHighlightsRbfVerticalUpMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs += processingShadowsHighlightsRbfOutputMs;
     m_playbackSmokeProcessingHighestGreenSumMs += processingHighestGreenMs;
     m_playbackSmokeProcessingCoreSumMs += processingCoreMs;
     m_playbackSmokeProcessingChromaSumMs += processingChromaMs;
@@ -15652,6 +15893,30 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeDrawTotalSumMs += drawTotalMs;
     if( telemetryBoolValue( timing, "processed8_direct_path_active" ) )
         ++m_playbackSmokeProcessed8DirectPathFrames;
+    if( borrowedPreparedRgb8Bytes > 0.0 )
+    {
+        ++m_playbackSmokeBorrowedPreparedRgb8Frames;
+        m_playbackSmokeBorrowedPreparedRgb8Bytes +=
+            static_cast<uint64_t>( borrowedPreparedRgb8Bytes + 0.5 );
+    }
+    if( ownedPreparedRgb8Bytes > 0.0 )
+    {
+        ++m_playbackSmokeOwnedPreparedRgb8Frames;
+        m_playbackSmokeOwnedPreparedRgb8Bytes +=
+            static_cast<uint64_t>( ownedPreparedRgb8Bytes + 0.5 );
+    }
+    if( movedPreparedRgb8Bytes > 0.0 )
+    {
+        ++m_playbackSmokeMovedPreparedRgb8Frames;
+        m_playbackSmokeMovedPreparedRgb8Bytes +=
+            static_cast<uint64_t>( movedPreparedRgb8Bytes + 0.5 );
+    }
+    if( qimagePreparedRgb8Bytes > 0.0 )
+    {
+        ++m_playbackSmokeQImagePreparedRgb8Frames;
+        m_playbackSmokeQImagePreparedRgb8Bytes +=
+            static_cast<uint64_t>( qimagePreparedRgb8Bytes + 0.5 );
+    }
     if( telemetryBoolValue( timing, "processed8_prefetch_hit" ) )
         ++m_playbackSmokeProcessed8PrefetchHits;
     if( telemetryBoolValue( timing, "raw_uint16_prefetch_hit" ) )
@@ -15682,10 +15947,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "playback_smoke.frame session=%1 index=%2 elapsed_ms=%3 "
                    "interval_ms=%4 display_frame=%5 position=%6 serial=%7 "
                    "scale_request=%8 scale_active=%9 worker_threads=%10 "
-                   "worker_thread_cap_active=%11 render_total_ms=%12 "
-                   "render_work_ms=%13 queue_wait_ms=%14 llrawproc_ms=%15 "
-                   "processed8_ms=%16 draw_total_ms=%17 still_drawing=%18 "
-                   "pending_advance=%19 queued_playback_drops=%20" )
+                   "worker_thread_cap_active=%11 openmp_threads=%12 "
+                   "openmp_thread_cap_active=%13 render_total_ms=%14 "
+                   "render_work_ms=%15 queue_wait_ms=%16 llrawproc_ms=%17 "
+                   "processed8_ms=%18 draw_total_ms=%19 still_drawing=%20 "
+                   "pending_advance=%21 queued_playback_drops=%22" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( elapsedMs, 0, 'f', 3 )
@@ -15695,9 +15961,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
                    .arg( requestContext.playbackScaleFactor )
                    .arg( readyFrame.playbackScaleFactorActive )
-                   .arg( m_playbackSmokeLastWorkerThreads )
-                   .arg( bool01( m_playbackSmokeLastWorkerThreadCapActive ) )
-                   .arg( renderTotalMs, 0, 'f', 3 )
+                    .arg( m_playbackSmokeLastWorkerThreads )
+                    .arg( bool01( m_playbackSmokeLastWorkerThreadCapActive ) )
+                    .arg( m_playbackSmokeLastOpenMpThreads )
+                    .arg( bool01( m_playbackSmokeLastOpenMpThreadCapActive ) )
+                    .arg( renderTotalMs, 0, 'f', 3 )
                    .arg( renderWorkMs, 0, 'f', 3 )
                    .arg( queueWaitMs, 0, 'f', 3 )
                    .arg( llrawprocMs, 0, 'f', 3 )
@@ -15893,14 +16161,15 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "max_render_total_ms=%14 avg_render_work_ms=%15 avg_queue_wait_ms=%16 "
                "avg_llrawproc_ms=%17 avg_processed8_ms=%18 avg_draw_total_ms=%19 "
                "max_draw_total_ms=%20 worker_threads_start=%21 worker_threads_last=%22 "
-               "worker_thread_cap_active_last=%23 scale_request_start=%24 "
-               "scale_request_last=%25 scale_active_last=%26 quality_mode=%27 "
-               "start_position=%28 current_position=%29 first_presented_frame=%30 "
-               "last_presented_frame=%31 start_serial=%32 prep_stale_drops=%33 "
-               "prep_generation_drops=%34 prep_replaced_before=%35 "
-               "prep_replaced_after=%36 still_drawing=%37 pending_advance=%38 "
-               "preroll_requested=%39 play_to_first_valid=%40 play_to_first_ms=%41 "
-               "frame_telemetry=%42" )
+               "worker_thread_cap_active_last=%23 openmp_threads_last=%24 "
+               "openmp_thread_cap_active_last=%25 scale_request_start=%26 "
+               "scale_request_last=%27 scale_active_last=%28 quality_mode=%29 "
+               "start_position=%30 current_position=%31 first_presented_frame=%32 "
+               "last_presented_frame=%33 start_serial=%34 prep_stale_drops=%35 "
+               "prep_generation_drops=%36 prep_replaced_before=%37 "
+               "prep_replaced_after=%38 still_drawing=%39 pending_advance=%40 "
+               "preroll_requested=%41 play_to_first_valid=%42 play_to_first_ms=%43 "
+               "frame_telemetry=%44" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -15924,6 +16193,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( m_playbackSmokeStartWorkerThreads )
                .arg( m_playbackSmokeLastWorkerThreads )
                .arg( bool01( m_playbackSmokeLastWorkerThreadCapActive ) )
+               .arg( m_playbackSmokeLastOpenMpThreads )
+               .arg( bool01( m_playbackSmokeLastOpenMpThreadCapActive ) )
                .arg( m_playbackSmokeStartScaleRequest )
                .arg( m_playbackSmokeLastScaleRequest )
                .arg( m_playbackSmokeLastScaleActive )
@@ -15969,7 +16240,11 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "audio_sync_requests=%34 audio_sync_applied=%35 "
                "audio_sync_skipped=%36 avg_processing_setup_ms=%37 "
                "avg_processing_shadows_highlights_prep_ms=%38 "
-               "avg_processing_highest_green_ms=%39" )
+               "avg_processing_highest_green_ms=%39 "
+               "borrowed_prepared_rgb8_frames=%40 owned_prepared_rgb8_frames=%41 "
+               "borrowed_prepared_rgb8_bytes=%42 owned_prepared_rgb8_bytes=%43 "
+               "moved_prepared_rgb8_frames=%44 moved_prepared_rgb8_bytes=%45 "
+               "qimage_prepared_rgb8_frames=%46 qimage_prepared_rgb8_bytes=%47" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16013,7 +16288,48 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                                     m_playbackSmokeStartAudioSyncSkipped ) )
                .arg( avgSmokeMs( m_playbackSmokeProcessingSetupSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsPrepSumMs ), 0, 'f', 3 )
-               .arg( avgSmokeMs( m_playbackSmokeProcessingHighestGreenSumMs ), 0, 'f', 3 );
+               .arg( avgSmokeMs( m_playbackSmokeProcessingHighestGreenSumMs ), 0, 'f', 3 )
+               .arg( m_playbackSmokeBorrowedPreparedRgb8Frames )
+               .arg( m_playbackSmokeOwnedPreparedRgb8Frames )
+               .arg( static_cast<qulonglong>( m_playbackSmokeBorrowedPreparedRgb8Bytes ) )
+               .arg( static_cast<qulonglong>( m_playbackSmokeOwnedPreparedRgb8Bytes ) )
+               .arg( m_playbackSmokeMovedPreparedRgb8Frames )
+               .arg( static_cast<qulonglong>( m_playbackSmokeMovedPreparedRgb8Bytes ) )
+               .arg( m_playbackSmokeQImagePreparedRgb8Frames )
+               .arg( static_cast<qulonglong>( m_playbackSmokeQImagePreparedRgb8Bytes ) );
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.processing_detail_summary session=%1 frames=%2 "
+               "avg_sh_prep_ms=%3 avg_sh_resize_ms=%4 avg_sh_copy_ms=%5 "
+               "avg_sh_filter_ms=%6" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( m_playbackSmokePresentedFrames )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsPrepSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsResizeSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsCopySumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterSumMs ), 0, 'f', 3 );
+
+    if( m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs > 0.0 )
+    {
+        qInfo().noquote()
+            << QStringLiteral(
+                   "playback_smoke.rbf_detail_summary session=%1 frames=%2 "
+                   "avg_total_ms=%3 avg_boundary_ms=%4 avg_range_table_ms=%5 "
+                   "avg_left_ms=%6 avg_right_ms=%7 avg_horizontal_average_ms=%8 "
+                   "avg_vertical_down_ms=%9 avg_vertical_up_ms=%10 avg_output_ms=%11" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfBoundarySumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfRangeTableSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfLeftSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfRightSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfHorizontalAverageSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs ), 0, 'f', 3 );
+    }
 
     if( m_playbackSmokeDualIsoFull20ValidFrames > 0 )
     {
@@ -16056,6 +16372,18 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( bool01( m_playbackSmokeDualIsoFull20LastAliasMap ) )
                    .arg( bool01( m_playbackSmokeDualIsoFull20LastFullres ) )
                    .arg( m_playbackSmokeDualIsoFull20LastThreads );
+
+        qInfo().noquote()
+            << QStringLiteral(
+                   "playback_smoke.dual_iso_mix_chroma_summary session=%1 frames=%2 "
+                   "avg_mix_chroma_ms=%3 avg_chroma_copy_ms=%4 "
+                   "avg_chroma_fullres_ms=%5 avg_chroma_halfres_ms=%6" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokeDualIsoFull20ValidFrames )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaCopySumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaFullresSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresSumMs ), 0, 'f', 3 );
     }
 }
 
@@ -16063,7 +16391,8 @@ bool MainWindow::primePlaybackCacheOnPlayStart( void )
 {
     if( !m_fileLoaded || !m_pMlvObject ) return false;
     if( playback_start_preroll_disabled_by_environment() ) return false;
-    if( m_pMlvObject->stop_caching || getMlvRawCacheLimitFrames( m_pMlvObject ) == 0 ) return false;
+    if( m_pMlvObject->stop_caching
+     || getMlvRawCacheLimitFrames( m_pMlvObject ) == 0 ) return false;
 
     int currentFrame = ui->horizontalSliderPosition->value();
     if( currentFrame < 0 ) currentFrame = 0;
@@ -16125,8 +16454,8 @@ void MainWindow::on_actionPlay_toggled(bool checked)
         beginPlayToFirstFrameMeasurement();
         m_playbackScopeLastUpdateTime = 0.0;
         requestFrameRefresh( true, "play-start" );
-        m_playbackFrameAdvancePending = true;
         m_lastPlayStartPrerollRequested = primePlaybackCacheOnPlayStart();
+        m_playbackFrameAdvancePending = true;
     }
 
     logInteractionEvent(
@@ -17243,7 +17572,16 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         bool updateScopesNow = true;
         if( ui->actionPlay->isChecked() )
         {
-            const int intervalMs = playbackScopeUpdateIntervalMs();
+            const double renderTotalMs =
+                telemetryDoubleValue( readyFrame.stageTimingTelemetry,
+                                      "render_thread_total_ms" );
+            const int baseIntervalMs = playbackScopeUpdateIntervalMs();
+            const int intervalMs =
+                renderTotalMs > 0.0
+                    ? qBound( baseIntervalMs,
+                              qRound( renderTotalMs * 1.4 ),
+                              500 )
+                    : baseIntervalMs;
             updateScopesNow =
                 intervalMs <= 0
              || m_playbackScopeLastUpdateTime <= 0.0
@@ -17701,8 +18039,11 @@ void MainWindow::drawFrameReady()
     }
     const size_t playbackScaledImageBytes =
         (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
-            ? static_cast<size_t>( readyFrame.playbackScaledWidth )
-              * static_cast<size_t>( readyFrame.playbackScaledHeight ) * 3u
+            ? static_cast<size_t>(
+                  readyFrame.playbackScaledBytesPerLine > 0
+                      ? readyFrame.playbackScaledBytesPerLine
+                      : readyFrame.playbackScaledWidth * 3 )
+              * static_cast<size_t>( readyFrame.playbackScaledHeight )
             : 0;
     const size_t borrowedPlaybackScaledImageBytes =
         (playbackScaledImageBytes > 0 && readyFrame.playbackScaledImage8)

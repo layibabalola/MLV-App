@@ -48,6 +48,8 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
           || ( processing->shadows_highlights.highlights <= -0.01
             || processing->shadows_highlights.highlights >= 0.01 ) );
     const int apply_local_tone = apply_contrast || apply_shadows_highlights;
+    const int blur_image_is_curve_index =
+        blurImage && processing_shadows_highlights_curve_index_mask_enabled();
     const int apply_vibrance =
         processing->allow_creative_adjustments != 0
         && ( processing->vibrance <= 0.99 || processing->vibrance >= 1.01 );
@@ -158,12 +160,20 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
             double expo_correction = 1.0;
             if( apply_shadows_highlights )
             {
-                const uint16_t bpix0_level = blurImage ? bpix[0] : pix0_level;
-                const uint16_t bpix1_level = blurImage ? bpix[1] : pix1_level;
-                const uint16_t bpix2_level = blurImage ? bpix[2] : pix2_level;
-                const int32_t bval = ( ( pm0[bpix0_level] << 2 )
-                                     + ( pm4[bpix1_level] * 11 )
-                                     +   pm8[bpix2_level] ) >> 4;
+                int32_t bval;
+                if( blur_image_is_curve_index )
+                {
+                    bval = bpix[0];
+                }
+                else
+                {
+                    const uint16_t bpix0_level = blurImage ? bpix[0] : pix0_level;
+                    const uint16_t bpix1_level = blurImage ? bpix[1] : pix1_level;
+                    const uint16_t bpix2_level = blurImage ? bpix[2] : pix2_level;
+                    bval = ( ( pm0[bpix0_level] << 2 )
+                           + ( pm4[bpix1_level] * 11 )
+                           +   pm8[bpix2_level] ) >> 4;
+                }
                 expo_correction *= shadow_highlight_curve[LIMIT16(bval)];
             }
             if( apply_contrast )
@@ -383,12 +393,20 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
         double expo_correction = 1.0;
         if( apply_shadows_highlights )
         {
-            const uint16_t bpix0_level = blurImage ? bpix[0] : pix0_level;
-            const uint16_t bpix1_level = blurImage ? bpix[1] : pix1_level;
-            const uint16_t bpix2_level = blurImage ? bpix[2] : pix2_level;
-            const int32_t bval = ( ( pm0[bpix0_level] << 2 )
-                                 + ( pm4[bpix1_level] * 11 )
-                                 +   pm8[bpix2_level] ) >> 4;
+            int32_t bval;
+            if( blur_image_is_curve_index )
+            {
+                bval = bpix[0];
+            }
+            else
+            {
+                const uint16_t bpix0_level = blurImage ? bpix[0] : pix0_level;
+                const uint16_t bpix1_level = blurImage ? bpix[1] : pix1_level;
+                const uint16_t bpix2_level = blurImage ? bpix[2] : pix2_level;
+                bval = ( ( pm0[bpix0_level] << 2 )
+                       + ( pm4[bpix1_level] * 11 )
+                       +   pm8[bpix2_level] ) >> 4;
+            }
             expo_correction *= shadow_highlight_curve[LIMIT16(bval)];
         }
         if( apply_contrast )

@@ -534,6 +534,116 @@ TEST(PlaybackScaling, BilinearVsNearestOnDiagonalLine)
     ASSERT_TRUE(bilinearSmoothed > nearestSmoothed * 10);
 }
 
+TEST(PlaybackScaling, FastScalerCanWritePaddedRows)
+{
+    const int sourceWidth = 7;
+    const int sourceHeight = 5;
+    const int targetWidth = 11;
+    const int targetHeight = 9;
+    const int rowBytes = targetWidth * 3;
+    const int paddedBytesPerLine = rowBytes + 5;
+
+    const std::vector<uint8_t> source =
+        make_synthetic_rgb8(sourceWidth, sourceHeight);
+
+    FastPlaybackScaleCache tightCache;
+    std::vector<uint8_t> tight;
+    ASSERT_TRUE(playbackBuildFastScaledRgb8(source.data(),
+                                            sourceWidth, sourceHeight,
+                                            targetWidth, targetHeight,
+                                            tight, tightCache));
+
+    FastPlaybackScaleCache paddedCache;
+    std::vector<uint8_t> padded;
+    ASSERT_TRUE(playbackBuildFastScaledRgb8(source.data(),
+                                            sourceWidth, sourceHeight,
+                                            targetWidth, targetHeight,
+                                            padded, paddedCache,
+                                            paddedBytesPerLine));
+
+    ASSERT_EQ(static_cast<size_t>(paddedBytesPerLine) *
+              static_cast<size_t>(targetHeight),
+              padded.size());
+
+    const auto assertPaddedRowsMatch =
+        [&](const std::vector<uint8_t> &tightBuffer,
+            const std::vector<uint8_t> &paddedBuffer)
+        {
+            ASSERT_EQ(static_cast<size_t>(paddedBytesPerLine) *
+                      static_cast<size_t>(targetHeight),
+                      paddedBuffer.size());
+            ASSERT_EQ(static_cast<size_t>(rowBytes) *
+                      static_cast<size_t>(targetHeight),
+                      tightBuffer.size());
+            for( int y = 0; y < targetHeight; ++y )
+            {
+                const size_t tightRow =
+                    static_cast<size_t>(y) * static_cast<size_t>(rowBytes);
+                const size_t paddedRow =
+                    static_cast<size_t>(y) * static_cast<size_t>(paddedBytesPerLine);
+                for( int x = 0; x < rowBytes; ++x )
+                {
+                    ASSERT_EQ(static_cast<int>(tightBuffer[tightRow + static_cast<size_t>(x)]),
+                              static_cast<int>(paddedBuffer[paddedRow + static_cast<size_t>(x)]));
+                }
+                for( int x = rowBytes; x < paddedBytesPerLine; ++x )
+                {
+                    ASSERT_EQ(0, static_cast<int>(paddedBuffer[paddedRow + static_cast<size_t>(x)]));
+                }
+            }
+        };
+
+    for( int y = 0; y < targetHeight; ++y )
+    {
+        const size_t tightRow = static_cast<size_t>(y) * static_cast<size_t>(rowBytes);
+        const size_t paddedRow =
+            static_cast<size_t>(y) * static_cast<size_t>(paddedBytesPerLine);
+        for( int x = 0; x < rowBytes; ++x )
+        {
+            ASSERT_EQ(static_cast<int>(tight[tightRow + static_cast<size_t>(x)]),
+                      static_cast<int>(padded[paddedRow + static_cast<size_t>(x)]));
+        }
+        for( int x = rowBytes; x < paddedBytesPerLine; ++x )
+        {
+            ASSERT_EQ(0, static_cast<int>(padded[paddedRow + static_cast<size_t>(x)]));
+        }
+    }
+
+    BilinearPlaybackScaleCache bilinearTightCache;
+    BilinearPlaybackScaleCache bilinearPaddedCache;
+    std::vector<uint8_t> bilinearTight;
+    std::vector<uint8_t> bilinearPadded;
+    ASSERT_TRUE(playbackBuildBilinearScaledRgb8(source.data(),
+                                                sourceWidth, sourceHeight,
+                                                targetWidth, targetHeight,
+                                                bilinearTight,
+                                                bilinearTightCache));
+    ASSERT_TRUE(playbackBuildBilinearScaledRgb8(source.data(),
+                                                sourceWidth, sourceHeight,
+                                                targetWidth, targetHeight,
+                                                bilinearPadded,
+                                                bilinearPaddedCache,
+                                                paddedBytesPerLine));
+    assertPaddedRowsMatch(bilinearTight, bilinearPadded);
+
+    CubicPlaybackScaleCache cubicTightCache;
+    CubicPlaybackScaleCache cubicPaddedCache;
+    std::vector<uint8_t> cubicTight;
+    std::vector<uint8_t> cubicPadded;
+    ASSERT_TRUE(playbackBuildCubicScaledRgb8(source.data(),
+                                             sourceWidth, sourceHeight,
+                                             targetWidth, targetHeight,
+                                             cubicTight,
+                                             cubicTightCache));
+    ASSERT_TRUE(playbackBuildCubicScaledRgb8(source.data(),
+                                             sourceWidth, sourceHeight,
+                                             targetWidth, targetHeight,
+                                             cubicPadded,
+                                             cubicPaddedCache,
+                                             paddedBytesPerLine));
+    assertPaddedRowsMatch(cubicTight, cubicPadded);
+}
+
 TEST(PlaybackScaling, CubicPreservesFlatFieldsAndProducesValidUpscale)
 {
     const int sourceWidth = 32;

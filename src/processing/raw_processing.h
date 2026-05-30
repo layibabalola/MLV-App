@@ -93,11 +93,14 @@ int processingCanUseDirect8BitOutput(const processingObject_t * processing);
  * kill switch on first call. */
 int processingFastPathAvx2Active(void);
 /* Nonzero when the runtime dispatcher selected the hand-tuned AVX2 + FMA
- * intrinsics variant of the direct processed8 fast path. Enabled by setting
- * MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1; still subject to MLVAPP_DISABLE_AVX2
- * and CPU feature support. */
+ * intrinsics variant of the direct processed8 fast path. The intrinsics
+ * variant is now the default on AVX2+FMA hosts; set
+ * MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1 to keep the autovec AVX2 variant.
+ * Still subject to MLVAPP_DISABLE_AVX2 and CPU feature support. */
 int processingFastPathAvx2IntrinActive(void);
 void processingResetLastTimingTelemetry(void);
+void processingSetPlaybackPreviewMode(int enabled);
+int processingPlaybackPreviewModeEnabled(void);
 void applyProcessingObject8( processingObject_t * processing,
                              int imageX, int imageY,
                              uint16_t * __restrict inputImage,
@@ -105,6 +108,18 @@ void applyProcessingObject8( processingObject_t * processing,
                              int threads, int imageChanged, uint64_t frameIndex );
 double processingGetLastSetupMilliseconds(void);
 double processingGetLastShadowsHighlightsPrepMilliseconds(void);
+double processingGetLastShadowsHighlightsResizeMilliseconds(void);
+double processingGetLastShadowsHighlightsCopyMilliseconds(void);
+double processingGetLastShadowsHighlightsFilterMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfTotalMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfBoundaryMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfRangeTableMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfLeftMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfRightMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfHorizontalAverageMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfVerticalDownMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfVerticalUpMilliseconds(void);
+double processingGetLastShadowsHighlightsRbfOutputMilliseconds(void);
 double processingGetLastHighestGreenMilliseconds(void);
 double processingGetLastCoreMilliseconds(void);
 double processingGetLastDenoiseMilliseconds(void);

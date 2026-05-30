@@ -6,7 +6,9 @@
 */
 
 #include "rbf.h"
+#include "rbf_wrapper.h"
 #include "RBFilterPlain.h"
+#include <cstdlib>
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,13 +17,64 @@ extern "C" {
 namespace
 {
 thread_local CRBFilterPlain g_rbf_filter;
+
+bool envFlagEnabled(const char * value)
+{
+    if( !value || !*value ) return false;
+    return value[0] == '1'
+        || value[0] == 'y'
+        || value[0] == 'Y'
+        || value[0] == 't'
+        || value[0] == 'T'
+        || value[0] == 'o'
+        || value[0] == 'O';
 }
+
+bool recursiveBfDetailTimingEnabled()
+{
+    static const bool enabled =
+        envFlagEnabled(std::getenv("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"));
+    return enabled;
+}
+}
+
+void recursive_bf_wrap_with_curve_index_lut(uint16_t * img_in,
+        uint16_t * img_out,
+        float sigma_spatial, float sigma_range,
+        int width, int height, int channel,
+        const uint16_t * output_lut,
+        const int32_t * output_curve_r,
+        const int32_t * output_curve_g,
+        const int32_t * output_curve_b);
 
 void recursive_bf_wrap_with_output_lut(uint16_t * img_in,
         uint16_t * img_out,
         float sigma_spatial, float sigma_range,
         int width, int height, int channel,
         const uint16_t * output_lut)
+{
+    recursive_bf_wrap_with_curve_index_lut(
+        img_in,
+        img_out,
+        sigma_spatial,
+        sigma_range,
+        width,
+        height,
+        channel,
+        output_lut,
+        nullptr,
+        nullptr,
+        nullptr);
+}
+
+void recursive_bf_wrap_with_curve_index_lut(uint16_t * img_in,
+        uint16_t * img_out,
+        float sigma_spatial, float sigma_range,
+        int width, int height, int channel,
+        const uint16_t * output_lut,
+        const int32_t * output_curve_r,
+        const int32_t * output_curve_g,
+        const int32_t * output_curve_b)
 {
     if( 0 )
     {
@@ -37,7 +90,18 @@ void recursive_bf_wrap_with_output_lut(uint16_t * img_in,
     {
         //Ming version with better right boarder
         g_rbf_filter.reserveMemory( width, height, channel );
-        g_rbf_filter.filter( img_in, img_out, sigma_spatial, sigma_range, width, height, channel, output_lut );
+        g_rbf_filter.setTimingEnabled( recursiveBfDetailTimingEnabled() );
+        g_rbf_filter.filter( img_in,
+                             img_out,
+                             sigma_spatial,
+                             sigma_range,
+                             width,
+                             height,
+                             channel,
+                             output_lut,
+                             output_curve_r,
+                             output_curve_g,
+                             output_curve_b );
     }
 }
 
@@ -55,6 +119,22 @@ void recursive_bf_wrap(uint16_t * img_in,
         height,
         channel,
         nullptr);
+}
+
+void recursive_bf_get_last_timing(recursive_bf_timing_t * timing)
+{
+    if( !timing ) return;
+
+    const RBFilterPlainTiming last = g_rbf_filter.lastTiming();
+    timing->total_ms = last.total_ms;
+    timing->boundary_ms = last.boundary_ms;
+    timing->range_table_ms = last.range_table_ms;
+    timing->left_ms = last.left_ms;
+    timing->right_ms = last.right_ms;
+    timing->horizontal_average_ms = last.horizontal_average_ms;
+    timing->vertical_down_ms = last.vertical_down_ms;
+    timing->vertical_up_ms = last.vertical_up_ms;
+    timing->output_ms = last.output_ms;
 }
 
 #ifdef __cplusplus

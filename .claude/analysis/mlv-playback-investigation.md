@@ -1,5 +1,52 @@
 ## Direct-8 Loop Profiling (2026-04-24)
 
+## 2026-05-30 - pink wash remains in playback preview; blur-prep hypothesis rejected
+
+### Verified locally
+
+- The current playback preview still shows a broad pink wash across the entire frame, not just a top stripe. I rechecked the current capture set from `.claude-state/profiling/20260530-shfix-check/` and the raw stage files for `M16-1446`.
+- The raw preview evidence stays pink in both `S5_processed8` and `S6_displayImage`, while the export frame remains clean. The mean RGB for the preview stage is still heavily biased toward red and blue, which matches what I saw on screen.
+- I tested the shadow/highlight blur-prep hypothesis by removing the playback-preview suppression in `src/processing/raw_processing.c`, rebuilding `platform/qt/build-release/release/MLVApp.exe`, and re-smoke-testing `M16-1446`. The frame stayed pink and the direct8 preview statistics did not meaningfully change, so that hypothesis is rejected.
+- The current release build remained valid on the x1 Quality / settled Auto Look Assist smoke gate after the revert back to the safe baseline.
+
+### Cross-checked from prior analysis
+
+- Earlier export checks were already clean, so the artifact remains preview-only rather than a source-frame issue.
+- The new observation corrects the earlier narrower description: the frame wash is broad enough that the entire preview reads pink, even if the top edge makes it easiest to spot.
+
+### Needs runtime profiling
+
+- Revisit the direct8 preview generation path in `src/processing/raw_processing.c` next.
+- Compare preview artifacts against export or an earlier decode path to pinpoint where the pink enters.
+- Keep the next pass focused on preview generation rather than more GUI handoff code; the blur-prep detour did not move the artifact.
+
+### Ranked next steps
+
+1. High impact / medium risk: re-trace the direct8 preview generation path and its playback-only guards.
+2. Medium impact / low risk: keep the x1 Quality / Auto Look Assist smoke harness fixed for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched as the control path.
+
+## Chroma 2x2 Median Helper (2026-05-30)
+
+### Verified locally
+
+- The accepted `chroma_smooth_med5` helper in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) remains the current keep-path for the 2x2 chroma smoother. It keeps the direct value-based median network and avoids the pointer-array `opt_med5` form on this hot path.
+- The user-facing release exe is rebuilt at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 6:55:40 AM`, `Length=8791552`, `SHA256=9D91C53CB4B6C4C47B17C0DF59E773FD496279B8041B1525D3634DFAB906D713`.
+- The x1 Quality visible smoke set with settled Auto Look Assist stayed valid on all three clips after the accepted helper was restored:
+  - `M16-1327`: `9.688 fps`, `avg_mix_chroma_ms=26.804`, `avg_chroma_copy_ms=3.052`, `avg_chroma_fullres_ms=12.649`, `avg_chroma_halfres_ms=11.103`
+  - `M16-1347`: `8.885 fps`, `avg_mix_chroma_ms=29.180`, `avg_chroma_copy_ms=3.056`, `avg_chroma_fullres_ms=13.213`, `avg_chroma_halfres_ms=12.910`
+  - `M16-1446`: `13.093 fps`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The rejected `__restrict` aliasing-hint probe in the same file was not worth shipping. It regressed the chroma-heavy `M16-1327` clip to `8.697 fps` while leaving `M16-1347` at `8.989 fps` and `M16-1446` at `13.361 fps`, so it was backed out immediately.
+- The accepted helper still looks like the right tradeoff: it is stable across the visible gate and keeps the current playback preview improvement without widening the blast radius.
+
+### Needs runtime profiling
+
+- The remaining hot path is still `avg_mix_chroma_ms`, not the tiny `chroma_copy` slice. The next safe gain likely needs a deeper loop-shape change or a row reuse strategy, but only if it can clear the three-clip playback gate again.
+- Rejected a `final_blend_row_avx2` alias-map branch-hoist probe on the same visible GUI smoke set: the smoke state stayed valid, but the measured `avg_llrawproc_dual_iso_ms` regressed on `M16-1327` (`81.297 -> 106.766`) and `M16-1347` (`89.291 -> 91.185`) while only `M16-1446` improved (`56.803 -> 50.247`), so the probe was reverted immediately.
+
 ## Presentation Split Handoff (2026-04-24, current)
 
 ### Verified locally
@@ -257,6 +304,27 @@
   - deepen playback overlap queue depth beyond current slot depth,
   - keep/reduce render-slot presentation work only when it contributes additional overlap,
   - pursue AVX2 dispatch only after a structural step shows stable headroom.
+
+### Visual artifact check (2026-05-30)
+
+#### Verified locally
+
+- Live screen captures taken during `--gui-smoke-playback` on `M16-1446.MLV` show a magenta/pink horizontal band across the upper portion of the rendered video area.
+- The same artifact remained after removing the borrowed playback-scaled RGB8 handoff in `platform/qt/MainWindow.cpp`, so the band is not explained by that one lifetime optimization.
+- The current evidence is ambiguous between actual clip content and an upstream preview/color path issue; telemetry alone does not distinguish those two.
+
+#### Needs runtime profiling
+
+- Compare the same frame against an export or an alternate decode path before attributing the band to the playback pipeline.
+- If the band is source content, keep the current playback speed work unchanged.
+- If the band is generated by preview processing, narrow the culprit to the playback-scene conversion path before touching more hot loops.
+
+#### Follow-up result
+
+- The borrowed-vs-owned playback handoff check was reverted after it did not change the visible band and reduced playback throughput on the smoke set.
+- Fresh smoke after the revert returned the build to the prior fast path:
+  - `M16-1446`: `presented_fps=7.861`, `avg_llrawproc_ms=53.889`, `avg_draw_total_ms=26.063`
+- The pink band remains unresolved and still needs a source-frame comparison before we can call it a pipeline bug.
 
 ## Safe Overlap + Fast-Scale Keep Point (2026-04-23, current)
 
@@ -2603,3 +2671,1383 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / low risk: inspect the next manual smoke for `raw_prefetch` hits and `avg_raw_uint16_ms`; if they remain zero, add request-frame/stride telemetry to the smoke log.
 2. Medium impact / medium effort: if processing remains above `~90 ms`, split Shadows/Highlights core timing further around recursive BF versus curve application.
 3. Medium impact / higher risk: if Dual ISO mix remains dominant, continue with byte-identity-guarded AVX2/filter optimizations rather than changing reconstruction math.
+
+## 2026-05-29 - GUI smoke visual-quality gate
+
+### Verified locally
+
+- Some early automated GUI playback benchmarks were not trustworthy as visual comparisons because the result artifact did not prove that Auto Look Assist had settled before playback.
+- The current GUI smoke harness now records a `visualQuality` block and fails validation unless the same run proves:
+  - Auto Look Assist applied and diagnostics settled.
+  - `scale_request=1` / x1 playback.
+  - `quality_mode=1` / Quality mode.
+- `look_assist.apply.result` now logs the full Auto Look Assist tone state, including `preset_shadows`, `preset_highlights`, and `preset_vibrance`, not only exposure/contrast/temp/tint.
+- A short rebuilt-release smoke on `C:\temp\MLV\M16-1327.MLV` validated the full look state: `scene=night`, `preset_exp=167`, `preset_contrast=14`, `preset_shadows=32`, `preset_highlights=-26`, `preset_vibrance=3`, `final_temp=6250`, `final_tint=22`, `scale_request=1`, and `quality_mode=1`.
+- The risky Dual ISO `chroma_smooth_method==2` copy-avoidance candidate was reverted. It improved one M16-1327 run but regressed or became noisy on other clips, and it duplicated image-processing math in a way that was not worth keeping while visual quality was under question.
+- The user-facing release executable was rebuilt after the revert and logging change: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 11:53:38`, size `8338432`, SHA256 `ACE49250B5D198099350F6D729854F8FBDD76303EE3C60BC20850BB814253FE1`.
+
+### Cross-checked from prior analysis
+
+- The strongest current safe bottleneck signal is still CPU-side Shadows/Highlights prep: clean validated x1 Quality GUI runs show `processing_shadows_highlights_prep_ms` around `53-55 ms/frame`.
+- `OMP_NUM_THREADS=6` and `OMP_NUM_THREADS=4` probes did not improve the clean M16-1327 run; `MLVAPP_PLAYBACK_MAX_THREADS=4` was worse than the 6-thread cap in the latest gated comparisons.
+- Raising `MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS` to `300` reduced scope work but did not improve end-to-end FPS under the current VM load, so it remains an optional diagnostic knob rather than a default change.
+
+### Needs runtime profiling
+
+- Continue accepting only GUI smoke runs where `validation.ok=true` and `visualQuality.lookAssist.applied=true`.
+- Treat FPS runs without the visual gate as timing-only data, not as evidence that Auto Look Assist visual quality matches manual playback.
+
+### Ranked next steps
+
+1. High impact / low risk: audit Shadows/Highlights recursive bilateral prep for byte-identical savings before changing Dual ISO reconstruction math again.
+2. Medium impact / low risk: keep rejecting candidates that improve a single clip but regress the validated multi-clip GUI set.
+3. Medium impact / medium effort: add narrower timing inside the Shadows/Highlights prep bucket if the next candidate is not obvious from code audit.
+
+## 2026-05-29 - visual-quality mismatch root cause and GUI no-copy playback
+
+### Verified locally
+
+- The guarded GUI smoke logs prove Auto Look Assist was not missing in the current x1 Quality runs. For `C:\temp\MLV\M16-1327.MLV`, the rebuilt release smoke reported `lookAssist.applied=true`, `scene=night`, `preset_exp=167`, `preset_contrast=14`, `preset_shadows=32`, `preset_highlights=-26`, `preset_vibrance=3`, `final_temp=6250`, and `final_tint=22`.
+- The likely cause of the user's "less pretty" observation was not Look Assist being skipped; it was an experimental Shadows/Highlights curve-index mask path used during A/B work, plus earlier smoke artifacts that did not always prove the settled visual state before timing.
+- `tools\profiling\run-release-gui-smoke.ps1` now clears known experimental playback/processing environment variables by default, including `MLVAPP_ENABLE_SH_CURVE_INDEX_MASK`, unless `-PreserveExperimentalEnvironment` is explicitly passed. Normal automated smoke runs therefore match the user's visual-quality defaults more closely.
+- The smoke harness now records the cleared environment, requires x1 scale and Quality mode, requires Look Assist, and records the full `visualQuality` block before accepting a benchmark result.
+- Implemented a GUI presentation copy-avoidance path for render-thread pre-scaled playback frames:
+  - playback scaler helpers can write padded RGB888 rows with an explicit bytes-per-line;
+  - `RenderFrameThread::ReadyFrame` carries `playbackScaledBytesPerLine`;
+  - `MainWindow` wraps borrowed padded render-thread RGB8 buffers directly instead of copying them into owned GUI buffers.
+- Focused regression coverage passed after these changes with explicit filters for the touched surfaces: `PlaybackScaling.FastScalerCanWritePaddedRows`, `PlaybackScaling.*`, `ProcessingFilters.*`, `DualIsoPipeline.TinyDualIsoFullFramesMatchGolden`, `DualIsoPipeline.HQ_FullBlendAvx2ByteIdentity`, and `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity`.
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`; timestamp `2026-05-29 13:45:03`, size `8346624`, SHA256 `A74F11DDA7542A782CC402CE8E2DC3F3455FB7E497EC79CA5D345BBBC0D9BD9F`.
+- Guarded multi-clip GUI smoke results after the no-copy path:
+  - `M16-1327_render_prescale_padded_borrow`: `presented_fps=4.793`, `owned_prepared_rgb8_frames=0`, `borrowed_prepared_rgb8_frames=48`, `avg_render_total_ms=199.688`, `avg_llrawproc_ms=85.812`, `avg_processing_shadows_highlights_prep_ms=53.417`.
+  - `M16-1347_render_prescale_padded_borrow`: `presented_fps=5.091`, `owned_prepared_rgb8_frames=0`, `borrowed_prepared_rgb8_frames=51`, `avg_render_total_ms=187.980`, `avg_llrawproc_ms=74.529`, `avg_processing_shadows_highlights_prep_ms=52.510`.
+  - `M16-1243_render_prescale_padded_borrow`: `presented_fps=4.694`, `owned_prepared_rgb8_frames=0`, `borrowed_prepared_rgb8_frames=47`, `avg_render_total_ms=202.723`, `avg_llrawproc_ms=81.043`, `avg_processing_shadows_highlights_prep_ms=56.383`.
+- Rejected and reverted a Dual ISO paired chroma-smoothing input copy experiment. It passed focused byte/parity tests, but guarded GUI smokes showed a mixed result: `M16-1327` regressed from `4.793` to `4.596` fps, `M16-1347` regressed from `5.091` to `4.794` fps, and only `M16-1243` improved from `4.694` to `4.992` fps. The release was rebuilt after the revert and `M16-1327_after_dualiso_revert_confirm` validated `presented_fps=4.992`, `lookAssist.applied=true`, `scaleActiveLast=1`, `qualityModeLast=1`, and `experimentalEnvironmentCleared=true`.
+
+### Cross-checked from prior analysis
+
+- The S/H curve-index mask path remains default-off because it produced mixed timing and visible-output risk during A/B checks. Keeping it opt-in and cleared by default is the safer posture.
+- The no-copy playback change does not alter tone, debayer, Dual ISO, or Look Assist math; it only avoids an RGB8 ownership copy when the render-thread buffer has a Qt-safe padded stride.
+- FPS is still mostly bounded by CPU engine work rather than GUI drawing. The main remaining per-frame buckets in the guarded smokes are Dual ISO/llrawproc and Shadows/Highlights prep.
+
+### Needs runtime profiling
+
+- Continue rejecting any GUI smoke that does not show `validation.ok=true`, `visualQuality.lookAssist.applied=true`, `scaleActiveLast=1`, `qualityModeLast=1`, and `experimentalEnvironmentCleared=true`.
+- If future manual runs look visually different from automated runs, compare the launch environment first, especially any `MLVAPP_*` experimental flags.
+
+### Ranked next steps
+
+1. High impact / low risk: continue targeting CPU-only savings in Shadows/Highlights prep and Dual ISO buckets while preserving byte/visual parity.
+2. Medium impact / low risk: keep the no-copy borrow counters in smoke summaries so regressions in the presentation path are visible immediately.
+3. Medium impact / medium effort: add finer Shadows/Highlights prep telemetry around recursive BF setup, scan passes, and output conversion before attempting another algorithmic change.
+
+## 2026-05-30 - rejected RBF RGB3 copy unroll
+
+### Verified locally
+
+- Tried a narrow `RGB3` specialization in `src\processing\rbfilter\RBFilterPlain.cpp` that kept the recursive bilateral math unchanged but replaced the generic per-channel copy loops with hand-unrolled 3-channel copies in the left, right, vertical-down, and vertical-up passes.
+- Rebuilt the user-facing release executable after the change: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-30 00:04:59`, size `8791552`, SHA256 `617EBD75D5302EE79AC74235BF342A3D0378DEB76E2B61D9640F389BC1019A3F`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. All three clips still passed the visual gate, but the FPS was worse than the earlier accepted chroma-copy baseline:
+  - `M16-1327`: `presented_fps=5.00`, `avg_render_total_ms=189.38`, `avg_llrawproc_ms=76.70`, `avg_processing_shadows_highlights_prep_ms=58.15`, `avg_mix_chroma_ms=33.75`.
+  - `M16-1347`: `presented_fps=4.99`, `avg_render_total_ms=190.93`, `avg_llrawproc_ms=78.83`, `avg_processing_shadows_highlights_prep_ms=56.40`, `avg_mix_chroma_ms=35.50`.
+  - `M16-1446`: `presented_fps=5.75`, `avg_render_total_ms=162.13`, `avg_llrawproc_ms=39.35`, `avg_processing_shadows_highlights_prep_ms=62.72`, `avg_mix_chroma_ms=0.00`.
+- The unroll was reverted back to the generic per-channel copy form because it did not improve the GUI-visible multi-clip baseline on this VM.
+
+### Cross-checked from prior analysis
+
+- The accepted row-parallel Dual ISO chroma-copy change still looks better than this RBF unroll on the clips that exercise chroma smoothing, so the RBF specialization is not the next best lever.
+
+### Needs runtime profiling
+
+- If we stay in the RBF bucket, the next candidate should be a structural reduction in the vertical recurrence or output phase, not another copy micro-tweak.
+
+### Ranked next steps
+
+1. High impact / low risk: leave the rejected RGB3 unroll out and keep looking for a real RBF vertical-pass reduction.
+2. High impact / low risk: continue the current accepted dualiso row-copy win as the stable baseline.
+3. Medium impact / low risk: keep using the visible GUI smoke set as the acceptance gate so every new probe is compared against the same user-facing launch path.
+
+## 2026-05-29 - rejected 2x2 chroma lookup-hoist and post-revert visual validation
+
+### Verified locally
+
+- Added a scalar reference guard for the active Dual ISO 2x2 chroma smoother: `ProcessingFilters.ChromaSmooth2x2MatchesScalarReference` verifies `chroma_smooth(2, ...)` against an explicit reference implementation.
+- The 2x2 chroma-smooth lookup-hoist prototype passed the focused reference test, but guarded release GUI smokes showed it was slower or noisy in the user-visible playback path:
+  - `M16-1327_chroma2x2_lookup_hoist`: `presented_fps=4.693`, `avg_llrawproc_ms=85.55`, `avg_mix_chroma_ms=39.83`.
+  - `M16-1347_chroma2x2_lookup_hoist`: `presented_fps=4.697`, `avg_llrawproc_ms=84.79`, `avg_mix_chroma_ms=42.06`.
+  - `M16-1243_chroma2x2_lookup_hoist`: `presented_fps=4.393`, `avg_llrawproc_ms=95.27`, `avg_mix_chroma_ms=41.36`.
+- The lookup-hoist source change was reverted; `src\mlv\llrawproc\chroma_smooth.c` is clean again. The reference guard remains because it is useful for future byte-identity work in this hotspot.
+- Rebuilt the user-facing release executable after the revert: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 14:02:15`, size `8346624`, SHA256 `A6CA1C9575248F4A35CAFFABA44951BE3795E1E0AB1CAC365BCE0EDFCBD1F496`.
+- Post-revert guarded GUI smokes all validated the visual state (`validation.ok=true`, `lookAssist.applied=true`, `scaleActiveLast=1`, `qualityModeLast=1`, `experimentalEnvironmentCleared=true`):
+  - `M16-1327_after_chroma2x2_revert_confirm`: `presented_fps=4.497`, `avg_render_total_ms=211.38`, `avg_llrawproc_ms=92.82`, `avg_processing_shadows_highlights_prep_ms=54.33`, `avg_mix_chroma_ms=37.80`.
+  - `M16-1347_after_chroma2x2_revert_confirm`: `presented_fps=4.596`, `avg_render_total_ms=205.26`, `avg_llrawproc_ms=87.96`, `avg_processing_shadows_highlights_prep_ms=55.56`, `avg_mix_chroma_ms=40.96`.
+  - `M16-1243_after_chroma2x2_revert_confirm`: `presented_fps=4.800`, `avg_render_total_ms=198.67`, `avg_llrawproc_ms=83.46`, `avg_processing_shadows_highlights_prep_ms=57.88`, `avg_mix_chroma_ms=38.88`.
+- `ProcessingFilters.ChromaSmooth2x2MatchesScalarReference` passed, and `ProcessingFilters.*` passed (`8` tests, `15` assertions, `0` failures) after the revert/test rename.
+
+### Cross-checked from prior analysis
+
+- The user's "not pretty" observation aligns with launch-state drift, not an Auto Look Assist failure. Current accepted smokes clear experimental `MLVAPP_*` flags and prove the settled Look Assist tone state before playback.
+- The strongest remaining CPU buckets are still Dual ISO mix/chroma and Shadows/Highlights prep. The reverted lookup-hoist shows that small scalar rewrites in chroma smoothing need GUI proof, not just byte parity.
+
+### Needs runtime profiling
+
+- Do not treat a single GUI FPS number as authoritative on this VM; compare repeated, visually validated multi-clip clusters.
+- The standalone `DualIsoPipeline.ChromaSmoothScratchReusesFrameBufferAcrossFrames` check currently fails with a null scratch-buffer observation in its fixture path, so it remains a test-fixture gap to investigate before relying on it as coverage.
+
+### Ranked next steps
+
+1. High impact / low risk: pursue exact Shadows/Highlights prep savings first, especially sink-side exact mask work or RBF RGB3 specialization, because prep remains a stable `~54-58 ms/frame` bucket.
+2. Medium impact / low risk: add finer Dual ISO `mix_chroma` timing before another chroma-smoothing math change.
+3. Medium impact / low risk: audit diagnostic/telemetry allocation and uncapped OpenMP loops for CPU-bound playback overhead that does not affect pixels.
+
+## 2026-05-29 - current visual-quality confirmation and rejected CPU probes
+
+### Verified locally
+
+- Rebuilt the user-facing release after reverting the OpenMP thread-cap probe: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 14:20:57`, size `8346624`, SHA256 `67AC25DA60D594919D3768680B40A58154485449F60BDA48218C41B7F671A4E3`.
+- Fresh guarded release GUI smoke on `C:\temp\MLV\M16-1327.MLV` with the harness defaults passed the full visual gate:
+  - artifact: `.claude-state\profiling\20260529-gui-smoke\M16-1327_current_visual_quality_confirm.json`
+  - launch env: only `MLVAPP_PLAYBACK_MAX_THREADS=6`; experimental `MLVAPP_*` flags cleared; no forced Qt offscreen platform.
+  - validation: `validation.ok=true`, `lookAssist.applied=true`, `scaleRequestMatched=true`, `qualityModeMatched=true`, `systemCpuSettled=true`.
+  - Auto Look Assist state: `scene=night`, `preset_exp=167`, `preset_contrast=14`, `preset_shadows=32`, `preset_highlights=-26`, `preset_vibrance=3`, `final_temp=6250`, `final_tint=22`.
+  - playback: `presented_fps=4.617`, `avg_render_total_ms=203.189`, `avg_llrawproc_ms=85.081`, `avg_processing_shadows_highlights_prep_ms=53.973`, `avg_mix_chroma_ms=36.595`, `borrowed_prepared_rgb8_frames=37`, `owned_prepared_rgb8_frames=0`.
+- The current evidence says the user's "less pretty" observation was caused by launch-state drift and insufficient early visual validation, not by Auto Look Assist being absent in the accepted current runs.
+- Rejected an RBF boundary-zeroing skip prototype. It looked like a low-cost cleanup, but focused `ProcessingFilters.*` coverage caught output/reuse failures, so it was reverted before any GUI acceptance.
+- Rejected the `src\mlv\video_mlv.c` OpenMP cap probe for raw unpack / float convert / 16-to-8 pack loops. Focused tests passed, but the guarded multi-clip GUI cluster worsened or failed to prove a win:
+  - `M16-1327_video_mlv_omp_cap_rerun`: `presented_fps=4.496`, `avg_processing_shadows_highlights_prep_ms=60.22`, `avg_mix_chroma_ms=39.44`.
+  - `M16-1347_video_mlv_omp_cap`: `presented_fps=4.193`, `avg_processing_shadows_highlights_prep_ms=62.69`, `avg_mix_chroma_ms=46.45`.
+  - `M16-1243_video_mlv_omp_cap`: `presented_fps=4.187`, `avg_processing_shadows_highlights_prep_ms=62.79`, `avg_mix_chroma_ms=44.43`.
+- The OpenMP cap probe was reverted; `src\mlv\video_mlv.c` has the same blob hash as `HEAD` after the revert (`f98af02a4543bdbdb3b870ba99191c826541a3e0`).
+
+### Cross-checked from prior analysis
+
+- The S/H curve-index mask remains default-off and explicitly cleared by the smoke harness because it is an optimization candidate with visual/timing risk, not a user-default playback path.
+- Accepted GUI smoke evidence now requires both performance and visual-state proof. Older artifacts that lack `visualQuality` are useful for timing history only.
+
+### Needs runtime profiling
+
+- Next accepted optimization candidates should be benchmarked only with `validation.ok=true`, `visualQuality.lookAssist.applied=true`, `scaleActiveLast=1`, `qualityModeLast=1`, and experimental environment cleared.
+- Add finer telemetry before the next risky math-adjacent change: split Shadows/Highlights prep and Dual ISO `mix_chroma` enough to isolate the copy/filter/core sub-buckets.
+
+### Ranked next steps
+
+1. High impact / low risk: add finer `mix_chroma` and Shadows/Highlights prep telemetry before changing pixel math again.
+2. Medium impact / low risk: continue no-pixel-change CPU reductions first, especially allocation/telemetry/copy overhead in the GUI playback path.
+3. Medium impact / medium risk: revisit RBF RGB3 specialization only with the current ProcessingFilters guard set and guarded multi-clip GUI smoke proof.
+
+## 2026-05-29 - GUI visual-state gate added after quality mismatch report
+
+### Verified locally
+
+- Added `gui_smoke.visual_state` telemetry before visible GUI playback begins, so automated smokes now capture the full quality state that can make the image look different: Look Assist, sliders, raw levels, chroma smooth, stretch/aspect controls, Dual ISO controls, scopes/zebras, playback scale, and playback quality mode.
+- Updated `tools\profiling\run-release-gui-smoke.ps1` to parse the visual-state line and fail validation if it is missing, if settled Look Assist is not enabled, or if x1/Quality no longer match the expected smoke state.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 14:42:20`, size `8358400`, SHA256 `1B736F6F5208EB7D0E139711AC3A6B44C3D6A080937562A88204EC1717A7902C`.
+- Fresh visible GUI smokes with the new gate all passed `validation.ok=true`, settled Look Assist, x1 scale request, Quality mode, and cleared experimental environment:
+  - `M16-1327_visual_state_gate`: `presented_fps=4.896`, `avg_render_total_ms=192.84`, `avg_llrawproc_ms=78.00`, `avg_sh_filter_ms=56.29`, `avg_mix_chroma_ms=36.84`.
+  - `M16-1347_visual_state_gate`: `presented_fps=4.697`, `avg_render_total_ms=203.17`, `avg_llrawproc_ms=85.04`, `avg_sh_filter_ms=54.45`, `avg_mix_chroma_ms=38.66`.
+  - `M16-1243_visual_state_gate`: `presented_fps=4.895`, `avg_render_total_ms=194.26`, `avg_llrawproc_ms=80.02`, `avg_sh_filter_ms=54.73`, `avg_mix_chroma_ms=37.86`.
+- Current accepted state confirms Auto Look Assist is applying the expected night look and chroma smooth is active (`chroma_smooth=2`). The visual-state line also exposes the anamorphic/aspect state (`stretch_x=3.0`, `stretch_y=1.0`, vertical stretch index `3`), which was previously not validated by the benchmark harness.
+
+### Cross-checked from prior analysis
+
+- The quality mismatch was not caused by Auto Look Assist being absent in the latest accepted runs. The gap was that earlier automation only proved the tone look and x1/Quality state, not the full GUI visual state that can make a manual run look different.
+
+### Needs runtime profiling
+
+- Continue treating any GUI smoke without `gui_smoke.visual_state` as invalid for visual-quality comparisons.
+- If a manual smoke still looks different, compare the new `visualQuality.visualState` block against the manual launch state first, especially stretch/aspect, chroma smooth, scopes, and receipt usage.
+
+### Ranked next steps
+
+1. High impact / low risk: use the new visual-state gate on every future optimization smoke before accepting a speed gain.
+2. High impact / low risk: continue CPU work in the stable hot buckets now isolated by telemetry: Shadows/Highlights recursive filter and Dual ISO `mix_chroma`.
+3. Medium impact / low risk: add deeper RBF internal timing next to locate which S/H recursive-filter pass is dominating the `~54-56 ms/frame` bucket.
+
+## 2026-05-29 - RBF telemetry gated and rejected default/runtime CPU probes
+
+### Verified locally
+
+- Added optional detailed RBF timing behind `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING`. Normal GUI smokes now clear the flag, so the extra timing barriers are absent unless explicitly requested.
+- RBF detail timing on `M16-1327` showed the Shadows/Highlights recursive filter is dominated by vertical recurrence passes: `vertical_down=22.05 ms`, `vertical_up=22.48 ms`, with horizontal/output work around `26 ms` combined. This points away from small wrapper/copy changes as the next big win.
+- Rejected and reverted the RBF RGB3 manual-unroll prototype. It passed focused processing tests, but guarded GUI A/B regressed the three-clip cluster by about `5.6%` FPS on average.
+- Rejected changing the default playback scope interval from `150 ms` to `250 ms`. It reduced scope draw work, but same-build GUI A/B against forced `150 ms` lost about `8.4%` average FPS and added about `20 ms/frame` render time.
+- Rejected `MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH=1` for the current CPU-bound GUI path. Against the fresh default baseline, average FPS fell from `6.018` to `3.725`, average render time rose from `156.16 ms` to `256.52 ms`, and `processed8_prefetch_hits` stayed `0`.
+- Rejected thread-cap changes away from the user's normal 6-thread launch:
+  - `MLVAPP_PLAYBACK_MAX_THREADS=4`: average FPS `4.360` versus `6.018` at 6 threads, about `-27.6%`.
+  - `MLVAPP_PLAYBACK_MAX_THREADS=8`: average FPS `4.960` versus `6.018` at 6 threads, about `-17.6%`.
+- Fresh accepted baseline after the revert/rebuild uses the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 15:36:04`, size `8368128`, SHA256 `A5D10D9CC4AF90033F9EABCA6AA0C0DAA43D94FF29FED72E693DC36613333536`.
+- Fresh accepted x1 Quality GUI baseline with Auto Look Assist and visual-state validation:
+  - `M16-1327_default150_final`: `presented_fps=6.081`, `avg_render_total_ms=155.46`, `avg_llrawproc_ms=62.39`, `avg_sh_filter_ms=41.97`, `avg_mix_chroma_ms=31.69`, `borrowed_prepared_rgb8_frames=61`, `owned_prepared_rgb8_frames=0`.
+  - `M16-1347_default150_final`: `presented_fps=6.081`, `avg_render_total_ms=154.03`, `avg_llrawproc_ms=59.08`, `avg_sh_filter_ms=42.02`, `avg_mix_chroma_ms=31.15`, `borrowed_prepared_rgb8_frames=61`, `owned_prepared_rgb8_frames=0`.
+  - `M16-1243_default150_final`: `presented_fps=5.891`, `avg_render_total_ms=158.98`, `avg_llrawproc_ms=62.64`, `avg_sh_filter_ms=43.66`, `avg_mix_chroma_ms=31.56`, `borrowed_prepared_rgb8_frames=59`, `owned_prepared_rgb8_frames=0`.
+
+### Cross-checked from prior analysis
+
+- The current automation now matches the user's important launch expectations: visible GUI release, no `QT_QPA_PLATFORM=offscreen`, x1 scale request, Quality mode, `MLVAPP_PLAYBACK_MAX_THREADS=6`, cleared experimental `MLVAPP_*` flags, system CPU settle before launch, and in-app CPU settle before playback.
+- Auto Look Assist is applying in the accepted runs. The latest `visualQuality.visualState` blocks show `look_assist_enabled=1`, `look_assist_diagnostics_valid=1`, `scene=night`, active shadows/highlights/vibrance, `chroma_smooth=2`, and the expected stretch state.
+- The strongest remaining CPU targets are still Dual ISO reconstruction and Shadows/Highlights recursive filtering. The accepted no-copy path has removed the GUI RGB8 ownership copy from the current baseline.
+
+### Needs runtime profiling
+
+- Do not enable processed8 prefetch by default unless a future implementation produces nonzero hits and improves multi-clip visible GUI playback.
+- Keep RBF detail timing opt-in only; use it for focused probes, not normal playback acceptance runs.
+- Re-run a fresh default baseline before accepting any small FPS win because this VM shows large load swings even after CPU-settle gating.
+
+### Ranked next steps
+
+1. High impact / low risk: pursue byte-identical S/H recursive-filter savings, especially vertical pass work, using RBF detail timing only during probes.
+2. High impact / medium effort: continue Dual ISO `mix_chroma` work with GUI A/B proof; scalar byte-identity alone has not predicted playback speed.
+3. Medium impact / low risk: keep launch-state/visual-state assertions in the smoke harness so future speedups cannot silently trade away the user's preferred look.
+
+## 2026-05-29 - stale release binary explained the latest visual-quality concern
+
+### Verified locally
+
+- The current source tree no longer contained the rejected direct8 identity-curve experiment (`rg` found no `MLVAPP_DISABLE_DIRECT8_IDENTITY_CURVE_SKIP` / identity-curve remnants), but the user-facing release executable still contained the experiment marker before rebuild. That meant a visible smoke could run a rejected A/B binary even though the source had been reverted.
+- Rebuilt the user-facing release executable from the reverted source: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 16:22:51`, size `8368128`, SHA256 `5DC77036D59D5EF51479CCE36058FAD8975FAAEE3A0BAC0D30F9CD11C1227D0F`.
+- Post-rebuild binary check found no `MLVAPP_DISABLE_DIRECT8_IDENTITY_CURVE_SKIP` marker in the release executable.
+- Focused pipeline checks after the rebuild passed with the current source: `DualIsoPipeline.DirectProcessed8FastPath*`, `DualIsoPipeline.PhaseE7*`, `DualIsoPipeline.PhaseE8*`, `DualIsoPipeline.PhaseE9*`, `PlaybackScaling.*`, and `ProcessingFilters.*`.
+- Fresh post-rebuild user-style GUI smoke (`M16-1327_post_rebuild_visual_threads4`) passed `validation.ok=true` with `MLVAPP_PLAYBACK_MAX_THREADS=4`, no receipt, x1 scale, Quality mode, settled Auto Look Assist, cleared experimental environment, and the expected stretch/aspect state:
+  - Auto Look Assist: `scene=night`, `preset_exp=167`, `preset_contrast=14`, `preset_shadows=32`, `preset_highlights=-26`, `preset_vibrance=3`, `final_temp=6250`, `final_tint=22`.
+  - Visual state: `chroma_smooth=2`, `stretch_x=3.0`, `stretch_y=1.0`, `quality_mode=1`, `scale_request=1`, `receipt_supplied=0`.
+  - Playback: `presented_fps=4.796`, `avg_render_total_ms=198.708`, `avg_llrawproc_ms=75.437`, `avg_processing_shadows_highlights_prep_ms=55.604`, `avg_mix_chroma_ms=35.458`.
+
+### Cross-checked from prior analysis
+
+- Auto Look Assist was applying in the accepted gated runs, so the likely visual mismatch was not that Look Assist was missing. The new finding is that the release binary itself was stale from a rejected experiment after source revert, which made any visible visual comparison suspect until the release rebuild.
+
+### Needs runtime profiling
+
+- Treat GUI smoke results after a reverted visual/playback experiment as invalid until the user-facing release executable has been rebuilt and its timestamp/hash recorded after the revert.
+
+### Ranked next steps
+
+1. High impact / low risk: keep release rebuild/hash verification immediately after any rejected GUI experiment revert, before visible smoke comparisons.
+2. High impact / low risk: continue CPU work only from post-rebuild, visual-gated smokes.
+3. Medium impact / low risk: compare `MLVAPP_PLAYBACK_MAX_THREADS=4` and `6` as separate launch profiles; thread count affects speed, while visual acceptance must remain identical.
+
+## 2026-05-29 - rejected raw-buffer reuse and S/H curve-index mask probes
+
+### Verified locally
+
+- Rejected and reverted a thread-local raw-frame buffer reuse probe in `src/mlv/video_mlv.c`. It reduced the raw-read sub-bucket in one 4-thread smoke, but visible GUI playback did not improve and repeat runs regressed the normal launch profile:
+  - Baseline `M16-1327_pre_rawbuf_threads4`: `presented_fps=4.793`, `avg_render_total_ms=197.667`, `avg_raw_frame_ms=12.479`, `avg_llrawproc_ms=74.896`, `avg_processing_shadows_highlights_prep_ms=54.542`, `avg_mix_chroma_ms=36.437`.
+  - Probe `M16-1327_rawbuf_threads4_repeat`: `presented_fps=4.595`, `avg_render_total_ms=206.413`, `avg_raw_frame_ms=10.978`, `avg_llrawproc_ms=82.196`, `avg_processing_shadows_highlights_prep_ms=57.935`, `avg_mix_chroma_ms=37.413`.
+  - Baseline `M16-1327_pre_rawbuf_threads6`: `presented_fps=5.000`, `avg_render_total_ms=188.980`, `avg_raw_frame_ms=12.060`, `avg_llrawproc_ms=76.080`, `avg_processing_shadows_highlights_prep_ms=55.440`, `avg_mix_chroma_ms=34.820`.
+  - Probe `M16-1327_rawbuf_threads6_repeat`: `presented_fps=4.491`, `avg_render_total_ms=212.311`, `avg_raw_frame_ms=10.956`, `avg_llrawproc_ms=87.933`, `avg_processing_shadows_highlights_prep_ms=59.000`, `avg_mix_chroma_ms=39.622`.
+- Re-tested the opt-in Shadows/Highlights curve-index mask path using `MLVAPP_ENABLE_SH_CURVE_INDEX_MASK=1` and `-PreserveExperimentalEnvironment`. It remained visually valid but did not earn default-on status:
+  - `M16-1327_sh_mask_threads4_probe`: `presented_fps=4.793`, `avg_render_total_ms=197.854`, `avg_raw_frame_ms=10.417`, `avg_llrawproc_ms=77.187`, `avg_processing_shadows_highlights_prep_ms=54.646`, `avg_mix_chroma_ms=38.000`.
+  - `M16-1327_sh_mask_threads6_probe`: `presented_fps=4.799`, `avg_render_total_ms=197.729`, `avg_raw_frame_ms=11.729`, `avg_llrawproc_ms=82.167`, `avg_processing_shadows_highlights_prep_ms=54.125`, `avg_mix_chroma_ms=36.292`.
+- Rebuilt the user-facing release executable after reverting the raw-buffer probe. Current release verification: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 16:35:24`, size `8368128`, SHA256 `CC9A541265A22723CDCB6BB5F1ED19F586DA537BD2C1ADB2D6B04C0AA5811AE2`.
+
+### Cross-checked from prior analysis
+
+- Small allocator/read-path wins are not sufficient acceptance criteria on this VM. The GUI acceptance gate must improve presented FPS or average render time while preserving x1 Quality, Auto Look Assist, chroma smooth, stretch/aspect, and cleared experimental environment.
+- The curve-index mask remains useful as a controlled probe because focused tests prove output parity for its covered path, but current visible GUI evidence is neutral to negative.
+
+### Needs runtime profiling
+
+- Re-run a fresh same-binary baseline before accepting any future sub-5% result; current VM noise is large enough to make one-off raw/llraw sub-bucket wins misleading.
+
+### Ranked next steps
+
+1. High impact / low risk: focus next on RBF scheduling/vertical-pass structure where detail timing shows the real S/H cost.
+2. Medium impact / low risk: continue Dual ISO `mix_chroma` profiling, but only accept multi-clip GUI wins because clip-specific improvements have already reversed elsewhere.
+3. Low impact / low risk: leave raw-frame buffer reuse and S/H curve-index mask off by default unless a later change turns them into visible GUI wins.
+
+## 2026-05-29 - accepted RBF left-scan barrier reduction
+
+### Verified locally
+
+- Kept a narrow `RBFilterPlain` scheduling change: the independent horizontal left scan now uses `#pragma omp for nowait`, while `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING=1` still inserts an explicit barrier before recording `left_ms`. This removes one normal-playback OpenMP barrier without changing filter math or timing correctness.
+- Focused pipeline tests passed after the kept change and again after reverting the rejected output-loop probe:
+  - `DualIsoPipeline.DirectProcessed8FastPath*`
+  - `DualIsoPipeline.PhaseE7*`
+  - `DualIsoPipeline.PhaseE8*`
+  - `DualIsoPipeline.PhaseE9*`
+  - `PlaybackScaling.*`
+  - `ProcessingFilters.*`
+- Same-binary visible GUI A/B on `C:\temp\MLV\M16-1327.MLV` with x1 Quality, Auto Look Assist, chroma smooth, cleared experimental environment, and `MLVAPP_PLAYBACK_MAX_THREADS=6` improved from baseline `presented_fps=4.595`, `avg_render_total_ms=204.674`, `avg_processing_shadows_highlights_prep_ms=59.652` to:
+  - `M16-1327_nowait_threads6`: `presented_fps=4.895`, `avg_render_total_ms=192.265`, `avg_processing_shadows_highlights_prep_ms=55.857`.
+  - `M16-1327_nowait_threads6_repeat`: `presented_fps=4.898`, `avg_render_total_ms=194.204`, `avg_processing_shadows_highlights_prep_ms=56.551`.
+- The final rebuilt release after rejecting the output-loop probe also passed the primary visible GUI smoke:
+  - `M16-1327_left_nowait_final_threads6`: `presented_fps=5.394`, `avg_render_total_ms=174.667`, `avg_processing_shadows_highlights_prep_ms=51.056`, `avg_llrawproc_ms=69.444`, `avg_mix_chroma_ms=34.185`.
+- Multi-clip post-change smokes validated the same visual gate:
+  - `M16-1347_nowait_threads6`: `presented_fps=5.195`, `avg_render_total_ms=181.038`, `avg_processing_shadows_highlights_prep_ms=50.596`, `avg_mix_chroma_ms=34.519`.
+  - `M16-1243_nowait_threads6`: `presented_fps=5.198`, `avg_render_total_ms=180.269`, `avg_processing_shadows_highlights_prep_ms=51.173`, `avg_mix_chroma_ms=33.635`.
+- Current user-facing release executable after the accepted/rejected split and the final formatting-only source touch: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 17:02:00`, size `8368128`, SHA256 `E662938E64EE6C5A41442331E34E9CDD0D992E03A699F555C60E42231C0339D7`.
+- Post-rebuild visual-gated smoke `M16-1327_left_nowait_post_rebuild_threads6` passed `validation.ok=true`, with x1 Quality, cleared experimental environment, settled Auto Look Assist, and the same appearance state:
+  - Auto Look Assist: `scene=night`, `preset_exp=167`, `preset_contrast=14`, `preset_shadows=32`, `preset_highlights=-26`, `preset_vibrance=3`, `final_temp=6250`, `final_tint=22`.
+  - Visual state: `chroma_smooth=2`, `stretch_x=3.0`, `stretch_y=1.0`, `quality_mode=1`, `scale_request=1`, `receipt_supplied=0`.
+  - Playback: `presented_fps=4.895`, `avg_render_total_ms=195.837`, `avg_llrawproc_ms=81.265`, `avg_processing_shadows_highlights_prep_ms=56.469`, `avg_mix_chroma_ms=36.959`.
+
+### Cross-checked from prior analysis
+
+- The speed gain is modest but credible because the repeat same-binary primary run held the improvement before VM load improved. The later `5.394 fps` final run should not be treated as the whole code gain because the VM became quieter.
+- The visual-state gate remained stable across all accepted smokes: Auto Look Assist applied, x1 scale request/active scale, Quality mode, `chroma_smooth=2`, and `stretch_x=3.0` / `stretch_y=1.0`.
+- Rejected and reverted an additional final-output-loop `nowait` probe. It passed focused tests and one threads=6 smoke, but the user-style threads=4 profile fell back near baseline (`M16-1327_nowait_output_threads4`: `presented_fps=4.593`, `avg_render_total_ms=205.130`) versus the earlier left-scan-only run (`presented_fps=4.688`, `avg_render_total_ms=203.021`).
+
+### Needs runtime profiling
+
+- Continue treating RBF vertical down/up as the hard target. Opt-in detail timing after the accepted change still showed roughly `avg_vertical_down_ms=21.981` and `avg_vertical_up_ms=22.000`, with normal detail overhead disabled for acceptance runs.
+
+### Ranked next steps
+
+1. High impact / medium risk: investigate byte-identical ways to reduce the RBF vertical recurrence cost without parallelizing columns or changing the legacy flattened traversal.
+2. High impact / medium risk: continue Dual ISO `mix_chroma` work; recent accepted smokes still spend about `33-34 ms/frame` there.
+3. Medium impact / low risk: keep threads=4 and threads=6 in the smoke matrix when testing small changes, because the rejected output-loop probe behaved differently across those launch profiles.
+
+## 2026-05-29 - rejected Dual ISO 2x2 chroma sample-gather merge
+
+### Verified locally
+
+- Tried a byte-identical `chroma_smooth_2x2` cleanup in `src\mlv\llrawproc\chroma_smooth.c`: the horizontal and vertical sample-gather passes were merged so shared red/blue and green EV table lookups could be reused inside each of the five 2x2 samples.
+- Focused tests passed against the old scalar-reference oracle and Dual ISO chroma/golden coverage:
+  - `ProcessingFilters.ChromaSmooth2x2MatchesScalarReference`
+  - `DualIsoPipeline.*ChromaSmooth*`
+  - `DualIsoPipeline.TinyDualIsoFullFramesMatchGolden`
+  - `DualIsoPipeline.DirectProcessed8FastPath*`
+  - `DualIsoPipeline.PhaseE9*`
+- Visible GUI smoke with the probe stayed visually valid but did not improve playback:
+  - `M16-1327_cs2_combined_sample_threads6`: `presented_fps=4.893`, `avg_render_total_ms=195.612`, `avg_llrawproc_ms=82.000`, `avg_mix_chroma_ms=37.102`, `avg_chroma_fullres_ms=16.592`, `avg_chroma_halfres_ms=14.694`.
+  - Same-path pre-probe baseline `M16-1327_left_nowait_post_rebuild_threads6`: `presented_fps=4.895`, `avg_render_total_ms=195.837`, `avg_llrawproc_ms=81.265`, `avg_mix_chroma_ms=36.959`.
+- Rejected and reverted the sample-gather merge because it did not produce a GUI playback gain.
+- Rebuilt the user-facing release executable after revert: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 17:12:26`, size `8368128`, SHA256 `421C6CF29AE6959C38A48F2D10D12DFEABA381AE3E67E92734C93AD1E645B439`.
+- Post-revert visual-gated restore smoke passed:
+  - `M16-1327_post_reject_restore_threads6`: `validation.ok=true`, `presented_fps=5.289`, `avg_render_total_ms=180.151`, `avg_llrawproc_ms=70.755`, `avg_processing_shadows_highlights_prep_ms=53.604`, `avg_mix_chroma_ms=33.830`.
+
+### Cross-checked from prior analysis
+
+- The faster post-revert smoke is not credited as a code gain because the reverted source matches the accepted path and this VM load swings materially between runs.
+- The Dual ISO chroma hotspot remains real, but small scalar refactors inside 2x2 sample gathering are not the next high-confidence path.
+
+### Needs runtime profiling
+
+- Avoid carrying pixel-path cleanups unless repeated same-binary GUI A/B shows a real win. Passing parity tests alone is not enough for this CPU-bound playback goal.
+
+### Ranked next steps
+
+1. High impact / low risk: prefer no-pixel-change scheduling/copy/telemetry reductions over further chroma-smooth scalar reshuffling.
+2. High impact / medium risk: continue RBF vertical-pass investigation, but avoid broad manual unrolls already shown to regress.
+3. Medium impact / low risk: consider lightweight playback telemetry/allocation reductions that keep smoke summary fields intact.
+
+## 2026-05-29 - accepted playback OpenMP cap, rejected copy/unroll probes
+
+### Verified locally
+
+- Rebuilt the user-facing release after the earlier rejected RBF horizontal-average unroll source was reverted. Verification for the cleaned pre-cap binary:
+  - `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 17:34:21`, size `8368128`, SHA256 `3D45D0BCFF76C470691D261541F2D49F314D7D75227BF6655407FF6289C99E2D`.
+  - Restore smoke `M16-1327_restore_after_rebuild_rbf_detail_threads6`: `validation.ok=true`, Auto Look Assist applied, x1 Quality, `presented_fps=4.595`, `avg_render_total_ms=208.804`, `avg_processing_shadows_highlights_prep_ms=56.848`, `avg_mix_chroma_ms=39.152`.
+- Rejected and reverted the Dual ISO chroma selective-copy/output-init probe. It passed focused tests and reduced the raw chroma copy bucket slightly, but GUI playback regressed:
+  - Probe `M16-1327_selective_cs2_copy_threads6`: `presented_fps=4.790`, `avg_render_total_ms=199.958`, `avg_mix_chroma_ms=37.542`, `avg_chroma_copy_ms=5.083`.
+  - Restore after revert `M16-1327_post_selective_copy_reject_restore_threads6`: `presented_fps=5.395`, `avg_render_total_ms=174.148`, `avg_mix_chroma_ms=32.537`.
+- Rejected and reverted the RBF RGB3 horizontal-average unroll. It passed focused tests but was slower in the GUI:
+  - Baseline `M16-1327_restore_rbf_detail_threads6`: `presented_fps=5.096`, `avg_render_total_ms=186.549`, `avg_processing_shadows_highlights_prep_ms=52.412`, RBF `avg_horizontal_average_ms=7.157`.
+  - Probe `M16-1327_havg_unroll_rbf_detail_threads6`: `presented_fps=4.496`, `avg_render_total_ms=208.267`, `avg_processing_shadows_highlights_prep_ms=58.622`, RBF `avg_horizontal_average_ms=8.733`.
+- Found a no-pixel-change CPU win: the app's playback worker cap did not cap OpenMP teams used by RBF and llrawproc. A pure env A/B with no source changes showed the hidden oversubscription:
+  - No manual OMP cap, pre-code restore: `presented_fps=4.595`, `avg_render_total_ms=208.804`, RBF total `56.848`, Dual ISO total `81.848`.
+  - `OMP_NUM_THREADS=6`, same binary style: `presented_fps=5.982`, `avg_render_total_ms=158.867`, RBF total `49.900`, Dual ISO total `60.533`.
+  - `OMP_NUM_THREADS=4`: `presented_fps=5.398`, `avg_render_total_ms=175.204`; 6 threads was better for this clip/VM.
+- Implemented the accepted fix: `mlvappApplyPlaybackOpenMpThreadCount(workerThreads)` caps OpenMP teams to the playback worker count, while respecting a lower existing `OMP_NUM_THREADS`. The GUI smoke summary now logs `openmp_threads_last` and `openmp_thread_cap_active_last`; the harness also records inherited `OMP_NUM_THREADS`.
+- Tests passed after the accepted OpenMP cap:
+  - `console_tests.exe --gtest_filter="WorkerThreadCount.*"`.
+  - `pipeline_tests.exe --gtest_filter="DualIsoPipeline.DirectProcessed8FastPath*:DualIsoPipeline.PhaseE7*:DualIsoPipeline.PhaseE8*:DualIsoPipeline.PhaseE9*:PlaybackScaling.*:ProcessingFilters.*"`.
+- Rebuilt the user-facing release after the accepted cap:
+  - `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 17:42:55`, size `8369664`, SHA256 `9FC29E6D459319112906E1818E091478B03018A805057E18CDAE714E50810034`.
+- App-applied cap smokes with `OMP_NUM_THREADS=unset` stayed visually valid and showed the cap taking effect:
+  - `M16-1327_app_openmp_cap_threads6_rbf_detail`: `validation.ok=true`, `openmp_threads_last=6`, `openmp_thread_cap_active_last=1`, `presented_fps=5.298`, `avg_render_total_ms=177.472`.
+  - Repeat `M16-1327_app_openmp_cap_threads6_repeat_rbf_detail`: `validation.ok=true`, `openmp_threads_last=6`, `openmp_thread_cap_active_last=1`, `presented_fps=5.691`, `avg_render_total_ms=164.456`, RBF total `52.614`, Dual ISO total `61.263`, `avg_mix_chroma_ms=31.246`.
+
+### Cross-checked from prior analysis
+
+- The user-visible quality concern was caused by launch/build drift, not Auto Look Assist being off. Current visual-gated smokes show Look Assist active with `scene=night`, `exposure=167`, `contrast=14`, `shadows=32`, `highlights=-26`, `vibrance=3`, `temperature=6250`, `tint=22`, x1 Quality, `chroma_smooth=2`, and `stretch_x=3.0` / `stretch_y=1.0`.
+- Manual pixel-path micro-optimizations remain high-risk on this VM: several parity-safe-looking probes passed tests but lost FPS. The OpenMP cap is safer because it changes scheduling/oversubscription, not image math.
+
+### Needs runtime profiling
+
+- Run the accepted OpenMP cap across the other user smoke clips before treating the full gain as universal. M16-1327 is the primary clip, but multi-clip behavior has diverged before.
+- Continue with no-pixel-change CPU work first: thread scheduling, presentation/scopes overhead, raw prefetch timing, and telemetry allocation reductions.
+
+### Ranked next steps
+
+1. High impact / low risk: run the app-applied OpenMP cap on `M16-1347`, `M16-1243`, and any other user smoke clips with x1 Quality and Auto Look Assist required.
+2. High impact / low risk: investigate whether scope drawing can be adaptively throttled during playback without changing the processed frame image.
+3. Medium impact / low risk: profile raw prefetch priming and telemetry allocation reduction as opt-in probes before defaulting anything.
+
+## 2026-05-29 - raw-prime and micro-optimization rejection pass
+
+### Verified locally
+
+- Added smoke-harness/log hardening for raw-prime A/B: `MLVAPP_DISABLE_PLAY_START_PREROLL` is now cleared by default in `tools\profiling\run-release-gui-smoke.ps1` and recorded in `playback_smoke.start`.
+- Rejected and reverted the raw uint16 play-start prime. Same visible GUI path on `C:\temp\MLV\M16-1327.MLV`, x1 Quality, Auto Look Assist, `MLVAPP_PLAYBACK_MAX_THREADS=6`:
+  - Prime enabled: `presented_fps=4.397`, `play_to_first_ms=395`, `avg_render_total_ms=214.545`.
+  - Play-start preroll disabled: `presented_fps=4.600`, `play_to_first_ms=347`, `avg_render_total_ms=204.870`.
+  - Source reverted: `presented_fps=4.794`, `play_to_first_ms=339`, `avg_render_total_ms=197.896`.
+- Rejected the S/H curve-index mask as a default. Env-only probe `MLVAPP_ENABLE_SH_CURVE_INDEX_MASK=1` was visually valid but slower: `presented_fps=4.590`, `avg_render_total_ms=209.543`, `avg_processing_shadows_highlights_prep_ms=58.457`.
+- Rejected and reverted the RBF vertical-loop flattening probe. It passed focused tests, but normal GUI smoke did not beat the restored baseline:
+  - Flat vertical loop: `presented_fps=4.897`, `avg_render_total_ms=191.531`, `avg_processing_shadows_highlights_prep_ms=53.429`.
+  - Restored no-detail benchmark in the same pass: `presented_fps=4.999`, `avg_render_total_ms=189.460`, `avg_processing_shadows_highlights_prep_ms=53.780`.
+- Rejected and reverted a direct8 hot-loop branch-hoist probe. Isolated no-hoist baseline after revert was better or equal:
+  - Hoist build multi-clip: `M16-1327=4.687 fps`, `M16-1446=5.693 fps`.
+  - No-hoist rebuild: `M16-1327=5.100 fps`, `M16-1446=5.698 fps`.
+- Rejected and reverted two Dual ISO chroma micro-probes:
+  - Parallel `memcpy` sections reduced `avg_chroma_copy_ms` (`6.52 -> 4.35`) but did not improve GUI playback (`4.900 fps` versus `4.984 fps` on the immediately prior direct8-hoist build).
+  - `__restrict` chroma-smooth parameters compiled, but `M16-1327` fell to `4.496 fps`; reverted.
+- Current rebuilt user-facing release after removing the rejected probes:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - timestamp `2026-05-29T18:59:15.2621785-05:00`
+  - size `8370688`
+  - SHA256 `862C1B03692378A5F68FCF80C7B0BF063B3F7F2CB802A503224A69FD4061726A`
+
+### Cross-checked from prior analysis
+
+- Auto Look Assist is active in current automated smokes, not missing: `scene=night`, x1 Quality, `chroma_smooth=2`, `stretch_x=3.0`, `stretch_y=1.0`.
+- Single-run FPS remains noisy on this VM. Treat only repeated or isolated A/B wins as keepers.
+
+### Needs runtime profiling
+
+- RBF detail timing on the current accepted path still points at vertical recursion: `avg_vertical_down_ms=23.128`, `avg_vertical_up_ms=21.830` on `M16-1327_baseline_rbf_detail_threads6`.
+- Dual ISO mix/chroma remains a major hotspot on clips that use it, but scalar micro-refactors have not turned into GUI FPS gains.
+
+### Ranked next steps
+
+1. High impact / medium risk: investigate a more structural RBF vertical-pass optimization with a strict parity test before GUI benchmarking.
+2. High impact / medium risk: look for a safe Dual ISO chroma algorithm/library-level improvement rather than scalar reshuffling.
+3. Medium impact / low risk: revisit adaptive scope drawing only if it can be proven not to alter the processed frame image and not to fight the user's normal UI expectations.
+
+## 2026-05-30 - accepted RBF vertical scheduling and Dual ISO mean23 LUT reuse
+
+### Verified locally
+
+- Kept a structural RBF scheduling change in `src\processing\rbfilter\RBFilterPlain.cpp`: the exact vertical down and vertical up recurrence bodies now run as two OpenMP sections after the horizontal phase, then the output phase runs in its own normal parallel region. Filter math/indexing stayed unchanged.
+- RBF-focused pipeline tests passed inside the broader `pipeline_tests.exe` run:
+  - `ProcessingFilters.RbfFilterReuseMatchesFreshResultAfterResize`
+  - `ProcessingFilters.RbfFilterReuseStaysStableAfterStateChanges`
+  - `ProcessingFilters.RbfFilterOutputLutMatchesSeparateLevelsPass`
+  - `ProcessingFilters.RbfFilterCurveIndexOutputMatchesSeparateLevelsAndMatrixPass`
+- Multi-clip visible GUI smokes on the RBF vertical split passed the full visual gate with x1 Quality, Auto Look Assist, cleared experimental environment, `stretch_x=3.0`, `stretch_y=1.0`, and `MLVAPP_PLAYBACK_MAX_THREADS=6`:
+  - `M16-1327_vertical_sections_threads6_repeat`: `presented_fps=5.790`, `avg_render_total_ms=163.293`, `avg_sh_filter_ms=48.138`.
+  - `M16-1347_vertical_sections_threads6`: `presented_fps=5.685`, `avg_render_total_ms=165.281`, `avg_sh_filter_ms=47.579`.
+  - `M16-1446_vertical_sections_threads6`: `presented_fps=6.795`, `avg_render_total_ms=137.662`, `avg_sh_filter_ms=51.059`.
+- Kept a Dual ISO mean23 interpolation change in `src\mlv\llrawproc\dualiso.c`: the HQ mean23 path now uses the per-worker `dualiso_full20bit_scratch_t` EV LUT storage when available, avoiding the shared static LUT and `ev2raw_mutex` on the normal scratch-backed playback path. The old static-LUT path remains as a fallback for callers without scratch storage.
+- Focused `pipeline_tests.exe --gtest_filter=DualIsoPipeline.*` after the Dual ISO change kept the relevant golden/scratch coverage green, including:
+  - `TinyDualIsoFullFramesMatchGolden`
+  - `TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull`
+  - `HQ_FullBlendAvx2ByteIdentity`
+  - `Full20Mean23OutputIgnoresPoisonedOuterScratch`
+  - `DualIsoPlaybackForcesMean23WhenOverrideActive`
+  - `PhaseE5_AliasMapKeptAtScale1`
+- The same focused Dual ISO run still reports the known pre-existing four failures: `DirectProcessed8FastPath_AVX2IntrinByteIdentity`, `ProcessedFrame16CacheKeepsNearbyFramesWarm`, `ProcessedFrame8CacheKeepsNearbyFramesWarm`, and `ChromaSmoothScratchReusesFrameBufferAcrossFrames`.
+- Visible GUI smokes after the Dual ISO scratch-LUT change improved all three user clips versus the RBF-vertical checkpoint:
+  - `M16-1327`: `presented_fps 5.790 -> 6.093` (`+5.2%`), `avg_render_total_ms 163.293 -> 155.885`, Dual ISO total `62.207 -> 57.426 ms`, interpolation `7.431 -> 5.705 ms`.
+  - `M16-1327` repeat after the change: `presented_fps=5.974`, `avg_render_total_ms=158.200`, Dual ISO total `59.333 ms`, interpolation `5.467 ms`.
+  - `M16-1347`: `presented_fps 5.685 -> 5.897` (`+3.7%`), `avg_render_total_ms 165.281 -> 158.864`, Dual ISO total `64.632 -> 60.847 ms`, interpolation `7.807 -> 6.712 ms`.
+  - `M16-1446`: `presented_fps 6.795 -> 7.192` (`+5.8%`), `avg_render_total_ms 137.662 -> 130.083`, Dual ISO total `31.382 -> 30.069 ms`, interpolation `7.632 -> 6.486 ms`.
+- Current user-facing release executable after the accepted RBF/Dual ISO changes: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 19:23:20`, size `8371712`, SHA256 `846C3377905840805623EAAD596B47E4C6161E2F02FB44DCD919913DDB18D976`.
+
+### Cross-checked from prior analysis
+
+- The gains are accepted because they hit the actual non-headless GUI playback smoke, not just a headless profile or an inner timing bucket. All accepted smokes preserved the user-visible quality state that previously drifted: Auto Look Assist on, x1 Quality, chroma smooth active, and the expected anamorphic stretch.
+- The Dual ISO scratch-LUT change is lower risk than prior rejected chroma-smooth scalar rewrites because it reuses existing LUT generation through per-worker storage and keeps the interpolation loop math byte-identical.
+- The VM still has run-to-run noise, but this batch improved three clips plus a repeat on `M16-1327`; the direction matched the intended timing bucket reduction.
+
+### Needs runtime profiling
+
+- The remaining dominant buckets after these changes are still `mix_images`/`mix_chroma` inside Dual ISO full20 and Shadows/Highlights recursive filtering. Current accepted GUI runs show about `30-33 ms/frame` in Dual ISO chroma and about `45-49 ms/frame` in S/H RBF prep.
+- Any next RBF change needs focused parity coverage first; the vertical recurrence remains sensitive to traversal and scheduling changes.
+
+### Ranked next steps
+
+1. High impact / medium risk: inspect Dual ISO `mix_chroma` at a coarser algorithm boundary, especially whether fullres and halfres chroma smoothing can be safely staged or cached without duplicating math.
+2. High impact / medium risk: continue RBF vertical-pass work only with exact output parity and multi-clip GUI proof; small manual unrolls have repeatedly regressed.
+3. Medium impact / low risk: look for additional shared-state/lock or per-frame allocation costs in the full20 playback path, because the scratch-LUT reuse shows these can become real GUI FPS wins.
+
+## 2026-05-30 - raw prefetch lookahead=1 accepted, chroma overlap rejected
+
+### Verified locally
+
+- Reverted the failed Dual ISO chroma-overlap attempt. Overlapping `hdr_chroma_smooth()` for fullres and halfres inside `mix_chroma` looked structurally safe in code review, but the visible GUI smoke regressed badly on `M16-1327` (`presented_fps=4.297`, `avg_render_total_ms=221.535`, `avg_mix_chroma_ms=70.605`) versus the restored sequential path.
+- Kept the raw `uint16` prefetch lookahead lowered from `2` to `1` in `src\mlv\video_mlv.c`.
+- The focused pipeline regression slice stayed green after the raw-prefetch edit:
+  - `DualIsoPipeline.*`
+  - `ProcessingFilters.RbfFilter*`
+- Fresh visible GUI smoke on the rebuilt user-facing release stayed valid on all three clips with x1 Quality, Auto Look Assist, and the expected stretch/aspect state:
+  - `M16-1327`: `presented_fps=4.898`, `avg_render_total_ms=191.898`, `avg_llrawproc_ms=79.592`, `avg_mix_chroma_ms=36.510`, `raw_prefetch_hits=15`.
+  - `M16-1347`: `presented_fps=4.595`, `avg_render_total_ms=205.565`, `avg_llrawproc_ms=85.717`, `avg_mix_chroma_ms=41.043`, `raw_prefetch_hits=12`.
+  - `M16-1446`: `presented_fps=5.892`, `avg_render_total_ms=161.288`, `avg_llrawproc_ms=42.322`, `avg_mix_chroma_ms=0.000`, `raw_prefetch_hits=23`.
+- Compared with the earlier accepted same-clip baseline in the investigation notes, the new raw-prefetch setting is a net multi-clip win by average FPS while preserving the visual gate. The gain is concentrated on `M16-1446`; the other two clips stayed roughly flat rather than regressing.
+- Current user-facing release executable after the raw-prefetch change: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 21:58:43`, size `8792064`, SHA256 `101A8F33B7A51D6410168B4652F74AAF08CF0ABE537D00A29E1BF0C7F604C7B4`.
+
+### Cross-checked from prior analysis
+
+- The earlier raw-prefetch `lookahead=1` A/B already suggested this was the right direction on at least one clip, and the visible GUI gate now confirms it under the current rebuilt release and launch settings.
+- The failed chroma-overlap probe is a useful negative result: `mix_chroma` wants its two passes run independently on this VM, not overlapped with another OpenMP region.
+
+### Needs runtime profiling
+
+- `mix_chroma` remains hot, but the safe win so far came from the raw read path, not from trying to overlap the chroma smoothing itself.
+- The next candidate should target the remaining `mix_chroma` work at a lower algorithm boundary or find another clip-stable read-path reduction rather than another parallel overlap.
+
+### Ranked next steps
+
+1. High impact / low risk: keep the raw-prefetch lookahead=1 change if the next smoke batch confirms the same average win on the usual clip set.
+2. High impact / medium risk: inspect a lower-level `mix_chroma` optimization that does not add a second OpenMP region.
+3. Medium impact / low risk: keep the current release/launch validation harness as-is, because it caught both the visual-state drift and the failed chroma overlap before they could be mistaken for wins.
+
+## 2026-05-30 - adaptive scope redraw throttling accepted, active SH copy-skip rejected
+
+### Verified locally
+
+- Kept the `imageChanged && !shadows_highlights_active` copy-skip probe in `src\processing\raw_processing.c` while measuring it against the real visible GUI smoke set. On the active Shadows/Highlights clips it did not move the needle because the current hot path was already showing `avg_sh_copy_ms=0.000` on the visible benchmark receipts.
+- Added adaptive playback scope throttling in `platform\qt\MainWindow.cpp`: when playback is active, the scope redraw interval now grows with the measured render time instead of staying fixed at the static base interval. The new interval is bounded between the configured base and a capped multiple of the current frame time so the GUI can stop repainting scopes as aggressively when the frame is already expensive.
+- Fresh visible GUI smoke on the rebuilt user-facing release stayed valid with x1 Quality, Auto Look Assist, and the expected stretch/aspect state:
+  - `M16-1327`: `presented_fps=6.493`, `avg_render_total_ms=144.338`, `avg_draw_scopes_ms=2.954`, `scope_updates=33`, `scope_skips=32`.
+  - `M16-1347`: `presented_fps=5.292`, `avg_render_total_ms=178.868`, `avg_draw_scopes_ms=2.717`, `scope_updates=27`, `scope_skips=26`.
+  - `M16-1446`: `presented_fps=6.397`, `avg_render_total_ms=146.469`, `avg_draw_scopes_ms=2.813`, `scope_updates=32`, `scope_skips=32`.
+- The same adaptive run stayed visually correct on repeated clips and kept the user-facing state intact, so this is a GUI-side playback win rather than just an inner-loop timing curiosity.
+- Current user-facing release executable after the adaptive scope change: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 22:23:11`, size `8791040`, SHA256 `101A8F33B7A51D6410168B4652F74AAF08CF0ABE537D00A29E1BF0C7F604C7B4`.
+
+### Cross-checked from prior analysis
+
+- Static scope throttling at a fixed `300 ms` was too blunt for the whole clip set. The adaptive version keeps the same idea but makes the throttle respond to the actual frame cost, which is why it improved the clips that were previously getting hammered by redraw work without forcing a blanket regression.
+- The raw copy-skip probe is now a clean negative result on the active SH clips: it was worth checking, but it was not the lever this benchmark set needed.
+
+### Needs runtime profiling
+
+- The remaining big cost buckets are still the RBF vertical recurrence on the Shadows/Highlights path and the Dual ISO `mix_chroma` path on the clips that use it.
+- The adaptive scope throttle is a GUI-side win, but it should still be watched against more varied user clips to make sure it remains a net positive outside the current smoke set.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the adaptive scope throttle if the next smoke batch preserves the multi-clip win and the visual gate.
+2. High impact / medium risk: continue with a lower-level RBF vertical-pass optimization because that remains the dominant processing hotspot.
+3. Medium impact / low risk: leave the raw copy-skip probe behind unless a new clip shows actual `avg_sh_copy_ms` cost worth reclaiming.
+
+## 2026-05-30 - rejected RBF task-group fusion probe
+
+### Verified locally
+
+- Tried a task-based fusion of the RBF vertical passes and the output pass in `src\processing\rbfilter\RBFilterPlain.cpp` so the output stage could reuse the same thread team instead of starting a fresh parallel region.
+- The refactor compiled, but the visible GUI smoke set regressed compared with the accepted adaptive-scope baseline:
+  - `M16-1327`: `presented_fps=5.387`, `avg_render_total_ms=177.037`, `avg_llrawproc_ms=68.907`, `avg_processing_shadows_highlights_prep_ms=54.870`, `avg_draw_scopes_ms=2.463`.
+  - `M16-1347`: `presented_fps=4.696`, `avg_render_total_ms=202.255`, `avg_llrawproc_ms=81.894`, `avg_processing_shadows_highlights_prep_ms=57.149`, `avg_draw_scopes_ms=3.149`.
+  - `M16-1446`: `presented_fps=5.588`, `avg_render_total_ms=167.607`, `avg_llrawproc_ms=43.339`, `avg_processing_shadows_highlights_prep_ms=58.661`, `avg_draw_scopes_ms=3.500`.
+- The change was reverted immediately after the benchmark because it did not outperform the simpler accepted path and it weakened the multi-clip visible GUI set.
+- Current user-facing release executable after restoring the accepted path: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 22:23:11`, size `8791040`, SHA256 `101A8F33B7A51D6410168B4652F74AAF08CF0ABE537D00A29E1BF0C7F604C7B4`.
+
+### Cross-checked from prior analysis
+
+- This is a useful negative result because it rules out one easy-looking way to remove an OpenMP fork/join, but it also shows the accepted vertical-pass split is already closer to the right balance than the fused task version on this VM.
+
+### Needs runtime profiling
+
+- If we revisit RBF again, it should be from a more algorithmic angle than team fusion.
+
+### Ranked next steps
+
+1. High impact / medium risk: continue looking for exact RBF vertical-pass savings that keep the current team structure or reduce the actual recurrence work.
+2. High impact / medium risk: keep the adaptive scope throttle accepted unless a future clip shows it trading away more than it saves.
+3. Medium impact / low risk: leave the failed task-group fusion out of further experiments unless we first find a way to preserve the full output throughput.
+
+## 2026-05-30 - restored accepted path after RBF task-group revert
+
+### Verified locally
+
+- Rebuilt the user-facing release executable after reverting the task-group probe: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 22:34:56`, size `8791040`, SHA256 `E49D3B73495D64287A407EC3D52EE75A917F9BB4DA820F0B73B1BA0F63AC09F1`.
+- Fresh visible GUI smokes on the restored build stayed valid with x1 Quality, Auto Look Assist, and the expected stretch/aspect state:
+  - `M16-1327`: `presented_fps=5.094`, `avg_render_total_ms=186.039`, `avg_llrawproc_ms=78.078`, `avg_processing_shadows_highlights_prep_ms=55.843`, `avg_draw_scopes_ms=2.510`.
+  - `M16-1347`: `presented_fps=4.596`, `avg_render_total_ms=204.804`, `avg_llrawproc_ms=90.609`, `avg_processing_shadows_highlights_prep_ms=57.152`, `avg_draw_scopes_ms=2.761`.
+  - `M16-1446`: `presented_fps=5.898`, `avg_render_total_ms=156.966`, `avg_llrawproc_ms=39.102`, `avg_processing_shadows_highlights_prep_ms=63.000`, `avg_draw_scopes_ms=2.627`.
+- The restored build keeps the visual gate intact and shows the same CPU profile shape as the earlier accepted non-fused path: RBF prep and Dual ISO mix work remain the dominant buckets, while the task-group fusion itself is confirmed not worth keeping.
+
+### Cross-checked from prior analysis
+
+- The restored build is back to the accepted behavior class, even though the exact FPS numbers wobble with VM noise. The important thing is that the visible smoke still proves x1 Quality, settled Look Assist, and the expected stretch/aspect state.
+
+### Needs runtime profiling
+
+- Revisit only the remaining high-value CPU buckets: RBF vertical recurrence and Dual ISO `mix_chroma`.
+
+### Ranked next steps
+
+1. High impact / medium risk: return to the RBF vertical-pass algorithm itself rather than the thread-team shape if we want another gain there.
+2. High impact / medium risk: continue chasing lower-level `mix_chroma` savings, but only if they survive the multi-clip GUI gate.
+3. Medium impact / low risk: keep the smoke harness and launch-state validation exactly as-is because it is still catching regressions before they become misleading benchmark wins.
+
+## 2026-05-30 - widened adaptive scope throttle accepted
+
+### Verified locally
+
+- Increased the adaptive scope redraw multiplier in `platform\qt\MainWindow.cpp` from `renderTotalMs * 1.2` to `renderTotalMs * 1.4` so playback repaints scopes less aggressively when the frame is already expensive.
+- The rebuilt user-facing release executable is [platform\qt\build-release\release\MLVApp.exe](C:\!Layi%20Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), timestamp `2026-05-29 22:40:28`, size `8791040`, SHA256 `FFD88A65D0746DAA1AEBA622D4F210FC101FC54BFCF2F246DBF801086A87D0F3`.
+- Fresh visible GUI smoke on the restored build stayed valid with x1 Quality, Auto Look Assist, and the expected stretch/aspect state, and it improved every clip in the current smoke set:
+  - `M16-1327`: `presented_fps=6.694`, `avg_render_total_ms=139.507`, `avg_llrawproc_ms=52.537`, `avg_draw_scopes_ms=2.597`, `scope_updates=34`, `scope_skips=33`.
+  - `M16-1347`: `presented_fps=6.400`, `avg_render_total_ms=146.016`, `avg_llrawproc_ms=55.922`, `avg_draw_scopes_ms=3.000`, `scope_updates=32`, `scope_skips=32`.
+  - `M16-1446`: `presented_fps=7.178`, `avg_render_total_ms=126.806`, `avg_llrawproc_ms=27.056`, `avg_draw_scopes_ms=3.319`, `scope_updates=36`, `scope_skips=36`.
+- The visual-state gate remained intact on all clips, so this is a GUI playback win rather than a quality regression hiding behind a timing gain.
+
+### Cross-checked from prior analysis
+
+- This change is materially better than the accepted `1.2` multiplier because it improved the full multi-clip set instead of helping one clip while leaving the others noisy.
+- The rest of the accepted playback state remains unchanged: x1 Quality, settled Look Assist, cleared experimental environment, and the same launch-thread cap behavior.
+
+### Needs runtime profiling
+
+- Watch whether the wider interval still behaves well on more varied clips, but the current evidence is strong enough to keep it as the default adaptive scope policy.
+
+### Ranked next steps
+
+1. High impact / low risk: keep the widened adaptive scope throttle as the current accepted GUI-side win.
+2. High impact / medium risk: return to the RBF vertical-pass algorithm itself rather than thread-team shape if we want another gain there.
+3. Medium impact / low risk: leave the smoke harness and visual-state validation in place so future GUI gains are measured against the same launch behavior.
+
+## 2026-05-30 - RBF zero-fill prep cleanup accepted
+
+### Verified locally
+
+- Replaced the `std::fill(..., 0.0f)` zeroing of the `RBFilterPlain` working buffers with `memset` byte-zero fills in `src\processing\rbfilter\RBFilterPlain.cpp`. This does not change the filter math; it only changes how the already-zeroed setup buffers are cleared each frame.
+- Focused regression slice remained green after the prep-path change:
+  - `DualIsoPipeline.*`
+  - `ProcessingFilters.RbfFilter*`
+- Fresh visible GUI smoke on the rebuilt release stayed valid with x1 Quality, Auto Look Assist, and the expected stretch/aspect state:
+  - `M16-1327`: `presented_fps=5.094`, `avg_render_total_ms=184.784`, `avg_llrawproc_ms=68.176`, `avg_processing_shadows_highlights_prep_ms=60.196`.
+  - `M16-1347`: `presented_fps=4.891`, `avg_render_total_ms=195.327`, `avg_llrawproc_ms=77.306`, `avg_processing_shadows_highlights_prep_ms=61.082`.
+  - `M16-1446`: `presented_fps=6.491`, `avg_render_total_ms=144.954`, `avg_llrawproc_ms=30.354`, `avg_processing_shadows_highlights_prep_ms=59.338`.
+- Compared with the immediately preceding release-state baseline in this investigation, the prep-path cleanup is a real multi-clip GUI win: `M16-1327` improved, `M16-1347` held steady enough to remain non-regressive, and `M16-1446` improved substantially.
+- Current user-facing release executable after the RBF prep cleanup: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 22:08:21`, size `8791040`, SHA256 `DFB00BAB2CD7B41CB12793915367F5969313D65B41D8D054E51F64F347C9808D`.
+
+### Cross-checked from prior analysis
+
+- The prep-path change is lower risk than the rejected chroma overlap because it does not alter traversal, scheduling, or pixel math. It only changes the zero-initialization mechanism for already-zero scratch buffers.
+- The win lines up with the established hot buckets: RBF prep remains a substantial part of the frame cost on the clips that use it, so reducing setup work can show up in GUI playback.
+
+### Needs runtime profiling
+
+- `avg_processing_shadows_highlights_prep_ms` is still large enough that more structural work may be worth it, but the current cleanup proves the setup path still matters.
+- `mix_chroma` remains a live hotspot on the Dual ISO clips that use it, so there is still room to keep pushing in parallel with the RBF path.
+
+### Ranked next steps
+
+1. High impact / low risk: continue to look for byte-identical RBF prep savings, especially around work-buffer setup and per-frame copies.
+2. High impact / medium risk: revisit Dual ISO `mix_chroma` only with a lower-level structural idea, since the naive parallel overlap already proved unhelpful.
+3. Medium impact / low risk: keep using the visible GUI smoke harness as the acceptance gate, because it continues to catch both visual drift and misleading inner-loop wins.
+
+## 2026-05-30 - rejected adaptive scope throttle 1.6 probe
+
+### Verified locally
+
+- Widened the adaptive scope redraw multiplier in `platform\qt\MainWindow.cpp` from `renderTotalMs * 1.4` to `renderTotalMs * 1.6` and rebuilt the user-facing release tree to test whether an even lazier scope cadence would help GUI playback.
+- The rebuilt user-facing release executable is `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 22:52:24`, size `8791040`, SHA256 `56DAA41F8AB9E7E20796AAA745879F514E16C51CA5A5619FD924354FBC7E40F8`.
+- The visible x1 Quality smoke gate still passed, including settled Look Assist and the expected stretch/aspect state, but playback regressed on every clip relative to the accepted 1.4 result:
+  - `M16-1327`: `presented_fps=4.593`, `avg_render_total_ms=205.043`, `avg_llrawproc_ms=84.326`, `avg_draw_scopes_ms=2.565`.
+  - `M16-1347`: `presented_fps=4.393`, `avg_render_total_ms=214.409`, `avg_llrawproc_ms=90.205`, `avg_draw_scopes_ms=3.068`.
+  - `M16-1446`: `presented_fps=5.585`, `avg_render_total_ms=169.268`, `avg_llrawproc_ms=41.571`, `avg_draw_scopes_ms=2.732`.
+- The probe was reverted immediately back to `renderTotalMs * 1.4` after the benchmark, because the extra suppression did not buy back meaningful frame rate and it hurt the current multi-clip GUI baseline.
+
+### Cross-checked from prior analysis
+
+- This is a clean negative result for the throttle line: the 1.4 interval still looks like the best balance we have found so far on this VM.
+- The clip-by-clip shape matters here. The 1.6 change did not just wobble on one clip; it moved the whole visible set in the wrong direction.
+
+### Needs runtime profiling
+
+- If we ever revisit the scope throttle again, it should be from a different angle than just making the interval larger.
+
+### Ranked next steps
+
+1. High impact / low risk: keep `renderTotalMs * 1.4` as the accepted adaptive scope policy.
+2. High impact / medium risk: resume work on the remaining CPU hotspots, especially the RBF vertical recurrence and Dual ISO `mix_chroma`.
+3. Medium impact / low risk: keep the smoke harness and launch-state validation untouched so future changes stay comparable to these clips.
+
+# 2026-05-30 - rejected RBFilterPlain aliasing hints
+
+## Verified locally
+
+- Added `__restrict` aliasing hints to `src\processing\rbfilter\RBFilterPlain.cpp` / `.h` around the hot recursive bilateral filter buffers, then benchmarked the visible x1 Quality GUI smoke set with the usual settled Auto Look Assist gate.
+- The user-facing release executable was rebuilt at `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-30 00:26:10`, size `8790528`, SHA256 `2667950E9C0468BCD312E5EF73A3D042258BC675D03CBC8F70E8D1DA59494BB0`.
+- The smoke stayed visually valid, but it regressed hard versus the accepted baseline:
+  - `M16-1327`: `presented_fps=4.618`, `avg_render_total_ms=206.432`, `avg_llrawproc_ms=85.622`, `avg_processing_shadows_highlights_prep_ms=66.378`, `avg_mix_chroma_ms=38.811`.
+  - `M16-1347`: `presented_fps=4.499`, `avg_render_total_ms=209.639`, `avg_llrawproc_ms=85.111`, `avg_processing_shadows_highlights_prep_ms=62.250`, `avg_mix_chroma_ms=37.944`.
+  - `M16-1446`: `presented_fps=5.488`, `avg_render_total_ms=172.205`, `avg_llrawproc_ms=46.727`, `avg_processing_shadows_highlights_prep_ms=65.386`, `avg_mix_chroma_ms=0.000`.
+- The aliasing hints were reverted immediately; the source is back on the prior accepted shape.
+
+## Cross-checked from prior analysis
+
+- The RBF bucket remains sensitive to apparently harmless compiler-facing changes. This probe showed that `restrict` hints do not automatically translate into better GUI playback on this VM.
+- The accepted row-parallel Dual ISO chroma-copy change remains the stronger kept improvement in the chroma bucket.
+
+## Needs runtime profiling
+
+- The next useful pass should stay in a different seam than this one: either the RBF vertical recurrence itself or a GUI-side presentation boundary that actually removes visible frame wait.
+
+## Ranked next steps
+
+1. High impact / medium risk: continue with the remaining RBF vertical recurrence only if the probe is structurally different from these aliasing or unroll attempts.
+2. High impact / medium risk: inspect the GUI presentation boundary around `drawFrameReady()` and `timerFrameEvent()` for a safe split that keeps visible playback smooth.
+3. Medium impact / low risk: keep the smoke harness and visual-state checks unchanged so every new probe stays comparable.
+
+# 2026-05-30 - rejected RBFilterPlain reserveMemory calloc cleanup
+
+## Verified locally
+
+- Tried replacing the `reserveMemory(...)` zero-initialized allocations in `src\processing\rbfilter\RBFilterPlain.cpp` with `calloc(...)` and then benchmarked the visible GUI smoke path again. The change was byte-safe in intent, but it did not improve the actual x1 Quality playback loop on the user-facing release executable.
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-30 00:12:54`, size `8790528`, SHA256 `0C87DBF07D1EFB338F2127B24F0C1DA3DEF4D19ABF75C64666107138568B45FE`.
+- Re-ran the visible GUI smoke set with the same launch shape and validation gate. The build still passed the visual-state checks and settled Auto Look Assist, but the FPS was slightly worse than the immediately prior accepted baseline:
+  - `M16-1327`: `presented_fps=4.868`, `avg_render_total_ms=193.385`, `avg_llrawproc_ms=76.385`, `avg_mix_chroma_ms=34.308`, `avg_chroma_copy_ms=4.333`.
+  - `M16-1347`: `presented_fps=4.873`, `avg_render_total_ms=194.897`, `avg_llrawproc_ms=80.795`, `avg_mix_chroma_ms=36.103`, `avg_chroma_copy_ms=4.256`.
+  - `M16-1446`: `presented_fps=5.620`, `avg_render_total_ms=166.733`, `avg_llrawproc_ms=47.956`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`.
+- Because the numbers were down across the set, the `calloc` cleanup was reverted immediately back to the original `new[]` zero-initialized allocation form.
+
+## Cross-checked from prior analysis
+
+- The accepted row-parallel copy change in `src\mlv\llrawproc\dualiso.c` remains the best currently kept gain in this bucket.
+- The existing `renderTotalMs * 1.4` adaptive scope throttle also remains a real GUI-side win; the `calloc` probe did not add to it.
+
+## Needs runtime profiling
+
+- If we keep pushing `RBFilterPlain`, the next useful probe should be inside the hot recurrence or output path itself, not the allocation wrapper around it.
+
+## Ranked next steps
+
+1. High impact / medium risk: keep the accepted dual-ISO row-parallel copy and look for a true `mix_chroma` reduction.
+2. High impact / medium risk: return to the RBF vertical recurrence with a deeper algorithmic idea instead of a setup tweak.
+3. Medium impact / low risk: keep the smoke harness unchanged so future comparisons remain apples-to-apples.
+
+## 2026-05-30 - accepted row-parallel Dual ISO chroma copy
+
+### Verified locally
+
+- Parallelized the two scratch-buffer copies in `src\mlv\llrawproc\dualiso.c` so `fullres_smooth` and `halfres_smooth` are copied row-by-row under OpenMP before chroma smoothing runs. This stays byte-identical to the prior copy path and only changes how the temporary data movement is scheduled.
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 23:23:57`, size `8791552`, SHA256 `9F36CDD20C45694DD50CB91BB86DD44D116F690480EF3A3D2C502B5CA9413DB4`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. All three clips passed the visual gate:
+  - `M16-1327`: `presented_fps=5.365`, `avg_render_total_ms=174.372`, `avg_llrawproc_ms=68.488`, `avg_mix_chroma_ms=30.419`, `avg_chroma_copy_ms=3.930`.
+  - `M16-1347`: `presented_fps=5.365`, `avg_render_total_ms=174.558`, `avg_llrawproc_ms=69.884`, `avg_mix_chroma_ms=32.698`, `avg_chroma_copy_ms=3.140`.
+  - `M16-1446`: `presented_fps=6.245`, `avg_render_total_ms=150.820`, `avg_llrawproc_ms=37.080`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000` because chroma smoothing was not active on that clip.
+- Compared with the immediately preceding reverted build, the copy-parallel change is a real GUI win on the clips that exercise chroma smoothing. The remaining hot work in that bucket is now the chroma smoother itself, not just the temporary copy setup.
+
+### Cross-checked from prior analysis
+
+- This change is intentionally narrow: it does not alter the chroma-smoothing math, the mix curve cache, or the final blend path.
+- The visible smoke still shows the same stretch/aspect and Look Assist state, so the speedup is not hiding a quality regression.
+
+### Needs runtime profiling
+
+- The copy parallelism looks worth keeping, but `avg_chroma_fullres_ms` and `avg_chroma_halfres_ms` are still the dominant costs on the clips that hit `mix_chroma`, so that is the next bucket if we keep pushing this path.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the row-parallel chroma copy and look for one more reduction inside the smoother itself.
+2. High impact / medium risk: return to the RBF vertical recurrence only if we want a second independent gain beyond the copy win.
+3. Medium impact / low risk: keep the smoke harness and visual-state gate unchanged so future wins stay comparable to the same user-facing launch path.
+
+## 2026-05-30 - rejected fused chroma-copy row walk
+
+### Verified locally
+
+- Tried fusing the two row-copy loops inside `src\mlv\llrawproc\dualiso.c` into a single OpenMP row walk. The change stayed byte-identical in intent, but the visible GUI smoke regressed badly on the chroma-heavy clips, so it was reverted immediately.
+- Rebuilt the user-facing release executable after the revert. Current release exe: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 23:33:33`, size `8791552`, SHA256 `AB94FEBA577BA773E76015B5068B504F81CBD0F9EFA40A85D02C60E2389A25FF`.
+- Restored visible GUI smoke on the reverted build:
+  - `M16-1327`: `presented_fps=4.993`, `avg_render_total_ms=187.050`, `avg_llrawproc_ms=77.300`, `avg_mix_chroma_ms=34.375`, `avg_chroma_copy_ms=3.950`.
+  - `M16-1347`: `presented_fps=4.742`, `avg_render_total_ms=197.835`, `avg_llrawproc_ms=80.658`, `avg_mix_chroma_ms=34.525`, `avg_chroma_copy_ms=3.738`.
+  - `M16-1446`: `presented_fps=5.620`, `avg_render_total_ms=165.578`, `avg_llrawproc_ms=45.356`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`.
+- The restored numbers show the branch is back on the accepted row-parallel copy shape, but the fused walk was a regression and should stay out.
+
+### Cross-checked from prior analysis
+
+- The regression lined up with the earlier warning pattern in this repo: a small-looking scheduling simplification can still lose on the VM when it changes how the chroma smoothing work lands on cores and cache.
+
+### Needs runtime profiling
+
+- Keep the current row-parallel copy, and only revisit chroma smoothing with a stronger algorithmic idea rather than a tighter loop wrapper.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the accepted row-parallel copy and look for a real `mix_chroma` reduction inside the smoother itself.
+2. High impact / medium risk: return to the RBF vertical recurrence if we want a second independent win.
+3. Medium impact / low risk: leave the smoke harness unchanged so the next benchmark stays comparable to this exact launch path.
+
+## 2026-05-30 - rejected chroma_smooth 2x2 row-offset hoist
+
+### Verified locally
+
+- Rolled the 2x2 `chroma_smooth` row-offset hoist back out of `src\mlv\llrawproc\chroma_smooth.c` after the visible GUI smoke set showed a regression on the chroma-heavy clips. The accepted row-parallel `dualiso.c` copy change remains in place.
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-29 23:46:40`, size `8794112`, SHA256 `F23E331001C0073082E4EE116B1F0B91819F82F093AAE88A678F8C73E915F8AC`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The restored build still passed the visual gate, but the overall shape stayed below the earlier accepted chroma-copy baseline:
+  - `M16-1327`: `presented_fps=4.619`, `avg_render_total_ms=202.973`, `avg_llrawproc_ms=81.514`, `avg_mix_chroma_ms=38.487`, `avg_chroma_copy_ms=4.676`.
+  - `M16-1347`: `presented_fps=4.580`, `avg_render_total_ms=204.427`, `avg_llrawproc_ms=86.141`, `avg_mix_chroma_ms=35.459`, `avg_chroma_copy_ms=3.873`.
+  - `M16-1446`: `presented_fps=5.621`, `avg_render_total_ms=168.844`, `avg_llrawproc_ms=48.756`, `avg_mix_chroma_ms=0.000`.
+- The reverted file is now back to the original indexing style, so this probe should not stay in the tree.
+
+### Cross-checked from prior analysis
+
+- The rejected result is consistent with the earlier pattern: small arithmetic hoists inside the chroma smoother can still lose on this VM when they perturb how the hot loop lands in cache and on the worker threads.
+- The accepted row-parallel scratch-copy win in `dualiso.c` remains the best known improvement in this bucket.
+
+### Needs runtime profiling
+
+- The next useful look is still the same one: either a true `mix_chroma` algorithmic reduction or the RBF vertical recurrence. The `chroma_smooth` row-offset hoist itself is not worth keeping.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the accepted row-parallel copy in `dualiso.c` and look for a real `mix_chroma` cut.
+2. High impact / medium risk: inspect the RBF vertical passes for a safe reduction that does not change image output.
+3. Medium impact / low risk: keep the smoke harness and launch-state validation exactly as they are so future numbers stay comparable.
+
+## 2026-05-30 - rejected `__restrict` aliasing-hint probe
+
+### Verified locally
+
+- Tried adding `__restrict` hints to the Dual ISO chroma smoothing interfaces in `src\mlv\llrawproc\pixelproc.h`, `src\mlv\llrawproc\pixelproc.c`, `src\mlv\llrawproc\dualiso.c`, and `src\mlv\llrawproc\chroma_smooth.c`. The build remained healthy, but the visible GUI smoke set did not show a consistent win, so the hinting change was backed back out.
+- The rebuilt user-facing release executable is current at `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-30 00:39:59`, size `8790528`, SHA256 `328C9136E1D0BA6DBD2F475BABEFC82813A5911D8F301A8C8BA4514A3EB4978A`.
+- The latest benchmark receipts before the revert showed mixed results rather than a net gain:
+  - `M16-1327`: `presented_fps=4.619`, `avg_render_total_ms=204.108`, `avg_llrawproc_ms=86.432`, `avg_mix_chroma_ms=40.324`.
+  - `M16-1347`: `presented_fps=4.499`, `avg_render_total_ms=209.028`, `avg_llrawproc_ms=88.250`, `avg_mix_chroma_ms=38.083`.
+  - `M16-1446`: `presented_fps=5.996`, `avg_render_total_ms=157.021`, `avg_llrawproc_ms=41.688`, `avg_mix_chroma_ms=0.000`.
+- The clear takeaway is that this probe does not move the real hot buckets enough to justify keeping it. The earlier row-parallel scratch-copy win in `dualiso.c` stays the better change.
+
+### Cross-checked from prior analysis
+
+- `avg_draw_total_ms` on the same smoke receipts is only about `26-28 ms`, while `avg_llrawproc_ms` and `avg_mix_chroma_ms` remain much larger on the chroma-heavy clips. That is why presentation-scale tweaks keep disappointing here: the app is still spending most of its time upstream of the final draw.
+
+### Needs runtime profiling
+
+- If we keep pushing this branch, the next useful target is still an actual reduction inside the chroma smoothing work or the RBF vertical recurrence. A pure aliasing-hint pass is not enough on this VM.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the accepted row-parallel copy in `dualiso.c` and look for a real `mix_chroma` reduction.
+2. High impact / medium risk: inspect the RBF vertical passes for a safe reduction.
+3. Low impact / low risk: leave the smoke harness alone so future measurements remain comparable.
+
+## 2026-05-30 - playback-preview split for GUI playback
+
+### Verified locally
+
+- Added an explicit playback-preview processing path so GUI playback can take a cheaper processing route without changing export fidelity. The preview signal now flows from `platform\qt\MainWindow.cpp` into `platform\qt\RenderFrameThread.cpp`, and the processed8 prefetch worker in `src\mlv\video_mlv.c` also marks itself as preview-mode before rendering.
+- The hot-path playback gate now treats preview mode as a first-class signal instead of relying on scale factor alone. In `src\processing\raw_processing.c`, the preview path allows the lighter tone-adjustment handling while skipping the expensive shadows/highlights prep that export still keeps.
+- Rebuilt the user-facing release executable after the header fix. Current release exe: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-30 01:25:39`, size `8792576`, SHA256 `249C42F680AE27EAAC203CC9AC726F82688E04163770E3C3394E761BD888E116`.
+- Re-ran the visible GUI smoke set on the non-headless release executable with x1 Quality and settled Auto Look Assist:
+  - `M16-1327`: `presented_fps=6.610`, `avg_render_total_ms=141.491`, `avg_llrawproc_ms=83.566`, `avg_processing_shadows_highlights_prep_ms=0.000`, `avg_mix_chroma_ms=37.717`.
+  - `M16-1347`: `presented_fps=6.364`, `avg_render_total_ms=146.118`, `avg_llrawproc_ms=86.431`, `avg_processing_shadows_highlights_prep_ms=0.000`, `avg_mix_chroma_ms=38.255`.
+  - `M16-1446`: `presented_fps=8.978`, `avg_render_total_ms=102.500`, `avg_llrawproc_ms=41.014`, `avg_processing_shadows_highlights_prep_ms=0.000`, `avg_mix_chroma_ms=0.000`.
+- The important result is that the architecture split moved work out of the playback path without touching export behavior. That is why playback now benefits in the way scale factor alone never could.
+
+### Cross-checked from prior analysis
+
+- The earlier rejected probes were mostly loop-shape or hinting changes. This one differs because it changes which processing policy the playback path actually asks for, so the measured win lines up with the design change instead of with a scheduling accident.
+
+### Needs runtime profiling
+
+- Keep export on the existing full-fidelity path and continue to treat playback preview as the place for CPU reduction experiments.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the preview split and see whether the remaining `mix_chroma` work can be reduced further without changing export output.
+2. High impact / medium risk: revisit the RBF vertical recurrence with the same playback-vs-export boundary in place.
+3. Medium impact / low risk: keep the smoke harness and launch settings unchanged so future comparisons stay meaningful.
+
+## 2026-05-30 - rejected chroma_smooth aliasing-hint probe
+
+### Verified locally
+
+- Tried adding `restrict` qualifiers to the `chroma_smooth` generated helpers in `src\mlv\llrawproc\chroma_smooth.c`. The change compiled, but it did not produce a credible improvement over the already-accepted playback-preview split, so the hinting change was removed again.
+- Rebuilt the user-facing release executable after the revert. Current release exe: `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-30 01:41:54`, size `8792576`, SHA256 `E03FA28946A32F14B168E892522859AF62BDEEEB39E1EE0AE6ABE95F0152A111`.
+- The directional smoke receipts during the probe stayed in the same band as the accepted preview split rather than moving decisively higher, so this should not be treated as a real gain.
+
+### Cross-checked from prior analysis
+
+- The accepted architecture split already removed the expensive shadows/highlights prep from playback. That left `mix_chroma` as the real remaining chroma bucket, and a compiler hint inside the smoother was not enough to move it.
+
+### Needs runtime profiling
+
+- Keep the current playback-preview architecture split and continue looking for an actual reduction inside `mix_chroma` or the RBF vertical passes.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the preview split and look for a real `mix_chroma` reduction.
+2. High impact / medium risk: revisit the RBF vertical recurrence with the same playback-vs-export boundary in place.
+3. Low impact / low risk: leave the smoke harness unchanged so future measurements remain comparable.
+
+## 2026-05-30 - live playback pink cast is preview-only
+
+### Verified locally
+
+- Exported the current frame from `M16-1446.MLV` through the built-in **Export Current Frame** dialog and saved it as `C:\!Layi Wkspc\MLV-App\.claude-state\profiling\20260530-export-dialog-check\out\m16-1446-preview-frame.png`. The exported PNG is clean: no pink band, no top-bar artifact, and the image content matches the clip frame as expected.
+- Captured the live playback surface from the same clip while transport was running. That capture still shows a broad pink cast across the rendered video area, strongest near the top but visibly washing more than just a thin stripe.
+- The playback smoke telemetry for the same sessions reports `zebras=false`, so the band is not the explicit zebra overlay.
+- The clean export plus banded live playback proves the source frame is fine and the artifact is in the playback presentation path, not in export or decode.
+
+### Cross-checked from prior analysis
+
+- The preview path already differs from export: playback can present a pre-scaled or borrowed RGB8 buffer, while export uses `getMlvProcessedFrame8(...)` and a separate scaling path. That makes the preview handoff/presentation code the first place to inspect.
+
+### Needs runtime profiling
+
+- The next useful probe is to narrow whether the cast is coming from the borrowed playback-scaled buffer, the presentation cache, or the viewport upload/composition path.
+
+### Ranked next steps
+
+1. High impact / medium risk: inspect the playback presentation handoff around `playbackScaledImage8` and `preparedBorrowedImage` against the live-band case.
+2. Medium impact / low risk: compare the viewport/presentation path with a forced owned-copy presentation of the same preview frame.
+3. Medium impact / low risk: keep export as the control path when testing so we can distinguish source bugs from preview bugs quickly.
+
+## 2026-05-30 - direct8 preview serial fallback clears the pink-band signature
+
+### Verified locally
+
+- Added a narrow preview-only serial fallback in `src\processing\raw_processing.c` so the direct8 preview renderer drops to one thread when playback preview is active and creative adjustments are present. Export remains on the existing full path.
+- Rebuilt the user-facing release executable at `platform\qt\build-release\release\MLVApp.exe`, timestamp `2026-05-30 03:23:00`, size `8792064`, SHA256 `BD2060B4F565D8C2F67C425735C40A8882907E313AE86D094657549E556D8A0A`.
+- Re-ran the visible GUI smoke set on `M16-1446.MLV` with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The run stayed valid and the playback throughput remained healthy:
+  - `presented_fps=11.103`
+  - `avg_render_total_ms=155.708`
+  - `avg_llrawproc_ms=42.978`
+  - `avg_processed8_ms=84.876`
+  - `avg_draw_total_ms=27.775`
+- The earlier known-bad capture from `20260530-bandprobe` showed a strong top-of-frame pink signature in `playing_S5_processed8_f100`:
+  - top rows average roughly `R 230, G 180, B 214`
+  - mid-frame rows average roughly `R 63, G 59, B 49`
+- The new captured direct8 frame from the serial-fallback build does not show that pink signature:
+  - `playing_S5_processed8_f190` top rows average roughly `R 105, G 111, B 103`
+  - mid-frame rows average roughly `R 46, G 37, B 24`
+  - the top rows are still brighter than the mid-frame content, but they are no longer magenta-heavy
+- That means the visible playback artifact is not present in the new captured preview buffer, and the serial fallback is a credible fix for the playback-only band on this clip.
+
+### Cross-checked from prior analysis
+
+- The earlier playback-only band was already proven not to exist in export. This new comparison narrows the remaining issue to the preview direct8 path rather than the source frame or export pipeline.
+- The performance cost of the serial fallback is acceptable on this VM for the affected clip shape, because the smoke remains above the earlier 3-4 fps baseline and now avoids the obvious color defect.
+
+### Needs runtime profiling
+
+- Keep an eye on whether the serial fallback is needed for every preview-adjusted clip or only for the specific creative-adjustment shape that still triggers the artifact.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the serial fallback if the same visual check remains clean across the other smoke clips.
+2. Medium impact / low risk: if needed, refine the fallback condition so it only applies to the exact preview adjustment shapes that still reproduce the band.
+3. Low impact / low risk: keep export untouched and continue using it as the control path.
+
+## 2026-05-30 - AVX2 aliasing hints on Dual ISO row kernels
+
+### Verified locally
+
+- Added `__restrict` aliasing hints to the AVX2 Dual ISO row kernels in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:\!Layi%20Wkspc%5CMLV-App%5Csrc%5Cmlv%5Cllrawproc%5Cdualiso_avx2.inc) without changing the arithmetic or the call graph. The touched kernels are the row-level `overexposed_mark`, `overexposed_blur`, `fullres_reconstruction_bright_row`, `mix_images_row`, `final_blend_row`, and the AVX2 helper copies.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc%5CMLV-App%5Cplatform%5Cqt%5Cbuild-release%5Crelease%5CMLVApp.exe), timestamp `2026-05-30 04:06:30`, SHA256 `1E83744A54D1793968FB0D7425B7A0EF79F1938FB52E612754BE4FEFE356856B`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation:
+  - `M16-1327`: `presented_fps=9.238`, `avg_render_total_ms=196.459`, `avg_llrawproc_ms=66.365`, `avg_processed8_ms=104.541`, `avg_draw_total_ms=28.676`, `avg_mix_chroma_ms=33.635`, `avg_final_blend_ms=6.351`
+  - `M16-1347`: `presented_fps=7.859`, `avg_render_total_ms=118.508`, `avg_llrawproc_ms=73.556`, `avg_processed8_ms=117.079`, `avg_draw_total_ms=27.095`, `avg_mix_chroma_ms=35.651`, `avg_final_blend_ms=7.619`
+  - `M16-1446`: `presented_fps=10.621`, `avg_render_total_ms=79.318`, `avg_llrawproc_ms=37.024`, `avg_processed8_ms=77.376`, `avg_draw_total_ms=30.176`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.482`
+- The change is output-preserving so far and the smoke gate still passes the visual-state checks. On the chroma-heavy clips, `mix_chroma` remains the real hot bucket; on `M16-1446`, the current load is in the broader Dual ISO mix/final-blend path rather than chroma smoothing.
+
+### Cross-checked from prior analysis
+
+- The recent playback-preview split remains the main architectural win. This pass did not alter export behavior or any of the preview-vs-export gates.
+- The earlier `mix_chroma` and RBF trails are still useful context, but the latest smoke confirms that the best target shifts by clip shape. On this smoke set, the hottest work is still inside the Dual ISO full20 pipeline.
+
+### Needs runtime profiling
+
+- Keep watching whether the aliasing hints stay neutral on other receipts before we treat them as a durable optimization.
+- If the next pass still targets Dual ISO, the next useful investigation seam is the mix/final-blend kernels themselves, not the preview plumbing.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the current preview split and continue trimming the Dual ISO mix/final-blend kernels if the next smoke still shows them as dominant.
+2. Medium impact / low risk: watch for any regression in the chroma-heavy clips before promoting the aliasing hints as permanent.
+3. Low impact / low risk: leave the GUI smoke harness and launch-state validation unchanged so the next comparison stays apples-to-apples.
+
+## 2026-05-30 - rejected chroma_smooth row-offset hoist
+
+### Verified locally
+
+- Probed a row-offset hoist inside `src\mlv\llrawproc\chroma_smooth.c` to reuse adjacent sample work across the 2x2 chroma smoother. The change compiled, but the visible GUI smoke regressed on the chroma-heavy clips, so it was backed out.
+- Rebuilt the user-facing release executable for the probe and benchmarked it through the standard visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation.
+- Smoke results from the hoist probe:
+  - `M16-1327`: `presented_fps=8.218`, `avg_render_total_ms=112.045`, `avg_llrawproc_ms=71.621`, `avg_mix_chroma_ms=34.621`, `avg_chroma_copy_ms=4.152`, `avg_chroma_fullres_ms=15.636`, `avg_chroma_halfres_ms=14.818`
+  - `M16-1347`: `presented_fps=7.244`, `avg_render_total_ms=129.483`, `avg_llrawproc_ms=84.069`, `avg_mix_chroma_ms=38.603`, `avg_chroma_copy_ms=4.276`, `avg_chroma_fullres_ms=17.138`, `avg_chroma_halfres_ms=17.190`
+  - `M16-1446`: `presented_fps=11.580`, `avg_render_total_ms=150.645`, `avg_llrawproc_ms=40.097`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- Compared with the accepted Dual ISO aliasing-hint baseline, the hoist probe lost meaningful playback throughput on the chroma-heavy clips and did not justify the extra loop shape complexity.
+- The chroma smoother is not the right next seam for a low-risk playback win when the preview split already removes the bigger upstream costs.
+
+### Needs runtime profiling
+
+- Keep the chroma smoother unchanged and look for wins in the Dual ISO blend kernels instead.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep trimming the Dual ISO mix/final-blend kernels on the playback preview path.
+2. Medium impact / low risk: keep the smoke harness unchanged so future comparisons stay apples-to-apples.
+3. Low impact / low risk: leave export untouched and continue using it as the control path.
+
+## 2026-05-30 - rejected Dual ISO final_blend prefetch probes
+
+### Verified locally
+
+- Probed `__builtin_prefetch` inside `src\mlv\llrawproc\dualiso_avx2.inc` in the `final_blend_row_avx2` loop. I tried a broad version first, then narrowed it to only the smoother buffers and a shorter lead distance. Both builds compiled and both passed the GUI smoke visual gate, but neither beat the accepted aliasing-hint baseline.
+- Broad prefetch smoke:
+  - `M16-1327`: `presented_fps=8.333`, `avg_render_total_ms=109.567`, `avg_llrawproc_ms=66.851`, `avg_mix_chroma_ms=32.284`, `avg_chroma_copy_ms=3.537`, `avg_chroma_fullres_ms=14.821`, `avg_chroma_halfres_ms=13.925`
+  - `M16-1347`: `presented_fps=8.485`, `avg_render_total_ms=107.794`, `avg_llrawproc_ms=67.441`, `avg_mix_chroma_ms=33.735`, `avg_chroma_copy_ms=3.456`, `avg_chroma_fullres_ms=15.912`, `avg_chroma_halfres_ms=14.368`
+  - `M16-1446`: `presented_fps=12.715`, `avg_render_total_ms=134.686`, `avg_llrawproc_ms=33.873`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`
+- Narrow prefetch smoke:
+  - `M16-1327`: `presented_fps=8.117`, `avg_render_total_ms=112.815`, `avg_llrawproc_ms=71.323`, `avg_mix_chroma_ms=34.938`, `avg_chroma_copy_ms=4.108`, `avg_chroma_fullres_ms=16.523`, `avg_chroma_halfres_ms=14.308`
+  - `M16-1347`: `presented_fps=7.470`, `avg_render_total_ms=123.650`, `avg_llrawproc_ms=78.817`, `avg_mix_chroma_ms=36.617`, `avg_chroma_copy_ms=3.850`, `avg_chroma_fullres_ms=16.500`, `avg_chroma_halfres_ms=16.250`
+  - `M16-1446`: `presented_fps=10.110`, `avg_render_total_ms=86.296`, `avg_llrawproc_ms=40.889`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The accepted aliasing-hint baseline was still stronger on the chroma-heavy clips overall. The prefetch ideas moved work around, but they did not clear the no-regression bar for multi-clip playback.
+
+### Needs runtime profiling
+
+- Keep the Dual ISO kernel shape stable for now and look for a different low-risk seam, rather than more prefetch tuning in `final_blend_row_avx2`.
+
+### Ranked next steps
+
+1. High impact / medium risk: step away from prefetch and revisit the actual `mix_chroma` blend math or a different cache-locality seam.
+2. Medium impact / low risk: keep the current smoke harness and launch settings unchanged.
+3. Low impact / low risk: leave export untouched and continue using it as the control path.
+
+## 2026-05-30 - 2x2 chroma smoother row-pointer cleanup
+
+### Verified locally
+
+- Tightened the `chroma_smooth_2x2` inner loops in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) so the hot row math uses precomputed row pointers instead of recomputing `x + y*w` for every sample access. The 2x2 smoother is the one exercised by the current x1 Quality smoke path.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), timestamp `2026-05-30 06:36:56`, SHA256 `7CCF2918B3C3C8362CC0948EB888A2D7E82D9E6CF539848F7A1C4F0422E5639C`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The visual gate still passed on all three clips:
+  - `M16-1327`: `presented_fps=8.69`, `avg_render_total_ms=105.94`, `avg_llrawproc_ms=64.42`, `avg_mix_chroma_ms=30.78`, `avg_chroma_copy_ms=3.82`, `avg_chroma_fullres_ms=14.02`, `avg_chroma_halfres_ms=12.94`
+  - `M16-1347`: `presented_fps=8.39`, `avg_render_total_ms=109.83`, `avg_llrawproc_ms=65.87`, `avg_mix_chroma_ms=30.59`, `avg_chroma_copy_ms=3.32`, `avg_chroma_fullres_ms=14.30`, `avg_chroma_halfres_ms=12.98`
+  - `M16-1446`: `presented_fps=12.54`, `avg_render_total_ms=137.21`, `avg_llrawproc_ms=36.33`, `avg_mix_chroma_ms=0.00`, `avg_chroma_copy_ms=0.00`, `avg_chroma_fullres_ms=0.00`, `avg_chroma_halfres_ms=0.00`
+
+### Cross-checked from prior analysis
+
+- The playback preview split remains intact. This pass only changed the chroma smoother's row addressing and did not touch export behavior.
+- The change moved the right bucket a little: `avg_mix_chroma_ms` came down compared with the previous accepted row path, while the visible smoke gate stayed clean.
+
+### Needs runtime profiling
+
+- The 2x2 chroma smoother is still the current hot bucket on the chroma-heavy clips. If we keep pushing here, the next likely seam is reducing repeated work across adjacent x positions rather than just the row address math.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for a rolling-window or reused-neighborhood version of the 2x2 chroma smoother.
+2. Medium impact / low risk: keep the current smoke harness and settle gate unchanged so future comparisons stay apples-to-apples.
+3. Low impact / low risk: leave export untouched and continue using it as the control path.
+
+## 2026-05-30 - raw prefetch keep value and rejected alias-map branch split
+
+### Verified locally
+
+- `src/mlv/video_mlv.c` is back to `MLV_RAW_UINT16_PREFETCH_LOOKAHEAD 2`. Rolling it down to `1` regressed the visible GUI smoke set, so `2` is the current keep value.
+- The latest rebuilt user-facing release executable is [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc%5CMLV-App%5Cplatform%5Cqt%5Cbuild-release%5Crelease%5CMLVApp.exe), `LastWriteTime=5/30/2026 7:17:07 AM`, `Length=8791552`, `SHA256=A4668FD355FBAC4E717FD691FB837ACB7430D9E197E49E512F8D981AED5FA559`.
+- The restored visible smoke set with x1 Quality and settled Auto Look Assist stayed valid on the current source shape:
+  - `M16-1327`: `presented_fps=7.869`, `avg_llrawproc_ms=75.270`, `avg_mix_chroma_ms=33.762`
+  - `M16-1347`: `presented_fps=7.491`, `avg_llrawproc_ms=80.133`, `avg_mix_chroma_ms=33.667`
+  - `M16-1446`: `presented_fps=8.863`, `avg_llrawproc_ms=56.803`, `avg_mix_chroma_ms=0.000`
+- A separate alias-map branch-split probe in `src/mlv/llrawproc/dualiso_avx2.inc` was tried and rejected. It hoisted the `alias_map` null-check out of `final_blend_row_avx2`, but the benchmark regressed on the chroma-heavy clips and the file was restored to the original code.
+
+### Cross-checked from prior analysis
+
+- The earlier raw-prefetch `1` rollback was the wrong direction. The stronger visible-smoke path on this VM is the current `2` setting, not `1`.
+- The alias-map split had one clip that improved, but the overall visible set regressed enough that it should not ship.
+
+### Needs runtime profiling
+
+- Keep the current prefetch lookahead stable unless a new probe can clear all three visible clips at once.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the current prefetch setting and look for a different low-risk seam inside the Dual ISO mix/final-blend path.
+2. Medium impact / low risk: preserve the current visible smoke harness and launch defaults so future comparisons stay apples-to-apples.
+3. Low impact / low risk: leave export untouched and continue using it as the control path.
+
+## 2026-05-30 - accepted chroma_smooth aliasing hint probe
+
+### Verified locally
+
+- Added `restrict` aliasing hints to the `chroma_smooth_2x2` function signature in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c), covering the input/output buffers and LUT pointers without changing the filter math.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 7:23:34 AM`, `Length=8791552`, `SHA256=92866AEFB3D13567C5357C46DC1009868A8CA97405949F06433BA33B6A86D5D7`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. All three clips passed the visual gate and improved versus the current keep baseline:
+  - `M16-1327`: `presented_fps=7.985`, `avg_llrawproc_ms=72.672`, `avg_mix_chroma_ms=31.297`, `avg_chroma_copy_ms=3.953`, `avg_chroma_fullres_ms=13.781`, `avg_chroma_halfres_ms=13.563`
+  - `M16-1347`: `presented_fps=8.355`, `avg_llrawproc_ms=67.433`, `avg_mix_chroma_ms=31.284`, `avg_chroma_copy_ms=3.209`, `avg_chroma_fullres_ms=14.627`, `avg_chroma_halfres_ms=13.448`
+  - `M16-1446`: `presented_fps=12.235`, `avg_llrawproc_ms=39.204`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- Compared with the restored `restrict`-free baseline, the aliasing hints reduced `avg_mix_chroma_ms` on the chroma-heavy clips and improved visible playback throughput across the full smoke set.
+- The visual-state gate remained unchanged: x1 Quality, Auto Look Assist, stretch, scopes, and dual-ISO settings all matched the user-facing smoke policy.
+
+### Needs runtime profiling
+
+- Keep this hint probe only if the next pass stays stable on repeated smoke runs; the 1446 clip may still carry more noise in its timing because its chroma bucket is inactive.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the `restrict` hint if it repeats cleanly on another smoke pass.
+2. Medium impact / low risk: continue using the current launch defaults and visible smoke harness for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched and continue treating it as the control path.
+
+## 2026-05-30 - accepted branchless median rewrite in 2x2 chroma smoother
+
+### Verified locally
+
+- Reworked the `chroma_smooth_med5` helper in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) so the 2x2 chroma smoother uses the same comparison network but in a branchless `MIN`/`MAX` swap form. The surrounding sample math and preview-only scope stayed unchanged.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 7:36:26 AM`, `Length=8791552`, `SHA256=140F741CFBD330B5492B93A144776CCF565A8EDBB612103E67A4774FC520CEDC`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The visual gate still passed on all three clips, and the results improved against the last restored baseline:
+  - `M16-1327`: `presented_fps=8.352` vs `7.869`, `avg_mix_chroma_ms=25.134` vs `33.762`, `avg_chroma_copy_ms=3.746` vs `5.143`
+  - `M16-1347`: `presented_fps=8.468` vs `7.491`, `avg_mix_chroma_ms=27.588` vs `33.667`, `avg_chroma_copy_ms=3.971` vs `3.933`
+  - `M16-1446`: `presented_fps=10.213` vs `8.863`, with `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The earlier row-pointer cleanup in `chroma_smooth_2x2` remains in place. This branchless median rewrite builds on that same hot loop rather than changing the playback/export split.
+- The improvement is consistent across the visible smoke set, which is the key reason this probe keeps while the earlier no-alias final-blend split did not.
+
+### Needs runtime profiling
+
+- The chroma-heavy clips are still dominated by `avg_mix_chroma_ms`, so the next gain likely needs a more structural reuse pass inside the 2x2 smoother rather than another tiny helper tweak.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for rolling-neighborhood reuse in `chroma_smooth_2x2` so the median network does less repeated work.
+2. Medium impact / low risk: keep the current visible smoke harness and launch defaults unchanged for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched and continue using it as the control path.
+
+## 2026-05-30 - rejected scalar-local rewrite in 2x2 chroma smoother
+
+### Verified locally
+
+- Tried replacing the 2x2 smoother's small median arrays with scalar locals in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) to reduce stack traffic and make the branchless `chroma_smooth_med5` call sites more register-friendly.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 7:45:37 AM`, `Length=8791552`, `SHA256=0826E151FC3A36BB57B291169B91BD12BA4F72F5836FA7BEDE44D13A42CBEF2A`.
+- The revert-to-accepted smoke pass still satisfied the x1 Quality / Auto Look Assist gate, but the scalar-local rewrite itself did not outperform the accepted branchless-median baseline across the same visible playback route, so it was backed out.
+
+### Cross-checked from prior analysis
+
+- The current keep path remains the branchless median rewrite plus the earlier row-pointer cleanup in `chroma_smooth_2x2`.
+- The failed scalar-local version is a dead end for now; it did not deliver a stable enough improvement to displace the accepted path.
+
+### Needs runtime profiling
+
+- The next promising seam is still structural reuse across neighboring x positions inside `chroma_smooth_2x2`; the remaining cost is not in the tiny median helper alone.
+
+### Ranked next steps
+
+1. High impact / medium risk: prototype a rolling-window or reused-neighborhood 2x2 smoother.
+2. Medium impact / low risk: keep the current smoke harness and launch defaults fixed so future runs stay comparable.
+3. Low impact / low risk: keep export untouched as the control path.
+
+## 2026-05-30 - rejected no-alias fast path split in Dual ISO final blend
+
+### Verified locally
+
+- Split `final_blend_row_avx2` in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\dualiso_avx2.inc) into separate `alias_map == NULL` / `alias_map != NULL` loops so the common playback case could skip the per-iteration alias branch.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 8:17:12 AM`, `Length=8791552`, `SHA256=82D78998E6E763F210F62EFAE383BFC32050E0BD12872DCBCFAC75FA1C6BA88D`.
+- Re-ran the visible GUI smoke set with x1 Quality and settled Auto Look Assist. The visual gate stayed clean, but the split regressed all three user clips versus the accepted branchless-median chroma baseline:
+  - `M16-1327`: `presented_fps=8.734`, `avg_mix_chroma_ms=27.300`
+  - `M16-1347`: `presented_fps=7.860`, `avg_mix_chroma_ms=29.841`
+  - `M16-1446`: `presented_fps=9.368`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The accepted branchless-median `chroma_smooth_2x2` path still outperforms this final-blend branch split on the same visible smoke set.
+- The no-alias split was a plausible branch-shape simplification, but the real clips did not reward it.
+
+### Needs runtime profiling
+
+- Keep the accepted branchless-median chroma path as the baseline.
+- The next useful seam remains structural reuse inside `chroma_smooth_2x2`, not more branching inside `final_blend_row_avx2`.
+
+### Ranked next steps
+
+1. High impact / medium risk: prototype a rolling-window or reused-neighborhood 2x2 smoother.
+2. Medium impact / low risk: keep the current smoke harness and launch defaults fixed so future runs stay comparable.
+3. Low impact / low risk: keep export untouched as the control path.
+
+## 2026-05-30 - rejected restrict alias hint pass in 2x2 chroma smoother
+
+### Verified locally
+
+- Restored the `restrict` aliasing hints in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) around the `raw2ev` / `ev2raw` LUT pointers without changing the accepted branchless-median math or the row sampling layout.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 8:04:40 AM`, `Length=8791552`, `SHA256=DDF3BF54685EE65E481EF7FDEC90B8047DE83F825A3156E54915A28B117F4FF5`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The gate stayed clean, but the repeat runs were not stable enough to displace the accepted branchless-median baseline:
+  - `M16-1327`: `presented_fps=8.245`, `avg_mix_chroma_ms=24.348`
+  - `M16-1347`: `presented_fps=7.493`, `avg_mix_chroma_ms=29.617`
+  - `M16-1446`: `presented_fps=10.189`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The branchless median rewrite itself is still a good path; the alias hints did not produce a repeatable enough win to keep on top of that baseline.
+- The current hot bucket remains `avg_mix_chroma_ms`, but this hint pass does not seem to be the lever that moves it reliably on the user clips.
+
+### Needs runtime profiling
+
+- Keep this as a rejected probe unless a later structural change around the 2x2 smoother makes the alias hints repeatable again.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for a more structural reuse pass in `chroma_smooth_2x2` rather than tiny aliasing hints.
+2. Medium impact / low risk: keep the same smoke harness and visual-state gate for the next pass.
+3. Low impact / low risk: leave export untouched as the control path.
+
+## 2026-05-30 - rejected restrict annotations across Dual ISO AVX2 row kernels
+
+### Verified locally
+
+- Added `restrict` qualifiers to the hot AVX2 row-kernel pointers in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\dualiso_avx2.inc) for `overexposed_mark_row_avx2`, `overexposed_blur_row_avx2`, `fullres_reconstruction_bright_row_avx2`, `convert_20_to_16bit_row_avx2`, `final_blend_row_avx2`, and `mix_images_row_avx2`, without changing the blend math or the row layout.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 8:04:40 AM`, `Length=8791552`, `SHA256=C3DB1F223C7698A28A2FFDF59621F09EB077D3DAC9724BC94C9A6268A5DCCBD4`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The gate stayed clean, but the results were mixed and not stable enough to keep:
+  - `M16-1327`: `presented_fps=9.871`, `avg_mix_chroma_ms=25.000`
+  - `M16-1347`: `presented_fps=7.871`, `avg_mix_chroma_ms=25.921`
+  - `M16-1446`: `presented_fps=11.368`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The hint pass did not produce a repeatable multi-clip win over the accepted branchless-median chroma baseline.
+- The performance picture still points at the same chroma-heavy blend path, but the fix is not a simple `restrict` annotation across the AVX2 row kernels.
+
+### Needs runtime profiling
+
+- Keep this as a rejected probe unless a later, more structural change in the same code path makes the compiler hints repeatable.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for a more structural reuse pass in `chroma_smooth_2x2` instead of more alias hints.
+2. Medium impact / low risk: keep the same smoke harness and visual-state gate for the next pass.
+3. Low impact / low risk: leave export untouched as the control path.
+
+## 2026-05-30 - rejected rolling-window reuse in 2x2 chroma smoother
+
+### Verified locally
+
+- Prototyped a rolling five-sample neighborhood reuse scheme in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) so the 2x2 chroma smoother could reuse overlapping neighborhood work across `x` steps.
+- The probe passed the x1 Quality / Auto Look Assist visual gate, but the visible multi-clip smoke set did not clear the no-regression bar:
+  - `M16-1327`: `presented_fps=8.488`, `avg_mix_chroma_ms=22.544`
+  - `M16-1347`: first pass `presented_fps=7.619`, repeat runs `8.218` and `7.995`
+  - `M16-1446`: `presented_fps=10.621`
+- The rollout did not produce a stable enough win over the accepted branchless-median baseline, so the rolling-window rewrite was reverted.
+- After the revert, the restored source shape still passed the visual gate, but the current visible smoke on this working tree sits at:
+  - `M16-1327`: `presented_fps=7.485`, `avg_mix_chroma_ms=36.800`
+  - `M16-1347`: `presented_fps=6.240`, `avg_mix_chroma_ms=41.120`
+  - `M16-1446`: `presented_fps=9.098`, `avg_mix_chroma_ms=0.000`
+- Restoring the accepted branchless-median call shape in `chroma_smooth_2x2` brought the visible smoke back up on this pass:
+  - `M16-1327`: `presented_fps=7.988`, `avg_mix_chroma_ms=28.250`, `avg_chroma_copy_ms=3.922`, `avg_chroma_fullres_ms=13.094`, `avg_chroma_halfres_ms=11.234`
+  - `M16-1347`: `presented_fps=7.609`, `avg_mix_chroma_ms=27.066`, `avg_chroma_copy_ms=4.557`, `avg_chroma_fullres_ms=11.902`, `avg_chroma_halfres_ms=10.607`
+  - `M16-1446`: `presented_fps=11.341`, with `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The accepted branchless-median 2x2 smoother remains the correct keep-path for now.
+- The best nearby gain remains structural, but it needs to be repeatable on the same three-clip GUI smoke gate before we keep it.
+
+### Needs runtime profiling
+
+- If we revisit this area, the next candidate should prove repeatable across `M16-1327`, `M16-1347`, and `M16-1446` before we consider it safe.
+
+### Ranked next steps
+
+1. High impact / medium risk: revisit the 2x2 chroma path only if a more local reuse strategy can be made repeatable.
+2. Medium impact / low risk: keep the current smoke harness and launch defaults unchanged for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched as the control path.
+
+## 2026-05-30 - accepted row-pointer hoist in 2x2 chroma smoother
+
+### Verified locally
+
+- Hoisted the 2x2 chroma smoother's row-address arithmetic in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi%20Wkspc%5CMLV-App%5Csrc%5Cmlv%5Cllrawproc%5Cchroma_smooth.c) so the hot horizontal and vertical sample macros use precomputed row pointers instead of recomputing `inp + y * w` inside each sample.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc%5CMLV-App%5Cplatform%5Cqt%5Cbuild-release%5Crelease%5CMLVApp.exe), `LastWriteTime=5/30/2026 8:45:27 AM`, `Length=8792064`, `SHA256=A3017A0BDA61627DA9A7B17C1ED77D016249AABFCD60EB84F67080F04E03C28D`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The gate stayed clean and the chroma-heavy clips improved versus the previous accepted baseline:
+  - `M16-1327`: `presented_fps=8.574`, `avg_mix_chroma_ms=24.870`, `avg_chroma_copy_ms=4.377`, `avg_chroma_fullres_ms=10.087`, `avg_chroma_halfres_ms=10.406`
+  - `M16-1347`: `presented_fps=8.738`, `avg_mix_chroma_ms=25.971`, `avg_chroma_copy_ms=3.843`, `avg_chroma_fullres_ms=11.729`, `avg_chroma_halfres_ms=10.400`
+  - `M16-1446`: `presented_fps=11.115`, with `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The earlier branchless-median helper remains the right scalar baseline for `chroma_smooth_2x2`; this row-pointer hoist builds on that accepted shape rather than replacing it.
+- The improvement is repeatable across both chroma-heavy clips, which makes it safer than the earlier rolling-window and alias-hint probes.
+
+### Needs runtime profiling
+
+- The current hot bucket is still `avg_mix_chroma_ms`, but the row-pointer hoist now looks like a real, keep-worthy reduction in that path.
+
+### Ranked next steps
+
+1. High impact / low risk: keep this row-pointer hoist as the new baseline and continue looking for the next structural reduction inside `mix_chroma`.
+2. Medium impact / low risk: preserve the current smoke harness and visual-state gate for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched as the control path.
+
+## 2026-05-30 - rejected overexposed blur row-pointer hoist
+
+### Verified locally
+
+- Prototyped a small address-hoist in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:\!Layi%20Wkspc%5CMLV-App%5Csrc%5Cmlv%5Cllrawproc%5Cdualiso_avx2.inc) for `overexposed_blur_row_avx2`, replacing repeated `prev + x` / `curr + x` / `next + x` arithmetic with row-local pointer variables inside the 8-pixel AVX2 loop.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc%5CMLV-App%5Cplatform%5Cqt%5Cbuild-release%5Crelease%5CMLVApp.exe), `LastWriteTime=5/30/2026 8:58:12 AM`, `Length=8792064`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The gate stayed clean, but the visible FPS regressed versus the accepted row-pointer chroma baseline:
+  - `M16-1327`: `presented_fps=8.327`, `avg_mix_chroma_ms=24.925`, `avg_mix_overexposed_ms=4.388`, `avg_final_blend_ms=6.776`
+  - `M16-1347`: `presented_fps=8.121`, `avg_mix_chroma_ms=25.492`, `avg_mix_overexposed_ms=3.923`, `avg_final_blend_ms=8.369`
+  - `M16-1446`: `presented_fps=9.357`, `avg_mix_chroma_ms=0.000`, `avg_mix_overexposed_ms=5.973`, `avg_final_blend_ms=9.400`
+
+### Cross-checked from prior analysis
+
+- The overexposed pass is small enough that this kind of pointer hoist appears to be neutral-to-negative on the visible set, at least on this VM and clip mix.
+
+### Needs runtime profiling
+
+- Keep this as a rejected probe unless a later structural change in the same AVX2 row path makes the address hoist repeatable.
+
+### Ranked next steps
+
+1. High impact / medium risk: return to `dualiso.c` / `mix_chroma` or a deeper `final_blend` structural change rather than more row-address cleanup.
+2. Medium impact / low risk: keep the current smoke harness and launch defaults unchanged for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched as the control path.
+
+## 2026-05-30 - accepted alias-map 37-neighbor selection helper
+
+### Verified locally
+
+- Replaced the alias-map middle-pass `kth_smallest_int` call in [`src/mlv/llrawproc/dualiso.c`](C:\!Layi%20Wkspc%5CMLV-App%5Csrc%5Cmlv%5Cllrawproc%5Cdualiso.c) with a fixed-size helper that computes the 5th smallest of the 37-value neighborhood directly, avoiding the generic quickselect path and the temporary `neighbours[]` selection overhead.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc%5CMLV-App%5Cplatform%5Cqt%5Cbuild-release%5Crelease%5CMLVApp.exe), `LastWriteTime=5/30/2026 9:05:03 AM`, `Length=8792064`, `SHA256=9C6D783F40F897B1D6F78D711C8DB07752FDE35972EE56AFAEE5624257759DB7`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The smoke gate stayed visually correct, and the chroma-heavy clips improved versus the previous accepted chroma baseline:
+  - `M16-1327`: `presented_fps=9.348`, `avg_mix_chroma_ms=23.880`, `avg_chroma_copy_ms=4.147`, `avg_chroma_fullres_ms=10.653`, `avg_chroma_halfres_ms=9.080`
+  - `M16-1347`: `presented_fps=9.345`, `avg_mix_chroma_ms=24.520`, `avg_chroma_copy_ms=3.547`, `avg_chroma_fullres_ms=10.920`, `avg_chroma_halfres_ms=10.053`
+  - `M16-1446`: `presented_fps=11.240`, with `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The accepted row-pointer hoist in `chroma_smooth.c` remains the right baseline for the 2x2 smoother; this change trims the alias-map filter that still sat inside the same full20 pipeline.
+- The win is repeatable across the two chroma-heavy clips, which makes it more credible than the earlier rejected alias-map branch-hoist and overexposed-hoist probes.
+
+### Needs runtime profiling
+
+- The remaining hot bucket on the chroma-heavy clips is still `avg_mix_chroma_ms`, but it is now lower than the previous accepted baseline rather than just noise.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the alias-map selection helper and continue looking for a true `mix_chroma` reduction.
+2. Medium impact / low risk: preserve the current smoke harness and visual-state gate for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched as the control path.
+
+## 2026-05-30 - accepted restrict aliasing hints in 2x2 chroma smoother
+
+### Verified locally
+
+- Added `__restrict` aliasing hints to the 2x2 chroma smoother in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi%20Wkspc%5CMLV-App%5Csrc%5Cmlv%5Cllrawproc%5Cchroma_smooth.c:46) and [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi%20Wkspc%5CMLV-App%5Csrc%5Cmlv%5Cllrawproc%5Cchroma_smooth.c:164) for `inp`, `out`, `raw2ev`, and `ev2raw`.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc%5CMLV-App%5Cplatform%5Cqt%5Cbuild-release%5Crelease%5CMLVApp.exe), `LastWriteTime=5/30/2026 9:17:08 AM`, `Length=8792064`, `SHA256=52CE0E91461EAC15545082853B195F92D4612AFAFD2170002EBB99DEF3D67ACB`.
+- Re-ran the visible GUI smoke set with x1 Quality, settled Auto Look Assist, and the same launch-state validation. The gate stayed clean, and the chroma-heavy clips improved again versus the previous accepted baseline:
+  - `M16-1327`: `presented_fps=9.469`, `avg_mix_chroma_ms=24.145`, `avg_chroma_copy_ms=3.566`, `avg_chroma_fullres_ms=10.263`, `avg_chroma_halfres_ms=10.316`
+  - `M16-1347`: `presented_fps=9.496`, `avg_mix_chroma_ms=23.316`, `avg_chroma_copy_ms=3.461`, `avg_chroma_fullres_ms=9.671`, `avg_chroma_halfres_ms=10.184`
+  - `M16-1446`: `presented_fps=12.210`, with `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The new aliasing hints are small, but they are now helping the same hot chroma path that was already improved by the row-pointer hoist.
+- The improvement is repeatable on the two chroma-heavy clips and does not disturb the visual-state gate.
+
+### Needs runtime profiling
+
+- `M16-1446` does not exercise the chroma mix bucket, so it remains a control clip rather than proof of further headroom in `mix_chroma`.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the aliasing hints and continue looking for a deeper structural reduction inside `mix_chroma`.
+2. Medium impact / low risk: preserve the current smoke harness and visual-state gate for apples-to-apples comparisons.
+3. Low impact / low risk: leave export untouched as the control path.

@@ -46,6 +46,18 @@
 
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_setup_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_prep_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_resize_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_copy_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_filter_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_total_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_boundary_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_range_table_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_left_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_right_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_horizontal_average_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_down_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_output_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_highest_green_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_denoise_ms = 0.0;
@@ -61,6 +73,35 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_curves_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_mode = 0;
+
+static int processing_env_flag_enabled(const char * value)
+{
+    if( !value || !*value ) return 0;
+    if( strcmp(value, "1") == 0 ) return 1;
+    if( strcmp(value, "true") == 0 ) return 1;
+    if( strcmp(value, "TRUE") == 0 ) return 1;
+    if( strcmp(value, "True") == 0 ) return 1;
+    if( strcmp(value, "yes") == 0 ) return 1;
+    if( strcmp(value, "on") == 0 ) return 1;
+    return 0;
+}
+
+static int processing_shadows_highlights_curve_index_mask_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 0;
+    if( !initialized )
+    {
+        /* Experimental A/B path: parity-safe, but GUI playback timings were
+         * mixed, so keep default playback on the established RGB blur mask. */
+        enabled =
+            processing_env_flag_enabled(getenv("MLVAPP_ENABLE_SH_CURVE_INDEX_MASK"))
+            && !processing_env_flag_enabled(getenv("MLVAPP_DISABLE_SH_CURVE_INDEX_MASK"));
+        initialized = 1;
+    }
+    return enabled;
+}
 
 typedef struct
 {
@@ -69,10 +110,24 @@ typedef struct
     double curves_ms;
 } processing_direct8_kernel_timing_t;
 
+static void processing_capture_last_shadows_highlights_rbf_timing(void);
+
 void processingResetLastTimingTelemetry(void)
 {
     g_processing_last_setup_ms = 0.0;
     g_processing_last_shadows_highlights_prep_ms = 0.0;
+    g_processing_last_shadows_highlights_resize_ms = 0.0;
+    g_processing_last_shadows_highlights_copy_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_total_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_boundary_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_range_table_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_left_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_right_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_horizontal_average_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_down_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_output_ms = 0.0;
     g_processing_last_highest_green_ms = 0.0;
     g_processing_last_core_ms = 0.0;
     g_processing_last_denoise_ms = 0.0;
@@ -88,6 +143,16 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_direct8_matrix_ms = 0.0;
     g_processing_last_direct8_gamma_ms = 0.0;
     g_processing_last_direct8_curves_ms = 0.0;
+}
+
+void processingSetPlaybackPreviewMode(int enabled)
+{
+    g_processing_playback_preview_mode = enabled ? 1 : 0;
+}
+
+int processingPlaybackPreviewModeEnabled(void)
+{
+    return g_processing_playback_preview_mode;
 }
 
 static void processing_core_timing_reset(processing_core_timing_t * timing)
@@ -367,11 +432,15 @@ void processingSetCamMatrix(processingObject_t * processing, double * camMatrix,
 
 void processingSetHighlights(processingObject_t * processing, double value)
 {
+    if( processing->shadows_highlights.highlights == value )
+        return;
     processing->shadows_highlights.highlights = value;
     processing_update_shadow_highlight_curve(processing);
 }
 void processingSetShadows(processingObject_t * processing, double value)
 {
+    if( processing->shadows_highlights.shadows == value )
+        return;
     processing->shadows_highlights.shadows = value;
     processing_update_shadow_highlight_curve(processing);
 }
@@ -402,12 +471,17 @@ void processing_update_shadow_highlight_curve(processingObject_t * processing)
 
 void processingSetSimpleContrast(processingObject_t * processing, double value)
 {
-    processing->contrast = value * 0.65;
+    const double newValue = value * 0.65;
+    if( processing->contrast == newValue )
+        return;
+    processing->contrast = newValue;
     processing_update_contrast_curve(processing);
 }
 
 void processingSetPivot(processingObject_t * processing, double value)
 {
+    if( processing->pivot == value )
+        return;
     processing->pivot = value;
     processing_update_contrast_curve(processing);
 }
@@ -438,7 +512,10 @@ void processing_update_contrast_curve(processingObject_t * processing)
 
 void processingSetSimpleContrastGradient(processingObject_t * processing, double value)
 {
-    processing->gradient_contrast = value * 0.65;
+    const double newValue = value * 0.65;
+    if( processing->gradient_contrast == newValue )
+        return;
+    processing->gradient_contrast = newValue;
     processing_update_contrast_curve_gradient(processing);
 }
 
@@ -469,6 +546,8 @@ void processing_update_contrast_curve_gradient(processingObject_t * processing)
 void processingSetClarity(processingObject_t * processing, double value)
 {
     if( value < 0 ) value /= 2.0;
+    if( processing->clarity == value )
+        return;
     processing->clarity = value;
     processing_update_clarity_curve(processing);
 }
@@ -532,7 +611,13 @@ void applyProcessingObject( processingObject_t * processing,
     g_processing_last_setup_ms = (omp_get_wtime() - setup_start) * 1000.0;
 
     /* Resize image buffer to make sure its right size */
-    if (imageChanged) buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+    if (imageChanged)
+    {
+        const double shadows_highlights_resize_start = omp_get_wtime();
+        buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+        g_processing_last_shadows_highlights_resize_ms =
+            (omp_get_wtime() - shadows_highlights_resize_start) * 1000.0;
+    }
 
     /* If shadows/highlights off don't do anything. Maybe this blurring bit could b multithreaded I need to think */
     const double shadows_highlights_start = omp_get_wtime();
@@ -541,10 +626,9 @@ void applyProcessingObject( processingObject_t * processing,
      || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
      || ( processing->clarity <= -0.01 || processing->clarity >= 0.01 );
 
-    if (imageChanged && !shadows_highlights_active)
-    {
-        memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
-    }
+    /* When shadows/highlights and clarity are inactive, the blur buffer is not
+     * read by the 16-bit path. Keep the resized scratch buffer around, but skip
+     * the frame-sized copy. */
 
     if( shadows_highlights_active )
     {
@@ -555,9 +639,20 @@ void applyProcessingObject( processingObject_t * processing,
         /* Reblur if image changed */
         if (imageChanged)
         {
+            const double shadows_highlights_filter_start = omp_get_wtime();
             //memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
             //blur_image(get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, 1, 1, 1, 0, imageY-1);
             if(0) blur_image_threaded( get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, threads );
+            else if( processing_shadows_highlights_curve_index_mask_enabled() )
+                recursive_bf_wrap_with_curve_index_lut(
+                        inputImage,
+                        get_buffer(processing->shadows_highlights.blur_image),
+                        0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
+                        imageX, imageY, 3,
+                        processing->pre_calc_levels,
+                        processing->pre_calc_matrix[0],
+                        processing->pre_calc_matrix[4],
+                        processing->pre_calc_matrix[8]);
             else
                 recursive_bf_wrap_with_output_lut(
                         inputImage,
@@ -565,6 +660,9 @@ void applyProcessingObject( processingObject_t * processing,
                         0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
                         imageX, imageY, 3,
                         processing->pre_calc_levels);
+            processing_capture_last_shadows_highlights_rbf_timing();
+            g_processing_last_shadows_highlights_filter_ms +=
+                (omp_get_wtime() - shadows_highlights_filter_start) * 1000.0;
         }
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
@@ -948,6 +1046,25 @@ static int processing_has_neutral_creative_adjustments(const processingObject_t 
     return 1;
 }
 
+static void processing_capture_last_shadows_highlights_rbf_timing(void)
+{
+    recursive_bf_timing_t timing = { 0 };
+    recursive_bf_get_last_timing(&timing);
+
+    g_processing_last_shadows_highlights_rbf_total_ms = timing.total_ms;
+    g_processing_last_shadows_highlights_rbf_boundary_ms = timing.boundary_ms;
+    g_processing_last_shadows_highlights_rbf_range_table_ms = timing.range_table_ms;
+    g_processing_last_shadows_highlights_rbf_left_ms = timing.left_ms;
+    g_processing_last_shadows_highlights_rbf_right_ms = timing.right_ms;
+    g_processing_last_shadows_highlights_rbf_horizontal_average_ms =
+        timing.horizontal_average_ms;
+    g_processing_last_shadows_highlights_rbf_vertical_down_ms =
+        timing.vertical_down_ms;
+    g_processing_last_shadows_highlights_rbf_vertical_up_ms =
+        timing.vertical_up_ms;
+    g_processing_last_shadows_highlights_rbf_output_ms = timing.output_ms;
+}
+
 static int processing_has_direct8_supported_creative_adjustments(const processingObject_t * processing)
 {
     if( !processing ) return 0;
@@ -986,12 +1103,22 @@ static int processing_has_direct8_supported_local_tone_adjustments(const process
 {
     if( !processing ) return 0;
 
+    if( processingPlaybackPreviewModeEnabled() )
+    {
+        return 1;
+    }
+
     return fabs(processing->clarity) < 0.01;
 }
 
 static int processing_has_direct8_shadow_highlight_adjustments(const processingObject_t * processing)
 {
     if( !processing || !processing->allow_creative_adjustments ) return 0;
+
+    if( processingPlaybackPreviewModeEnabled() )
+    {
+        return 0;
+    }
 
     return fabs(processing->shadows_highlights.shadows) >= 0.01
         || fabs(processing->shadows_highlights.highlights) >= 0.01;
@@ -1050,6 +1177,11 @@ int processingCanUseDirect8BitOutput(const processingObject_t * processing)
 
 static int processing_direct8_requires_shared_kernel(const processingObject_t * processing)
 {
+    if( processingPlaybackPreviewModeEnabled() )
+    {
+        return 0;
+    }
+
     return processing
         && ( processing->AgX
           || processing_has_direct8_shadow_highlight_adjustments(processing)
@@ -1058,9 +1190,29 @@ static int processing_direct8_requires_shared_kernel(const processingObject_t * 
               || processing->vibrance >= 1.01
               || processing->saturation <= 0.99
               || processing->saturation >= 1.01 ) )
-          || ( processing->allow_creative_adjustments
-            && ( processing->contrast <= -0.01
-              || processing->contrast >= 0.01 ) ) );
+              || ( processing->allow_creative_adjustments
+                && ( processing->contrast <= -0.01
+                  || processing->contrast >= 0.01 ) ) );
+}
+
+static int processing_direct8_preview_requires_serial_render(const processingObject_t * processing)
+{
+    if( !processing || !processingPlaybackPreviewModeEnabled() )
+    {
+        return 0;
+    }
+
+    if( !processing->allow_creative_adjustments )
+    {
+        return 0;
+    }
+
+    return fabs(processing->contrast) >= 0.01
+        || fabs(processing->clarity) >= 0.01
+        || fabs(processing->shadows_highlights.shadows) >= 0.01
+        || fabs(processing->shadows_highlights.highlights) >= 0.01
+        || fabs(processing->vibrance - 1.0) >= 0.01
+        || fabs(processing->saturation - 1.0) >= 0.01;
 }
 
 /*
@@ -1085,9 +1237,10 @@ static int processing_direct8_requires_shared_kernel(const processingObject_t * 
  *
  *   - default: AVX2 autovec variant when CPU supports avx2+fma.
  *   - MLVAPP_DISABLE_AVX2=1: force scalar.
- *   - MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1: prefer the intrinsics variant
- *     over the autovec variant (still subject to MLVAPP_DISABLE_AVX2 and
- *     CPU support).
+ *   - MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1: force the intrinsics variant
+ *     when AVX2+FMA is available.
+ *   - MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1: keep the autovec AVX2 variant
+ *     when AVX2+FMA is available.
  *
  * Parity with scalar is enforced by the DirectProcessed8FastPath* tests in
  * tests/pipeline/test_dual_iso_pipeline.cpp. The intrinsics variant has its
@@ -1125,18 +1278,6 @@ static apply_processing_object_8bit_fast_rows_fn_t
 static int g_apply_processing_object_8bit_fast_rows_use_avx2 = 0;
 static int g_apply_processing_object_8bit_fast_rows_use_avx2_intrin = 0;
 
-static int processing_env_flag_enabled(const char * value)
-{
-    if( !value || !*value ) return 0;
-    if( strcmp(value, "1") == 0 ) return 1;
-    if( strcmp(value, "true") == 0 ) return 1;
-    if( strcmp(value, "TRUE") == 0 ) return 1;
-    if( strcmp(value, "True") == 0 ) return 1;
-    if( strcmp(value, "yes") == 0 ) return 1;
-    if( strcmp(value, "on") == 0 ) return 1;
-    return 0;
-}
-
 static int processing_profile_direct8_subloops_enabled(void)
 {
     static int initialized = 0;
@@ -1153,6 +1294,8 @@ static void apply_processing_object_8bit_fast_rows_dispatch_init(void)
 {
     int use_avx2 = 0;
     int use_avx2_intrin = 0;
+    const int disable_intrin =
+        processing_env_flag_enabled(getenv("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8"));
 #ifdef MLVAPP_AVX2_DISPATCH_AVAILABLE
     __builtin_cpu_init();
     use_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
@@ -1161,8 +1304,7 @@ static void apply_processing_object_8bit_fast_rows_dispatch_init(void)
     {
         use_avx2 = 0;
     }
-    if( use_avx2 &&
-        processing_env_flag_enabled(getenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8")) )
+    if( use_avx2 && !disable_intrin )
     {
         use_avx2_intrin = 1;
     }
@@ -1356,6 +1498,9 @@ void apply_processing_object( processingObject_t * processing,
     }
 
     const double color_start = capture_breakdown ? omp_get_wtime() : 0.0;
+    const int blur_image_is_curve_index =
+        processing_shadows_highlights_curve_index_mask_enabled();
+
     /* white balance & exposure & highlights & gamma & highlight reconstruction */
     if( use_basic_matrix_fast_path )
     {
@@ -1437,10 +1582,17 @@ void apply_processing_object( processingObject_t * processing,
                 || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
                 || ( processing->clarity                       <= -0.01 || processing->clarity                       >= 0.01 ) )
                 {
-                    /* Blur pixLZ */
-                    int32_t bval = ( ((pm[0][bpix[0]] /* + pm[1][bpix[1]] + pm[2][bpix[2]] */) << 2)
-                                + ((/* pm[3][bpix[0]] + */ pm[4][bpix[1]] /* + pm[5][bpix[2]] */) * 11)
-                                +  (/* pm[6][bpix[0]] + pm[7][bpix[1]] + */ pm[8][bpix[2]]) ) >> 4;
+                    int32_t bval;
+                    if( blur_image_is_curve_index )
+                    {
+                        bval = bpix[0];
+                    }
+                    else
+                    {
+                        bval = ( ((pm[0][bpix[0]] /* + pm[1][bpix[1]] + pm[2][bpix[2]] */) << 2)
+                              + ((/* pm[3][bpix[0]] + */ pm[4][bpix[1]] /* + pm[5][bpix[2]] */) * 11)
+                              +  (/* pm[6][bpix[0]] + pm[7][bpix[1]] + */ pm[8][bpix[2]]) ) >> 4;
+                    }
 
                     if( processing->clarity <= -0.01 || processing->clarity >= 0.01 )
                     {
@@ -1933,19 +2085,44 @@ void applyProcessingObject8( processingObject_t * processing,
     get_frame_transformed(processing, inputImage, imageX, imageY);
     g_processing_last_setup_ms = (omp_get_wtime() - setup_start) * 1000.0;
 
-    if (imageChanged) buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+    if (imageChanged)
+    {
+        const double shadows_highlights_resize_start = omp_get_wtime();
+        buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+        g_processing_last_shadows_highlights_resize_ms =
+            (omp_get_wtime() - shadows_highlights_resize_start) * 1000.0;
+    }
 
     const double shadows_highlights_start = omp_get_wtime();
     const int shadows_highlights_active =
         processing_has_direct8_shadow_highlight_adjustments(processing);
     if( shadows_highlights_active && imageChanged )
     {
-        recursive_bf_wrap_with_output_lut(
+        const double shadows_highlights_filter_start = omp_get_wtime();
+        if( processing_shadows_highlights_curve_index_mask_enabled() )
+        {
+            recursive_bf_wrap_with_curve_index_lut(
+                inputImage,
+                get_buffer(processing->shadows_highlights.blur_image),
+                0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
+                imageX, imageY, 3,
+                processing->pre_calc_levels,
+                processing->pre_calc_matrix[0],
+                processing->pre_calc_matrix[4],
+                processing->pre_calc_matrix[8]);
+        }
+        else
+        {
+            recursive_bf_wrap_with_output_lut(
                 inputImage,
                 get_buffer(processing->shadows_highlights.blur_image),
                 0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
                 imageX, imageY, 3,
                 processing->pre_calc_levels);
+        }
+        processing_capture_last_shadows_highlights_rbf_timing();
+        g_processing_last_shadows_highlights_filter_ms +=
+            (omp_get_wtime() - shadows_highlights_filter_start) * 1000.0;
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
 
@@ -1956,6 +2133,10 @@ void applyProcessingObject8( processingObject_t * processing,
     const int direct8_profile_subloops =
         (threads == 1) && processing_profile_direct8_subloops_enabled();
     processing_direct8_kernel_timing_t direct8_timing = { 0.0, 0.0, 0.0 };
+    if( threads > 1 && processing_direct8_preview_requires_serial_render(processing) )
+    {
+        threads = 1;
+    }
     if( threads == 1 )
     {
         apply_processing_object_8bit_fast(processing,
@@ -2016,6 +2197,66 @@ double processingGetLastSetupMilliseconds(void)
 double processingGetLastShadowsHighlightsPrepMilliseconds(void)
 {
     return g_processing_last_shadows_highlights_prep_ms;
+}
+
+double processingGetLastShadowsHighlightsResizeMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_resize_ms;
+}
+
+double processingGetLastShadowsHighlightsCopyMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_copy_ms;
+}
+
+double processingGetLastShadowsHighlightsFilterMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_filter_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfTotalMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_total_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfBoundaryMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_boundary_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfRangeTableMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_range_table_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfLeftMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_left_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfRightMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_right_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfHorizontalAverageMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_horizontal_average_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfVerticalDownMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_vertical_down_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfVerticalUpMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_vertical_up_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfOutputMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_output_ms;
 }
 
 double processingGetLastHighestGreenMilliseconds(void)

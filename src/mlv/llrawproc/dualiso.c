@@ -1355,7 +1355,7 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
 
         if (raw_lo >= white)
             break;
-        
+
         if (acc_hi - prev_acc_hi > min_pix)
         {
             if (acc_hi > hist_total * 1 / 100 && acc_hi < hist_total * 99.99 / 100)    /* throw away outliers */
@@ -1491,6 +1491,28 @@ static const double fullres_thr = 0.8;
 /* trial and error - too high = aliasing, too low = noisy */
 static const int ALIAS_MAP_MAX = 15000;
 
+static inline int alias_map_fifth_smallest_37(const int values[37])
+{
+    int best[5] = { INT_MAX, INT_MAX, INT_MAX, INT_MAX, INT_MAX };
+
+    for (int i = 0; i < 37; ++i)
+    {
+        const int v = values[i];
+        if (v < best[4])
+        {
+            int j = 4;
+            while (j > 0 && v < best[j - 1])
+            {
+                best[j] = best[j - 1];
+                --j;
+            }
+            best[j] = v;
+        }
+    }
+
+    return best[4];
+}
+
 static void white_detect(struct raw_info raw_info, uint16_t * image_data, int* white_dark, int* white_bright, int * is_bright)
 {
     /* sometimes the white level is much lower than 15000; this would cause pink highlights */
@@ -1519,7 +1541,7 @@ static void white_detect(struct raw_info raw_info, uint16_t * image_data, int* w
         for (int x = raw_info.active_area.x1; x < raw_info.active_area.x2; x += 3)
         {
             int pix = raw_get_pixel16(x, y);
-            
+
 #define BIN_IDX is_bright[y%4]
             counts[BIN_IDX] = MIN(counts[BIN_IDX], max_pix-1);
             pixels[BIN_IDX][counts[BIN_IDX]] = -pix;
@@ -2015,7 +2037,7 @@ static int _match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, 
         {
             int p = raw_get_pixel32(x, y);
             if (p == 0) continue;
-            
+
             if (BRIGHT_ROW)
             {
                 /* bright exposure: darken and apply the black offset (fixme: why not half?) */
@@ -2025,7 +2047,7 @@ static int _match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, 
             {
                 p = p - b20 + b20*a;
             }
-            
+
             /* out of range? */
             /* note: this breaks M24-1127 */
             //p = COERCE(p, 0, 0xFFFFF);
@@ -2845,19 +2867,93 @@ static inline void amaze_interpolate(struct raw_info raw_info,
     
 }
 
-static inline void mean23_interpolate(struct raw_info raw_info, uint32_t * raw_buffer_32, uint32_t* dark, uint32_t* bright, int black, int white, int white_darkened, int * is_bright)
+static inline void mean23_interpolate_with_lut(struct raw_info raw_info,
+                                               uint32_t * raw_buffer_32,
+                                               uint32_t* dark,
+                                               uint32_t* bright,
+                                               int white_darkened,
+                                               int * is_bright,
+                                               int * raw2ev,
+                                               int * ev2raw)
 {
     int w = raw_info.width;
     int h = raw_info.height;
+    #pragma omp parallel for
+    for (int y = 2; y < h-2; y ++)
+    {
+        uint32_t* native = BRIGHT_ROW ? bright : dark;
+        uint32_t* interp = BRIGHT_ROW ? dark : bright;
+        int is_rg = (y % 2 == 0); /* RG or GB? */
+        int row_white = !BRIGHT_ROW ? white_darkened : raw_info.white_level;
+
+        for (int x = 2; x < w-3; x += 2)
+        {
+
+            /* red/blue: interpolate from (x,y+2) and (x,y-2) */
+            /* green: interpolate from (x+1,y+1),(x-1,y+1),(x,y-2) or (x+1,y-1),(x-1,y-1),(x,y+2), whichever has the correct brightness */
+
+            int s = (is_bright[y%4] == is_bright[(y+1)%4]) ? -1 : 1;
+
+            if (is_rg)
+            {
+                int ra = raw_get_pixel32(x, y-2);
+                int rb = raw_get_pixel32(x, y+2);
+                int ri = mean2(raw2ev[ra], raw2ev[rb], raw2ev[row_white], 0);
+
+                int ga = raw_get_pixel32(x+1+1, y+s);
+                int gb = raw_get_pixel32(x+1-1, y+s);
+                int gc = raw_get_pixel32(x+1, y-2*s);
+                int gi = mean3(raw2ev[ga], raw2ev[gb], raw2ev[gc], raw2ev[row_white], 0);
+
+                interp[x   + y * w] = ev2raw[ri];
+                interp[x+1 + y * w] = ev2raw[gi];
+            }
+            else
+            {
+                int ba = raw_get_pixel32(x+1  , y-2);
+                int bb = raw_get_pixel32(x+1  , y+2);
+                int bi = mean2(raw2ev[ba], raw2ev[bb], raw2ev[row_white], 0);
+
+                int ga = raw_get_pixel32(x+1, y+s);
+                int gb = raw_get_pixel32(x-1, y+s);
+                int gc = raw_get_pixel32(x, y-2*s);
+                int gi = mean3(raw2ev[ga], raw2ev[gb], raw2ev[gc], raw2ev[row_white], 0);
+
+                interp[x   + y * w] = ev2raw[gi];
+                interp[x+1 + y * w] = ev2raw[bi];
+            }
+
+            native[x   + y * w] = raw_get_pixel32(x, y);
+            native[x+1 + y * w] = raw_get_pixel32(x+1, y);
+        }
+    }
+}
+
+static inline void mean23_interpolate(struct raw_info raw_info, uint32_t * raw_buffer_32, uint32_t* dark, uint32_t* bright, int black, int white, int white_darkened, int * is_bright, dualiso_full20bit_scratch_t * scratch)
+{
 #ifndef STDOUT_SILENT
     printf("Interpolation   : mean23\n");
 #endif
-    /* for fast EV - raw conversion */
+    int * scratch_raw2ev = NULL;
+    int * scratch_ev2raw = NULL;
+    if (ensure_scratch_ev_lut(scratch, black, white, &scratch_raw2ev, &scratch_ev2raw))
+    {
+        mean23_interpolate_with_lut(raw_info,
+                                    raw_buffer_32,
+                                    dark,
+                                    bright,
+                                    white_darkened,
+                                    is_bright,
+                                    scratch_raw2ev,
+                                    scratch_ev2raw);
+        return;
+    }
+
+    /* Fallback for callers without reusable scratch storage. */
     static int raw2ev[1<<20];   /* EV x EV_RESOLUTION */
     static int ev2raw_0[24*EV_RESOLUTION];
     static int previous_black = -1;
     
-    /* handle sub-black values (negative EV) */
     int* ev2raw = ev2raw_0 + 10*EV_RESOLUTION;
     
     LOCK(ev2raw_mutex)
@@ -2867,55 +2963,14 @@ static inline void mean23_interpolate(struct raw_info raw_info, uint32_t * raw_b
             build_ev2raw_lut(raw2ev, ev2raw_0, black, white);
             previous_black = black;
         }
-        #pragma omp parallel for
-        for (int y = 2; y < h-2; y ++)
-        {
-            uint32_t* native = BRIGHT_ROW ? bright : dark;
-            uint32_t* interp = BRIGHT_ROW ? dark : bright;
-            int is_rg = (y % 2 == 0); /* RG or GB? */
-            int white = !BRIGHT_ROW ? white_darkened : raw_info.white_level;
-            
-            for (int x = 2; x < w-3; x += 2)
-            {
-                
-                /* red/blue: interpolate from (x,y+2) and (x,y-2) */
-                /* green: interpolate from (x+1,y+1),(x-1,y+1),(x,y-2) or (x+1,y-1),(x-1,y-1),(x,y+2), whichever has the correct brightness */
-                
-                int s = (is_bright[y%4] == is_bright[(y+1)%4]) ? -1 : 1;
-                
-                if (is_rg)
-                {
-                    int ra = raw_get_pixel32(x, y-2);
-                    int rb = raw_get_pixel32(x, y+2);
-                    int ri = mean2(raw2ev[ra], raw2ev[rb], raw2ev[white], 0);
-                    
-                    int ga = raw_get_pixel32(x+1+1, y+s);
-                    int gb = raw_get_pixel32(x+1-1, y+s);
-                    int gc = raw_get_pixel32(x+1, y-2*s);
-                    int gi = mean3(raw2ev[ga], raw2ev[gb], raw2ev[gc], raw2ev[white], 0);
-                    
-                    interp[x   + y * w] = ev2raw[ri];
-                    interp[x+1 + y * w] = ev2raw[gi];
-                }
-                else
-                {
-                    int ba = raw_get_pixel32(x+1  , y-2);
-                    int bb = raw_get_pixel32(x+1  , y+2);
-                    int bi = mean2(raw2ev[ba], raw2ev[bb], raw2ev[white], 0);
-                    
-                    int ga = raw_get_pixel32(x+1, y+s);
-                    int gb = raw_get_pixel32(x-1, y+s);
-                    int gc = raw_get_pixel32(x, y-2*s);
-                    int gi = mean3(raw2ev[ga], raw2ev[gb], raw2ev[gc], raw2ev[white], 0);
-                    
-                    interp[x   + y * w] = ev2raw[gi];
-                    interp[x+1 + y * w] = ev2raw[bi];
-                }
-                
-                native[x   + y * w] = raw_get_pixel32(x, y);
-                native[x+1 + y * w] = raw_get_pixel32(x+1, y);
-            }
-        }
+        mean23_interpolate_with_lut(raw_info,
+                                    raw_buffer_32,
+                                    dark,
+                                    bright,
+                                    white_darkened,
+                                    is_bright,
+                                    raw2ev,
+                                    ev2raw);
     }
     UNLOCK(ev2raw_mutex)
 }
@@ -3112,7 +3167,7 @@ static inline void build_alias_map(struct raw_info raw_info,
                                                  -alias_map[x-4 + (y+4) * w], -alias_map[x-2 + (y+4) * w], -alias_map[x+0 + (y+4) * w], -alias_map[x+2 + (y+4) * w], -alias_map[x+4 + (y+4) * w],
                                                                               -alias_map[x-2 + (y+6) * w], -alias_map[x+0 + (y+6) * w], -alias_map[x+2 + (y+6) * w],
             };
-            alias_aux[x + y * w] = -kth_smallest_int(neighbours, COUNT(neighbours), 5);
+            alias_aux[x + y * w] = -alias_map_fifth_smallest_37(neighbours);
         }
     }
 #ifndef STDOUT_SILENT
@@ -3642,13 +3697,50 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
 #ifndef STDOUT_SILENT
         printf("Chroma smoothing...\n");
 #endif
+        const double chroma_stage_start = mlv_stage_timing_now();
         mix_stage_start = mlv_stage_timing_now();
-        memcpy(fullres_smooth, fullres, w * h * sizeof(uint32_t));
-        memcpy(halfres_smooth, halfres, w * h * sizeof(uint32_t));
-        hdr_chroma_smooth(raw_info, fullres, fullres_smooth, chroma_smooth_method, raw2ev, ev2raw);
-        hdr_chroma_smooth(raw_info, halfres, halfres_smooth, chroma_smooth_method, raw2ev, ev2raw);
-        g_dualiso_full20bit_timing.mix_chroma_ms +=
+        if (w > 0 && h > 0)
+        {
+            const size_t row_pixels = (size_t)w;
+            const size_t row_bytes = row_pixels * sizeof(uint32_t);
+            const int copy_fullres = fullres_smooth != fullres;
+
+            #pragma omp parallel
+            {
+                if (copy_fullres)
+                {
+                    #pragma omp for nowait schedule(static)
+                    for (int y = 0; y < h; ++y)
+                    {
+                        memcpy(&fullres_smooth[(size_t)y * row_pixels],
+                               &fullres[(size_t)y * row_pixels],
+                               row_bytes);
+                    }
+                }
+
+                #pragma omp for schedule(static)
+                for (int y = 0; y < h; ++y)
+                {
+                    memcpy(&halfres_smooth[(size_t)y * row_pixels],
+                           &halfres[(size_t)y * row_pixels],
+                           row_bytes);
+                }
+            }
+        }
+        g_dualiso_full20bit_timing.mix_chroma_copy_ms +=
             dualiso_debug_elapsed_ms(mix_stage_start);
+
+        mix_stage_start = mlv_stage_timing_now();
+        hdr_chroma_smooth(raw_info, fullres, fullres_smooth, chroma_smooth_method, raw2ev, ev2raw);
+        g_dualiso_full20bit_timing.mix_chroma_fullres_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
+
+        mix_stage_start = mlv_stage_timing_now();
+        hdr_chroma_smooth(raw_info, halfres, halfres_smooth, chroma_smooth_method, raw2ev, ev2raw);
+        g_dualiso_full20bit_timing.mix_chroma_halfres_ms +=
+            dualiso_debug_elapsed_ms(mix_stage_start);
+        g_dualiso_full20bit_timing.mix_chroma_ms +=
+            dualiso_debug_elapsed_ms(chroma_stage_start);
     }
     if(alias_map)
     {
@@ -3725,11 +3817,9 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
         memcpy(overexposed, over_aux, (size_t)w * h * sizeof(uint16_t));
     }
 
-    int overexposed_blur_avx2 = 0;
 #ifdef DUALISO_AVX2_AVAILABLE
-    if (g_dualiso_hq_use_avx2)
+    if (overexposed_avx2)
     {
-        overexposed_blur_avx2 = 1;
         #pragma omp parallel for
         for (int y = 3; y < h-3; y ++)
         {
@@ -3741,7 +3831,7 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
         }
     }
 #endif
-    if (!overexposed_blur_avx2)
+    if (!overexposed_avx2)
     {
         #pragma omp parallel for collapse(2)
         for (int y = 3; y < h-3; y ++)
@@ -3789,44 +3879,82 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
     if (g_dualiso_hq_use_avx2)
     {
-        #pragma omp parallel for
-        for (int y = 0; y < h; y ++) {
-            final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
-                                 &fullres[(size_t)y*w],
-                                 &fullres_smooth[(size_t)y*w],
-                                 &halfres_smooth[(size_t)y*w],
-                                 &dark[(size_t)y*w],
-                                 &bright[(size_t)y*w],
-                                 &overexposed[(size_t)y*w],
-                                 alias_map ? &alias_map[(size_t)y*w] : NULL,
-                                 raw2ev, ev2raw, fullres_curve,
-                                 black, dark_noise, w);
-            /* tail: pixels not covered by SIMD bulk */
-            int x_start = (w / 8) * 8;
-            for (int x = x_start; x < w; x ++) {
-                int b = bright[x + y*w];
-                int hr = halfres_smooth[x + y*w];
-                int fr = fullres[x + y*w];
-                int frs = fullres_smooth[x + y*w];
-                int hrev = raw2ev[hr];
-                int frev = raw2ev[fr];
-                int frsev = raw2ev[frs];
-                double f = fullres_curve[b & 0xFFFFF];
-                double c = 0;
-                if (alias_map) {
+        if (alias_map)
+        {
+            #pragma omp parallel for
+            for (int y = 0; y < h; y ++) {
+                final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
+                                     &fullres[(size_t)y*w],
+                                     &fullres_smooth[(size_t)y*w],
+                                     &halfres_smooth[(size_t)y*w],
+                                     &dark[(size_t)y*w],
+                                     &bright[(size_t)y*w],
+                                     &overexposed[(size_t)y*w],
+                                     &alias_map[(size_t)y*w],
+                                     raw2ev, ev2raw, fullres_curve,
+                                     black, dark_noise, w);
+                /* tail: pixels not covered by SIMD bulk */
+                int x_start = (w / 8) * 8;
+                for (int x = x_start; x < w; x ++) {
+                    int b = bright[x + y*w];
+                    int hr = halfres_smooth[x + y*w];
+                    int fr = fullres[x + y*w];
+                    int frs = fullres_smooth[x + y*w];
+                    int hrev = raw2ev[hr];
+                    int frev = raw2ev[fr];
+                    int frsev = raw2ev[frs];
+                    double f = fullres_curve[b & 0xFFFFF];
                     int co = alias_map[x + y*w];
-                    c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
+                    double c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
+                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                    c = MAX(c, ovf);
+                    double noisy_or_overexposed = MAX(ovf, 1-f);
+                    f = MAX(f, c);
+                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+                    int output = hrev * (1-f) + fev * f;
+                    output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
+                    raw_set_pixel32(x, y, ev2raw[output]);
                 }
-                double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
-                c = MAX(c, ovf);
-                double noisy_or_overexposed = MAX(ovf, 1-f);
-                f = MAX(f, c);
-                double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
-                int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
-                f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
-                int output = hrev * (1-f) + fev * f;
-                output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
-                raw_set_pixel32(x, y, ev2raw[output]);
+            }
+        }
+        else
+        {
+            #pragma omp parallel for
+            for (int y = 0; y < h; y ++) {
+                final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
+                                     &fullres[(size_t)y*w],
+                                     &fullres_smooth[(size_t)y*w],
+                                     &halfres_smooth[(size_t)y*w],
+                                     &dark[(size_t)y*w],
+                                     &bright[(size_t)y*w],
+                                     &overexposed[(size_t)y*w],
+                                     NULL,
+                                     raw2ev, ev2raw, fullres_curve,
+                                     black, dark_noise, w);
+                /* tail: pixels not covered by SIMD bulk */
+                int x_start = (w / 8) * 8;
+                for (int x = x_start; x < w; x ++) {
+                    int b = bright[x + y*w];
+                    int hr = halfres_smooth[x + y*w];
+                    int fr = fullres[x + y*w];
+                    int frs = fullres_smooth[x + y*w];
+                    int hrev = raw2ev[hr];
+                    int frev = raw2ev[fr];
+                    int frsev = raw2ev[frs];
+                    double f = fullres_curve[b & 0xFFFFF];
+                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                    double c = ovf;
+                    double noisy_or_overexposed = MAX(ovf, 1-f);
+                    f = MAX(f, c);
+                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+                    int output = hrev * (1-f) + fev * f;
+                    output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
+                    raw_set_pixel32(x, y, ev2raw[output]);
+                }
             }
         }
     }
@@ -4167,7 +4295,15 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     else
     {
         dualiso_debug_note_hq_path(1);
-        mean23_interpolate(raw_info, raw_buffer_32, dark, bright, black, white, white_darkened, is_bright);
+        mean23_interpolate(raw_info,
+                           raw_buffer_32,
+                           dark,
+                           bright,
+                           black,
+                           white,
+                           white_darkened,
+                           is_bright,
+                           scratch);
     }
 
     border_interpolate(raw_info, raw_buffer_32, dark, bright, is_bright);

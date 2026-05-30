@@ -227,19 +227,95 @@ static void convert_20_to_16bit_row_avx2(uint16_t * out,
  * Processes 8 pixels per iter; tail pixels handled by caller.
  * ====================================================================== */
 __attribute__((target("avx2,fma")))
+static void final_blend_row_avx2_no_alias(uint32_t * raw_buffer_32,
+                                          const uint32_t * fullres,
+                                          const uint32_t * fullres_smooth,
+                                          const uint32_t * halfres_smooth,
+                                          const uint32_t * dark,
+                                          const uint32_t * bright,
+                                          const uint16_t * overexposed,
+                                          const int * raw2ev_lut,
+                                          const int * ev2raw_lut,        /* points to ev2raw_0 + 10*EV_RESOLUTION */
+                                          const double * fullres_curve,
+                                          int black, int dark_noise,
+                                          int total)
+{
+    const __m256i mask20 = _mm256_set1_epi32(0xFFFFF);
+    const __m256i v_black     = _mm256_set1_epi32(black);
+    const __m256i v_lo        = _mm256_set1_epi32(-10*EV_RESOLUTION);
+    const __m256i v_hi        = _mm256_set1_epi32(14*EV_RESOLUTION - 1);
+    const __m256  v_one       = _mm256_set1_ps(1.0f);
+    const __m256  v_zero      = _mm256_setzero_ps();
+    const __m256  v_inv_200   = _mm256_set1_ps(1.0f / 200.0f);
+    const __m256  v_inv4dn    = _mm256_set1_ps(1.0f / (4.0f * (float)dark_noise));
+
+    int x = 0;
+    for (; x + 8 <= total; x += 8) {
+        __m256i b   = _mm256_loadu_si256((const __m256i*)&bright[x]);
+        __m256i hr  = _mm256_loadu_si256((const __m256i*)&halfres_smooth[x]);
+        __m256i fr  = _mm256_loadu_si256((const __m256i*)&fullres[x]);
+        __m256i frs = _mm256_loadu_si256((const __m256i*)&fullres_smooth[x]);
+        __m256i d   = _mm256_loadu_si256((const __m256i*)&dark[x]);
+
+        __m256i hrev_i  = _mm256_i32gather_epi32(raw2ev_lut, hr,  4);
+        __m256i frev_i  = _mm256_i32gather_epi32(raw2ev_lut, fr,  4);
+        __m256i frsev_i = _mm256_i32gather_epi32(raw2ev_lut, frs, 4);
+
+        __m256 hrev  = _mm256_cvtepi32_ps(hrev_i);
+        __m256 frev  = _mm256_cvtepi32_ps(frev_i);
+        __m256 frsev = _mm256_cvtepi32_ps(frsev_i);
+
+        __m256i b_idx = _mm256_and_si256(b, mask20);
+        __m128i b_idx_lo = _mm256_castsi256_si128(b_idx);
+        __m128i b_idx_hi = _mm256_extracti128_si256(b_idx, 1);
+        __m256d f_lo_d = _mm256_i32gather_pd(fullres_curve, b_idx_lo, 8);
+        __m256d f_hi_d = _mm256_i32gather_pd(fullres_curve, b_idx_hi, 8);
+        __m128 f_lo = _mm256_cvtpd_ps(f_lo_d);
+        __m128 f_hi = _mm256_cvtpd_ps(f_hi_d);
+        __m256 f = _mm256_insertf128_ps(_mm256_castps128_ps256(f_lo), f_hi, 1);
+
+        __m256 c_amap = v_zero;
+
+        __m128i over16 = _mm_loadu_si128((const __m128i*)&overexposed[x]);
+        __m256i over_i = _mm256_cvtepu16_epi32(over16);
+        __m256 ovf = _mm256_mul_ps(_mm256_cvtepi32_ps(over_i), v_inv_200);
+        ovf = _mm256_min_ps(_mm256_max_ps(ovf, v_zero), v_one);
+
+        __m256 c = _mm256_max_ps(c_amap, ovf);
+        __m256 noisy_or_over = _mm256_max_ps(ovf, _mm256_sub_ps(v_one, f));
+        f = _mm256_max_ps(f, c);
+
+        __m256 fev = _mm256_fmadd_ps(noisy_or_over, _mm256_sub_ps(frsev, frev), frev);
+
+        __m256i sig = _mm256_srai_epi32(_mm256_add_epi32(d, b), 1);
+        __m256i sig_minus_black = _mm256_sub_epi32(sig, v_black);
+        __m256 cap = _mm256_mul_ps(_mm256_cvtepi32_ps(sig_minus_black), v_inv4dn);
+        f = _mm256_max_ps(v_zero, _mm256_min_ps(f, cap));
+
+        __m256 outf = _mm256_fmadd_ps(f, _mm256_sub_ps(fev, hrev), hrev);
+
+        __m256i outi = _mm256_cvttps_epi32(outf);
+        outi = _mm256_min_epi32(_mm256_max_epi32(outi, v_lo), v_hi);
+
+        __m256i raw_out = _mm256_i32gather_epi32(ev2raw_lut, outi, 4);
+        _mm256_storeu_si256((__m256i*)&raw_buffer_32[x], raw_out);
+    }
+}
+
+__attribute__((target("avx2,fma")))
 static void final_blend_row_avx2(uint32_t * raw_buffer_32,
-                                  const uint32_t * fullres,
-                                  const uint32_t * fullres_smooth,
-                                  const uint32_t * halfres_smooth,
-                                  const uint32_t * dark,
-                                  const uint32_t * bright,
-                                  const uint16_t * overexposed,
-                                  const uint16_t * alias_map,   /* may be NULL */
-                                  const int * raw2ev_lut,
-                                  const int * ev2raw_lut,        /* points to ev2raw_0 + 10*EV_RESOLUTION */
-                                  const double * fullres_curve,
-                                  int black, int dark_noise,
-                                  int total)
+                                 const uint32_t * fullres,
+                                 const uint32_t * fullres_smooth,
+                                 const uint32_t * halfres_smooth,
+                                 const uint32_t * dark,
+                                 const uint32_t * bright,
+                                 const uint16_t * overexposed,
+                                 const uint16_t * alias_map,   /* may be NULL */
+                                 const int * raw2ev_lut,
+                                 const int * ev2raw_lut,        /* points to ev2raw_0 + 10*EV_RESOLUTION */
+                                 const double * fullres_curve,
+                                 int black, int dark_noise,
+                                 int total)
 {
     const __m256i mask20 = _mm256_set1_epi32(0xFFFFF);
     const __m256i v_black     = _mm256_set1_epi32(black);
@@ -310,9 +386,9 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
         __m256i raw_out = _mm256_i32gather_epi32(ev2raw_lut, outi, 4);
         _mm256_storeu_si256((__m256i*)&raw_buffer_32[x], raw_out);
     }
-    (void)x;
 }
 
+__attribute__((target("avx2,fma")))
 /* ====================================================================== *
  * B2.2 — mix_images half-res blend.
  * ====================================================================== */

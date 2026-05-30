@@ -1824,6 +1824,12 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             continue;
         }
 
+        /* The processed8 prefetch worker runs on its own thread, so the
+         * render-thread-local playback preview flag would otherwise be lost
+         * here. Keep the same playback preview policy active while the
+         * background worker renders the cached frame so it does not spend
+         * export-grade CPU on preview-only playback work. */
+        processingSetPlaybackPreviewMode(1);
         int renderOk = mlv_render_processed_frame8_direct_with_processing(
             task->video,
             task->processing,
@@ -1833,6 +1839,7 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             task->threads,
             task->scaleFactor,
             0);
+        processingSetPlaybackPreviewMode(0);
 
         pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
         if (renderOk

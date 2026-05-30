@@ -365,7 +365,7 @@
     "userFacingFeasibility": "high for committed Git changes; medium for branch/worktree cleanup with recovery evidence; manual for uncommitted foreign dirty paths"
   },
   "remediationFreeze": {
-    "enabled": true,
+    "enabled": false,
     "markerPath": ".claude-state/closeout-remediation.freeze",
     "envVar": "CLOSEOUT_REMEDIATION_FREEZE",
     "generatedAuditRoot": ".claude-state/closeout-log/remediation-freeze",

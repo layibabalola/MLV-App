@@ -5,6 +5,10 @@
 #include <QThread>
 #include <QtGlobal>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 inline bool mlvappWorkerThreadOverrideActive()
 {
     bool singleThreadOk = false;
@@ -75,6 +79,35 @@ inline int mlvappEffectivePlaybackWorkerThreadCount()
     }
 
     return qBound(1, workerThreads, cap);
+}
+
+inline int mlvappPlaybackOpenMpThreadTargetFor(int workerThreads, int currentOpenMpMaxThreads)
+{
+    if (workerThreads <= 0) {
+        return currentOpenMpMaxThreads > 0 ? currentOpenMpMaxThreads : 1;
+    }
+
+    if (currentOpenMpMaxThreads > 0 && currentOpenMpMaxThreads < workerThreads) {
+        return currentOpenMpMaxThreads;
+    }
+
+    return workerThreads;
+}
+
+inline int mlvappApplyPlaybackOpenMpThreadCount(int workerThreads)
+{
+#ifdef _OPENMP
+    const int currentOpenMpMaxThreads = omp_get_max_threads();
+    const int target =
+        mlvappPlaybackOpenMpThreadTargetFor(workerThreads, currentOpenMpMaxThreads);
+    if (target > 0 && target != currentOpenMpMaxThreads) {
+        omp_set_num_threads(target);
+    }
+    return target;
+#else
+    Q_UNUSED(workerThreads);
+    return 1;
+#endif
 }
 
 #endif

@@ -27,7 +27,9 @@ Added dual threading by masc4ii (c) 2021
 
 #include "RBFilterPlain.h"
 #include <algorithm>
+#include <cstring>
 #include <math.h>
+#include <omp.h>
 
 using namespace std;
 
@@ -39,6 +41,13 @@ static inline int getDiffFactorRgb3(const uint16_t *color1, const uint16_t *colo
     const int dg = abs((int)color1[1] - (int)color2[1]);
     const int db = abs((int)color1[2] - (int)color2[2]);
     return ((dr + db) >> 2) + (dg >> 1);
+}
+
+static inline uint16_t limitU16FromInt32(int32_t value)
+{
+    if (value < 0) return 0;
+    if (value > QX_DEF_U16_MAX) return QX_DEF_U16_MAX;
+    return static_cast<uint16_t>(value);
 }
 
 CRBFilterPlain::CRBFilterPlain()
@@ -83,34 +92,17 @@ void CRBFilterPlain::reserveMemory(int max_width, int max_height, int channels)
 	int width_height = m_reserve_width * m_reserve_height;
 	int width_height_channel = width_height * m_reserve_channels;
 
-	m_left_pass_color = new float[width_height_channel];
-	m_left_pass_factor = new float[width_height];
+	m_left_pass_color = new float[width_height_channel]();
+	m_left_pass_factor = new float[width_height]();
 
-	m_right_pass_color = new float[width_height_channel];
-	m_right_pass_factor = new float[width_height];
+	m_right_pass_color = new float[width_height_channel]();
+	m_right_pass_factor = new float[width_height]();
 
-	m_down_pass_color = new float[width_height_channel];
-	m_down_pass_factor = new float[width_height];
+	m_down_pass_color = new float[width_height_channel]();
+	m_down_pass_factor = new float[width_height]();
 
-	m_up_pass_color = new float[width_height_channel];
-	m_up_pass_factor = new float[width_height];
-
-#pragma omp parallel for
-    for( int i = 0; i < width_height_channel; i++ )
-    {
-        m_left_pass_color[i] = 0;
-        m_right_pass_color[i] = 0;
-        m_down_pass_color[i] = 0;
-        m_up_pass_color[i] = 0;
-    }
-#pragma omp parallel for
-    for( int i = 0; i < width_height; i++ )
-    {
-        m_left_pass_factor[i] = 0;
-        m_right_pass_factor[i] = 0;
-        m_down_pass_factor[i] = 0;
-        m_up_pass_factor[i] = 0;
-    }
+	m_up_pass_color = new float[width_height_channel]();
+	m_up_pass_factor = new float[width_height]();
 }
 
 void CRBFilterPlain::releaseMemory()
@@ -221,11 +213,18 @@ int CRBFilterPlain::getDiffFactor(const uint16_t *color1, const uint16_t *color2
 // memory must be reserved before calling image filter
 // this implementation of filter uses plain C++, single threaded
 // channel count must be 3 or 4 (alpha not used)
-void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
+void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict img_dst,
 	float sigma_spatial, float sigma_range,
 	int width, int height, int channel,
-    const uint16_t * output_lut)
+    const uint16_t * __restrict output_lut,
+    const int32_t * __restrict output_curve_r,
+    const int32_t * __restrict output_curve_g,
+    const int32_t * __restrict output_curve_b)
 {
+    const bool timing_enabled = m_timing_enabled;
+    const double filter_start = timing_enabled ? omp_get_wtime() : 0.0;
+    m_last_timing = RBFilterPlainTiming();
+
     if(!img_src) return;
     if(!img_dst) return;
     if(!(m_reserve_channels == channel)) return;
@@ -234,40 +233,53 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
 
     const int width_height = width * height;
     const int width_height_channel = width_height * channel;
+    const bool rgb3 = (channel == 3);
+    const bool output_curve_index =
+        output_lut
+        && output_curve_r
+        && output_curve_g
+        && output_curve_b
+        && channel == 3;
 
     const int last_row_color_offset = (height - 1) * width * channel;
     const int down_written_pixels = width + (height - 1) * (width - 1);
     const int up_unwritten_pixels = height - 1;
 
-    std::fill(m_left_pass_color + last_row_color_offset,
-              m_left_pass_color + width_height_channel,
-              0.0f);
-    std::fill(m_left_pass_factor + (height - 1) * width,
-              m_left_pass_factor + width_height,
-              0.0f);
+    const double boundary_start = timing_enabled ? omp_get_wtime() : 0.0;
+    memset(m_left_pass_color + last_row_color_offset,
+           0,
+           (size_t)(width_height_channel - last_row_color_offset) * sizeof(float));
+    memset(m_left_pass_factor + (height - 1) * width,
+           0,
+           (size_t)(width_height - (height - 1) * width) * sizeof(float));
 
-    std::fill(m_right_pass_color,
-              m_right_pass_color + width * channel,
-              0.0f);
-    std::fill(m_right_pass_factor,
-              m_right_pass_factor + width,
-              0.0f);
+    memset(m_right_pass_color,
+           0,
+           (size_t)width * (size_t)channel * sizeof(float));
+    memset(m_right_pass_factor,
+           0,
+           (size_t)width * sizeof(float));
 
-    std::fill(m_down_pass_color + down_written_pixels * channel,
-              m_down_pass_color + width_height_channel,
-              0.0f);
-    std::fill(m_down_pass_factor + down_written_pixels,
-              m_down_pass_factor + width_height,
-              0.0f);
+    memset(m_down_pass_color + down_written_pixels * channel,
+           0,
+           (size_t)(width_height_channel - down_written_pixels * channel) * sizeof(float));
+    memset(m_down_pass_factor + down_written_pixels,
+           0,
+           (size_t)(width_height - down_written_pixels) * sizeof(float));
 
-    std::fill(m_up_pass_color,
-              m_up_pass_color + up_unwritten_pixels * channel,
-              0.0f);
-    std::fill(m_up_pass_factor,
-              m_up_pass_factor + up_unwritten_pixels,
-              0.0f);
+    memset(m_up_pass_color,
+           0,
+           (size_t)up_unwritten_pixels * (size_t)channel * sizeof(float));
+    memset(m_up_pass_factor,
+           0,
+           (size_t)up_unwritten_pixels * sizeof(float));
+    if( timing_enabled )
+    {
+        m_last_timing.boundary_ms = (omp_get_wtime() - boundary_start) * 1000.0;
+    }
 
     // compute a lookup table
+    const double range_table_start = timing_enabled ? omp_get_wtime() : 0.0;
     float alpha_f = static_cast<float>(exp(-sqrt(2.0) / (sigma_spatial * QX_DEF_U16_MAX)));
     float inv_alpha_f = 1.f - alpha_f;
     float inv_sigma_range = 1.0f / (sigma_range * QX_DEF_U16_MAX);
@@ -293,11 +305,31 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
         m_range_table_valid = true;
     }
     const float * range_table_f = m_range_table;
+    if( timing_enabled )
+    {
+        m_last_timing.range_table_ms = (omp_get_wtime() - range_table_start) * 1000.0;
+    }
+
+    double left_start = 0.0;
+    double right_start = 0.0;
+    double horizontal_average_start = 0.0;
+    double down_ms = 0.0;
+    double up_ms = 0.0;
+    double output_start = 0.0;
 
     #pragma omp parallel
     {
+        if( timing_enabled )
+        {
+            #pragma omp master
+            {
+                left_start = omp_get_wtime();
+            }
+            #pragma omp barrier
+        }
+
         // Horizontal rows are independent; process the left and right scans row-parallel.
-        #pragma omp for
+        #pragma omp for nowait
         for (int y = 0; y < height-1; y++)
         {
             const int row_color_offset = y * width * channel;
@@ -321,7 +353,7 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
             {
                 // determine difference in pixel color between current and previous
                 // calculation is different depending on number of channels
-                int diff = channel == 3
+                int diff = rgb3
                     ? getDiffFactorRgb3(src_color, src_prev)
                     : getDiffFactor(src_color, src_prev);
                 src_prev = src_color;
@@ -335,6 +367,17 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
                     *left_pass_color++ = inv_alpha_f * (*src_color++) + alpha_f * (*prev_color++);
                 }
             }
+        }
+
+        if( timing_enabled )
+        {
+            #pragma omp barrier
+            #pragma omp master
+            {
+                m_last_timing.left_ms = (omp_get_wtime() - left_start) * 1000.0;
+                right_start = omp_get_wtime();
+            }
+            #pragma omp barrier
         }
 
         #pragma omp for
@@ -361,7 +404,7 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
             {
                 // Preserve the original pointer arithmetic, including the hard-coded
                 // neighbor stride used by this legacy filter.
-                int diff = channel == 3
+                int diff = rgb3
                     ? getDiffFactorRgb3(src_color, src_color - 3)
                     : getDiffFactor(src_color, src_color - 3);
 
@@ -374,6 +417,16 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
                     *right_pass_color-- = inv_alpha_f * (*src_color--) + alpha_f * (*prev_color--);
                 }
             }
+        }
+
+        if( timing_enabled )
+        {
+            #pragma omp master
+            {
+                m_last_timing.right_ms = (omp_get_wtime() - right_start) * 1000.0;
+                horizontal_average_start = omp_get_wtime();
+            }
+            #pragma omp barrier
         }
 
         // vertical pass will be applied on top on horizontal pass, while using pixel differences from original image
@@ -398,108 +451,147 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
             }
         }
 
-        #pragma omp for
-        for( int par = 0; par < 2; par++ )
+        if( timing_enabled )
         {
-            ///////////////
-            // Down pass
-            if( !par )
+            #pragma omp master
             {
-                const float* src_color_hor = m_left_pass_color; // result of horizontal pass filter
-
-                const uint16_t* src_color = img_src;
-                float* down_pass_color = m_down_pass_color;
-                float* down_pass_factor = m_down_pass_factor;
-
-                const uint16_t* src_prev = src_color;
-                const float* prev_color = down_pass_color;
-                const float* prev_factor = down_pass_factor;
-
-                // 1st line done separately because no previous line
-                for (int x = 0; x < width; x++)
-                {
-                    *down_pass_factor++ = 1.f;
-                    for (int c = 0; c < channel; c++)
-                    {
-                        *down_pass_color++ = *src_color_hor++;
-                    }
-                    src_color += channel;
-                }
-
-                // handle other lines
-                for (int y = 1; y < height; y++)
-                {
-                    for (int x = 0; x < width-1; x++)
-                    {
-                        // determine difference in pixel color between current and previous
-                        // calculation is different depending on number of channels
-                        int diff = channel == 3
-                            ? getDiffFactorRgb3(src_color, src_prev)
-                            : getDiffFactor(src_color, src_prev);
-                        src_prev += channel;
-                        src_color += channel;
-
-                        float alpha_f = range_table_f[diff];
-
-                        *down_pass_factor++ = inv_alpha_f + alpha_f * (*prev_factor++);
-
-                        for (int c = 0; c < channel; c++)
-                        {
-                            *down_pass_color++ = inv_alpha_f * (*src_color_hor++) + alpha_f * (*prev_color++);
-                        }
-                    }
-                }
+                m_last_timing.horizontal_average_ms =
+                    (omp_get_wtime() - horizontal_average_start) * 1000.0;
             }
-            else
-            ///////////////
-            // Up pass
+            #pragma omp barrier
+        }
+
+    }
+
+    auto runVerticalDown = [&]()
+    {
+        const double vertical_pass_start =
+            timing_enabled ? omp_get_wtime() : 0.0;
+        const float* src_color_hor = m_left_pass_color; // result of horizontal pass filter
+
+        const uint16_t* src_color = img_src;
+        float* down_pass_color = m_down_pass_color;
+        float* down_pass_factor = m_down_pass_factor;
+
+        const uint16_t* src_prev = src_color;
+        const float* prev_color = down_pass_color;
+        const float* prev_factor = down_pass_factor;
+
+        // 1st line done separately because no previous line
+        for (int x = 0; x < width; x++)
+        {
+            *down_pass_factor++ = 1.f;
+            for (int c = 0; c < channel; c++)
             {
-                // start from end and then go up to begining
-                int last_index = width * height * channel - 1;
-                const uint16_t* src_color = img_src + last_index;
-                const float* src_color_hor = m_left_pass_color + last_index; // result of horizontal pass filter
-                float* up_pass_color = m_up_pass_color + last_index;
-                float* up_pass_factor = m_up_pass_factor + (width * height - 1);
+                *down_pass_color++ = *src_color_hor++;
+            }
+            src_color += channel;
+        }
 
-                //	const uint16_t* src_prev = src_color;
-                const float* prev_color = up_pass_color;
-                const float* prev_factor = up_pass_factor;
+        // handle other lines
+        for (int y = 1; y < height; y++)
+        {
+            for (int x = 0; x < width-1; x++)
+            {
+                // determine difference in pixel color between current and previous
+                // calculation is different depending on number of channels
+                int diff = rgb3
+                    ? getDiffFactorRgb3(src_color, src_prev)
+                    : getDiffFactor(src_color, src_prev);
+                src_prev += channel;
+                src_color += channel;
 
-                // 1st line done separately because no previous line
-                for (int x = 0; x < width; x++)
+                float alpha_f = range_table_f[diff];
+
+                *down_pass_factor++ = inv_alpha_f + alpha_f * (*prev_factor++);
+
+                for (int c = 0; c < channel; c++)
                 {
-                    *up_pass_factor-- = 1.f;
-                    for (int c = 0; c < channel; c++)
-                    {
-                        *up_pass_color-- = *src_color_hor--;
-                    }
-                    src_color -= channel;
-                }
-
-                // handle other lines
-                for (int y = 1; y < height; y++)
-                {
-                    for (int x = 0; x < width-1; x++)
-                    {
-                        // determine difference in pixel color between current and previous
-                        // calculation is different depending on number of channels
-                        src_color -= channel;
-                        int diff = channel == 3
-                            ? getDiffFactorRgb3(src_color, src_color + width * channel)
-                            : getDiffFactor(src_color, src_color + width * channel);
-
-                        float alpha_f = range_table_f[diff];
-
-                        *up_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
-
-                        for (int c = 0; c < channel; c++)
-                        {
-                            *up_pass_color-- = inv_alpha_f * (*src_color_hor--) + alpha_f * (*prev_color--);
-                        }
-                    }
+                    *down_pass_color++ = inv_alpha_f * (*src_color_hor++) + alpha_f * (*prev_color++);
                 }
             }
         }
+        if( timing_enabled )
+        {
+            down_ms = (omp_get_wtime() - vertical_pass_start) * 1000.0;
+        }
+    };
+
+    auto runVerticalUp = [&]()
+    {
+        const double vertical_pass_start =
+            timing_enabled ? omp_get_wtime() : 0.0;
+        // start from end and then go up to begining
+        int last_index = width * height * channel - 1;
+        const uint16_t* src_color = img_src + last_index;
+        const float* src_color_hor = m_left_pass_color + last_index; // result of horizontal pass filter
+        float* up_pass_color = m_up_pass_color + last_index;
+        float* up_pass_factor = m_up_pass_factor + (width * height - 1);
+
+	//	const uint16_t* src_prev = src_color;
+        const float* prev_color = up_pass_color;
+        const float* prev_factor = up_pass_factor;
+
+        // 1st line done separately because no previous line
+        for (int x = 0; x < width; x++)
+        {
+            *up_pass_factor-- = 1.f;
+            for (int c = 0; c < channel; c++)
+            {
+                *up_pass_color-- = *src_color_hor--;
+            }
+            src_color -= channel;
+        }
+
+        // handle other lines
+        for (int y = 1; y < height; y++)
+        {
+            for (int x = 0; x < width-1; x++)
+            {
+                // determine difference in pixel color between current and previous
+                // calculation is different depending on number of channels
+                src_color -= channel;
+                int diff = rgb3
+                    ? getDiffFactorRgb3(src_color, src_color + width * channel)
+                    : getDiffFactor(src_color, src_color + width * channel);
+
+                float alpha_f = range_table_f[diff];
+
+                *up_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
+
+                for (int c = 0; c < channel; c++)
+                {
+                    *up_pass_color-- = inv_alpha_f * (*src_color_hor--) + alpha_f * (*prev_color--);
+                }
+            }
+        }
+        if( timing_enabled )
+        {
+            up_ms = (omp_get_wtime() - vertical_pass_start) * 1000.0;
+        }
+    };
+
+    #pragma omp parallel sections num_threads(2)
+    {
+        #pragma omp section
+        {
+            runVerticalDown();
+        }
+        #pragma omp section
+        {
+            runVerticalUp();
+        }
+    }
+
+    if( timing_enabled )
+    {
+        m_last_timing.vertical_down_ms = down_ms;
+        m_last_timing.vertical_up_ms = up_ms;
+        output_start = omp_get_wtime();
+    }
+
+    #pragma omp parallel
+    {
 
         ///////////////
         // average result of vertical pass is written to output buffer
@@ -513,18 +605,45 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
             {
                 if (channel == 3)
                 {
-                    #pragma omp for
-                    for (int i = 0; i < width_height; i++)
+                    if (output_curve_index)
                     {
-                        // average color divided by average factor
-                        float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
-                        int idx = i + i + i;
-                        img_dst[idx] =
-                            output_lut[(uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])))];
-                        img_dst[idx + 1] =
-                            output_lut[(uint16_t)(factor * ((up_pass_color[idx + 1]) + (down_pass_color[idx + 1])))];
-                        img_dst[idx + 2] =
-                            output_lut[(uint16_t)(factor * ((up_pass_color[idx + 2]) + (down_pass_color[idx + 2])))];
+                        #pragma omp for
+                        for (int i = 0; i < width_height; i++)
+                        {
+                            // average color divided by average factor
+                            float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
+                            int idx = i + i + i;
+                            const uint16_t filtered_r =
+                                output_lut[(uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])))];
+                            const uint16_t filtered_g =
+                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 1]) + (down_pass_color[idx + 1])))];
+                            const uint16_t filtered_b =
+                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 2]) + (down_pass_color[idx + 2])))];
+                            const int32_t curve_index =
+                                ((output_curve_r[filtered_r] << 2)
+                               + (output_curve_g[filtered_g] * 11)
+                               +  output_curve_b[filtered_b]) >> 4;
+                            const uint16_t mask_value = limitU16FromInt32(curve_index);
+                            img_dst[idx] = mask_value;
+                            img_dst[idx + 1] = mask_value;
+                            img_dst[idx + 2] = mask_value;
+                        }
+                    }
+                    else
+                    {
+                        #pragma omp for
+                        for (int i = 0; i < width_height; i++)
+                        {
+                            // average color divided by average factor
+                            float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
+                            int idx = i + i + i;
+                            img_dst[idx] =
+                                output_lut[(uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])))];
+                            img_dst[idx + 1] =
+                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 1]) + (down_pass_color[idx + 1])))];
+                            img_dst[idx + 2] =
+                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 2]) + (down_pass_color[idx + 2])))];
+                        }
                     }
                 }
                 else
@@ -579,5 +698,17 @@ void CRBFilterPlain::filter(uint16_t* img_src, uint16_t* img_dst,
                 }
             }
         }
+
+        if( timing_enabled )
+        {
+            #pragma omp master
+            {
+                m_last_timing.output_ms = (omp_get_wtime() - output_start) * 1000.0;
+            }
+        }
+    }
+    if( timing_enabled )
+    {
+        m_last_timing.total_ms = (omp_get_wtime() - filter_start) * 1000.0;
     }
 }

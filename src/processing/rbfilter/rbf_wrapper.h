@@ -14,6 +14,19 @@ extern "C" {
 
 #include <stdint.h>
 
+typedef struct recursive_bf_timing_t
+{
+        double total_ms;
+        double boundary_ms;
+        double range_table_ms;
+        double left_ms;
+        double right_ms;
+        double horizontal_average_ms;
+        double vertical_down_ms;
+        double vertical_up_ms;
+        double output_ms;
+} recursive_bf_timing_t;
+
 extern void recursive_bf_wrap(
         uint16_t * img_in,
         uint16_t * img_out,
@@ -26,6 +39,18 @@ extern void recursive_bf_wrap_with_output_lut(
         float sigma_spatial, float sigma_range,
         int width, int height, int channel,
         const uint16_t * output_lut);
+
+extern void recursive_bf_wrap_with_curve_index_lut(
+        uint16_t * img_in,
+        uint16_t * img_out,
+        float sigma_spatial, float sigma_range,
+        int width, int height, int channel,
+        const uint16_t * output_lut,
+        const int32_t * output_curve_r,
+        const int32_t * output_curve_g,
+        const int32_t * output_curve_b);
+
+extern void recursive_bf_get_last_timing(recursive_bf_timing_t * timing);
 
 #ifdef __cplusplus
 }

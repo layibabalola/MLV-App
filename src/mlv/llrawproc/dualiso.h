@@ -146,6 +146,9 @@ typedef struct
     double mix_ev_lut_ms;
     double mix_halfres_ms;
     double mix_chroma_ms;
+    double mix_chroma_copy_ms;
+    double mix_chroma_fullres_ms;
+    double mix_chroma_halfres_ms;
     double mix_alias_map_ms;
     double mix_overexposed_ms;
     double final_blend_ms;

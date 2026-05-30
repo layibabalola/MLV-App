@@ -287,6 +287,7 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->playbackFastScaleActive = slot.playbackFastScaleActive;
         frame->playbackScaledWidth = slot.playbackScaledWidth;
         frame->playbackScaledHeight = slot.playbackScaledHeight;
+        frame->playbackScaledBytesPerLine = slot.playbackScaledBytesPerLine;
         frame->usedGpuBilinearDebayer = slot.usedGpuBilinearDebayer;
         frame->gpuBilinearFallbackReason = slot.gpuBilinearFallbackReason;
         frame->gpuBilinearRendererDescription = slot.gpuBilinearRendererDescription;
@@ -1457,6 +1458,22 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const uint32_t frameNumber = slot.frameNumber;
     const OutputMode outputMode = slot.outputMode;
     const bool useGpuBilinearDebayer = m_activeUseGpuBilinearDebayer;
+    const bool playbackPreviewFastPathActive =
+        outputMode == OutputProcessed8
+        && m_activePresentationContext.playbackActive
+        && m_activePresentationContext.renderThreadUsingPlaybackPreviewProcessing;
+    struct PlaybackPreviewModeGuard
+    {
+        PlaybackPreviewModeGuard( bool enabled )
+        {
+            processingSetPlaybackPreviewMode( enabled ? 1 : 0 );
+        }
+
+        ~PlaybackPreviewModeGuard()
+        {
+            processingSetPlaybackPreviewMode( 0 );
+        }
+    } playbackPreviewModeGuard( playbackPreviewFastPathActive );
     const double frameRequestStageTime = m_activeFrameRequestStageTime;
     const double renderThreadQueueWaitMs =
         (frameRequestStageTime > 0.0 && render_start >= frameRequestStageTime)
@@ -1504,9 +1521,13 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_rendered_height"),
         renderedImageHeight );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_playback_preview_fast_path"),
+        playbackPreviewFastPathActive );
 
     const int generalWorkerThreads = mlvappEffectiveWorkerThreadCount();
     const int workerThreads = mlvappEffectivePlaybackWorkerThreadCount();
+    const int openMpThreads = mlvappApplyPlaybackOpenMpThreadCount(workerThreads);
     if( m_pMlvObject )
     {
         setMlvCpuCores( m_pMlvObject, workerThreads );
@@ -1517,6 +1538,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_worker_thread_cap_active"),
         workerThreads < generalWorkerThreads );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_openmp_threads"),
+        openMpThreads );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_openmp_thread_cap_active"),
+        openMpThreads < generalWorkerThreads );
 
     if ( outputMode == OutputProcessed16 && !slot.rawImage16.empty() )
     {
@@ -1724,6 +1751,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.playbackFastScaleActive = false;
     slot.playbackScaledWidth = 0;
     slot.playbackScaledHeight = 0;
+    slot.playbackScaledBytesPerLine = 0;
     if( outputMode == OutputProcessed8
      && m_activePresentationPreparationOptions.fastPlaybackScale
      && !slot.rawImage8.empty()
@@ -1781,6 +1809,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
             stretchY );
         bool bilinearUsed = false;
         bool cubicUsed = false;
+        const int targetBytesPerLine =
+            ((m_activePresentationPreparationOptions.targetWidth * 3) + 3) & ~3;
 
         if( useCubicPresentationScale )
         {
@@ -1791,7 +1821,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                               m_activePresentationPreparationOptions.targetWidth,
                                               m_activePresentationPreparationOptions.targetHeight,
                                               slot.playbackScaledImage8,
-                                              m_playbackCubicScaleCache );
+                                              m_playbackCubicScaleCache,
+                                              targetBytesPerLine );
             cubicUsed = slot.playbackFastScaleActive;
         }
         if( !slot.playbackFastScaleActive && useBilinearPresentationScale )
@@ -1803,7 +1834,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                                  m_activePresentationPreparationOptions.targetWidth,
                                                  m_activePresentationPreparationOptions.targetHeight,
                                                  slot.playbackScaledImage8,
-                                                 m_playbackBilinearScaleCache );
+                                                 m_playbackBilinearScaleCache,
+                                                 targetBytesPerLine );
             bilinearUsed = slot.playbackFastScaleActive;
         }
         if( !slot.playbackFastScaleActive )
@@ -1815,12 +1847,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                              m_activePresentationPreparationOptions.targetWidth,
                                              m_activePresentationPreparationOptions.targetHeight,
                                              slot.playbackScaledImage8,
-                                             m_playbackScaleCache );
+                                             m_playbackScaleCache,
+                                             targetBytesPerLine );
         }
         if( slot.playbackFastScaleActive )
         {
             slot.playbackScaledWidth = m_activePresentationPreparationOptions.targetWidth;
             slot.playbackScaledHeight = m_activePresentationPreparationOptions.targetHeight;
+            slot.playbackScaledBytesPerLine = targetBytesPerLine;
         }
         slot.stageTimingTelemetry.insert( QStringLiteral("render_thread_playback_scale_active"),
                                           slot.playbackFastScaleActive );
@@ -1989,6 +2023,30 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const double processingSetupMs = processingGetLastSetupMilliseconds();
     const double processingShadowsHighlightsPrepMs =
         processingGetLastShadowsHighlightsPrepMilliseconds();
+    const double processingShadowsHighlightsResizeMs =
+        processingGetLastShadowsHighlightsResizeMilliseconds();
+    const double processingShadowsHighlightsCopyMs =
+        processingGetLastShadowsHighlightsCopyMilliseconds();
+    const double processingShadowsHighlightsFilterMs =
+        processingGetLastShadowsHighlightsFilterMilliseconds();
+    const double processingShadowsHighlightsRbfTotalMs =
+        processingGetLastShadowsHighlightsRbfTotalMilliseconds();
+    const double processingShadowsHighlightsRbfBoundaryMs =
+        processingGetLastShadowsHighlightsRbfBoundaryMilliseconds();
+    const double processingShadowsHighlightsRbfRangeTableMs =
+        processingGetLastShadowsHighlightsRbfRangeTableMilliseconds();
+    const double processingShadowsHighlightsRbfLeftMs =
+        processingGetLastShadowsHighlightsRbfLeftMilliseconds();
+    const double processingShadowsHighlightsRbfRightMs =
+        processingGetLastShadowsHighlightsRbfRightMilliseconds();
+    const double processingShadowsHighlightsRbfHorizontalAverageMs =
+        processingGetLastShadowsHighlightsRbfHorizontalAverageMilliseconds();
+    const double processingShadowsHighlightsRbfVerticalDownMs =
+        processingGetLastShadowsHighlightsRbfVerticalDownMilliseconds();
+    const double processingShadowsHighlightsRbfVerticalUpMs =
+        processingGetLastShadowsHighlightsRbfVerticalUpMilliseconds();
+    const double processingShadowsHighlightsRbfOutputMs =
+        processingGetLastShadowsHighlightsRbfOutputMilliseconds();
     const double processingHighestGreenMs =
         processingGetLastHighestGreenMilliseconds();
     const double processingCoreMs = processingGetLastCoreMilliseconds();
@@ -2152,6 +2210,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.mix_halfres_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_ms"),
                                       dualIsoFull20.mix_chroma_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_copy_ms"),
+                                      dualIsoFull20.mix_chroma_copy_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_fullres_ms"),
+                                      dualIsoFull20.mix_chroma_fullres_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_alias_map_ms"),
                                       dualIsoFull20.mix_alias_map_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_overexposed_ms"),
@@ -2214,6 +2278,30 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingSetupMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_prep_ms"),
                                       processingShadowsHighlightsPrepMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_resize_ms"),
+                                      processingShadowsHighlightsResizeMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_copy_ms"),
+                                      processingShadowsHighlightsCopyMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_ms"),
+                                      processingShadowsHighlightsFilterMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_total_ms"),
+                                      processingShadowsHighlightsRbfTotalMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_boundary_ms"),
+                                      processingShadowsHighlightsRbfBoundaryMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_range_table_ms"),
+                                      processingShadowsHighlightsRbfRangeTableMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_left_ms"),
+                                      processingShadowsHighlightsRbfLeftMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_right_ms"),
+                                      processingShadowsHighlightsRbfRightMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_horizontal_average_ms"),
+                                      processingShadowsHighlightsRbfHorizontalAverageMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_down_ms"),
+                                      processingShadowsHighlightsRbfVerticalDownMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_up_ms"),
+                                      processingShadowsHighlightsRbfVerticalUpMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_output_ms"),
+                                      processingShadowsHighlightsRbfOutputMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_highest_green_ms"),
                                       processingHighestGreenMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_ms"),

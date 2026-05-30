@@ -96,3 +96,18 @@ TEST(WorkerThreadCount, PlaybackWorkerCountCanDisableCap)
     ASSERT_EQ(mlvappEffectiveWorkerThreadCount(),
               mlvappEffectivePlaybackWorkerThreadCount());
 }
+
+TEST(WorkerThreadCount, PlaybackOpenMpTargetCapsOversubscribedTeams)
+{
+    ASSERT_EQ(6, mlvappPlaybackOpenMpThreadTargetFor(6, 16));
+}
+
+TEST(WorkerThreadCount, PlaybackOpenMpTargetRespectsLowerUserLimit)
+{
+    ASSERT_EQ(4, mlvappPlaybackOpenMpThreadTargetFor(6, 4));
+}
+
+TEST(WorkerThreadCount, PlaybackOpenMpTargetFallsBackToCurrentForInvalidWorkerCount)
+{
+    ASSERT_EQ(3, mlvappPlaybackOpenMpThreadTargetFor(0, 3));
+}

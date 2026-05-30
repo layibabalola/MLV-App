@@ -89,7 +89,11 @@ macx{
 # Windows, standard use with standard Qt download.
 # Else comment these lines!
 win32{
-    QMAKE_CFLAGS += -O2 -fopenmp -mssse3 -msse3 -msse2 -msse -D_FILE_OFFSET_BITS=64 -std=c99 -ftree-vectorize
+    QMAKE_CFLAGS_RELEASE -= -O2
+    QMAKE_CFLAGS_RELEASE += -O3
+    QMAKE_CXXFLAGS_RELEASE -= -O2
+    QMAKE_CXXFLAGS_RELEASE += -O3
+    QMAKE_CFLAGS += -O3 -fopenmp -mssse3 -msse3 -msse2 -msse -D_FILE_OFFSET_BITS=64 -std=c99 -ftree-vectorize
     LIBS += -llibgomp-1
     # dbghelp: required by CrashForensics' MiniDumpWriteDump-based
     # unhandled-exception filter.

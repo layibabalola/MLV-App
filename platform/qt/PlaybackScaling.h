@@ -92,7 +92,8 @@ inline bool playbackBuildFastScaledRgb8(const uint8_t *source,
                                         int targetWidth,
                                         int targetHeight,
                                         std::vector<uint8_t> &scaledBuffer,
-                                        FastPlaybackScaleCache &cache)
+                                        FastPlaybackScaleCache &cache,
+                                        int targetBytesPerLine = 0)
 {
     if( !source
      || sourceWidth <= 0
@@ -104,9 +105,19 @@ inline bool playbackBuildFastScaledRgb8(const uint8_t *source,
         return false;
     }
 
+    const int rowBytes = targetWidth * 3;
+    const int dstBytesPerLine =
+        (targetBytesPerLine > 0) ? targetBytesPerLine : rowBytes;
+    if( dstBytesPerLine < rowBytes )
+    {
+        scaledBuffer.clear();
+        return false;
+    }
+
     const size_t targetPixels =
         static_cast<size_t>( targetWidth ) * static_cast<size_t>( targetHeight );
-    scaledBuffer.resize( targetPixels * 3u );
+    scaledBuffer.resize( static_cast<size_t>( dstBytesPerLine )
+                         * static_cast<size_t>( targetHeight ) );
 
     if( cache.sourceWidth != sourceWidth
      || cache.sourceHeight != sourceHeight
@@ -145,7 +156,8 @@ inline bool playbackBuildFastScaledRgb8(const uint8_t *source,
         const uint8_t *srcRow =
             source + static_cast<size_t>( cache.yOffsets[static_cast<size_t>( y )] );
         uint8_t *dstRow =
-            scaledBuffer.data() + static_cast<size_t>( y ) * static_cast<size_t>( targetWidth ) * 3u;
+            scaledBuffer.data()
+            + static_cast<size_t>( y ) * static_cast<size_t>( dstBytesPerLine );
 
         int x = 0;
         for( ; x + 3 < targetWidth; x += 4 )
@@ -183,6 +195,11 @@ inline bool playbackBuildFastScaledRgb8(const uint8_t *source,
             dstPixel[1] = srcPixel[1];
             dstPixel[2] = srcPixel[2];
         }
+
+        if( dstBytesPerLine > rowBytes )
+        {
+            std::fill( dstRow + rowBytes, dstRow + dstBytesPerLine, 0u );
+        }
     }
 
     return true;
@@ -212,7 +229,8 @@ inline bool playbackBuildBilinearScaledRgb8(const uint8_t *source,
                                             int targetWidth,
                                             int targetHeight,
                                             std::vector<uint8_t> &scaledBuffer,
-                                            BilinearPlaybackScaleCache &cache)
+                                            BilinearPlaybackScaleCache &cache,
+                                            int targetBytesPerLine = 0)
 {
     if( !source
      || sourceWidth <= 0
@@ -224,9 +242,19 @@ inline bool playbackBuildBilinearScaledRgb8(const uint8_t *source,
         return false;
     }
 
+    const int rowBytes = targetWidth * 3;
+    const int dstBytesPerLine =
+        (targetBytesPerLine > 0) ? targetBytesPerLine : rowBytes;
+    if( dstBytesPerLine < rowBytes )
+    {
+        scaledBuffer.clear();
+        return false;
+    }
+
     const size_t targetPixels =
         static_cast<size_t>( targetWidth ) * static_cast<size_t>( targetHeight );
-    scaledBuffer.resize( targetPixels * 3u );
+    scaledBuffer.resize( static_cast<size_t>( dstBytesPerLine )
+                         * static_cast<size_t>( targetHeight ) );
 
     if( cache.sourceWidth != sourceWidth
      || cache.sourceHeight != sourceHeight
@@ -316,7 +344,8 @@ inline bool playbackBuildBilinearScaledRgb8(const uint8_t *source,
         const int fy = cache.yWeights[static_cast<size_t>( y )];
         const int fyComp = 256 - fy;
         uint8_t *dstRow =
-            scaledBuffer.data() + static_cast<size_t>( y ) * static_cast<size_t>( targetWidth ) * 3u;
+            scaledBuffer.data()
+            + static_cast<size_t>( y ) * static_cast<size_t>( dstBytesPerLine );
 
         for( int x = 0; x < targetWidth; ++x )
         {
@@ -349,6 +378,11 @@ inline bool playbackBuildBilinearScaledRgb8(const uint8_t *source,
             dstPixel[2] = static_cast<uint8_t>(
                 ( top2 * fyComp + bottom2 * fy + 32768 ) >> 16 );
         }
+
+        if( dstBytesPerLine > rowBytes )
+        {
+            std::fill( dstRow + rowBytes, dstRow + dstBytesPerLine, 0u );
+        }
     }
 
     return true;
@@ -365,7 +399,8 @@ inline bool playbackBuildCubicScaledRgb8(const uint8_t *source,
                                          int targetWidth,
                                          int targetHeight,
                                          std::vector<uint8_t> &scaledBuffer,
-                                         CubicPlaybackScaleCache &cache)
+                                         CubicPlaybackScaleCache &cache,
+                                         int targetBytesPerLine = 0)
 {
     if( !source
      || sourceWidth <= 0
@@ -377,9 +412,19 @@ inline bool playbackBuildCubicScaledRgb8(const uint8_t *source,
         return false;
     }
 
+    const int rowBytes = targetWidth * 3;
+    const int dstBytesPerLine =
+        (targetBytesPerLine > 0) ? targetBytesPerLine : rowBytes;
+    if( dstBytesPerLine < rowBytes )
+    {
+        scaledBuffer.clear();
+        return false;
+    }
+
     const size_t targetPixels =
         static_cast<size_t>( targetWidth ) * static_cast<size_t>( targetHeight );
-    scaledBuffer.resize( targetPixels * 3u );
+    scaledBuffer.resize( static_cast<size_t>( dstBytesPerLine )
+                         * static_cast<size_t>( targetHeight ) );
 
     if( cache.sourceWidth != sourceWidth
      || cache.sourceHeight != sourceHeight
@@ -436,7 +481,8 @@ inline bool playbackBuildCubicScaledRgb8(const uint8_t *source,
     for( int y = 0; y < targetHeight; ++y )
     {
         uint8_t *dstRow =
-            scaledBuffer.data() + static_cast<size_t>( y ) * static_cast<size_t>( targetWidth ) * 3u;
+            scaledBuffer.data()
+            + static_cast<size_t>( y ) * static_cast<size_t>( dstBytesPerLine );
         const std::array<int, 4> &yOffsets = cache.yRowOffsets[static_cast<size_t>( y )];
         const std::array<float, 4> &wy = cache.yWeights[static_cast<size_t>( y )];
 
@@ -468,6 +514,11 @@ inline bool playbackBuildCubicScaledRgb8(const uint8_t *source,
             dstPixel[1] = playbackClampFloatToByte( accumG );
             dstPixel[2] = playbackClampFloatToByte( accumB );
         }
+
+        if( dstBytesPerLine > rowBytes )
+        {
+            std::fill( dstRow + rowBytes, dstRow + dstBytesPerLine, 0u );
+        }
     }
 
     return true;
@@ -476,19 +527,14 @@ inline bool playbackBuildCubicScaledRgb8(const uint8_t *source,
 inline QImage playbackWrapRgb8Image(uint8_t *data, int width, int height, int bytesPerLine = 0)
 {
     if( !data || width <= 0 || height <= 0 ) return QImage();
-    // Most RGB8 buffers in this codebase (playbackScaledImage8 from
-    // playbackBuildFastScaledRgb8, displayImageBacking, the rendered
-    // processed8 slot) are tightly packed at width*3 bytes/row, NOT
-    // padded to a 4-byte boundary. Qt's no-bytesPerLine constructor
-    // would compute an aligned stride and lie about the buffer layout
-    // for any width%4 != 0, leading to qt_convert_rgb888_to_rgb32_ssse3
-    // reading past the buffer end on the final row (SIGSEGV crash on
-    // 2026-04-24). Default the explicit bytesPerLine to the packed
-    // value so the QImage tells Qt the truth about the actual stride.
-    // Callers whose buffers ARE padded (e.g. PlaybackPrepResult after
-    // 2026-04-24, which intentionally pads to align scanlines for the
-    // GUI-side .convertToFormat path) MUST pass the padded stride
-    // explicitly.
+    // Many RGB8 buffers in this codebase are tightly packed at width*3
+    // bytes/row, while render-thread playback-scaled buffers may be padded
+    // to a 4-byte boundary. Qt's no-bytesPerLine constructor can compute an
+    // aligned stride and lie about a tight buffer layout for any width%4 != 0,
+    // leading to qt_convert_rgb888_to_rgb32_ssse3 reading past the buffer end
+    // on the final row (SIGSEGV crash on 2026-04-24). Default the explicit
+    // bytesPerLine to the packed value so the QImage tells Qt the truth;
+    // callers with padded buffers must pass the padded stride explicitly.
     const int bpl = (bytesPerLine > 0) ? bytesPerLine : (width * 3);
     return QImage( data, width, height, bpl, QImage::Format_RGB888 );
 }
@@ -499,7 +545,8 @@ inline QImage playbackBuildFastScaledImage(const uint8_t *source,
                                            int targetWidth,
                                            int targetHeight,
                                            std::vector<uint8_t> &scaledBuffer,
-                                           FastPlaybackScaleCache &cache)
+                                           FastPlaybackScaleCache &cache,
+                                           int targetBytesPerLine = 0)
 {
     if( !playbackBuildFastScaledRgb8( source,
                                       sourceWidth,
@@ -507,12 +554,16 @@ inline QImage playbackBuildFastScaledImage(const uint8_t *source,
                                       targetWidth,
                                       targetHeight,
                                       scaledBuffer,
-                                      cache ) )
+                                      cache,
+                                      targetBytesPerLine ) )
     {
         return QImage();
     }
 
-    return playbackWrapRgb8Image( scaledBuffer.data(), targetWidth, targetHeight );
+    return playbackWrapRgb8Image( scaledBuffer.data(),
+                                  targetWidth,
+                                  targetHeight,
+                                  targetBytesPerLine );
 }
 
 #endif // PLAYBACKSCALING_H
