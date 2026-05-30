@@ -4673,6 +4673,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the direct8 guard and main-render preview scope fix in place while the fallback path remains the active safety rail.
 3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback-speed work.
 
+## 2026-05-30 - accepted raw-lookup hoist in chroma_smooth 2x2 sample path
+
+### Verified locally
+
+- I kept the accepted 2x2 [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) kernel and tightened the hot sample macros so they reuse the already-loaded `raw2ev[r]` and `raw2ev[b]` values instead of re-reading those table entries when storing `med_r` and `med_b`.
+- The rebuilt user-facing release exe is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 5:30:23 PM`, `Length=8793088`, `SHA256=D0A78DA61F99628C972DF967EE58E691C7FBD21B81A9D21E343B33EE4A5A6B92`.
+- The sequential visible GUI smoke trio stayed valid with x1 Quality and settled Auto Look Assist preserved, and the raw-lookup hoist improved the retained fallback path on all three clips while keeping `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_ms=30.024`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_ms=30.935`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_ms=7.126`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- Compared with the restored baseline, this change materially reduced the overall render time on the chroma-heavy clips and improved the `avg_mix_chroma_ms` bucket without changing the x1 visual state.
+- The direct8 guard remained off on the smoke clips, so the improvement is coming from the retained fallback path rather than the preview-color fast path.
+- This is the first retained-path change in this stretch that clearly beats the accepted baseline on all three clips, so it is worth keeping.
+
+### Needs runtime profiling
+
+- The remaining big bucket is still `mix_chroma`; if we keep iterating, the next step should be another structural reduction that preserves the same visual state.
+- Keep the same sequential three-clip smoke gate so future gains and regressions stay comparable.
+
+### Ranked next steps
+
+1. High impact / medium risk: continue looking for another structural reduction in `chroma_smooth.c` or the retained Dual ISO blend stack while the x1 state stays intact.
+2. Medium impact / low risk: keep the current direct8 guard and preview scope fix in place while the fallback path remains the active safety rail.
+3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback-speed work.
+
 ## 2026-05-30 - rejected write-flag hoist in chroma_smooth 2x2
 
 ### Verified locally
