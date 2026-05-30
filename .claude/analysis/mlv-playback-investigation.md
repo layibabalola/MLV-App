@@ -1,3 +1,14 @@
+## 2026-05-30 - rejected 2x2 chroma_smooth constant hoist
+- I tried hoisting the `thr` / clamp constants inside the 2x2-only [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) branch so the hot center-pixel blend would avoid rebuilding the same threshold literals each iteration.
+- The build succeeded, but the visible smoke gate regressed badly enough that the change is not worth keeping, so it was reverted back to the accepted 2x2 baseline before closeout.
+- The rebuilt user-facing release exe after the rejected probe was [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 4:11:05 PM`, `Length=8792064`, `SHA256=FEAF7ED370922EE7B49EC22DD1707ABF157A691557411DDEF35011DE110289BF`.
+- The sequential visible GUI smoke trio stayed valid for x1 Quality and settled Auto Look Assist, but the fallback path slowed down on the two chroma-heavy clips:
+  - `M16-1327`: `presented_fps=4.236`, `avg_render_total_ms=225.294`, `avg_processed16_to_8bit_ms=2.765`, `avg_mix_chroma_ms=29.559`
+  - `M16-1347`: `presented_fps=4.245`, `avg_render_total_ms=217.676`, `avg_processed16_to_8bit_ms=2.382`, `avg_mix_chroma_ms=29.412`
+  - `M16-1446`: `presented_fps=5.369`, `avg_render_total_ms=175.395`, `avg_processed16_to_8bit_ms=3.919`, `avg_mix_chroma_ms=0.000`
+- The regression is large enough that this should stay a rejected probe rather than a keep-path tweak.
+- The next useful target is still a more structural change in the retained fallback path, not another literal-hoist cleanup in `chroma_smooth.c`.
+
 ## 2026-05-30 - rejected chroma_smooth invariant hoist probe
 - I tried a small invariant-hoist cleanup in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) to lift the `thr`/clamp constants out of the hot branches, but the experiment did not survive the shared-template instantiations cleanly enough to keep.
 - The source was restored to the accepted baseline before final verification, so the tree is clean again and there is no net code change from the attempt.
