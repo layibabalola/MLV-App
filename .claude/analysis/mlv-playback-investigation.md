@@ -4416,3 +4416,31 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: look for another stable reduction in `hdr_chroma_smooth()` that does not rework the local candidate storage shape.
 2. Medium impact / low risk: keep the same x1 Quality three-clip smoke gate as the acceptance test.
 3. Low impact / low risk: leave export and the direct8 preview guard untouched while the fallback path is still the target.
+
+## 2026-05-30 - rejected final_blend_row_avx2_no_alias cleanup in dualiso AVX2 path
+
+### Verified locally
+
+- Prototyped a tiny cleanup in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\dualiso_avx2.inc) that collapsed the `alias_map == NULL` tail in `final_blend_row_avx2_no_alias()` from a `c_amap = 0; f = max(c_amap, ovf);` shape down to a direct `f = max(f, ovf);` form.
+- The probe was reverted after the visible three-clip smoke rerun did not show a clear enough win on the current fallback path. The rebuilt user-facing release exe is back at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 3:06:39 PM`, `Length=8792576`, `SHA256=C204A8465367B7B17245A34A27853B12267241782CE1FEBB329DF587CBEC0914`.
+- The restored baseline smoke stayed visually valid with x1 Quality and settled Auto Look Assist preserved, but the timing movement was not compelling enough to keep the helper:
+  - `M16-1327`: `presented_fps=4.492`, `avg_render_total_ms=212.306`, `avg_llrawproc_ms=74.500`, `avg_processing_shadows_highlights_prep_ms=64.306`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.744`, `avg_render_total_ms=202.026`, `avg_llrawproc_ms=72.105`, `avg_processing_shadows_highlights_prep_ms=60.395`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=4.996`, `avg_render_total_ms=189.150`, `avg_llrawproc_ms=47.825`, `avg_processing_shadows_highlights_prep_ms=62.525`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- This probe was perf-only and did not touch the preview-color boundary where the pink wash still localizes to `S5_processed8`.
+- Compared with the earlier fallback baselines, the change did not produce a stable improvement across the same three-clip visible gate, so it is safer to reject it than to keep a noisy micro-optimization.
+- The current direct8 guard remains the right visual safeguard for the non-neutral local-tone playback-preview state.
+
+### Needs runtime profiling
+
+- The remaining fallback hot spots are still the shared `processed16_to_8bit` route and the Dual ISO blend buckets; the tiny `final_blend_row_avx2_no_alias` tail cleanup was not enough to move the gate.
+- If we revisit `dualiso_avx2.inc` again, the next candidate needs to be more structural than a final tail simplification and must beat the current fallback baseline clearly.
+
+### Ranked next steps
+
+1. High impact / medium risk: profile the shared `processed16_to_8bit` route and the Dual ISO blend buckets next, because that is where the retained fallback cost is concentrated.
+2. Medium impact / low risk: keep the current direct8 guard in place for non-neutral local-tone playback preview.
+3. Low impact / low risk: preserve the same three-clip visible smoke gate for any future playback-speed change.
