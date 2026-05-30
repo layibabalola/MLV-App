@@ -4644,6 +4644,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the direct8 guard and the main-render preview scope fix in place while the fallback path remains the active safety rail.
 3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback-speed work.
 
+## 2026-05-30 - rejected direct no-alias final_blend dispatch in dualiso AVX2 tail
+
+### Verified locally
+
+- I tried changing the null-`alias_map` AVX2 final blend path in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) to call `final_blend_row_avx2_no_alias()` directly instead of routing through the generic wrapper.
+- The experiment was reverted back to the accepted wrapper path before closeout, so there is no net code change from the attempt.
+- The rebuilt user-facing release exe after the revert is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 5:23:21 PM`, `Length=8793088`.
+- The sequential visible GUI smoke trio stayed valid with x1 Quality and settled Auto Look Assist preserved, but the no-alias dispatch was worse than the reverted wrapper baseline on the same clips:
+  - `M16-1327`: `presented_fps=4.620`, `avg_render_total_ms=203.538`, `avg_mix_ms=38.274`, `avg_mix_chroma_ms=29.301`, `avg_final_blend_ms=7.461`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.873`, `avg_render_total_ms=196.950`, `avg_mix_ms=37.000`, `avg_mix_chroma_ms=28.312`, `avg_final_blend_ms=7.667`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=4.747`, `avg_render_total_ms=200.553`, `avg_mix_ms=12.500`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=7.367`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- Compared with the immediate no-alias experiment, the restored wrapper path was better on the same smoke clips, so the direct call was not a win.
+- The direct8 guard remained off for these clips, so the regression is confined to the retained fallback path and not the pink preview path returning.
+- The next useful retained-path candidate should be different from the final-blend dispatch split.
+
+### Needs runtime profiling
+
+- If we revisit the final blend area, it needs to beat the wrapper baseline on all three clips and keep the x1 visual state intact.
+- Keep the sequential three-clip smoke gate for any future fallback-path change.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for a different structural reduction in `dualiso.c` that affects the dominant mix_chroma bucket instead of the final-blend dispatch.
+2. Medium impact / low risk: keep the direct8 guard and main-render preview scope fix in place while the fallback path remains the active safety rail.
+3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback-speed work.
+
 ## 2026-05-30 - rejected write-flag hoist in chroma_smooth 2x2
 
 ### Verified locally
