@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/direct8-gcurve-identity-skip",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 32,
+  "createdAt": "2026-05-30T15:15:21+00:00",
+  "detectorHash": "53b755472dd22b121c9c17eb7a6e0929",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "06976e823bad6d6bce61aafd63c19c1cbd83fc57",
+  "schemaVersion": "1.0",
+  "targetHead": "4322b9e6b02b73b035ddf443beb4675ea7d7b399",
+  "workBlockId": "wb-7095cd1d008748ca"
+}
