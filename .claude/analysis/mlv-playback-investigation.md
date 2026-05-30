@@ -4550,3 +4550,12 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: look for a deeper structural reduction in the Dual ISO blend stack instead of another narrow aliasing hint.
 2. Medium impact / low risk: keep the direct8 guard in place while the fallback path remains the active safety rail.
 3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback work.
+## 2026-05-30 - rejected dualiso_avx2 restrict hint pass
+
+- Probe: add `__restrict` qualifiers to the AVX2 row-kernel signatures in `src/mlv/llrawproc/dualiso_avx2.inc`.
+- Result: visible smoke stayed green, but the three-clip sequential gate did not improve overall versus the last accepted fallback baseline.
+- Comparison against the accepted baseline:
+  - `M16-1327`: `presented_fps=4.874`, `avg_render_total_ms=194.487`, `avg_processed16_to_8bit_ms=2.333`, `avg_mix_chroma_ms=28.615`
+  - `M16-1347`: `presented_fps=4.752`, `avg_render_total_ms=198.259`, `avg_processed16_to_8bit_ms=1.924`, `avg_mix_chroma_ms=30.664`
+  - `M16-1446`: `presented_fps=5.121`, `avg_render_total_ms=182.537`, `avg_processed16_to_8bit_ms=2.098`, `avg_mix_chroma_ms=0.000`
+- Decision: reject and revert; the path-selection guard stayed stable, but the net render trend was worse than the prior accepted baseline.
