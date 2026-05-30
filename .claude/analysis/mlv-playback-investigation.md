@@ -4615,6 +4615,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the current direct8 gate and main-render preview scope fix in place while the visual path stays under scrutiny.
 3. Low impact / low risk: continue using the sequential three-clip visible smoke set as the acceptance gate for future playback-speed changes.
 
+## 2026-05-30 - rejected row-parallel copy plus schedule(static, 8) in dualiso mix_chroma copy prelude
+
+### Verified locally
+
+- I tried replacing the sequential `memcpy` copy prelude in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) with a row-parallel copy loop and then tightened it to `#pragma omp parallel for schedule(static, 8)`.
+- The experiment was reverted back to the accepted sequential copy baseline before closeout, so there is no net code change from the attempt.
+- The rebuilt user-facing release exe after the revert is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 5:11:53 PM`, `Length=8793088`.
+- The sequential visible GUI smoke trio stayed valid with x1 Quality and settled Auto Look Assist preserved, and the reverted baseline restored the better overall fallback path compared with the row-parallel/scheduled experiment:
+  - `M16-1327`: `presented_fps=4.742`, `avg_render_total_ms=196.026`, `avg_chroma_copy_ms=5.625`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.992`, `avg_render_total_ms=188.375`, `avg_chroma_copy_ms=5.500`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.253`, `avg_render_total_ms=180.451`, `avg_chroma_copy_ms=0.000`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The row-parallel copy attempt itself was already mixed, and the `schedule(static, 8)` tweak made the retained fallback path worse rather than better.
+- Reverting back to the sequential `memcpy` baseline restored the accepted source shape and kept the direct8 guard inactive on the smoke clips.
+- The next retained-path improvement should look for a different structural reduction in `dualiso.c`, not another scheduler tweak on the copy prelude.
+
+### Needs runtime profiling
+
+- If we revisit the `mix_chroma` copy prelude again, it needs to beat the accepted baseline on all three clips, not just reduce the copy subphase in isolation.
+- Keep the same sequential three-clip smoke gate for any future fallback-path change so regressions remain obvious.
+
+### Ranked next steps
+
+1. High impact / medium risk: search for a deeper reduction in `dualiso.c`'s retained blend work instead of another copy-loop scheduling change.
+2. Medium impact / low risk: keep the direct8 guard and the main-render preview scope fix in place while the fallback path remains the active safety rail.
+3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback-speed work.
+
 ## 2026-05-30 - rejected write-flag hoist in chroma_smooth 2x2
 
 ### Verified locally
