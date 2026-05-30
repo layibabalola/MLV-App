@@ -1,5 +1,33 @@
 ## Direct-8 Loop Profiling (2026-04-24)
 
+## 2026-05-30 - direct8 batch-dispatch probe regressed the visible gate
+
+### Verified locally
+
+- I tried hoisting the AVX2 direct8 vibrance/saturation dispatch out of the per-pixel branch in [`src/processing/raw_processing_8bit_kernel_avx2_intrin.inc`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing_8bit_kernel_avx2_intrin.inc), but the visible smoke gate got slower on all three clips.
+- The regression showed up immediately in the rebuilt release exe at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) before the revert: `LastWriteTime=5/30/2026 12:15:51 PM`, `Length=8793088`, `SHA256=FB0A28D7C74FB79791636E28D352C951D78261A751CA4C40241CB5A322E184C9`.
+- The latest visible GUI smoke trio on the reverted build is back to the accepted baseline shape with x1 Quality and settled Auto Look Assist preserved:
+  - `M16-1327`: `presented_fps=6.856`, `avg_render_total_ms=270.673`, `avg_queue_wait_ms=126.727`, `avg_processed8_ms=141.018`
+  - `M16-1347`: `presented_fps=5.996`, `avg_render_total_ms=154.917`, `avg_queue_wait_ms=0.083`, `avg_processed8_ms=152.604`
+  - `M16-1446`: `presented_fps=7.489`, `avg_render_total_ms=124.133`, `avg_queue_wait_ms=0.083`, `avg_processed8_ms=122.250`
+- The direct8 probe was therefore reverted, restoring the prior per-pixel loop shape in the fast AVX2 body.
+
+### Cross-checked from prior analysis
+
+- The earlier accepted baseline on the same three clips was materially better than the probe build and had the same visual-state contract.
+- The pink-wash diagnosis remains unchanged: the artifact still points at the direct8 preview path, but this specific dispatch-hoist attempt did not improve that path enough to keep.
+
+### Needs runtime profiling
+
+- If we revisit direct8 next, keep the change more local than the batch-dispatch split and compare against the restored baseline on the same three clips.
+- Any next probe should preserve the accepted x1 Quality and settled Auto Look Assist state while tracking both throughput and color parity.
+
+### Ranked next steps
+
+1. High impact / low risk: leave the restored direct8 loop in place and look for a smaller arithmetic/parity tweak.
+2. Medium impact / low risk: keep the visible three-clip smoke gate as the acceptance test for any future preview-kernel edit.
+3. Low impact / low risk: continue using the same stage-capture control set to guard the color path while perf work continues.
+
 ## 2026-05-30 - AVX2 direct8 skipped vibrance/saturation
 
 ### Verified locally
