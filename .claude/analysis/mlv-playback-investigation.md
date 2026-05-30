@@ -1,3 +1,31 @@
+## 2026-05-30 - main render thread now carries the playback-preview gate
+
+### Verified locally
+
+- I patched [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so the main 8-bit render path now sets `processingSetPlaybackPreviewMode(1)` while `getMlvProcessedFrame8_with_scale()` runs, then restores the prior state on exit. The same save/restore pattern is also applied in the `getMlvProcessedFrame8ScaledFromRaw16()` and `getMlvProcessedFrame8ScaledFromReconnedRaw16()` helpers.
+- The rebuilt user-facing release exe is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 2:20:54 PM`, `Length=8792576`, `SHA256=364BDB0B8204FC08F388838FD09497DFC8E57198D4BFB618D3C056B70FA77B3A`.
+- The visible GUI smoke set on the rebuilt binary stays valid with x1 Quality and settled Auto Look Assist preserved, and it now reports `processed8_direct_path_frames=0` on all three clips:
+  - `M16-1327`: `presented_fps=4.868`, `avg_render_total_ms=196.846`, `avg_processed16_to_8bit_ms=2.282`
+  - `M16-1347`: `presented_fps=4.493`, `avg_render_total_ms=207.639`, `avg_processed16_to_8bit_ms=2.500`
+  - `M16-1446`: `presented_fps=5.492`, `avg_render_total_ms=170.295`, `avg_processed16_to_8bit_ms=2.045`
+
+### Cross-checked from prior analysis
+
+- The earlier diagnosis still stands: the pink wash enters at `S5_processed8`, not in export and not in the GUI paint layer.
+- The previous direct8 smoke was proving only that the fallback path was active; the missing fresh stage PNGs meant that alone was not enough to claim the visual artifact was gone.
+- The new scope fix addresses the mismatch between the prefetch worker and the main render thread, which was the last obvious reason the preview gate could be ignored during the on-screen render.
+
+### Needs runtime profiling
+
+- I still need a fresh stage-image capture run that writes the `S1` / `S2` / `S5` / `S6` PNGs for the same frame so the visual boundary can be rechecked directly after the scope fix.
+- If the pink is still present with the new gate in place, the next suspect is the shared 16-bit fallback path itself rather than direct8.
+
+### Ranked next steps
+
+1. High impact / medium risk: rerun the stage-capture pipeline on `M16-1446` so the post-fix `S5_processed8` / `S6_displayImage` frames can be compared directly against `S2_post_dualiso`.
+2. Medium impact / low risk: keep the new preview-flag scope fix in place while the visual proof is refreshed.
+3. Low impact / low risk: if the pink is still visible, profile the shared `processed16_to_8bit` path next because that is now the remaining likely preview-color boundary.
+
 ## 2026-05-30 - rejected RBF vertical branch hoist
 
 ### Verified locally
