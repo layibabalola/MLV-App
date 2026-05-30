@@ -1,3 +1,14 @@
+## 2026-05-30 - rejected 2x2 chroma_smooth EV-row cache probe
+- I tried a per-thread EV-row cache fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the 2x2 chroma smoother could reuse a cached 8-row `raw2ev` window instead of redoing the same lookup work inside the inner pass.
+- The first draft had a shared-loop-variable bug inside the cache fill and was corrected before validation, but the corrected probe still did not earn a keep: the visible GUI smoke gate regressed on all three clips versus the accepted baseline, so the change was reverted back to the accepted 2x2 shape.
+- Probe build smoke on the visible x1 Quality / settled Auto Look Assist gate stayed visually valid and kept `processed8_direct_path_frames=0`, but the timing regressed versus the accepted baseline:
+  - `M16-1327`: `presented_fps=5.372`, `avg_render_total_ms=175.186`, `avg_llrawproc_ms=55.581`, `avg_mix_chroma_ms=24.512`
+  - `M16-1347`: `presented_fps=5.368`, `avg_render_total_ms=176.930`, `avg_llrawproc_ms=60.558`, `avg_mix_chroma_ms=25.884`
+  - `M16-1446`: `presented_fps=5.861`, `avg_render_total_ms=160.723`, `avg_llrawproc_ms=33.723`, `avg_mix_chroma_ms=0.000`
+- The rebuilt user-facing release exe after the revert is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 6:44:12 PM`, `Length=8793088`, `SHA256=68F8CDF49E1F34865A36DA81FBF84FAC82601950B98FE871B0F88F016CF29E2E`.
+- The direct8 guard stayed intact and the launch state remained stable, so this is a throughput-only reject rather than a color-state regression.
+- The next useful target remains a different retained `dualiso.c` structural reduction, not another EV-cache rewrite in this exact shape.
+
 ## 2026-05-30 - rejected scalar shared-lookup rewrite in 2x2 chroma_smooth
 - I tried a scalar-local rewrite in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) that precomputed the shared red/blue and green lookups for each of the five sample positions in the 2x2 chroma pass, then reused those locals in both the horizontal and vertical median/error passes.
 - The candidate did not survive the visible gate: the first chroma-heavy clip already regressed versus the accepted baseline, with `M16-1327` falling to `presented_fps=5.235`, `avg_render_total_ms=182.357`, `avg_mix_chroma_ms=25.405`, `processed8_direct_path_frames=0` versus the accepted baseline `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`.
