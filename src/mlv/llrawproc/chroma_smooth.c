@@ -85,6 +85,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
             #define CS2_SAMPLE_H(k, row0, row1, x0) do { \
                 const int r = row0[x0]; \
                 const int b = row1[x0 + 1]; \
+                const int rr = raw2ev[r]; \
+                const int bb = raw2ev[b]; \
                 const int g1 = raw2ev[row0[x0 + 1]]; \
                 const int g2 = raw2ev[row1[x0]]; \
                 const int g3 = raw2ev[row0[x0 - 1]]; \
@@ -92,8 +94,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 const int gr = (g1 + g3) / 2; \
                 const int gb = (g2 + g5) / 2; \
                 eh += ABS(g1 - g3) + ABS(g2 - g5); \
-                med_r[(k)] = raw2ev[r] - gr; \
-                med_b[(k)] = raw2ev[b] - gb; \
+                med_r[(k)] = rr - gr; \
+                med_b[(k)] = bb - gb; \
             } while (0)
 
             CS2_SAMPLE_H(0, row_y, row_y_p1, x - 2);
@@ -109,6 +111,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
             #define CS2_SAMPLE_V(k, row0, row1, rowm1, rowp2, x0) do { \
                 const int r = row0[x0]; \
                 const int b = row1[x0 + 1]; \
+                const int rr = raw2ev[r]; \
+                const int bb = raw2ev[b]; \
                 const int g1 = raw2ev[row0[x0 + 1]]; \
                 const int g2 = raw2ev[row1[x0]]; \
                 const int g4 = raw2ev[rowm1[x0]]; \
@@ -116,8 +120,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 const int gr = (g2 + g4) / 2; \
                 const int gb = (g1 + g6) / 2; \
                 ev += ABS(g2 - g4) + ABS(g1 - g6); \
-                med_r[(k)] = raw2ev[r] - gr; \
-                med_b[(k)] = raw2ev[b] - gb; \
+                med_r[(k)] = rr - gr; \
+                med_b[(k)] = bb - gb; \
             } while (0)
 
             CS2_SAMPLE_V(0, row_y, row_y_p1, row_y_m1, row_y_p2, x - 2);
