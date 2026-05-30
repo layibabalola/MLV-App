@@ -1,3 +1,32 @@
+## 2026-05-30 - direct8 fallback stays clean while the shared 16-bit route improves
+
+### Verified locally
+
+- I kept the playback-preview direct8 gate in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c#L1102) in place for the current non-neutral local-tone look state, so the broad pink wash does not return.
+- I then trimmed the Dual ISO blend hot loop in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c#L3643) and [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c#L3883) to reuse row pointers and tail-index math instead of recomputing `y * w` addressing in the scalar remainder.
+- The rebuilt user-facing release exe is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 12:51:01 PM`, `Length=8792576`, `SHA256=127147C38FA17054E16975F0E49BA03A3892BF031B305513AE88D1C4666F09F4`.
+- The visible three-clip smoke set stayed valid with x1 Quality and settled Auto Look Assist preserved, and the shared 16-bit fallback path is measurably better than the earlier fallback baseline:
+  - `M16-1327`: `presented_fps=4.620`, `avg_render_total_ms=201.811`, `avg_processed16_to_8bit_ms=2.189`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.619`, `avg_render_total_ms=203.919`, `avg_processed16_to_8bit_ms=2.162`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.499`, `avg_render_total_ms=171.386`, `avg_processed16_to_8bit_ms=2.750`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The pink wash is still not fixed by the GUI layer or export path; the working control remains the preview-only direct8 boundary.
+- The earlier `MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1` control still showed the same pink wash, so the bug was broader than the AVX2 body.
+- The current fallback remains the correct visual safeguard for this look state, and the new loop cleanup is a safe perf-only follow-on to that gate.
+
+### Needs runtime profiling
+
+- The current shared 16-bit route is still slower than the ideal direct8 preview path, even after the row-pointer cleanup, so any further optimization should stay on the fallback path until direct8 parity is proven.
+- If we re-enable a narrower direct8 subset later, the same three-clip smoke set should stay the acceptance gate.
+
+### Ranked next steps
+
+1. High impact / medium risk: profile the shared `processed16_to_8bit` and `dual_iso` hot loops next to see whether another small cleanup is worth keeping.
+2. Medium impact / low risk: preserve the current direct8 gate for non-neutral local-tone playback preview until a narrower parity proof exists.
+3. Low impact / low risk: keep the visible three-clip smoke set as the regression gate for any future playback-speed change.
+
 ## 2026-05-30 - direct8 preview was over-claiming support for non-neutral local tone
 
 ### Verified locally

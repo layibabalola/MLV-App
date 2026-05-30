@@ -3643,20 +3643,25 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
         mix_stage_start = mlv_stage_timing_now();
         #pragma omp parallel for
         for (int y = 0; y < h; y ++) {
-            mix_images_row_avx2(&halfres[(size_t)y*w],
-                                &bright[(size_t)y*w],
-                                &dark[(size_t)y*w],
+            const size_t row_offset = (size_t)y * (size_t)w;
+            uint32_t *halfres_row = &halfres[row_offset];
+            const uint32_t *bright_row = &bright[row_offset];
+            const uint32_t *dark_row = &dark[row_offset];
+
+            mix_images_row_avx2(halfres_row,
+                                bright_row,
+                                dark_row,
                                 raw2ev, ev2raw, mix_curve_float, w);
             /* tail: pixels not covered by SIMD bulk */
-            int x_start = (w / 8) * 8;
+            const int x_start = w & ~7;
             for (int x = x_start; x < w; x ++) {
-                int b = bright[x + y*w];
-                int d = dark[x + y*w];
+                int b = bright_row[x];
+                int d = dark_row[x];
                 int bev = raw2ev[b];
                 int dev = raw2ev[d];
-                double k = COERCE(mix_curve[b & 0xFFFFF], 0, 1);
+                double k = COERCE(mix_curve_float[b & 0xFFFFF], 0, 1);
                 int mixed = bev * (1-k) + dev * k;
-                halfres[x + y*w] = ev2raw[mixed];
+                halfres_row[x] = ev2raw[mixed];
             }
         }
         g_dualiso_full20bit_timing.mix_halfres_ms +=
@@ -3883,35 +3888,45 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
         {
             #pragma omp parallel for
             for (int y = 0; y < h; y ++) {
-                final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
-                                     &fullres[(size_t)y*w],
-                                     &fullres_smooth[(size_t)y*w],
-                                     &halfres_smooth[(size_t)y*w],
-                                     &dark[(size_t)y*w],
-                                     &bright[(size_t)y*w],
-                                     &overexposed[(size_t)y*w],
-                                     &alias_map[(size_t)y*w],
+                const size_t row_offset = (size_t)y * (size_t)w;
+                uint32_t *raw_row = &raw_buffer_32[row_offset];
+                const uint32_t *fullres_row = &fullres[row_offset];
+                const uint32_t *fullres_smooth_row = &fullres_smooth[row_offset];
+                const uint32_t *halfres_smooth_row = &halfres_smooth[row_offset];
+                const uint32_t *dark_row = &dark[row_offset];
+                const uint32_t *bright_row = &bright[row_offset];
+                const uint16_t *overexposed_row = &overexposed[row_offset];
+                const uint16_t *alias_row = &alias_map[row_offset];
+
+                final_blend_row_avx2(raw_row,
+                                     fullres_row,
+                                     fullres_smooth_row,
+                                     halfres_smooth_row,
+                                     dark_row,
+                                     bright_row,
+                                     overexposed_row,
+                                     alias_row,
                                      raw2ev, ev2raw, fullres_curve,
                                      black, dark_noise, w);
                 /* tail: pixels not covered by SIMD bulk */
-                int x_start = (w / 8) * 8;
+                const int x_start = w & ~7;
                 for (int x = x_start; x < w; x ++) {
-                    int b = bright[x + y*w];
-                    int hr = halfres_smooth[x + y*w];
-                    int fr = fullres[x + y*w];
-                    int frs = fullres_smooth[x + y*w];
+                    int b = bright_row[x];
+                    int hr = halfres_smooth_row[x];
+                    int fr = fullres_row[x];
+                    int frs = fullres_smooth_row[x];
                     int hrev = raw2ev[hr];
                     int frev = raw2ev[fr];
                     int frsev = raw2ev[frs];
                     double f = fullres_curve[b & 0xFFFFF];
-                    int co = alias_map[x + y*w];
+                    int co = alias_row[x];
                     double c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
-                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                    double ovf = COERCE(overexposed_row[x] / 200.0, 0, 1);
                     c = MAX(c, ovf);
                     double noisy_or_overexposed = MAX(ovf, 1-f);
                     f = MAX(f, c);
                     double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
-                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                    int sig = (dark_row[x] + bright_row[x]) / 2;
                     f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
                     int output = hrev * (1-f) + fev * f;
                     output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
@@ -3923,33 +3938,42 @@ static inline void final_blend(struct raw_info raw_info, uint32_t* raw_buffer_32
         {
             #pragma omp parallel for
             for (int y = 0; y < h; y ++) {
-                final_blend_row_avx2(&raw_buffer_32[(size_t)y*w],
-                                     &fullres[(size_t)y*w],
-                                     &fullres_smooth[(size_t)y*w],
-                                     &halfres_smooth[(size_t)y*w],
-                                     &dark[(size_t)y*w],
-                                     &bright[(size_t)y*w],
-                                     &overexposed[(size_t)y*w],
+                const size_t row_offset = (size_t)y * (size_t)w;
+                uint32_t *raw_row = &raw_buffer_32[row_offset];
+                const uint32_t *fullres_row = &fullres[row_offset];
+                const uint32_t *fullres_smooth_row = &fullres_smooth[row_offset];
+                const uint32_t *halfres_smooth_row = &halfres_smooth[row_offset];
+                const uint32_t *dark_row = &dark[row_offset];
+                const uint32_t *bright_row = &bright[row_offset];
+                const uint16_t *overexposed_row = &overexposed[row_offset];
+
+                final_blend_row_avx2(raw_row,
+                                     fullres_row,
+                                     fullres_smooth_row,
+                                     halfres_smooth_row,
+                                     dark_row,
+                                     bright_row,
+                                     overexposed_row,
                                      NULL,
                                      raw2ev, ev2raw, fullres_curve,
                                      black, dark_noise, w);
                 /* tail: pixels not covered by SIMD bulk */
-                int x_start = (w / 8) * 8;
+                const int x_start = w & ~7;
                 for (int x = x_start; x < w; x ++) {
-                    int b = bright[x + y*w];
-                    int hr = halfres_smooth[x + y*w];
-                    int fr = fullres[x + y*w];
-                    int frs = fullres_smooth[x + y*w];
+                    int b = bright_row[x];
+                    int hr = halfres_smooth_row[x];
+                    int fr = fullres_row[x];
+                    int frs = fullres_smooth_row[x];
                     int hrev = raw2ev[hr];
                     int frev = raw2ev[fr];
                     int frsev = raw2ev[frs];
                     double f = fullres_curve[b & 0xFFFFF];
-                    double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
+                    double ovf = COERCE(overexposed_row[x] / 200.0, 0, 1);
                     double c = ovf;
                     double noisy_or_overexposed = MAX(ovf, 1-f);
                     f = MAX(f, c);
                     double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
-                    int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
+                    int sig = (dark_row[x] + bright_row[x]) / 2;
                     f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
                     int output = hrev * (1-f) + fev * f;
                     output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
