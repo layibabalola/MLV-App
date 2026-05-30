@@ -1,5 +1,33 @@
 ## Direct-8 Loop Profiling (2026-04-24)
 
+## 2026-05-30 - chroma row reuse trims the visible playback hot loop
+
+### Verified locally
+
+- I reworked the 2x2 chroma smoother in [`src/mlv/llrawproc/chroma_smooth.c`](C:\!Layi Wkspc\MLV-App\src\mlv\llrawproc\chroma_smooth.c) so the hot inner loop reuses the prepared row pointers for the center-pixel blend instead of rebuilding the same `y * w` addressing each iteration.
+- The user-facing release exe at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe) is now `LastWriteTime=5/30/2026 11:17:52 AM`, `Length=8792576`, `SHA256=A970E6E46F0B731D67503D4CD57A80EDB2B51BEC53EE17F9891072C0044768CA`.
+- The visible smoke trio still passes the x1 Quality and settled Auto Look Assist gate on this build, and the row-pointer reuse nudged the playback numbers in the right direction on the harder clips:
+  - `M16-1327`: `presented_fps=9.000`, `avg_render_work_ms=108.944`, `avg_mix_chroma_ms=24.597`
+  - `M16-1347`: `presented_fps=7.982`, `avg_render_work_ms=116.734`, `avg_mix_chroma_ms=25.422`
+  - `M16-1446`: `presented_fps=11.209`, `avg_render_work_ms=87.722`, `avg_mix_chroma_ms=0.000`
+- The earlier queue-depth widening probe was rejected. It did not hold the three-clip gate together, so the `kFrameSlotCount` / request-queue change was reverted before finalizing the keep-path.
+
+### Cross-checked from prior analysis
+
+- The broad pink preview wash is still localized to the direct8 preview path, not export.
+- The chroma hotspot remains the larger low-risk opportunity in the current visible gate; the row reuse change is a safer step than another queue-shape experiment.
+
+### Needs runtime profiling
+
+- Compare the current build against the prior release on the same clips once more if another small chroma-loop cleanup is proposed.
+- Keep watching `avg_mix_chroma_ms` and `avg_render_work_ms` on `M16-1327` / `M16-1347`; those are still the best indicators for whether a future loop-shape change is worth keeping.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the current row-pointer reuse path and look for one more safe chroma-loop simplification.
+2. Medium impact / low risk: continue using the visible three-clip gate as the acceptance test for playback tuning.
+3. Low impact / low risk: leave the preview/export color split untouched while perf work continues.
+
 ## 2026-05-30 - pink wash localizes to the direct8 preview path
 
 ### Verified locally
