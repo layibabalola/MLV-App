@@ -26,6 +26,33 @@
 2. Medium impact / low risk: keep the new preview-flag scope fix in place while the visual proof is refreshed.
 3. Low impact / low risk: if the pink is still visible, profile the shared `processed16_to_8bit` path next because that is now the remaining likely preview-color boundary.
 
+## 2026-05-30 - rejected processed16 packdown AVX2 row helper
+
+### Verified locally
+
+- I tried a packdown-only cleanup in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) that replaced the scalar `processed16_to_8bit` copy with a runtime-gated AVX2 row pack helper and row-wise parallelism.
+- The change was reverted after the three-clip visible smoke rerun showed a mixed result rather than a clear win on the current fallback path. The rebuilt user-facing release exe is back at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 2:50:23 PM`, `Length=8792576`, `SHA256=E4579F1EC7D07CF425009D12ED4BD4338F5016FFE6AD3D40F131ADF3BF67997D`.
+- The reverted smoke set stayed visually valid with x1 Quality and settled Auto Look Assist preserved, but the timing movement was not consistent enough to keep the helper:
+  - `M16-1327`: `presented_fps=4.981`, `avg_render_total_ms=191.600`, `avg_processed16_to_8bit_ms=1.925`, `avg_llrawproc_ms=67.750`, `avg_debayered_frame_ms=84.075`, `avg_processing_shadows_highlights_prep_ms=57.800`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.742`, `avg_render_total_ms=198.132`, `avg_processed16_to_8bit_ms=2.421`, `avg_llrawproc_ms=70.763`, `avg_debayered_frame_ms=89.868`, `avg_processing_shadows_highlights_prep_ms=56.737`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=4.873`, `avg_render_total_ms=190.615`, `avg_processed16_to_8bit_ms=2.359`, `avg_llrawproc_ms=49.487`, `avg_debayered_frame_ms=70.564`, `avg_processing_shadows_highlights_prep_ms=63.385`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The broad pink artifact still localizes to the preview path boundary, but this packdown change did not move that boundary and did not prove any new direct8-safe subset.
+- Compared with the earlier baseline, one clip improved and one regressed, which is not a stable enough signal to keep a GUI-facing conversion change.
+
+### Needs runtime profiling
+
+- The dominant fallback cost is still in the shared 16-bit preview stack, but the per-row packdown loop was not the right lever for this release build.
+- If we revisit `processed16_to_8bit` again, it should be because we have a stronger proof that the full path, not just the byte-pack, is the bottleneck.
+
+### Ranked next steps
+
+1. High impact / medium risk: profile the shared 16-bit preview stack end-to-end, not just the packdown tail.
+2. Medium impact / low risk: keep the direct8 guard and the main-render preview scope fix in place while the visual path stays under scrutiny.
+3. Low impact / low risk: leave the visible three-clip smoke set as the acceptance gate for any future playback-speed change.
+
 ## 2026-05-30 - rejected RBFilter vertical stride/output hoist
 
 ### Verified locally
