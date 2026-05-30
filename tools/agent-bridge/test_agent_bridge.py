@@ -287,6 +287,11 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIn("Works in PS 5.1", reminder_text)
         self.assertIn("WinRT ContentType=WindowsRuntime is not", reminder_text)
         self.assertIn("PS 7.x (pwsh.exe)", reminder_text)
+        self.assertIn("Invoke-DirtyStateRemediation", reminder_text)
+        self.assertIn("-Arguments @(\"repair\")", reminder_text)
+        self.assertIn("Dirty-state remediation ($HookPhase)", reminder_text)
+        self.assertLess(reminder_text.index("Invoke-DirtyStateRemediation"), reminder_text.index("Get-RecentReminderDuplicate"))
+        self.assertLess(reminder_text.index("Invoke-DirtyStateRemediation"), reminder_text.index("Set-ResponseDebtTurnStart"))
 
     def test_codex_bridge_reminder_log_writes_use_retry_helper(self) -> None:
         text = (Path(__file__).resolve().parent / "codex_bridge_reminder.ps1").read_text(encoding="utf-8")
