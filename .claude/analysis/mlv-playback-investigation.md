@@ -4614,3 +4614,30 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: keep the accepted early overexposed-cell skip baseline and look for a different retained-path reduction if we revisit `chroma_smooth.c`.
 2. Medium impact / low risk: keep the current direct8 gate and main-render preview scope fix in place while the visual path stays under scrutiny.
 3. Low impact / low risk: continue using the sequential three-clip visible smoke set as the acceptance gate for future playback-speed changes.
+
+## 2026-05-30 - rejected write-flag hoist in chroma_smooth 2x2
+
+### Verified locally
+
+- I tried a tiny follow-on hoist in the accepted 2x2 [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) path that precomputed `write_r` / `write_b` flags once per cell and reused them for the skip and store conditions.
+- The source was restored to the accepted early-skip baseline before closeout, so there is no net code change from the write-flag attempt.
+- The rebuilt user-facing release exe after the restore is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 4:55:53 PM`, `Length=8793088`, `SHA256=9BC34EDCA5DBC7D5D6B078F38F43EAECB67D56D679A03D4567CDA07CF8914EDF`.
+- The sequential visible GUI smoke trio stayed valid with x1 Quality and settled Auto Look Assist preserved, but the write-flag hoist was mixed and regressed versus the accepted early-skip baseline on at least one chroma-heavy clip:
+  - `M16-1327`: `presented_fps=4.612`, `avg_render_total_ms=206.622`, `avg_processed16_to_8bit_ms=1.973`, `avg_mix_chroma_ms=30.514`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.616`, `avg_render_total_ms=202.730`, `avg_processed16_to_8bit_ms=2.108`, `avg_mix_chroma_ms=30.405`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=4.984`, `avg_render_total_ms=188.925`, `avg_processed16_to_8bit_ms=2.775`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- Compared with the accepted early overexposed-cell skip baseline, the write-flag hoist did not produce a stable overall win and was worse on the chroma-heavy smoke clips than the accepted reference.
+- The direct8 guard stayed inactive on the smoke clips, so the regression is again confined to the retained fallback path.
+
+### Needs runtime profiling
+
+- If the next `chroma_smooth` iteration stays in this area, it needs to be a smaller structural change that beats the accepted early-skip baseline on all three clips, not another tiny flag-hoist cleanup.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the accepted early overexposed-cell skip baseline and look for a different retained-path reduction if we revisit `chroma_smooth.c`.
+2. Medium impact / low risk: keep the current direct8 gate and main-render preview scope fix in place while the visual path stays under scrutiny.
+3. Low impact / low risk: continue using the sequential three-clip visible smoke set as the acceptance gate for future playback-speed changes.
