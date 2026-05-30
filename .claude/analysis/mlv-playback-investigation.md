@@ -4500,3 +4500,31 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: profile the remaining Dual ISO blend buckets now that the packdown loop is in a better shape.
 2. Medium impact / low risk: keep the direct8 guard in place for non-neutral local-tone playback preview.
 3. Low impact / low risk: keep the sequential three-clip smoke gate for any future playback-speed change.
+
+## 2026-05-30 - rejected narrow __restrict hint pass in dualiso AVX2 rows
+
+### Verified locally
+
+- Reverted the narrow aliasing-hint probe in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:\!Layi%20Wkspc\MLV-App\src\mlv\llrawproc\dualiso_avx2.inc) so `mix_images_row_avx2()` and `final_blend_row_avx2()` are back on the baseline pointer signatures.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 3:46:30 PM`, `Length=8793088`, `SHA256=2B704D6B32BD3A57D1BAD7F5E6169F6FB80F7C04565E18CECEF97A5417070014`.
+- Re-ran the visible GUI smoke gate sequentially with x1 Quality and settled Auto Look Assist preserved. The rollback stayed visually valid, kept `processed8_direct_path_frames=0`, and restored the accepted fallback baseline rather than the regressed narrow hint pass:
+  - `M16-1327`: `presented_fps=4.623`, `avg_render_total_ms=206.757`, `avg_llrawproc_ms=70.324`, `avg_processed16_to_8bit_ms=2.676`, `avg_mix_chroma_ms=28.622`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.483`, `avg_render_total_ms=213.500`, `avg_llrawproc_ms=77.861`, `avg_processed16_to_8bit_ms=2.278`, `avg_mix_chroma_ms=32.000`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.241`, `avg_render_total_ms=179.071`, `avg_llrawproc_ms=40.524`, `avg_processed16_to_8bit_ms=2.691`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The narrow `__restrict` hints did not produce a stable visible win across the same three-clip gate, even though the broad direct8 guard and x1 Quality state stayed intact.
+- The content hash for `src/mlv/llrawproc/dualiso_avx2.inc` now matches `HEAD` again after the rollback and index refresh, so the worktree is clean.
+- The fallback baseline remains the accepted reference point until a new hotspot proves it can beat those three clips consistently.
+
+### Needs runtime profiling
+
+- If we revisit `dualiso_avx2.inc`, the next lever needs to be more structural than pointer qualifiers alone.
+- Keep the same sequential three-clip smoke gate for any future fallback-path change so any regression shows up quickly and comparably.
+
+### Ranked next steps
+
+1. High impact / medium risk: look for a deeper structural reduction in the Dual ISO blend stack instead of another narrow aliasing hint.
+2. Medium impact / low risk: keep the direct8 guard in place while the fallback path remains the active safety rail.
+3. Low impact / low risk: preserve the sequential three-clip smoke gate as the acceptance test for future playback work.
