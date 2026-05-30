@@ -1,3 +1,29 @@
+## 2026-05-30 - rejected RBF vertical branch hoist
+
+### Verified locally
+
+- I tried a narrow control-flow hoist in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc/MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) that pulled the `rgb3` branch out of the hot vertical down/up inner loops and reused a row-stride local in the upward pass.
+- The hoist was reverted after the visible GUI smoke rerun showed no meaningful improvement on the current fallback path. The rebuilt user-facing release exe is now back at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 1:31:53 PM`, `Length=8792576`, `SHA256=67963B0C1717D568058DB859F1A934FABDCC70B291FE3485E11B96A84A5D986D`.
+- The post-revert visible smoke set stayed valid with x1 Quality and settled Auto Look Assist preserved, but the fallback-path timings did not move enough to justify keeping the hoist:
+  - `M16-1327`: `presented_fps=4.750`, `avg_render_total_ms=197.079`, `avg_processed16_to_8bit_ms=1.974`, `avg_processing_shadows_highlights_prep_ms=57.842`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.120`, `avg_render_total_ms=184.707`, `avg_processed16_to_8bit_ms=3.024`, `avg_processing_shadows_highlights_prep_ms=63.415`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- This probe did not touch the preview-color boundary that still localizes the pink wash to `S5_processed8`; it was a playback-speed experiment only.
+- The current direct8 fallback gate remains the right visual guard for the non-neutral local-tone playback-preview state, and this hoist neither improved that color behavior nor proved a new direct8-safe subset.
+
+### Needs runtime profiling
+
+- The remaining fallback hot spots are still the shared 16-bit preview path and the Dual ISO blend buckets, not more branch-splitting around the `RBFilterPlain` vertical recurrence.
+- Any future RBF probe should be measured against the same three-clip visible gate and must beat the current fallback baseline before it is kept.
+
+### Ranked next steps
+
+1. High impact / medium risk: profile the shared `processed16_to_8bit` path and the Dual ISO mix buckets next, because that is where the current fallback cost is concentrated.
+2. Medium impact / low risk: preserve the current direct8 gate for non-neutral local-tone playback preview until a narrower parity proof exists.
+3. Low impact / low risk: keep the visible three-clip smoke set as the regression gate for any future playback-speed change.
+
 ## 2026-05-30 - direct8 fallback stays clean while the shared 16-bit route improves
 
 ### Verified locally
