@@ -1,3 +1,15 @@
+## 2026-05-30 - rejected 2x2 chroma_smooth shared-lookup probe
+- I tried a shared-lookup rewrite in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) that cached the common per-sample `raw2ev` lookups across the horizontal and vertical `CHROMA_SMOOTH_2X2` passes so each sample could reuse the same red/blue and shared-green values.
+- The probe did not earn a keep: the visible GUI smoke gate stayed valid with x1 Quality and settled Auto Look Assist, but the dominant chroma-heavy clip regressed against the accepted baseline and the shared lookup shape did not deliver a clear win, so I reverted it back to the accepted 2x2 baseline.
+- The rebuilt user-facing release exe after the reject/revert is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 6:12:10 PM`, `Length=8793088`, `SHA256=60D9E09A8847D383374320A1F2ED69CC254B5F0734EA1A99D72546B441A739C8`.
+- Early smoke evidence from the probe showed the regression clearly on `M16-1327`, which fell to `presented_fps=5.360`, `avg_render_total_ms=177.442`, `avg_mix_chroma_ms=24.070`, `processed8_direct_path_frames=0` versus the accepted baseline `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`.
+- The same run kept the direct8 guard intact and `lookAssist` settled, so this was a pure fallback-path reject rather than a color-state regression.
+- The restored-baseline rerun kept x1 Quality and settled Auto Look Assist intact and stayed on the fallback path with `processed8_direct_path_frames=0` for all three clips:
+  - `M16-1327`: `presented_fps=5.241`, `avg_render_total_ms=178.238`, `avg_mix_chroma_ms=23.000`
+  - `M16-1347`: `presented_fps=5.365`, `avg_render_total_ms=173.326`, `avg_mix_chroma_ms=24.279`
+  - `M16-1446`: `presented_fps=6.105`, `avg_render_total_ms=154.306`, `avg_mix_chroma_ms=0.000`
+- The next useful target is still a different structural reduction in the retained `dualiso.c` mix stack, not another shared-lookup cleanup in `chroma_smooth.c`.
+
 ## 2026-05-30 - rejected alias-map row-pointer cleanup in dualiso fallback filter
 - I tried converting the 37-neighbor alias-map smoothing pass in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) to row-pointer locals so the hot retained fallback path could avoid repeated `x + y*w` address arithmetic.
 - The experiment did not survive the visible smoke gate: the row-pointer version regressed overall render time versus the accepted baseline, so I reverted it and restored the previous `collapse(2)` filter shape.
