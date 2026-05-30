@@ -1,3 +1,14 @@
+## 2026-05-30 - rejected alias-map row-pointer cleanup in dualiso fallback filter
+- I tried converting the 37-neighbor alias-map smoothing pass in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) to row-pointer locals so the hot retained fallback path could avoid repeated `x + y*w` address arithmetic.
+- The experiment did not survive the visible smoke gate: the row-pointer version regressed overall render time versus the accepted baseline, so I reverted it and restored the previous `collapse(2)` filter shape.
+- The rebuilt user-facing release exe after the reject/revert is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 5:50:08 PM`, `Length=8793088`, `SHA256=1AD94EBF347E47B1E8A5C5FB0E3E3E8988D3BEACEDF4B762242C2064AA896FFB`.
+- The sequential visible GUI smoke rerun on the restored baseline stayed valid for x1 Quality and settled Auto Look Assist, but it was slower than the accepted fallback baseline on the two chroma-heavy clips:
+  - `M16-1327`: `presented_fps=5.495`, `avg_render_total_ms=171.455`, `avg_mix_chroma_ms=23.909`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.247`, `avg_render_total_ms=222.971`, `avg_mix_chroma_ms=31.441`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.495`, `avg_render_total_ms=171.886`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+- The retained path signal was mixed at best and clearly regressed overall render time, so this should stay a rejected probe rather than a keep change.
+- The current clean tree is back on the accepted baseline, and the next useful target remains a different structural reduction in the retained Dual ISO blend stack.
+
 ## 2026-05-30 - rejected 2x2 chroma_smooth constant hoist
 - I tried hoisting the `thr` / clamp constants inside the 2x2-only [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) branch so the hot center-pixel blend would avoid rebuilding the same threshold literals each iteration.
 - The build succeeded, but the visible smoke gate regressed badly enough that the change is not worth keeping, so it was reverted back to the accepted 2x2 baseline before closeout.
