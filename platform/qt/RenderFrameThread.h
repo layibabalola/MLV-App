@@ -80,6 +80,7 @@ public:
             bool renderThreadUsingGpuPreviewProcessing = false;
             bool renderThreadUsingGpuBilinearDebayer = false;
             bool renderThreadUsingCpuPreviewProcessing = false;
+            bool renderThreadUsingPlaybackPreviewProcessing = false;
         };
 
         const uint8_t *rawImage8 = nullptr;
@@ -94,6 +95,7 @@ public:
         bool playbackFastScaleActive = false;
         int playbackScaledWidth = 0;
         int playbackScaledHeight = 0;
+        int playbackScaledBytesPerLine = 0;
         bool usedGpuBilinearDebayer = false;
         QString gpuBilinearFallbackReason;
         QString gpuBilinearRendererDescription;
@@ -197,6 +199,7 @@ private:
         bool playbackFastScaleActive = false;
         int playbackScaledWidth = 0;
         int playbackScaledHeight = 0;
+        int playbackScaledBytesPerLine = 0;
         bool usedGpuBilinearDebayer = false;
         QString gpuBilinearFallbackReason;
         QString gpuBilinearRendererDescription;
@@ -230,6 +233,7 @@ private:
             playbackFastScaleActive = false;
             playbackScaledWidth = 0;
             playbackScaledHeight = 0;
+            playbackScaledBytesPerLine = 0;
             usedGpuBilinearDebayer = false;
             gpuBilinearFallbackReason.clear();
             gpuBilinearRendererDescription.clear();

@@ -5,11 +5,15 @@
 #include "../../src/processing/rbfilter/rbf_wrapper.h"
 #include "../../src/processing/sobel/sobel.h"
 
+#include <cstddef>
+#include <cstdint>
+
 extern "C" {
+#include "../../src/mlv/llrawproc/pixelproc.h"
 #include "../../src/mlv/llrawproc/patternnoise.h"
 }
 
-#include <cstdint>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -49,6 +53,135 @@ std::vector<uint16_t> make_bayer_pattern(int width, int height)
 std::string hash_image(const std::vector<uint16_t> & image)
 {
     return sha256_bytes(image.data(), image.size() * sizeof(uint16_t));
+}
+
+uint16_t limit_u16_from_i32(std::int32_t value)
+{
+    if( value < 0 ) return 0;
+    if( value > 65535 ) return 65535;
+    return static_cast<uint16_t>(value);
+}
+
+int coerce_int(int value, int low, int high)
+{
+    return std::max(std::min(value, high), low);
+}
+
+int median5_copy(int values[5])
+{
+    int copy[5] = { values[0], values[1], values[2], values[3], values[4] };
+    std::sort(copy, copy + 5);
+    return copy[2];
+}
+
+void chroma_smooth_2x2_reference(std::vector<uint16_t> & image,
+                                 int width,
+                                 int height,
+                                 int black,
+                                 int white,
+                                 int * raw2ev,
+                                 int * ev2raw)
+{
+    constexpr int ev_resolution = 65536;
+    const std::vector<uint16_t> input = image;
+
+    for( int y = 4; y < height - 5; y += 2 )
+    {
+        for( int x = 4; x < width - 4; x += 2 )
+        {
+            int med_r[5];
+            int med_b[5];
+            int eh = 0;
+            int ev = 0;
+
+            const int sample_i[5] = { -2, 0, 0, 0, 2 };
+            const int sample_j[5] = {  0, -2, 0, 2, 0 };
+
+            for( int k = 0; k < 5; ++k )
+            {
+                const int base = (x + sample_i[k]) + (y + sample_j[k]) * width;
+                const int r = input[base];
+                const int b = input[base + 1 + width];
+                const int g1 = raw2ev[input[base + 1]];
+                const int g2 = raw2ev[input[base + width]];
+                const int g3 = raw2ev[input[base - 1]];
+                const int g5 = raw2ev[input[base + 2 + width]];
+                const int gr = (g1 + g3) / 2;
+                const int gb = (g2 + g5) / 2;
+                eh += std::abs(g1 - g3) + std::abs(g2 - g5);
+                med_r[k] = raw2ev[r] - gr;
+                med_b[k] = raw2ev[b] - gb;
+            }
+
+            const int drh = median5_copy(med_r);
+            const int dbh = median5_copy(med_b);
+
+            for( int k = 0; k < 5; ++k )
+            {
+                const int base = (x + sample_i[k]) + (y + sample_j[k]) * width;
+                const int r = input[base];
+                const int b = input[base + 1 + width];
+                const int g1 = raw2ev[input[base + 1]];
+                const int g2 = raw2ev[input[base + width]];
+                const int g4 = raw2ev[input[base - width]];
+                const int g6 = raw2ev[input[base + 1 + 2 * width]];
+                const int gr = (g2 + g4) / 2;
+                const int gb = (g1 + g6) / 2;
+                ev += std::abs(g2 - g4) + std::abs(g1 - g6);
+                med_r[k] = raw2ev[r] - gr;
+                med_b[k] = raw2ev[b] - gb;
+            }
+
+            const int drv = median5_copy(med_r);
+            const int dbv = median5_copy(med_b);
+
+            const int g1 = raw2ev[input[x + 1 + y * width]];
+            const int g2 = raw2ev[input[x + (y + 1) * width]];
+            const int g3 = raw2ev[input[x - 1 + y * width]];
+            const int g4 = raw2ev[input[x + (y - 1) * width]];
+            const int g5 = raw2ev[input[x + 2 + (y + 1) * width]];
+            const int g6 = raw2ev[input[x + 1 + (y + 2) * width]];
+
+            const int grv = (g2 + g4) / 2;
+            const int grh = (g1 + g3) / 2;
+            const int gbv = (g1 + g6) / 2;
+            const int gbh = (g2 + g5) / 2;
+            int gr = ev < eh ? grv : grh;
+            int gb = ev < eh ? gbv : gbh;
+            int dr = ev < eh ? drv : drh;
+            int db = ev < eh ? dbv : dbh;
+
+            const int r0 = input[x + y * width];
+            const int b0 = input[x + 1 + (y + 1) * width];
+            const int threshold = 64;
+            if( r0 < black + threshold
+             || b0 < black + threshold
+             || std::abs(drv - drh) < threshold
+             || std::abs(grv - grh) < threshold
+             || std::abs(gbv - gbh) < threshold )
+            {
+                dr = (drv + drh) / 2;
+                db = (dbv + dbh) / 2;
+                gr = (g1 + g2 + g3 + g4) / 4;
+                gb = (g1 + g2 + g5 + g6) / 4;
+            }
+
+            if( r0 < white )
+            {
+                image[x + y * width] =
+                    static_cast<uint16_t>(ev2raw[coerce_int(gr + dr,
+                                                            -10 * ev_resolution,
+                                                            14 * ev_resolution - 1)]);
+            }
+            if( b0 < white )
+            {
+                image[x + 1 + (y + 1) * width] =
+                    static_cast<uint16_t>(ev2raw[coerce_int(gb + db,
+                                                            -10 * ev_resolution,
+                                                            14 * ev_resolution - 1)]);
+            }
+        }
+    }
 }
 
 } // namespace
@@ -177,6 +310,90 @@ TEST(ProcessingFilters, RbfFilterOutputLutMatchesSeparateLevelsPass)
                                       levels_lut.data());
 
     ASSERT_EQ(hash_image(expected_output), hash_image(actual_output));
+}
+
+TEST(ProcessingFilters, RbfFilterCurveIndexOutputMatchesSeparateLevelsAndMatrixPass)
+{
+    const int width = 22;
+    const int height = 18;
+    const float sigma_spatial = 0.0005f;
+    const float sigma_range = 0.165f;
+
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+    std::vector<uint16_t> filtered_rgb(input.size(), 0);
+    std::vector<uint16_t> expected_output(input.size(), 0);
+    std::vector<uint16_t> actual_output(input.size(), 0);
+    std::vector<uint16_t> levels_lut(65536);
+    std::vector<std::int32_t> curve_r(65536);
+    std::vector<std::int32_t> curve_g(65536);
+    std::vector<std::int32_t> curve_b(65536);
+    for( std::size_t i = 0; i < levels_lut.size(); ++i )
+    {
+        const uint32_t value = static_cast<uint32_t>(i);
+        levels_lut[i] = static_cast<uint16_t>((value * 257u + (value >> 3) + 19u) & 0xffffu);
+        curve_r[i] = static_cast<std::int32_t>(i) - 5000;
+        curve_g[i] = static_cast<std::int32_t>((i * 3u) / 4u);
+        curve_b[i] = 8000 - static_cast<std::int32_t>(i / 2u);
+    }
+
+    recursive_bf_wrap_with_output_lut(input.data(),
+                                      filtered_rgb.data(),
+                                      sigma_spatial,
+                                      sigma_range,
+                                      width,
+                                      height,
+                                      3,
+                                      levels_lut.data());
+    for( std::size_t index = 0; index < filtered_rgb.size(); index += 3 )
+    {
+        const std::int32_t curve_index =
+            ((curve_r[filtered_rgb[index + 0]] << 2)
+           + (curve_g[filtered_rgb[index + 1]] * 11)
+           +  curve_b[filtered_rgb[index + 2]]) >> 4;
+        const uint16_t mask = limit_u16_from_i32(curve_index);
+        expected_output[index + 0] = mask;
+        expected_output[index + 1] = mask;
+        expected_output[index + 2] = mask;
+    }
+
+    recursive_bf_wrap_with_curve_index_lut(input.data(),
+                                           actual_output.data(),
+                                           sigma_spatial,
+                                           sigma_range,
+                                           width,
+                                           height,
+                                           3,
+                                           levels_lut.data(),
+                                           curve_r.data(),
+                                           curve_g.data(),
+                                           curve_b.data());
+
+    ASSERT_EQ(hash_image(expected_output), hash_image(actual_output));
+}
+
+TEST(ProcessingFilters, ChromaSmooth2x2MatchesScalarReference)
+{
+    const int width = 34;
+    const int height = 30;
+    const int black = 256;
+    const int white = 15000;
+
+    std::vector<uint16_t> expected = make_bayer_pattern(width, height);
+    std::vector<uint16_t> actual = expected;
+
+    int * raw2ev = get_raw2ev(black);
+    int * ev2raw = get_ev2raw(black);
+    ASSERT_TRUE(raw2ev != nullptr);
+    ASSERT_TRUE(ev2raw != nullptr);
+
+    chroma_smooth_scratch_t scratch = { nullptr, 0 };
+    chroma_smooth_2x2_reference(expected, width, height, black, white, raw2ev, ev2raw);
+    chroma_smooth(2, actual.data(), width, height, black, white, raw2ev, ev2raw, &scratch);
+
+    ASSERT_EQ(hash_image(expected), hash_image(actual));
+
+    std::free(scratch.buffer);
+    free_luts(raw2ev, ev2raw);
 }
 
 TEST(ProcessingFilters, SobelScratchReuseMatchesFreshResultAfterResize)

@@ -256,7 +256,8 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
                                                                               int selectedMode,
                                                                               int selectedInterpolation,
                                                                               int selectedAliasMap,
-                                                                              int selectedFullResBlending)
+                                                                              int selectedFullResBlending,
+                                                                              bool playbackFastProcessingSubsetActive = false)
 {
     if (dualIsoPlaybackOverrideDisabledViaEnv())
     {
@@ -275,7 +276,7 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
      * writes the playbackForceMean23 flag, giving us HQ + mean23 (cast
      * closed) at the cost of cadence. */
     const bool previewOverrideActive = playbackActive
-                                    && rawFixEnabled
+                                    && (rawFixEnabled || playbackFastProcessingSubsetActive)
                                     && (dualIsoValidity != 0)
                                     && (selectedMode > 0)
                                     && !preferHqMean23;

@@ -20,13 +20,52 @@
 #endif
 
 #ifdef CHROMA_SMOOTH_2X2
-static void CHROMA_SMOOTH_FUNC(int w, int h, CHROMA_SMOOTH_TYPE * inp, CHROMA_SMOOTH_TYPE * out, int* raw2ev, int* ev2raw, int black, int white)
+static inline int chroma_smooth_med5(int a0, int a1, int a2, int a3, int a4)
+{
+    #define CS2_SWAP(lo, hi) do { \
+        const int _cs2_lo = MIN((lo), (hi)); \
+        const int _cs2_hi = MAX((lo), (hi)); \
+        (lo) = _cs2_lo; \
+        (hi) = _cs2_hi; \
+    } while (0)
+
+    CS2_SWAP(a0, a1);
+    CS2_SWAP(a3, a4);
+    CS2_SWAP(a0, a3);
+    CS2_SWAP(a1, a4);
+    CS2_SWAP(a1, a2);
+    CS2_SWAP(a2, a3);
+    CS2_SWAP(a1, a2);
+
+    #undef CS2_SWAP
+    return a2;
+}
+
+static void CHROMA_SMOOTH_FUNC(int w,
+                               int h,
+                               CHROMA_SMOOTH_TYPE * __restrict inp,
+                               CHROMA_SMOOTH_TYPE * __restrict out,
+                               int* __restrict raw2ev,
+                               int* __restrict ev2raw,
+                               int black,
+                               int white)
 {
     int x,y;
 
     #pragma omp parallel for
     for (y = 4; y < h-5; y += 2)
     {
+        const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
+        const CHROMA_SMOOTH_TYPE *row_y_m2 = inp + (size_t)(y - 2) * (size_t)w;
+        const CHROMA_SMOOTH_TYPE *row_y_m1 = inp + (size_t)(y - 1) * (size_t)w;
+        const CHROMA_SMOOTH_TYPE *row_y = inp + (size_t)y * (size_t)w;
+        const CHROMA_SMOOTH_TYPE *row_y_p1 = row_y + w;
+        const CHROMA_SMOOTH_TYPE *row_y_p2 = inp + (size_t)(y + 2) * (size_t)w;
+        const CHROMA_SMOOTH_TYPE *row_y_p3 = inp + (size_t)(y + 3) * (size_t)w;
+        const CHROMA_SMOOTH_TYPE *row_y_p4 = inp + (size_t)(y + 4) * (size_t)w;
+        CHROMA_SMOOTH_TYPE *out_y = out + (size_t)y * (size_t)w;
+        CHROMA_SMOOTH_TYPE *out_y_p1 = out_y + w;
+
         for (x = 4; x < w-4; x += 2)
         {
             int med_r[5];
@@ -34,14 +73,13 @@ static void CHROMA_SMOOTH_FUNC(int w, int h, CHROMA_SMOOTH_TYPE * inp, CHROMA_SM
             int eh = 0;
             int ev = 0;
 
-            #define CS2_SAMPLE_H(k, i, j) do { \
-                const int base = (x + (i)) + (y + (j)) * w; \
-                const int r = inp[base]; \
-                const int b = inp[base + 1 + w]; \
-                const int g1 = raw2ev[inp[base + 1]]; \
-                const int g2 = raw2ev[inp[base + w]]; \
-                const int g3 = raw2ev[inp[base - 1]]; \
-                const int g5 = raw2ev[inp[base + 2 + w]]; \
+            #define CS2_SAMPLE_H(k, row0, row1, x0) do { \
+                const int r = row0[x0]; \
+                const int b = row1[x0 + 1]; \
+                const int g1 = raw2ev[row0[x0 + 1]]; \
+                const int g2 = raw2ev[row1[x0]]; \
+                const int g3 = raw2ev[row0[x0 - 1]]; \
+                const int g5 = raw2ev[row1[x0 + 2]]; \
                 const int gr = (g1 + g3) / 2; \
                 const int gb = (g2 + g5) / 2; \
                 eh += ABS(g1 - g3) + ABS(g2 - g5); \
@@ -49,24 +87,23 @@ static void CHROMA_SMOOTH_FUNC(int w, int h, CHROMA_SMOOTH_TYPE * inp, CHROMA_SM
                 med_b[(k)] = raw2ev[b] - gb; \
             } while (0)
 
-            CS2_SAMPLE_H(0, -2,  0);
-            CS2_SAMPLE_H(1,  0, -2);
-            CS2_SAMPLE_H(2,  0,  0);
-            CS2_SAMPLE_H(3,  0,  2);
-            CS2_SAMPLE_H(4,  2,  0);
+            CS2_SAMPLE_H(0, row_y, row_y_p1, x - 2);
+            CS2_SAMPLE_H(1, row_y_m2, row_y_m1, x);
+            CS2_SAMPLE_H(2, row_y, row_y_p1, x);
+            CS2_SAMPLE_H(3, row_y_p2, row_y_p3, x);
+            CS2_SAMPLE_H(4, row_y, row_y_p1, x + 2);
             #undef CS2_SAMPLE_H
 
-            const int drh = opt_med5(med_r);
-            const int dbh = opt_med5(med_b);
+            const int drh = chroma_smooth_med5(med_r[0], med_r[1], med_r[2], med_r[3], med_r[4]);
+            const int dbh = chroma_smooth_med5(med_b[0], med_b[1], med_b[2], med_b[3], med_b[4]);
 
-            #define CS2_SAMPLE_V(k, i, j) do { \
-                const int base = (x + (i)) + (y + (j)) * w; \
-                const int r = inp[base]; \
-                const int b = inp[base + 1 + w]; \
-                const int g1 = raw2ev[inp[base + 1]]; \
-                const int g2 = raw2ev[inp[base + w]]; \
-                const int g4 = raw2ev[inp[base - w]]; \
-                const int g6 = raw2ev[inp[base + 1 + 2*w]]; \
+            #define CS2_SAMPLE_V(k, row0, row1, rowm1, rowp2, x0) do { \
+                const int r = row0[x0]; \
+                const int b = row1[x0 + 1]; \
+                const int g1 = raw2ev[row0[x0 + 1]]; \
+                const int g2 = raw2ev[row1[x0]]; \
+                const int g4 = raw2ev[rowm1[x0]]; \
+                const int g6 = raw2ev[rowp2[x0 + 1]]; \
                 const int gr = (g2 + g4) / 2; \
                 const int gb = (g1 + g6) / 2; \
                 ev += ABS(g2 - g4) + ABS(g1 - g6); \
@@ -74,15 +111,15 @@ static void CHROMA_SMOOTH_FUNC(int w, int h, CHROMA_SMOOTH_TYPE * inp, CHROMA_SM
                 med_b[(k)] = raw2ev[b] - gb; \
             } while (0)
 
-            CS2_SAMPLE_V(0, -2,  0);
-            CS2_SAMPLE_V(1,  0, -2);
-            CS2_SAMPLE_V(2,  0,  0);
-            CS2_SAMPLE_V(3,  0,  2);
-            CS2_SAMPLE_V(4,  2,  0);
+            CS2_SAMPLE_V(0, row_y, row_y_p1, row_y_m1, row_y_p2, x - 2);
+            CS2_SAMPLE_V(1, row_y_m2, row_y_m1, row_y_m3, row_y, x);
+            CS2_SAMPLE_V(2, row_y, row_y_p1, row_y_m1, row_y_p2, x);
+            CS2_SAMPLE_V(3, row_y_p2, row_y_p3, row_y_p1, row_y_p4, x);
+            CS2_SAMPLE_V(4, row_y, row_y_p1, row_y_m1, row_y_p2, x + 2);
             #undef CS2_SAMPLE_V
 
-            const int drv = opt_med5(med_r);
-            const int dbv = opt_med5(med_b);
+            const int drv = chroma_smooth_med5(med_r[0], med_r[1], med_r[2], med_r[3], med_r[4]);
+            const int dbv = chroma_smooth_med5(med_b[0], med_b[1], med_b[2], med_b[3], med_b[4]);
 
             int g1 = raw2ev[inp[x+1 +     y * w]];
             int g2 = raw2ev[inp[x   + (y+1) * w]];
@@ -113,16 +150,23 @@ static void CHROMA_SMOOTH_FUNC(int w, int h, CHROMA_SMOOTH_TYPE * inp, CHROMA_SM
             }
 
             if (r0 < white)
-                out[x   +     y * w] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                out_y[x] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
 
             if (b0 < white)
-                out[x+1 + (y+1) * w] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                out_y_p1[x + 1] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
         }
     }
 }
 
 #else
-static void CHROMA_SMOOTH_FUNC(int w, int h, CHROMA_SMOOTH_TYPE * inp, CHROMA_SMOOTH_TYPE * out, int* raw2ev, int* ev2raw, int black, int white)
+static void CHROMA_SMOOTH_FUNC(int w,
+                               int h,
+                               CHROMA_SMOOTH_TYPE * __restrict inp,
+                               CHROMA_SMOOTH_TYPE * __restrict out,
+                               int* __restrict raw2ev,
+                               int* __restrict ev2raw,
+                               int black,
+                               int white)
 {
     int x,y;
 

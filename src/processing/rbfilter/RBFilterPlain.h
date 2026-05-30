@@ -28,6 +28,19 @@ Fixed bugs and adapted to RGB64 by masc4ii (c) 2019
 
 #include "stdint.h"
 
+struct RBFilterPlainTiming
+{
+    double total_ms = 0.0;
+    double boundary_ms = 0.0;
+    double range_table_ms = 0.0;
+    double left_ms = 0.0;
+    double right_ms = 0.0;
+    double horizontal_average_ms = 0.0;
+    double vertical_down_ms = 0.0;
+    double vertical_up_ms = 0.0;
+    double output_ms = 0.0;
+};
+
 // This class is useful only for the sake of understanding the main principles of Recursive Bilateral Filter
 // It is designed in non-optimal but easy to understand way. It also does not match 1:1 with original, 
 // some creative liberties were taken with original idea.
@@ -54,6 +67,8 @@ class CRBFilterPlain
 	float		m_range_table_alpha = 0.0f;
 	float		m_range_table_inv_sigma = 0.0f;
 	bool		m_range_table_valid = false;
+    bool        m_timing_enabled = false;
+    RBFilterPlainTiming m_last_timing;
 
     int getDiffFactor(const uint16_t* color1, const uint16_t* color2) const;
 
@@ -69,8 +84,13 @@ public:
 	// memory must be reserved before calling image filter
 	// this implementation of filter uses plain C++, single threaded
 	// channel count must be 3 or 4 (alpha not used)
-    void filter(uint16_t* img_src, uint16_t* img_dst,
+    void filter(uint16_t* __restrict img_src, uint16_t* __restrict img_dst,
 		float sigma_spatial, float sigma_range,
 		int width, int height, int channel,
-        const uint16_t * output_lut = nullptr);
+        const uint16_t * __restrict output_lut = nullptr,
+        const int32_t * __restrict output_curve_r = nullptr,
+        const int32_t * __restrict output_curve_g = nullptr,
+        const int32_t * __restrict output_curve_b = nullptr);
+    void setTimingEnabled(bool enabled) { m_timing_enabled = enabled; }
+    RBFilterPlainTiming lastTiming() const { return m_last_timing; }
 };

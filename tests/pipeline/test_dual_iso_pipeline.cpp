@@ -1243,10 +1243,11 @@ extern "C" int processingFastPathReinitDispatchForTesting(void);
 TEST(DualIsoPipeline, DirectProcessed8FastPath_AVX2IntrinByteIdentity)
 {
     /* Byte-identity check for the hand-tuned AVX2 + FMA intrinsics direct8
-     * variant. Strategy: render the reference once with the default dispatch
-     * (scalar or autovec AVX2), shift down to uint8 to get the expected
-     * frame, then re-render with MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8=1 forcing
-     * the intrinsics path, and assert max_abs_diff == 0 across all pixels. */
+     * variant. Strategy: render the reference once with the autovec AVX2
+     * path forced via MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1, shift down to
+     * uint8 to get the expected frame, then re-render with the default
+     * dispatch (intrinsics on AVX2+FMA hosts), and assert max_abs_diff == 0
+     * across all pixels. */
 #if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
     __builtin_cpu_init();
     const bool host_supports_avx2_fma =
@@ -1264,12 +1265,24 @@ TEST(DualIsoPipeline, DirectProcessed8FastPath_AVX2IntrinByteIdentity)
         return;
     }
 
-    /* Stage 1: reference frame16 -> shifted-to-8 expected. Run with the
-     * intrinsics OFF so we get the deterministic scalar/autovec output. */
+    /* Stage 0: ensure the default dispatch really selects the intrinsics
+     * variant when no opt-out env is present. */
 #ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8", "");
     _putenv_s("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "");
 #else
+    unsetenv("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8");
     unsetenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8");
+#endif
+    processingFastPathReinitDispatchForTesting();
+    ASSERT_TRUE(processingFastPathAvx2IntrinActive() != 0);
+
+    /* Stage 1: reference frame16 -> shifted-to-8 expected. Run with the
+     * intrinsics disabled so we get the deterministic scalar/autovec output. */
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8", "1");
+#else
+    setenv("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8", "1", 1);
 #endif
     processingFastPathReinitDispatchForTesting();
     ASSERT_TRUE(processingFastPathAvx2IntrinActive() == 0);
@@ -1289,11 +1302,12 @@ TEST(DualIsoPipeline, DirectProcessed8FastPath_AVX2IntrinByteIdentity)
         expected_frame8[index] = static_cast<uint8_t>(reference_frame16[index] >> 8);
     }
 
-    /* Stage 2: enable the intrinsics path and re-render at 8-bit. */
+    /* Stage 2: clear the opt-out and re-render at 8-bit with the default
+     * intrinsics dispatch. */
 #ifdef _WIN32
-    _putenv_s("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "1");
+    _putenv_s("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8", "");
 #else
-    setenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "1", 1);
+    unsetenv("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8");
 #endif
     const int reinit_active = processingFastPathReinitDispatchForTesting();
     ASSERT_TRUE(reinit_active != 0);
@@ -1320,8 +1334,10 @@ TEST(DualIsoPipeline, DirectProcessed8FastPath_AVX2IntrinByteIdentity)
 
     /* Restore default dispatch for subsequent tests. */
 #ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8", "");
     _putenv_s("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8", "");
 #else
+    unsetenv("MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8");
     unsetenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8");
 #endif
     processingFastPathReinitDispatchForTesting();

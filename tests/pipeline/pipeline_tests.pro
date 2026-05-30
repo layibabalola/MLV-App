@@ -117,7 +117,11 @@ HEADERS += \
     $$REPO_ROOT/tests/pipeline/backend_parametric_fixture.h
 
 win32{
-    QMAKE_CFLAGS += -O2 -fopenmp -mssse3 -msse3 -msse2 -msse -D_FILE_OFFSET_BITS=64 -std=c99 -ftree-vectorize
+    QMAKE_CFLAGS_RELEASE -= -O2
+    QMAKE_CFLAGS_RELEASE += -O3
+    QMAKE_CXXFLAGS_RELEASE -= -O2
+    QMAKE_CXXFLAGS_RELEASE += -O3
+    QMAKE_CFLAGS += -O3 -fopenmp -mssse3 -msse3 -msse2 -msse -D_FILE_OFFSET_BITS=64 -std=c99 -ftree-vectorize
     LIBS += -llibgomp-1
     # dbghelp: CrashForensics links MiniDumpWriteDump via dbghelp.
     LIBS += -ldbghelp

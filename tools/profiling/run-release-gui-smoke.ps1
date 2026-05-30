@@ -9,9 +9,17 @@ param(
     [double]$SettleCpuPercent = 10,
     [int]$SettleCpuStableMs = 1000,
     [int]$SettleCpuMaxMs = 45000,
+    [double]$SystemSettleCpuPercent = -1,
+    [int]$SystemSettleCpuStableMs = 2000,
+    [int]$SystemSettleCpuMaxMs = 60000,
     [string]$Threads = "6",
     [string]$ScaleFactor = "",
+    [int]$ExpectedScaleRequest = 1,
+    [int]$ExpectedQualityMode = 1,
     [switch]$PreferHqMean23,
+    [switch]$FrameTelemetry,
+    [switch]$RbfDetailTiming,
+    [switch]$PreserveExperimentalEnvironment,
     [string]$Receipt = "",
     [string]$Scope = "",
     [ValidateSet("", "on", "off")]
@@ -66,6 +74,85 @@ function Get-LogTimestampUtc {
             [System.Globalization.DateTimeStyles]::AdjustToUniversal)
 }
 
+function Get-SystemCpuPercent {
+    $sample = Get-CimInstance `
+        -ClassName Win32_PerfFormattedData_PerfOS_Processor `
+        -Filter "Name='_Total'" `
+        -ErrorAction Stop
+    [double]$sample.PercentProcessorTime
+}
+
+function Wait-SystemCpuSettle {
+    param(
+        [double]$ThresholdPercent,
+        [int]$StableMs,
+        [int]$MaxMs
+    )
+
+    $requested = $ThresholdPercent -ge 0 -and $StableMs -gt 0 -and $MaxMs -gt 0
+    $result = [ordered]@{
+        requested = $requested
+        settled = -not $requested
+        thresholdPercent = $ThresholdPercent
+        stableMs = 0
+        requiredStableMs = $StableMs
+        elapsedMs = 0
+        maxMs = $MaxMs
+        lastPercent = $null
+        failure = $null
+    }
+    if (-not $requested) {
+        return [pscustomobject]$result
+    }
+
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastSampleMs = 0
+    while ($watch.ElapsedMilliseconds -lt $MaxMs -and $result.stableMs -lt $StableMs) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $cpuPercent = Get-SystemCpuPercent
+        }
+        catch {
+            $result.failure = $_.Exception.Message
+            break
+        }
+
+        $nowMs = [int]$watch.ElapsedMilliseconds
+        $deltaMs = [Math]::Max(1, $nowMs - $lastSampleMs)
+        $lastSampleMs = $nowMs
+        $result.lastPercent = $cpuPercent
+
+        if ($cpuPercent -le $ThresholdPercent) {
+            $result.stableMs += $deltaMs
+        }
+        else {
+            $result.stableMs = 0
+        }
+    }
+
+    $result.elapsedMs = [int]$watch.ElapsedMilliseconds
+    $result.settled = $result.stableMs -ge $StableMs
+    [pscustomobject]$result
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($property) {
+        return $property.Value
+    }
+
+    $null
+}
+
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $root "platform\qt\build-release\release\MLVApp.exe"
@@ -117,8 +204,10 @@ if ($AdditionalArgs.Count -gt 0) {
 }
 
 $launchEnv = [ordered]@{
-    MLVAPP_PLAYBACK_SMOKE_TELEMETRY = "1"
     MLVAPP_PLAYBACK_MAX_THREADS = $Threads
+}
+if ($FrameTelemetry) {
+    $launchEnv["MLVAPP_PLAYBACK_SMOKE_TELEMETRY"] = "1"
 }
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $launchEnv["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
@@ -126,6 +215,43 @@ if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
 if ($PreferHqMean23) {
     $launchEnv["MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"] = "1"
 }
+if ($RbfDetailTiming) {
+    $launchEnv["MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"] = "1"
+}
+if (-not [string]::IsNullOrWhiteSpace($env:OMP_NUM_THREADS)) {
+    $launchEnv["OMP_NUM_THREADS"] = $env:OMP_NUM_THREADS
+}
+
+$experimentalEnvironment = @(
+    "MLVAPP_ENABLE_SH_CURVE_INDEX_MASK",
+    "MLVAPP_DISABLE_SH_CURVE_INDEX_MASK",
+    "MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH",
+    "MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8",
+    "MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8",
+    "MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ",
+    "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING",
+    "MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS",
+    "MLVAPP_DISABLE_RAW_UINT16_PREFETCH",
+    "MLVAPP_DISABLE_PLAY_START_PREROLL"
+)
+$experimentalEnvironmentToClear = @(
+    $experimentalEnvironment | Where-Object { -not $launchEnv.Contains($_) }
+)
+$clearedEnvironment = @()
+if (-not $FrameTelemetry) {
+    $clearedEnvironment += "MLVAPP_PLAYBACK_SMOKE_TELEMETRY"
+}
+if (-not $RbfDetailTiming) {
+    $clearedEnvironment += "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"
+}
+$clearedEnvironment += @(
+    "MLVAPP_PLAYBACK_SCALE_FACTOR",
+    "MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"
+)
+if (-not $PreserveExperimentalEnvironment) {
+    $clearedEnvironment += $experimentalEnvironmentToClear
+}
+$clearedEnvironment = @($clearedEnvironment | Select-Object -Unique)
 
 if ($DryRun) {
     [pscustomobject]@{
@@ -133,10 +259,20 @@ if ($DryRun) {
         workingDirectory = $root
         arguments = $arguments
         environment = $launchEnv
-        clearsEnvironment = @(
-            "MLVAPP_PLAYBACK_SCALE_FACTOR",
-            "MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"
-        )
+        clearsEnvironment = $clearedEnvironment
+        preserveExperimentalEnvironment = [bool]$PreserveExperimentalEnvironment
+        preLaunchSystemCpuSettle = [pscustomobject]@{
+            requested = $SystemSettleCpuPercent -ge 0
+            thresholdPercent = $SystemSettleCpuPercent
+            stableMs = $SystemSettleCpuStableMs
+            maxMs = $SystemSettleCpuMaxMs
+        }
+        validationPolicy = [pscustomobject]@{
+            requireLookAssist = $RequireLookAssist
+            requireCpuSettled = $RequireCpuSettled
+            expectedScaleRequest = $ExpectedScaleRequest
+            expectedQualityMode = $ExpectedQualityMode
+        }
         output = $outputPath
     } | ConvertTo-Json -Depth 5
     return
@@ -160,8 +296,13 @@ foreach ($argument in $arguments) {
 }
 
 $envBlock = $startInfo.EnvironmentVariables
-$envBlock["MLVAPP_PLAYBACK_SMOKE_TELEMETRY"] = "1"
 $envBlock["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
+if ($FrameTelemetry) {
+    $envBlock["MLVAPP_PLAYBACK_SMOKE_TELEMETRY"] = "1"
+}
+else {
+    [void]$envBlock.Remove("MLVAPP_PLAYBACK_SMOKE_TELEMETRY")
+}
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $envBlock["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
 }
@@ -174,6 +315,22 @@ if ($PreferHqMean23) {
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23")
 }
+if ($RbfDetailTiming) {
+    $envBlock["MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"] = "1"
+}
+else {
+    [void]$envBlock.Remove("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")
+}
+if (-not $PreserveExperimentalEnvironment) {
+    foreach ($name in $experimentalEnvironmentToClear) {
+        [void]$envBlock.Remove($name)
+    }
+}
+
+$preLaunchSystemCpuSettle = Wait-SystemCpuSettle `
+    -ThresholdPercent $SystemSettleCpuPercent `
+    -StableMs $SystemSettleCpuStableMs `
+    -MaxMs $SystemSettleCpuMaxMs
 
 $startUtc = [datetime]::UtcNow
 $process = [System.Diagnostics.Process]::Start($startInfo)
@@ -212,14 +369,26 @@ $summaryLine = $recentLines |
 $cpuSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.cpu_summary*" } |
     Select-Object -Last 1
+$processingDetailSummaryLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.processing_detail_summary*" } |
+    Select-Object -Last 1
+$rbfDetailSummaryLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.rbf_detail_summary*" } |
+    Select-Object -Last 1
 $dualIsoSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.dual_iso_full20_summary*" } |
+    Select-Object -Last 1
+$dualIsoMixChromaSummaryLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.dual_iso_mix_chroma_summary*" } |
     Select-Object -Last 1
 $lookAssistSettleLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.look_assist_settle*" } |
     Select-Object -Last 1
 $lookAssistApplyLine = $recentLines |
     Where-Object { $_ -like "*look_assist.apply.result*" } |
+    Select-Object -Last 1
+$visualStateLine = $recentLines |
+    Where-Object { $_ -like "*gui_smoke.visual_state*" } |
     Select-Object -Last 1
 $cpuSettleLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.cpu_settle*" } |
@@ -228,6 +397,81 @@ $cpuSettleLine = $recentLines |
 $runMetadata = $null
 if ($runMetadataLine -and $runMetadataLine -match 'run_metadata=(?<json>\{.*\})') {
     $runMetadata = $Matches["json"] | ConvertFrom-Json
+}
+
+$playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $playbackStartLine } else { $null }
+$playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
+$cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
+$processingDetailSummary = if ($processingDetailSummaryLine) { Convert-PlaybackLogLineToObject $processingDetailSummaryLine } else { $null }
+$rbfDetailSummary = if ($rbfDetailSummaryLine) { Convert-PlaybackLogLineToObject $rbfDetailSummaryLine } else { $null }
+$dualIsoFull20Summary = if ($dualIsoSummaryLine) { Convert-PlaybackLogLineToObject $dualIsoSummaryLine } else { $null }
+$dualIsoMixChromaSummary = if ($dualIsoMixChromaSummaryLine) { Convert-PlaybackLogLineToObject $dualIsoMixChromaSummaryLine } else { $null }
+$lookAssistSettle = if ($lookAssistSettleLine) { Convert-PlaybackLogLineToObject $lookAssistSettleLine } else { $null }
+$lookAssistApply = if ($lookAssistApplyLine) { Convert-PlaybackLogLineToObject $lookAssistApplyLine } else { $null }
+$visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualStateLine } else { $null }
+$cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
+
+$lookAssistApplied =
+    ($null -ne $lookAssistApply) -and
+    ($null -ne $lookAssistSettle) -and
+    ($lookAssistSettle.enabled -eq 1) -and
+    ($lookAssistSettle.diagnostics_valid -eq 1) -and
+    (-not [string]::IsNullOrWhiteSpace([string]$lookAssistApply.scene))
+
+$scaleRequestStart = Get-ObjectPropertyValue $playbackStart "scale_request"
+$scaleRequestLast = Get-ObjectPropertyValue $playbackSummary "scale_request_last"
+$scaleActiveLast = Get-ObjectPropertyValue $playbackSummary "scale_active_last"
+$qualityModeStart = Get-ObjectPropertyValue $playbackStart "quality_mode"
+$qualityModeLast = Get-ObjectPropertyValue $playbackSummary "quality_mode"
+$validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
+$validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
+
+$cpuSettled = $true
+if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
+    $cpuSettled = $false
+    if ($cpuSettle) {
+        $cpuSettled = ($cpuSettle.settled -eq 1)
+    }
+}
+
+$validationFailures = @()
+if ($RequireLookAssist -and -not $lookAssistApplied) {
+    $validationFailures += "Look Assist did not settle/apply before playback."
+}
+if ($null -eq $visualState) {
+    $validationFailures += "GUI visual state telemetry was missing."
+}
+if ($RequireLookAssist -and
+    $null -ne $visualState -and
+    ([int](Get-ObjectPropertyValue $visualState "look_assist_enabled") -ne 1 -or
+     [int](Get-ObjectPropertyValue $visualState "look_assist_diagnostics_valid") -ne 1)) {
+    $validationFailures += "GUI visual state did not have settled Look Assist enabled."
+}
+if ($RequireCpuSettled -and -not $cpuSettled) {
+    $validationFailures += "CPU did not settle before playback."
+}
+if ($RequireCpuSettled -and
+    $preLaunchSystemCpuSettle.requested -and
+    -not $preLaunchSystemCpuSettle.settled) {
+    $validationFailures += "System CPU did not settle before launching MLVApp."
+}
+if ($ExpectedScaleRequest -ge 0 -and
+    ($null -eq $validatedScaleRequest -or [int]$validatedScaleRequest -ne $ExpectedScaleRequest)) {
+    $validationFailures += "Playback scale request was $validatedScaleRequest; expected $ExpectedScaleRequest."
+}
+if ($ExpectedScaleRequest -ge 0 -and
+    $null -ne $visualState -and
+    [int](Get-ObjectPropertyValue $visualState "scale_request") -ne $ExpectedScaleRequest) {
+    $validationFailures += "GUI visual state scale request was $(Get-ObjectPropertyValue $visualState "scale_request"); expected $ExpectedScaleRequest."
+}
+if ($ExpectedQualityMode -ge 0 -and
+    ($null -eq $validatedQualityMode -or [int]$validatedQualityMode -ne $ExpectedQualityMode)) {
+    $validationFailures += "Quality mode was $validatedQualityMode; expected $ExpectedQualityMode."
+}
+if ($ExpectedQualityMode -ge 0 -and
+    $null -ne $visualState -and
+    [int](Get-ObjectPropertyValue $visualState "quality_mode") -ne $ExpectedQualityMode) {
+    $validationFailures += "GUI visual state quality mode was $(Get-ObjectPropertyValue $visualState "quality_mode"); expected $ExpectedQualityMode."
 }
 
 $result = [pscustomobject]@{
@@ -244,13 +488,49 @@ $result = [pscustomobject]@{
         validationPolicy = [pscustomobject]@{
             requireLookAssist = $RequireLookAssist
             requireCpuSettled = $RequireCpuSettled
+            expectedScaleRequest = $ExpectedScaleRequest
+            expectedQualityMode = $ExpectedQualityMode
         }
         matchedUserShellDefaults = [pscustomobject]@{
-            telemetry = $true
+            frameTelemetry = [bool]$FrameTelemetry
+            rbfDetailTiming = [bool]$RbfDetailTiming
             playbackMaxThreads = $Threads
             scaleFactorUnsetUnlessRequested = [string]::IsNullOrWhiteSpace($ScaleFactor)
             preferHqMean23UnsetUnlessRequested = -not $PreferHqMean23
+            experimentalEnvironmentCleared = -not $PreserveExperimentalEnvironment
+            clearedEnvironment = $clearedEnvironment
             qtPlatformNotForced = $true
+        }
+        preLaunchSystemCpuSettle = $preLaunchSystemCpuSettle
+    }
+    visualQuality = [pscustomobject]@{
+        scaleRequestStart = $scaleRequestStart
+        scaleRequestLast = $scaleRequestLast
+        scaleActiveLast = $scaleActiveLast
+        qualityModeStart = $qualityModeStart
+        qualityModeLast = $qualityModeLast
+        visualState = $visualState
+        lookAssist = [pscustomobject]@{
+            applied = [bool]$lookAssistApplied
+            enabled = Get-ObjectPropertyValue $lookAssistSettle "enabled"
+            diagnosticsValid = Get-ObjectPropertyValue $lookAssistSettle "diagnostics_valid"
+            waitMs = Get-ObjectPropertyValue $lookAssistSettle "wait_ms"
+            analysis = Get-ObjectPropertyValue $lookAssistApply "analysis"
+            scene = Get-ObjectPropertyValue $lookAssistApply "scene"
+            median = Get-ObjectPropertyValue $lookAssistApply "median"
+            p05 = Get-ObjectPropertyValue $lookAssistApply "p05"
+            p95 = Get-ObjectPropertyValue $lookAssistApply "p95"
+            p99 = Get-ObjectPropertyValue $lookAssistApply "p99"
+            presetExposure = Get-ObjectPropertyValue $lookAssistApply "preset_exp"
+            presetContrast = Get-ObjectPropertyValue $lookAssistApply "preset_contrast"
+            presetPivot = Get-ObjectPropertyValue $lookAssistApply "preset_pivot"
+            presetShadows = Get-ObjectPropertyValue $lookAssistApply "preset_shadows"
+            presetHighlights = Get-ObjectPropertyValue $lookAssistApply "preset_highlights"
+            presetVibrance = Get-ObjectPropertyValue $lookAssistApply "preset_vibrance"
+            presetTemperatureDelta = Get-ObjectPropertyValue $lookAssistApply "preset_temp_delta"
+            presetTintDelta = Get-ObjectPropertyValue $lookAssistApply "preset_tint_delta"
+            finalTemperature = Get-ObjectPropertyValue $lookAssistApply "final_temp"
+            finalTint = Get-ObjectPropertyValue $lookAssistApply "final_tint"
         }
     }
     process = [pscustomobject]@{
@@ -264,56 +544,43 @@ $result = [pscustomobject]@{
     log = [pscustomobject]@{
         path = if ($logFile) { $logFile.FullName } else { $null }
         runMetadata = $runMetadata
-        playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $playbackStartLine } else { $null }
-        summary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
-        cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
-        dualIsoFull20Summary = if ($dualIsoSummaryLine) { Convert-PlaybackLogLineToObject $dualIsoSummaryLine } else { $null }
-        lookAssistSettle = if ($lookAssistSettleLine) { Convert-PlaybackLogLineToObject $lookAssistSettleLine } else { $null }
-        lookAssistApply = if ($lookAssistApplyLine) { Convert-PlaybackLogLineToObject $lookAssistApplyLine } else { $null }
-        cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
+        playbackStart = $playbackStart
+        summary = $playbackSummary
+        cpuSummary = $cpuSummary
+        processingDetailSummary = $processingDetailSummary
+        rbfDetailSummary = $rbfDetailSummary
+        dualIsoFull20Summary = $dualIsoFull20Summary
+        dualIsoMixChromaSummary = $dualIsoMixChromaSummary
+        lookAssistSettle = $lookAssistSettle
+        lookAssistApply = $lookAssistApply
+        visualState = $visualState
+        cpuSettle = $cpuSettle
         raw = [pscustomobject]@{
             runMetadata = $runMetadataLine
             playbackStart = $playbackStartLine
             summary = $summaryLine
             cpuSummary = $cpuSummaryLine
+            processingDetailSummary = $processingDetailSummaryLine
+            rbfDetailSummary = $rbfDetailSummaryLine
             dualIsoFull20Summary = $dualIsoSummaryLine
+            dualIsoMixChromaSummary = $dualIsoMixChromaSummaryLine
             lookAssistSettle = $lookAssistSettleLine
             lookAssistApply = $lookAssistApplyLine
+            visualState = $visualStateLine
             cpuSettle = $cpuSettleLine
         }
     }
-}
-
-$validationFailures = @()
-$lookAssistApplied = $lookAssistApplyLine -and $lookAssistSettleLine
-if ($lookAssistApplied) {
-    $lookAssistSettle = Convert-PlaybackLogLineToObject $lookAssistSettleLine
-    $lookAssistApply = Convert-PlaybackLogLineToObject $lookAssistApplyLine
-    $lookAssistApplied =
-        ($lookAssistSettle.enabled -eq 1) -and
-        ($lookAssistSettle.diagnostics_valid -eq 1) -and
-        (-not [string]::IsNullOrWhiteSpace([string]$lookAssistApply.scene))
-}
-if ($RequireLookAssist -and -not $lookAssistApplied) {
-    $validationFailures += "Look Assist did not settle/apply before playback."
-}
-
-$cpuSettled = $true
-if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
-    $cpuSettled = $false
-    if ($cpuSettleLine) {
-        $cpuSettle = Convert-PlaybackLogLineToObject $cpuSettleLine
-        $cpuSettled = ($cpuSettle.settled -eq 1)
-    }
-}
-if ($RequireCpuSettled -and -not $cpuSettled) {
-    $validationFailures += "CPU did not settle before playback."
 }
 
 $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomobject]@{
     ok = ($validationFailures.Count -eq 0)
     lookAssistApplied = [bool]$lookAssistApplied
     cpuSettled = [bool]$cpuSettled
+    systemCpuSettled = [bool]$preLaunchSystemCpuSettle.settled
+    scaleRequestMatched = ($ExpectedScaleRequest -lt 0 -or
+        ($null -ne $validatedScaleRequest -and [int]$validatedScaleRequest -eq $ExpectedScaleRequest))
+    qualityModeMatched = ($ExpectedQualityMode -lt 0 -or
+        ($null -ne $validatedQualityMode -and [int]$validatedQualityMode -eq $ExpectedQualityMode))
     failures = $validationFailures
 })
 

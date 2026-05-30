@@ -658,8 +658,12 @@ private:
         // by up to one row inside qt_convert_rgb888_to_rgb32_ssse3 and
         // segfaults — see the 2026-04-24 crash investigation).
         int preparedBytesPerLine = 0;
+        const uint8_t *preparedBorrowedImage = nullptr;
+        size_t preparedBorrowedImageSize = 0;
+        bool preparedImageMoved = false;
         uint8_t underOver = 0;
         double imageBuildMs = 0.0;
+        QImage preparedOwnedImage;
         std::vector<uint8_t> preparedImage;
         std::vector<uint8_t> scopeSourceImage;
     };
@@ -809,6 +813,7 @@ private:
     bool m_renderThreadUsing16BitPreview;
     bool m_renderThreadUsingGpuPreviewProcessing;
     bool m_renderThreadUsingGpuBilinearDebayer;
+    bool m_renderThreadUsingPlaybackPreviewProcessing = false;
     bool m_renderThreadUsingCpuPreviewProcessing = false;
     int m_playToFirstFrameTargetFrame = -1;
     double m_playToFirstFrameStartSeconds = 0.0;
@@ -882,6 +887,9 @@ private:
     double m_playbackSmokeDualIsoFull20MixEvLutSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixHalfresSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCopySumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaFullresSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaHalfresSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;
@@ -894,6 +902,18 @@ private:
     double m_playbackSmokeProcessingSumMs = 0.0;
     double m_playbackSmokeProcessingSetupSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsPrepSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsResizeSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsCopySumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsFilterSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfBoundarySumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfRangeTableSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfLeftSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfRightSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfHorizontalAverageSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs = 0.0;
     double m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
     double m_playbackSmokeProcessingCoreSumMs = 0.0;
     double m_playbackSmokeProcessingChromaSumMs = 0.0;
@@ -913,6 +933,14 @@ private:
     double m_playbackSmokeDrawTotalSumMs = 0.0;
     double m_playbackSmokeDrawTotalMaxMs = 0.0;
     int m_playbackSmokeProcessed8DirectPathFrames = 0;
+    int m_playbackSmokeBorrowedPreparedRgb8Frames = 0;
+    int m_playbackSmokeOwnedPreparedRgb8Frames = 0;
+    int m_playbackSmokeMovedPreparedRgb8Frames = 0;
+    int m_playbackSmokeQImagePreparedRgb8Frames = 0;
+    uint64_t m_playbackSmokeBorrowedPreparedRgb8Bytes = 0;
+    uint64_t m_playbackSmokeOwnedPreparedRgb8Bytes = 0;
+    uint64_t m_playbackSmokeMovedPreparedRgb8Bytes = 0;
+    uint64_t m_playbackSmokeQImagePreparedRgb8Bytes = 0;
     int m_playbackSmokeDualIsoFull20ValidFrames = 0;
     int m_playbackSmokeDualIsoFull20LastInterpMethod = -1;
     int m_playbackSmokeDualIsoFull20LastThreads = 0;
@@ -924,6 +952,8 @@ private:
     uint64_t m_playbackSmokeQueuedPlaybackDropMax = 0;
     int m_playbackSmokeLastWorkerThreads = 0;
     bool m_playbackSmokeLastWorkerThreadCapActive = false;
+    int m_playbackSmokeLastOpenMpThreads = 0;
+    bool m_playbackSmokeLastOpenMpThreadCapActive = false;
     int m_playbackSmokeLastScaleRequest = 1;
     int m_playbackSmokeLastScaleActive = 1;
     bool m_headlessPlaybackProfileUsePlaybackPolicy = false;
