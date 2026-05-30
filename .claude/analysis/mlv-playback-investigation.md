@@ -1,3 +1,14 @@
+## 2026-05-30 - rejected scalar shared-lookup rewrite in 2x2 chroma_smooth
+- I tried a scalar-local rewrite in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) that precomputed the shared red/blue and green lookups for each of the five sample positions in the 2x2 chroma pass, then reused those locals in both the horizontal and vertical median/error passes.
+- The candidate did not survive the visible gate: the first chroma-heavy clip already regressed versus the accepted baseline, with `M16-1327` falling to `presented_fps=5.235`, `avg_render_total_ms=182.357`, `avg_mix_chroma_ms=25.405`, `processed8_direct_path_frames=0` versus the accepted baseline `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`.
+- The build succeeded and kept the x1 Quality / settled Auto Look Assist gate intact, but the shared-local shape slowed the dominant chroma bucket instead of improving it, so I reverted it back to the accepted 2x2 baseline.
+- The rebuilt user-facing release exe after the reject/revert is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 6:17:58 PM`, `Length=8793600`, `SHA256=93822340E7EDB8805523303577B6623CFFC5A0A9AC363344A1E9904CA1AC6764`.
+- The restored-baseline rerun kept x1 Quality and settled Auto Look Assist intact and stayed on the fallback path with `processed8_direct_path_frames=0` for all three clips:
+  - `M16-1327`: `presented_fps=5.490`, `avg_render_total_ms=171.182`, `avg_mix_chroma_ms=23.705`
+  - `M16-1347`: `presented_fps=5.118`, `avg_render_total_ms=182.634`, `avg_mix_chroma_ms=27.634`
+  - `M16-1446`: `presented_fps=5.991`, `avg_render_total_ms=158.417`, `avg_mix_chroma_ms=0.000`
+- The next useful target remains the retained `dualiso.c` mix stack, but not another 2x2 chroma_smooth lookup-sharing probe in this shape.
+
 ## 2026-05-30 - rejected 2x2 chroma_smooth shared-lookup probe
 - I tried a shared-lookup rewrite in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) that cached the common per-sample `raw2ev` lookups across the horizontal and vertical `CHROMA_SMOOTH_2X2` passes so each sample could reuse the same red/blue and shared-green values.
 - The probe did not earn a keep: the visible GUI smoke gate stayed valid with x1 Quality and settled Auto Look Assist, but the dominant chroma-heavy clip regressed against the accepted baseline and the shared lookup shape did not deliver a clear win, so I reverted it back to the accepted 2x2 baseline.
