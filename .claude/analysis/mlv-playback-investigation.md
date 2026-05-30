@@ -1,5 +1,37 @@
 ## Direct-8 Loop Profiling (2026-04-24)
 
+## 2026-05-30 - pink wash localizes to the direct8 preview path
+
+### Verified locally
+
+- The current playback preview artifact still presents as a broad pink wash across the full frame, while export stays clean.
+- Re-checking the stage captures from `.claude-state/profiling/20260530-bandprobe/` shows the pink is not present in `S1_pre_dualiso` or `S2_post_dualiso`; it appears by `S5_processed8` and is still visible in `S6_displayImage`.
+- That places the color shift inside the direct8 preview generation path, after the post-dualiso stage and before the GUI presents the frame.
+- I tested the obvious safety change of forcing the preview path onto the shared 16-bit kernel by removing the playback-preview direct8 override in `src/processing/raw_processing.c`. It removed the color issue, but it also collapsed performance to an unusably slow level on the visible smoke gate, so that approach is rejected.
+- The better compromise so far is to keep the fast direct8 path and make the AVX2 matrix/Y math match scalar-style rounding more closely by avoiding fused-multiply-add in the hand-tuned kernel. The latest `M16-1446` smoke stayed green with the fast path intact and much better throughput than the shared-kernel fallback.
+- The rebuilt release exe at `platform/qt/build-release/release/MLVApp.exe` is currently `LastWriteTime=5/30/2026 11:05:54 AM`, `Length=8793600`, `SHA256=8838EA5CB7F6BE51710E2C0B311BE51665EE5B0D5F32852ED9F78BABDE9FD8E2`.
+- The current visible smoke trio on the rebuilt release binary is green and preserves x1 Quality plus settled Auto Look Assist:
+  - `M16-1327`: `presented_fps=8.233`, `avg_render_total_ms=110.985`, `processed8_direct_path_frames=66`
+  - `M16-1347`: `presented_fps=7.750`, `avg_render_total_ms=119.242`, `processed8_direct_path_frames=62`
+  - `M16-1446`: `presented_fps=10.978`, `avg_render_total_ms=162.500`, `processed8_direct_path_frames=88`
+
+### Cross-checked from prior analysis
+
+- Earlier export checks were already clean, so the artifact remains preview-only rather than a source-frame issue.
+- The blur-prep/shadow-highlights hypothesis was already tested and rejected; the current evidence points lower in the preview pipeline, not in the earlier receive/decode stages.
+
+### Needs runtime profiling
+
+- Re-run the visible smoke trio on the current build and verify the pink wash status still matches the stage-capture diagnosis.
+- If the artifact persists, compare the direct8 preview math against the earlier decode path and export control path to find the exact color divergence point.
+- Keep the next pass focused on the direct8 preview path rather than more GUI handoff code; the broad wash still appears to be born in preview generation.
+
+### Ranked next steps
+
+1. High impact / medium risk: keep the fast direct8 path and continue narrowing the numeric mismatch inside the preview kernel.
+2. Medium impact / low risk: rerun the visible smoke trio on the current release exe so the color diagnosis and performance gate stay aligned.
+3. Low impact / low risk: continue using export as the clean control path.
+
 ## 2026-05-30 - pink wash remains in playback preview; blur-prep hypothesis rejected
 
 ### Verified locally

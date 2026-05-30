@@ -180,22 +180,25 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
              * the rounding on intermediate sums. The byte-quantising `>>8`
              * downstream absorbs sub-ulp drift; if parity tests fail we
              * fall back to non-fused mul+add here. */
-            __m256 v_r0 = _mm256_mul_ps(v_pix0, v_wb0);
-            v_r0 = _mm256_fmadd_ps(v_pix1, v_wb1, v_r0);
-            v_r0 = _mm256_fmadd_ps(v_pix2, v_wb2, v_r0);
+            /* Keep the matrix multiply in non-fused mul/add form so the
+             * hand-tuned AVX2 path matches the scalar/autovec rounding on
+             * the preview receipts that feed the GUI smoke set. */
+            __m256 v_r0 = _mm256_add_ps(_mm256_mul_ps(v_pix0, v_wb0),
+                                        _mm256_mul_ps(v_pix1, v_wb1));
+            v_r0 = _mm256_add_ps(v_r0, _mm256_mul_ps(v_pix2, v_wb2));
 
-            __m256 v_r1 = _mm256_mul_ps(v_pix0, v_wb3);
-            v_r1 = _mm256_fmadd_ps(v_pix1, v_wb4, v_r1);
-            v_r1 = _mm256_fmadd_ps(v_pix2, v_wb5, v_r1);
+            __m256 v_r1 = _mm256_add_ps(_mm256_mul_ps(v_pix0, v_wb3),
+                                        _mm256_mul_ps(v_pix1, v_wb4));
+            v_r1 = _mm256_add_ps(v_r1, _mm256_mul_ps(v_pix2, v_wb5));
 
-            __m256 v_r2 = _mm256_mul_ps(v_pix0, v_wb6);
-            v_r2 = _mm256_fmadd_ps(v_pix1, v_wb7, v_r2);
-            v_r2 = _mm256_fmadd_ps(v_pix2, v_wb8, v_r2);
+            __m256 v_r2 = _mm256_add_ps(_mm256_mul_ps(v_pix0, v_wb6),
+                                        _mm256_mul_ps(v_pix1, v_wb7));
+            v_r2 = _mm256_add_ps(v_r2, _mm256_mul_ps(v_pix2, v_wb8));
 
             /* Compute Y per lane. */
-            __m256 v_Y = _mm256_mul_ps(v_y0, v_r0);
-            v_Y = _mm256_fmadd_ps(v_y1, v_r1, v_Y);
-            v_Y = _mm256_fmadd_ps(v_y2, v_r2, v_Y);
+            __m256 v_Y = _mm256_add_ps(_mm256_mul_ps(v_y0, v_r0),
+                                       _mm256_mul_ps(v_y1, v_r1));
+            v_Y = _mm256_add_ps(v_Y, _mm256_mul_ps(v_y2, v_r2));
 
             /* Reinhard branch.
              *
