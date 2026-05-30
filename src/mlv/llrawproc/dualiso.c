@@ -3706,31 +3706,16 @@ static inline int mix_images(struct raw_info raw_info, uint32_t* fullres, uint32
         mix_stage_start = mlv_stage_timing_now();
         if (w > 0 && h > 0)
         {
-            const size_t row_pixels = (size_t)w;
-            const size_t row_bytes = row_pixels * sizeof(uint32_t);
+            const size_t plane_pixels = (size_t)w * (size_t)h;
+            const size_t plane_bytes = plane_pixels * sizeof(uint32_t);
             const int copy_fullres = fullres_smooth != fullres;
 
-            #pragma omp parallel
+            if (copy_fullres)
             {
-                if (copy_fullres)
-                {
-                    #pragma omp for nowait schedule(static)
-                    for (int y = 0; y < h; ++y)
-                    {
-                        memcpy(&fullres_smooth[(size_t)y * row_pixels],
-                               &fullres[(size_t)y * row_pixels],
-                               row_bytes);
-                    }
-                }
-
-                #pragma omp for schedule(static)
-                for (int y = 0; y < h; ++y)
-                {
-                    memcpy(&halfres_smooth[(size_t)y * row_pixels],
-                           &halfres[(size_t)y * row_pixels],
-                           row_bytes);
-                }
+                memcpy(fullres_smooth, fullres, plane_bytes);
             }
+
+            memcpy(halfres_smooth, halfres, plane_bytes);
         }
         g_dualiso_full20bit_timing.mix_chroma_copy_ms +=
             dualiso_debug_elapsed_ms(mix_stage_start);

@@ -4281,3 +4281,30 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: look for a different fallback-path hotspot than the packdown stage if we want a meaningful speedup.
 2. Medium impact / low risk: keep comparing the same three clips under the same x1 Quality visual state.
 3. Low impact / low risk: leave the direct8 preview gate unchanged until the color path is proven safe.
+
+## 2026-05-30 - accepted whole-plane memcpy in dualiso chroma copy prelude
+
+### Verified locally
+
+- Simplified the `mix_chroma_copy_ms` prelude in [`src/mlv/llrawproc/dualiso.c`](C:\!Layi%20Wkspc\MLV-App\src\mlv\llrawproc\dualiso.c) by replacing the per-row OpenMP copy loop with whole-plane `memcpy` calls for `fullres_smooth` and `halfres_smooth`.
+- Rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:\!Layi%20Wkspc\MLV-App\platform\qt\build-release\release\MLVApp.exe), `LastWriteTime=5/30/2026 1:58:01 PM`, `Length=8792064`, `SHA256=CBECFC448866C68B5485DCBDD0896157F80FA05A78A1425F0F51218A35E8AD1B`.
+- Re-ran the visible GUI smoke set with x1 Quality and settled Auto Look Assist preserved. The gate stayed valid, `processed8_direct_path_frames=0` throughout, and the shared fallback path improved on all three clips:
+  - `M16-1327`: `presented_fps=5.233`, `avg_render_total_ms=181.619`, `avg_mix_chroma_ms=26.143`, `avg_chroma_copy_ms=5.476`, `avg_chroma_fullres_ms=10.881`, `avg_chroma_halfres_ms=9.786`
+  - `M16-1347`: `presented_fps=5.108`, `avg_render_total_ms=186.902`, `avg_mix_chroma_ms=25.195`, `avg_chroma_copy_ms=5.317`, `avg_chroma_fullres_ms=10.049`, `avg_chroma_halfres_ms=9.829`
+  - `M16-1446`: `presented_fps=5.737`, `avg_render_total_ms=163.413`, `avg_mix_chroma_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- This is the first fallback-path change in the current run that improved the same three-clip visible smoke gate without touching the direct8 preview guard.
+- The improvement is consistent with the `mix_chroma` bucket still being the hot path and with the copy prelude being pure data motion, so the change is a credible keep.
+
+### Needs runtime profiling
+
+- `M16-1446` remains the control clip for `mix_chroma`, because it does not exercise the chroma mix bucket.
+- The next fallback-path gain likely needs to come from `hdr_chroma_smooth()` itself rather than the copy prelude.
+
+### Ranked next steps
+
+1. High impact / medium risk: inspect `hdr_chroma_smooth()` for one more inner-loop reduction now that the copy prelude has been trimmed.
+2. Medium impact / low risk: preserve the current smoke harness and visual-state gate for apples-to-apples comparisons.
+3. Low impact / low risk: keep the direct8 preview gate unchanged until the color path is proven safe.
