@@ -4794,3 +4794,33 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: keep the accepted `chroma_smooth.c` baseline and look for a deeper structural reduction in the retained Dual ISO blend stack.
 2. Medium impact / low risk: preserve the sequential three-clip visible smoke gate as the acceptance test for future playback-speed work.
 3. Low impact / low risk: leave the direct8 preview guard untouched while the fallback path remains the active safety rail.
+
+## 2026-05-30 - rejected dualiso final_blend float-cache probe
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) plus [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) by adding a cached `float` copy of `fullres_curve` and switching the AVX2 final-blend row kernel to `_mm256_i32gather_ps` instead of the existing double-gather plus conversion path.
+- The visible GUI smoke gate stayed valid with x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, but the probe was slower than the accepted nearby fallback baseline on all three clips, so it was reverted.
+- Probe smoke results from `.claude-state/profiling/20260530-dualiso-floatcurve-gui-smoke/`:
+  - `M16-1327`: `presented_fps=4.991`, `avg_render_total_ms=189.950`, `avg_llrawproc_ms=63.025`, `avg_mix_chroma_ms=25.450`, `avg_final_blend_ms=7.825`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.496`, `avg_render_total_ms=205.500`, `avg_llrawproc_ms=68.278`, `avg_mix_chroma_ms=26.556`, `avg_final_blend_ms=8.778`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=4.618`, `avg_render_total_ms=204.838`, `avg_llrawproc_ms=53.135`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=8.324`, `processed8_direct_path_frames=0`
+- The user-facing release exe was rebuilt after the revert and is back on the baseline source shape at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 6:32:32 PM`, `Length=8793088`, `SHA256=98E322C124078AD65FE9A5481A049B57D824AD3E1C9C8E6E3AB2C6A849CC6A46`.
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The probe did not touch the direct8 guard, and the visible smoke still reported `processed8_direct_path_frames=0`, so the regression is isolated to the retained fallback path rather than the pink/direct8 path returning.
+
+### Needs runtime profiling
+
+- The rejected shape suggests the final-blend gather is not the right next low-risk win on this VM; if we revisit `dualiso.c`, we should look for a different retained-path reduction that improves both chroma-heavy clips together instead of only changing the gather element width.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted double-gather final-blend path in place and look for a different structural reduction in the retained Dual ISO mix stack.
+2. Medium impact / low risk: keep the sequential three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
