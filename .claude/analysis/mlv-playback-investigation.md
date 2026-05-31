@@ -7409,6 +7409,11 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The GUI smoke validation was clean on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, and `cpuSettled=true`.
 - After reverting the probe, the restored-baseline release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
 - Restored-baseline release executable metadata:
+  - `LastWriteTime`: `2026-05-31 10:07:10`
+  - `Length`: `8796672`
+  - `SHA256`: `E13BFD6F22A723BCBDC6BD0A95F1ABFB54AF019B1B67AA257E919CB0DC4E0A5F`
+- After reverting the probe, the restored-baseline release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Restored-baseline release executable metadata:
   - `LastWriteTime`: `2026-05-31 09:58:27`
   - `Length`: `8793600`
   - `SHA256`: `D133D13683EADA4B7D29B543B6626BE68145C6D44CF14157567E43C70504A8B0`
@@ -7448,3 +7453,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next probe should stay structural but target a different hot-path shape than this vibrance specialization.
 - Since the smoke gate remained stable, the next experiment can focus on reducing generic-loop work without preserving this specific branch split.
+
+## 2026-05-31 - rejected pixel-saturation helper for generic color loop
+
+### Verified locally
+
+- I added a tiny inline saturation helper in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) and used it in the creative vibrance and HSL-style saturation paths to replace the per-pixel 3-step max/min loop with a branchless `MAX`/`MIN` chain while preserving the x1 Quality / settled Auto Look Assist gate behavior.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the probe build.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 09:58:27`
+  - `Length`: `8793600`
+  - `SHA256`: `D133D13683EADA4B7D29B543B6626BE68145C6D44CF14157567E43C70504A8B0`
+- The visible smoke runs from `.claude-state/profiling/wb-68fe75d089af4c6f/pixel-saturation-helper/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, but the helper lost the current keeper on all three clips:
+  - `M16-1327`: `presented_fps=6.238`, `avg_render_total_ms=149.740`, `avg_llrawproc_ms=58.900`, `avg_processing_core_color_ms=14.220`, `avg_processing_core_creative_ms=10.800`
+  - `M16-1347`: `presented_fps=5.733`, `avg_render_total_ms=164.761`, `avg_llrawproc_ms=72.304`, `avg_processing_core_color_ms=14.413`, `avg_processing_core_creative_ms=10.543`
+  - `M16-1446`: `presented_fps=7.123`, `avg_render_total_ms=129.912`, `avg_llrawproc_ms=34.825`, `avg_processing_core_color_ms=15.772`, `avg_processing_core_creative_ms=12.421`
+- The GUI smoke validation was clean on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, and `cpuSettled=true`.
+
+### Cross-checked from prior analysis
+
+- The helper did not improve the full gate against the current keeper `ed2821e1`.
+- This confirms the visible gate is still sensitive to small creative-path changes, even when the x1 Quality visual state remains intact.
+
+### Needs runtime profiling
+
+- The next probe should target a different generic-loop shape rather than this saturation-helper simplification.
+- `processing_core_color` and `processing_core_creative` remain the best buckets to chase, but this helper is not a keeper candidate.
