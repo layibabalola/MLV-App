@@ -6998,3 +6998,26 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The probe kept the visible gate intact and did not change the direct8 guard.
 - This is a throughput reject rather than a visual regression.
 - The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this positive-vibrance branch specialization is not a keeper.
+
+## 2026-05-31 - rejected toning coefficient probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by collapsing the toning loop into per-channel coefficients and switching the loop to an indexed `#pragma omp simd` pass.
+- The probe build completed successfully and the smoke gate stayed visually valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- Probe build identity from the smoke run:
+  - `build_sha=73ecc7ee4070a32b11790e118a53449d7d6eb51f`
+- Probe smoke results from `.claude-state/profiling/20260531-toning-coeff-simd/`:
+  - `M16-1327`: `presented_fps=5.740`, `avg_render_total_ms=163.043`, `avg_llrawproc_ms=68.109`, `avg_processing_ms=61.500`, `avg_processing_core_ms=38.065`, `avg_processing_core_color_ms=14.196`, `avg_processing_core_creative_ms=11.587`, `avg_processing_core_output_ms=1.109`, `avg_processing_core_other_ms=7.370`, `avg_processing_shadows_highlights_prep_ms=23.413`, `avg_debayer_exclusive_ms=6.674`, `avg_processed16_ms=153.630`, `avg_processed16_to_8bit_ms=2.804`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.370`, `avg_render_total_ms=176.442`, `avg_llrawproc_ms=77.419`, `avg_processing_ms=64.857`, `avg_processing_core_ms=39.907`, `avg_processing_core_color_ms=14.233`, `avg_processing_core_creative_ms=12.465`, `avg_processing_core_output_ms=1.102`, `avg_processing_core_other_ms=6.959`, `avg_processing_shadows_highlights_prep_ms=24.326`, `avg_debayer_exclusive_ms=8.286`, `avg_processed16_ms=167.651`, `avg_processed16_to_8bit_ms=2.469`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.117`, `avg_render_total_ms=153.531`, `avg_llrawproc_ms=48.592`, `avg_processing_ms=64.256`, `avg_processing_core_ms=38.490`, `avg_processing_core_color_ms=14.592`, `avg_processing_core_creative_ms=11.673`, `avg_processing_core_output_ms=1.163`, `avg_processing_core_other_ms=6.959`, `avg_processing_shadows_highlights_prep_ms=26.367`, `avg_debayer_exclusive_ms=8.286`, `avg_processed16_ms=143.694`, `avg_processed16_to_8bit_ms=2.469`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost on all three clips:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.740 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.370 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `6.117 fps`
+
+### Cross-checked from prior analysis
+
+- The probe kept the visible gate intact and did not change the direct8 guard.
+- This is a throughput reject rather than a visual regression.
+- The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this toning coefficient specialization is not a keeper.
