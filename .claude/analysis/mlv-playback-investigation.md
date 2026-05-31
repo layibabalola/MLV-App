@@ -1,3 +1,13 @@
+## 2026-05-31 - rejected chroma copy parallelization in dualiso pre-pass
+- I tried converting the chroma pre-pass in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) from two serial whole-plane `memcpy` calls into a single row-parallel copy loop so the fullres/halfres smoothing stage could start sooner.
+- The shape was not a keeper: `M16-1327` regressed immediately versus the accepted baseline, and the other visible clips did not recover enough to justify the extra threading overhead, so I reverted the copy pre-pass back to the accepted baseline shape.
+- The rebuilt release exe for the probe was [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 10:41:17 PM`, `Length=8793600`, `SHA256=27E5F2BAC6F2B058483311C8F8F7CDDCA4BCD01018BB16E61769F4213DF4F3F8`.
+- Probe smoke results from `.claude-state/profiling/20260530-chroma-copy-parallel-M16-1327.json`, `.claude-state/profiling/20260530-chroma-copy-parallel-M16-1347.json`, and `.claude-state/profiling/20260530-chroma-copy-parallel-M16-1446.json`:
+  - `M16-1327`: `presented_fps=4.750`, `avg_render_total_ms=195.474`, `avg_llrawproc_ms=66.053`, `avg_mix_chroma_ms=26.237`, `avg_chroma_copy_ms=3.842`, `avg_final_blend_ms=7.132`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.978`, `avg_render_total_ms=193.150`, `avg_llrawproc_ms=64.200`, `avg_mix_chroma_ms=27.275`, `avg_chroma_copy_ms=4.675`, `avg_final_blend_ms=8.725`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.121`, `avg_render_total_ms=186.463`, `avg_llrawproc_ms=45.049`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_final_blend_ms=7.756`, `processed8_direct_path_frames=0`
+- The accepted nearby baseline still wins on the same three-clip visible gate (`6.101 / 5.983 / 6.865 fps`), so this copy parallelization stays rejected.
+
 ## 2026-05-31 - rejected convert_to_20bit mask-elision probe
 - I tried removing the redundant `& 0xFFFFF` mask from [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) inside `convert_to_20bit_avx2()` and its scalar tail, but the change was only a semantic cleanup and did not show a plausible runtime win worth keeping.
 - I reverted the source back to the accepted `convert_to_20bit` shape before final verification, then rebuilt the user-facing release tree from the restored baseline.
