@@ -5620,6 +5620,45 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - playback smoke telemetry surfacing for processing_core
+
+### Verified locally
+
+- Added playback-smoke telemetry surfacing for the finer `processing_core_*` buckets in [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp) and [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.h).
+- The user-facing release tree was rebuilt successfully after the telemetry patch.
+- Release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 2:18:19 AM`
+  - `Length=8796672`
+  - `SHA256=53C28E121872FC2D88E6F7C9C238D6CF22E0A337C00575DC469459BF27E5C981`
+- Sequential visible GUI smoke gate from `.claude-state/profiling/20260531-processing-core-telemetry/`:
+  - `M16-1327`: `presented_fps=5.624`, `avg_render_total_ms=166.133`, `avg_llrawproc_ms=70.800`, `avg_processing_ms=63.244`, `avg_processing_core_ms=37.956`, `avg_processing_core_levels_ms=6.022`, `avg_processing_core_color_ms=14.822`, `avg_processing_core_creative_ms=11.467`, `avg_processing_core_output_ms=1.222`, `avg_processing_core_other_ms=6.555`, `avg_debayer_exclusive_ms=6.667`, `avg_processing_shadows_highlights_prep_ms=25.267`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.241`, `avg_render_total_ms=178.357`, `avg_llrawproc_ms=79.881`, `avg_processing_ms=65.452`, `avg_processing_core_ms=38.881`, `avg_processing_core_levels_ms=5.357`, `avg_processing_core_color_ms=15.667`, `avg_processing_core_creative_ms=11.810`, `avg_processing_core_output_ms=1.119`, `avg_processing_core_other_ms=7.214`, `avg_debayer_exclusive_ms=6.095`, `avg_processing_shadows_highlights_prep_ms=26.571`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.367`, `avg_render_total_ms=146.294`, `avg_llrawproc_ms=44.549`, `avg_processing_ms=67.235`, `avg_processing_core_ms=40.608`, `avg_processing_core_levels_ms=5.627`, `avg_processing_core_color_ms=15.510`, `avg_processing_core_creative_ms=12.176`, `avg_processing_core_output_ms=1.078`, `avg_processing_core_other_ms=7.745`, `avg_debayer_exclusive_ms=7.627`, `avg_processing_shadows_highlights_prep_ms=26.627`, `processed8_direct_path_frames=0`
+- The smoke logs also still show the dual-ISO mix bucket on the chroma-heavy clips:
+  - `M16-1327`: `avg_mix_chroma_ms=28.311`, `avg_chroma_copy_ms=6.844`, `avg_chroma_fullres_ms=11.333`, `avg_chroma_halfres_ms=10.133`
+  - `M16-1347`: `avg_mix_chroma_ms=30.262`, `avg_chroma_copy_ms=6.476`, `avg_chroma_fullres_ms=12.929`, `avg_chroma_halfres_ms=10.857`
+  - `M16-1446`: `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The telemetry patch is instrumentation-only; it does not change the visible GUI path or the playback algorithm.
+- The new fields confirm the remaining retained-path split is now visible without further code changes:
+  - `processing_core` is still the main non-Dual-ISO bucket after the half-res RBF keeper
+  - `dualIsoMixChromaSummary` remains substantial on the chroma-heavy clips
+- The accepted nearby baseline is still stronger on the same three-clip gate, so the new telemetry does not change the performance conclusion by itself.
+
+### Needs runtime profiling
+
+- The next safe code probe should be decided from the new `processing_core_*` split, not from the old coarse `processing_core_ms` aggregate.
+- If we keep probing the retained path, the best next candidate is the largest `processing_core_*` sub-bucket rather than another Dual ISO micro-tweak.
+
+### Ranked next steps
+
+1. High impact / low risk: keep the new `processing_core_*` telemetry in the smoke summary so future probes have a finer attribution baseline.
+2. Medium impact / medium risk: use the new split to choose the next retained-path probe, most likely in the `processing_core_color` or `processing_core_creative` branch.
+3. Low impact / low risk: leave the direct8 guard and x1 Quality / settled Auto Look Assist smoke gate unchanged so any later probe remains comparable.
+
 ## 2026-05-31 - rejected playback_downsample x-only AVX2 probe
 
 ### Verified locally

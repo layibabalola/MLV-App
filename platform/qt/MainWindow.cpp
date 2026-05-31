@@ -15531,6 +15531,11 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs = 0.0;
     m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
     m_playbackSmokeProcessingCoreSumMs = 0.0;
+    m_playbackSmokeProcessingCoreLevelsSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
+    m_playbackSmokeProcessingCoreOutputSumMs = 0.0;
+    m_playbackSmokeProcessingCoreOtherSumMs = 0.0;
     m_playbackSmokeProcessingChromaSumMs = 0.0;
     m_playbackSmokeProcessingSharpenSumMs = 0.0;
     m_playbackSmokeProcessingGrainSumMs = 0.0;
@@ -15876,6 +15881,16 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs += processingShadowsHighlightsRbfOutputMs;
     m_playbackSmokeProcessingHighestGreenSumMs += processingHighestGreenMs;
     m_playbackSmokeProcessingCoreSumMs += processingCoreMs;
+    m_playbackSmokeProcessingCoreLevelsSumMs +=
+        telemetryDoubleValue( timing, "processing_core_levels_ms" );
+    m_playbackSmokeProcessingCoreColorSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_ms" );
+    m_playbackSmokeProcessingCoreCreativeSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_ms" );
+    m_playbackSmokeProcessingCoreOutputSumMs +=
+        telemetryDoubleValue( timing, "processing_core_output_ms" );
+    m_playbackSmokeProcessingCoreOtherSumMs +=
+        telemetryDoubleValue( timing, "processing_core_other_ms" );
     m_playbackSmokeProcessingChromaSumMs += processingChromaMs;
     m_playbackSmokeProcessingSharpenSumMs += processingSharpenMs;
     m_playbackSmokeProcessingGrainSumMs += processingGrainMs;
@@ -16227,24 +16242,29 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_llrawproc_chroma_smooth_ms=%7 avg_llrawproc_other_ms=%8 "
                "avg_debayered_frame_ms=%9 avg_debayer_exclusive_ms=%10 "
                "avg_processing_ms=%11 avg_processing_core_ms=%12 "
-               "avg_processing_chroma_ms=%13 avg_processing_sharpen_ms=%14 "
-               "avg_processing_grain_ms=%15 avg_direct8_matrix_ms=%16 "
-               "avg_direct8_gamma_ms=%17 avg_direct8_curves_ms=%18 "
-               "avg_processed16_ms=%19 avg_processed16_for_8bit_ms=%20 "
-               "avg_processed16_to_8bit_ms=%21 avg_playback_scale_ms=%22 "
-               "avg_draw_image_ms=%23 avg_draw_present_ms=%24 "
-               "avg_draw_advance_ms=%25 avg_draw_scopes_ms=%26 "
-               "processed8_direct_path_frames=%27 processed8_prefetch_hits=%28 "
-               "raw_prefetch_hits=%29 queued_playback_drops=%30 "
-               "max_queued_playback_drops=%31 scope_updates=%32 scope_skips=%33 "
-               "audio_sync_requests=%34 audio_sync_applied=%35 "
-               "audio_sync_skipped=%36 avg_processing_setup_ms=%37 "
-               "avg_processing_shadows_highlights_prep_ms=%38 "
-               "avg_processing_highest_green_ms=%39 "
-               "borrowed_prepared_rgb8_frames=%40 owned_prepared_rgb8_frames=%41 "
-               "borrowed_prepared_rgb8_bytes=%42 owned_prepared_rgb8_bytes=%43 "
-               "moved_prepared_rgb8_frames=%44 moved_prepared_rgb8_bytes=%45 "
-               "qimage_prepared_rgb8_frames=%46 qimage_prepared_rgb8_bytes=%47" )
+               "avg_processing_core_levels_ms=%13 "
+               "avg_processing_core_color_ms=%14 "
+               "avg_processing_core_creative_ms=%15 "
+               "avg_processing_core_output_ms=%16 "
+               "avg_processing_core_other_ms=%17 "
+               "avg_processing_chroma_ms=%18 avg_processing_sharpen_ms=%19 "
+               "avg_processing_grain_ms=%20 avg_direct8_matrix_ms=%21 "
+               "avg_direct8_gamma_ms=%22 avg_direct8_curves_ms=%23 "
+               "avg_processed16_ms=%24 avg_processed16_for_8bit_ms=%25 "
+               "avg_processed16_to_8bit_ms=%26 avg_playback_scale_ms=%27 "
+               "avg_draw_image_ms=%28 avg_draw_present_ms=%29 "
+               "avg_draw_advance_ms=%30 avg_draw_scopes_ms=%31 "
+               "processed8_direct_path_frames=%32 processed8_prefetch_hits=%33 "
+               "raw_prefetch_hits=%34 queued_playback_drops=%35 "
+               "max_queued_playback_drops=%36 scope_updates=%37 scope_skips=%38 "
+               "audio_sync_requests=%39 audio_sync_applied=%40 "
+               "audio_sync_skipped=%41 avg_processing_setup_ms=%42 "
+               "avg_processing_shadows_highlights_prep_ms=%43 "
+               "avg_processing_highest_green_ms=%44 "
+               "borrowed_prepared_rgb8_frames=%45 owned_prepared_rgb8_frames=%46 "
+               "borrowed_prepared_rgb8_bytes=%47 owned_prepared_rgb8_bytes=%48 "
+               "moved_prepared_rgb8_frames=%49 moved_prepared_rgb8_bytes=%50 "
+               "qimage_prepared_rgb8_frames=%51 qimage_prepared_rgb8_bytes=%52" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16257,6 +16277,11 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeDebayerExclusiveSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreLevelsSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreOutputSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreOtherSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingChromaSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingSharpenSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingGrainSumMs ), 0, 'f', 3 )
