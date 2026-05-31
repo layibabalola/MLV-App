@@ -5620,6 +5620,40 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected creative-tail simd probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by adding `#pragma omp simd` to the contrast-curve and gradation-curve table-lookup loops in the creative tail, plus cached LUT pointers for those tables.
+- The user-facing release tree was rebuilt from the probe and then the same sequential visible GUI smoke gate was run with x1 Quality and settled Auto Look Assist preserved. The probe kept the direct8 guard intact and left `processed8_direct_path_frames=0`, but it lost the three-clip gate versus the accepted nearby baseline, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 2:35:26 AM`
+  - `Length=8799232`
+  - `SHA256=2414B2B633E8B9F4D259CCB1F78D24FE0509343692DE4DA62CBCEFC349E0F647`
+- Reverted-baseline release executable metadata after restoring the source shape:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 2:39:50 AM`
+  - `Length=8796672`
+  - `SHA256=BE6C74CACD181130DC3C00A3C5E0D2A6D1023101153E877D09E6D50956869042`
+- Probe smoke results from `.claude-state/profiling/20260531-processing-core-creative-tail/`:
+  - `M16-1327`: `presented_fps=5.997`, `avg_render_total_ms=157.125`, `avg_llrawproc_ms=66.688`, `avg_processing_ms=56.312`, `avg_processing_core_ms=34.271`, `avg_processing_core_color_ms=14.938`, `avg_processing_core_creative_ms=11.771`, `avg_processing_core_output_ms=1.104`, `avg_debayer_exclusive_ms=6.854`, `avg_processing_shadows_highlights_prep_ms=22.042`, `avg_mix_chroma_ms=27.083`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.874`, `avg_render_total_ms=158.340`, `avg_llrawproc_ms=65.170`, `avg_processing_ms=59.368`, `avg_processing_core_ms=35.667`, `avg_processing_core_color_ms=15.965`, `avg_processing_core_creative_ms=12.895`, `avg_processing_core_output_ms=1.123`, `avg_debayer_exclusive_ms=7.754`, `avg_processing_shadows_highlights_prep_ms=23.702`, `avg_mix_chroma_ms=0.0`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.124`, `avg_render_total_ms=132.158`, `avg_llrawproc_ms=39.035`, `avg_processing_ms=59.368`, `avg_processing_core_ms=35.667`, `avg_processing_core_color_ms=15.965`, `avg_processing_core_creative_ms=12.895`, `avg_processing_core_output_ms=1.123`, `avg_debayer_exclusive_ms=7.754`, `avg_processing_shadows_highlights_prep_ms=23.702`, `avg_mix_chroma_ms=0.0`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` cleanup keeper still has the stronger three-clip gate:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- This creative-tail probe missed the keeper on the chroma-heavy clips and only held the light clip by a small margin, so it stays rejected.
+- The direct8 guard stayed intact throughout, and `processed8_direct_path_frames=0` remained true.
+
+### Needs runtime profiling
+
+- The next candidate, if any, should be materially different from this creative-tail table-lookup hint, most likely a separate piece of `processing_core_color` or a different retained-path hotspot.
+
 ## 2026-05-31 - playback smoke telemetry surfacing for processing_core
 
 ### Verified locally
