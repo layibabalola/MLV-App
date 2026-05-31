@@ -7120,3 +7120,70 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The probe kept the visible gate intact and did not change the direct8 guard.
 - This is a throughput reject rather than a visual regression.
 - The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this gradient-layer exr split is not a keeper.
+
+## 2026-05-31 - work-block handoff: highlight_reconstruction branch split in progress
+
+### Current state
+
+- Work block: `wb-68fe75d089af4c6f`
+- Branch: `codex/work-block/wb-68fe75d089af4c6f`
+- Base head at bootstrap: `7c745d13f376b6b21f8aea7b12f316f05b8a1e73`
+- Active edit: `src/processing/raw_processing.c`
+- Goal of the edit: specialize the hot generic color loop for the common `highlight_reconstruction == 0` case by moving the branch out of the per-pixel loop.
+
+### What changed
+
+- I replaced the single hot `#pragma omp simd` color loop with a macro-generated split:
+  - one path for `use_highlight_reconstruction`
+  - one path for the zero case
+- The intended effect is output-identical behavior with no per-pixel highlight branch in the zero case.
+
+### Current blocker
+
+- The release build is currently broken in `raw_processing.c`.
+- The latest focused object build for `obj/raw_processing.o` fails with:
+  - `invalid storage class for function 'compile_ternary'`
+  - `expected declaration or statement at end of input`
+- That strongly suggests the new macro split has an unclosed brace or otherwise broke function structure near the hot loop.
+
+### Next step for the next session
+
+- Inspect `src/processing/raw_processing.c` around the `APPLY_COLOR_LOOP` macro split in `apply_processing_object()`.
+- Fix the syntax / brace structure first.
+- Then rebuild the real release tree at `platform/qt/build-release/release/MLVApp.exe`.
+- If the build succeeds, run the usual three visible smoke clips and compare against the current keeper `ed2821e1`.
+
+### Useful evidence
+
+- Existing note evidence still says the current preview receipt shape has `highlight_reconstruction == 0`.
+- The active hot loop currently still has both the gradient-layer and main highlight reconstruction blocks, but they are now intended to be compiled out on the zero path.
+
+## 2026-05-31 - rejected highlight_reconstruction branch split probe
+
+### Verified locally
+
+- I repaired the `src/processing/raw_processing.c` macro split by removing the unsafe `//` comments with trailing line continuations that were breaking the preprocessor state.
+- The focused object build for `obj/raw_processing.o` then completed successfully.
+- The user-facing release tree rebuilt successfully at `platform/qt/build-release/release/MLVApp.exe`.
+- Release executable metadata after rebuild:
+  - path: `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime`: `2026-05-31 08:05:01`
+  - `Length`: `8804352`
+  - `SHA256`: `9DCF71B99970C7585E00FEA511751BA92E741F8A0F7AD97485BEB1133FE23582`
+- Visible GUI smoke results from `.claude-state/profiling/wb-68fe75d089af4c6f/gui-smoke/` preserved the x1 Quality / settled Auto Look Assist gate, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=6.606`, `avg_render_total_ms=142.264`, `avg_llrawproc_ms=55.057`, `avg_processing_core_color_ms=12.585`, `avg_processing_core_creative_ms=11.057`, `avg_processing_shadows_highlights_prep_ms=24.113`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.728`, `avg_render_total_ms=138.518`, `avg_llrawproc_ms=58.593`, `avg_processing_core_color_ms=12.944`, `avg_processing_core_creative_ms=10.296`, `avg_processing_shadows_highlights_prep_ms=18.796`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.366`, `avg_render_total_ms=126.932`, `avg_llrawproc_ms=35.458`, `avg_processing_core_color_ms=14.847`, `avg_processing_core_creative_ms=11.000`, `avg_processing_shadows_highlights_prep_ms=20.814`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost the full three-clip gate overall:
+  - `M16-1327`: keeper `6.608 fps` vs probe `6.606 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `6.728 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `7.366 fps`
+
+### Cross-checked from prior analysis
+
+- The smoke gate stayed visually valid, but the probe only improved one clip and lost the other two, so it does not displace the current keeper.
+- The branch-split idea is worth revisiting, but this exact macro split is not a keeper.
+
+### Needs runtime profiling
+
+- A better-shaped probe may still exist in this region, but it should be reworked from the current keeper baseline rather than extended from this rejected macro split.
