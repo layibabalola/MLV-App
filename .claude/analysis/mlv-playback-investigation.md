@@ -1,3 +1,29 @@
+## 2026-05-31 - store-path lookup helper gave a net mix_chroma win, but the clip split stayed asymmetric
+
+### Verified locally
+
+- I replaced the repeated `COERCE(...); ev2raw[...]` store pattern in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) with a small inlined `chroma_smooth_ev2raw_lookup()` helper so the hot center-store path does less clamp boilerplate before the lookup.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) after the helper landed:
+  - `LastWriteTime=5/31/2026 5:45:08 PM`
+  - `Length=8837632`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved, using `MLVAPP_DUALISO_MIX_CHROMA_PROBE=3`.
+- The helper’s per-clip effect stayed asymmetric:
+  - `M16-1327`: `avg_llrawproc_ms=558.25`, `avg_mix_chroma_ms=442.00`
+  - `M16-1347`: `avg_llrawproc_ms=605.25`, `avg_mix_chroma_ms=467.00`
+- Compared with the prior stage split averages for the same settled frames, the combined chroma-heavy workload improved overall:
+  - Stage split combined `avg_llrawproc_ms` across `M16-1327` and `M16-1347`: `635.75`
+  - Store-helper combined `avg_llrawproc_ms` across `M16-1327` and `M16-1347`: `581.75`
+- The visible smoke gate stayed intact, so the helper appears to be a throughput improvement rather than a quality regression.
+
+### Cross-checked from prior analysis
+
+- The earlier stage split showed the store side was the largest bucket inside both fullres and halfres `mix_chroma` center paths.
+- This helper is consistent with that diagnosis: the improvement came from the store-heavy hot path, but the gain is not uniform across clips.
+
+### Needs runtime profiling
+
+- The next move should be a narrower follow-up inside the same store-heavy area if there is a clearly separable hot subpath left, otherwise the investigation should move to the next retained bucket rather than trying to force another `mix_chroma` rewrite.
+
 ## 2026-05-31 - mix_chroma fullres/halfres stage split shows both stages are store-heavy
 
 ### Verified locally

@@ -41,6 +41,17 @@ static inline int chroma_smooth_med5(int a0, int a1, int a2, int a3, int a4)
     return a2;
 }
 
+static inline uint16_t chroma_smooth_ev2raw_lookup(const int * ev2raw, int ev)
+{
+    const int lo = -10 * EV_RESOLUTION;
+    const int hi = 14 * EV_RESOLUTION - 1;
+    if ((unsigned int)(ev - lo) > (unsigned int)(hi - lo))
+    {
+        ev = ev < lo ? lo : hi;
+    }
+    return (uint16_t)ev2raw[ev];
+}
+
 static void CHROMA_SMOOTH_FUNC(int w,
                                int h,
                                CHROMA_SMOOTH_TYPE * __restrict inp,
@@ -241,7 +252,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
             if (write_r)
             {
                 if (probe_center) chroma_center_store_r_start = mlv_stage_timing_now();
-                out_y[x] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                out_y[x] = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
                 if (probe_center)
                 {
                     const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
@@ -259,7 +270,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
             if (write_b)
             {
                 if (probe_center) chroma_center_store_b_start = mlv_stage_timing_now();
-                out_y_p1[x + 1] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                out_y_p1[x + 1] = chroma_smooth_ev2raw_lookup(ev2raw, gb + db);
                 if (probe_center)
                 {
                     const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
@@ -466,10 +477,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
             /* replace red and blue pixels with filtered values, keep green pixels unchanged */
             /* don't touch overexposed areas */
             if (out[x   +     y * w] < (unsigned int)white)
-                out[x   +     y * w] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                out[x   +     y * w] = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
             
             if (out[x+1  + (y+1)* w] < (unsigned int)white)
-                out[x+1 + (y+1) * w] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                out[x+1 + (y+1) * w] = chroma_smooth_ev2raw_lookup(ev2raw, gb + db);
         }
     }
 }
