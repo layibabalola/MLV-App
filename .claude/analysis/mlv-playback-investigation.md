@@ -7632,3 +7632,31 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - The next Dual ISO probe should still focus on `mix_chroma` or a deeper reduction in the mix stack, not this border-copy shape.
+
+## 2026-05-31 - rejected mix-curve bandfill rewrite for Dual ISO playback smoke
+
+### Verified locally
+
+- I changed the Dual ISO mix-curve rebuild in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) so the 1M-entry curve would fill its constant prefix and suffix directly, then only compute the expensive `log2`/`cos` transition band. I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) and reran the three visible GUI smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 11:10:50`
+  - `Length`: `8797184`
+  - `SHA256`: `756EB24B9CC5B4C451FB648B5D4923C14C799DE4E4FFCE211A8047FCFB1B73A9`
+- GUI smoke results from `.claude-state/profiling/wb-68fe75d089af4c6f/gui-bandfill/`:
+  - `M16-1327`: `presented_fps=5.867`, `avg_render_total_ms=158.213`, `avg_llrawproc_ms=66.532`, `avg_processing_core_color_ms=15.532`, `avg_processing_core_creative_ms=11.957`, `avg_processing_shadows_highlights_prep_ms=23.255`, `avg_mix_chroma_ms=27.915`, `avg_final_blend_ms=7.085`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.730`, `avg_render_total_ms=164.544`, `avg_llrawproc_ms=72.826`, `avg_processing_core_color_ms=14.739`, `avg_processing_core_creative_ms=12.543`, `avg_processing_shadows_highlights_prep_ms=23.109`, `avg_mix_chroma_ms=29.413`, `avg_final_blend_ms=7.956`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.104`, `avg_render_total_ms=132.930`, `avg_llrawproc_ms=38.614`, `avg_processing_core_color_ms=15.316`, `avg_processing_core_creative_ms=11.947`, `avg_processing_shadows_highlights_prep_ms=24.772`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.456`, `processed8_direct_path_frames=0`
+- The visual gate stayed intact on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, `cpuSettled=true`, and the raw visual state remained x1 Quality with settled Auto Look Assist.
+- The frame-0 mix-curve build did get cheaper in the raw profile packets, but that did not carry the full GUI smoke over the keeper. The retained Dual ISO mix path, especially `mix_chroma`, still dominated and the three-clip gate lost versus keeper `ed2821e1` on all clips.
+
+### Cross-checked from prior analysis
+
+- Current keeper `ed2821e1` still beats this probe on the full visible gate:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.867 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.730 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `7.104 fps`
+- The probe is therefore a throughput reject, not a visual regression.
+
+### Needs runtime profiling
+
+- The next Dual ISO candidate should go straight at `mix_chroma` or a deeper retained-path reduction rather than the curve-build phase.
