@@ -6852,3 +6852,49 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The inner-channel SIMD pass did not clear the full three-clip gate against the current keeper.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact inner-loop SIMD shape is not a keeper.
+
+## 2026-05-31 - rejected color-core inner straight-line probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by replacing several small per-channel loops in the generic color path with straight-line assignments:
+  - desaturation writeback after gamut correction
+  - AgX clamp loop
+  - main gamma loop
+  - gradient-layer desaturation writeback
+  - gradient-layer AgX clamp loop
+  - gradient gamma loop
+  - HueVs output writeback loop
+- The probe build was rebuilt through the repo wrapper, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe stayed visually valid, but it lost the three-clip gate versus the committed `color-path SIMD keeper` on all three clips, so it is not a keeper.
+- Probe build metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 6:26:43 AM`
+  - `Length=8796672`
+  - `SHA256=4FCD6733455C72E122DCCE76DF96169B49EFD42BD5B7A25B99B47634A253EEF4`
+- Reverted-baseline release executable metadata after rebuilding the clean source:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 6:33:46 AM`
+  - `Length=8796672`
+  - `SHA256=EA2BDA9568F60205EEE39C93929D8F37D8675F8EE830BA4F6C3C03E3833A0215`
+- Probe smoke results from `.claude-state/profiling/20260531-color-core-inner-simd/`:
+  - `M16-1327`: `presented_fps=5.494`, `avg_render_total_ms=171.909`, `avg_llrawproc_ms=75.636`, `avg_processing_ms=60.250`, `avg_processing_core_ms=37.364`, `avg_processing_core_color_ms=16.318`, `avg_processing_core_creative_ms=12.614`, `avg_processing_shadows_highlights_prep_ms=22.841`, `avg_debayer_exclusive_ms=7.773`, `avg_processed16_ms=163.000`, `avg_processed16_to_8bit_ms=2.341`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.999`, `avg_render_total_ms=155.833`, `avg_llrawproc_ms=67.792`, `avg_processing_ms=55.146`, `avg_processing_core_ms=33.771`, `avg_processing_core_color_ms=15.125`, `avg_processing_core_creative_ms=11.625`, `avg_processing_shadows_highlights_prep_ms=21.375`, `avg_debayer_exclusive_ms=6.750`, `avg_processed16_ms=147.583`, `avg_processed16_to_8bit_ms=2.161`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.985`, `avg_render_total_ms=134.089`, `avg_llrawproc_ms=41.268`, `avg_processing_ms=60.393`, `avg_processing_core_ms=38.000`, `avg_processing_core_color_ms=16.304`, `avg_processing_core_creative_ms=11.875`, `avg_processing_shadows_highlights_prep_ms=22.393`, `avg_debayer_exclusive_ms=6.911`, `avg_processed16_ms=125.464`, `avg_processed16_to_8bit_ms=2.161`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed color-path SIMD keeper still wins on the same three-clip gate:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.494 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.999 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `6.985 fps`
+- The probe kept the visible gate intact:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- This is a throughput reject rather than a visual regression.
+
+### Needs runtime profiling
+
+- The inner-channel straight-line cleanup did not clear the full three-clip gate against the current keeper.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact inner-loop straight-line shape is not a keeper.
