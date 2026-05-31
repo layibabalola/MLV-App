@@ -6698,3 +6698,42 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The color-path predicate hoist and saturation max/min simplification did not clear the gate.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact hoist shape is not a keeper.
+
+## 2026-05-31 - rejected creative SIMD/toning probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by adding `#pragma omp simd` to the creative vibrance, saturation, and toning loops, and by simplifying the toning multiply to precomputed channel mixes:
+  - vibrance loop: `#pragma omp simd`
+  - saturation loop: `#pragma omp simd`
+  - toning loop: `#pragma omp simd`
+  - toning mix factors: `toning_mix_r/g/b = toning_dry + toning_wet[channel]`
+  - saturation proxy in the vibrance/saturation loops: direct `MAX` / `MIN` reductions
+- The release tree was rebuilt from the probe build, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe stayed visually valid, but it lost the three-clip gate versus the committed `processing_core` keeper on two clips, and the one clip that improved did so with a large queue-wait spike, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 5:56:28 AM`
+  - `Length=8796160`
+  - `SHA256=7ABC131FA4992A74AEF5E176AEF14C10008D1F3609782BB90753A1006AEE965C`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-simd-toning-smoke/`:
+  - `M16-1327`: `presented_fps=6.248`, `avg_render_total_ms=150.280`, `avg_llrawproc_ms=63.160`, `avg_processing_ms=53.680`, `avg_processing_core_ms=31.180`, `avg_processing_core_color_ms=14.260`, `avg_processing_core_creative_ms=11.400`, `avg_processing_shadows_highlights_prep_ms=22.480`, `avg_debayer_exclusive_ms=6.480`, `avg_processed16_ms=142.040`, `avg_processed16_to_8bit_ms=2.080`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.227`, `avg_render_total_ms=151.580`, `avg_llrawproc_ms=63.740`, `avg_processing_ms=55.320`, `avg_processing_core_ms=32.400`, `avg_processing_core_color_ms=14.780`, `avg_processing_core_creative_ms=11.980`, `avg_processing_shadows_highlights_prep_ms=22.920`, `avg_debayer_exclusive_ms=6.540`, `avg_processed16_ms=143.380`, `avg_processed16_to_8bit_ms=2.280`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=8.237`, `avg_render_total_ms=223.424`, `avg_queue_wait_ms=104.030`, `avg_llrawproc_ms=32.379`, `avg_processing_ms=54.182`, `avg_processing_core_ms=32.167`, `avg_processing_core_color_ms=13.439`, `avg_processing_core_creative_ms=10.697`, `avg_processing_shadows_highlights_prep_ms=22.727`, `avg_debayer_exclusive_ms=6.894`, `avg_processed16_ms=110.924`, `avg_processed16_to_8bit_ms=2.379`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- The probe only improved `M16-1446`, and that clip also showed `avg_queue_wait_ms=104.030`, so the end-to-end gate was not a clean win.
+- The visual state stayed intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Needs runtime profiling
+
+- The creative SIMD/toning loop simplification did not clear the three-clip gate.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact SIMD/toning shape is not a keeper.
