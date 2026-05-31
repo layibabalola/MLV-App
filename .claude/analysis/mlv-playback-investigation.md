@@ -7044,3 +7044,33 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The probe kept the visible gate intact and did not change the direct8 guard.
 - This is a throughput reject rather than a visual regression.
 - The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this color-cache shape is not a keeper.
+
+## 2026-05-31 - rejected color-scalar hoist probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by hoisting frame-invariant scalar fields used in the hot generic color loop:
+  - `vignette_strength`
+  - `vignette_end`
+  - `highest_green`
+  - `highest_green_gradient`
+  - `highest_green_diso`
+  - `highest_green_gradient_diso`
+  - `dual_iso_mode`
+- The probe build completed successfully and the smoke gate stayed visually valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- Probe build identity from the smoke run:
+  - `build_sha=af07cd7110b69eaacfb24cd782cebb36aefa0987`
+- Probe smoke results from `.claude-state/profiling/20260531-color-scalar-hoist/`:
+  - `M16-1327`: `presented_fps=5.495`, `avg_render_total_ms=170.659`, `avg_llrawproc_ms=72.409`, `avg_processing_ms=62.432`, `avg_processing_core_ms=38.386`, `avg_processing_core_color_ms=14.636`, `avg_processing_core_creative_ms=11.068`, `avg_processing_core_other_ms=7.886`, `avg_processing_shadows_highlights_prep_ms=24.091`, `avg_debayer_exclusive_ms=7.750`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.869`, `avg_render_total_ms=159.447`, `avg_llrawproc_ms=51.468`, `avg_processing_ms=68.043`, `avg_processing_core_ms=42.064`, `avg_processing_core_color_ms=16.915`, `avg_processing_core_creative_ms=13.128`, `avg_processing_core_other_ms=8.894`, `avg_processing_shadows_highlights_prep_ms=21.955`, `avg_debayer_exclusive_ms=7.568`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.490`, `avg_render_total_ms=170.227`, `avg_llrawproc_ms=72.000`, `avg_processing_ms=60.386`, `avg_processing_core_ms=38.295`, `avg_processing_core_color_ms=15.136`, `avg_processing_core_creative_ms=12.500`, `avg_processing_core_other_ms=4.909`, `avg_processing_shadows_highlights_prep_ms=25.936`, `avg_debayer_exclusive_ms=7.511`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost on all three clips:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.495 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.869 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `5.490 fps`
+
+### Cross-checked from prior analysis
+
+- The probe kept the visible gate intact and did not change the direct8 guard.
+- This is a throughput reject rather than a visual regression.
+- The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this scalar-hoist shape is not a keeper.
