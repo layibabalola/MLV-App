@@ -5268,3 +5268,42 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted center-cell hoist out and look for a different retained-path reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-31 - rejected dualiso alias-map grayscale row-pointer probe
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) by rewriting the alias-map grayscale consolidation loop in `build_alias_map()` to reuse row pointers instead of recomputing `x + y*w` offsets for every access.
+- The user-facing release tree was rebuilt after the edit, then the same sequential visible GUI smoke gate was rerun on the retained x1 Quality / settled Auto Look Assist setup.
+- Rebuilt release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 9:45:08 PM`
+  - `Length=8793088`
+  - `SHA256=3C5B4CB3BCF849E80AB97DF8E767B2919BBBE40BCC23FC7131C91A01CD4AF464`
+- Probe smoke results from `.claude-state/profiling/20260530-dualiso-aliasmap-grayscale-smoke/`:
+  - `M16-1327`: `presented_fps=5.493`, `avg_render_total_ms=338.000`, `avg_llrawproc_ms=58.295`, `avg_mix_chroma_ms=25.977`, `avg_chroma_copy_ms=5.273`, `avg_chroma_fullres_ms=11.114`, `avg_chroma_halfres_ms=9.591`, `avg_final_blend_ms=6.773`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.991`, `avg_render_total_ms=185.175`, `avg_llrawproc_ms=62.900`, `avg_mix_chroma_ms=27.275`, `avg_chroma_copy_ms=5.750`, `avg_chroma_fullres_ms=12.025`, `avg_chroma_halfres_ms=9.500`, `avg_final_blend_ms=7.175`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.852`, `avg_render_total_ms=160.596`, `avg_llrawproc_ms=34.213`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`, `avg_final_blend_ms=7.043`, `processed8_direct_path_frames=0`
+- The same baseline rerun after reverting the probe stayed valid with the current restored source shape and preserved the direct8 guard:
+  - `M16-1327`: `presented_fps=4.869`, `avg_render_total_ms=193.872`, `avg_llrawproc_ms=68.744`, `avg_mix_chroma_ms=28.513`, `avg_chroma_copy_ms=5.821`, `avg_chroma_fullres_ms=12.231`, `avg_chroma_halfres_ms=10.462`, `avg_final_blend_ms=7.846`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.114`, `avg_render_total_ms=184.854`, `avg_llrawproc_ms=63.902`, `avg_mix_chroma_ms=25.854`, `avg_chroma_copy_ms=5.512`, `avg_chroma_fullres_ms=10.244`, `avg_chroma_halfres_ms=10.073`, `avg_final_blend_ms=8.659`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.989`, `avg_render_total_ms=156.396`, `avg_llrawproc_ms=31.854`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`, `avg_final_blend_ms=7.333`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The visible smoke state for this gate keeps `dual_iso_alias_map=0`, so the alias-map grayscale loop is not the active path for the user-facing benchmark we are trying to improve.
+- The row-pointer rewrite therefore did not improve the retained-path throughput on this VM, and it is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `dualiso.c`, the next candidate should target the active retained path seen in the current smoke gate rather than the alias-map grayscale consolidation that remains inactive there.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted alias-map row-pointer probe out and target the active retained-path hot loop in `dualiso.c` or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
