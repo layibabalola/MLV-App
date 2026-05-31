@@ -7558,3 +7558,28 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next probe should likely move to `src/mlv/llrawproc/dualiso.c`, especially `mix_chroma` or a deeper `final_blend` reduction, rather than another RBF recurrence tweak.
 - If we stay in `raw_processing.c`, the next candidate needs to be materially different from the rejected branch-split family already recorded above.
+
+## 2026-05-31 - rejected dualiso no-alias final_blend dispatch
+
+### Verified locally
+
+- I changed [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) so the AVX2 `final_blend()` path uses `final_blend_row_avx2_no_alias(...)` when `alias_map == NULL`, then rebuilt the release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 10:44:43`
+  - `Length`: `8796672`
+  - `SHA256`: `7BC6243FCCE5A450AF7E595F8977B85AE6D870BCA0048BC1BF93E8C18AE3DEDE`
+- The visible smoke runs from `.claude-state/profiling/dualiso-noalias/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=5.497`, `avg_render_total_ms=166.795`, `avg_llrawproc_ms=70.932`, `avg_processing_core_color_ms=14.000`, `avg_processing_core_creative_ms=11.045`, `avg_processing_shadows_highlights_prep_ms=24.068`, `avg_mix_chroma_ms=28.568`, `avg_final_blend_ms=7.523`
+  - `M16-1347`: `presented_fps=6.493`, `avg_render_total_ms=143.115`, `avg_llrawproc_ms=57.981`, `avg_processing_core_color_ms=16.000`, `avg_processing_core_creative_ms=11.423`, `avg_processing_shadows_highlights_prep_ms=20.327`, `avg_mix_chroma_ms=26.115`, `avg_final_blend_ms=7.577`
+  - `M16-1446`: `presented_fps=7.497`, `avg_render_total_ms=122.083`, `avg_llrawproc_ms=33.783`, `avg_processing_core_color_ms=15.733`, `avg_processing_core_creative_ms=12.267`, `avg_processing_shadows_highlights_prep_ms=22.217`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.667`
+- The GUI smoke validation was clean on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, and `cpuSettled=true`.
+
+### Cross-checked from prior analysis
+
+- The full gate still lost against the keeper `ed2821e1` because `M16-1327` and `M16-1446` both regressed versus the keeper, even though `M16-1347` improved.
+- This confirms the visible gate is still sensitive to a narrow dual-ISO change in the no-alias path, even when the x1 Quality visual state stays intact.
+
+### Needs runtime profiling
+
+- The no-alias `final_blend` dispatch is not a keeper candidate.
+- If we revisit `dualiso.c`, the next probe should likely target `mix_chroma` or a deeper reduction in the mix stack rather than this row-dispatch specialization.
