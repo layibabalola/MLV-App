@@ -5377,3 +5377,73 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted shared-sample cache probe out and look for a different reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-31 - rejected processed16_to_8bit `omp simd` packdown probe
+
+### Verified locally
+
+- I probed [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) by adding an explicit `#pragma omp simd` hint to the row-local `processed16_to_8bit` byte-pack loop so the compiler could vectorize the per-row shift packdown more aggressively.
+- The user-facing release tree was rebuilt from the probe and the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved.
+- Rebuilt release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 10:14:48 PM`
+  - `Length=8793088`
+  - `SHA256=A282F8A8B32B66FC9F1C41591F49BC9857FAE3340F90F781D98273A9AF8BFE4F`
+- Probe smoke results from `.claude-state/profiling/20260531-processed16-simd/`:
+  - `M16-1327`: `presented_fps=5.112`, `avg_render_total_ms=186.195`, `avg_llrawproc_ms=63.317`, `avg_processed16_to_8bit_ms=2.171`, `avg_mix_chroma_ms=25.634`, `avg_final_blend_ms=5.951`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.617`, `avg_render_total_ms=168.978`, `avg_llrawproc_ms=55.533`, `avg_processed16_to_8bit_ms=2.133`, `avg_mix_chroma_ms=23.667`, `avg_final_blend_ms=7.311`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.357`, `avg_render_total_ms=146.843`, `avg_llrawproc_ms=29.745`, `avg_processed16_to_8bit_ms=1.941`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.314`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate is still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The visible smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe is still a retained-path throughput miss rather than a direct8 fallback regression.
+- The `omp simd` packdown probe is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `processed16_to_8bit`, the next candidate should be a different structural reduction in the packdown stage rather than another compiler hint on the same row loop.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted `omp simd` packdown probe out and look for a different reduction in `video_mlv.c`, `dualiso.c`, or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-31 - rejected mix_images_row_avx2 mask-elision probe
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) by removing the redundant `& 0xFFFFF` mask from the bright-side `mix_curve` gather in `mix_images_row_avx2()` and matching the scalar tail in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c).
+- The user-facing release tree was rebuilt from the probe and the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved.
+- Rebuilt release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 10:21:51 PM`
+  - `Length=8793088`
+  - `SHA256=A3B4C84355543585B4A4D4AFA4DF492E4CBC4BB7CCA6E63B00D277D55236227F`
+- Probe smoke results from `.claude-state/profiling/20260531-mix-maskless-M16-1327.json`, `.claude-state/profiling/20260531-mix-maskless-M16-1347.json`, and `.claude-state/profiling/20260531-mix-maskless-M16-1446.json`:
+  - `M16-1327`: `presented_fps=5.117`, `avg_render_total_ms=185.610`, `avg_llrawproc_ms=63.366`, `avg_mix_ms=36.098`, `avg_mix_chroma_ms=27.293`, `avg_final_blend_ms=6.878`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.997`, `avg_render_total_ms=188.925`, `avg_llrawproc_ms=66.850`, `avg_mix_ms=37.800`, `avg_mix_chroma_ms=28.825`, `avg_final_blend_ms=9.125`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.490`, `avg_render_total_ms=166.841`, `avg_llrawproc_ms=37.318`, `avg_mix_ms=8.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=7.386`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate is still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The visible smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe is still a retained-path throughput miss rather than a direct8 fallback regression.
+- The mask-elision probe is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `dualiso_avx2.inc`, the next candidate should target a different structural reduction in the active retained mix path rather than another gather-mask shortcut.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted mask-elision probe out and look for a different reduction in `mix_images_row_avx2()` or the adjacent retained dual-ISO kernels.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
