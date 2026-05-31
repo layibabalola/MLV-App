@@ -5620,6 +5620,25 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31T03:05 CDT - Creative toning loop cleanup reject
+
+- I probed `src/processing/raw_processing.c` by hoisting the toning scalars into locals and adding `#pragma omp simd` to the final toning loop in `apply_processing_object(...)`, then reverted it after the visible gate failed to beat the committed `processing_core` keeper.
+- The user-facing release tree was rebuilt from the reverted source, and the rebuilt executable is:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 3:05:27 AM`
+  - `Length=8796672`
+  - `SHA256=5739C77266DBD5809D92469AE43A800929D385D5759087AB10FDBD9A5E404142`
+- Reverted-baseline smoke results from `.claude-state/profiling/20260531-processing-core-creative-toning-revert/`:
+  - `M16-1327`: `presented_fps=5.871`, `avg_render_total_ms=159.532`, `avg_llrawproc_ms=66.489`, `avg_processing_ms=59.170`, `avg_processing_core_ms=34.511`, `avg_processing_core_color_ms=15.979`, `avg_processing_core_creative_ms=12.447`, `avg_processing_shadows_highlights_prep_ms=24.660`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.742`, `avg_render_total_ms=162.804`, `avg_llrawproc_ms=71.130`, `avg_processing_ms=64.074`, `avg_processing_core_ms=36.296`, `avg_processing_core_color_ms=16.389`, `avg_processing_core_creative_ms=12.796`, `avg_processing_shadows_highlights_prep_ms=27.759`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.728`, `avg_render_total_ms=139.796`, `avg_llrawproc_ms=39.278`, `avg_processing_ms=64.074`, `avg_processing_core_ms=36.296`, `avg_processing_core_color_ms=16.389`, `avg_processing_core_creative_ms=12.796`, `avg_processing_shadows_highlights_prep_ms=27.759`, `processed8_direct_path_frames=0`
+- Cross-check against the committed keeper baseline still showed the keeper ahead on the three-clip visible gate:
+  - `M16-1327`: keeper `6.373 fps` vs probe `5.871 fps`
+  - `M16-1347`: keeper `6.613 fps` vs probe `5.742 fps`
+  - `M16-1446`: keeper `7.242 fps` vs probe `6.728 fps`
+- The toning cleanup preserved x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, so this was a throughput reject rather than a visual regression.
+- The probe is rejected rather than promoted.
+
 ## 2026-05-31 - rejected processing_core_color gamma-loop simd probe
 
 ### Verified locally
