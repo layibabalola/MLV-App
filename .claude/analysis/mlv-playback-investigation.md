@@ -7391,3 +7391,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we revisit this region, the next probe should target a different generic-loop shape or a more selective data-layout change rather than this branch split.
 - The hot buckets remain `processing_core_color` and `processing_core_creative`; this probe did not move the full gate in the right direction.
+
+## 2026-05-31 - rejected non-gradient split for generic color loop
+
+### Verified locally
+
+- I specialized the generic color loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) so the common non-gradient path can skip the gradient-only work and branch checks while keeping the x1 Quality / settled Auto Look Assist gate intact.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 09:44:24`
+  - `Length`: `8800768`
+  - `SHA256`: `1B49B877EEB27177FA93340A4F4F21D1A8625CB0B58B2D0E7AD927A5C7D63358`
+- The visible smoke runs from `.claude-state/profiling/wb-68fe75d089af4c6f/gradient-smoke/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=3.123`, `avg_render_total_ms=303.360`, `avg_llrawproc_ms=132.760`, `avg_processing_core_color_ms=51.360`, `avg_processing_core_creative_ms=48.080`
+  - `M16-1347`: `presented_fps=2.998`, `avg_render_total_ms=322.667`, `avg_llrawproc_ms=150.875`, `avg_processing_core_color_ms=51.583`, `avg_processing_core_creative_ms=50.250`
+  - `M16-1446`: `presented_fps=3.995`, `avg_render_total_ms=238.000`, `avg_llrawproc_ms=59.406`, `avg_processing_core_color_ms=53.344`, `avg_processing_core_creative_ms=49.250`
+- The GUI smoke validation was clean on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, and `cpuSettled=true`.
+
+### Cross-checked from prior analysis
+
+- This probe regressed throughput versus the accepted keeper `ed2821e1`; the visible gate stayed valid, but the render and LL raw-processing timings were materially worse.
+- The hot work still sits in the generic color path, but this gradient split is not a keeper candidate.
+
+### Needs runtime profiling
+
+- The next probe should stay structural but target a different hot-path shape than this gradient specialization.
+- Since the smoke gate remained stable, the next experiment can focus on reducing generic-loop work without preserving this specific branch split.
