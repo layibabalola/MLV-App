@@ -1,3 +1,13 @@
+## 2026-05-31 - rejected convert_to_20bit mask-elision probe
+- I tried removing the redundant `& 0xFFFFF` mask from [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) inside `convert_to_20bit_avx2()` and its scalar tail, but the change was only a semantic cleanup and did not show a plausible runtime win worth keeping.
+- I reverted the source back to the accepted `convert_to_20bit` shape before final verification, then rebuilt the user-facing release tree from the restored baseline.
+- The rebuilt release exe is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 10:35:03 PM`, `Length=8793088`, `SHA256=6B118977E1AAF0F5DFDB33BEC11190D93423DF5EE11F16391C014549AE65793E`.
+- Restored-baseline smoke stayed visually valid on the same three-clip gate, with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=5.247`, `avg_render_total_ms=181.952`, `avg_llrawproc_ms=59.214`, `avg_mix_chroma_ms=26.381`, `avg_final_blend_ms=6.786`
+  - `M16-1347`: `presented_fps=5.116`, `avg_render_total_ms=185.049`, `avg_llrawproc_ms=63.268`, `avg_mix_chroma_ms=27.073`, `avg_final_blend_ms=8.195`
+  - `M16-1446`: `presented_fps=5.614`, `avg_render_total_ms=168.511`, `avg_llrawproc_ms=39.578`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.711`
+- The accepted nearby baseline remains stronger on the same gate (`6.101 / 5.983 / 6.865 fps`), so this shape stays rejected rather than becoming a new candidate.
+
 ## 2026-05-30 - rejected final_blend no-alias AVX2 specialization
 - I tried routing the common `alias_map == NULL` AVX2 branch in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) through the existing `final_blend_row_avx2_no_alias()` specialization instead of the generic `final_blend_row_avx2()` kernel.
 - That specialization did not survive the visible x1 Quality / settled Auto Look Assist gate: all three alias-map-free clips regressed versus the accepted baseline, so I reverted the dispatcher back to the generic kernel and kept the alias-map path untouched.
