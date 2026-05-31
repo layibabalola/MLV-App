@@ -111,6 +111,9 @@ typedef struct {
 
         /* Blurred image for highlights/shadows */
         processing_buffer_t * blur_image;
+        /* Half-resolution scratch used for the optional half-res RBF probe */
+        processing_buffer_t * blur_image_half_in;
+        processing_buffer_t * blur_image_half_out;
     } shadows_highlights;
 
     /* White balance */

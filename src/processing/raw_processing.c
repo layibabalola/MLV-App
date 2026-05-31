@@ -228,6 +228,99 @@ static int ensure_processing_u16_scratch(uint16_t ** buffer, size_t * capacity, 
     return 1;
 }
 
+static void rgb_u16_downsample_2x_box(const uint16_t * __restrict src,
+                                      uint16_t * __restrict dst,
+                                      int src_w,
+                                      int src_h,
+                                      int threads)
+{
+    const int dst_w = src_w >> 1;
+    const int dst_h = src_h >> 1;
+    const size_t src_stride = (size_t)src_w * 3u;
+    const size_t dst_stride = (size_t)dst_w * 3u;
+
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int y = 0; y < dst_h; ++y)
+    {
+        const uint16_t * row0 = src + (size_t)(y * 2) * src_stride;
+        const uint16_t * row1 = row0 + src_stride;
+        uint16_t * drow = dst + (size_t)y * dst_stride;
+        for (int x = 0; x < dst_w; ++x)
+        {
+            const uint16_t * p00 = row0 + (size_t)(x * 2) * 3u;
+            const uint16_t * p01 = p00 + 3;
+            const uint16_t * p10 = row1 + (size_t)(x * 2) * 3u;
+            const uint16_t * p11 = p10 + 3;
+            for (int c = 0; c < 3; ++c)
+            {
+                const uint32_t sum = (uint32_t)p00[c] + (uint32_t)p01[c]
+                                    + (uint32_t)p10[c] + (uint32_t)p11[c];
+                drow[3 * x + c] = (uint16_t)(sum >> 2);
+            }
+        }
+    }
+}
+
+static void rgb_u16_upsample_2x_bilinear(const uint16_t * __restrict src,
+                                         uint16_t * __restrict dst,
+                                         int src_w,
+                                         int src_h,
+                                         int threads)
+{
+    const int dst_w = src_w << 1;
+    const int dst_h = src_h << 1;
+    const size_t src_stride = (size_t)src_w * 3u;
+    const size_t dst_stride = (size_t)dst_w * 3u;
+
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int y = 0; y < dst_h; ++y)
+    {
+        const int y0 = y >> 1;
+        const int y1 = (y0 + 1 < src_h) ? (y0 + 1) : y0;
+        const int wy = y & 1;
+        const uint16_t * row0 = src + (size_t)y0 * src_stride;
+        const uint16_t * row1 = src + (size_t)y1 * src_stride;
+        uint16_t * drow = dst + (size_t)y * dst_stride;
+
+        for (int x = 0; x < dst_w; ++x)
+        {
+            const int x0 = x >> 1;
+            const int x1 = (x0 + 1 < src_w) ? (x0 + 1) : x0;
+            const int wx = x & 1;
+            const uint16_t * p00 = row0 + (size_t)x0 * 3u;
+            const uint16_t * p01 = row0 + (size_t)x1 * 3u;
+            const uint16_t * p10 = row1 + (size_t)x0 * 3u;
+            const uint16_t * p11 = row1 + (size_t)x1 * 3u;
+
+            for (int c = 0; c < 3; ++c)
+            {
+                const uint32_t v00 = p00[c];
+                const uint32_t v01 = p01[c];
+                const uint32_t v10 = p10[c];
+                const uint32_t v11 = p11[c];
+                uint32_t sum;
+                if (!wx && !wy)
+                {
+                    sum = v00;
+                }
+                else if (wx && !wy)
+                {
+                    sum = v00 + v01;
+                }
+                else if (!wx && wy)
+                {
+                    sum = v00 + v10;
+                }
+                else
+                {
+                    sum = v00 + v01 + v10 + v11;
+                }
+                drow[3 * x + c] = (uint16_t)(sum >> (wx + wy));
+            }
+        }
+    }
+}
+
 static int ensure_sharpen_mask_scratch(processingObject_t * processing, size_t pixel_count)
 {
     return ensure_processing_u16_scratch(&processing->sharpen_mask_gray,
@@ -275,7 +368,11 @@ processingObject_t * initProcessingObject()
 
     /* Blur buffer images (may change size) */
     processing->shadows_highlights.blur_image = new_image_buffer();
+    processing->shadows_highlights.blur_image_half_in = new_image_buffer();
+    processing->shadows_highlights.blur_image_half_out = new_image_buffer();
     buffer_set_size(processing->shadows_highlights.blur_image, 2, 2); /* Fix craxh */
+    buffer_set_size(processing->shadows_highlights.blur_image_half_in, 2, 2);
+    buffer_set_size(processing->shadows_highlights.blur_image_half_out, 2, 2);
 
     double rgb_to_YCbCr[7] = {  0.299000,  0.587000,  0.114000,
                                -0.168736, -0.331264, /* 0.5 */
@@ -632,6 +729,10 @@ void applyProcessingObject( processingObject_t * processing,
 
     if( shadows_highlights_active )
     {
+        const int use_halfres_rbf =
+            (imageX >= 2) && (imageY >= 2)
+         && ((imageX & 1) == 0)
+         && ((imageY & 1) == 0);
 
         /* Blur diameter depends on image diagonal */
         int blur_radius = (int)(((sqrt(pow(imageX,2.0)+pow(imageY,2.0)) / 440.0 - 1.0)/2 + 0.5)*4.0);
@@ -643,6 +744,50 @@ void applyProcessingObject( processingObject_t * processing,
             //memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
             //blur_image(get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, 1, 1, 1, 0, imageY-1);
             if(0) blur_image_threaded( get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, threads );
+            else if( use_halfres_rbf )
+            {
+                const int half_w = imageX >> 1;
+                const int half_h = imageY >> 1;
+                const float half_sigma_spatial = 0.0025f * 0.5f;
+                buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+                buffer_set_size(processing->shadows_highlights.blur_image_half_in, half_w, half_h);
+                buffer_set_size(processing->shadows_highlights.blur_image_half_out, half_w, half_h);
+
+                rgb_u16_downsample_2x_box(inputImage,
+                                          get_buffer(processing->shadows_highlights.blur_image_half_in),
+                                          imageX,
+                                          imageY,
+                                          threads);
+                if( processing_shadows_highlights_curve_index_mask_enabled() )
+                    recursive_bf_wrap_with_curve_index_lut(
+                            get_buffer(processing->shadows_highlights.blur_image_half_in),
+                            get_buffer(processing->shadows_highlights.blur_image_half_out),
+                            half_sigma_spatial,
+                            0.075f+(((float)100.0-40.0f)/666.6f),
+                            half_w,
+                            half_h,
+                            3,
+                            processing->pre_calc_levels,
+                            processing->pre_calc_matrix[0],
+                            processing->pre_calc_matrix[4],
+                            processing->pre_calc_matrix[8]);
+                else
+                    recursive_bf_wrap_with_output_lut(
+                            get_buffer(processing->shadows_highlights.blur_image_half_in),
+                            get_buffer(processing->shadows_highlights.blur_image_half_out),
+                            half_sigma_spatial,
+                            0.075f+(((float)100.0-40.0f)/666.6f),
+                            half_w,
+                            half_h,
+                            3,
+                            processing->pre_calc_levels);
+
+                rgb_u16_upsample_2x_bilinear(get_buffer(processing->shadows_highlights.blur_image_half_out),
+                                             get_buffer(processing->shadows_highlights.blur_image),
+                                             half_w,
+                                             half_h,
+                                             threads);
+            }
             else if( processing_shadows_highlights_curve_index_mask_enabled() )
                 recursive_bf_wrap_with_curve_index_lut(
                         inputImage,
@@ -2800,6 +2945,8 @@ void freeProcessingObject(processingObject_t * processing)
     for (int i = 6; i >= 0; --i) free(processing->cs_zone.pre_calc_rgb_to_YCbCr[i]);
     for (int i = 3; i >= 0; --i) free(processing->cs_zone.pre_calc_YCbCr_to_rgb[i]);
     free_image_buffer(processing->shadows_highlights.blur_image);
+    free_image_buffer(processing->shadows_highlights.blur_image_half_in);
+    free_image_buffer(processing->shadows_highlights.blur_image_half_out);
     denoise_2D_median_release(&processing->denoiser_context);
     free(processing);
 }
