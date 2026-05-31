@@ -1,3 +1,28 @@
+## 2026-05-31 - rejected offset-pointer EV lookup in the store-heavy mix_chroma helper
+
+### Verified locally
+
+- I tried a narrower store-path tightening in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) by switching the hot EV lookup helper to an offset-pointer form, then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- The final rebuild after reverting the experiment is current at:
+  - `LastWriteTime=5/31/2026 5:57:15 PM`
+  - `Length=8837632`
+  - `SHA256=3476EB77C2F4D2209E1F44F049FD04FDB354D79A02432ABFF91757AA6F3593F7`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved. The gate stayed intact on the final run:
+  - `M16-1327`: `average_latency_ms=1130.10`, `average_cadence_ms=1088.96`, `processed8_direct_path_active=false`, `look_assist_toggle_smoke_stable=true`
+  - `M16-1347`: `average_latency_ms=1741.66`, `average_cadence_ms=1875.59`, `processed8_direct_path_active=false`, `look_assist_toggle_smoke_stable=true`
+  - `M16-1446`: `average_latency_ms=741.62`, `average_cadence_ms=439.53`, `processed8_direct_path_active=false`, `look_assist_toggle_smoke_stable=true`
+- The offset-pointer form was not a keeper: on the chroma-heavy clips it regressed the combined settled `avg_llrawproc_ms` versus the earlier simpler helper shape, so I reverted it back to the simpler `chroma_smooth_ev2raw_lookup(const int *ev2raw, int ev)` form.
+
+### Cross-checked from prior analysis
+
+- The earlier helper form already gave a net `mix_chroma` win, even though the benefit stayed asymmetric across clips.
+- The offset-pointer experiment proved that the extra indirection and base adjustment were not free enough to justify replacing the simpler helper.
+
+### Needs runtime profiling
+
+- Keep the simpler store-path helper as the current keeper.
+- If we continue in `mix_chroma`, the next candidate should be a different subpath than the EV lookup wrapper itself.
+
 ## 2026-05-31 - store-path lookup helper gave a net mix_chroma win, but the clip split stayed asymmetric
 
 ### Verified locally
