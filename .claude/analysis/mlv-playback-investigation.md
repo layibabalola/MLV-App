@@ -5342,6 +5342,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - If we keep exploring this area, the next candidate should be a structurally different mix-path change or a broader quality tradeoff.
 - If we want to stay conservative, the honest next move is to switch hotspots again rather than spend more cycles on `mix_images()` micro-optimizations that the visible gate cannot clearly resolve.
 
+## 2026-05-31 - rejected fused chroma-smooth pair traversal in Dual ISO mix_images
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) and [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) by moving the common 2x2 chroma-smooth work into a fused row traversal for the `mix_images()` path when `chroma_smooth_method == 2`.
+- The user-facing release tree was rebuilt after the edit, and the same sequential visible GUI smoke gate was rerun on the retained x1 Quality / settled Auto Look Assist setup with `dual_iso_alias_map=0` and `processed8_direct_path_frames=0`.
+- Rebuilt release executable metadata for the probe build:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 1:02:38 AM`
+  - `Length=8795136`
+  - `SHA256=39248B0DE122807354D1B042E7110E45035C9F82DED3FAC8B2B880FDBE8E7423`
+- Probe smoke results from `.claude-state/profiling/20260531-chroma-fusion/M16-1327.json`, `.claude-state/profiling/20260531-chroma-fusion/M16-1347.json`, and `.claude-state/profiling/20260531-chroma-fusion/M16-1446.json`:
+  - `M16-1327`: `presented_fps=5.617`, `avg_render_total_ms=165.800`, `avg_llrawproc_ms=72.089`, `avg_processing_shadows_highlights_prep_ms=23.533`, `avg_mix_chroma_ms=27.111`, `avg_chroma_copy_ms=5.956`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.740`, `avg_render_total_ms=164.326`, `avg_llrawproc_ms=69.826`, `avg_processing_shadows_highlights_prep_ms=24.022`, `avg_mix_chroma_ms=28.935`, `avg_chroma_copy_ms=7.109`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.737`, `avg_render_total_ms=140.185`, `avg_llrawproc_ms=42.000`, `avg_processing_shadows_highlights_prep_ms=25.463`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby baseline for the same three-clip gate is still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The probe preserved the visible state but did not clear the baseline on the chroma-heavy clips, so it is a reject rather than a keeper.
+
+### Needs runtime profiling
+
+- The mix path still looks like a structural limit for this iteration. If we keep exploring it, the next candidate should be materially different from this fused 2x2 traversal rather than another copy/lookup shuffle.
+
 ## 2026-05-30 - rejected `processed16_to_8bit` SSE2 packdown probe
 
 ### Verified locally
