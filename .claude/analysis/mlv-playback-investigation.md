@@ -5307,3 +5307,38 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted alias-map row-pointer probe out and target the active retained-path hot loop in `dualiso.c` or `dualiso_avx2.inc`.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-31 - rejected dualiso_avx2 mix_images_row_avx2 masked-bright gather probe
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) by masking the bright-side gather index in `mix_images_row_avx2()` before the `raw2ev_lut` lookup, leaving the dark-side gather unchanged.
+- The user-facing release tree was rebuilt from the probe and the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved.
+- Rebuilt release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 9:54:03 PM`
+  - `Length=8793088`
+  - `SHA256=8B43850D51E3C420343E05587EA32593C161EF98C16D5176DA40E4C10B91211F`
+- Probe smoke results from `.claude-state/profiling/20260530-mix-images-mask/`:
+  - `M16-1327`: `presented_fps=5.499`, `avg_render_total_ms=172.159`, `avg_llrawproc_ms=56.909`, `avg_mix_chroma_ms=24.705`, `avg_final_blend_ms=6.955`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.111`, `avg_render_total_ms=182.805`, `avg_llrawproc_ms=59.732`, `avg_mix_chroma_ms=25.561`, `avg_final_blend_ms=7.902`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.744`, `avg_render_total_ms=163.217`, `avg_llrawproc_ms=35.717`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.739`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The visible smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe was still a retained-path throughput miss rather than a direct8 fallback regression.
+- The masked-bright gather probe is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `dualiso_avx2.inc`, the next candidate should target a different structural reduction in the active retained mix path rather than another gather-mask adjustment.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted gather-mask probe out and look for a different reduction in `mix_images_row_avx2()` or the adjacent retained dual-ISO kernels.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
