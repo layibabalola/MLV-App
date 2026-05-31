@@ -5620,6 +5620,46 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected use_cam_matrix gamut-unroll probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by unrolling the 3-channel `use_cam_matrix` gamut-desaturation block in `apply_processing_object(...)` for both the main path and the gradient path.
+- The user-facing release tree was rebuilt from the probe and the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it did not beat the committed `processing_core` keeper cleanly enough to keep, so it is rejected.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 3:22:08 AM`
+  - `Length=8796672`
+  - `SHA256=2565B13C85A30CD24C831D2AD2FB826F0727712BBE611F2FB0774BF8FB8A0640`
+- Restored-baseline release executable metadata after reverting the probe:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 3:31:40 AM`
+  - `Length=8796672`
+  - `SHA256=80FEA68109AAA07053FADFC2D9169C080B135F9640D3BEE6996CD66421AE3759`
+- Probe smoke results from `.claude-state/profiling/20260531-toning-unroll/`:
+  - `M16-1327`: `presented_fps=6.350`, `avg_render_total_ms=148.490`, `avg_llrawproc_ms=60.431`, `avg_processing_ms=55.510`, `avg_processing_core_ms=32.157`, `avg_processing_core_levels_ms=5.176`, `avg_processing_core_color_ms=13.745`, `avg_processing_core_creative_ms=11.667`, `avg_processing_core_other_ms=2.588`, `avg_processing_shadows_highlights_prep_ms=23.333`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.114`, `avg_render_total_ms=152.000`, `avg_llrawproc_ms=61.612`, `avg_processing_ms=55.469`, `avg_processing_core_ms=32.959`, `avg_processing_core_levels_ms=5.061`, `avg_processing_core_color_ms=15.408`, `avg_processing_core_creative_ms=11.388`, `avg_processing_core_other_ms=2.143`, `avg_processing_shadows_highlights_prep_ms=22.510`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.247`, `avg_render_total_ms=128.828`, `avg_llrawproc_ms=35.379`, `avg_processing_ms=58.621`, `avg_processing_core_ms=35.207`, `avg_processing_core_levels_ms=4.741`, `avg_processing_core_color_ms=15.828`, `avg_processing_core_creative_ms=11.517`, `avg_processing_core_other_ms=3.741`, `avg_processing_shadows_highlights_prep_ms=23.414`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper remains stronger on the same three-clip gate:
+  - `M16-1327`: keeper `6.373 fps` vs probe `6.350 fps`
+  - `M16-1347`: keeper `6.613 fps` vs probe `6.114 fps`
+  - `M16-1446`: keeper `7.242 fps` vs probe `7.247 fps` on this run, but the probe still lost the full three-clip gate and does not displace the keeper cleanly
+- The visible smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe remained a retained-path throughput miss rather than a direct8 fallback regression.
+- The gamut-unroll cleanup is rejected rather than promoted because it did not improve the full three-clip gate enough to displace the current accepted keeper cleanly.
+
+### Needs runtime profiling
+
+- If we keep exploring `processing_core_color`, the next candidate should be materially different from this gamut-unroll probe, most likely another specific sub-path in `processing_core_color` or `processing_core_creative`.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted gamut-unroll probe out and look for a different reduction in `processing_core_color` or `processing_core_creative`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31T03:25 CDT - rejected toning neutral fast-path probe
 
 - I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by adding a neutral fast-path guard for the final toning block in `apply_processing_object(...)`.
