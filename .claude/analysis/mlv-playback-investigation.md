@@ -5609,6 +5609,41 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - accepted half-res shadows/highlights blur probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by adding a half-resolution shadows/highlights blur path: RGB input is box-downsampled to half size, the existing recursive bilateral filter runs on the smaller buffer, and the result is bilinear-upsampled back into the full-resolution blur buffer consumed by the existing processing path.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid and improved throughput on all three visible clips, so it is a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 12:48:18 AM`
+  - `Length=8795136`
+  - `SHA256=39248B0DE122807354D1B042E7110E45035C9F82DED3FAC8B2B880FDBE8E7423`
+- Probe smoke results from `.claude-state/profiling/20260531-rbf-halfres-blur/`:
+  - `M16-1327`: `presented_fps=6.245`, `avg_render_total_ms=148.200`, `avg_llrawproc_ms=61.900`, `avg_processing_shadows_highlights_prep_ms=21.820`, `avg_vertical_down_ms=5.920`, `avg_vertical_up_ms=6.320`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.240`, `avg_render_total_ms=150.580`, `avg_llrawproc_ms=64.720`, `avg_processing_shadows_highlights_prep_ms=20.960`, `avg_vertical_down_ms=6.500`, `avg_vertical_up_ms=5.857`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.993`, `avg_render_total_ms=132.018`, `avg_llrawproc_ms=37.839`, `avg_processing_shadows_highlights_prep_ms=24.214`, `avg_vertical_down_ms=6.500`, `avg_vertical_up_ms=5.857`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_processing_shadows_highlights_prep_ms=55.750`, `avg_mix_chroma_ms=23.224`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_processing_shadows_highlights_prep_ms=55.600`, `avg_mix_chroma_ms=23.522`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_processing_shadows_highlights_prep_ms=55.458`, `avg_mix_chroma_ms=0.0`, `processed8_direct_path_frames=0`
+- The visual smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe remained on the safe retained-path lane and did not reopen the pink/direct8 regression.
+- The half-res blur path is accepted because it materially reduced `avg_processing_shadows_highlights_prep_ms` and improved `presented_fps` on all three gate clips.
+
+### Needs runtime profiling
+
+- The current data says the half-res RBF probe is a keeper on the visible gate, but the next iteration should still watch for clip-specific quality drift or a need to retune the half-res sigma scaling.
+
+### Ranked next steps
+
+1. High impact / low risk: keep the half-res RBF path and continue using the same three-clip visible smoke gate to watch for any quality drift.
+2. Medium impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target elsewhere.
+3. Low impact / low risk: if a later clip reveals quality issues, retune the half-res sigma scaling before changing the consumer again.
+
 ## 2026-05-31 - rejected RBF output-stage simd hint
 
 ### Verified locally
