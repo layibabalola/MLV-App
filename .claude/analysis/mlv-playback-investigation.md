@@ -5082,3 +5082,39 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted pointer-local shape out and look for a different retained-path reduction in `dualiso.c`, `dualiso_avx2.inc`, or a different `chroma_smooth.c` structure.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-30 - rejected alias-map grayscale row-local probe
+
+### Verified locally
+
+- I probed the alias-map grayscale consolidation loop in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) by replacing the repeated `x + y*w` accesses with row-local pointers inside the 2x2 grayscale pass.
+- The user-facing release tree was rebuilt after the edit, then the same sequential visible GUI smoke gate was rerun on the retained x1 Quality / settled Auto Look Assist setup.
+- Rebuilt release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 8:25:34 PM`
+  - `Length=8793600`
+  - `SHA256=34DF4E27C8262ACF19C54127F6CC1B53CD8652749D5DF35BC548B182ECF13486`
+- Probe smoke results from `.claude-state/profiling/20260530-alias-gray-rowlocal-smoke/`:
+  - `M16-1327`: `presented_fps=5.243`, `avg_render_total_ms=179.357`, `avg_llrawproc_ms=58.190`, `avg_mix_chroma_ms=25.143`, `avg_final_blend_ms=6.452`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.122`, `avg_render_total_ms=181.561`, `avg_llrawproc_ms=59.415`, `avg_mix_chroma_ms=25.049`, `avg_final_blend_ms=7.756`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.364`, `avg_render_total_ms=175.140`, `avg_llrawproc_ms=39.558`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=7.372`, `processed8_direct_path_frames=0`
+- The visual state stayed valid throughout the probe: x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`.
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The probe preserved the direct8 guard and kept `processed8_direct_path_frames=0`, so the regression is a retained-path throughput miss rather than a direct8 fallback regression.
+- The row-local grayscale rewrite did not beat the accepted baseline on this VM, so it is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `dualiso.c`, the next candidate should be a different structural reduction in the retained alias-map or blend stack rather than another 2x2 grayscale indexing cleanup.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted row-local grayscale shape out and look for a different retained-path reduction in `dualiso.c` or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
