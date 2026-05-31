@@ -1,3 +1,57 @@
+## 2026-05-31 - rejected rgb3-specialized RBF vertical passes
+
+### Verified locally
+
+- I specialized the vertical passes in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc/MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) for the common `channel == 3` case so the retained Shadows/Highlights prep path could use fixed 3-channel copies and `getDiffFactorRgb3(...)` directly, while keeping the generic fallback unchanged.
+- The user-facing release tree was rebuilt back to the accepted baseline at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after restoring the source:
+  - `LastWriteTime=5/31/2026 1:38:33 PM`
+  - `Length=8797184`
+  - `SHA256=BFCC9CC287B20B3B1C9C6E3099063269026094B1C154163A4551F3F0CAE23E7A`
+- The visible x1 Quality smoke gate stayed valid on all three clips, with settled Auto Look Assist preserved and the direct8 guard intact: `processed8_direct_path_active` was `true` only on the warm-up frame and `false` on frames 1 and 2 in all three runs.
+- Settled-frame averages from `.claude-state/profiling/wb-547bd32f12e74486/rbf-rgb3/` were not competitive:
+  - `M16-1327`: `render_thread_work_ms=286.5`, `llrawproc_ms=123`, `processing_shadows_highlights_prep_ms=26`, `processing_shadows_highlights_filter_ms=26`, `processing_core_color_ms=55`, `processing_core_creative_ms=52`, `dual_iso_full20_mix_chroma_ms=65.5`, `dual_iso_full20_final_blend_ms=11.5`, `cadence_ms=455.164`, `derived_fps=2.197`
+  - `M16-1347`: `render_thread_work_ms=295`, `llrawproc_ms=129.5`, `processing_shadows_highlights_prep_ms=26`, `processing_shadows_highlights_filter_ms=26`, `processing_core_color_ms=53.5`, `processing_core_creative_ms=54.5`, `dual_iso_full20_mix_chroma_ms=73`, `dual_iso_full20_final_blend_ms=12`, `cadence_ms=464.999`, `derived_fps=2.151`
+  - `M16-1446`: `render_thread_work_ms=230.5`, `llrawproc_ms=56`, `processing_shadows_highlights_prep_ms=31`, `processing_shadows_highlights_filter_ms=31`, `processing_core_color_ms=55`, `processing_core_creative_ms=50.5`, `dual_iso_full20_mix_chroma_ms=0`, `dual_iso_full20_final_blend_ms=8`, `cadence_ms=359.075`, `derived_fps=2.785`
+
+### Cross-checked from prior analysis
+
+- The current keeper `ed2821e1` still remains the better visible-gate result for this region.
+- The rgb3-specialized vertical-pass shape is far slower than the keeper on all three clips, so it is a throughput reject rather than a visual regression.
+- The packets still show the visible smoke state stable, so the rejection is about performance, not quality.
+
+### Needs runtime profiling
+
+- The next RBF probe should not revisit this 3-channel vertical-pass specialization.
+- If we stay in `RBFilterPlain.cpp`, the next candidate needs a different structural shape or a different stage in the Shadows/Highlights prep pipeline.
+
+## 2026-05-31 - rejected row-fused 2x2 chroma-smooth pair path
+
+### Verified locally
+
+- I tried a row-fused 2x2 chroma-smooth pair path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) and routed the Dual ISO retained path in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) to call it when `chroma_smooth_method == 2` and `fullres_smooth != fullres`.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) before the source was restored.
+- Probe release executable metadata:
+  - `LastWriteTime=5/31/2026 1:23:25 PM`
+  - `Length=8802816`
+  - `SHA256=7D1D1F9A20E6B3CB82E8B5A1D2B4C7D9F4E06A09AC88E8B94D69D5D1E4B6A0A4`
+- After restoring both source files back to `HEAD`, the user-facing release tree was rebuilt again to the accepted baseline shape.
+- The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid. The direct8 guard remained intact: `processed8_direct_path_active` was `true` only on the warm-up frame and `false` on frames 1 and 2 for all three clips.
+- Settled-frame averages from `.claude-state/profiling/wb-547bd32f12e74486/mix-chroma-pair/` were not competitive:
+  - `M16-1327`: `avg_render_thread_work_ms=328.5`, `avg_llrawproc_ms=153`, `avg_llrawproc_dual_iso_ms=153`, `avg_dual_iso_full20_mix_chroma_ms=84.5`, `avg_dual_iso_full20_final_blend_ms=11.5`, `avg_processing_core_color_ms=56.5`, `avg_processing_core_creative_ms=52`
+  - `M16-1347`: `avg_render_thread_work_ms=291.5`, `avg_llrawproc_ms=127`, `avg_llrawproc_dual_iso_ms=127`, `avg_dual_iso_full20_mix_chroma_ms=69`, `avg_dual_iso_full20_final_blend_ms=12`, `avg_processing_core_color_ms=54.5`, `avg_processing_core_creative_ms=48.5`
+  - `M16-1446`: `avg_render_thread_work_ms=214.5`, `avg_llrawproc_ms=49`, `avg_llrawproc_dual_iso_ms=49`, `avg_dual_iso_full20_mix_chroma_ms=0`, `avg_dual_iso_full20_final_blend_ms=8.5`, `avg_processing_core_color_ms=52.5`, `avg_processing_core_creative_ms=51`
+
+### Cross-checked from prior analysis
+
+- The current keeper `ed2821e1` still remains the better visible-gate result for this region.
+- The row-fused helper did not reduce the retained Dual ISO mix-stack cost enough to displace the accepted baseline; the settled-frame work stayed far above the keeper on the chroma-heavy clips.
+- This is a throughput reject, not a visual regression.
+
+### Needs runtime profiling
+
+- The next Dual ISO probe should be structurally different from this row-fused chroma pair path.
+- `mix_chroma` remains the best retained-path hotspot if we stay in this pipeline, but this exact fused shape is not a keeper candidate.
+
 ## 2026-05-31 - rejected highlight-reconstruction branch split in the hot raw-processing loop
 
 ### Verified locally
