@@ -68,6 +68,8 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_sharpen_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_grain_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_levels_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_matrix_ms = 0.0;
@@ -138,6 +140,8 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_grain_ms = 0.0;
     g_processing_last_core_levels_ms = 0.0;
     g_processing_last_core_color_ms = 0.0;
+    g_processing_last_core_color_cam_ms = 0.0;
+    g_processing_last_core_color_gamma_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
     g_processing_last_core_output_ms = 0.0;
     g_processing_last_direct8_matrix_ms = 0.0;
@@ -161,6 +165,8 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
 
     timing->levels_ms = 0.0;
     timing->color_ms = 0.0;
+    timing->color_cam_ms = 0.0;
+    timing->color_gamma_ms = 0.0;
     timing->creative_ms = 0.0;
     timing->output_ms = 0.0;
 }
@@ -837,6 +843,8 @@ void applyProcessingObject( processingObject_t * processing,
                                 &core_timing);
         g_processing_last_core_levels_ms = core_timing.levels_ms;
         g_processing_last_core_color_ms = core_timing.color_ms;
+        g_processing_last_core_color_cam_ms = core_timing.color_cam_ms;
+        g_processing_last_core_color_gamma_ms = core_timing.color_gamma_ms;
         g_processing_last_core_creative_ms = core_timing.creative_ms;
         g_processing_last_core_output_ms = core_timing.output_ms;
     }
@@ -887,6 +895,10 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_levels_ms, core_timings[t].levels_ms);
             g_processing_last_core_color_ms =
                 MAX(g_processing_last_core_color_ms, core_timings[t].color_ms);
+            g_processing_last_core_color_cam_ms =
+                MAX(g_processing_last_core_color_cam_ms, core_timings[t].color_cam_ms);
+            g_processing_last_core_color_gamma_ms =
+                MAX(g_processing_last_core_color_gamma_ms, core_timings[t].color_gamma_ms);
             g_processing_last_core_creative_ms =
                 MAX(g_processing_last_core_creative_ms, core_timings[t].creative_ms);
             g_processing_last_core_output_ms =
@@ -1897,6 +1909,7 @@ void apply_processing_object( processingObject_t * processing,
             /* I really don't like how this if is in a big loop :(( */
             if( use_cam_matrix )
             {
+                const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
                 /* WB correction */
                 float pix0b = pix[0], pix1b = pix[1], pix2b = pix[2];
                 float result[3];
@@ -1949,12 +1962,21 @@ void apply_processing_object( processingObject_t * processing,
                     pix[1] = LIMIT16(result[1]);
                     pix[2] = LIMIT16(result[2]);
                 }
+                if( capture_breakdown )
+                {
+                    core_timing->color_cam_ms += (omp_get_wtime() - color_cam_start) * 1000.0;
+                }
             }
 
             /* Gamma and expo correction (shadows&highlights, contrast, clarity) */
+            const double color_gamma_start = capture_breakdown ? omp_get_wtime() : 0.0;
             for( int i = 0; i < 3; i++ )
             {
                 pix[i] = processing->pre_calc_gamma[ LIMIT16((uint32_t)pix[i]) ]; /* Not float-> int is done here */
+            }
+            if( capture_breakdown )
+            {
+                core_timing->color_gamma_ms += (omp_get_wtime() - color_gamma_start) * 1000.0;
             }
 
             /* Gradient part 2 & blending */
@@ -1963,6 +1985,7 @@ void apply_processing_object( processingObject_t * processing,
                 /* WB correction gradient layer*/
                 if( use_cam_matrix )
                 {
+                    const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
                     double result[3];
                     result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
@@ -2009,12 +2032,21 @@ void apply_processing_object( processingObject_t * processing,
                         pixg[1] = LIMIT16(result[1]);
                         pixg[2] = LIMIT16(result[2]);
                     }
+                    if( capture_breakdown )
+                    {
+                        core_timing->color_cam_ms += (omp_get_wtime() - color_cam_start) * 1000.0;
+                    }
                 }
 
                 /* Gamma and expo correction (shadows&highlights, contrast, clarity) gradient layer*/
+                const double color_gamma_start = capture_breakdown ? omp_get_wtime() : 0.0;
                 for( int i = 0; i < 3; i++ )
                 {
                     pixg[i] = processing->pre_calc_gamma_gradient[ LIMIT16((uint32_t)pixg[i]) ];
+                }
+                if( capture_breakdown )
+                {
+                    core_timing->color_gamma_ms += (omp_get_wtime() - color_gamma_start) * 1000.0;
                 }
 
                 /* Blending using the mask */
@@ -2477,6 +2509,16 @@ double processingGetLastCoreLevelsMilliseconds(void)
 double processingGetLastCoreColorMilliseconds(void)
 {
     return g_processing_last_core_color_ms;
+}
+
+double processingGetLastCoreColorCamMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_ms;
+}
+
+double processingGetLastCoreColorGammaMilliseconds(void)
+{
+    return g_processing_last_core_color_gamma_ms;
 }
 
 double processingGetLastCoreCreativeMilliseconds(void)

@@ -2232,6 +2232,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.mix_chroma_center_store_r_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_store_b_probe_ms"),
                                       dualIsoFull20.mix_chroma_center_store_b_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_write_both_count"),
+                                      dualIsoFull20.mix_chroma_center_write_both_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_write_r_only_count"),
+                                      dualIsoFull20.mix_chroma_center_write_r_only_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_write_b_only_count"),
+                                      dualIsoFull20.mix_chroma_center_write_b_only_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_write_none_count"),
+                                      dualIsoFull20.mix_chroma_center_write_none_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_use_average_count"),
+                                      dualIsoFull20.mix_chroma_center_use_average_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_choose_ev_lt_eh_count"),
+                                      dualIsoFull20.mix_chroma_center_choose_ev_lt_eh_count );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_probe_ms"),
                                       dualIsoFull20.mix_chroma_halfres_center_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_gather_probe_ms"),
@@ -2244,6 +2256,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.mix_chroma_halfres_center_store_r_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_store_b_probe_ms"),
                                       dualIsoFull20.mix_chroma_halfres_center_store_b_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_write_both_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_write_both_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_write_r_only_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_write_r_only_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_write_b_only_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_write_b_only_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_write_none_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_write_none_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_use_average_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_use_average_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_choose_ev_lt_eh_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_choose_ev_lt_eh_count );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_probe_mode"),
                                       dualIsoFull20.mix_chroma_probe_mode );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_probe_stage"),
@@ -2378,6 +2402,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingCoreLevelsMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_ms"),
                                       processingCoreColorMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_ms"),
+                                      processingGetLastCoreColorCamMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_gamma_ms"),
+                                      processingGetLastCoreColorGammaMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_direct8_matrix_ms"),
                                       processingDirect8MatrixMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_direct8_gamma_ms"),

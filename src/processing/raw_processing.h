@@ -130,6 +130,8 @@ double processingGetLastSharpenMilliseconds(void);
 double processingGetLastGrainMilliseconds(void);
 double processingGetLastCoreLevelsMilliseconds(void);
 double processingGetLastCoreColorMilliseconds(void);
+double processingGetLastCoreColorCamMilliseconds(void);
+double processingGetLastCoreColorGammaMilliseconds(void);
 double processingGetLastCoreCreativeMilliseconds(void);
 double processingGetLastCoreOutputMilliseconds(void);
 double processingGetLastDirect8MatrixMilliseconds(void);
@@ -355,6 +357,8 @@ void processingSetHueVsCurves(processingObject_t * processing, int num, float * 
 typedef struct {
     double levels_ms;
     double color_ms;
+    double color_cam_ms;
+    double color_gamma_ms;
     double creative_ms;
     double output_ms;
 } processing_core_timing_t;
