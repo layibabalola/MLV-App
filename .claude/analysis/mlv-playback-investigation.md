@@ -5190,3 +5190,51 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted offset-table shape out and look for a different retained-path reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-30 - rejected dualiso 2x2 chroma row-sweep fusion
+
+### Verified locally
+
+- I probed the retained 2x2 chroma-smoothing path by fusing the fullres and halfres passes into one OpenMP row sweep inside [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) and reusing the shared 2x2 row helper from [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c).
+- The user-facing release tree was rebuilt after the edit, then the same sequential visible GUI smoke gate was rerun on the retained x1 Quality / settled Auto Look Assist setup.
+- Rebuilt release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 9:02:53 PM`
+  - `Length=8793088`
+  - `SHA256=563490AF5C16F520CE76BA6F72C8CDED86A333D166B398CA1A7C981F48D76988`
+- Probe smoke results from `.claude-state/profiling/20260530-mixchroma-fusion-smoke/`:
+  - `M16-1327`: `avg_latency_ms=1082.205`, `avg_cadence_ms=588.200`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `avg_latency_ms=710.668`, `avg_cadence_ms=555.538`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `avg_latency_ms=702.087`, `avg_cadence_ms=448.726`, `processed8_direct_path_frames=0`
+- Per-frame stage averages from the same profiles showed the retained path was still heavy and the fused sweep did not beat the accepted baseline:
+  - `M16-1327`: `dual_iso_total_ms=273.333`, `dual_iso_mix_chroma_ms=66.667`, `dual_iso_mix_chroma_copy_ms=2.333`, `dual_iso_mix_chroma_fullres_ms=30.000`, `dual_iso_mix_chroma_halfres_ms=34.333`, `dual_iso_final_blend_ms=16.333`
+  - `M16-1347`: `dual_iso_total_ms=254.667`, `dual_iso_mix_chroma_ms=52.000`, `dual_iso_mix_chroma_copy_ms=3.333`, `dual_iso_mix_chroma_fullres_ms=27.000`, `dual_iso_mix_chroma_halfres_ms=21.667`, `dual_iso_final_blend_ms=18.667`
+  - `M16-1446`: `dual_iso_total_ms=195.667`, `dual_iso_mix_chroma_ms=0.000`, `dual_iso_mix_chroma_copy_ms=0.000`, `dual_iso_mix_chroma_fullres_ms=0.000`, `dual_iso_mix_chroma_halfres_ms=0.000`, `dual_iso_final_blend_ms=12.333`
+- The visual state stayed valid throughout the probe: x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`.
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The fused row-sweep preserved the direct8 guard and kept `processed8_direct_path_frames=0`, but it did not improve the retained-path throughput on this VM.
+- The row-sweep fusion probe is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring the retained 2x2 smoother, the next candidate should be a different structural reduction rather than another shared-row sweep of the same two passes.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted row-sweep fusion shape out and look for a different retained-path reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+### Recovery smoke
+
+- After reverting the probe, the release tree was rebuilt again from the restored baseline shape at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 9:06:01 PM`, `Length=8793088`, `SHA256=FCAE761EBB5AEB78B8B626D435997165A21A9B93659475E66CE59585859CFDF7`.
+- The restored baseline smoke stayed visually valid with x1 Quality and settled Auto Look Assist, and `processed8_direct_path_frames=0` remained true:
+  - `M16-1327`: `avg_latency_ms=1121.806`, `avg_cadence_ms=608.208`, `dual_iso_total_ms=249.667`, `dual_iso_mix_chroma_ms=50.000`, `dual_iso_mix_chroma_fullres_ms=24.667`, `dual_iso_mix_chroma_halfres_ms=22.667`, `dual_iso_final_blend_ms=14.000`
+  - `M16-1347`: `avg_latency_ms=778.901`, `avg_cadence_ms=590.453`, `dual_iso_total_ms=261.333`, `dual_iso_mix_chroma_ms=58.000`, `dual_iso_mix_chroma_fullres_ms=29.000`, `dual_iso_mix_chroma_halfres_ms=26.333`, `dual_iso_final_blend_ms=15.667`
+  - `M16-1446`: `avg_latency_ms=690.630`, `avg_cadence_ms=429.770`, `dual_iso_total_ms=195.333`, `dual_iso_mix_chroma_ms=0.000`, `dual_iso_final_blend_ms=14.000`
