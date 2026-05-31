@@ -6619,3 +6619,42 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The lookup caching did not move the gate enough to matter.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact alias-cache shape is not a keeper.
+
+## 2026-05-31 - rejected creative LUT composition probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by composing the contrast and gradation creative LUTs into a precomputed 16-bit lookup table for the creative path:
+  - `pre_calc_curve_r`
+  - `gcurve_y`
+  - `gcurve_r`
+  - `gcurve_g`
+  - `gcurve_b`
+- The release tree was rebuilt from the probe build, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe stayed visually valid, but it lost the full three-clip gate versus the committed `processing_core` keeper, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 5:39:36 AM`
+  - `Length=8797696`
+  - `SHA256=19BAA53834B1D3DA04A5EB25EF1F2EC906C31AAF91E10B3DA5A6EEBA6C9D87B6`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-lut-composition-gui-smoke/`:
+  - `M16-1327`: `presented_fps=5.865`, `avg_render_total_ms=160.085`, `avg_llrawproc_ms=66.298`, `avg_processed16_ms=151.085`, `avg_processing_ms=58.404`, `avg_processing_core_ms=34.809`, `avg_processing_core_levels_ms=5.681`, `avg_processing_core_color_ms=15.085`, `avg_processing_core_creative_ms=11.553`, `avg_processing_core_output_ms=1.383`, `avg_processing_core_other_ms=4.213`, `avg_processing_shadows_highlights_prep_ms=23.596`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.611`, `avg_render_total_ms=167.400`, `avg_llrawproc_ms=73.844`, `avg_processed16_ms=158.600`, `avg_processing_ms=57.533`, `avg_processing_core_ms=34.022`, `avg_processing_core_levels_ms=4.467`, `avg_processing_core_color_ms=15.444`, `avg_processing_core_creative_ms=10.800`, `avg_processing_core_output_ms=1.133`, `avg_processing_core_other_ms=4.222`, `avg_processing_shadows_highlights_prep_ms=23.511`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.985`, `avg_render_total_ms=131.750`, `avg_llrawproc_ms=37.982`, `avg_processed16_ms=123.214`, `avg_processing_ms=61.000`, `avg_processing_core_ms=36.411`, `avg_processing_core_levels_ms=5.125`, `avg_processing_core_color_ms=15.393`, `avg_processing_core_creative_ms=11.661`, `avg_processing_core_output_ms=1.232`, `avg_processing_core_other_ms=5.054`, `avg_processing_shadows_highlights_prep_ms=24.589`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- The probe lost on the first two clips and did not cleanly beat the gate overall, so it is a throughput reject rather than a keeper.
+- The visual state stayed intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Needs runtime profiling
+
+- The creative LUT composition did not clear the gate even though it was exact and materially different from the earlier creative fusions.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact composition shape is not a keeper.
