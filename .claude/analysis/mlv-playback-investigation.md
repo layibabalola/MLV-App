@@ -5569,6 +5569,46 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected debayer omp simd probe
+
+### Verified locally
+
+- I probed [`src/debayer/debayer.c`](C:/!Layi%20Wkspc/MLV-App/src/debayer/debayer.c) by adding `#pragma omp simd` to the fixed-width 16-element AoS-3 interleave loop in `debayer_basic_u16_rows_avx2()`.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it regressed end-to-end throughput on all three visible clips, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 12:35:49 AM`
+  - `Length=8793600`
+  - `SHA256=2150C84D9094C95D4D65B248DAF890B5EFFC494E52592CB7C98ECDCC4897F6A4`
+- Restored-baseline release executable metadata after reverting the probe:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 12:40:20 AM`
+  - `Length=8793088`
+  - `SHA256=B1221661CACE2A12219E43CEB44817CA1F7AA992638D86ECECE29E2165FECD0D`
+- Probe smoke results from `.claude-state/profiling/20260531-debayer-omp-simd-revert/`:
+  - `M16-1327`: `presented_fps=5.375`, `avg_render_total_ms=173.628`, `avg_llrawproc_ms=57.488`, `avg_processing_shadows_highlights_prep_ms=54.465`, `avg_vertical_down_ms=23.047`, `avg_vertical_up_ms=23.163`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.122`, `avg_render_total_ms=183.854`, `avg_llrawproc_ms=61.146`, `avg_processing_shadows_highlights_prep_ms=55.902`, `avg_vertical_down_ms=22.878`, `avg_vertical_up_ms=23.049`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.868`, `avg_render_total_ms=159.106`, `avg_llrawproc_ms=32.511`, `avg_processing_shadows_highlights_prep_ms=60.787`, `avg_vertical_down_ms=24.489`, `avg_vertical_up_ms=24.681`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.0`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The visual smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe remained a retained-path throughput miss rather than a direct8 fallback regression.
+- The `omp simd` hint is rejected rather than promoted because the end-to-end fps regressed on all three clips despite the fixed-width interleave loop being the only change.
+
+### Needs runtime profiling
+
+- If we keep exploring `debayer.c`, the next candidate should be a different structural reduction in the debayer output path rather than another tiny SIMD hint on the AoS-3 interleave.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted `omp simd` hint out and look for a different reduction in the debayer row writer or a separate hotspot.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31 - rejected RBF output-stage simd hint
 
 ### Verified locally
