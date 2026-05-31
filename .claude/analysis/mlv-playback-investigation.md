@@ -6938,3 +6938,40 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Fusing the creative tail into one ordered pass did not clear the full three-clip gate against the current keeper.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact fused-tail shape is not a keeper.
+
+## 2026-05-31 - rejected AgX hoist probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by hoisting `processing->AgX` into a local `use_agx` flag and reusing it in the generic color-path and gradient-layer color-path branches.
+- The change was output-identical in the visible gate, preserving x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- The probe build was rebuilt through the repo wrapper, then the same three-clip visible GUI smoke gate was rerun with frame telemetry and RBF timing enabled. It improved `M16-1347` slightly, but lost the gate overall versus the committed color-path keeper, so it is not a keeper.
+- Probe build identity:
+  - `build_sha=f3d95327d644880f2317d526523253a0e189f1e8` from the smoke run metadata
+- Reverted-baseline release executable metadata after rebuilding the clean source:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 6:41:08 AM`
+  - `Length=8796672`
+  - `SHA256=2CD53C15E7D61B50B98F477935246EF4ABD1F2E72FCD1478C9396BCE9089E9CE`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-fusion-pass/`:
+  - `M16-1327`: `presented_fps=6.249`, `avg_render_total_ms=150.180`, `avg_llrawproc_ms=61.480`, `avg_processing_ms=55.780`, `avg_processing_core_ms=32.540`, `avg_processing_core_color_ms=14.620`, `avg_processing_core_creative_ms=10.720`, `avg_processing_shadows_highlights_prep_ms=23.240`, `avg_debayer_exclusive_ms=6.240`, `avg_processed16_ms=142.020`, `avg_processed16_to_8bit_ms=2.040`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.620`, `avg_render_total_ms=140.585`, `avg_llrawproc_ms=58.057`, `avg_processing_ms=50.981`, `avg_processing_core_ms=30.019`, `avg_processing_core_color_ms=14.925`, `avg_processing_core_creative_ms=11.132`, `avg_processing_shadows_highlights_prep_ms=20.943`, `avg_debayer_exclusive_ms=6.038`, `avg_processed16_ms=132.906`, `avg_processed16_to_8bit_ms=1.925`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.616`, `avg_render_total_ms=139.981`, `avg_llrawproc_ms=58.057`, `avg_processing_ms=61.623`, `avg_processing_core_ms=38.057`, `avg_processing_core_color_ms=17.509`, `avg_processing_core_creative_ms=12.642`, `avg_processing_shadows_highlights_prep_ms=23.566`, `avg_debayer_exclusive_ms=7.038`, `avg_processed16_ms=130.736`, `avg_processed16_to_8bit_ms=2.528`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed color-path SIMD keeper still wins on the same three-clip gate:
+  - `M16-1327`: keeper `6.608 fps` vs probe `6.249 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `6.620 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `6.616 fps`
+- The probe kept the visible gate intact:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- This is a throughput reject rather than a visual regression.
+
+### Needs runtime profiling
+
+- The AgX branch hoist did not clear the full three-clip gate against the current keeper.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact AgX-hoist shape is not a keeper.
