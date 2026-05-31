@@ -67,6 +67,7 @@ static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_alias_map_taken_count =
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_fullres_blend_taken_count = 0;
 DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing = {0};
 static int g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
+static int g_dualiso_mix_chroma_probe_stage_cache = 0;
 static int g_dualiso_final_blend_probe_mode_cache = INT_MIN;
 
 enum
@@ -129,8 +130,16 @@ void dualiso_debug_reset_full20bit_timing(void)
     memset(&g_dualiso_full20bit_timing, 0, sizeof(g_dualiso_full20bit_timing));
     g_dualiso_full20bit_timing.interp_method = -1;
     g_dualiso_full20bit_timing.mix_chroma_probe_mode = -1;
+    g_dualiso_full20bit_timing.mix_chroma_probe_stage = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_gather_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_arithmetic_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms = 0;
     g_dualiso_full20bit_timing.final_blend_probe_mode = -1;
     g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
+    g_dualiso_mix_chroma_probe_stage_cache = 0;
     g_dualiso_final_blend_probe_mode_cache = INT_MIN;
 }
 
@@ -158,7 +167,7 @@ int dualiso_mix_chroma_probe_mode(void)
         {
             char * end = NULL;
             long parsed = strtol(v, &end, 10);
-            if (end != v && *end == '\0' && parsed >= -1 && parsed <= 3)
+            if (end != v && *end == '\0' && parsed >= -1 && parsed <= 4)
             {
                 g_dualiso_mix_chroma_probe_mode_cache = (int)parsed;
             }
@@ -177,6 +186,10 @@ int dualiso_mix_chroma_probe_mode(void)
             else if (!strcmp(v, "center") || !strcmp(v, "CENTER"))
             {
                 g_dualiso_mix_chroma_probe_mode_cache = 3;
+            }
+            else if (!strcmp(v, "fullres") || !strcmp(v, "FULLRES"))
+            {
+                g_dualiso_mix_chroma_probe_mode_cache = 4;
             }
             else
             {
@@ -3863,12 +3876,20 @@ static inline int mix_images(struct raw_info raw_info,
             dualiso_debug_elapsed_ms(mix_stage_start);
 
         mix_stage_start = mlv_stage_timing_now();
+        g_dualiso_mix_chroma_probe_stage_cache = 1;
+        g_dualiso_full20bit_timing.mix_chroma_probe_stage = 1;
         hdr_chroma_smooth(raw_info, fullres, fullres_smooth, chroma_smooth_method, raw2ev, ev2raw);
+        g_dualiso_mix_chroma_probe_stage_cache = 0;
+        g_dualiso_full20bit_timing.mix_chroma_probe_stage = 0;
         g_dualiso_full20bit_timing.mix_chroma_fullres_ms +=
             dualiso_debug_elapsed_ms(mix_stage_start);
 
         mix_stage_start = mlv_stage_timing_now();
+        g_dualiso_mix_chroma_probe_stage_cache = 2;
+        g_dualiso_full20bit_timing.mix_chroma_probe_stage = 2;
         hdr_chroma_smooth(raw_info, halfres, halfres_smooth, chroma_smooth_method, raw2ev, ev2raw);
+        g_dualiso_mix_chroma_probe_stage_cache = 0;
+        g_dualiso_full20bit_timing.mix_chroma_probe_stage = 0;
         g_dualiso_full20bit_timing.mix_chroma_halfres_ms +=
             dualiso_debug_elapsed_ms(mix_stage_start);
         g_dualiso_full20bit_timing.mix_chroma_ms +=

@@ -1,3 +1,29 @@
+## 2026-05-31 - mix_chroma fullres/halfres stage split shows both stages are store-heavy
+
+### Verified locally
+
+- I extended the retained Dual ISO `mix_chroma` probe wiring in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the center probe now reports stage-specific counters for both the fullres pass and the halfres pass, and I carried those counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) after the telemetry split:
+  - `LastWriteTime=5/31/2026 5:39:05 PM`
+  - `Length=8837632`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved, using `MLVAPP_DUALISO_MIX_CHROMA_PROBE=3` so the stage-specific center buckets were populated.
+- The new split shows both stages are material and both are dominated by writeback/store work:
+  - `M16-1327`: fullres center `259.000 ms`, halfres center `291.999 ms`
+  - `M16-1347`: fullres center `192.999 ms`, halfres center `171.999 ms`
+  - `M16-1446`: `mix_chroma` remained bypassed, so both stage buckets stayed at `0`
+- The stage split also confirms that the halfres pass is not a minor afterthought: on `M16-1327` its total `mix_chroma_halfres_ms` exceeded the fullres pass, while on `M16-1347` the two stages were closer but both still large.
+- The visible smoke gate stayed intact; the probe change is telemetry-only and did not disturb the direct-path guard or the settled Auto Look Assist behavior.
+
+### Cross-checked from prior analysis
+
+- The earlier probe already showed the center slice was the hot part of `mix_chroma`; this new split shows that both retained stages contribute materially, so the next decision should be made between the two stage-specific writeback paths rather than against a coarse single-bucket average.
+- The stage split does not yet expose an obvious low-risk keeper optimization by itself.
+
+### Needs runtime profiling
+
+- The next candidate should come from a narrower store-path decision inside fullres or halfres, not from the broad `mix_chroma` wrapper.
+- If the next probe does not turn up a clear store-path winner, the honest next move is to stop local CPU work and move to secondary buckets.
+
 ## 2026-05-31 - mix_chroma center store split confirmed store pressure, but the shortcut did not win
 
 ### Verified locally

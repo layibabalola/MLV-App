@@ -2232,8 +2232,22 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.mix_chroma_center_store_r_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_store_b_probe_ms"),
                                       dualIsoFull20.mix_chroma_center_store_b_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_gather_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_gather_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_arithmetic_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_arithmetic_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_store_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_store_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_store_r_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_store_r_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_store_b_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_store_b_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_probe_mode"),
                                       dualIsoFull20.mix_chroma_probe_mode );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_probe_stage"),
+                                      dualIsoFull20.mix_chroma_probe_stage );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_alias_map_ms"),
                                       dualIsoFull20.mix_alias_map_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_overexposed_ms"),
