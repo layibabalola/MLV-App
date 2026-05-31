@@ -6339,3 +6339,54 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted RGB3 specialization out and look for a different reduction in the vertical recurrence or a separate Dual ISO hotspot.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-31 - rejected creative lookup-path hoist probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by hoisting the creative-path lookup tables and scalar flags into locals inside `apply_processing_object()`:
+  - `use_agx`
+  - `vibrance`
+  - `saturation`
+  - `toning_dry`
+  - `toning_wet`
+  - `pre_calc_curve_r`
+  - `gcurve_y`
+  - `gcurve_r`
+  - `gcurve_g`
+  - `gcurve_b`
+  - `pre_calc_vibrance`
+  - `pre_calc_sat`
+  - `hue_vs_hue`
+  - `hue_vs_saturation`
+  - `hue_vs_luma`
+  - `luma_vs_saturation`
+  - `agx_inverse`
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it did not beat the committed `processing_core` keeper on the three-clip gate, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 4:21:21 AM`
+  - `Length=8796672`
+  - `SHA256=A9F74A95305CE883C5EF70F3620E4D5ECC993746354D803D1F972A0799A17C88`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-hoist-gui-smoke/`:
+  - `M16-1327`: `presented_fps=6.372`, `avg_render_total_ms=148.412`, `avg_llrawproc_ms=59.922`, `avg_processing_ms=53.922`, `avg_processing_core_ms=32.431`, `avg_processing_core_color_ms=14.471`, `avg_processing_core_creative_ms=12.020`, `avg_processing_shadows_highlights_prep_ms=21.431`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.865`, `avg_render_total_ms=160.128`, `avg_llrawproc_ms=69.255`, `avg_processing_ms=59.957`, `avg_processing_core_ms=36.702`, `avg_processing_core_color_ms=16.319`, `avg_processing_core_creative_ms=11.787`, `avg_processing_shadows_highlights_prep_ms=23.255`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.120`, `avg_render_total_ms=261.947`, `avg_llrawproc_ms=36.860`, `avg_processing_ms=63.649`, `avg_processing_core_ms=37.228`, `avg_processing_core_color_ms=16.421`, `avg_processing_core_creative_ms=13.246`, `avg_processing_shadows_highlights_prep_ms=26.421`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- The probe only tied `M16-1327` within noise, and it lost decisively on `M16-1347` and `M16-1446`, so it is a throughput reject rather than a keeper.
+- The visual state stayed intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Needs runtime profiling
+
+- If we keep probing `processing_core_color` or `processing_core_creative`, the next candidate should be materially different from this lookup-path hoist.
+- The retained `processing_core` keeper still looks like the better baseline for this gate until a stronger, more structural probe appears.
