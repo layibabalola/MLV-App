@@ -234,12 +234,14 @@ static void final_blend_row_avx2_no_alias(uint32_t * raw_buffer_32,
                                           const uint32_t * dark,
                                           const uint32_t * bright,
                                           const uint16_t * overexposed,
+                                          const float * raw2ev_float_lut,
                                           const int * raw2ev_lut,
                                           const int * ev2raw_lut,        /* points to ev2raw_0 + 10*EV_RESOLUTION */
                                           const double * fullres_curve,
                                           int black, int dark_noise,
                                           int total)
 {
+    (void)raw2ev_lut;
     const __m256i mask20 = _mm256_set1_epi32(0xFFFFF);
     const __m256i v_black     = _mm256_set1_epi32(black);
     const __m256i v_lo        = _mm256_set1_epi32(-10*EV_RESOLUTION);
@@ -257,13 +259,9 @@ static void final_blend_row_avx2_no_alias(uint32_t * raw_buffer_32,
         __m256i frs = _mm256_loadu_si256((const __m256i*)&fullres_smooth[x]);
         __m256i d   = _mm256_loadu_si256((const __m256i*)&dark[x]);
 
-        __m256i hrev_i  = _mm256_i32gather_epi32(raw2ev_lut, hr,  4);
-        __m256i frev_i  = _mm256_i32gather_epi32(raw2ev_lut, fr,  4);
-        __m256i frsev_i = _mm256_i32gather_epi32(raw2ev_lut, frs, 4);
-
-        __m256 hrev  = _mm256_cvtepi32_ps(hrev_i);
-        __m256 frev  = _mm256_cvtepi32_ps(frev_i);
-        __m256 frsev = _mm256_cvtepi32_ps(frsev_i);
+        __m256 hrev  = _mm256_i32gather_ps(raw2ev_float_lut, hr,  4);
+        __m256 frev  = _mm256_i32gather_ps(raw2ev_float_lut, fr,  4);
+        __m256 frsev = _mm256_i32gather_ps(raw2ev_float_lut, frs, 4);
 
         __m256i b_idx = _mm256_and_si256(b, mask20);
         __m128i b_idx_lo = _mm256_castsi256_si128(b_idx);
@@ -311,12 +309,14 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
                                  const uint32_t * bright,
                                  const uint16_t * overexposed,
                                  const uint16_t * alias_map,   /* may be NULL */
+                                 const float * raw2ev_float_lut,
                                  const int * raw2ev_lut,
                                  const int * ev2raw_lut,        /* points to ev2raw_0 + 10*EV_RESOLUTION */
                                  const double * fullres_curve,
                                  int black, int dark_noise,
                                  int total)
 {
+    (void)raw2ev_lut;
     const __m256i mask20 = _mm256_set1_epi32(0xFFFFF);
     const __m256i v_black     = _mm256_set1_epi32(black);
     const __m256i v_lo        = _mm256_set1_epi32(-10*EV_RESOLUTION);
@@ -335,13 +335,9 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
         __m256i frs = _mm256_loadu_si256((const __m256i*)&fullres_smooth[x]);
         __m256i d   = _mm256_loadu_si256((const __m256i*)&dark[x]);
 
-        __m256i hrev_i  = _mm256_i32gather_epi32(raw2ev_lut, hr,  4);
-        __m256i frev_i  = _mm256_i32gather_epi32(raw2ev_lut, fr,  4);
-        __m256i frsev_i = _mm256_i32gather_epi32(raw2ev_lut, frs, 4);
-
-        __m256 hrev  = _mm256_cvtepi32_ps(hrev_i);
-        __m256 frev  = _mm256_cvtepi32_ps(frev_i);
-        __m256 frsev = _mm256_cvtepi32_ps(frsev_i);
+        __m256 hrev  = _mm256_i32gather_ps(raw2ev_float_lut, hr,  4);
+        __m256 frev  = _mm256_i32gather_ps(raw2ev_float_lut, fr,  4);
+        __m256 frsev = _mm256_i32gather_ps(raw2ev_float_lut, frs, 4);
 
         __m256i b_idx = _mm256_and_si256(b, mask20);
         __m128i b_idx_lo = _mm256_castsi256_si128(b_idx);
@@ -396,11 +392,13 @@ __attribute__((target("avx2,fma")))
 static void mix_images_row_avx2(uint32_t * halfres,
                                  const uint32_t * bright,
                                  const uint32_t * dark,
+                                 const float * raw2ev_float_lut,
                                  const int * raw2ev_lut,
                                  const int * ev2raw_lut,
                                  const float * mix_curve,
                                  int total)
 {
+    (void)raw2ev_lut;
     const __m256i mask20 = _mm256_set1_epi32(0xFFFFF);
     const __m256i v_lo   = _mm256_set1_epi32(-10*EV_RESOLUTION);
     const __m256i v_hi   = _mm256_set1_epi32(14*EV_RESOLUTION - 1);
@@ -412,10 +410,8 @@ static void mix_images_row_avx2(uint32_t * halfres,
         __m256i b = _mm256_loadu_si256((const __m256i*)&bright[x]);
         __m256i d = _mm256_loadu_si256((const __m256i*)&dark[x]);
 
-        __m256i bev_i = _mm256_i32gather_epi32(raw2ev_lut, b, 4);
-        __m256i dev_i = _mm256_i32gather_epi32(raw2ev_lut, d, 4);
-        __m256 bev = _mm256_cvtepi32_ps(bev_i);
-        __m256 dev = _mm256_cvtepi32_ps(dev_i);
+        __m256 bev = _mm256_i32gather_ps(raw2ev_float_lut, b, 4);
+        __m256 dev = _mm256_i32gather_ps(raw2ev_float_lut, d, 4);
 
         __m256i b_idx = _mm256_and_si256(b, mask20);
         __m256 k = _mm256_i32gather_ps(mix_curve, b_idx, 4);

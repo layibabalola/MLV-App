@@ -57,13 +57,16 @@ typedef struct
     uint16_t * alias_map;
     uint16_t * over_aux;
     int * ev_raw2ev;
+    float * ev_raw2ev_float;
     int * ev2raw_0;
     double * mix_curve[DUALISO_MIX_CURVE_CACHE_SLOTS];
     float * mix_curve_float[DUALISO_MIX_CURVE_CACHE_SLOTS];
     size_t pixel_capacity;
     size_t ev_raw2ev_capacity;
+    size_t ev_raw2ev_float_capacity;
     size_t ev2raw_capacity;
     int ev_lut_valid;
+    int ev_lut_float_valid;
     int ev_lut_black;
     int ev_lut_white;
     size_t mix_curve_capacity[DUALISO_MIX_CURVE_CACHE_SLOTS];

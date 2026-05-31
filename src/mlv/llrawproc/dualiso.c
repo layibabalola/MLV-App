@@ -1058,6 +1058,7 @@ void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
     free(scratch->alias_map);
     free(scratch->over_aux);
     free(scratch->ev_raw2ev);
+    free(scratch->ev_raw2ev_float);
     free(scratch->ev2raw_0);
     for (int i = 0; i < DUALISO_MIX_CURVE_CACHE_SLOTS; i++)
     {
@@ -2400,9 +2401,10 @@ static int ensure_scratch_ev_lut(dualiso_full20bit_scratch_t * scratch,
                                  int black,
                                  int white,
                                  int ** raw2ev_out,
+                                 float ** raw2ev_float_out,
                                  int ** ev2raw_out)
 {
-    if (!scratch || !raw2ev_out || !ev2raw_out)
+    if (!scratch || !raw2ev_out || !raw2ev_float_out || !ev2raw_out)
     {
         return 0;
     }
@@ -2413,26 +2415,42 @@ static int ensure_scratch_ev_lut(dualiso_full20bit_scratch_t * scratch,
                                                   sizeof(*scratch->ev_raw2ev))
         ? scratch->ev_raw2ev
         : NULL;
+    float * raw2ev_float = ensure_reusable_scratch_buffer((void **)&scratch->ev_raw2ev_float,
+                                                          &scratch->ev_raw2ev_float_capacity,
+                                                          DUALISO_RAW2EV_LUT_COUNT,
+                                                          sizeof(*scratch->ev_raw2ev_float))
+        ? scratch->ev_raw2ev_float
+        : NULL;
     int * ev2raw_0 = ensure_reusable_scratch_buffer((void **)&scratch->ev2raw_0,
                                                     &scratch->ev2raw_capacity,
                                                     DUALISO_EV2RAW_LUT_COUNT,
                                                     sizeof(*scratch->ev2raw_0))
         ? scratch->ev2raw_0
         : NULL;
-    if (!raw2ev || !ev2raw_0)
+    if (!raw2ev || !raw2ev_float || !ev2raw_0)
     {
         return 0;
     }
 
-    if (!scratch->ev_lut_valid || scratch->ev_lut_black != black)
+    if (!scratch->ev_lut_valid
+        || scratch->ev_lut_black != black
+        || scratch->ev_lut_white != white
+        || !scratch->ev_lut_float_valid)
     {
         build_ev2raw_lut(raw2ev, ev2raw_0, black, white);
+        #pragma omp parallel for
+        for (int i = 0; i < (int)DUALISO_RAW2EV_LUT_COUNT; i++)
+        {
+            raw2ev_float[i] = (float)raw2ev[i];
+        }
         scratch->ev_lut_black = black;
         scratch->ev_lut_white = white;
         scratch->ev_lut_valid = 1;
+        scratch->ev_lut_float_valid = 1;
     }
 
     *raw2ev_out = raw2ev;
+    *raw2ev_float_out = raw2ev_float;
     *ev2raw_out = ev2raw_0 + 10 * EV_RESOLUTION;
     return 1;
 }
@@ -2936,7 +2954,8 @@ static inline void mean23_interpolate(struct raw_info raw_info, uint32_t * raw_b
 #endif
     int * scratch_raw2ev = NULL;
     int * scratch_ev2raw = NULL;
-    if (ensure_scratch_ev_lut(scratch, black, white, &scratch_raw2ev, &scratch_ev2raw))
+    float * scratch_raw2ev_float = NULL;
+    if (ensure_scratch_ev_lut(scratch, black, white, &scratch_raw2ev, &scratch_raw2ev_float, &scratch_ev2raw))
     {
         mean23_interpolate_with_lut(raw_info,
                                     raw_buffer_32,
@@ -3629,9 +3648,10 @@ static inline int mix_images(struct raw_info raw_info,
 
 
     int * raw2ev = NULL;
+    float * raw2ev_float = NULL;
     int * ev2raw = NULL;
     mix_stage_start = mlv_stage_timing_now();
-    if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &ev2raw))
+    if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &raw2ev_float, &ev2raw))
     {
         g_dualiso_full20bit_timing.mix_ev_lut_ms +=
             dualiso_debug_elapsed_ms(mix_stage_start);
@@ -3668,7 +3688,7 @@ static inline int mix_images(struct raw_info raw_info,
             mix_images_row_avx2(halfres_row,
                                 bright_row,
                                 dark_row,
-                                raw2ev, ev2raw, mix_curve_float, w);
+                                raw2ev_float, raw2ev, ev2raw, mix_curve_float, w);
             /* tail: pixels not covered by SIMD bulk */
             for (int x = x_start; x < w; x ++) {
                 int b = bright_row[x];
@@ -3884,8 +3904,9 @@ static inline void final_blend(struct raw_info raw_info,
     int h = raw_info.height;
     
     int * raw2ev = NULL;
+    float * raw2ev_float = NULL;
     int * ev2raw = NULL;
-    if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &ev2raw))
+    if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &raw2ev_float, &ev2raw))
     {
         return;
     }
@@ -3920,7 +3941,7 @@ static inline void final_blend(struct raw_info raw_info,
                                      bright_row,
                                      overexposed_row,
                                      alias_row,
-                                     raw2ev, ev2raw, fullres_curve,
+                                     raw2ev_float, raw2ev, ev2raw, fullres_curve,
                                      black, dark_noise, w);
                 /* tail: pixels not covered by SIMD bulk */
                 for (int x = x_start; x < w; x ++) {
@@ -3968,7 +3989,7 @@ static inline void final_blend(struct raw_info raw_info,
                                      bright_row,
                                      overexposed_row,
                                      NULL,
-                                     raw2ev, ev2raw, fullres_curve,
+                                     raw2ev_float, raw2ev, ev2raw, fullres_curve,
                                      black, dark_noise, w);
                 /* tail: pixels not covered by SIMD bulk */
                 for (int x = x_start; x < w; x ++) {

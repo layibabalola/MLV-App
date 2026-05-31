@@ -1,3 +1,31 @@
+## 2026-05-31 - accepted float EV-LUT probe for Dual ISO mix/final blend
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c), [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.h), and [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) by adding a reusable float EV lookup table to the Dual ISO scratch path and wiring the AVX2 half-res mix and final-blend kernels to gather EV values directly from that float table instead of gathering ints and converting lane-by-lane.
+- The user-facing release tree was rebuilt and the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the direct8 guard intact (`dual_iso_alias_map=0`, `processed8_direct_path_frames=0`) and beat the current three-clip gate, so it is a keeper candidate.
+- Rebuilt user-facing release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 11:24:31 AM`
+  - `Length=8797184`
+  - `SHA256=6F67FAFC86CA0B7AEF7E221F7E34679A4B41C43CB6B4E90F7B5D6B117B2F3C2A`
+- Probe smoke results from `.claude-state/profiling/wb-68fe75d089af4c6f/float-ev-lut/`:
+  - `M16-1327`: `presented_fps=7.121`, `avg_render_total_ms=129.860`, `avg_llrawproc_ms=51.526`, `avg_processing_core_color_ms=14.684`, `avg_processing_core_creative_ms=11.228`, `avg_processing_shadows_highlights_prep_ms=19.737`, `avg_mix_chroma_ms=23.175`, `avg_chroma_copy_ms=5.526`, `avg_chroma_fullres_ms=9.123`, `avg_chroma_halfres_ms=8.526`, `avg_final_blend_ms=6.404`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=8.085`, `avg_render_total_ms=114.246`, `avg_llrawproc_ms=48.123`, `avg_processing_core_color_ms=14.031`, `avg_processing_core_creative_ms=9.862`, `avg_processing_shadows_highlights_prep_ms=16.446`, `avg_mix_chroma_ms=21.615`, `avg_chroma_copy_ms=4.246`, `avg_chroma_fullres_ms=9.185`, `avg_chroma_halfres_ms=8.185`, `avg_final_blend_ms=5.708`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=8.238`, `avg_render_total_ms=113.530`, `avg_llrawproc_ms=29.333`, `avg_processing_core_color_ms=15.273`, `avg_processing_core_creative_ms=11.561`, `avg_processing_shadows_highlights_prep_ms=20.364`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`, `avg_final_blend_ms=5.970`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The current accepted nearby fallback baseline for the same three-clip gate was lower on all three clips:
+  - `M16-1327`: `presented_fps=6.101`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`
+  - `M16-1347`: `presented_fps=5.983`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`
+  - `M16-1446`: `presented_fps=6.865`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`
+- The visible smoke state stayed valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, so this was a retained-path throughput win rather than a visual regression.
+
+### Needs runtime profiling
+
+- The float EV-LUT path is the first Dual ISO probe in this sequence to beat the full three-clip GUI gate, but it still leaves `avg_mix_chroma_ms` and `avg_final_blend_ms` as the dominant retained buckets.
+- If we keep exploring `dualiso.c`, the next candidate should look for a further reduction in the chroma mix stack rather than reworking the curve build again.
+
 ## 2026-05-31 - rejected processing color coefficient hoist probe
 - I tried a small output-preserving cleanup in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) inside `apply_processing_object()`: the WB matrix coefficients and AgX forward matrix coefficients were hoisted out of the hot per-pixel color loop into local scalars so the generic processing path would avoid repeated indexed loads.
 - The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid and kept the direct8 guard intact (`dual_iso_alias_map=0`, `processed8_direct_path_frames=0`), but the probe did not beat the committed `processing_core` keeper on the full three-clip gate. `M16-1327` landed at `presented_fps=6.361` versus the keeper `6.373`; `M16-1347` landed at `5.865` versus the keeper `6.613`; `M16-1446` landed at `7.248` versus the keeper `7.242`.
