@@ -5819,6 +5819,52 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected half-res blur-helper cleanup probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by tightening the half-res RGB blur helpers used by the accepted Shadows/Highlights RBF keeper:
+  - `rgb_u16_downsample_2x_box(...)` used direct RGB channel assignments with pointer increments instead of the generic per-channel loop and repeated block-index math.
+  - `rgb_u16_upsample_2x_bilinear(...)` used explicit per-channel assignments in the bilinear cases instead of the generic inner loop.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it did not beat the accepted nearby baseline across the three-clip gate, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 1:34:26 AM`
+  - `Length=8795136`
+  - `SHA256=7028E0CEEC05FFC581DA71F904FBBF6A5E40749F1E586665539286904A6FE80C`
+- Restored-baseline release executable metadata after reverting the probe:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 1:37:44 AM`
+  - `Length=8795136`
+  - `SHA256=C7BFC864DC85FCFB102FA5816BFA3318B0F989F7AB00B3B120A2A3270B47E2E7`
+- Probe smoke results from `.claude-state/profiling/20260531-halfres-helper/`:
+  - `M16-1327`: `presented_fps=6.245`, `avg_render_total_ms=148.200`, `avg_llrawproc_ms=61.900`, `avg_processing_shadows_highlights_prep_ms=21.820`, `avg_vertical_down_ms=5.920`, `avg_vertical_up_ms=6.320`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.240`, `avg_render_total_ms=150.580`, `avg_llrawproc_ms=64.720`, `avg_processing_shadows_highlights_prep_ms=20.960`, `avg_vertical_down_ms=6.500`, `avg_vertical_up_ms=5.857`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.993`, `avg_render_total_ms=132.018`, `avg_llrawproc_ms=37.839`, `avg_processing_shadows_highlights_prep_ms=24.214`, `avg_vertical_down_ms=6.500`, `avg_vertical_up_ms=5.857`, `processed8_direct_path_frames=0`
+- Restored-baseline smoke results after revert from `.claude-state/profiling/20260531-halfres-helper-revert/`:
+  - `M16-1327`: `presented_fps=6.241`, `avg_render_total_ms=149.440`, `avg_llrawproc_ms=60.920`, `avg_processing_shadows_highlights_prep_ms=22.720`, `avg_vertical_down_ms=6.040`, `avg_vertical_up_ms=6.160`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.746`, `avg_render_total_ms=164.065`, `avg_llrawproc_ms=68.543`, `avg_processing_shadows_highlights_prep_ms=25.565`, `avg_vertical_down_ms=5.978`, `avg_vertical_up_ms=5.848`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.860`, `avg_render_total_ms=135.127`, `avg_llrawproc_ms=40.836`, `avg_processing_shadows_highlights_prep_ms=23.582`, `avg_vertical_down_ms=5.800`, `avg_vertical_up_ms=6.109`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate remains stronger on `M16-1347` and is also still ahead on `M16-1446` by a small margin:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.0`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The helper cleanup preserved the direct8 guard, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this remained a retained-path throughput reject rather than a visual regression.
+- The cleanup is rejected rather than promoted because it did not improve the full three-clip gate enough to displace the current accepted baseline cleanly.
+
+### Needs runtime profiling
+
+- If we keep exploring the half-res blur helpers, the next candidate should be a different structural reduction in the same path, not another tiny pointer-local cleanup.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted helper cleanup out and look for a different reduction in the Shadows/Highlights RBF path or a separate hotspot.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31 - rejected RBFilter RGB3 recurrence / output index probe
 
 ### Verified locally
