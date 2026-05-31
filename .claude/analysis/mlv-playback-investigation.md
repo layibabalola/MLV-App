@@ -7583,3 +7583,52 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The no-alias `final_blend` dispatch is not a keeper candidate.
 - If we revisit `dualiso.c`, the next probe should likely target `mix_chroma` or a deeper reduction in the mix stack rather than this row-dispatch specialization.
+
+## 2026-05-31 - rejected chroma border-copy specialization for 2x2 smooth path
+
+### Verified locally
+
+- I changed the 2x2 chroma smooth path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) to write the interior green pixels explicitly, and I changed [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) so the chroma-smoothing pre-pass only copies the 4-pixel border instead of the whole plane for `chroma_smooth_method == 2`.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the probe build.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 10:55:13`
+  - `Length`: `8797696`
+  - `SHA256`: `8058E26A872DECE463A602AC7BC1E034AB844C6CB56D564FE492CCCBEE46055A`
+- The visible smoke runs from `.claude-state/profiling/dualiso-chroma-bordercopy/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=6.498`, `avg_render_total_ms=144.058`, `avg_llrawproc_ms=53.462`, `avg_processing_core_color_ms=14.288`, `avg_processing_core_creative_ms=11.577`, `avg_processing_shadows_highlights_prep_ms=24.615`, `avg_mix_chroma_ms=21.615`, `avg_chroma_copy_ms=0.731`
+  - `M16-1347`: `presented_fps=5.620`, `avg_render_total_ms=161.839`, `avg_llrawproc_ms=66.200`, `avg_processing_core_color_ms=16.711`, `avg_processing_core_creative_ms=12.267`, `avg_processing_shadows_highlights_prep_ms=23.178`, `avg_mix_chroma_ms=24.578`, `avg_chroma_copy_ms=0.000`
+  - `M16-1446`: `presented_fps=7.240`, `avg_render_total_ms=128.448`, `avg_llrawproc_ms=34.190`, `avg_processing_core_color_ms=14.672`, `avg_processing_core_creative_ms=12.466`, `avg_processing_shadows_highlights_prep_ms=23.879`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`
+- The GUI smoke validation was clean on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, and `cpuSettled=true`.
+
+### Cross-checked from prior analysis
+
+- The chroma border-copy reduced `avg_mix_chroma_ms` on the chroma-heavy clips, but the full three-clip gate still lost to keeper `ed2821e1`.
+- `M16-1327` stayed close, but `M16-1347` and `M16-1446` were still below the keeper, so this is still a throughput reject rather than a visual regression.
+
+### Needs runtime profiling
+
+- The next Dual ISO probe should likely keep the pre-pass rewrite but avoid the extra per-pixel interior stores, or move to a different mix-stack reduction entirely.
+- `mix_chroma` is still the right hotspot, but this exact border-copy shape is not a keeper candidate.
+
+## 2026-05-31 - restored baseline after rejected chroma border-copy probe
+
+### Verified locally
+
+- I reverted the chroma border-copy specialization in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) and [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c), then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Release executable metadata after the restore rebuild:
+  - `LastWriteTime`: `2026-05-31 10:59:07 AM`
+  - `Length`: `8796672`
+  - `SHA256`: `65614A67EEE90D607C97B20C8D36C22ED00A6B7EBC076DC6692959D9EFB816D0`
+- I reran the three visible smoke clips from `.claude-state/profiling/wb-68fe75d089af4c6f/restore-baseline/` and the x1 Quality visual gate stayed intact. The look-assist smoke flags remained stable (`look_assist_toggle_smoke_stable=true`, `look_assist_chroma_smooth_auto_applied=true`, `playback_scale_toggle_smoke_stable=true`).
+- The profile packets still show the direct8 path warming up on `completed_frame=0` and then dropping off on the later settled frames for each clip, so the settled playback state remains on the intended path:
+  - `M16-1327`: `processed8_direct_path_active` was `true` on frame 0, then `false` on frames 1 and 2.
+  - `M16-1347`: `processed8_direct_path_active` was `true` on frame 0, then `false` on frames 1 and 2.
+  - `M16-1446`: `processed8_direct_path_active` was `true` on frame 0, then `false` on frames 1 and 2.
+
+### Cross-checked from prior analysis
+
+- The rejected border-copy probe remains a throughput reject versus keeper `ed2821e1`; the restore rebuild simply returned the tree to the accepted baseline.
+
+### Needs runtime profiling
+
+- The next Dual ISO probe should still focus on `mix_chroma` or a deeper reduction in the mix stack, not this border-copy shape.
