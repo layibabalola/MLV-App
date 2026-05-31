@@ -6432,3 +6432,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we keep probing `processing_core_color` or `processing_core_creative`, the next candidate should be materially different from this lookup-path hoist.
 - The retained `processing_core` keeper still looks like the better baseline for this gate until a stronger, more structural probe appears.
+
+## 2026-05-31 - rejected AgX-split color-path specialization probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by splitting the hot `use_cam_matrix` color path inside `apply_processing_object()` into an `AgX` branch and a non-`AgX` branch:
+  - added `const int use_agx = processing->AgX;`
+  - specialized the per-pixel color loop so the `AgX` path applied the gamut clamp/desaturate and AgX matrix compression directly inside the loop body
+  - kept the non-`AgX` branch on the plain `LIMIT16(result[i])` path
+- The probe wedged the first visible clip during settle rather than producing a clean three-clip comparison. The log shows:
+  - `gui_smoke.look_assist_settle enabled=1 diagnostics_valid=1 wait_ms=85566`
+  - `gui_smoke.cpu_settle requested=1 settled=0 elapsed_ms=45030 stable_ms=0 required_stable_ms=1000 threshold_percent=10.000 last_percent=53.330 max_ms=45000`
+  - `play.toggled.begin checked=1 ...` only after the settle timeout path was already exhausted
+- The release tree was rebuilt after reverting the probe so the user-facing executable is back on the baseline source shape:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 4:51:58 AM`
+  - `Length=8796672`
+  - `SHA256=5B6B5663E64604F5414A72C928F4E8DCA9B7A3E597CE55E46C617E6E9B30313F`
+
+### Cross-checked from prior analysis
+
+- The live tree is clean again on `master` tracking `fork/master`.
+- The earlier committed `processing_core` keeper still remains the best known visible-gate baseline for this campaign.
+- Because this probe timed out during settle on the first clip, it is rejected without needing a full three-clip comparison.
+
+### Needs runtime profiling
+
+- If we keep probing `processing_core_color`, the next candidate should be materially different from this AgX-specialization shape.
+- The current evidence still points to `processing_core_color` / `processing_core_creative` as the remaining meaningful buckets, but this exact branch split is not a keeper.
