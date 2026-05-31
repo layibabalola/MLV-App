@@ -5569,6 +5569,50 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected RBF output-stage simd hint
+
+### Verified locally
+
+- I probed [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc/MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) by adding `#pragma omp for simd` to the output stage and simplifying the RGB index math to `i * 3` before reverting the change back to the baseline shape.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe was a clear throughput regression and is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 12:21:35 AM`
+  - `Length=8793088`
+  - `SHA256=59D4A7D504952BD7AE0D0C534DA5438C1B087A7AC4FFB68C7CC9109F0B9FB3ED`
+- Restored-baseline release executable metadata after reverting the probe:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 12:25:28 AM`
+  - `Length=8793088`
+  - `SHA256=574419FF34CADAE3708A3E0E26C580BE67FAC29246FAC8F7E210AC518792FE35`
+- Probe smoke results from `.claude-state/profiling/20260531-rbf-output-simd-recheck/`:
+  - `M16-1327`: `presented_fps=3.497`, `avg_render_total_ms=272.893`, `avg_llrawproc_ms=108.179`, `avg_processing_shadows_highlights_prep_ms=75.786`, `avg_vertical_down_ms=27.929`, `avg_vertical_up_ms=30.107`, `avg_output_ms=12.464`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=3.743`, `avg_render_total_ms=256.267`, `avg_llrawproc_ms=96.933`, `avg_processing_shadows_highlights_prep_ms=71.433`, `avg_vertical_down_ms=27.133`, `avg_vertical_up_ms=28.800`, `avg_output_ms=11.100`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=3.745`, `avg_render_total_ms=252.267`, `avg_llrawproc_ms=71.767`, `avg_processing_shadows_highlights_prep_ms=84.800`, `avg_vertical_down_ms=33.500`, `avg_vertical_up_ms=30.633`, `avg_output_ms=12.500`, `processed8_direct_path_frames=0`
+- Restored-baseline smoke results after revert from `.claude-state/profiling/20260531-rbf-output-simd-revert/`:
+  - `M16-1327`: `presented_fps=5.735`, `avg_render_total_ms=164.326`, `avg_llrawproc_ms=50.870`, `avg_processing_shadows_highlights_prep_ms=56.217`, `avg_vertical_down_ms=23.174`, `avg_vertical_up_ms=23.370`, `avg_output_ms=8.630`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.375`, `avg_render_total_ms=176.023`, `avg_llrawproc_ms=59.791`, `avg_processing_shadows_highlights_prep_ms=54.442`, `avg_vertical_down_ms=21.930`, `avg_vertical_up_ms=22.674`, `avg_output_ms=8.070`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.238`, `avg_render_total_ms=148.220`, `avg_llrawproc_ms=29.960`, `avg_processing_shadows_highlights_prep_ms=56.360`, `avg_vertical_down_ms=23.420`, `avg_vertical_up_ms=24.260`, `avg_output_ms=8.460`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.0`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The output-stage simd hint kept x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, so the regression was retained-path throughput rather than a direct8 fallback regression.
+- The hint is rejected rather than promoted because it regressed end-to-end fps on all three clips.
+
+### Needs runtime profiling
+
+- If we keep exploring `RBFilterPlain`, the next candidate should be a different structural reduction in the vertical recurrence itself, not another output-stage hint or generic-to-RGB3 specialization.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted output-stage simd hint out and look for a different reduction in the vertical recurrence or a separate Dual ISO hotspot.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31 - rejected RBFilter RGB3 vertical recurrence probe
 
 ### Verified locally
