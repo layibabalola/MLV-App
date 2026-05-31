@@ -5620,6 +5620,46 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected processing_core_color gamma-loop simd probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by adding local `pre_calc_gamma` pointers and `#pragma omp simd` hints to the main gamma correction loop and the gradient gamma correction loop inside `apply_processing_object(...)`.
+- The user-facing release tree was rebuilt from the probe and then retested on the same sequential visible GUI smoke gate with x1 Quality and settled Auto Look Assist preserved. The probe stayed visually valid, but it lost the three-clip gate versus the committed `processing_core` keeper, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 2:50:45 AM`
+  - `Length=8791552`
+  - `SHA256=3FED7C9DB80C402B6916EAE5224135C712BCCD47F07F27A0D8875A10E37DA397`
+- Restored release executable metadata after reverting the probe:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 2:55:32 AM`
+  - `Length=8796672`
+  - `SHA256=5FAB1919762DF2DCD0ADF308EEA5D61FF7A8E6CD77B3456F1F971EB2A6C0AA6C`
+- Probe smoke results from `.claude-state/profiling/20260531-processing-core-color-gamma/`:
+  - `M16-1327`: `presented_fps=6.351`, `avg_render_total_ms=146.961`, `avg_llrawproc_ms=58.980`, `avg_processing_ms=55.941`, `avg_processing_core_ms=32.294`, `avg_processing_core_color_ms=14.510`, `avg_processing_core_creative_ms=11.490`, `avg_processing_core_output_ms=1.216`, `avg_processing_shadows_highlights_prep_ms=23.647`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.870`, `avg_render_total_ms=192.564`, `avg_llrawproc_ms=90.641`, `avg_processing_ms=68.723`, `avg_processing_core_ms=40.319`, `avg_processing_core_color_ms=15.447`, `avg_processing_core_creative_ms=14.000`, `avg_processing_core_output_ms=1.213`, `avg_processing_shadows_highlights_prep_ms=28.404`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.989`, `avg_render_total_ms=132.161`, `avg_llrawproc_ms=37.839`, `avg_processing_ms=59.179`, `avg_processing_core_ms=34.946`, `avg_processing_core_color_ms=15.375`, `avg_processing_core_creative_ms=11.964`, `avg_processing_core_output_ms=1.214`, `avg_processing_shadows_highlights_prep_ms=24.196`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed keeper for the same three-clip gate is still stronger:
+  - `M16-1327`: `presented_fps=6.373`, `avg_render_total_ms=145.216`, `avg_processing_core_ms=35.392`, `avg_processing_core_color_ms=14.647`, `avg_processing_core_creative_ms=11.882`, `avg_processing_core_output_ms=1.235`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.613`, `avg_render_total_ms=141.340`, `avg_processing_core_ms=31.415`, `avg_processing_core_color_ms=13.849`, `avg_processing_core_creative_ms=10.566`, `avg_processing_core_output_ms=1.113`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.242`, `avg_render_total_ms=127.534`, `avg_processing_core_ms=34.810`, `avg_processing_core_color_ms=14.638`, `avg_processing_core_creative_ms=11.207`, `avg_processing_core_output_ms=1.172`, `processed8_direct_path_frames=0`
+- The direct8 guard stayed intact, x1 Quality stayed intact, and Auto Look Assist stayed settled, so this remained a retained-path throughput reject rather than a visual regression.
+- The gamma-loop SIMD cleanup did not improve the end-to-end gate enough to displace the committed `processing_core` keeper, so it is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `processing_core_color`, the next candidate should be materially different from this gamma-loop hint, most likely a separate part of `processing_core_color` or `processing_core_creative`.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted gamma-loop SIMD probe out and look for a different reduction in `processing_core_color` or `processing_core_creative`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31 - rejected creative vibrance / saturation simd probe
 
 ### Verified locally
