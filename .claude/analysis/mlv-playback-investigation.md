@@ -5538,3 +5538,43 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted RGB3 specialization out and look for a different reduction in the vertical recurrence or a separate Dual ISO hotspot.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-31 - rejected chroma-smoothing copy-footprint probe
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) and [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) by trying to shrink the 2x2 chroma smoother's prefill cost: the probe kept the 2x2 kernel writing the interior red/blue sites while explicitly carrying the untouched green/white sites, and `dualiso.c` switched the chroma-smooth prefill from full-plane memcpy to 4-pixel border-band initialization when method `2` was active.
+- The user-facing release tree was rebuilt from the probe, then the sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 11:17:11 PM`
+  - `Length=8794112`
+  - `SHA256=D23FFA95D36FC906A533E1DEA771D31F22B73D671D9957426F4F9CB64FC883D8`
+- Reverted release executable metadata after restoring the baseline source shape:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 11:20:43 PM`
+  - `Length=8793088`
+  - `SHA256=7A4232621E55738F47D5D5A213A59E89A9791EE86EC4AD375127CD2E17D2164B`
+- Probe smoke results from `.claude-state/profiling/20260531-chroma-copy-footprint/`:
+  - `M16-1327`: `presented_fps=5.241`, `avg_render_total_ms=180.524`, `avg_llrawproc_ms=56.143`, `avg_mix_chroma_ms=21.857`, `avg_chroma_copy_ms=0.381`, `avg_final_blend_ms=6.929`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.978`, `avg_render_total_ms=189.875`, `avg_llrawproc_ms=61.275`, `avg_mix_chroma_ms=23.725`, `avg_chroma_copy_ms=0.500`, `avg_final_blend_ms=7.575`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.736`, `avg_render_total_ms=165.696`, `avg_llrawproc_ms=39.196`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_final_blend_ms=7.174`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate is still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The visible smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe remained a retained-path throughput miss rather than a direct8 fallback regression.
+- The copy-footprint reduction is rejected rather than promoted because it lowered end-to-end fps on all three clips even though `avg_chroma_copy_ms` fell.
+
+### Needs runtime profiling
+
+- If we keep exploring `chroma_smooth.c`, the next candidate should be a different structural reduction in the retained 2x2 smoother rather than another copy-footprint rewrite.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted copy-footprint probe out and look for a different reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
