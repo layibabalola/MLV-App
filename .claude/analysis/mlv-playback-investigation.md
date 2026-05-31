@@ -1,3 +1,29 @@
+## 2026-05-31 - rejected proper_wb_matrix hoist in the hot raw-processing loop
+
+### Verified locally
+
+- I tried caching the repeated `processing->proper_wb_matrix[...]` coefficients outside the hot generic color loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c), then reused those locals in the `use_cam_matrix` path for both the main pixel and gradient pixel branches.
+- The user-facing release tree was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after restoring the source:
+  - `LastWriteTime=5/31/2026 1:46:10 PM`
+  - `Length=8797184`
+  - `SHA256=AADB800050C8DB5549FC0A9FB728C8FF0611675D5756D895A0B3C5A5FE76DC10`
+- The visible x1 Quality smoke gate stayed valid on all three clips. `look_assist_chroma_smooth_auto_applied=true`, `look_assist_toggle_smoke_stable=true`, and the direct8 guard remained intact with `processed8_direct_path_active=true` only on the warm-up frame and `false` on frames 1 and 2.
+- Settled-frame averages from `.claude-state/profiling/wb-e171a41e9bd14ee5/allow-creative-cache/` were not competitive:
+  - `M16-1327`: `average_cadence_ms=488.82`, `average_latency_ms=1005.46`, `render_thread_work_ms=339.9999`, `llrawproc_ms=150.0001`, `processing_core_color_ms=52.9999`, `processing_core_creative_ms=55.9999`, `processing_shadows_highlights_prep_ms=37.0002`, `dual_iso_full20_mix_chroma_ms=83.9999`, `dual_iso_full20_final_blend_ms=13.0000`
+  - `M16-1347`: `average_cadence_ms=474.26`, `average_latency_ms=689.01`, `render_thread_work_ms=303.0000`, `llrawproc_ms=131.0000`, `processing_core_color_ms=51.0001`, `processing_core_creative_ms=55.9999`, `processing_shadows_highlights_prep_ms=29.9999`, `dual_iso_full20_mix_chroma_ms=71.0001`, `dual_iso_full20_final_blend_ms=11.9998`
+  - `M16-1446`: `average_cadence_ms=369.40`, `average_latency_ms=648.30`, `render_thread_work_ms=227.9999`, `llrawproc_ms=58.0001`, `processing_core_color_ms=52.0000`, `processing_core_creative_ms=52.0000`, `processing_shadows_highlights_prep_ms=26.9999`, `dual_iso_full20_mix_chroma_ms=0`, `dual_iso_full20_final_blend_ms=13.9999`
+
+### Cross-checked from prior analysis
+
+- The current keeper `ed2821e1` still remains the better visible-gate result for this region.
+- The cached-coefficient probe did not move the settled retained-path work in the right direction, so it is a throughput reject rather than a visual regression.
+- The visible smoke state stayed stable, so the rejection is about performance, not quality.
+
+### Needs runtime profiling
+
+- The next probe should not revisit this exact coefficient-hoist shape.
+- If we stay in `raw_processing.c`, the next candidate needs a different structural shape than the current `use_cam_matrix` coefficient caching.
+
 ## 2026-05-31 - rejected rgb3-specialized RBF vertical passes
 
 ### Verified locally
