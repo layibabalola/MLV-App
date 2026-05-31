@@ -4865,3 +4865,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted 2x2 chroma smoother in place and look for a different retained-path reduction in `dualiso.c` or `dualiso_avx2.inc`.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-30 - rejected chroma_smooth pair-helper probe
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) plus [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) with a shared 2x2 row helper and a paired chroma smoother so the fullres and halfres passes could reuse the same row-local setup work.
+- The visible GUI smoke gate stayed valid with x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, but the probe was not a keeper because it lost badly on the chroma-heavy clips after rebuild.
+- Probe smoke results from `.claude-state/profiling/20260530-pair-helper-smoke/`:
+  - `M16-1327`: `presented_fps=2.867`, `avg_render_total_ms=338.957`, `avg_llrawproc_ms=134.261`, `avg_mix_chroma_ms=76.217`, `avg_chroma_copy_ms=3.826`, `avg_chroma_fullres_ms=38.348`, `avg_chroma_halfres_ms=34.043`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=2.620`, `avg_render_total_ms=355.095`, `avg_llrawproc_ms=143.429`, `avg_mix_chroma_ms=79.476`, `avg_chroma_copy_ms=4.571`, `avg_chroma_fullres_ms=39.000`, `avg_chroma_halfres_ms=35.905`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=3.250`, `avg_render_total_ms=287.269`, `avg_llrawproc_ms=58.615`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`, `processed8_direct_path_frames=0`
+- The user-facing release executable was rebuilt after the revert and is back on the baseline source shape at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 7:12:02 PM`, `Length=8793088`, `SHA256=2F6BA4CF1DC47DD1C29F5C1DD7BDA346805F4C034F5285C56C6BE2992F9B7B0B`.
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The probe preserved the direct8 guard and the visible smoke still reported `processed8_direct_path_frames=0`, so the regression is isolated to the retained fallback path rather than a direct8 fallback regression.
+- The restore smoke stayed visually valid, but it still did not recover the historical accepted throughput numbers, so the pair-helper probe remains rejected rather than becoming a new baseline.
+
+### Needs runtime profiling
+
+- If we keep exploring `dualiso.c`, the next candidate should not rely on a paired row-helper shape; the retained chroma mix work still needs a different structural reduction to beat the accepted three-clip baseline.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted pair-helper path out and look for a different retained-path reduction in `dualiso.c` or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
