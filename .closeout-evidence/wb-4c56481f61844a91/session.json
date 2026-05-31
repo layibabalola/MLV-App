@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/work-block/wb-4c56481f61844a91",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-05-31T15:29:09+00:00",
+  "detectorHash": "2acbd74178ebbb6285a8ce6a02a8cf82",
+  "featureHead": "3da1011d58956cda0214bfb1ec4f893788cce33a",
+  "schemaVersion": "1.0",
+  "targetHead": "43166ca3c0386922f1950bdfea2438ec318fdd92",
+  "workBlockId": "wb-4c56481f61844a91",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
