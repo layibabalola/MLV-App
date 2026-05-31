@@ -5620,6 +5620,42 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected creative vibrance/saturation/toning fusion probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by fusing the vibrance, saturation, and toning passes into a single per-pixel creative traversal while leaving the contrast-curve, gradation-curve, and AgX passes separate.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it still failed to beat the committed `processing_core` keeper on the full three-clip gate, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 3:48:15 AM`
+  - `Length=8793088`
+  - `SHA256=A9572B9AA6C5765A378D3AF3BEA5A0C259F4BE1A1FE68544B888A0035D4D5D85`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-fusion/`:
+  - `M16-1327`: `presented_fps=5.871`, `avg_render_total_ms=160.319`, `avg_llrawproc_ms=66.128`, `avg_processing_ms=60.745`, `avg_processing_core_ms=37.319`, `avg_processing_core_color_ms=14.660`, `avg_processing_core_creative_ms=15.191`, `avg_processing_shadows_highlights_prep_ms=23.383`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.866`, `avg_render_total_ms=157.894`, `avg_llrawproc_ms=65.787`, `avg_processing_ms=58.979`, `avg_processing_core_ms=37.277`, `avg_processing_core_color_ms=16.319`, `avg_processing_core_creative_ms=15.192`, `avg_processing_shadows_highlights_prep_ms=21.702`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.240`, `avg_render_total_ms=147.480`, `avg_llrawproc_ms=40.440`, `avg_processing_ms=68.360`, `avg_processing_core_ms=41.880`, `avg_processing_core_color_ms=15.640`, `avg_processing_core_creative_ms=15.820`, `avg_processing_shadows_highlights_prep_ms=26.480`, `processed8_direct_path_frames=0`
+- The source was restored to the baseline shape before closeout; no separate post-revert smoke rerun was needed because the probe was already a clear reject.
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper remains stronger on the same three-clip gate:
+  - `M16-1327`: keeper `6.373 fps` vs probe `5.871 fps`
+  - `M16-1347`: keeper `6.613 fps` vs probe `5.866 fps`
+  - `M16-1446`: keeper `7.242 fps` vs probe `6.240 fps`
+- This probe kept the direct8 guard intact, preserved x1 Quality and settled Auto Look Assist, and left `processed8_direct_path_frames=0`, so this was a retained-path throughput reject rather than a visual regression.
+- The creative traversal reduced passes, but it did not improve the full gate enough to displace the current accepted baseline cleanly.
+
+### Needs runtime profiling
+
+- If we keep exploring `processing_core_creative`, the next candidate should be materially different from this vibrance/saturation/toning fusion, most likely a narrower structural change in the remaining creative curves or a separate retained-path hotspot.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted creative fusion out and look for a different reduction in `processing_core_color`, `processing_core_creative`, or a separate hotspot.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31 - rejected use_cam_matrix gamut-unroll probe
 
 ### Verified locally
