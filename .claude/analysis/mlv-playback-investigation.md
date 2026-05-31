@@ -6975,3 +6975,26 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The AgX branch hoist did not clear the full three-clip gate against the current keeper.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact AgX-hoist shape is not a keeper.
+
+## 2026-05-31 - rejected positive-vibrance specialization probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by specializing the common positive-vibrance branch outside the hot per-pixel loop in the creative path.
+- The probe build completed successfully and the smoke gate stayed visually valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- Probe build identity from the smoke run:
+  - `build_sha=b8f645dfcda7ebe41eb909cb4b3eedeea8ca3450`
+- Probe smoke results from `.claude-state/profiling/20260531-vibrance-positive-specialization/`:
+  - `M16-1327`: `presented_fps=6.248`, `avg_render_total_ms=149.920`, `avg_llrawproc_ms=62.100`, `avg_processing_ms=55.540`, `avg_processing_core_ms=32.440`, `avg_processing_core_color_ms=15.400`, `avg_processing_core_creative_ms=11.020`, `avg_processing_core_output_ms=1.160`, `avg_processing_core_other_ms=2.960`, `avg_processing_shadows_highlights_prep_ms=23.100`, `avg_debayer_exclusive_ms=6.220`, `avg_processed16_ms=141.520`, `avg_processed16_to_8bit_ms=2.420`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.123`, `avg_render_total_ms=153.245`, `avg_llrawproc_ms=65.878`, `avg_processing_ms=54.469`, `avg_processing_core_ms=32.653`, `avg_processing_core_color_ms=15.184`, `avg_processing_core_creative_ms=11.245`, `avg_processing_core_output_ms=1.408`, `avg_processing_core_other_ms=1.694`, `avg_processing_shadows_highlights_prep_ms=21.816`, `avg_debayer_exclusive_ms=6.939`, `avg_processed16_ms=144.898`, `avg_processed16_to_8bit_ms=2.291`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.863`, `avg_render_total_ms=135.309`, `avg_llrawproc_ms=40.036`, `avg_processing_ms=61.655`, `avg_processing_core_ms=36.927`, `avg_processing_core_color_ms=16.200`, `avg_processing_core_creative_ms=12.018`, `avg_processing_core_output_ms=1.145`, `avg_processing_core_other_ms=3.527`, `avg_processing_shadows_highlights_prep_ms=24.727`, `avg_debayer_exclusive_ms=6.945`, `avg_processed16_ms=126.673`, `avg_processed16_to_8bit_ms=2.291`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost on all three clips:
+  - `M16-1327`: keeper `6.608 fps` vs probe `6.248 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `6.123 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `6.863 fps`
+
+### Cross-checked from prior analysis
+
+- The probe kept the visible gate intact and did not change the direct8 guard.
+- This is a throughput reject rather than a visual regression.
+- The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this positive-vibrance branch specialization is not a keeper.
