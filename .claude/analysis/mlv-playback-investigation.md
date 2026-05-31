@@ -7187,3 +7187,33 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - A better-shaped probe may still exist in this region, but it should be reworked from the current keeper baseline rather than extended from this rejected macro split.
+
+## 2026-05-31 - rejected scalar-hoist probe for generic color loop
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by hoisting the generic color-loop white-balance and AgX matrix lookups into locals so the common path could avoid repeated per-pixel matrix dereferences.
+- The source change compiled cleanly once the shell command used the explicit Qt MinGW toolchain path.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Release executable metadata after the restored baseline rebuild:
+  - `LastWriteTime`: `2026-05-31 08:20:10`
+  - `Length`: `8796672`
+  - `SHA256`: `3BC54B7E21D197E34D67564EFFD32D95E684463024EB5128876C8E27E94A8C7F`
+- Visible GUI smoke results from `.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=5.865`, `avg_render_total_ms=160.617`, `avg_llrawproc_ms=68.043`, `avg_processing_core_color_ms=14.170`, `avg_processing_core_creative_ms=11.979`, `avg_processing_shadows_highlights_prep_ms=26.255`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.242`, `avg_render_total_ms=179.333`, `avg_llrawproc_ms=84.500`, `avg_processing_core_color_ms=15.095`, `avg_processing_core_creative_ms=11.857`, `avg_processing_shadows_highlights_prep_ms=23.054`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.106`, `avg_render_total_ms=131.807`, `avg_llrawproc_ms=39.807`, `avg_processing_core_color_ms=15.877`, `avg_processing_core_creative_ms=12.333`, `avg_processing_shadows_highlights_prep_ms=23.491`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost the three-clip gate:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.865 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.242 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `7.106 fps`
+- I reverted the probe and restored `raw_processing.c` to the checked-in baseline before finalizing this handoff.
+
+### Cross-checked from prior analysis
+
+- The visible gate stayed intact and `processed8_direct_path_frames` remained `0`, so this is a throughput reject rather than a visual regression.
+- The cache-hoist shape did not beat the keeper on any clip, so it is not a keeper candidate.
+
+### Needs runtime profiling
+
+- If we revisit this region, the next probe should start from the current keeper baseline and target a different branch shape or data layout instead of this scalar-hoist variant.
