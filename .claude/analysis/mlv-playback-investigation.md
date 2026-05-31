@@ -5660,6 +5660,46 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected creative-pass fusion probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by fusing the creative contrast-curve pass, gradation-curve pass, and AgX inverse into one per-pixel sweep so the creative tail would stop walking the image multiple times.
+- The user-facing release tree was rebuilt from the probe and the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it did not beat the committed `processing_core` keeper on any of the three clips, so it is rejected.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 3:35:43 AM`
+  - `Length=8794112`
+  - `SHA256=39774AD16F042A7F7E550ECCC37BC2B036C5222CBE5E070A6133538C88C51494`
+- Restored-baseline release executable metadata after reverting the probe:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 3:38:49 AM`
+  - `Length=8796672`
+  - `SHA256=108284101E45D551A0E0AF29906E6140B307EBB91B4F6A71057247A13AF47FEB`
+- Probe smoke results from `.claude-state/profiling/20260531-033608-gui-smoke/`:
+  - `M16-1327`: `presented_fps=5.996`, `avg_render_total_ms=156.396`, `avg_llrawproc_ms=66.958`, `avg_processing_ms=55.896`, `avg_processing_core_ms=33.021`, `avg_processing_core_color_ms=16.250`, `avg_processing_core_creative_ms=12.958`, `avg_processing_shadows_highlights_prep_ms=22.875`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.739`, `avg_render_total_ms=163.935`, `avg_llrawproc_ms=69.891`, `avg_processing_ms=59.783`, `avg_processing_core_ms=36.000`, `avg_processing_core_color_ms=16.000`, `avg_processing_core_creative_ms=12.826`, `avg_processing_shadows_highlights_prep_ms=23.783`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.874`, `avg_render_total_ms=156.702`, `avg_llrawproc_ms=46.638`, `avg_processing_ms=70.468`, `avg_processing_core_ms=42.213`, `avg_processing_core_color_ms=17.255`, `avg_processing_core_creative_ms=14.809`, `avg_processing_shadows_highlights_prep_ms=28.234`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper remains stronger on the same three-clip gate:
+  - `M16-1327`: keeper `6.373 fps` vs probe `5.996 fps`
+  - `M16-1347`: keeper `6.613 fps` vs probe `5.739 fps`
+  - `M16-1446`: keeper `7.242 fps` vs probe `5.874 fps`
+- The visible smoke state stayed valid with `dual_iso_alias_map=0`, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this probe remained a retained-path throughput miss rather than a direct8 fallback regression.
+- The creative-pass fusion is rejected rather than promoted because it lost the full three-clip gate decisively on all three clips.
+
+### Needs runtime profiling
+
+- If we keep exploring `processing_core_color` or `processing_core_creative`, the next candidate should be materially different from this fused creative-tail pass, most likely a narrower structural change in one sub-stage rather than another multi-pass fusion.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted creative-pass fusion out and look for a different reduction in `processing_core_color` or `processing_core_creative`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31T03:25 CDT - rejected toning neutral fast-path probe
 
 - I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by adding a neutral fast-path guard for the final toning block in `apply_processing_object(...)`.
