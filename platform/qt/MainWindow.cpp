@@ -15741,6 +15741,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_arithmetic_probe_ms" );
     const double dualIsoFull20MixChromaCenterStoreProbeMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_store_probe_ms" );
+    const double dualIsoFull20MixChromaCenterStoreRProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_store_r_probe_ms" );
+    const double dualIsoFull20MixChromaCenterStoreBProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_store_b_probe_ms" );
     const int dualIsoFull20MixChromaProbeMode =
         telemetryIntValue( timing, "dual_iso_full20_mix_chroma_probe_mode" );
     const double dualIsoFull20MixAliasMapMs =
@@ -16094,15 +16098,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        "mix_ms=%11 mix_curve_select_ms=%12 mix_curve_build_ms=%13 "
                        "mix_curve_float_ms=%14 mix_ev_lut_ms=%15 mix_halfres_ms=%16 "
                        "mix_chroma_ms=%17 mix_alias_map_ms=%18 mix_overexposed_ms=%19 "
-                       "final_blend_setup_ms=%20 final_blend_row_kernel_ms=%21 "
-                       "final_blend_raw2ev_gather_probe_ms=%22 "
-                       "final_blend_fullres_curve_gather_probe_ms=%23 "
-                       "final_blend_ev2raw_store_probe_ms=%24 "
-                       "final_blend_arithmetic_probe_ms=%25 "
-                       "final_blend_overexposed_density=%26 final_blend_cap_clamp_pct=%27 "
-                       "final_blend_f_near_0_pct=%28 final_blend_f_near_1_pct=%29 "
-                       "final_blend_ms=%30 convert16_ms=%31 other_ms=%32 "
-                       "interp_method=%33 final_blend_probe_mode=%34 alias_map=%35 fullres=%36 threads=%37" )
+                       "mix_chroma_center_store_r_probe_ms=%20 "
+                       "mix_chroma_center_store_b_probe_ms=%21 "
+                       "final_blend_setup_ms=%22 final_blend_row_kernel_ms=%23 "
+                       "final_blend_raw2ev_gather_probe_ms=%24 "
+                       "final_blend_fullres_curve_gather_probe_ms=%25 "
+                       "final_blend_ev2raw_store_probe_ms=%26 "
+                       "final_blend_arithmetic_probe_ms=%27 "
+                       "final_blend_overexposed_density=%28 final_blend_cap_clamp_pct=%29 "
+                       "final_blend_f_near_0_pct=%30 final_blend_f_near_1_pct=%31 "
+                       "final_blend_ms=%32 convert16_ms=%33 other_ms=%34 "
+                       "interp_method=%35 final_blend_probe_mode=%36 alias_map=%37 fullres=%38 threads=%39" )
                        .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                        .arg( m_playbackSmokePresentedFrames )
                        .arg( dualIsoFull20TotalMs, 0, 'f', 3 )
@@ -16122,6 +16128,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        .arg( dualIsoFull20MixChromaMs, 0, 'f', 3 )
                        .arg( dualIsoFull20MixAliasMapMs, 0, 'f', 3 )
                        .arg( dualIsoFull20MixOverexposedMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixChromaCenterStoreRProbeMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixChromaCenterStoreBProbeMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendSetupMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendRowKernelMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendRaw2EvGatherProbeMs, 0, 'f', 3 )

@@ -2228,6 +2228,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.mix_chroma_center_arithmetic_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_store_probe_ms"),
                                       dualIsoFull20.mix_chroma_center_store_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_store_r_probe_ms"),
+                                      dualIsoFull20.mix_chroma_center_store_r_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_center_store_b_probe_ms"),
+                                      dualIsoFull20.mix_chroma_center_store_b_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_probe_mode"),
                                       dualIsoFull20.mix_chroma_probe_mode );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_alias_map_ms"),

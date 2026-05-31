@@ -161,7 +161,11 @@ static void CHROMA_SMOOTH_FUNC(int w,
             double chroma_center_gather_start = 0.0;
             double chroma_center_arithmetic_start = 0.0;
             double chroma_center_store_start = 0.0;
+            double chroma_center_store_r_start = 0.0;
+            double chroma_center_store_b_start = 0.0;
             if (probe_center) chroma_center_gather_start = mlv_stage_timing_now();
+            const int write_r = (unsigned int)r0 < white_u;
+            const int write_b = (unsigned int)b0 < white_u;
             int g1 = raw2ev[row_y[x+1]];
             int g2 = raw2ev[row_y_p1[x]];
             int g3 = raw2ev[row_y[x-1]];
@@ -179,18 +183,36 @@ static void CHROMA_SMOOTH_FUNC(int w,
             int grh = (g1+g3)/2;
             int gbv = (g1+g6)/2;
             int gbh = (g2+g5)/2;
-            int gr = ev < eh ? grv : grh;
-            int gb = ev < eh ? gbv : gbh;
             int dr = ev < eh ? drv : drh;
             int db = ev < eh ? dbv : dbh;
-
             int thr = 64;
-            if (r0 < black_thr || b0 < black_thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr)
+            const int use_average = r0 < black_thr || b0 < black_thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr;
+
+            int gr = 0;
+            if (write_r)
             {
-                dr = (drv+drh)/2;
-                db = (dbv+dbh)/2;
-                gr = (g1+g2+g3+g4)/4;
-                gb = (g1+g2+g5+g6)/4;
+                if (use_average)
+                {
+                    dr = (drv+drh)/2;
+                    gr = (g1+g2+g3+g4)/4;
+                }
+                else
+                {
+                    gr = ev < eh ? grv : grh;
+                }
+            }
+            int gb = 0;
+            if (write_b)
+            {
+                if (use_average)
+                {
+                    db = (dbv+dbh)/2;
+                    gb = (g1+g2+g5+g6)/4;
+                }
+                else
+                {
+                    gb = ev < eh ? gbv : gbh;
+                }
             }
             if (probe_center)
             {
@@ -199,11 +221,27 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 chroma_center_store_start = mlv_stage_timing_now();
             }
 
-            if ((unsigned int)r0 < white_u)
+            if (write_r)
+            {
+                if (probe_center) chroma_center_store_r_start = mlv_stage_timing_now();
                 out_y[x] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                if (probe_center)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_center_store_r_probe_ms +=
+                        (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
+                }
+            }
 
-            if ((unsigned int)b0 < white_u)
+            if (write_b)
+            {
+                if (probe_center) chroma_center_store_b_start = mlv_stage_timing_now();
                 out_y_p1[x + 1] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+                if (probe_center)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_center_store_b_probe_ms +=
+                        (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
+                }
+            }
             if (probe_center)
             {
                 g_dualiso_full20bit_timing.mix_chroma_center_store_probe_ms +=
