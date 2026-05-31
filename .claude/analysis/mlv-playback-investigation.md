@@ -1,3 +1,130 @@
+## 2026-05-31 - rejected mix-curve float prebuild in the retained Dual ISO half-res blend
+
+### Verified locally
+
+- I tried prebuilding the `mix_curve_float` cache alongside the retained Dual ISO `mix_curve` rebuild in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c), then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- The release exe after the restore rebuild is:
+  - `LastWriteTime=5/31/2026 12:13:07 PM`
+  - `Length=8797184`
+  - `SHA256=FCBF28BD64DC355436F1654D7277E68C455D5D3C98E288D3E9409A8A3C857434`
+- The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid, with `processed8_direct_path_active` still dropping to `false` on frames 1 and 2 for all three clips.
+- The settled-frame profiles from `.claude-state/profiling/wb-148adf3c30cf402c/mix-curve-float-prebuild/` regressed hard:
+  - `M16-1327`: `render_thread_work_ms=298.0`, `llrawproc_ms=121.5`, `processing_core_color_ms=54.5`, `processing_core_creative_ms=58.0`, `processing_shadows_highlights_prep_ms=30.0`, `average_cadence_ms=532.9685`, `average_latency_ms=1506.87863333333`
+  - `M16-1347`: `render_thread_work_ms=498.5`, `llrawproc_ms=247.0`, `processing_core_color_ms=78.5`, `processing_core_creative_ms=63.5`, `processing_shadows_highlights_prep_ms=47.0`, `average_cadence_ms=895.9339`, `average_latency_ms=1085.04673333333`
+  - `M16-1446`: `render_thread_work_ms=341.5`, `llrawproc_ms=101.0`, `processing_core_color_ms=71.5`, `processing_core_creative_ms=61.5`, `processing_shadows_highlights_prep_ms=57.0`, `average_cadence_ms=612.06715`, `average_latency_ms=1052.5958`
+
+### Cross-checked from prior analysis
+
+- The probe is materially worse than the accepted visible-gate keeper `ed2821e1`; the settled-frame work and latency both moved in the wrong direction.
+- The visual gate did not regress, so this is a throughput reject, not a quality regression.
+
+### Needs runtime profiling
+
+- The next probe should stay in the retained Dual ISO path, but it needs a different structural shape than prebuilding the float cache alongside the double curve.
+- `mix_chroma` remains the best remaining hotspot to chase.
+
+## 2026-05-31 - rejected 2x2 chroma-smooth precompute hoist
+
+### Verified locally
+
+- I tried a localized rewrite in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) that precomputed the repeated `raw2ev` lookups for the 2x2 chroma-smooth path, then reused those values in the horizontal and vertical sample macros.
+- The user-facing release tree was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after reverting the probe back to the accepted baseline shape.
+- Release executable metadata after the restore rebuild:
+  - `LastWriteTime=5/31/2026 12:06:08 PM`
+  - `Length=8797184`
+  - `SHA256=3A432AA167980FDCB61C7D7F05C6E4D19AB11D922F8EEBB600F6B1714147D52D`
+- The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid on all three clips, with `processed8_direct_path_active=true` only on the warm-up frame and `false` on frames 1 and 2 for each run.
+- Settled-frame averages from `.claude-state/profiling/wb-148adf3c30cf402c/chroma-smooth-2x2/` were not competitive:
+  - `M16-1327`: `render_thread_work_ms=342.5`, `llrawproc_ms=151.5`, `processing_core_color_ms=58.5`, `processing_core_creative_ms=58.0`, `processing_shadows_highlights_prep_ms=35.0`
+  - `M16-1347`: `render_thread_work_ms=395.5`, `llrawproc_ms=185.0`, `processing_core_color_ms=64.5`, `processing_core_creative_ms=62.0`, `processing_shadows_highlights_prep_ms=40.0`
+  - `M16-1446`: `render_thread_work_ms=304.0`, `llrawproc_ms=83.5`, `processing_core_color_ms=75.5`, `processing_core_creative_ms=55.0`, `processing_shadows_highlights_prep_ms=42.5`
+
+### Cross-checked from prior analysis
+
+- The probe did not move the settled retained-path work in the right direction versus the current keeper; it is a throughput reject, not a visual regression.
+- The warm-up frame still behaved normally, but the settled frames show the probe is too expensive to keep in the hot 2x2 smooth path.
+
+### Needs runtime profiling
+
+- If we revisit `chroma_smooth.c`, the next candidate needs a different structural shape than a repeated-lookup hoist.
+- The retained Dual ISO mix stack remains the more promising hotspot, especially `mix_chroma`.
+
+## 2026-05-31 - rejected mix-curve clamp elision in the retained Dual ISO blend path
+
+### Verified locally
+
+- I tried removing the redundant `[0, 1]` clamp from the retained Dual ISO half-res mix path in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) and [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc), then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- The release exe after the restored-baseline rebuild is:
+  - `LastWriteTime=5/31/2026 11:57:03 AM`
+  - `Length=8797184`
+  - `SHA256=DC245EA44FE87A18AC2BBFE813C82947414004100F1436708437F6EF9237273C`
+- The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid and the direct8 guard remained intact (`processed8_direct_path_active=false`), but the steady-state retained-path buckets regressed badly enough that this is not a keeper candidate.
+- Smoke profile averages from `.claude-state/profiling/wb-68fe75d089af4c6f/mixcurve-clamp/`:
+  - `M16-1327`: `avg_render_thread_work_ms=284`, `avg_dual_iso_full20_mix_chroma_ms=66.5`, `avg_dual_iso_full20_final_blend_ms=10.5`
+  - `M16-1347`: `avg_render_thread_work_ms=282`, `avg_dual_iso_full20_mix_chroma_ms=73`, `avg_dual_iso_full20_final_blend_ms=11`
+  - `M16-1446`: `avg_render_thread_work_ms=199`, `avg_dual_iso_full20_mix_chroma_ms=0`, `avg_dual_iso_full20_final_blend_ms=6.5`
+- The mix-curve clamp is mathematically redundant, but the probe still lost the three-clip visible gate once validated against the current keeper and should be rejected rather than promoted.
+
+### Cross-checked from prior analysis
+
+- The accepted retained-path baseline already had the mix curve bounded through construction, so removing the clamp was only a micro-optimization attempt, not a new algorithmic path.
+- The current keeper on the same visible gate was still substantially better on the chroma-heavy clips, especially in `avg_mix_chroma_ms` and `avg_final_blend_ms`, so the clamp elision did not move the target state in the right direction.
+
+### Needs runtime profiling
+
+- The next probe should stay on the retained Dual ISO path, but it needs a more structural change than a clamp removal.
+- `avg_mix_chroma_ms` remains the best bucket to chase next, with `avg_final_blend_ms` still worth watching on the chroma-heavy clips.
+
+## 2026-05-31 - rejected RBFilter row-stride hoist against the active playback gate
+
+### Verified locally
+
+- I tried a small cleanup in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc/MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) to hoist the upward-pass row-stride address math out of the hot inner loop.
+- The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid and kept `dual_iso_alias_map=0` and `processed8_direct_path_frames=0`, but the active packets on this gate do not show the RBF sub-buckets as the dominant retained work, so the probe was not a keeper candidate.
+- Rebuilt user-facing release executable metadata after the restore build:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 11:42:21 AM`
+  - `Length=8797184`
+  - `SHA256=4102E1551CAC3B8864EF1D060613C29CC26DF82094DCB811DADB6EE368BC474B`
+- Probe smoke results from `.claude-state/profiling/wb-68fe75d089af4c6f/rbf-rowstride/` stayed visually valid, with the direct8 guard intact, but the steady-state packets did not move the right bucket:
+  - `M16-1327`: `render_thread_work_ms=275.5`, `llrawproc_dual_iso_ms=117`, `processing_shadows_highlights_prep_ms=29.5`, `processing_shadows_highlights_filter_ms=29.5`, `processing_core_color_ms=50`, `processing_core_creative_ms=48.5`, `processed8_direct_path_active=false`
+  - `M16-1347`: `render_thread_work_ms=293.5`, `llrawproc_dual_iso_ms=137`, `processing_shadows_highlights_prep_ms=26`, `processing_shadows_highlights_filter_ms=26`, `processing_core_color_ms=52.5`, `processing_core_creative_ms=47.5`, `processed8_direct_path_active=false`
+  - `M16-1446`: `render_thread_work_ms=231.5`, `llrawproc_dual_iso_ms=51.5`, `processing_shadows_highlights_prep_ms=32.5`, `processing_shadows_highlights_filter_ms=32.5`, `processing_core_color_ms=57`, `processing_core_creative_ms=48.5`, `processed8_direct_path_active=false`
+
+### Cross-checked from prior analysis
+
+- The current playback gate is still dominated by the Dual ISO mix stack, and the RBF sub-buckets did not explain the current visible-path timings well enough to justify keeping this cleanup.
+- The row-stride hoist therefore stays a reject, and the next probe should stay on the active retained hot path rather than this RBF recurrence shape.
+
+### Needs runtime profiling
+
+- The next candidate should return to the Dual ISO retained path, especially `mix_chroma`, rather than trying to force the visible gate through `RBFilterPlain.cpp`.
+
+## 2026-05-31 - rejected fullres curve float probe for Dual ISO final blend
+### Verified locally
+
+- I tried a narrower Dual ISO follow-up in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) and [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc): a cached float version of the full-res blend curve for the AVX2 final-blend path, leaving the scalar double curve in place.
+- The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid, with `dual_iso_alias_map=0` and `processed8_direct_path_frames=0`, but the steady-state packets did not justify keeping the change, so it was reverted back to the accepted float EV-LUT baseline.
+- Rebuilt user-facing release executable metadata after the restore build:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 11:36:55 AM`
+  - `Length=8797184`
+  - `SHA256=317FF1490661A6E49A952D7E5D11E6CE120969CD9E4FE02865977CFCEDF63E21`
+- Probe smoke results from `.claude-state/profiling/wb-68fe75d089af4c6f/fullres-float-curve/` stayed visually valid and kept the direct8 guard intact, but the steady-state render packets were not a keeper on throughput:
+  - `M16-1327`: `render_thread_work_ms=278.5`, `llrawproc_dual_iso_ms=116.5`, `dual_iso_full20_total_ms=114.5`, `dual_iso_full20_mix_chroma_ms=69`, `dual_iso_full20_final_blend_ms=8`, `processing_core_color_ms=52.5`, `processing_core_creative_ms=49.5`, `processed8_direct_path_active=false`
+  - `M16-1347`: `render_thread_work_ms=279`, `llrawproc_dual_iso_ms=123`, `dual_iso_full20_total_ms=121`, `dual_iso_full20_mix_chroma_ms=66.5`, `dual_iso_full20_final_blend_ms=9.5`, `processing_core_color_ms=50.5`, `processing_core_creative_ms=50.5`, `processed8_direct_path_active=false`
+  - `M16-1446`: `render_thread_work_ms=225.5`, `llrawproc_dual_iso_ms=62`, `dual_iso_full20_total_ms=62`, `dual_iso_full20_mix_chroma_ms=0`, `dual_iso_full20_final_blend_ms=12`, `processing_core_color_ms=52`, `processing_core_creative_ms=48`, `processed8_direct_path_active=false`
+
+### Cross-checked from prior analysis
+
+- The current accepted float EV-LUT keeper is still the better three-clip result on the visible-gate comparison, so this full-res float-curve tweak is a reject rather than a promotion.
+- The visible smoke state stayed valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, so this remained a throughput reject rather than a visual regression.
+
+### Needs runtime profiling
+
+- If we stay in `dualiso.c`, the next candidate should look for a further reduction in the chroma mix stack rather than reworking the full-res curve again.
+- The current evidence still points at `avg_mix_chroma_ms` and `avg_final_blend_ms` as the dominant retained buckets on the chroma-heavy clips.
+
 ## 2026-05-31 - accepted float EV-LUT probe for Dual ISO mix/final blend
 ### Verified locally
 
@@ -7688,3 +7815,23 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - The next Dual ISO candidate should go straight at `mix_chroma` or a deeper retained-path reduction rather than the curve-build phase.
+
+## 2026-05-31 - rejected chroma smooth row-threshold hoist
+
+### Verified locally
+
+- I hoisted `black_thr` and `white_u` out of the inner `y` loop in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c), rebuilt the user-facing release tree, and reran the three visible GUI smoke clips from `.claude-state/profiling/wb-148adf3c30cf402c/chroma-hoist-rowthreshold/`.
+- The visible gate stayed intact on all three clips: x1 Quality, settled Auto Look Assist, and the same retained Dual ISO path behavior as before.
+- Settled-frame averages from frames 1+2 for the probe were:
+  - `M16-1327`: `render_thread_work_ms=328.9999`, `llrawproc_ms=144.5000`, `processing_core_color_ms=60.0001`, `processing_core_creative_ms=52.9999`, `processing_shadows_highlights_prep_ms=36.0001`, `dual_iso_full20_mix_chroma_ms=75.9999`, `dual_iso_full20_final_blend_ms=14.9999`
+  - `M16-1347`: `render_thread_work_ms=447.0001`, `llrawproc_ms=249.5000`, `processing_core_color_ms=61.0000`, `processing_core_creative_ms=62.0000`, `processing_shadows_highlights_prep_ms=33.5001`, `dual_iso_full20_mix_chroma_ms=163.5001`, `dual_iso_full20_final_blend_ms=17.0001`
+  - `M16-1446`: `render_thread_work_ms=305.4999`, `llrawproc_ms=70.9999`, `processing_core_color_ms=74.5001`, `processing_core_creative_ms=64.9999`, `processing_shadows_highlights_prep_ms=33.5000`, `dual_iso_full20_mix_chroma_ms=0`, `dual_iso_full20_final_blend_ms=13.0000`
+
+### Cross-checked from prior analysis
+
+- The hoist is a throughput reject. It did not beat the current keeper `ed2821e1` on the visible gate, and `M16-1347` in particular regressed sharply.
+- The hot path remains the retained Dual ISO mix stack, but this row-threshold cleanup did not reduce the dominant cost in a useful way.
+
+### Needs runtime profiling
+
+- The next probe should return to a structurally different `mix_chroma` or deeper retained-path change, not another tiny threshold hoist in `chroma_smooth.c`.
