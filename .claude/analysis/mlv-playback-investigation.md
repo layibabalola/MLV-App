@@ -1,4 +1,15 @@
 ## 2026-05-30 - rejected 2x2 chroma_smooth EV-row cache probe
+- I tried a cache-friendly rewrite in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) that hoisted the five red/blue EV lookups used by the 2x2 smoother into small per-cell locals so the horizontal and vertical sample passes could reuse the same converted values.
+- The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid, and the direct8 guard remained intact with `processed8_direct_path_frames=0`, but the probe did not beat the accepted baseline on the chroma-heavy clips, so it was reverted back to the accepted 2x2 shape.
+- The rebuilt user-facing release exe after the reject/revert is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 8:04:28 PM`, `Length=8793088`, `SHA256=47632242A0C2F719F2785D090DA88F587A4EAED781EED2BF81B852A9ED884521`.
+- The restore smoke results were:
+  - `M16-1327`: `presented_fps=5.484`, `avg_render_total_ms=175.000`, `avg_llrawproc_ms=57.227`, `avg_mix_chroma_ms=25.659`, `avg_final_blend_ms=6.705`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.991`, `avg_render_total_ms=187.925`, `avg_llrawproc_ms=65.150`, `avg_mix_chroma_ms=27.625`, `avg_final_blend_ms=7.825`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.740`, `avg_render_total_ms=161.457`, `avg_llrawproc_ms=32.304`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.935`, `processed8_direct_path_frames=0`
+- Compared with the accepted nearby baseline, the probe was still slower on the chroma-heavy clips, so the cache shape is a reject rather than a keep.
+- The next useful target remains a different structural reduction in `dualiso.c` or `dualiso_avx2.inc`, not another 2x2 smoother EV-cache rewrite in this exact shape.
+
+## 2026-05-30 - rejected 2x2 chroma_smooth EV-row cache probe
 - I tried a per-thread EV-row cache fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the 2x2 chroma smoother could reuse a cached 8-row `raw2ev` window instead of redoing the same lookup work inside the inner pass.
 - The first draft had a shared-loop-variable bug inside the cache fill and was corrected before validation, but the corrected probe still did not earn a keep: the visible GUI smoke gate regressed on all three clips versus the accepted baseline, so the change was reverted back to the accepted 2x2 shape.
 - Probe build smoke on the visible x1 Quality / settled Auto Look Assist gate stayed visually valid and kept `processed8_direct_path_frames=0`, but the timing regressed versus the accepted baseline:
