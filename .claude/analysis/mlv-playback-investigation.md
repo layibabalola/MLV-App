@@ -7407,6 +7407,11 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `M16-1347`: `presented_fps=2.998`, `avg_render_total_ms=322.667`, `avg_llrawproc_ms=150.875`, `avg_processing_core_color_ms=51.583`, `avg_processing_core_creative_ms=50.250`
   - `M16-1446`: `presented_fps=3.995`, `avg_render_total_ms=238.000`, `avg_llrawproc_ms=59.406`, `avg_processing_core_color_ms=53.344`, `avg_processing_core_creative_ms=49.250`
 - The GUI smoke validation was clean on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, and `cpuSettled=true`.
+- After reverting the probe, the restored-baseline release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Restored-baseline release executable metadata:
+  - `LastWriteTime`: `2026-05-31 09:58:27`
+  - `Length`: `8793600`
+  - `SHA256`: `D133D13683EADA4B7D29B543B6626BE68145C6D44CF14157567E43C70504A8B0`
 
 ### Cross-checked from prior analysis
 
@@ -7416,4 +7421,30 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - The next probe should stay structural but target a different hot-path shape than this gradient specialization.
+- Since the smoke gate remained stable, the next experiment can focus on reducing generic-loop work without preserving this specific branch split.
+
+## 2026-05-31 - rejected vibrance path split for generic color loop
+
+### Verified locally
+
+- I split the creative vibrance block in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) so the positive-vibrance case no longer pays the per-pixel `processing->vibrance > 1.0` branch, while preserving the x1 Quality / settled Auto Look Assist gate behavior.
+- The split compiled cleanly and the user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) before the visible smoke pass.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 09:44:24`
+  - `Length`: `8800768`
+  - `SHA256`: `1B49B877EEB27177FA93340A4F4F21D1A8625CB0B58B2D0E7AD927A5C7D63358`
+- The visible smoke runs from `.claude-state/profiling/wb-68fe75d089af4c6f/gradient-smoke/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=2.999`, `avg_render_total_ms=317.958`, `avg_llrawproc_ms=143.417`, `avg_processing_core_color_ms=51.708`, `avg_processing_core_creative_ms=50.500`
+  - `M16-1347`: `presented_fps=2.998`, `avg_render_total_ms=322.667`, `avg_llrawproc_ms=150.875`, `avg_processing_core_color_ms=51.583`, `avg_processing_core_creative_ms=50.250`
+  - `M16-1446`: `presented_fps=3.995`, `avg_render_total_ms=238.000`, `avg_llrawproc_ms=59.406`, `avg_processing_core_color_ms=53.344`, `avg_processing_core_creative_ms=49.250`
+- The GUI smoke validation was clean on all three clips: `qualityModeMatched=true`, `lookAssistApplied=true`, and `cpuSettled=true`.
+
+### Cross-checked from prior analysis
+
+- This probe regressed throughput versus the accepted keeper `ed2821e1`; the visible gate stayed valid, but the render and LL raw-processing timings were materially worse.
+- The hot work still sits in the generic color path, but this vibrance split is not a keeper candidate.
+
+### Needs runtime profiling
+
+- The next probe should stay structural but target a different hot-path shape than this vibrance specialization.
 - Since the smoke gate remained stable, the next experiment can focus on reducing generic-loop work without preserving this specific branch split.
