@@ -52,11 +52,16 @@ static void CHROMA_SMOOTH_FUNC(int w,
 {
     int x,y;
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (y = 4; y < h-5; y += 2)
     {
         const int black_thr = black + 64;
         const unsigned int white_u = (unsigned int)white;
+        const int probe_mode = dualiso_mix_chroma_probe_mode();
+        const int probe_detail = probe_mode >= 0;
+        const int probe_horiz = probe_detail && (probe_mode == 0 || probe_mode == 1);
+        const int probe_vert = probe_detail && (probe_mode == 0 || probe_mode == 2);
+        const int probe_center = probe_detail && (probe_mode == 0 || probe_mode == 3);
         const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m2 = inp + (size_t)(y - 2) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m1 = inp + (size_t)(y - 1) * (size_t)w;
@@ -81,6 +86,9 @@ static void CHROMA_SMOOTH_FUNC(int w,
             int med_b[5];
             int eh = 0;
             int ev = 0;
+            double chroma_horiz_start = 0.0;
+            double chroma_vert_start = 0.0;
+            double chroma_center_start = 0.0;
 
             #define CS2_SAMPLE_H(k, row0, row1, x0) do { \
                 const int r = row0[x0]; \
@@ -98,6 +106,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 med_b[(k)] = bb - gb; \
             } while (0)
 
+            if (probe_horiz) chroma_horiz_start = mlv_stage_timing_now();
             CS2_SAMPLE_H(0, row_y, row_y_p1, x - 2);
             CS2_SAMPLE_H(1, row_y_m2, row_y_m1, x);
             CS2_SAMPLE_H(2, row_y, row_y_p1, x);
@@ -107,6 +116,11 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             const int drh = chroma_smooth_med5(med_r[0], med_r[1], med_r[2], med_r[3], med_r[4]);
             const int dbh = chroma_smooth_med5(med_b[0], med_b[1], med_b[2], med_b[3], med_b[4]);
+            if (probe_horiz)
+            {
+                g_dualiso_full20bit_timing.mix_chroma_horiz_probe_ms +=
+                    (mlv_stage_timing_now() - chroma_horiz_start) * 1000.0;
+            }
 
             #define CS2_SAMPLE_V(k, row0, row1, rowm1, rowp2, x0) do { \
                 const int r = row0[x0]; \
@@ -124,6 +138,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 med_b[(k)] = bb - gb; \
             } while (0)
 
+            if (probe_vert) chroma_vert_start = mlv_stage_timing_now();
             CS2_SAMPLE_V(0, row_y, row_y_p1, row_y_m1, row_y_p2, x - 2);
             CS2_SAMPLE_V(1, row_y_m2, row_y_m1, row_y_m3, row_y, x);
             CS2_SAMPLE_V(2, row_y, row_y_p1, row_y_m1, row_y_p2, x);
@@ -133,16 +148,32 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             const int drv = chroma_smooth_med5(med_r[0], med_r[1], med_r[2], med_r[3], med_r[4]);
             const int dbv = chroma_smooth_med5(med_b[0], med_b[1], med_b[2], med_b[3], med_b[4]);
+            if (probe_vert)
+            {
+                g_dualiso_full20bit_timing.mix_chroma_vert_probe_ms +=
+                    (mlv_stage_timing_now() - chroma_vert_start) * 1000.0;
+            }
 
             /* Reuse the row pointers already prepared for this pass so the
              * center-pixel blend does not keep rebuilding the same y*w
              * address arithmetic inside the hot inner loop. */
+            if (probe_center) chroma_center_start = mlv_stage_timing_now();
+            double chroma_center_gather_start = 0.0;
+            double chroma_center_arithmetic_start = 0.0;
+            double chroma_center_store_start = 0.0;
+            if (probe_center) chroma_center_gather_start = mlv_stage_timing_now();
             int g1 = raw2ev[row_y[x+1]];
             int g2 = raw2ev[row_y_p1[x]];
             int g3 = raw2ev[row_y[x-1]];
             int g4 = raw2ev[row_y_m1[x]];
             int g5 = raw2ev[row_y_p1[x+2]];
             int g6 = raw2ev[row_y_p2[x+1]];
+            if (probe_center)
+            {
+                g_dualiso_full20bit_timing.mix_chroma_center_gather_probe_ms +=
+                    (mlv_stage_timing_now() - chroma_center_gather_start) * 1000.0;
+                chroma_center_arithmetic_start = mlv_stage_timing_now();
+            }
 
             int grv = (g2+g4)/2;
             int grh = (g1+g3)/2;
@@ -161,12 +192,25 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 gr = (g1+g2+g3+g4)/4;
                 gb = (g1+g2+g5+g6)/4;
             }
+            if (probe_center)
+            {
+                g_dualiso_full20bit_timing.mix_chroma_center_arithmetic_probe_ms +=
+                    (mlv_stage_timing_now() - chroma_center_arithmetic_start) * 1000.0;
+                chroma_center_store_start = mlv_stage_timing_now();
+            }
 
             if ((unsigned int)r0 < white_u)
                 out_y[x] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
 
             if ((unsigned int)b0 < white_u)
                 out_y_p1[x + 1] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
+            if (probe_center)
+            {
+                g_dualiso_full20bit_timing.mix_chroma_center_store_probe_ms +=
+                    (mlv_stage_timing_now() - chroma_center_store_start) * 1000.0;
+                g_dualiso_full20bit_timing.mix_chroma_center_probe_ms +=
+                    (mlv_stage_timing_now() - chroma_center_start) * 1000.0;
+            }
         }
     }
 }

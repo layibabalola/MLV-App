@@ -27,6 +27,8 @@
 #include <errno.h>
 
 #include "../raw.h"
+#include "../../debug/StageTiming.h"
+#include "dualiso.h"
 #include "opt_med.h"
 #include "wirth.h"
 #include "pixelproc.h"
