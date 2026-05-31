@@ -164,6 +164,8 @@ typedef struct
     double mix_chroma_center_gather_probe_ms;
     double mix_chroma_center_arithmetic_probe_ms;
     double mix_chroma_center_store_probe_ms;
+    double mix_chroma_center_store_r_probe_ms;
+    double mix_chroma_center_store_b_probe_ms;
     double mix_alias_map_ms;
     double mix_overexposed_ms;
     double final_blend_setup_ms;

@@ -1,3 +1,33 @@
+## 2026-05-31 - mix_chroma center store split confirmed store pressure, but the shortcut did not win
+
+### Verified locally
+
+- I extended the retained Dual ISO `mix_chroma` center probe in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) with separate `store_r` and `store_b` telemetry and carried the new counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/RenderFrameThread.cpp), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the probe wiring update:
+  - `LastWriteTime=5/31/2026 5:23:55 PM`
+  - `Length=8830976`
+  - `SHA256=B67C8EEEA600F921F2C2A87D6814CB76684632DFAFA22CDC97DF053559AF7076`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved.
+- The post-split probe showed the center bucket is still the hot one, and the writeback side is still meaningful:
+  - `M16-1327`: `center_probe_ms=301.5`, `center_gather_ms=21.0`, `center_arithmetic_ms=26.499`, `center_store_ms=86.5`, `center_store_r_ms=56.0`, `center_store_b_ms=59.0`, `llrawproc_ms=496.0`
+  - `M16-1347`: `center_probe_ms=423.499`, `center_gather_ms=51.5`, `center_arithmetic_ms=51.5`, `center_store_ms=131.0`, `center_store_r_ms=86.499`, `center_store_b_ms=115.0`, `llrawproc_ms=829.5`
+  - `M16-1446`: `center_probe_ms=0`, `center_gather_ms=0`, `center_arithmetic_ms=0`, `center_store_ms=0`, `center_store_r_ms=0`, `center_store_b_ms=0`, `llrawproc_ms=273.0`
+- I also tried a tiny early-exit for white pixels in the same center path, but the settled smoke numbers did not improve and the change was reverted before closeout. The temporary run was worse on the chroma-heavy clips:
+  - `M16-1327`: `llrawproc_ms=631.5` versus the probe-split `615.0`
+  - `M16-1347`: `llrawproc_ms=953.0` versus the probe-split `875.5`
+  - `M16-1446`: `llrawproc_ms=252.5` versus the probe-split `273.0`
+
+### Cross-checked from prior analysis
+
+- The finer split did its job: it confirmed that the center writeback path is still a real bucket, and `store_b` is consistently at least as large as `store_r` on the chroma-heavy clips.
+- The attempted early-exit did not move the visible gate in the right direction, so it is not a keeper.
+- This keeps the investigation honest: we have better visibility into the bottleneck, but not yet a winning center-store rewrite.
+
+### Needs runtime profiling
+
+- The next candidate should move to a different `mix_chroma` sub-bucket, likely `fullres` or `halfres`, rather than another center writeback cleanup.
+- If the next probe still cannot improve the settled three-clip gate, the honest next move is to stop local CPU work and move to secondary buckets.
+
 ## 2026-05-31 - mix_chroma phase 0 completed; center store dominates
 
 ### Verified locally
