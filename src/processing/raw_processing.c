@@ -1638,10 +1638,12 @@ void apply_processing_object( processingObject_t * processing,
     processing_core_timing_reset(core_timing);
     const double levels_start = capture_breakdown ? omp_get_wtime() : 0.0;
     /* Apply some precalcuolated settings */
+    const uint16_t * pre_calc_levels = processing->pre_calc_levels;
+    #pragma omp simd
     for (int i = 0; i < img_s; ++i)
     {
         /* Black + white level */
-        img[i] = processing->pre_calc_levels[ img[i] ];
+        img[i] = pre_calc_levels[ img[i] ];
     }
     if( capture_breakdown )
     {
@@ -1651,6 +1653,23 @@ void apply_processing_object( processingObject_t * processing,
     const double color_start = capture_breakdown ? omp_get_wtime() : 0.0;
     const int blur_image_is_curve_index =
         processing_shadows_highlights_curve_index_mask_enabled();
+    const int allow_creative_adjustments = processing->allow_creative_adjustments;
+    const int use_cam_matrix = processing->use_cam_matrix > 0;
+    const int exr_mode = processing->exr_mode;
+    const int use_vignette = processing->vignette_strength != 0;
+    const int use_highlight_reconstruction = processing->highlight_reconstruction;
+    const int use_shadows_highlights =
+        ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
+     || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
+     || ( processing->clarity <= -0.01 || processing->clarity >= 0.01 );
+    const int use_contrast =
+        ( processing->contrast          <= -0.01 || processing->contrast          >= 0.01 )
+     || ( processing->clarity           <= -0.01 || processing->clarity           >= 0.01 )
+     || ( processing->gradient_contrast <= -0.01 || processing->gradient_contrast >= 0.01 );
+    const int use_gradient_adjustments =
+        ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
+     || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 );
+    const double inv_65535 = 1.0 / 65535.0;
 
     /* white balance & exposure & highlights & gamma & highlight reconstruction */
     if( use_basic_matrix_fast_path )
@@ -1717,7 +1736,7 @@ void apply_processing_object( processingObject_t * processing,
             double expo_correction_gradient = 1.0;
 
             /* Vignette correction */
-            if( processing->vignette_strength != 0 )
+            if( use_vignette )
             {
                 vmpix++;
                 if( vmpix < processing->vignette_end )  /* just safety - sometimes parameters may change faster than processing */
@@ -1726,12 +1745,10 @@ void apply_processing_object( processingObject_t * processing,
                 }
             }
 
-            if (processing->allow_creative_adjustments)
+            if (allow_creative_adjustments)
             {
                 /* shadows & highlights, clarity part 1 */
-                if( ( processing->shadows_highlights.shadows    <= -0.01 || processing->shadows_highlights.shadows    >= 0.01 )
-                || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
-                || ( processing->clarity                       <= -0.01 || processing->clarity                       >= 0.01 ) )
+                if( use_shadows_highlights )
                 {
                     int32_t bval;
                     if( blur_image_is_curve_index )
@@ -1760,9 +1777,7 @@ void apply_processing_object( processingObject_t * processing,
                 }
 
                 /* Contrast on untouched pixel */
-                if( ( processing->contrast          <= -0.01 || processing->contrast          >= 0.01 )
-                || ( processing->clarity           <= -0.01 || processing->clarity           >= 0.01 )
-                || ( processing->gradient_contrast <= -0.01 || processing->gradient_contrast >= 0.01 ) )
+                if( use_contrast )
                 {
                     int32_t cval = ( ((pm[0][pix[0]] /* + pm[1][pix[1]] + pm[2][pix[2]] */) << 2)
                                  + ((/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */) * 11)
@@ -1795,9 +1810,7 @@ void apply_processing_object( processingObject_t * processing,
 
             /* Gradient variables and part 1 */
             float pixg[3];
-            if( processing->gradient_enable && gmpix[0] != 0 &&
-              ( ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
-             || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 ) ) )
+            if( processing->gradient_enable && gmpix[0] != 0 && use_gradient_adjustments )
             {
                 /* do the same for gradient as for the pic itself, but before the values are overwritten */
                 /* white balance & exposure */
@@ -1812,7 +1825,7 @@ void apply_processing_object( processingObject_t * processing,
                 tmp1g   = LIMIT16(tmp1g);
 
                 /* Now highlight reconstruction for gradient layer*/
-                if (processing->highlight_reconstruction)
+                if (use_highlight_reconstruction)
                 {
                     if(*processing->dual_iso != 0)
                     {
@@ -1843,7 +1856,7 @@ void apply_processing_object( processingObject_t * processing,
             tmp1   = LIMIT16(tmp1);
 
             /* Now highlight reconstruction */
-            if (processing->highlight_reconstruction)
+            if (use_highlight_reconstruction)
             {
                 if(*processing->dual_iso != 0)
                 {
@@ -1876,7 +1889,7 @@ void apply_processing_object( processingObject_t * processing,
             }
 
             /* I really don't like how this if is in a big loop :(( */
-            if( processing->use_cam_matrix > 0 )
+            if( use_cam_matrix )
             {
                 /* WB correction */
                 float pix0b = pix[0], pix1b = pix[1], pix2b = pix[2];
@@ -1885,7 +1898,7 @@ void apply_processing_object( processingObject_t * processing,
                 result[1] = pix0b * processing->proper_wb_matrix[3] + pix1b * processing->proper_wb_matrix[4] + pix2b * processing->proper_wb_matrix[5];
                 result[2] = pix0b * processing->proper_wb_matrix[6] + pix1b * processing->proper_wb_matrix[7] + pix2b * processing->proper_wb_matrix[8];
 
-                if (!processing->exr_mode)
+                if (!exr_mode)
                 {
                     /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
                     float Y = rgb_to_Y[0] * result[0]
@@ -1939,19 +1952,17 @@ void apply_processing_object( processingObject_t * processing,
             }
 
             /* Gradient part 2 & blending */
-            if( processing->gradient_enable && gmpix[0] != 0 &&
-              ( ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
-             || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 ) ) )
+            if( processing->gradient_enable && gmpix[0] != 0 && use_gradient_adjustments )
             {
                 /* WB correction gradient layer*/
-                if( processing->use_cam_matrix > 0 )
+                if( use_cam_matrix )
                 {
                     float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
                     double result[3];
                     result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
                     result[1] = pix0b * processing->proper_wb_matrix[3] + pix1b * processing->proper_wb_matrix[4] + pix2b * processing->proper_wb_matrix[5];
                     result[2] = pix0b * processing->proper_wb_matrix[6] + pix1b * processing->proper_wb_matrix[7] + pix2b * processing->proper_wb_matrix[8];
-                    if (!processing->exr_mode)
+                    if (!exr_mode)
                     {
                         /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
                         float Y = rgb_to_Y[0] * result[0]
@@ -2001,9 +2012,11 @@ void apply_processing_object( processingObject_t * processing,
                 }
 
                 /* Blending using the mask */
-                pix[0] = gmpix[0] / 65535.0 * pixg[0] + (65535 - gmpix[0]) / 65535.0 * pix[0];
-                pix[1] = gmpix[0] / 65535.0 * pixg[1] + (65535 - gmpix[0]) / 65535.0 * pix[1];
-                pix[2] = gmpix[0] / 65535.0 * pixg[2] + (65535 - gmpix[0]) / 65535.0 * pix[2];
+                const double blend = gmpix[0] * inv_65535;
+                const double inv_blend = 1.0 - blend;
+                pix[0] = blend * pixg[0] + inv_blend * pix[0];
+                pix[1] = blend * pixg[1] + inv_blend * pix[1];
+                pix[2] = blend * pixg[2] + inv_blend * pix[2];
             }
         }
     }
@@ -2014,7 +2027,7 @@ void apply_processing_object( processingObject_t * processing,
 
     const double creative_start = capture_breakdown ? omp_get_wtime() : 0.0;
     //Code for HueVs...
-    if( (processing->allow_creative_adjustments )
+    if( allow_creative_adjustments
      && ( processing->hue_vs_luma_used
        || processing->hue_vs_saturation_used
        || processing->hue_vs_hue_used
@@ -2071,7 +2084,7 @@ void apply_processing_object( processingObject_t * processing,
         }
     }
 
-    if (processing->allow_creative_adjustments)
+    if (allow_creative_adjustments)
     {
         if( processing->vibrance > 1.01 || processing->vibrance < 0.99 )
         {
@@ -2143,7 +2156,7 @@ void apply_processing_object( processingObject_t * processing,
     }
 
     /* Toning */
-    if (processing->allow_creative_adjustments)
+    if (allow_creative_adjustments)
     {
         if( processing->toning_dry < 99.8 )
         {
@@ -2157,7 +2170,7 @@ void apply_processing_object( processingObject_t * processing,
         }
     }
 
-    if (processing->allow_creative_adjustments)
+    if (allow_creative_adjustments)
     {
         /* Contrast Curve (OMG putting this after gamma made it 999x better) */
         for (uint16_t * pix = img; pix < img_end; pix += 3)
@@ -2168,7 +2181,7 @@ void apply_processing_object( processingObject_t * processing,
         }
     }
 
-    if (processing->allow_creative_adjustments)
+    if (allow_creative_adjustments)
     {
         //Gradation curve
         for (uint16_t * pix = img; pix < img_end; pix += 3)

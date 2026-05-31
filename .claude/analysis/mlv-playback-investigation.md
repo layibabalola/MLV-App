@@ -5659,6 +5659,52 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / medium risk: use the new split to choose the next retained-path probe, most likely in the `processing_core_color` or `processing_core_creative` branch.
 3. Low impact / low risk: leave the direct8 guard and x1 Quality / settled Auto Look Assist smoke gate unchanged so any later probe remains comparable.
 
+## 2026-05-31 - processing_core color/levels scalar cleanup probe kept
+
+### Verified locally
+
+- Applied a small output-identical cleanup in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) to make the `processing_core` split more visible and reduce scalar overhead in the hot path:
+  - added a `#pragma omp simd` hint to the `pre_calc_levels` pass
+  - cached frame-invariant color-path flags (`allow_creative_adjustments`, `use_cam_matrix`, `exr_mode`, `use_vignette`, `use_highlight_reconstruction`, `use_shadows_highlights`, `use_contrast`, `use_gradient_adjustments`)
+  - replaced repeated `65535.0` gradient blend divisions with a cached reciprocal
+- The user-facing release tree was rebuilt successfully after the cleanup.
+- Release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 2:30:14 AM`
+  - `Length=8796672`
+  - `SHA256=2308E338876A9D362A2233FD1EFEEEED2CB4217660E3AEBF452CC49D52ABFD7B`
+- Sequential visible GUI smoke gate from `.claude-state/profiling/20260531-processing-core-simd/`:
+  - `M16-1327`: `presented_fps=6.373`, `avg_render_total_ms=145.216`, `avg_llrawproc_ms=55.510`, `avg_processing_ms=56.706`, `avg_processing_core_ms=35.392`, `avg_processing_core_levels_ms=5.941`, `avg_processing_core_color_ms=14.647`, `avg_processing_core_creative_ms=11.882`, `avg_processing_core_output_ms=1.235`, `avg_processing_core_other_ms=4.157`, `avg_debayer_exclusive_ms=6.235`, `avg_processing_shadows_highlights_prep_ms=21.314`, `avg_mix_chroma_ms=28.311`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.613`, `avg_render_total_ms=141.340`, `avg_llrawproc_ms=56.755`, `avg_processing_ms=52.000`, `avg_processing_core_ms=31.415`, `avg_processing_core_levels_ms=4.717`, `avg_processing_core_color_ms=13.849`, `avg_processing_core_creative_ms=10.566`, `avg_processing_core_output_ms=1.113`, `avg_processing_core_other_ms=3.151`, `avg_debayer_exclusive_ms=5.585`, `avg_processing_shadows_highlights_prep_ms=20.566`, `avg_mix_chroma_ms=30.262`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.242`, `avg_render_total_ms=127.534`, `avg_llrawproc_ms=33.931`, `avg_processing_ms=57.259`, `avg_processing_core_ms=34.810`, `avg_processing_core_levels_ms=4.690`, `avg_processing_core_color_ms=14.638`, `avg_processing_core_creative_ms=11.207`, `avg_processing_core_output_ms=1.172`, `avg_processing_core_other_ms=4.724`, `avg_debayer_exclusive_ms=7.034`, `avg_processing_shadows_highlights_prep_ms=22.448`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+- The visual state stayed intact:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby baseline was stronger before this probe:
+  - `M16-1327`: `presented_fps=6.101`
+  - `M16-1347`: `presented_fps=5.983`
+  - `M16-1446`: `presented_fps=6.865`
+- The new telemetry shows the improvement is real rather than a measurement artifact:
+  - `processing_core_color_ms` and `processing_core_creative_ms` both moved down
+  - `processing_core_other_ms` fell materially
+  - `avg_render_total_ms` dropped on all three clips
+- The direct8 guard stayed intact throughout, so this remained a retained-path improvement rather than a direct8 regression.
+
+### Needs runtime profiling
+
+- The next probe should use the finer `processing_core_*` split to decide whether the remaining reduction belongs in `color`, `creative`, or a different retained-path hotspot.
+
+### Ranked next steps
+
+1. High impact / low risk: keep the new telemetry and this cleanup as the new baseline for future retained-path probes.
+2. Medium impact / medium risk: use the updated `processing_core_*` split to choose the next biggest remaining retained-path bucket.
+3. Low impact / low risk: keep the three-clip visible smoke gate and x1 Quality / settled Auto Look Assist checks unchanged so later comparisons stay valid.
+
 ## 2026-05-31 - rejected playback_downsample x-only AVX2 probe
 
 ### Verified locally
