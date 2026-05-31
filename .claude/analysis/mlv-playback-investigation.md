@@ -7479,3 +7479,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next probe should target a different generic-loop shape rather than this saturation-helper simplification.
 - `processing_core_color` and `processing_core_creative` remain the best buckets to chase, but this helper is not a keeper candidate.
+
+## 2026-05-31 - rejected highlight-reconstruction zero-case split for generic color loop
+
+### Verified locally
+
+- I moved the `highlight_reconstruction` decision out of the per-pixel generic color loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by factoring the loop into a shared include and instantiating it separately for the `highlight_reconstruction == 1` and `== 0` cases.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) before the smoke pass.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 10:19:29`
+  - `Length`: `8804352`
+  - `SHA256`: `A679DCA2ED1C2B635607E1B180D25BD514AB384FAA36B016B799C472FE7BC3D5`
+- The visible smoke runs from `.claude-state/profiling/wb-68fe75d089af4c6f/highlight-recon-split/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=6.621`, `avg_render_total_ms=139.755`, `avg_llrawproc_ms=54.925`, `avg_processing_core_color_ms=14.340`, `avg_processing_core_creative_ms=11.075`, `avg_processing_shadows_highlights_prep_ms=22.094`
+  - `M16-1347`: `presented_fps=6.238`, `avg_render_total_ms=150.720`, `avg_llrawproc_ms=64.140`, `avg_processing_core_color_ms=14.920`, `avg_processing_core_creative_ms=11.300`, `avg_processing_shadows_highlights_prep_ms=21.640`
+  - `M16-1446`: `presented_fps=7.591`, `avg_render_total_ms=122.869`, `avg_llrawproc_ms=34.656`, `avg_processing_core_color_ms=14.607`, `avg_processing_core_creative_ms=11.705`, `avg_processing_shadows_highlights_prep_ms=20.754`
+- Compared with the current keeper (`ed2821e1`), the split only improved `M16-1327` and regressed the other two clips:
+  - `M16-1327`: keeper `6.608 fps` vs split `6.621 fps`
+  - `M16-1347`: keeper `6.618 fps` vs split `6.238 fps`
+  - `M16-1446`: keeper `7.744 fps` vs split `7.591 fps`
+
+### Cross-checked from prior analysis
+
+- The visible smoke clips still stay on the generic color loop, and `highlight_reconstruction` remains the right branch to hoist out of the per-pixel path.
+- This split did not change the visible gate, but it lost the keeper on the full three-clip throughput comparison.
+
+### Needs runtime profiling
+
+- The zero-case specialization is directionally correct, but it is not yet the right shape for the full gate.
+- The next probe should either reduce more work than this branch split or target a different hot path outside the generic loop.
