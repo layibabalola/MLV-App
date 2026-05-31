@@ -5319,6 +5319,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - mix stack hotspot confirmation on the current accepted baseline
+
+### Verified locally
+
+- I reran the current user-facing release binary against the same three visible clips with the existing smoke telemetry enabled.
+- The visual state stayed at x1 Quality with settled Auto Look Assist, `dual_iso_alias_map=0`, `dual_iso_fullres=1`, and `processed8_direct_path_frames=0`.
+- The current retained Dual ISO mix cost is still dominated by the chroma-smooth pair, with the copy prelude smaller but still visible:
+  - `M16-1327`: `avg_mix_chroma_ms=26.160`, `avg_chroma_copy_ms=5.580`, `avg_chroma_fullres_ms=10.280`, `avg_chroma_halfres_ms=10.260`
+  - `M16-1347`: `avg_mix_chroma_ms=23.725`, `avg_chroma_copy_ms=0.500`, `avg_chroma_fullres_ms=10.280`, `avg_chroma_halfres_ms=10.260`
+  - `M16-1446`: `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`
+- The full-res and half-res chroma-smooth passes are nearly symmetric, so the remaining time is not concentrated in a single cheap cleanup.
+
+### Cross-checked from prior analysis
+
+- The half-res Shadows/Highlights blur keeper already proved that a structural quality tradeoff can win when it cuts a whole hot bucket.
+- The earlier chroma-smooth copy-footprint and lookup-hoist probes already showed that small micro-optimizations in this area are not enough on their own to beat the three-clip visible gate.
+- The current baseline therefore looks like a mix-path limit for this iteration: any future probe here should be materially different, not another copy/lookup shuffle.
+
+### Needs runtime profiling
+
+- If we keep exploring this area, the next candidate should be a structurally different mix-path change or a broader quality tradeoff.
+- If we want to stay conservative, the honest next move is to switch hotspots again rather than spend more cycles on `mix_images()` micro-optimizations that the visible gate cannot clearly resolve.
+
 ## 2026-05-30 - rejected `processed16_to_8bit` SSE2 packdown probe
 
 ### Verified locally
