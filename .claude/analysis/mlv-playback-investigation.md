@@ -5539,6 +5539,46 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected RBFilter RGB3 vertical recurrence probe
+
+### Verified locally
+
+- I probed [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc/MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) by specializing `runVerticalDown()` and `runVerticalUp()` for the always-`channel == 3` playback case: the probe unrolled the 3-channel first-line copies and the 3-channel blend writes, while keeping the generic fallback path intact.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it regressed throughput on all three visible clips, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 11:41:52 PM`
+  - `Length=8794624`
+  - `SHA256=E03954383A87C1B92BD27FA1A64D3281DB9AF33418FB01574032E867069B9E2C`
+- Restored-baseline release executable metadata after reverting the probe:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 11:45:53 PM`
+  - `Length=8793088`
+  - `SHA256=B9937471BE646ED7F0B80289717C785E1D630B5FF73356702CA5650743387788`
+- Probe smoke results from `.claude-state/profiling/20260531-rbf-vertical-rgb3-probe/`:
+  - `M16-1327`: `presented_fps=4.993`, `avg_render_total_ms=187.2`, `avg_llrawproc_ms=64.475`, `avg_processing_shadows_highlights_prep_ms=56.375`, `avg_vertical_down_ms=22.1`, `avg_vertical_up_ms=22.925`, `avg_mix_chroma_ms=27.45`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.736`, `avg_render_total_ms=199.789`, `avg_llrawproc_ms=73.368`, `avg_processing_shadows_highlights_prep_ms=58.132`, `avg_vertical_down_ms=22.711`, `avg_vertical_up_ms=21.684`, `avg_mix_chroma_ms=30.553`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.247`, `avg_render_total_ms=178.31`, `avg_llrawproc_ms=45.024`, `avg_processing_shadows_highlights_prep_ms=60.976`, `avg_vertical_down_ms=23.762`, `avg_vertical_up_ms=23.643`, `avg_mix_chroma_ms=0.0`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.0`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The RGB3 vertical specialization kept the direct8 guard intact, preserved x1 Quality and settled Auto Look Assist, and left `dual_iso_alias_map=0` / `processed8_direct_path_frames=0`, so this was a retained-path throughput reject rather than a visual regression.
+- The specialization is rejected rather than promoted because the end-to-end fps regressed on all three clips despite the hot vertical recurrence being specialized.
+
+### Needs runtime profiling
+
+- If we keep exploring `RBFilterPlain`, the next candidate should be a different structural reduction in the vertical recurrence itself, not another generic-to-RGB3 specialization or copy-only micro-tweak.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted RGB3 specialization out and look for a different reduction in the vertical recurrence or a separate Dual ISO hotspot.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31 - rejected chroma-smoothing copy-footprint probe
 
 ### Verified locally
