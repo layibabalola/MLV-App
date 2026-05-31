@@ -7097,3 +7097,26 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The probe kept the visible gate intact and did not change the direct8 guard.
 - This is a throughput reject rather than a visual regression.
 - The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this exr-mode split is not a keeper.
+
+## 2026-05-31 - rejected gradient-layer exr split probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by splitting the gradient-layer color block on `exr_mode` so the per-pixel loop could skip that branch on the common path.
+- The probe build completed successfully and the smoke gate stayed visually valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- Probe build identity from the smoke run:
+  - `build_sha=d7373a68af4fbd3d3928a1f92f1d5680a2c09e5b`
+- Probe smoke results from `.claude-state/profiling/20260531-color-gradient-layer-split/`:
+  - `M16-1327`: `presented_fps=5.993`, `avg_render_total_ms=154.812`, `avg_llrawproc_ms=63.854`, `avg_processing_ms=57.437`, `avg_processing_core_ms=34.937`, `avg_processing_core_levels_ms=4.833`, `avg_processing_core_color_ms=15.083`, `avg_processing_core_creative_ms=11.979`, `avg_processing_core_output_ms=1.208`, `avg_processing_core_other_ms=4.354`, `avg_processing_shadows_highlights_prep_ms=22.500`, `avg_debayer_exclusive_ms=7.146`, `avg_processed16_ms=145.938`, `avg_processed16_to_8bit_ms=2.271`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.490`, `avg_render_total_ms=170.591`, `avg_llrawproc_ms=75.045`, `avg_processing_ms=63.455`, `avg_processing_core_ms=38.841`, `avg_processing_core_levels_ms=7.227`, `avg_processing_core_color_ms=14.545`, `avg_processing_core_creative_ms=12.750`, `avg_processing_core_output_ms=1.273`, `avg_processing_core_other_ms=5.545`, `avg_processing_shadows_highlights_prep_ms=24.614`, `avg_debayer_exclusive_ms=6.841`, `avg_processed16_ms=161.955`, `avg_processed16_to_8bit_ms=2.362`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.247`, `avg_render_total_ms=127.621`, `avg_llrawproc_ms=36.621`, `avg_processing_ms=56.466`, `avg_processing_core_ms=33.828`, `avg_processing_core_levels_ms=3.603`, `avg_processing_core_color_ms=14.948`, `avg_processing_core_creative_ms=12.207`, `avg_processing_core_output_ms=1.052`, `avg_processing_core_other_ms=4.000`, `avg_processing_shadows_highlights_prep_ms=22.621`, `avg_debayer_exclusive_ms=6.017`, `avg_processed16_ms=118.638`, `avg_processed16_to_8bit_ms=2.362`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost on all three clips:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.993 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.490 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `7.247 fps`
+
+### Cross-checked from prior analysis
+
+- The probe kept the visible gate intact and did not change the direct8 guard.
+- This is a throughput reject rather than a visual regression.
+- The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this gradient-layer exr split is not a keeper.
