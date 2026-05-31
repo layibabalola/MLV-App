@@ -5578,3 +5578,47 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted copy-footprint probe out and look for a different reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-31 - rejected RBFilter RGB3 recurrence / output index probe
+
+### Verified locally
+
+- I probed [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc/MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) by specializing the left-pass recurrence for the always-`channel == 3` playback case and by simplifying the output index arithmetic to `i * 3` before reverting it back to the generic baseline shape.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it still failed to beat the accepted nearby baseline on the chroma-heavy clips, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 11:27:20 PM`
+  - `Length=8793600`
+  - `SHA256=not retained before revert`
+- Reverted release executable metadata after restoring the baseline source shape:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 11:35:11 PM`
+  - `Length=8793088`
+  - `SHA256=73FCAB4235547955BB99DD4ABD6312D6DFE2CEE1640B4BC97B4675EFF15E1A8A`
+- Probe smoke results from `.claude-state/profiling/20260531-rbf-rgb3-probe/`:
+  - `M16-1327`: `presented_fps=5.249`, `avg_render_total_ms=177.738`, `avg_llrawproc_ms=60.381`, `avg_processing_shadows_highlights_prep_ms=54.952`, `avg_mix_chroma_ms=27.048`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.991`, `avg_render_total_ms=189.400`, `avg_llrawproc_ms=63.875`, `avg_processing_shadows_highlights_prep_ms=58.325`, `avg_mix_chroma_ms=27.650`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.621`, `avg_render_total_ms=167.156`, `avg_llrawproc_ms=37.733`, `avg_processing_shadows_highlights_prep_ms=60.133`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+- Restored-baseline smoke results after revert from `.claude-state/profiling/20260531-rbf-rgb3-revert/`:
+  - `M16-1327`: `presented_fps=5.118`, `avg_render_total_ms=185.024`, `avg_llrawproc_ms=60.780`, `avg_processing_shadows_highlights_prep_ms=58.537`, `avg_mix_chroma_ms=26.732`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.120`, `avg_render_total_ms=184.854`, `avg_llrawproc_ms=63.317`, `avg_processing_shadows_highlights_prep_ms=57.244`, `avg_mix_chroma_ms=27.390`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.372`, `avg_render_total_ms=171.977`, `avg_llrawproc_ms=39.698`, `avg_processing_shadows_highlights_prep_ms=60.023`, `avg_mix_chroma_ms=0.000`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The RGB3 specialization kept the direct8 guard intact, preserved x1 Quality and settled Auto Look Assist, and left `processed8_direct_path_frames=0`, so this was a retained-path throughput reject rather than a visual regression.
+- The specialization is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `RBFilterPlain`, the next candidate should be a different structural reduction in the vertical recurrence itself, not another generic-to-RGB3 specialization or output-index micro-tweak.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted RGB3 specialization out and look for a different reduction in the vertical recurrence or a separate Dual ISO hotspot.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
