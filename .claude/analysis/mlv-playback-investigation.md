@@ -5639,6 +5639,25 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The toning cleanup preserved x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, so this was a throughput reject rather than a visual regression.
 - The probe is rejected rather than promoted.
 
+## 2026-05-31T03:15 CDT - Gradation-curve cache reject
+
+- I probed `src/processing/raw_processing.c` by precomposing the gradation curves once at settings-update time and replacing the per-pixel `gcurve_y -> gcurve_{r,g,b}` chain with `gcurve_{r,g,b}_after_y` lookup tables, then reverted it after the visible gate failed to beat the committed `processing_core` keeper.
+- The user-facing release tree was rebuilt from the reverted source, and the rebuilt executable is:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 3:15:00 AM`
+  - `Length=8796672`
+  - `SHA256=5739C77266DBD5809D92469AE43A800929D385D5759087AB10FDBD9A5E404142`
+- Reverted-baseline smoke results from `.claude-state/profiling/20260531-processing-core-creative-toning-revert/`:
+  - `M16-1327`: `presented_fps=6.117`, `avg_render_total_ms=152.531`, `avg_llrawproc_ms=63.878`, `avg_processing_ms=55.408`, `avg_processing_core_ms=33.306`, `avg_processing_core_color_ms=14.898`, `avg_processing_core_creative_ms=11.245`, `avg_processing_shadows_highlights_prep_ms=22.082`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.370`, `avg_render_total_ms=176.860`, `avg_llrawproc_ms=78.000`, `avg_processing_ms=64.419`, `avg_processing_core_ms=38.488`, `avg_processing_core_color_ms=15.488`, `avg_processing_core_creative_ms=12.628`, `avg_processing_shadows_highlights_prep_ms=25.930`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.120`, `avg_render_total_ms=153.245`, `avg_llrawproc_ms=46.429`, `avg_processing_ms=64.837`, `avg_processing_core_ms=38.918`, `avg_processing_core_color_ms=17.061`, `avg_processing_core_creative_ms=12.551`, `avg_processing_shadows_highlights_prep_ms=25.898`, `processed8_direct_path_frames=0`
+- Cross-check against the committed keeper baseline still showed the keeper ahead on all three clips:
+  - `M16-1327`: keeper `6.373 fps` vs probe `6.117 fps`
+  - `M16-1347`: keeper `6.613 fps` vs probe `5.370 fps`
+  - `M16-1446`: keeper `7.242 fps` vs probe `6.120 fps`
+- The gradation cache preserved x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, so this was a throughput reject rather than a visual regression.
+- The probe is rejected rather than promoted.
+
 ## 2026-05-31 - rejected processing_core_color gamma-loop simd probe
 
 ### Verified locally
