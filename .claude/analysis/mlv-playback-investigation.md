@@ -7021,3 +7021,26 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The probe kept the visible gate intact and did not change the direct8 guard.
 - This is a throughput reject rather than a visual regression.
 - The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this toning coefficient specialization is not a keeper.
+
+## 2026-05-31 - rejected color-cache probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by caching repeated color/creative lookup tables and row pointers inside `apply_processing_object()`.
+- The probe build completed successfully and the smoke gate stayed visually valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- Probe build identity from the smoke run:
+  - `build_sha=379e55a8ac366b95cc2eb376bc20670775f5532c`
+- Probe smoke results from `.claude-state/profiling/20260531-color-cache-smoke/`:
+  - `M16-1327`: `presented_fps=5.370`, `avg_render_total_ms=173.256`, `avg_llrawproc_ms=67.419`, `avg_processing_ms=69.628`, `avg_processing_core_ms=43.000`, `avg_processing_core_color_ms=17.512`, `avg_processing_core_creative_ms=13.395`, `avg_processing_core_other_ms=8.186`, `avg_processing_shadows_highlights_prep_ms=26.628`, `avg_debayer_exclusive_ms=7.791`, `avg_processed16_ms=163.744`, `avg_processed16_to_8bit_ms=2.581`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.117`, `avg_render_total_ms=182.293`, `avg_llrawproc_ms=83.122`, `avg_processing_ms=65.805`, `avg_processing_core_ms=39.878`, `avg_processing_core_color_ms=18.171`, `avg_processing_core_creative_ms=14.023`, `avg_processing_core_other_ms=5.098`, `avg_processing_shadows_highlights_prep_ms=25.902`, `avg_debayer_exclusive_ms=7.049`, `avg_processed16_ms=173.805`, `avg_processed16_to_8bit_ms=2.581`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.497`, `avg_render_total_ms=170.659`, `avg_llrawproc_ms=50.909`, `avg_processing_ms=80.023`, `avg_processing_core_ms=46.818`, `avg_processing_core_color_ms=18.977`, `avg_processing_core_creative_ms=14.023`, `avg_processing_core_other_ms=9.114`, `avg_processing_shadows_highlights_prep_ms=33.205`, `avg_debayer_exclusive_ms=7.636`, `avg_processed16_ms=160.432`, `avg_processed16_to_8bit_ms=2.122`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost on all three clips:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.370 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.117 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `5.497 fps`
+
+### Cross-checked from prior analysis
+
+- The probe kept the visible gate intact and did not change the direct8 guard.
+- This is a throughput reject rather than a visual regression.
+- The current meaningful buckets remain `processing_core_color` and `processing_core_creative`, but this color-cache shape is not a keeper.
