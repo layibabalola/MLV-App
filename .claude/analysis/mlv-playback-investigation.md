@@ -6658,3 +6658,43 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The creative LUT composition did not clear the gate even though it was exact and materially different from the earlier creative fusions.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact composition shape is not a keeper.
+
+## 2026-05-31 - rejected color-branch hoist probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by hoisting frame-constant color-path predicates out of the per-pixel loop and simplifying the saturation proxy to direct `MAX` / `MIN` calculations:
+  - `processing->clarity`
+  - `processing->contrast`
+  - `processing->gradient_contrast`
+  - `processing->shadows_highlights.shadows`
+  - `processing->shadows_highlights.highlights`
+  - `pix[0]`, `pix[1]`, `pix[2]` max/min saturation proxy
+- The release tree was rebuilt from the probe build, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it lost the three-clip gate versus the committed `processing_core` keeper on every clip, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 5:49:22 AM`
+  - `Length=8796672`
+  - `SHA256=E30F8F5FBE2DB8C6D4F0B1E2D2F8D6E0E4E1FCE1B4A42CB2F6E4A9F5B9B4F2B9`
+- Probe smoke results from `.claude-state/profiling/20260531-color-branch-hoist-gui-smoke/`:
+  - `M16-1327`: `presented_fps=5.864`, `avg_render_total_ms=161.851`, `avg_llrawproc_ms=67.787`, `avg_processing_ms=58.617`, `avg_processing_core_ms=33.894`, `avg_processing_core_color_ms=13.617`, `avg_processing_core_creative_ms=12.681`, `avg_processing_shadows_highlights_prep_ms=24.723`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.617`, `avg_render_total_ms=166.022`, `avg_llrawproc_ms=74.867`, `avg_processing_ms=55.089`, `avg_processing_core_ms=31.178`, `avg_processing_core_color_ms=14.156`, `avg_processing_core_creative_ms=12.644`, `avg_processing_shadows_highlights_prep_ms=23.867`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.495`, `avg_render_total_ms=142.558`, `avg_llrawproc_ms=42.308`, `avg_processing_ms=62.712`, `avg_processing_core_ms=35.154`, `avg_processing_core_color_ms=14.404`, `avg_processing_core_creative_ms=12.519`, `avg_processing_shadows_highlights_prep_ms=27.519`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- The probe lost on all three clips, so it is a throughput reject rather than a keeper.
+- The visual state stayed intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Needs runtime profiling
+
+- The color-path predicate hoist and saturation max/min simplification did not clear the gate.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact hoist shape is not a keeper.
