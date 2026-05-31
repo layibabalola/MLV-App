@@ -6774,3 +6774,40 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The creative SIMD/toning loop simplification did not clear the three-clip gate.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact SIMD/toning shape is not a keeper.
+
+## 2026-05-31 - rejected creative curve SIMD probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by rewriting the contrast-curve and gradation-curve loops into canonical pixel-index form and adding `#pragma omp simd` to both loops:
+  - contrast curve: canonical `for (int px = 0; px < pixel_count; ++px)` form
+  - gradation curve: canonical `for (int px = 0; px < pixel_count; ++px)` form
+  - per-iteration pointer derivation: `uint16_t * pix = img + (px * 3)`
+- The probe build was rebuilt through the repo wrapper, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe stayed visually valid, but it lost the three-clip gate versus the committed `processing_core` keeper on the first two clips, so it is not a keeper.
+- Reverted-baseline release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 6:13:37 AM`
+  - `Length=8796672`
+  - `SHA256=6CED48F6A36E8E7413824544D5E8FABA9C9B62CC6D5F525763961E3F7B9E3E27`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-curve-simd-revert/`:
+  - `M16-1327`: `presented_fps=5.991`, `avg_render_total_ms=155.083`, `avg_llrawproc_ms=65.583`, `avg_processing_ms=57.313`, `avg_processing_core_ms=34.208`, `avg_processing_core_color_ms=14.938`, `avg_processing_core_creative_ms=11.396`, `avg_processing_shadows_highlights_prep_ms=23.083`, `avg_debayer_exclusive_ms=6.292`, `avg_processed16_ms=145.792`, `avg_processed16_to_8bit_ms=2.375`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.241`, `avg_render_total_ms=151.180`, `avg_llrawproc_ms=62.460`, `avg_processing_ms=55.180`, `avg_processing_core_ms=33.820`, `avg_processing_core_color_ms=15.540`, `avg_processing_core_creative_ms=11.660`, `avg_processing_shadows_highlights_prep_ms=21.360`, `avg_debayer_exclusive_ms=6.680`, `avg_processed16_ms=142.980`, `avg_processed16_to_8bit_ms=1.900`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.599`, `avg_render_total_ms=121.197`, `avg_llrawproc_ms=33.705`, `avg_processing_ms=55.492`, `avg_processing_core_ms=32.689`, `avg_processing_core_color_ms=15.705`, `avg_processing_core_creative_ms=11.984`, `avg_processing_shadows_highlights_prep_ms=22.803`, `avg_debayer_exclusive_ms=6.672`, `avg_processed16_ms=113.131`, `avg_processed16_to_8bit_ms=2.164`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.991 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `6.241 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `7.599 fps`
+- The probe kept the visible gate intact:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- This is a throughput reject rather than a visual regression.
+
+### Needs runtime profiling
+
+- The creative curve SIMD rewrite did not clear the full three-clip gate against the current keeper.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact curve rewrite shape is not a keeper.
