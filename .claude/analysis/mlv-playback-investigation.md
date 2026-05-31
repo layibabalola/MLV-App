@@ -6578,3 +6578,44 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we keep probing `processing_core_color` or `processing_core_creative`, the next candidate should be materially different from this toning+curve fusion.
 - The current evidence still points to `processing_core_color` / `processing_core_creative` as the remaining meaningful buckets, but this exact fusion shape is not a keeper.
+
+## 2026-05-31 - rejected processing core alias-cache probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by caching the repeated matrix and creative lookup tables in the non-fast 16-bit processing path:
+  - `pm[0]`, `pm[4]`, `pm[8]`
+  - `pmg[0]`, `pmg[4]`, `pmg[8]`
+  - `pre_calc_vibrance`
+  - `pre_calc_sat`
+  - `pre_calc_curve_r`
+  - `gcurve_y`, `gcurve_r`, `gcurve_g`, `gcurve_b`
+  - `toning_dry`, `toning_wet`
+- The release tree was rebuilt from the probe build, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe stayed visually valid, but it lost the three-clip gate to the committed `processing_core` keeper on every clip, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 5:24:39 AM`
+  - `Length=8796672`
+  - `SHA256=81846C150FDCC0FB96E4DF2A73A2C98416920C53856D0D75476639CEE43B1BBD`
+- Probe smoke results from `.claude-state/profiling/20260531-processing-core-alias-cache/`:
+  - `M16-1327`: `presented_fps=5.868`, `avg_render_total_ms=158.702`, `avg_llrawproc_ms=61.489`, `avg_processing_ms=63.149`, `avg_processing_core_ms=39.234`, `avg_processing_core_levels_ms=5.617`, `avg_processing_core_color_ms=14.362`, `avg_processing_core_creative_ms=17.660`, `avg_processing_core_output_ms=1.128`, `avg_processing_core_other_ms=3.787`, `avg_processing_shadows_highlights_prep_ms=23.915`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.739`, `avg_render_total_ms=162.413`, `avg_llrawproc_ms=62.239`, `avg_processing_ms=68.848`, `avg_processing_core_ms=45.783`, `avg_processing_core_levels_ms=6.087`, `avg_processing_core_color_ms=14.587`, `avg_processing_core_creative_ms=20.630`, `avg_processing_core_output_ms=1.239`, `avg_processing_core_other_ms=5.935`, `avg_processing_shadows_highlights_prep_ms=23.043`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.624`, `avg_render_total_ms=140.208`, `avg_llrawproc_ms=34.528`, `avg_processing_ms=73.038`, `avg_processing_core_ms=48.925`, `avg_processing_core_levels_ms=8.094`, `avg_processing_core_color_ms=17.151`, `avg_processing_core_creative_ms=21.736`, `avg_processing_core_output_ms=1.359`, `avg_processing_core_other_ms=3.509`, `avg_processing_shadows_highlights_prep_ms=24.113`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- The probe lost on all three clips, so it is a throughput reject rather than a keeper.
+- The visual state stayed intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Needs runtime profiling
+
+- The lookup caching did not move the gate enough to matter.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact alias-cache shape is not a keeper.
