@@ -5238,3 +5238,33 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `M16-1327`: `avg_latency_ms=1121.806`, `avg_cadence_ms=608.208`, `dual_iso_total_ms=249.667`, `dual_iso_mix_chroma_ms=50.000`, `dual_iso_mix_chroma_fullres_ms=24.667`, `dual_iso_mix_chroma_halfres_ms=22.667`, `dual_iso_final_blend_ms=14.000`
   - `M16-1347`: `avg_latency_ms=778.901`, `avg_cadence_ms=590.453`, `dual_iso_total_ms=261.333`, `dual_iso_mix_chroma_ms=58.000`, `dual_iso_mix_chroma_fullres_ms=29.000`, `dual_iso_mix_chroma_halfres_ms=26.333`, `dual_iso_final_blend_ms=15.667`
   - `M16-1446`: `avg_latency_ms=690.630`, `avg_cadence_ms=429.770`, `dual_iso_total_ms=195.333`, `dual_iso_mix_chroma_ms=0.000`, `dual_iso_final_blend_ms=14.000`
+
+## 2026-05-30 - rejected chroma_smooth 2x2 center-cell EV hoist
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) by hoisting the center cell's repeated raw-to-EV lookups out of both the horizontal and vertical 2x2 sample passes so the two passes could reuse the same converted center values.
+- The visible GUI smoke gate stayed valid with x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, but the probe was slower than the accepted nearby baseline on the chroma-heavy clips, so it was rejected and reverted.
+- Probe smoke evidence from `.claude-state/profiling/20260530-center-cell-hoist/`:
+  - `M16-1327`: `presented_fps=4.999`, `avg_render_total_ms=188.000`, `avg_llrawproc_ms=61.140`, `avg_mix_chroma_ms=26.600`, `avg_final_blend_ms=7.240`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.589`, `avg_render_total_ms=207.457`, `avg_llrawproc_ms=69.800`, `avg_mix_chroma_ms=28.040`, `avg_final_blend_ms=9.740`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.783`, `avg_render_total_ms=165.414`, `avg_llrawproc_ms=34.138`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.724`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The center-cell hoist preserved the direct8 guard and kept `processed8_direct_path_frames=0`, but it did not improve the retained-path throughput on this VM.
+- The center-cell hoist is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `chroma_smooth.c`, the next candidate should be a different structural reduction in the retained 2x2 smoother rather than another center-cell EV hoist of the same sample window.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted center-cell hoist out and look for a different retained-path reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
