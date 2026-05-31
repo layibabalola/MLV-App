@@ -1,3 +1,18 @@
+## 2026-05-30 - rejected final_blend no-alias AVX2 specialization
+- I tried routing the common `alias_map == NULL` AVX2 branch in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) through the existing `final_blend_row_avx2_no_alias()` specialization instead of the generic `final_blend_row_avx2()` kernel.
+- That specialization did not survive the visible x1 Quality / settled Auto Look Assist gate: all three alias-map-free clips regressed versus the accepted baseline, so I reverted the dispatcher back to the generic kernel and kept the alias-map path untouched.
+- The probe build used [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) at `LastWriteTime=5/30/2026 8:09:20 PM`, `Length=8793088`, `SHA256=559C73A98F423A2A04E7A32B188C781404E1A0B283FDB2AF230DB7DFBBFCF792`.
+- Probe smoke results:
+  - `M16-1327`: `presented_fps=4.743`, `avg_render_total_ms=194.263`, `avg_llrawproc_ms=63.789`, `avg_mix_chroma_ms=25.711`, `avg_final_blend_ms=7.000`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.994`, `avg_render_total_ms=190.750`, `avg_llrawproc_ms=62.525`, `avg_mix_chroma_ms=26.150`, `avg_final_blend_ms=7.825`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.356`, `avg_render_total_ms=176.163`, `avg_llrawproc_ms=38.209`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=7.000`, `processed8_direct_path_frames=0`
+- After the revert, the restored baseline rebuild is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) at `LastWriteTime=5/30/2026 8:12:14 PM`, `Length=8793088`, `SHA256=DCAB115C5F5ADDDF06FB58C71946D9836B6084611D165415EBD09ECBB733F1BC`.
+- The restored-baseline smoke stayed visually valid with x1 Quality and settled Auto Look Assist intact, and `processed8_direct_path_frames=0` remained true:
+  - `M16-1327`: `presented_fps=5.121`, `avg_render_total_ms=183.976`, `avg_llrawproc_ms=59.756`, `avg_mix_chroma_ms=23.732`, `avg_final_blend_ms=7.000`
+  - `M16-1347`: `presented_fps=5.108`, `avg_render_total_ms=186.341`, `avg_llrawproc_ms=60.293`, `avg_mix_chroma_ms=27.122`, `avg_final_blend_ms=7.537`
+  - `M16-1446`: `presented_fps=5.729`, `avg_render_total_ms=164.674`, `avg_llrawproc_ms=38.196`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.022`
+- The next useful target remains a different retained `dualiso.c` reduction, not this no-alias kernel specialization in the current shape.
+
 ## 2026-05-30 - rejected 2x2 chroma_smooth EV-row cache probe
 - I tried a cache-friendly rewrite in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) that hoisted the five red/blue EV lookups used by the 2x2 smoother into small per-cell locals so the horizontal and vertical sample passes could reuse the same converted values.
 - The visible x1 Quality / settled Auto Look Assist smoke gate stayed valid, and the direct8 guard remained intact with `processed8_direct_path_frames=0`, but the probe did not beat the accepted baseline on the chroma-heavy clips, so it was reverted back to the accepted 2x2 shape.
