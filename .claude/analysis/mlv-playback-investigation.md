@@ -7217,3 +7217,33 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - If we revisit this region, the next probe should start from the current keeper baseline and target a different branch shape or data layout instead of this scalar-hoist variant.
+
+## 2026-05-31 - rejected AgX branch split probe for generic color loop
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by splitting the generic color-loop `processing->AgX` branch out of the per-pixel loop so the common AgX-on path could avoid the inner `if` test.
+- The focused object build for `obj/raw_processing.o` completed successfully.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Release executable metadata after the AgX split rebuild:
+  - `LastWriteTime`: `2026-05-31 08:26:56`
+  - `Length`: `8796672`
+  - `SHA256`: `603E58333656202763E1CA6BBED52016CB9A2B321AD3DEBCA4692F4B1F9E531F`
+- Visible GUI smoke results from `.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=6.247`, `avg_render_total_ms=149.640`, `avg_llrawproc_ms=59.340`, `avg_processing_core_color_ms=14.840`, `avg_processing_core_creative_ms=12.300`, `avg_processing_shadows_highlights_prep_ms=22.980`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.865`, `avg_render_total_ms=158.723`, `avg_llrawproc_ms=66.553`, `avg_processing_core_color_ms=15.190`, `avg_processing_core_creative_ms=11.936`, `avg_processing_shadows_highlights_prep_ms=22.851`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.742`, `avg_render_total_ms=139.056`, `avg_llrawproc_ms=41.389`, `avg_processing_core_color_ms=16.019`, `avg_processing_core_creative_ms=11.648`, `avg_processing_shadows_highlights_prep_ms=24.519`, `processed8_direct_path_frames=0`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost the three-clip gate:
+  - `M16-1327`: keeper `6.608 fps` vs probe `6.247 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.865 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `6.742 fps`
+- I reverted the AgX split probe and restored `raw_processing.c` to the checked-in baseline before finalizing this handoff.
+
+### Cross-checked from prior analysis
+
+- The visible gate stayed intact and `processed8_direct_path_frames` remained `0`, so this is a throughput reject rather than a visual regression.
+- The common-path AgX split did not beat the keeper on any clip, so it is not a keeper candidate.
+
+### Needs runtime profiling
+
+- If we revisit this region, the next probe should start from the current keeper baseline and target a different branch shape or data layout instead of this AgX split variant.
