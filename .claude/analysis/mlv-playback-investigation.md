@@ -7533,3 +7533,28 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next probe should target a different hot path or a more impactful structural change than the shadow/highlight curve-index toggle.
 - `avg_processing_shadows_highlights_prep_ms` remains a meaningful hot bucket, but this toggle is not the winner.
+
+## 2026-05-31 - current-baseline RBF and Dual ISO timing read
+
+### Verified locally
+
+- I reran the three visible smoke clips on the current baseline with `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING=1` to get a lower-level timing read without changing the code.
+- The visible gate stayed valid on all three clips: x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- The detailed RBF timing shows the accepted half-res Shadows/Highlights path is still behaving as expected, but the vertical passes remain the dominant RBF cost:
+  - `M16-1327`: `avg_processing_shadows_highlights_prep_ms=22.373`, `avg_sh_prep_ms=22.373`, `avg_sh_filter_ms=22.373`, `avg_total_ms=16.824`, `avg_left_ms=1.922`, `avg_right_ms=1.804`, `avg_horizontal_average_ms=1.824`, `avg_vertical_down_ms=6.451`, `avg_vertical_up_ms=5.902`, `avg_output_ms=2.843`
+  - `M16-1347`: `avg_processing_shadows_highlights_prep_ms=22.816`, `avg_sh_prep_ms=22.816`, `avg_sh_filter_ms=22.816`, `avg_total_ms=16.592`, `avg_left_ms=1.490`, `avg_right_ms=1.612`, `avg_horizontal_average_ms=2.102`, `avg_vertical_down_ms=5.592`, `avg_vertical_up_ms=5.714`, `avg_output_ms=3.327`
+  - `M16-1446`: `avg_processing_shadows_highlights_prep_ms=21.950`, `avg_sh_prep_ms=21.950`, `avg_sh_filter_ms=21.933`, `avg_total_ms=16.400`, `avg_left_ms=1.700`, `avg_right_ms=1.550`, `avg_horizontal_average_ms=1.850`, `avg_vertical_down_ms=6.250`, `avg_vertical_up_ms=6.467`, `avg_output_ms=2.917`
+- The same run also showed the retained Dual ISO path remains substantial on these clips:
+  - `M16-1327`: `avg_llrawproc_ms=61.353`, `avg_processing_core_color_ms=13.314`, `avg_processing_core_creative_ms=11.098`, `avg_processing_core_output_ms=1.275`, `avg_processing_shadows_highlights_prep_ms=22.373`, `avg_mix_chroma_ms=24.686`, `avg_final_blend_ms=7.118`
+  - `M16-1347`: `avg_llrawproc_ms=60.408`, `avg_processing_core_color_ms=13.878`, `avg_processing_core_creative_ms=10.959`, `avg_processing_core_output_ms=1.265`, `avg_processing_shadows_highlights_prep_ms=22.816`, `avg_mix_chroma_ms=26.306`, `avg_final_blend_ms=7.490`
+  - `M16-1446`: `avg_llrawproc_ms=34.467`, `avg_processing_core_color_ms=13.983`, `avg_processing_core_creative_ms=11.867`, `avg_processing_core_output_ms=1.183`, `avg_processing_shadows_highlights_prep_ms=21.950`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=0.000`
+
+### Cross-checked from prior analysis
+
+- The current color-path SIMD keeper still appears to be the best visible-gate performer on the three-clip comparison, but this run shows the remaining retained-path work is split between the generic color loop and the Dual ISO mix stack.
+- The RBF core is no longer the obvious next structural lever: it is still hot, but it is already much smaller than the retained Dual ISO mix bucket on the chroma-heavy clips.
+
+### Needs runtime profiling
+
+- The next probe should likely move to `src/mlv/llrawproc/dualiso.c`, especially `mix_chroma` or a deeper `final_blend` reduction, rather than another RBF recurrence tweak.
+- If we stay in `raw_processing.c`, the next candidate needs to be materially different from the rejected branch-split family already recorded above.
