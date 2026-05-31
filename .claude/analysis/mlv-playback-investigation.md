@@ -7835,3 +7835,60 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - The next probe should return to a structurally different `mix_chroma` or deeper retained-path change, not another tiny threshold hoist in `chroma_smooth.c`.
+
+## 2026-05-31 - rejected fused 2x2 chroma pair-region probe
+
+### Verified locally
+
+- I tried a more structural retained-path probe by refactoring the 2x2 chroma smoother in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) into a reusable row helper and then calling it from [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) under a single fused OpenMP region for the `chroma_smooth_method == 2` case.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the probe build and again after restoring the baseline source shape.
+- Probe release executable metadata:
+  - `LastWriteTime`: `2026-05-31 12:29:53 PM`
+  - `Length`: `8796672`
+  - `SHA256`: `B628CCBC943DA64E537E06D34CA7963ABFB4391CA23A3DF300463E27E31F23C0`
+- Reverted-baseline release executable metadata:
+  - `LastWriteTime`: `2026-05-31 12:33:11 PM`
+  - `Length`: `8797184`
+  - `SHA256`: `C1C5ACD1CE73517FC4709518930FF5DF5DA5D9365B630D057BA3D6AD55E700E4`
+- Settled-frame averages from frames 1+2 for the probe were:
+  - `M16-1327`: `render_thread_work_ms=301`, `llrawproc_ms=137`, `dual_iso_full20_mix_chroma_ms=83`, `dual_iso_full20_final_blend_ms=10.5`
+  - `M16-1347`: `render_thread_work_ms=302`, `llrawproc_ms=142.5`, `dual_iso_full20_mix_chroma_ms=77`, `dual_iso_full20_final_blend_ms=12`
+  - `M16-1446`: `render_thread_work_ms=208.5`, `llrawproc_ms=42.5`, `dual_iso_full20_mix_chroma_ms=0`, `dual_iso_full20_final_blend_ms=8`
+- The visible gate stayed on x1 Quality with settled Auto Look Assist and `dual_iso_alias_map=0`, but the probe was materially slower than the accepted baseline on the chroma-heavy clips.
+
+### Cross-checked from prior analysis
+
+- Compared with the accepted nearby baseline, this fused-region shape was a throughput reject.
+- The helper/pair fusion did not improve the retained Dual ISO mix stack enough to displace the current accepted baseline.
+
+### Needs runtime profiling
+
+- The next probe should return to a different `mix_chroma` shape or a separate retained-path hotspot rather than another OpenMP-region fusion in `chroma_smooth.c`.
+
+## 2026-05-31 - rejected single-row OpenMP fusion for 2x2 chroma smoothing
+
+### Verified locally
+
+- I changed the retained Dual ISO chroma smoothing path so `chroma_smooth_method == 2` now runs the 2x2 row helper under a single `#pragma omp parallel for` in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) with the reusable row helper in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c). I rebuilt the user-facing release tree and reran the three visible GUI smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_active=0` on the settled frames.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 12:37:50 PM`
+  - `Length`: `8800256`
+  - `SHA256`: `8058E26A872DECE463A602AC7BC1E034AB844C6CB56D564FE492CCCBEE46055A`
+- Release executable metadata after restoring the accepted baseline:
+  - `LastWriteTime`: `2026-05-31 12:40:54 PM`
+  - `Length`: `8797184`
+  - `SHA256`: `A2607211D1A74738FE4806F65F33336E6B18E44A955E1A269B581355D6393589`
+- Settled-frame averages from frames 1+2 for the probe were:
+  - `M16-1327`: `latency_ms=548.9422`, `render_thread_work_ms=346.5000`, `llrawproc_ms=157.0001`, `llrawproc_dual_iso_ms=157.0001`, `dual_iso_full20_mix_chroma_ms=81.4999`, `dual_iso_full20_final_blend_ms=11.5000`
+  - `M16-1347`: `latency_ms=485.6672`, `render_thread_work_ms=281.0000`, `llrawproc_ms=123.0000`, `llrawproc_dual_iso_ms=123.0000`, `dual_iso_full20_mix_chroma_ms=65.5000`, `dual_iso_full20_final_blend_ms=13.0000`
+  - `M16-1446`: `latency_ms=327.5452`, `render_thread_work_ms=196.0001`, `llrawproc_ms=41.0000`, `llrawproc_dual_iso_ms=41.0000`, `dual_iso_full20_mix_chroma_ms=0.0000`, `dual_iso_full20_final_blend_ms=6.0000`
+- The visible gate stayed intact on all three clips, but the probe did not beat the keeper on the full three-clip comparison.
+
+### Cross-checked from prior analysis
+
+- Current keeper `ed2821e1` still remains the better visible-gate result for this region.
+- The single-row OpenMP fusion did not reduce the retained Dual ISO mix-stack cost enough to displace the accepted baseline.
+
+### Needs runtime profiling
+
+- The next Dual ISO probe should be structurally different from this row-loop fusion, with `mix_chroma` still the best retained-path hotspot to chase.
