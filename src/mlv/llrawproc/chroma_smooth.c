@@ -61,7 +61,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
         const int probe_detail = probe_mode >= 0;
         const int probe_horiz = probe_detail && (probe_mode == 0 || probe_mode == 1);
         const int probe_vert = probe_detail && (probe_mode == 0 || probe_mode == 2);
-        const int probe_center = probe_detail && (probe_mode == 0 || probe_mode == 3);
+        const int probe_stage = g_dualiso_full20bit_timing.mix_chroma_probe_stage;
+        const int probe_center_fullres = probe_detail && (probe_mode == 0 || probe_mode == 3) && probe_stage == 1;
+        const int probe_center_halfres = probe_detail && (probe_mode == 0 || probe_mode == 3) && probe_stage == 2;
+        const int probe_center = probe_center_fullres || probe_center_halfres;
         const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m2 = inp + (size_t)(y - 2) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m1 = inp + (size_t)(y - 1) * (size_t)w;
@@ -174,8 +177,15 @@ static void CHROMA_SMOOTH_FUNC(int w,
             int g6 = raw2ev[row_y_p2[x+1]];
             if (probe_center)
             {
-                g_dualiso_full20bit_timing.mix_chroma_center_gather_probe_ms +=
-                    (mlv_stage_timing_now() - chroma_center_gather_start) * 1000.0;
+                const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_gather_start) * 1000.0;
+                if (probe_center_fullres)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_center_gather_probe_ms += elapsed_ms;
+                }
+                else
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_halfres_center_gather_probe_ms += elapsed_ms;
+                }
                 chroma_center_arithmetic_start = mlv_stage_timing_now();
             }
 
@@ -216,8 +226,15 @@ static void CHROMA_SMOOTH_FUNC(int w,
             }
             if (probe_center)
             {
-                g_dualiso_full20bit_timing.mix_chroma_center_arithmetic_probe_ms +=
-                    (mlv_stage_timing_now() - chroma_center_arithmetic_start) * 1000.0;
+                const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_arithmetic_start) * 1000.0;
+                if (probe_center_fullres)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_center_arithmetic_probe_ms += elapsed_ms;
+                }
+                else
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_halfres_center_arithmetic_probe_ms += elapsed_ms;
+                }
                 chroma_center_store_start = mlv_stage_timing_now();
             }
 
@@ -227,8 +244,15 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 out_y[x] = ev2raw[COERCE(gr + dr, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
                 if (probe_center)
                 {
-                    g_dualiso_full20bit_timing.mix_chroma_center_store_r_probe_ms +=
-                        (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
+                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_store_r_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_probe_ms += elapsed_ms;
+                    }
                 }
             }
 
@@ -238,16 +262,31 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 out_y_p1[x + 1] = ev2raw[COERCE(gb + db, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1)];
                 if (probe_center)
                 {
-                    g_dualiso_full20bit_timing.mix_chroma_center_store_b_probe_ms +=
-                        (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
+                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_store_b_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms += elapsed_ms;
+                    }
                 }
             }
             if (probe_center)
             {
-                g_dualiso_full20bit_timing.mix_chroma_center_store_probe_ms +=
-                    (mlv_stage_timing_now() - chroma_center_store_start) * 1000.0;
-                g_dualiso_full20bit_timing.mix_chroma_center_probe_ms +=
-                    (mlv_stage_timing_now() - chroma_center_start) * 1000.0;
+                const double store_elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_start) * 1000.0;
+                const double total_elapsed_ms = (mlv_stage_timing_now() - chroma_center_start) * 1000.0;
+                if (probe_center_fullres)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_center_store_probe_ms += store_elapsed_ms;
+                    g_dualiso_full20bit_timing.mix_chroma_center_probe_ms += total_elapsed_ms;
+                }
+                else
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_probe_ms += store_elapsed_ms;
+                    g_dualiso_full20bit_timing.mix_chroma_halfres_center_probe_ms += total_elapsed_ms;
+                }
             }
         }
     }

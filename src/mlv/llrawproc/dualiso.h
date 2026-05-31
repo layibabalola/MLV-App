@@ -166,6 +166,12 @@ typedef struct
     double mix_chroma_center_store_probe_ms;
     double mix_chroma_center_store_r_probe_ms;
     double mix_chroma_center_store_b_probe_ms;
+    double mix_chroma_halfres_center_probe_ms;
+    double mix_chroma_halfres_center_gather_probe_ms;
+    double mix_chroma_halfres_center_arithmetic_probe_ms;
+    double mix_chroma_halfres_center_store_probe_ms;
+    double mix_chroma_halfres_center_store_r_probe_ms;
+    double mix_chroma_halfres_center_store_b_probe_ms;
     double mix_alias_map_ms;
     double mix_overexposed_ms;
     double final_blend_setup_ms;
@@ -184,6 +190,7 @@ typedef struct
     double mix_curve_corr_ev;
     double mix_curve_overlap;
     int mix_chroma_probe_mode;
+    int mix_chroma_probe_stage;
     int final_blend_probe_mode;
     int mix_curve_rebuilt;
     int mix_curve_global_hit;
