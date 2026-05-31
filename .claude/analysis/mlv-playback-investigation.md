@@ -4987,3 +4987,36 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 1. High impact / medium risk: leave the reverted maskless blend-kernel path out and look for a different retained-path reduction in `dualiso.c` or `dualiso_avx2.inc`.
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
+## 2026-05-30 - rejected dualiso AVX2 alias-map all-skip / no-skip fast path
+
+### Verified locally
+
+- I probed the AVX2 alias-map row kernels in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) by adding fast paths for two obvious cases:
+  - all 8 lanes skipped by the `fullres_curve[bright] > fullres_thr` predicate
+  - no lanes skipped, so the blend could store directly without loading the existing row
+- The sequential visible GUI smoke gate stayed valid with x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, but the probe did not beat the accepted nearby fallback baseline on the chroma-heavy clips, so it was reverted.
+- Probe smoke results from `.claude-state/profiling/20260530-dualiso-alias-fastpath-gui-smoke/`:
+  - `M16-1327`: `presented_fps=5.249`, `avg_render_total_ms=180.143`, `avg_llrawproc_ms=59.810`, `avg_mix_chroma_ms=25.000`, `avg_chroma_copy_ms=5.619`, `avg_chroma_fullres_ms=9.452`, `avg_chroma_halfres_ms=9.929`, `avg_final_blend_ms=6.881`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.868`, `avg_render_total_ms=194.641`, `avg_llrawproc_ms=66.949`, `avg_mix_chroma_ms=28.487`, `avg_chroma_copy_ms=6.103`, `avg_chroma_fullres_ms=11.205`, `avg_chroma_halfres_ms=11.179`, `avg_final_blend_ms=7.487`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.498`, `avg_render_total_ms=168.750`, `avg_llrawproc_ms=37.591`, `avg_mix_chroma_ms=0.000`, `avg_chroma_copy_ms=0.000`, `avg_chroma_fullres_ms=0.000`, `avg_chroma_halfres_ms=0.000`, `avg_final_blend_ms=8.023`, `processed8_direct_path_frames=0`
+- After reverting the probe, the user-facing release executable was rebuilt back onto the baseline source shape at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 7:52:11 PM`, `Length=8793088`, `SHA256=8345115A1A3A8DF0307491EE362B6A93E2FBDEECF4504CD8B35BCF857E3CE80C`.
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The probe preserved the direct8 guard and the visible smoke still reported `processed8_direct_path_frames=0`, so the regression is isolated to the retained fallback path rather than a direct8 fallback regression.
+- The all-skip / no-skip alias-map fast path did not beat the accepted baseline on this VM, so it is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `dualiso.c` and `dualiso_avx2.inc`, the next candidate should again be a different structural reduction in the retained Dual ISO mix stack rather than another control-flow shortcut around the alias-map row kernels.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted alias-map fast path out and look for a different retained-path reduction in `dualiso.c` or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
