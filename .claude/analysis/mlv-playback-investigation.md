@@ -5620,6 +5620,51 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-31 - rejected playback_downsample x-only AVX2 probe
+
+### Verified locally
+
+- I probed [`src/processing/playback_downsample.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/playback_downsample.c) by adding an AVX2 row kernel for the scale-4 x-only Bayer downsample fallback and routing the x-only path through it when `g_pl_downsample_use_avx2` is enabled.
+- The user-facing release tree was rebuilt from the probe, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it was slower than the accepted nearby baseline on all three clips, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 1:51:37 AM`
+  - `Length=8795136`
+  - `SHA256=EB2E2065ECD03C0FC3BBA8D1E2F7A296E0E8A453AD21C3FE947615A2D87EDA20`
+- Reverted release executable metadata after restoring the baseline source shape:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 1:56:00 AM`
+  - `Length=8795136`
+  - `SHA256=0A1F98B30CB1E7801FC0812A6966D1D0BAA59E37957F973F691646CEC8CF900D`
+- Probe smoke results from `.claude-state/profiling/20260531-playback-downsample-avx2-smoke/`:
+  - `M16-1327`: `presented_fps=5.114`, `avg_render_total_ms=184.146`, `avg_llrawproc_ms=78.683`, `avg_processed16_ms=175.000`, `avg_processing_shadows_highlights_prep_ms=27.439`, `avg_debayer_exclusive_ms=7.780`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.743`, `avg_render_total_ms=200.184`, `avg_llrawproc_ms=96.658`, `avg_processed16_ms=191.053`, `avg_processing_shadows_highlights_prep_ms=24.368`, `avg_debayer_exclusive_ms=7.474`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.110`, `avg_render_total_ms=185.146`, `avg_llrawproc_ms=63.951`, `avg_processed16_ms=174.439`, `avg_processing_shadows_highlights_prep_ms=33.073`, `avg_debayer_exclusive_ms=9.220`, `processed8_direct_path_frames=0`
+- The visual state stayed intact:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby baseline for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The x-only AVX2 downsample probe preserved the direct8 guard, x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, so this remained a retained-path throughput reject rather than a visual regression.
+- The probe is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `playback_downsample.c`, the next candidate should be a different structural reduction in the same scale-4 path, not another x-only AVX2 row-kernel swap.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted x-only AVX2 helper out and look for a different reduction in the retained processing stack or a separate hotspot.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-31 - rejected debayer omp simd probe
 
 ### Verified locally
