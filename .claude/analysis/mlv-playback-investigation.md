@@ -1,3 +1,56 @@
+## 2026-05-31 - secondary bucket split in processing_core_color exposed cam and gamma as the next shared cost
+
+### Verified locally
+
+- I added a narrow measurement split to [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the hot `processing_core_color` bucket now reports `processing_core_color_cam_ms` and `processing_core_color_gamma_ms` in addition to the existing aggregate timing.
+- The timing plumbing was carried through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) after the split:
+  - `LastWriteTime=5/31/2026 6:19:12 PM`
+  - `Length=8846848`
+  - `SHA256=8CE3A0CB8B7D15C5AE88F5DCDF3B08BC4B0635B2C2F22B872863B3A4CB3A4929`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved.
+- The new split shows `processing_core_color` is still the largest secondary bucket, but its cam-matrix and gamma pieces are both material rather than a single clean slam-dunk:
+  - `M16-1327`: `processing_core_color_ms=328.000`, `processing_core_color_cam_ms=64.500`, `processing_core_color_gamma_ms=71.000`
+  - `M16-1347`: `processing_core_color_ms=267.500`, `processing_core_color_cam_ms=77.999`, `processing_core_color_gamma_ms=59.500`
+  - `M16-1446`: `processing_core_color_ms=334.500`, `processing_core_color_cam_ms=82.999`, `processing_core_color_gamma_ms=65.000`
+- The visible gate stayed intact, so this remains a throughput investigation rather than a quality regression.
+
+### Cross-checked from prior analysis
+
+- The retained `mix_chroma` center-path skews are now fully characterized enough to stop chasing one-sided store work there.
+- The `processing_core_color` bucket is the next highest-value retained bucket, but the new split shows it is still internally mixed rather than obviously dominated by one tiny sub-bucket.
+
+### Needs runtime profiling
+
+- If we keep improving locally, the next question is whether `processing_core_color_cam` or `processing_core_color_gamma` can be split again into a clearer keeper-shaped reduction.
+- If that split also fails to expose a clearly dominant sub-bucket, the honest move is to stop local CPU work and move to the next retained bucket.
+
+## 2026-05-31 - rejected one-sided center-store specialization for mix_chroma
+
+### Verified locally
+
+- I added probe-only write-pattern and branch-skew counters to the retained `mix_chroma` center path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), threaded them through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h) and [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe), and reran the same three visible smoke clips with `MLVAPP_DUALISO_MIX_CHROMA_PROBE=3`.
+- The profiled release executable is current at:
+  - `LastWriteTime=5/31/2026 6:07:28 PM`
+  - `Length=8844800`
+  - `SHA256=9A20D51AC96200DAA7E0E6D01F7F6BD0C12F112B03DF922E35ACA95FACF19579`
+- The visible smoke gate stayed intact on the rerun: x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`.
+- The new probe shows the center store path is fully shared, not one-sided:
+  - `M16-1327`: settled center writes were `both=2034000`, `r_only=0`, `b_only=0`, `none=0`; `use_average=79287` and `ev_lt_eh=418547`
+  - `M16-1347`: settled center writes were `both=2034000`, `r_only=0`, `b_only=0`, `none=0`; `use_average=131495` and `ev_lt_eh=890341`
+  - `M16-1446`: `mix_chroma` stayed bypassed, so the center counters stayed at `0`
+- That rules out a one-sided store specialization as the next narrow patch. The only remaining skew inside this probe is the arithmetic branch, and even that skew is modest rather than extreme.
+
+### Cross-checked from prior analysis
+
+- The earlier store-path helper was still the right keeper shape.
+- The new write-pattern probe confirms the helper should not be split into separate `r_only` / `b_only` fast paths for the chroma-heavy clips we are using as the visible gate.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next candidate should be a different center-path reduction than one-sided store specialization.
+- If we do not find a stronger arithmetic or gather skew next, the honest move is to stop local CPU work and move to secondary buckets.
+
 ## 2026-05-31 - rejected offset-pointer EV lookup in the store-heavy mix_chroma helper
 
 ### Verified locally

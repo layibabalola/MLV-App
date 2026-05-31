@@ -91,8 +91,21 @@ static void CHROMA_SMOOTH_FUNC(int w,
         {
             int r0 = row_y[x];
             int b0 = row_y_p1[x + 1];
-            if ((unsigned int)r0 >= white_u && (unsigned int)b0 >= white_u)
+            const int write_r = (unsigned int)r0 < white_u;
+            const int write_b = (unsigned int)b0 < white_u;
+            if (!write_r && !write_b)
             {
+                if (probe_center)
+                {
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_write_none_count += 1.0;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_write_none_count += 1.0;
+                    }
+                }
                 continue;
             }
 
@@ -178,8 +191,53 @@ static void CHROMA_SMOOTH_FUNC(int w,
             double chroma_center_store_r_start = 0.0;
             double chroma_center_store_b_start = 0.0;
             if (probe_center) chroma_center_gather_start = mlv_stage_timing_now();
-            const int write_r = (unsigned int)r0 < white_u;
-            const int write_b = (unsigned int)b0 < white_u;
+            if (probe_center)
+            {
+                if (write_r && write_b)
+                {
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_write_both_count += 1.0;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_write_both_count += 1.0;
+                    }
+                }
+                else if (write_r)
+                {
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_write_r_only_count += 1.0;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_write_r_only_count += 1.0;
+                    }
+                }
+                else if (write_b)
+                {
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_write_b_only_count += 1.0;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_write_b_only_count += 1.0;
+                    }
+                }
+                else
+                {
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_write_none_count += 1.0;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_write_none_count += 1.0;
+                    }
+                }
+            }
             int g1 = raw2ev[row_y[x+1]];
             int g2 = raw2ev[row_y_p1[x]];
             int g3 = raw2ev[row_y[x-1]];
@@ -204,10 +262,36 @@ static void CHROMA_SMOOTH_FUNC(int w,
             int grh = (g1+g3)/2;
             int gbv = (g1+g6)/2;
             int gbh = (g2+g5)/2;
-            int dr = ev < eh ? drv : drh;
-            int db = ev < eh ? dbv : dbh;
+            const int choose_ev_lt_eh = ev < eh;
+            if (probe_center)
+            {
+                if (choose_ev_lt_eh)
+                {
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_choose_ev_lt_eh_count += 1.0;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_choose_ev_lt_eh_count += 1.0;
+                    }
+                }
+            }
+            int dr = choose_ev_lt_eh ? drv : drh;
+            int db = choose_ev_lt_eh ? dbv : dbh;
             int thr = 64;
             const int use_average = r0 < black_thr || b0 < black_thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr;
+            if (probe_center && use_average)
+            {
+                if (probe_center_fullres)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_center_use_average_count += 1.0;
+                }
+                else
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_halfres_center_use_average_count += 1.0;
+                }
+            }
 
             int gr = 0;
             if (write_r)
@@ -219,7 +303,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 }
                 else
                 {
-                    gr = ev < eh ? grv : grh;
+                    gr = choose_ev_lt_eh ? grv : grh;
                 }
             }
             int gb = 0;
@@ -232,7 +316,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 }
                 else
                 {
-                    gb = ev < eh ? gbv : gbh;
+                    gb = choose_ev_lt_eh ? gbv : gbh;
                 }
             }
             if (probe_center)

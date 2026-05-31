@@ -930,6 +930,8 @@ private:
     double m_playbackSmokeProcessingCoreSumMs = 0.0;
     double m_playbackSmokeProcessingCoreLevelsSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorGammaSumMs = 0.0;
     double m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
     double m_playbackSmokeProcessingCoreOutputSumMs = 0.0;
     double m_playbackSmokeProcessingCoreOtherSumMs = 0.0;
