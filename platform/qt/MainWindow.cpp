@@ -15726,6 +15726,26 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_mix_alias_map_ms" );
     const double dualIsoFull20MixOverexposedMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_overexposed_ms" );
+    const double dualIsoFull20FinalBlendSetupMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_setup_ms" );
+    const double dualIsoFull20FinalBlendRowKernelMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_row_kernel_ms" );
+    const double dualIsoFull20FinalBlendRaw2EvGatherProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_raw2ev_gather_probe_ms" );
+    const double dualIsoFull20FinalBlendFullresCurveGatherProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_fullres_curve_gather_probe_ms" );
+    const double dualIsoFull20FinalBlendEv2RawStoreProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_ev2raw_store_probe_ms" );
+    const double dualIsoFull20FinalBlendArithmeticProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_arithmetic_probe_ms" );
+    const double dualIsoFull20FinalBlendOverexposedDensity =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_overexposed_density" );
+    const double dualIsoFull20FinalBlendCapClampPct =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_cap_clamp_pct" );
+    const double dualIsoFull20FinalBlendFNear0Pct =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_f_near_0_pct" );
+    const double dualIsoFull20FinalBlendFNear1Pct =
+        telemetryDoubleValue( timing, "dual_iso_full20_final_blend_f_near_1_pct" );
     const double dualIsoFull20FinalBlendMs =
         telemetryDoubleValue( timing, "dual_iso_full20_final_blend_ms" );
     const double dualIsoFull20Convert16Ms =
@@ -15734,6 +15754,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_other_ms" );
     const int dualIsoFull20InterpMethod =
         telemetryIntValue( timing, "dual_iso_full20_interp_method" );
+    const int dualIsoFull20FinalBlendProbeMode =
+        telemetryIntValue( timing, "dual_iso_full20_final_blend_probe_mode" );
     const int dualIsoFull20Threads =
         telemetryIntValue( timing, "dual_iso_full20_threads" );
     const bool dualIsoFull20AliasMap =
@@ -16044,8 +16066,15 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        "mix_ms=%11 mix_curve_select_ms=%12 mix_curve_build_ms=%13 "
                        "mix_curve_float_ms=%14 mix_ev_lut_ms=%15 mix_halfres_ms=%16 "
                        "mix_chroma_ms=%17 mix_alias_map_ms=%18 mix_overexposed_ms=%19 "
-                       "final_blend_ms=%20 convert16_ms=%21 other_ms=%22 "
-                       "interp_method=%23 alias_map=%24 fullres=%25 threads=%26" )
+                       "final_blend_setup_ms=%20 final_blend_row_kernel_ms=%21 "
+                       "final_blend_raw2ev_gather_probe_ms=%22 "
+                       "final_blend_fullres_curve_gather_probe_ms=%23 "
+                       "final_blend_ev2raw_store_probe_ms=%24 "
+                       "final_blend_arithmetic_probe_ms=%25 "
+                       "final_blend_overexposed_density=%26 final_blend_cap_clamp_pct=%27 "
+                       "final_blend_f_near_0_pct=%28 final_blend_f_near_1_pct=%29 "
+                       "final_blend_ms=%30 convert16_ms=%31 other_ms=%32 "
+                       "interp_method=%33 final_blend_probe_mode=%34 alias_map=%35 fullres=%36 threads=%37" )
                        .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                        .arg( m_playbackSmokePresentedFrames )
                        .arg( dualIsoFull20TotalMs, 0, 'f', 3 )
@@ -16065,10 +16094,21 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        .arg( dualIsoFull20MixChromaMs, 0, 'f', 3 )
                        .arg( dualIsoFull20MixAliasMapMs, 0, 'f', 3 )
                        .arg( dualIsoFull20MixOverexposedMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendSetupMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendRowKernelMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendRaw2EvGatherProbeMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendFullresCurveGatherProbeMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendEv2RawStoreProbeMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendArithmeticProbeMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendOverexposedDensity, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendCapClampPct, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendFNear0Pct, 0, 'f', 3 )
+                       .arg( dualIsoFull20FinalBlendFNear1Pct, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendMs, 0, 'f', 3 )
                        .arg( dualIsoFull20Convert16Ms, 0, 'f', 3 )
                        .arg( dualIsoFull20OtherMs, 0, 'f', 3 )
                        .arg( dualIsoFull20InterpMethod )
+                       .arg( dualIsoFull20FinalBlendProbeMode )
                        .arg( bool01( dualIsoFull20AliasMap ) )
                        .arg( bool01( dualIsoFull20Fullres ) )
                        .arg( dualIsoFull20Threads );

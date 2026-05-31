@@ -218,6 +218,35 @@ static void convert_20_to_16bit_row_avx2(uint16_t * out,
     *k_inout = k;
 }
 
+__attribute__((target("avx2,fma")))
+static inline void convert_raw32_chunk_to_16bit_avx2(uint16_t * out,
+                                                     __m256i raw,
+                                                     const float * randn_cache,
+                                                     int * k_inout)
+{
+    const __m256 v_inv16 = _mm256_set1_ps(1.0f/16.0f);
+    const __m256 v_half  = _mm256_set1_ps(0.5f);
+    const __m256i v_zero = _mm256_setzero_si256();
+    const __m256i v_max16 = _mm256_set1_epi32(0xFFFF);
+    int k = *k_inout;
+    int idxs[8] __attribute__((aligned(32)));
+    for (int i = 0; i < 8; i++) idxs[i] = (k + i) & 1023;
+    __m256i vidx = _mm256_load_si256((const __m256i*)idxs);
+    __m256 dither = _mm256_i32gather_ps(randn_cache, vidx, 4);
+    __m256 vf = _mm256_cvtepi32_ps(raw);
+    __m256 r = _mm256_fmadd_ps(vf, v_inv16, dither);
+    r = _mm256_add_ps(r, v_half);
+    __m256i ri = _mm256_cvttps_epi32(r);
+    ri = _mm256_max_epi32(ri, v_zero);
+    ri = _mm256_min_epi32(ri, v_max16);
+    __m128i lo = _mm256_castsi256_si128(ri);
+    __m128i hi = _mm256_extracti128_si256(ri, 1);
+    __m128i p  = _mm_packus_epi32(lo, hi);
+    _mm_storeu_si128((__m128i*)out, p);
+    k = (k + 8) & 1023;
+    *k_inout = k;
+}
+
 /* ====================================================================== *
  * B2.1 — final_blend kernel (the big win).
  * Direct transcription of .claude-state/profiling/20260424-phase-b0-final-blend/
@@ -302,6 +331,7 @@ static void final_blend_row_avx2_no_alias(uint32_t * raw_buffer_32,
 
 __attribute__((target("avx2,fma")))
 static void final_blend_row_avx2(uint32_t * raw_buffer_32,
+                                 uint16_t * image_data,
                                  const uint32_t * fullres,
                                  const uint32_t * fullres_smooth,
                                  const uint32_t * halfres_smooth,
@@ -314,7 +344,19 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
                                  const int * ev2raw_lut,        /* points to ev2raw_0 + 10*EV_RESOLUTION */
                                  const double * fullres_curve,
                                  int black, int dark_noise,
-                                 int total)
+                                 int total,
+                                 const float * randn_cache,
+                                 int * k_inout,
+                                 int fuse_to_16bit,
+                                 int probe_mode,
+                                 double * raw2ev_probe_ms,
+                                 double * fullres_curve_probe_ms,
+                                 double * arithmetic_probe_ms,
+                                 double * ev2raw_store_probe_ms,
+                                 double * overexposed_density,
+                                 double * cap_clamp_pct,
+                                 double * f_near_0_pct,
+                                 double * f_near_1_pct)
 {
     (void)raw2ev_lut;
     const __m256i mask20 = _mm256_set1_epi32(0xFFFFF);
@@ -326,6 +368,17 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
     const __m256  v_inv_alias = _mm256_set1_ps(1.0f / (float)DUALISO_ALIAS_MAP_MAX);
     const __m256  v_inv_200   = _mm256_set1_ps(1.0f / 200.0f);
     const __m256  v_inv4dn    = _mm256_set1_ps(1.0f / (4.0f * (float)dark_noise));
+    const int probe_raw2ev = (probe_mode == 0 || probe_mode == 1);
+    const int probe_fullres_curve = (probe_mode == 0 || probe_mode == 2);
+    const int probe_ev2raw_store = (probe_mode == 0 || probe_mode == 3);
+    const int probe_arithmetic = (probe_mode == 0 || probe_mode == 4);
+    const int probe_detail = probe_mode >= 0;
+    const __m256 v_near_zero = _mm256_set1_ps(0.01f);
+    const __m256 v_near_one = _mm256_set1_ps(0.99f);
+    double local_overexposed = 0.0;
+    double local_cap_clamp = 0.0;
+    double local_f_near_0 = 0.0;
+    double local_f_near_1 = 0.0;
 
     int x = 0;
     for (; x + 8 <= total; x += 8) {
@@ -335,10 +388,15 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
         __m256i frs = _mm256_loadu_si256((const __m256i*)&fullres_smooth[x]);
         __m256i d   = _mm256_loadu_si256((const __m256i*)&dark[x]);
 
+        double stage_start = 0.0;
+        if (probe_raw2ev) stage_start = mlv_stage_timing_now();
         __m256 hrev  = _mm256_i32gather_ps(raw2ev_float_lut, hr,  4);
         __m256 frev  = _mm256_i32gather_ps(raw2ev_float_lut, fr,  4);
         __m256 frsev = _mm256_i32gather_ps(raw2ev_float_lut, frs, 4);
+        if (probe_raw2ev) *raw2ev_probe_ms += dualiso_debug_elapsed_ms(stage_start);
 
+        stage_start = 0.0;
+        if (probe_fullres_curve) stage_start = mlv_stage_timing_now();
         __m256i b_idx = _mm256_and_si256(b, mask20);
         __m128i b_idx_lo = _mm256_castsi256_si128(b_idx);
         __m128i b_idx_hi = _mm256_extracti128_si256(b_idx, 1);
@@ -347,7 +405,10 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
         __m128 f_lo = _mm256_cvtpd_ps(f_lo_d);
         __m128 f_hi = _mm256_cvtpd_ps(f_hi_d);
         __m256 f = _mm256_insertf128_ps(_mm256_castps128_ps256(f_lo), f_hi, 1);
+        if (probe_fullres_curve) *fullres_curve_probe_ms += dualiso_debug_elapsed_ms(stage_start);
 
+        stage_start = 0.0;
+        if (probe_arithmetic) stage_start = mlv_stage_timing_now();
         __m256 c_amap;
         if (alias_map) {
             __m128i amap16 = _mm_loadu_si128((const __m128i*)&alias_map[x]);
@@ -366,21 +427,52 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
         __m256 c = _mm256_max_ps(c_amap, ovf);
         __m256 noisy_or_over = _mm256_max_ps(ovf, _mm256_sub_ps(v_one, f));
         f = _mm256_max_ps(f, c);
+        if (probe_detail) {
+            __m256 over_mask = _mm256_cmp_ps(ovf, v_zero, _CMP_GT_OQ);
+            local_overexposed += (double)dualiso_count_bits_u32((unsigned)_mm256_movemask_ps(over_mask));
+        }
 
         __m256 fev = _mm256_fmadd_ps(noisy_or_over, _mm256_sub_ps(frsev, frev), frev);
 
         __m256i sig = _mm256_srai_epi32(_mm256_add_epi32(d, b), 1);
         __m256i sig_minus_black = _mm256_sub_epi32(sig, v_black);
         __m256 cap = _mm256_mul_ps(_mm256_cvtepi32_ps(sig_minus_black), v_inv4dn);
+        if (probe_detail) {
+            __m256 cap_clamp_mask = _mm256_cmp_ps(f, cap, _CMP_GT_OQ);
+            local_cap_clamp += (double)dualiso_count_bits_u32((unsigned)_mm256_movemask_ps(cap_clamp_mask));
+        }
         f = _mm256_max_ps(v_zero, _mm256_min_ps(f, cap));
 
         __m256 outf = _mm256_fmadd_ps(f, _mm256_sub_ps(fev, hrev), hrev);
+        if (probe_detail) {
+            __m256 near0_mask = _mm256_cmp_ps(f, v_near_zero, _CMP_LE_OQ);
+            __m256 near1_mask = _mm256_cmp_ps(f, v_near_one, _CMP_GE_OQ);
+            local_f_near_0 += (double)dualiso_count_bits_u32((unsigned)_mm256_movemask_ps(near0_mask));
+            local_f_near_1 += (double)dualiso_count_bits_u32((unsigned)_mm256_movemask_ps(near1_mask));
+        }
 
         __m256i outi = _mm256_cvttps_epi32(outf);
         outi = _mm256_min_epi32(_mm256_max_epi32(outi, v_lo), v_hi);
 
+        if (probe_arithmetic) *arithmetic_probe_ms += dualiso_debug_elapsed_ms(stage_start);
+
+        stage_start = 0.0;
+        if (probe_ev2raw_store) stage_start = mlv_stage_timing_now();
         __m256i raw_out = _mm256_i32gather_epi32(ev2raw_lut, outi, 4);
-        _mm256_storeu_si256((__m256i*)&raw_buffer_32[x], raw_out);
+        if (fuse_to_16bit) {
+            convert_raw32_chunk_to_16bit_avx2(&image_data[x], raw_out, randn_cache, k_inout);
+        } else {
+            _mm256_storeu_si256((__m256i*)&raw_buffer_32[x], raw_out);
+        }
+        if (probe_ev2raw_store) *ev2raw_store_probe_ms += dualiso_debug_elapsed_ms(stage_start);
+    }
+
+    if (probe_detail)
+    {
+        *overexposed_density += local_overexposed;
+        *cap_clamp_pct += local_cap_clamp;
+        *f_near_0_pct += local_f_near_0;
+        *f_near_1_pct += local_f_near_1;
     }
 }
 

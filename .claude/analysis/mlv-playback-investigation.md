@@ -1,28 +1,64 @@
-## 2026-05-31 - rejected proper_wb_matrix hoist in the hot raw-processing loop
+## 2026-05-31 - phase 1 narrow final_blend -> convert_20_to_16bit fusion implemented
 
 ### Verified locally
 
-- I tried caching the repeated `processing->proper_wb_matrix[...]` coefficients outside the hot generic color loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c), then reused those locals in the `use_cam_matrix` path for both the main pixel and gradient pixel branches.
-- The user-facing release tree was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after restoring the source:
-  - `LastWriteTime=5/31/2026 1:46:10 PM`
-  - `Length=8797184`
-  - `SHA256=AADB800050C8DB5549FC0A9FB728C8FF0611675D5756D895A0B3C5A5FE76DC10`
-- The visible x1 Quality smoke gate stayed valid on all three clips. `look_assist_chroma_smooth_auto_applied=true`, `look_assist_toggle_smoke_stable=true`, and the direct8 guard remained intact with `processed8_direct_path_active=true` only on the warm-up frame and `false` on frames 1 and 2.
-- Settled-frame averages from `.claude-state/profiling/wb-e171a41e9bd14ee5/allow-creative-cache/` were not competitive:
-  - `M16-1327`: `average_cadence_ms=488.82`, `average_latency_ms=1005.46`, `render_thread_work_ms=339.9999`, `llrawproc_ms=150.0001`, `processing_core_color_ms=52.9999`, `processing_core_creative_ms=55.9999`, `processing_shadows_highlights_prep_ms=37.0002`, `dual_iso_full20_mix_chroma_ms=83.9999`, `dual_iso_full20_final_blend_ms=13.0000`
-  - `M16-1347`: `average_cadence_ms=474.26`, `average_latency_ms=689.01`, `render_thread_work_ms=303.0000`, `llrawproc_ms=131.0000`, `processing_core_color_ms=51.0001`, `processing_core_creative_ms=55.9999`, `processing_shadows_highlights_prep_ms=29.9999`, `dual_iso_full20_mix_chroma_ms=71.0001`, `dual_iso_full20_final_blend_ms=11.9998`
-  - `M16-1446`: `average_cadence_ms=369.40`, `average_latency_ms=648.30`, `render_thread_work_ms=227.9999`, `llrawproc_ms=58.0001`, `processing_core_color_ms=52.0000`, `processing_core_creative_ms=52.0000`, `processing_shadows_highlights_prep_ms=26.9999`, `dual_iso_full20_mix_chroma_ms=0`, `dual_iso_full20_final_blend_ms=13.9999`
+- I implemented the narrow retained-path fusion in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) and [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) so the AVX2 `final_blend` row path now writes the 16-bit output directly instead of round-tripping through `raw_buffer_32` and a separate `convert_20_to_16bit()` pass.
+- The release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the fusion patch:
+  - `LastWriteTime=5/31/2026 2:51:40 PM`
+  - `Length=8815616`
+  - `SHA256=FC4E2F29FD9ED56CB2CCB7C5B6E5DF23AFB2CFF5C313FD74F81470F62FFA697F`
+- I reran the visible x1 Quality / settled Auto Look Assist smoke gate on all three clips with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`, and the gate stayed intact:
+  - `M16-1327`: `lookAssistApplied=true`, `cpuSettled=true`, `dual_iso_alias_map=0`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `lookAssistApplied=true`, `cpuSettled=true`, `dual_iso_alias_map=0`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `lookAssistApplied=true`, `cpuSettled=true`, `dual_iso_alias_map=0`, `processed8_direct_path_frames=0`
+- The Phase 1 smoke summaries show the fused path taking effect because `avg_convert16_ms` dropped to zero on all three clips while `avg_final_blend_ms` remained the active retained-path cost:
+  - `M16-1327`: `avg_final_blend_ms=19.814`, `avg_convert16_ms=0.000`, `avg_llrawproc_ms=85.023`
+  - `M16-1347`: `avg_final_blend_ms=24.641`, `avg_convert16_ms=0.000`, `avg_llrawproc_ms=92.103`
+  - `M16-1446`: `avg_final_blend_ms=24.488`, `avg_convert16_ms=0.000`, `avg_llrawproc_ms=69.195`
 
 ### Cross-checked from prior analysis
 
-- The current keeper `ed2821e1` still remains the better visible-gate result for this region.
-- The cached-coefficient probe did not move the settled retained-path work in the right direction, so it is a throughput reject rather than a visual regression.
-- The visible smoke state stayed stable, so the rejection is about performance, not quality.
+- Phase 0 already showed meaningful gather/store pressure and material `convert16_ms`, so the narrow fusion was the right next patch rather than a broader Dual ISO rewrite.
+- The fused path kept the visible smoke gate intact, so this remained a throughput change rather than a visual regression.
+- The broader ideas stay closed: I did not reopen the broad `mix_chroma -> final_blend` fusion, EV-domain side planes, or any of the previously rejected structural rewrites.
 
 ### Needs runtime profiling
 
-- The next probe should not revisit this exact coefficient-hoist shape.
-- If we stay in `raw_processing.c`, the next candidate needs a different structural shape than the current `use_cam_matrix` coefficient caching.
+- The next step is to compare the fused path against the current keeper on the same three clips and decide whether this is a keeper or just a locally-valid improvement.
+- If the fused path does not keep winning on the same visible gate, the honest next move is to stop local CPU work and move to secondary buckets.
+
+## 2026-05-31 - phase 0 final_blend probe completed; narrow fusion now justified
+
+### Verified locally
+
+- I added Phase 0 measurement plumbing to [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c), [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso_avx2.inc), [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/llrawproc.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/llrawproc.c), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/RenderFrameThread.cpp), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the patch:
+  - `LastWriteTime=5/31/2026 2:14:12 PM`
+  - `Length=8811008`
+  - `SHA256=67EA9EC9BD192E03C364AF4C2DEB542C8AB8182C7073B4F1A4C22CB32A92A231`
+- I ran the visible x1 Quality / settled Auto Look Assist smoke gate on all three clips with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0` so the new `final_blend` probes were populated while preserving the visible gate:
+  - `M16-1327`: `dual_iso_alias_map=0`, `processed8_direct_path_frames=0`, `lookAssistApplied=true`, `cpuSettled=true`
+  - `M16-1347`: `dual_iso_alias_map=0`, `processed8_direct_path_frames=0`, `lookAssistApplied=true`, `cpuSettled=true`
+  - `M16-1446`: `dual_iso_alias_map=0`, `processed8_direct_path_frames=0`, `lookAssistApplied=true`, `cpuSettled=true`
+- The new `final_blend` telemetry is now visible in the playback log lines and shows meaningful stage pressure:
+  - `M16-1327`: `final_blend_row_kernel_ms=23`, `final_blend_raw2ev_gather_probe_ms=6`, `final_blend_fullres_curve_gather_probe_ms=9`, `final_blend_ev2raw_store_probe_ms=19.001`, `final_blend_arithmetic_probe_ms=4`, `final_blend_overexposed_density=0.215`, `final_blend_cap_clamp_pct=0.000`, `final_blend_f_near_0_pct=0.299`, `final_blend_f_near_1_pct=0.222`, `final_blend_probe_mode=0`
+  - `M16-1347`: `final_blend_row_kernel_ms=16`, `final_blend_raw2ev_gather_probe_ms=7`, `final_blend_fullres_curve_gather_probe_ms=14.999`, `final_blend_ev2raw_store_probe_ms=17.001`, `final_blend_arithmetic_probe_ms=9`, `final_blend_overexposed_density=0.214`, `final_blend_cap_clamp_pct=0.000`, `final_blend_f_near_0_pct=0.301`, `final_blend_f_near_1_pct=0.221`, `final_blend_probe_mode=0`
+  - `M16-1446`: `final_blend_row_kernel_ms=19`, `final_blend_raw2ev_gather_probe_ms=16`, `final_blend_fullres_curve_gather_probe_ms=9`, `final_blend_ev2raw_store_probe_ms=23`, `final_blend_arithmetic_probe_ms=7`, `final_blend_overexposed_density=0.212`, `final_blend_cap_clamp_pct=0.000`, `final_blend_f_near_0_pct=0.304`, `final_blend_f_near_1_pct=0.219`, `final_blend_probe_mode=0`
+- The aggregate smoke summaries for the same probe run still show `avg_convert16_ms` as non-trivial on the chroma-heavy clips:
+  - `M16-1327`: `avg_convert16_ms=2.676`, `avg_final_blend_ms=22.919`, `avg_llrawproc_ms=100.568`
+  - `M16-1347`: `avg_convert16_ms=2.270`, `avg_final_blend_ms=26.892`, `avg_llrawproc_ms=100.000`
+  - `M16-1446`: `avg_convert16_ms=3.116`, `avg_final_blend_ms=24.558`, `avg_llrawproc_ms=69.953`
+
+### Cross-checked from prior analysis
+
+- The Phase 0 probe now answers the gate the synthesis note asked for: `final_blend` is not ALU-saturated in a way that would rule out local work, and `convert16_ms` is material enough to matter on the visible gate.
+- The detailed probe breakdown shows meaningful gather/store pressure, especially on the chroma-heavy clips, with `ev2raw_store_probe_ms` and `fullres_curve`/`raw2ev` gathers all non-trivial instead of one tiny bucket dominating.
+- The visible smoke gate remained intact, so this is still a throughput investigation, not a quality regression.
+
+### Needs runtime profiling
+
+- Phase 1 is warranted: prototype the narrow `final_blend -> convert_20_to_16bit` fusion next, while keeping the closed broader Dual ISO ideas closed for now.
+- If the fusion does not beat the current keeper on the same three-clip gate, the next honest move is to stop local CPU work and move to secondary buckets.
 
 ## 2026-05-31 - rejected rgb3-specialized RBF vertical passes
 

@@ -84,6 +84,7 @@ static void llrawproc_reset_dual_iso_full20bit_timing(void)
            0,
            sizeof(g_llrawproc_last_dual_iso_full20bit_timing));
     g_llrawproc_last_dual_iso_full20bit_timing.interp_method = -1;
+    g_llrawproc_last_dual_iso_full20bit_timing.final_blend_probe_mode = -1;
 }
 
 static int dualiso_playback_mean23_override_disabled_via_env(void)
