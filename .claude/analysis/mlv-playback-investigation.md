@@ -1,3 +1,33 @@
+## 2026-05-31 - mix_chroma phase 0 completed; center store dominates
+
+### Verified locally
+
+- I extended the retained Dual ISO `mix_chroma` probe path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) and carried the new counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the probe wiring update:
+  - `LastWriteTime=5/31/2026 5:05:31 PM`
+  - `Length=8828416`
+  - `SHA256=56ECF6BE475AA78ED96EB409192866E49B6A56FAC5BD074D470233E4FD673217`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved. The direct-path guard stayed off on the settled frames and the probe mode fields now survive into telemetry.
+- The isolated `mix_chroma` probe modes on the chroma-heavy clips show the center slice as the heavy one:
+  - Mode 1, horizontal: `M16-1327 avg=41.5 ms`, `M16-1347 avg=39.0 ms`
+  - Mode 2, vertical: `M16-1327 avg=36.5 ms`, `M16-1347 avg=43.0 ms`
+  - Mode 3, center: `M16-1327 avg=325.0 ms`, `M16-1347 avg=336.0 ms`
+- The deeper center split says the writeback/store side is the largest bucket inside that center slice:
+  - `M16-1327`: `center_gather_ms=36.5`, `center_arithmetic_ms=31.5`, `center_store_ms=105.5`
+  - `M16-1347`: `center_gather_ms=29.5`, `center_arithmetic_ms=35.0`, `center_store_ms=128.5`
+- `M16-1446` stayed effectively out of the `mix_chroma` path, so it remains the bypass clip for this investigation.
+
+### Cross-checked from prior analysis
+
+- The earlier coarse probe already pointed to `mix_chroma` as the next retained-path hotspot after the `final_blend -> convert_20_to_16bit` fusion.
+- The new center split tightens that picture: the heaviest remaining work is not the horizontal or vertical sampling pass, but the center writeback path.
+- The visible gate stayed intact, so this is still a throughput investigation, not a quality regression.
+
+### Needs runtime profiling
+
+- The next candidate should stay inside the center writeback path, not the broad `mix_chroma` stage as a whole.
+- If the next narrow center-path cleanup does not move the settled three-clip gate, the honest next move is to stop local CPU work and move to secondary buckets.
+
 ## 2026-05-31 - phase 1 narrow final_blend -> convert_20_to_16bit fusion implemented
 
 ### Verified locally

@@ -26,6 +26,12 @@
 #include <stdint.h>
 #include "../raw.h"
 
+#if defined(_MSC_VER)
+#define DUALISO_THREAD_LOCAL __declspec(thread)
+#else
+#define DUALISO_THREAD_LOCAL __thread
+#endif
+
 enum
 {
     DUALISO_MIX_CURVE_CACHE_SLOTS = 4
@@ -152,6 +158,12 @@ typedef struct
     double mix_chroma_copy_ms;
     double mix_chroma_fullres_ms;
     double mix_chroma_halfres_ms;
+    double mix_chroma_horiz_probe_ms;
+    double mix_chroma_vert_probe_ms;
+    double mix_chroma_center_probe_ms;
+    double mix_chroma_center_gather_probe_ms;
+    double mix_chroma_center_arithmetic_probe_ms;
+    double mix_chroma_center_store_probe_ms;
     double mix_alias_map_ms;
     double mix_overexposed_ms;
     double final_blend_setup_ms;
@@ -169,6 +181,7 @@ typedef struct
     double other_ms;
     double mix_curve_corr_ev;
     double mix_curve_overlap;
+    int mix_chroma_probe_mode;
     int final_blend_probe_mode;
     int mix_curve_rebuilt;
     int mix_curve_global_hit;
@@ -178,6 +191,8 @@ typedef struct
     int threads;
     int valid;
 } dualiso_full20bit_timing_t;
+
+extern DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing;
 
 int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch);
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch);
@@ -202,5 +217,6 @@ unsigned long long dualiso_debug_alias_map_taken_count(void);
 unsigned long long dualiso_debug_fullres_blend_taken_count(void);
 void dualiso_debug_reset_full20bit_timing(void);
 void dualiso_debug_get_full20bit_timing(dualiso_full20bit_timing_t * timing);
+int dualiso_mix_chroma_probe_mode(void);
 
 #endif

@@ -890,6 +890,12 @@ private:
     double m_playbackSmokeDualIsoFull20MixChromaCopySumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaFullresSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaHorizProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaVertProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterGatherProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterArithmeticProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterStoreProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;
@@ -948,6 +954,7 @@ private:
     uint64_t m_playbackSmokeQImagePreparedRgb8Bytes = 0;
     int m_playbackSmokeDualIsoFull20ValidFrames = 0;
     int m_playbackSmokeDualIsoFull20LastInterpMethod = -1;
+    int m_playbackSmokeDualIsoFull20LastMixChromaProbeMode = -1;
     int m_playbackSmokeDualIsoFull20LastThreads = 0;
     bool m_playbackSmokeDualIsoFull20LastAliasMap = false;
     bool m_playbackSmokeDualIsoFull20LastFullres = false;
