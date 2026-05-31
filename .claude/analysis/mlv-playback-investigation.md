@@ -7247,3 +7247,147 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - If we revisit this region, the next probe should start from the current keeper baseline and target a different branch shape or data layout instead of this AgX split variant.
+
+## 2026-05-31 - rejected core-color cam-matrix timing instrumentation probe
+
+### Verified locally
+
+- I added a temporary `processing_core_color_cam_ms` timing bucket around the `use_cam_matrix` block in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) and threaded it through the playback smoke telemetry.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after removing the temporary instrumentation again.
+- Release executable metadata after the baseline rebuild:
+  - `LastWriteTime`: `2026-05-31 08:52:46`
+  - `Length`: `8796672`
+  - `SHA256`: `EB62837659FDD546546444C865BA043B0D55A91AA64EB3724831A53CCCAA7867`
+- The three visible smoke clips stayed on the x1 Quality / settled Auto Look Assist gate with `dual_iso_alias_map=0` and `processed8_direct_path_frames=0`, but the instrumented build was slower overall:
+  - `M16-1327`: `presented_fps=4.980`, `avg_render_total_ms=190.425`, `avg_llrawproc_ms=63.100`, `avg_processing_core_color_ms=54.950`, `avg_processing_core_color_cam_ms=21.350`, `avg_processing_core_creative_ms=10.225`, `avg_processing_shadows_highlights_prep_ms=21.900`
+  - `M16-1347`: `presented_fps=4.867`, `avg_render_total_ms=194.026`, `avg_llrawproc_ms=68.744`, `avg_processing_core_color_ms=54.769`, `avg_processing_core_color_cam_ms=22.641`, `avg_processing_core_creative_ms=10.718`, `avg_processing_shadows_highlights_prep_ms=22.462`
+  - `M16-1446`: `presented_fps=5.750`, `avg_render_total_ms=164.913`, `avg_llrawproc_ms=34.957`, `avg_processing_core_color_ms=56.891`, `avg_processing_core_color_cam_ms=22.456`, `avg_processing_core_creative_ms=10.500`, `avg_processing_shadows_highlights_prep_ms=25.326`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost the three-clip gate by a wide margin:
+  - `M16-1327`: keeper `6.608 fps` vs probe `4.980 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `4.867 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `5.750 fps`
+
+### Cross-checked from prior analysis
+
+- The new bucket makes it clear the `use_cam_matrix` work is large enough to measure, but the timing probe itself is too invasive to keep in the shipping build.
+- The extra telemetry does not rescue the branch-split idea; this exact instrumentation probe is not a keeper.
+
+### Needs runtime profiling
+
+- If we revisit this region, the next experiment should avoid per-pixel timing overhead and instead probe a structural change that can be judged against the keeper without perturbing throughput.
+
+## 2026-05-31 - rejected branch-prediction hint probe for generic color loop
+
+### Verified locally
+
+- I added branch-prediction hints around the hot `use_cam_matrix`, `use_highlight_reconstruction`, and gradient-adjustment checks in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) while keeping the behavior identical.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after reverting the probe back out again.
+- Release executable metadata after the baseline rebuild:
+  - `LastWriteTime`: `2026-05-31 09:04:34`
+  - `Length`: `8796672`
+  - `SHA256`: `792F211A54E681D1AA5BDB70BF7D9C1A235DBE5E7D975B01BA1D735482BF5DD9`
+- The three visible smoke clips preserved x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, but the hint probe lost the keeper on all three clips:
+  - `M16-1327`: `presented_fps=5.743`, `avg_render_total_ms=162.304`, `avg_llrawproc_ms=70.609`, `avg_processing_core_color_ms=16.261`, `avg_processing_core_creative_ms=12.370`, `avg_processing_shadows_highlights_prep_ms=22.500`
+  - `M16-1347`: `presented_fps=5.370`, `avg_render_total_ms=173.465`, `avg_llrawproc_ms=77.930`, `avg_processing_core_color_ms=16.372`, `avg_processing_core_creative_ms=12.419`, `avg_processing_shadows_highlights_prep_ms=23.977`
+  - `M16-1446`: `presented_fps=6.605`, `avg_render_total_ms=139.887`, `avg_llrawproc_ms=38.981`, `avg_processing_core_color_ms=16.377`, `avg_processing_core_creative_ms=12.943`, `avg_processing_shadows_highlights_prep_ms=25.660`
+- Comparison against the current color-path SIMD keeper (`ed2821e1`) shows this probe lost the full three-clip gate:
+  - `M16-1327`: keeper `6.608 fps` vs probe `5.743 fps`
+  - `M16-1347`: keeper `6.618 fps` vs probe `5.370 fps`
+  - `M16-1446`: keeper `7.744 fps` vs probe `6.605 fps`
+
+### Cross-checked from prior analysis
+
+- The branch-prediction hints did not improve the visible gate and in practice regressed throughput across the board, so they are not a keeper.
+- The common hot work remains `processing_core_color` / `processing_core_creative`; this low-risk hinting probe does not change that diagnosis.
+
+### Needs runtime profiling
+
+- The next experiment should be structural rather than hint-only, and it should target the same hot color path with a shape that can plausibly beat the current keeper on all three clips.
+
+## 2026-05-31 - rejected basic-matrix hit probe for generic color loop
+
+### Verified locally
+
+- I added a temporary `processing_basic_matrix_fast_path_used` telemetry bit in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) and threaded it through the playback smoke telemetry to check whether the visible smoke clips enter the retained basic-matrix fast path.
+- The diagnostic build compiled cleanly, then I reverted the probe and restored `raw_processing.c` / `raw_processing.h` to the checked-in baseline before finalizing this handoff.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the revert.
+- Release executable metadata after the restored-baseline rebuild:
+  - `LastWriteTime`: `2026-05-31 09:16:57`
+  - `Length`: `8796672`
+  - `SHA256`: `D9CF5C8017A350F6F23DA508781E1DF620862C02AC7893DCA24F0E5C9461677D`
+- The probe smoke run from `.claude-state/profiling/wb-68fe75d089af4c6f/basic-matrix-hitprobe/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, but the new fast-path counter stayed at zero for all three clips:
+  - `M16-1327`: `presented_fps=5.996`, `avg_render_total_ms=153.437`, `avg_llrawproc_ms=64.354`, `avg_processing_core_color_ms=14.583`, `avg_processing_core_creative_ms=11.833`, `processing_basic_matrix_fast_path_frames=0`
+  - `M16-1347`: `presented_fps=5.860`, `avg_render_total_ms=158.447`, `avg_llrawproc_ms=69.659`, `avg_processing_core_color_ms=15.612`, `avg_processing_core_creative_ms=11.383`, `processing_basic_matrix_fast_path_frames=0`
+  - `M16-1446`: `presented_fps=6.978`, `avg_render_total_ms=134.911`, `avg_llrawproc_ms=41.054`, `avg_processing_core_color_ms=17.375`, `avg_processing_core_creative_ms=12.464`, `processing_basic_matrix_fast_path_frames=0`
+- The restored-baseline rerun from `.claude-state/profiling/wb-68fe75d089af4c6f/baseline-reset/` also preserved the x1 Quality gate and still showed `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=6.241`, `avg_render_total_ms=150.760`, `avg_llrawproc_ms=62.280`, `avg_processing_core_color_ms=14.700`, `avg_processing_core_creative_ms=11.900`
+  - `M16-1347`: `presented_fps=5.853`, `avg_render_total_ms=162.363`, `avg_llrawproc_ms=68.213`, `avg_processing_core_color_ms=15.657`, `avg_processing_core_creative_ms=12.131`
+  - `M16-1446`: `presented_fps=7.097`, `avg_render_total_ms=132.298`, `avg_llrawproc_ms=39.772`, `avg_processing_core_color_ms=14.649`, `avg_processing_core_creative_ms=12.035`
+
+### Cross-checked from prior analysis
+
+- The diagnostic confirmed the visible smoke clips are not using the retained basic-matrix fast path, so the hot work remains in the generic loop.
+- The telemetry probe did not improve the three-clip throughput story, so it is not a keeper candidate.
+
+### Needs runtime profiling
+
+- The next useful probe should target the generic color loop itself, now that we know the visible smoke clips stay on that path.
+- A good follow-up is still a structural change that reduces generic-loop work without adding per-pixel telemetry or other probe overhead.
+
+## 2026-05-31 - rejected highlight-reconstruction split for generic color loop
+
+### Verified locally
+
+- I split the generic color loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) so the `use_highlight_reconstruction` check moves out of the per-pixel path for the common zero case, while preserving the existing x1 Quality gate behavior.
+- The split compiled cleanly and the user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Release executable metadata after the rebuilt baseline:
+  - `LastWriteTime`: `2026-05-31 09:26:37`
+  - `Length`: `8796672`
+  - `SHA256`: `4BD50A9FA2E2949F1AE9B5949ED5073A35CA9EE6BA8832F2341693C48E0957D5`
+- The smoke run from `.claude-state/profiling/wb-68fe75d089af4c6f/highlight-split/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, but it lost the current keeper on all three clips:
+  - `M16-1327`: `presented_fps=5.730`, `avg_render_total_ms=164.783`, `avg_llrawproc_ms=69.261`, `avg_processing_core_color_ms=15.152`, `avg_processing_core_creative_ms=12.413`
+  - `M16-1347`: `presented_fps=5.384`, `avg_render_total_ms=172.770`, `avg_llrawproc_ms=75.670`, `avg_processing_core_color_ms=15.790`, `avg_processing_core_creative_ms=13.560`
+  - `M16-1446`: `presented_fps=6.618`, `avg_render_total_ms=141.283`, `avg_llrawproc_ms=42.698`, `avg_processing_core_color_ms=15.981`, `avg_processing_core_creative_ms=12.906`
+- Comparison against the current keeper (`ed2821e1`) shows this split is a throughput reject:
+  - `M16-1327`: keeper `6.608 fps` vs split `5.730 fps`
+  - `M16-1347`: keeper `6.618 fps` vs split `5.384 fps`
+  - `M16-1446`: keeper `7.744 fps` vs split `6.618 fps`
+
+### Cross-checked from prior analysis
+
+- The new split did not improve the full gate, so it is not a keeper candidate.
+- The visible smoke clips still remain on the generic color loop, but this particular structural split is slower than the accepted baseline.
+
+### Needs runtime profiling
+
+- The next probe should target a different generic-loop shape or data layout rather than this highlight-reconstruction branch split.
+- Since the visible smoke clips are not using the retained basic-matrix fast path, future work should stay focused on the generic loop itself.
+
+## 2026-05-31 - rejected use_cam_matrix split for generic color loop
+
+### Verified locally
+
+- I split the generic color loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) so the common `use_cam_matrix == 0` path no longer pays the per-pixel `use_cam_matrix` branch, while preserving the existing x1 Quality / settled Auto Look Assist gate behavior.
+- The split compiled cleanly, and the user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) before the visible smoke pass.
+- Release executable metadata after the rebuilt baseline:
+  - `LastWriteTime`: `2026-05-31 09:34:40`
+  - `Length`: `8796672`
+  - `SHA256`: `C21FFE0D299E74DD66CEF3BECFA6AB4681368FD6668AF93D09BFF34EF26C259F`
+- The visible smoke run preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, but the split lost the keeper on all three clips:
+  - `M16-1327`: `presented_fps=5.730`, `avg_render_total_ms=164.783`, `avg_llrawproc_ms=69.261`, `avg_processing_core_color_ms=15.152`, `avg_processing_core_creative_ms=12.413`
+  - `M16-1347`: `presented_fps=5.375`, `avg_render_total_ms=172.767`, `avg_llrawproc_ms=75.674`, `avg_processing_core_color_ms=15.790`, `avg_processing_core_creative_ms=13.560`
+  - `M16-1446`: `presented_fps=6.618`, `avg_render_total_ms=141.283`, `avg_llrawproc_ms=42.698`, `avg_processing_core_color_ms=15.981`, `avg_processing_core_creative_ms=12.906`
+- Comparison against the current keeper (`ed2821e1`) shows this split is a throughput reject:
+  - `M16-1327`: keeper `6.608 fps` vs split `5.730 fps`
+  - `M16-1347`: keeper `6.618 fps` vs split `5.375 fps`
+  - `M16-1446`: keeper `7.744 fps` vs split `6.618 fps`
+
+### Cross-checked from prior analysis
+
+- The visible smoke clips still remain on the generic color loop, but this particular `use_cam_matrix` branch split is slower than the accepted baseline.
+- The x1 Quality visual gate stayed intact, so this is a throughput reject rather than a visual regression.
+
+### Needs runtime profiling
+
+- If we revisit this region, the next probe should target a different generic-loop shape or a more selective data-layout change rather than this branch split.
+- The hot buckets remain `processing_core_color` and `processing_core_creative`; this probe did not move the full gate in the right direction.
