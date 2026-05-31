@@ -7508,3 +7508,28 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The zero-case specialization is directionally correct, but it is not yet the right shape for the full gate.
 - The next probe should either reduce more work than this branch split or target a different hot path outside the generic loop.
+
+## 2026-05-31 - rejected shadow/highlight curve-index toggle for playback smoke
+
+### Verified locally
+
+- I profiled the existing `MLVAPP_ENABLE_SH_CURVE_INDEX_MASK=1` experimental path in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) without changing the source, using the same three visible smoke clips and the same x1 Quality / settled Auto Look Assist gate.
+- The user-facing release tree remained the restored baseline at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- The visible smoke runs from `.claude-state/profiling/wb-68fe75d089af4c6f/sh-curve-index-toggle/` preserved the x1 Quality gate, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`:
+  - `M16-1327`: `presented_fps=6.361`, `avg_render_total_ms=147.157`, `avg_llrawproc_ms=59.961`, `avg_processing_core_color_ms=15.157`, `avg_processing_core_creative_ms=11.804`, `avg_processing_shadows_highlights_prep_ms=21.490`
+  - `M16-1347`: `presented_fps=6.115`, `avg_render_total_ms=152.612`, `avg_llrawproc_ms=63.408`, `avg_processing_core_color_ms=15.837`, `avg_processing_core_creative_ms=11.490`, `avg_processing_shadows_highlights_prep_ms=21.041`
+  - `M16-1446`: `presented_fps=7.237`, `avg_render_total_ms=127.138`, `avg_llrawproc_ms=32.948`, `avg_processing_core_color_ms=15.776`, `avg_processing_core_creative_ms=11.603`, `avg_processing_shadows_highlights_prep_ms=23.086`
+- Compared with the current keeper (`ed2821e1`), the curve-index toggle lost the full three-clip gate:
+  - `M16-1327`: keeper `6.608 fps` vs toggle `6.361 fps`
+  - `M16-1347`: keeper `6.618 fps` vs toggle `6.115 fps`
+  - `M16-1446`: keeper `7.744 fps` vs toggle `7.237 fps`
+
+### Cross-checked from prior analysis
+
+- The existing experimental toggle did not beat the keeper on the current visible clips, so the default RGB blur mask remains the better playback path for now.
+- The smoke state stayed visually stable, so this is a throughput reject rather than a quality regression.
+
+### Needs runtime profiling
+
+- The next probe should target a different hot path or a more impactful structural change than the shadow/highlight curve-index toggle.
+- `avg_processing_shadows_highlights_prep_ms` remains a meaningful hot bucket, but this toggle is not the winner.
