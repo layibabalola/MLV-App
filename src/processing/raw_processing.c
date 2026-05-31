@@ -1670,6 +1670,7 @@ void apply_processing_object( processingObject_t * processing,
         ( processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01 )
      || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 );
     const double inv_65535 = 1.0 / 65535.0;
+    const int pixel_count = img_s / 3;
 
     /* white balance & exposure & highlights & gamma & highlight reconstruction */
     if( use_basic_matrix_fast_path )
@@ -1730,8 +1731,13 @@ void apply_processing_object( processingObject_t * processing,
     }
     else
     {
-        for (uint16_t * pix = img, * bpix = blurImage, *gmpix = gm; pix < img_end; pix += 3, bpix += 3, gmpix++)
+        #pragma omp simd
+        for (int px = 0; px < pixel_count; ++px)
         {
+            uint16_t * pix = img + (px * 3);
+            uint16_t * bpix = blurImage + (px * 3);
+            uint16_t * gmpix = gm + px;
+
             double expo_correction = 1.0;
             double expo_correction_gradient = 1.0;
 

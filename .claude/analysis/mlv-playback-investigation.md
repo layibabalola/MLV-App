@@ -6699,6 +6699,43 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The color-path predicate hoist and saturation max/min simplification did not clear the gate.
 - The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but this exact hoist shape is not a keeper.
 
+## 2026-05-31 - accepted color-path SIMD probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by adding `#pragma omp simd` to the main generic color-path loop and rewriting it to a canonical pixel-index form:
+  - `#pragma omp simd` on the `processing->allow_creative_adjustments` color loop
+  - canonical `for (int px = 0; px < pixel_count; ++px)` form
+  - per-iteration pointer derivation for `pix`, `bpix`, and `gmpix`
+- The release tree was rebuilt from the probe build, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe stayed visually valid and beat the committed `processing_core` keeper on all three clips, so it is a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 6:05:49 AM`
+  - `Length=8796672`
+  - `SHA256=862A278851759F3F028CA491FF57B36E7CD136EBEF8B50B60050AAE66E7FF802`
+- Probe smoke results from `.claude-state/profiling/20260531-color-simd-smoke/`:
+  - `M16-1327`: `presented_fps=6.608`, `avg_render_total_ms=142.491`, `avg_llrawproc_ms=57.453`, `avg_processing_ms=52.698`, `avg_processing_core_ms=31.415`, `avg_processing_core_color_ms=12.925`, `avg_processing_core_creative_ms=11.283`, `avg_processing_shadows_highlights_prep_ms=21.283`, `avg_debayer_exclusive_ms=6.019`, `avg_processed16_ms=134.377`, `avg_processed16_to_8bit_ms=2.151`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=6.618`, `avg_render_total_ms=140.642`, `avg_llrawproc_ms=57.811`, `avg_processing_ms=51.906`, `avg_processing_core_ms=31.981`, `avg_processing_core_color_ms=14.528`, `avg_processing_core_creative_ms=10.906`, `avg_processing_shadows_highlights_prep_ms=22.290`, `avg_debayer_exclusive_ms=5.585`, `avg_processed16_ms=132.566`, `avg_processed16_to_8bit_ms=1.935`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=7.744`, `avg_render_total_ms=118.823`, `avg_llrawproc_ms=31.952`, `avg_processing_ms=57.016`, `avg_processing_core_ms=34.710`, `avg_processing_core_color_ms=15.758`, `avg_processing_core_creative_ms=11.048`, `avg_processing_shadows_highlights_prep_ms=22.290`, `avg_debayer_exclusive_ms=6.790`, `avg_processed16_ms=110.968`, `avg_processed16_to_8bit_ms=1.935`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate is now beaten on all three clips:
+  - `M16-1327`: keeper `6.373 fps` vs probe `6.608 fps`
+  - `M16-1347`: keeper `6.613 fps` vs probe `6.618 fps`
+  - `M16-1446`: keeper `7.242 fps` vs probe `7.744 fps`
+- The probe kept the visual gate intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- This is a keeper, not a reject.
+
+### Needs runtime profiling
+
+- The color-path SIMD rewrite is a real win and should become the new baseline for this campaign.
+- The remaining meaningful buckets are still `processing_core_color` and `processing_core_creative`, but they should now be compared against this new keeper rather than the older `processing_core` cleanup branch.
+
 ## 2026-05-31 - rejected creative SIMD/toning probe
 
 ### Verified locally
