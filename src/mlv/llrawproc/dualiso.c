@@ -66,6 +66,7 @@ static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_mean23_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_alias_map_taken_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_fullres_blend_taken_count = 0;
 static DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing = {0};
+static int g_dualiso_final_blend_probe_mode_cache = INT_MIN;
 
 enum
 {
@@ -126,6 +127,8 @@ void dualiso_debug_reset_full20bit_timing(void)
 {
     memset(&g_dualiso_full20bit_timing, 0, sizeof(g_dualiso_full20bit_timing));
     g_dualiso_full20bit_timing.interp_method = -1;
+    g_dualiso_full20bit_timing.final_blend_probe_mode = -1;
+    g_dualiso_final_blend_probe_mode_cache = INT_MIN;
 }
 
 void dualiso_debug_get_full20bit_timing(dualiso_full20bit_timing_t * timing)
@@ -143,9 +146,66 @@ static void dualiso_debug_set_full20bit_path(int interp_method, int use_alias_ma
     g_dualiso_full20bit_timing.valid = 1;
 }
 
+static int dualiso_final_blend_probe_mode(void)
+{
+    if (g_dualiso_final_blend_probe_mode_cache == INT_MIN)
+    {
+        const char * v = getenv("MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE");
+        if (v && *v)
+        {
+            char * end = NULL;
+            long parsed = strtol(v, &end, 10);
+            if (end != v && *end == '\0' && parsed >= -1 && parsed <= 4)
+            {
+                g_dualiso_final_blend_probe_mode_cache = (int)parsed;
+            }
+            else if (!strcmp(v, "full") || !strcmp(v, "FULL"))
+            {
+                g_dualiso_final_blend_probe_mode_cache = 0;
+            }
+            else if (!strcmp(v, "raw2ev") || !strcmp(v, "RAW2EV"))
+            {
+                g_dualiso_final_blend_probe_mode_cache = 1;
+            }
+            else if (!strcmp(v, "fullres_curve") || !strcmp(v, "FULLRES_CURVE"))
+            {
+                g_dualiso_final_blend_probe_mode_cache = 2;
+            }
+            else if (!strcmp(v, "ev2raw_store") || !strcmp(v, "EV2RAW_STORE"))
+            {
+                g_dualiso_final_blend_probe_mode_cache = 3;
+            }
+            else if (!strcmp(v, "arithmetic") || !strcmp(v, "ARITHMETIC"))
+            {
+                g_dualiso_final_blend_probe_mode_cache = 4;
+            }
+            else
+            {
+                g_dualiso_final_blend_probe_mode_cache = -1;
+            }
+        }
+        else
+        {
+            g_dualiso_final_blend_probe_mode_cache = -1;
+        }
+    }
+    return g_dualiso_final_blend_probe_mode_cache;
+}
+
 static double dualiso_debug_elapsed_ms(double start)
 {
     return (mlv_stage_timing_now() - start) * 1000.0;
+}
+
+static int dualiso_count_bits_u32(unsigned int mask)
+{
+    int count = 0;
+    while (mask)
+    {
+        count += (int)(mask & 1u);
+        mask >>= 1;
+    }
+    return count;
 }
 
 static void dualiso_debug_finish_full20bit_timing(double start)
@@ -3883,7 +3943,8 @@ static inline int mix_images(struct raw_info raw_info,
     return 1;
 }
 
-static inline void final_blend(struct raw_info raw_info,
+static inline int final_blend(struct raw_info raw_info,
+                               uint16_t * __restrict image_data,
                                uint32_t * __restrict raw_buffer_32,
                                uint32_t * __restrict fullres,
                                uint32_t * __restrict fullres_smooth,
@@ -3895,8 +3956,10 @@ static inline void final_blend(struct raw_info raw_info,
                                int black,
                                int white,
                                int dark_noise,
+                               const float * randn_cache,
                                dualiso_full20bit_scratch_t * scratch)
 {
+    double final_blend_setup_start = mlv_stage_timing_now();
     /* fullres mixing curve */
     double * fullres_curve = build_fullres_curve(black);
     
@@ -3906,25 +3969,55 @@ static inline void final_blend(struct raw_info raw_info,
     int * raw2ev = NULL;
     float * raw2ev_float = NULL;
     int * ev2raw = NULL;
+    const int final_blend_probe_mode = dualiso_final_blend_probe_mode();
+    const int final_blend_probe_all = (final_blend_probe_mode == 0);
+    const int final_blend_probe_raw2ev = final_blend_probe_all || final_blend_probe_mode == 1;
+    const int final_blend_probe_fullres_curve = final_blend_probe_all || final_blend_probe_mode == 2;
+    const int final_blend_probe_ev2raw_store = final_blend_probe_all || final_blend_probe_mode == 3;
+    const int final_blend_probe_arithmetic = final_blend_probe_all || final_blend_probe_mode == 4;
+    const int final_blend_probe_detail = final_blend_probe_mode >= 0;
+    g_dualiso_full20bit_timing.final_blend_probe_mode = final_blend_probe_mode;
+    (void)final_blend_probe_all;
+    (void)final_blend_probe_raw2ev;
+    (void)final_blend_probe_fullres_curve;
+    (void)final_blend_probe_ev2raw_store;
+    (void)final_blend_probe_arithmetic;
+    (void)final_blend_probe_detail;
     if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &raw2ev_float, &ev2raw))
     {
-        return;
+        g_dualiso_full20bit_timing.final_blend_setup_ms += dualiso_debug_elapsed_ms(final_blend_setup_start);
+        return 0;
     }
+    g_dualiso_full20bit_timing.final_blend_setup_ms += dualiso_debug_elapsed_ms(final_blend_setup_start);
 #ifndef STDOUT_SILENT
     printf("Final blending...\n");
 #endif
+
+    double final_blend_row_kernel_start = mlv_stage_timing_now();
+    int final_blend_fused_to_16bit = 0;
 
 #ifdef DUALISO_AVX2_AVAILABLE
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
     if (g_dualiso_hq_use_avx2)
     {
         const int x_start = w & ~7;
+        const int fuse_to_16bit = 1;
+        double final_blend_raw2ev_gather_probe_ms = 0.0;
+        double final_blend_fullres_curve_gather_probe_ms = 0.0;
+        double final_blend_ev2raw_store_probe_ms = 0.0;
+        double final_blend_arithmetic_probe_ms = 0.0;
+        double final_blend_overexposed_density = 0.0;
+        double final_blend_cap_clamp_pct = 0.0;
+        double final_blend_f_near_0_pct = 0.0;
+        double final_blend_f_near_1_pct = 0.0;
         if (alias_map)
         {
-            #pragma omp parallel for
+            #pragma omp parallel for reduction(+:final_blend_raw2ev_gather_probe_ms,final_blend_fullres_curve_gather_probe_ms,final_blend_ev2raw_store_probe_ms,final_blend_arithmetic_probe_ms,final_blend_overexposed_density,final_blend_cap_clamp_pct,final_blend_f_near_0_pct,final_blend_f_near_1_pct)
             for (int y = 0; y < h; y ++) {
                 const size_t row_offset = (size_t)y * (size_t)w;
                 uint32_t *raw_row = &raw_buffer_32[row_offset];
+                uint16_t *image_row = &image_data[row_offset];
+                int row_k = (y * 7) & 1023;
                 const uint32_t *fullres_row = &fullres[row_offset];
                 const uint32_t *fullres_smooth_row = &fullres_smooth[row_offset];
                 const uint32_t *halfres_smooth_row = &halfres_smooth[row_offset];
@@ -3932,8 +4025,17 @@ static inline void final_blend(struct raw_info raw_info,
                 const uint32_t *bright_row = &bright[row_offset];
                 const uint16_t *overexposed_row = &overexposed[row_offset];
                 const uint16_t *alias_row = &alias_map[row_offset];
+                double row_raw2ev_gather_probe_ms = 0.0;
+                double row_fullres_curve_gather_probe_ms = 0.0;
+                double row_ev2raw_store_probe_ms = 0.0;
+                double row_arithmetic_probe_ms = 0.0;
+                double row_overexposed_density = 0.0;
+                double row_cap_clamp_pct = 0.0;
+                double row_f_near_0_pct = 0.0;
+                double row_f_near_1_pct = 0.0;
 
                 final_blend_row_avx2(raw_row,
+                                     image_row,
                                      fullres_row,
                                      fullres_smooth_row,
                                      halfres_smooth_row,
@@ -3942,7 +4044,19 @@ static inline void final_blend(struct raw_info raw_info,
                                      overexposed_row,
                                      alias_row,
                                      raw2ev_float, raw2ev, ev2raw, fullres_curve,
-                                     black, dark_noise, w);
+                                     black, dark_noise, w,
+                                     randn_cache,
+                                     &row_k,
+                                     fuse_to_16bit,
+                                     final_blend_probe_mode,
+                                     &row_raw2ev_gather_probe_ms,
+                                     &row_fullres_curve_gather_probe_ms,
+                                     &row_arithmetic_probe_ms,
+                                     &row_ev2raw_store_probe_ms,
+                                     &row_overexposed_density,
+                                     &row_cap_clamp_pct,
+                                     &row_f_near_0_pct,
+                                     &row_f_near_1_pct);
                 /* tail: pixels not covered by SIMD bulk */
                 for (int x = x_start; x < w; x ++) {
                     int b = bright_row[x];
@@ -3959,29 +4073,66 @@ static inline void final_blend(struct raw_info raw_info,
                     c = MAX(c, ovf);
                     double noisy_or_overexposed = MAX(ovf, 1-f);
                     f = MAX(f, c);
-                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
                     int sig = (dark_row[x] + bright_row[x]) / 2;
-                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+                    double cap_limit = (double)(sig - black) / (4*dark_noise);
+                    if (final_blend_probe_detail)
+                    {
+                        if (ovf > 0.0) row_overexposed_density += 1.0;
+                        if (f > cap_limit) row_cap_clamp_pct += 1.0;
+                        if (f <= 0.01) row_f_near_0_pct += 1.0;
+                        if (f >= 0.99) row_f_near_1_pct += 1.0;
+                    }
+                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+                    f = MAX(0, MIN(f, cap_limit));
                     int output = hrev * (1-f) + fev * f;
                     output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
-                    raw_set_pixel32(x, y, ev2raw[output]);
+                    if (fuse_to_16bit)
+                    {
+                        float dither = randn_cache[row_k & 1023];
+                        row_k = (row_k + 1) & 1023;
+                        int v = (int)((ev2raw[output] / 16.0f) + dither + 0.5f);
+                        image_row[x] = (uint16_t)COERCE(v, 0, 0xFFFF);
+                    }
+                    else
+                    {
+                        raw_set_pixel32(x, y, ev2raw[output]);
+                    }
                 }
+                final_blend_raw2ev_gather_probe_ms += row_raw2ev_gather_probe_ms;
+                final_blend_fullres_curve_gather_probe_ms += row_fullres_curve_gather_probe_ms;
+                final_blend_ev2raw_store_probe_ms += row_ev2raw_store_probe_ms;
+                final_blend_arithmetic_probe_ms += row_arithmetic_probe_ms;
+                final_blend_overexposed_density += row_overexposed_density;
+                final_blend_cap_clamp_pct += row_cap_clamp_pct;
+                final_blend_f_near_0_pct += row_f_near_0_pct;
+                final_blend_f_near_1_pct += row_f_near_1_pct;
             }
         }
         else
         {
-            #pragma omp parallel for
+            #pragma omp parallel for reduction(+:final_blend_raw2ev_gather_probe_ms,final_blend_fullres_curve_gather_probe_ms,final_blend_ev2raw_store_probe_ms,final_blend_arithmetic_probe_ms,final_blend_overexposed_density,final_blend_cap_clamp_pct,final_blend_f_near_0_pct,final_blend_f_near_1_pct)
             for (int y = 0; y < h; y ++) {
                 const size_t row_offset = (size_t)y * (size_t)w;
                 uint32_t *raw_row = &raw_buffer_32[row_offset];
+                uint16_t *image_row = &image_data[row_offset];
+                int row_k = (y * 7) & 1023;
                 const uint32_t *fullres_row = &fullres[row_offset];
                 const uint32_t *fullres_smooth_row = &fullres_smooth[row_offset];
                 const uint32_t *halfres_smooth_row = &halfres_smooth[row_offset];
                 const uint32_t *dark_row = &dark[row_offset];
                 const uint32_t *bright_row = &bright[row_offset];
                 const uint16_t *overexposed_row = &overexposed[row_offset];
+                double row_raw2ev_gather_probe_ms = 0.0;
+                double row_fullres_curve_gather_probe_ms = 0.0;
+                double row_ev2raw_store_probe_ms = 0.0;
+                double row_arithmetic_probe_ms = 0.0;
+                double row_overexposed_density = 0.0;
+                double row_cap_clamp_pct = 0.0;
+                double row_f_near_0_pct = 0.0;
+                double row_f_near_1_pct = 0.0;
 
                 final_blend_row_avx2(raw_row,
+                                     image_row,
                                      fullres_row,
                                      fullres_smooth_row,
                                      halfres_smooth_row,
@@ -3990,7 +4141,19 @@ static inline void final_blend(struct raw_info raw_info,
                                      overexposed_row,
                                      NULL,
                                      raw2ev_float, raw2ev, ev2raw, fullres_curve,
-                                     black, dark_noise, w);
+                                     black, dark_noise, w,
+                                     randn_cache,
+                                     &row_k,
+                                     fuse_to_16bit,
+                                     final_blend_probe_mode,
+                                     &row_raw2ev_gather_probe_ms,
+                                     &row_fullres_curve_gather_probe_ms,
+                                     &row_arithmetic_probe_ms,
+                                     &row_ev2raw_store_probe_ms,
+                                     &row_overexposed_density,
+                                     &row_cap_clamp_pct,
+                                     &row_f_near_0_pct,
+                                     &row_f_near_1_pct);
                 /* tail: pixels not covered by SIMD bulk */
                 for (int x = x_start; x < w; x ++) {
                     int b = bright_row[x];
@@ -4005,15 +4168,55 @@ static inline void final_blend(struct raw_info raw_info,
                     double c = ovf;
                     double noisy_or_overexposed = MAX(ovf, 1-f);
                     f = MAX(f, c);
-                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
                     int sig = (dark_row[x] + bright_row[x]) / 2;
-                    f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
+                    double cap_limit = (double)(sig - black) / (4*dark_noise);
+                    if (final_blend_probe_detail)
+                    {
+                        if (ovf > 0.0) row_overexposed_density += 1.0;
+                        if (f > cap_limit) row_cap_clamp_pct += 1.0;
+                        if (f <= 0.01) row_f_near_0_pct += 1.0;
+                        if (f >= 0.99) row_f_near_1_pct += 1.0;
+                    }
+                    double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+                    f = MAX(0, MIN(f, cap_limit));
                     int output = hrev * (1-f) + fev * f;
                     output = COERCE(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION-1);
-                    raw_set_pixel32(x, y, ev2raw[output]);
+                    if (fuse_to_16bit)
+                    {
+                        float dither = randn_cache[row_k & 1023];
+                        row_k = (row_k + 1) & 1023;
+                        int v = (int)((ev2raw[output] / 16.0f) + dither + 0.5f);
+                        image_row[x] = (uint16_t)COERCE(v, 0, 0xFFFF);
+                    }
+                    else
+                    {
+                        raw_set_pixel32(x, y, ev2raw[output]);
+                    }
                 }
+                final_blend_raw2ev_gather_probe_ms += row_raw2ev_gather_probe_ms;
+                final_blend_fullres_curve_gather_probe_ms += row_fullres_curve_gather_probe_ms;
+                final_blend_ev2raw_store_probe_ms += row_ev2raw_store_probe_ms;
+                final_blend_arithmetic_probe_ms += row_arithmetic_probe_ms;
+                final_blend_overexposed_density += row_overexposed_density;
+                final_blend_cap_clamp_pct += row_cap_clamp_pct;
+                final_blend_f_near_0_pct += row_f_near_0_pct;
+                final_blend_f_near_1_pct += row_f_near_1_pct;
             }
         }
+
+        if (final_blend_probe_detail)
+        {
+            const double total_pixels = (double)w * (double)h;
+            g_dualiso_full20bit_timing.final_blend_overexposed_density = final_blend_overexposed_density / total_pixels;
+            g_dualiso_full20bit_timing.final_blend_cap_clamp_pct = final_blend_cap_clamp_pct / total_pixels;
+            g_dualiso_full20bit_timing.final_blend_f_near_0_pct = final_blend_f_near_0_pct / total_pixels;
+            g_dualiso_full20bit_timing.final_blend_f_near_1_pct = final_blend_f_near_1_pct / total_pixels;
+        }
+        g_dualiso_full20bit_timing.final_blend_raw2ev_gather_probe_ms += final_blend_raw2ev_gather_probe_ms;
+        g_dualiso_full20bit_timing.final_blend_fullres_curve_gather_probe_ms += final_blend_fullres_curve_gather_probe_ms;
+        g_dualiso_full20bit_timing.final_blend_ev2raw_store_probe_ms += final_blend_ev2raw_store_probe_ms;
+        g_dualiso_full20bit_timing.final_blend_arithmetic_probe_ms += final_blend_arithmetic_probe_ms;
+        final_blend_fused_to_16bit = 1;
     }
     else
 #endif
@@ -4088,6 +4291,8 @@ static inline void final_blend(struct raw_info raw_info,
             }
         }
     }
+    g_dualiso_full20bit_timing.final_blend_row_kernel_ms += dualiso_debug_elapsed_ms(final_blend_row_kernel_start);
+    return final_blend_fused_to_16bit;
 }
 
 static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * image_data, uint32_t * raw_buffer_32)
@@ -4390,8 +4595,14 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         double ideal_noise_std = noise_std[0];
 #endif
         stage_start = mlv_stage_timing_now();
-        final_blend(raw_info, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, scratch);
+        int final_blend_fused_to_16bit = final_blend(raw_info, image_data, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, randn05_cache, scratch);
         g_dualiso_full20bit_timing.final_blend_ms += dualiso_debug_elapsed_ms(stage_start);
+        if (!final_blend_fused_to_16bit)
+        {
+            stage_start = mlv_stage_timing_now();
+            convert_20_to_16bit(raw_info, image_data, raw_buffer_32);
+            g_dualiso_full20bit_timing.convert16_ms += dualiso_debug_elapsed_ms(stage_start);
+        }
 
         /* let's see how much dynamic range we actually got */
 #ifndef STDOUT_SILENT
@@ -4399,9 +4610,6 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         printf("Noise level     : %.02f (20-bit), ideally %.02f\n", noise_std[0], ideal_noise_std);
         printf("Dynamic range   : %.02f EV (cooked)\n", log2(white - black) - log2(noise_std[0]));
 #endif
-        stage_start = mlv_stage_timing_now();
-        convert_20_to_16bit(raw_info, image_data, raw_buffer_32);
-        g_dualiso_full20bit_timing.convert16_ms += dualiso_debug_elapsed_ms(stage_start);
         ret = 1;
     }
     
