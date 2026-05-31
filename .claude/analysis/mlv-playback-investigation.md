@@ -1,3 +1,34 @@
+## 2026-05-31 - rejected highlight-reconstruction branch split in the hot raw-processing loop
+
+### Verified locally
+
+- I tried specializing the hot generic color loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by splitting `apply_processing_object()` into separate `use_highlight_reconstruction` and no-highlight paths so the common `highlight_reconstruction == 0` case would not pay the per-pixel branch.
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) before the revert.
+- Probe release executable metadata:
+  - `LastWriteTime=5/31/2026 1:07:22 PM`
+  - `Length=8804864`
+  - `SHA256=D97167BFD0F3C1412FD001E536E528AA2348ED5F5B3E31F9885919E86EA690FA`
+- After restoring `raw_processing.c` back to `HEAD`, the user-facing release tree was rebuilt again to the accepted baseline shape:
+  - `LastWriteTime=5/31/2026 1:11:08 PM`
+  - `Length=8797184`
+  - `SHA256=5C2807EDD936E07F7FB80172169F034F100F541B239361FFAD26E75E18C9E00D`
+- The visible smoke gate stayed on x1 Quality with settled Auto Look Assist semantics preserved in the packets. `look_assist_chroma_smooth_auto_applied=true`, `look_assist_toggle_smoke_stable=true`, and `processed8_direct_path_active` was `true` only on the warm-up frame and `false` on frames 1 and 2 for all three clips.
+- Settled-frame averages from `.claude-state/profiling/wb-8df5e901f3da4434/highlight-split/` were not competitive:
+  - `M16-1327`: `avg_render_thread_work_ms=339`, `avg_llrawproc_ms=152.5`, `avg_processing_core_color_ms=54.5`, `avg_processing_core_creative_ms=55`, `avg_processing_shadows_highlights_prep_ms=36.5`, `avg_dual_iso_full20_mix_chroma_ms=91.5`, `avg_dual_iso_full20_final_blend_ms=18`, `avg_cadence_ms=515.312`, `derived_fps=1.941`
+  - `M16-1347`: `avg_render_thread_work_ms=281`, `avg_llrawproc_ms=124.5`, `avg_processing_core_color_ms=51.5`, `avg_processing_core_creative_ms=48.5`, `avg_processing_shadows_highlights_prep_ms=26.5`, `avg_dual_iso_full20_mix_chroma_ms=65`, `avg_dual_iso_full20_final_blend_ms=11.5`, `avg_cadence_ms=448.357`, `derived_fps=2.23`
+  - `M16-1446`: `avg_render_thread_work_ms=195.5`, `avg_llrawproc_ms=43`, `avg_processing_core_color_ms=51`, `avg_processing_core_creative_ms=47`, `avg_processing_shadows_highlights_prep_ms=26.5`, `avg_dual_iso_full20_mix_chroma_ms=0`, `avg_dual_iso_full20_final_blend_ms=7`, `avg_cadence_ms=329.414`, `derived_fps=3.036`
+
+### Cross-checked from prior analysis
+
+- The visible gate is still the same x1 Quality / settled Auto Look Assist playback path the investigation has been using, so this is directly comparable to the current keeper history.
+- The new split is materially slower than the accepted nearby baseline on the same three-clip gate, so it should be rejected rather than promoted.
+- The packets still show the direct8 guard intact and the visible state stable, so this is a throughput reject, not a quality regression.
+
+### Needs runtime profiling
+
+- The next probe should not revisit the same highlight-reconstruction branch split shape.
+- If we stay in `raw_processing.c`, the next candidate needs a different structural shape than the current `use_highlight_reconstruction` split and should probably target a different invariant or a smaller hot sub-path.
+
 ## 2026-05-31 - rejected mix-curve float prebuild in the retained Dual ISO half-res blend
 
 ### Verified locally
@@ -7892,3 +7923,53 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - The next Dual ISO probe should be structurally different from this row-loop fusion, with `mix_chroma` still the best retained-path hotspot to chase.
+
+## 2026-05-31 - rejected final_blend no-alias dispatch
+
+### Verified locally
+
+- I switched the AVX2 final-blend no-alias call site in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c) to use the existing `final_blend_row_avx2_no_alias(...)` specialization when `alias_map` is null, rebuilt the user-facing release tree, and reran the three visible GUI smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_active=0` on the settled frames.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 12:49:13 PM`
+  - `Length`: `8797184`
+  - `SHA256`: `7411EAF415367203C221171A16B40BAB31EACD55433A535BC6C1F02FB9172469`
+- Settled-frame averages from frames 1+2 for the probe were:
+  - `M16-1327`: `latency_ms=525.0324`, `render_thread_work_ms=334.0000`, `llrawproc_ms=148.5001`, `llrawproc_dual_iso_ms=148.5001`, `dual_iso_full20_mix_chroma_ms=79.9999`, `dual_iso_full20_final_blend_ms=21.0000`, `processing_core_color_ms=52.5000`, `processing_core_creative_ms=58.5001`, `processing_shadows_highlights_prep_ms=38.5000`
+  - `M16-1347`: `latency_ms=733.5245`, `render_thread_work_ms=456.9999`, `llrawproc_ms=217.9999`, `llrawproc_dual_iso_ms=217.9999`, `dual_iso_full20_mix_chroma_ms=119.0000`, `dual_iso_full20_final_blend_ms=18.5001`, `processing_core_color_ms=71.0000`, `processing_core_creative_ms=66.0000`, `processing_shadows_highlights_prep_ms=57.4999`
+  - `M16-1446`: `latency_ms=495.7757`, `render_thread_work_ms=290.0000`, `llrawproc_ms=77.0000`, `llrawproc_dual_iso_ms=77.0000`, `dual_iso_full20_mix_chroma_ms=0.0000`, `dual_iso_full20_final_blend_ms=13.0000`, `processing_core_color_ms=69.9999`, `processing_core_creative_ms=61.0001`, `processing_shadows_highlights_prep_ms=41.5000`
+- The visible gate stayed intact on the qualitative checks, but the probe regressed throughput badly and did not beat the keeper on the full three-clip comparison.
+
+### Cross-checked from prior analysis
+
+- This specialization was slower than the accepted baseline on all three visible clips, with the middle clip regressing sharply.
+- The no-alias final-blend row path already exists, but wiring it in directly did not improve the keeper comparison.
+
+### Needs runtime profiling
+
+- The next Dual ISO probe should not revisit this no-alias dispatch shape.
+- `mix_chroma` remains the better retained-path hotspot if we stay in this pipeline.
+
+## 2026-05-31 - rejected single-PRAGMA two-pass 2x2 chroma smoothing
+
+### Verified locally
+
+- I tried a different `mix_chroma` shape by moving the 2x2 chroma smoothing work into a single OpenMP region with separate `for` passes for `fullres` and `halfres` in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c), with the row helper in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c). I rebuilt the user-facing release tree and reran the three visible GUI smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_active=0` on the settled frames.
+- Release executable metadata after the probe rebuild:
+  - `LastWriteTime`: `2026-05-31 12:55:19 PM`
+  - `Length`: `8800256`
+  - `SHA256`: `46A492AF0223CA2A01543C9FB3B62CBCC335E2C2758E4C6ECC3D6FCFBC3AC8D8`
+- Settled-frame averages from frames 1+2 for the probe were:
+  - `M16-1327`: `latency_ms=585.4623`, `render_thread_work_ms=367.4999`, `llrawproc_ms=178.4999`, `llrawproc_dual_iso_ms=177.4999`, `dual_iso_full20_mix_chroma_ms=97.0000`, `dual_iso_full20_final_blend_ms=14.0001`
+  - `M16-1347`: `latency_ms=1045.0856`, `render_thread_work_ms=669.5000`, `llrawproc_ms=373.0000`, `llrawproc_dual_iso_ms=373.0000`, `dual_iso_full20_mix_chroma_ms=180.0001`, `dual_iso_full20_final_blend_ms=29.9999`
+  - `M16-1446`: `latency_ms=628.5882`, `render_thread_work_ms=383.9999`, `llrawproc_ms=102.0000`, `llrawproc_dual_iso_ms=102.0000`, `dual_iso_full20_mix_chroma_ms=0.0000`, `dual_iso_full20_final_blend_ms=13.9999`
+- The visible gate stayed intact on the qualitative checks, but throughput regressed badly on all three clips and the probe is not competitive with the keeper.
+
+### Cross-checked from prior analysis
+
+- This two-pass OpenMP shape is worse than the accepted baseline and worse than the previous rejected chroma shapes on the visible gate.
+- The result reinforces that the current retained Dual ISO mix stack still wants a different kind of reduction than more OpenMP-region rearrangement.
+
+### Needs runtime profiling
+
+- The next Dual ISO probe should avoid this two-pass OpenMP shape.
+- If we stay in `mix_chroma`, the next candidate needs to cut actual work, not just region overhead.
