@@ -4866,6 +4866,36 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-30 - rejected chroma_smooth 2x2 unroll/threshold-hoist probe
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) by hoisting the `thr` constant out of the inner x-loop and adding `#pragma GCC unroll 2` to the 2x2 chroma-smoother hot loop.
+- The sequential visible GUI smoke gate stayed valid with x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, but the probe was slower than the accepted nearby fallback baseline on the two chroma-heavy clips, so it was reverted.
+- Probe smoke results from `.claude-state/profiling/20260530-chroma-unroll-smoke/`:
+  - `M16-1327`: `presented_fps=5.500`, `avg_render_total_ms=169.932`, `avg_llrawproc_ms=53.409`, `avg_mix_chroma_ms=23.886`, `avg_final_blend_ms=5.705`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.240`, `avg_render_total_ms=180.524`, `avg_llrawproc_ms=61.048`, `avg_mix_chroma_ms=25.048`, `avg_final_blend_ms=6.548`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.733`, `avg_render_total_ms=163.152`, `avg_llrawproc_ms=37.587`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=7.478`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The probe preserved the direct8 guard and the visible smoke still reported `processed8_direct_path_frames=0`, so the regression is isolated to the retained fallback path rather than a direct8 fallback regression.
+- The next step is to keep the reverted 2x2 chroma smoother out and look for a different structural reduction in the retained Dual ISO mix stack.
+
+### Needs runtime profiling
+
+- The unroll hint did not improve the retained chroma-heavy bucket enough to beat the accepted baseline on this VM; a future probe should likely target a different structural change in `dualiso.c` or `dualiso_avx2.inc`.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted 2x2 chroma smoother out and look for a different retained-path reduction in `dualiso.c` or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ## 2026-05-30 - rejected chroma_smooth pair-helper probe
 
 ### Verified locally
