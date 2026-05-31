@@ -5231,6 +5231,36 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-30 - rejected chroma_smooth 2x2 no-copy pass-through
+
+### Verified locally
+
+- I probed [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/chroma_smooth.c) by making the 2x2 helper write through the green pixels itself and by removing the whole-plane seed copies from [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/llrawproc/dualiso.c).
+- The visible GUI smoke gate stayed valid with x1 Quality, settled Auto Look Assist, and `processed8_direct_path_frames=0`, but the probe was slower than the accepted nearby baseline on all three clips, so it was rejected and reverted.
+- Probe smoke evidence from `.claude-state/profiling/20260530-no-copy-pass-through/`:
+  - `M16-1327`: `presented_fps=4.697`, `avg_render_total_ms=201.808`, `avg_llrawproc_ms=64.638`, `avg_mix_chroma_ms=22.468`, `avg_final_blend_ms=8.000`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.399`, `avg_render_total_ms=217.589`, `avg_llrawproc_ms=72.226`, `avg_mix_chroma_ms=23.909`, `avg_final_blend_ms=8.462`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.394`, `avg_render_total_ms=175.296`, `avg_llrawproc_ms=39.963`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.833`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby fallback baseline for the same three-clip gate was still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The no-copy pass-through kept the direct8 guard intact and preserved the visual state, but it did not improve retained-path throughput on this VM.
+- The no-copy probe is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `chroma_smooth.c`, the next candidate should be a different structural reduction in the retained 2x2 smoother rather than another pass-through or copy-elision tweak.
+
+### Ranked next steps
+
+1. High impact / medium risk: leave the reverted no-copy shape out and look for a different retained-path reduction in `chroma_smooth.c`, `dualiso.c`, or `dualiso_avx2.inc`.
+2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
+3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
+
 ### Recovery smoke
 
 - After reverting the probe, the release tree was rebuilt again from the restored baseline shape at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe), `LastWriteTime=5/30/2026 9:06:01 PM`, `Length=8793088`, `SHA256=FCAE761EBB5AEB78B8B626D435997165A21A9B93659475E66CE59585859CFDF7`.
