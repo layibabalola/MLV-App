@@ -6498,3 +6498,42 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we keep probing `processing_core_color` or `processing_core_creative`, the next candidate should be materially different from this vibrance+saturation fusion.
 - The current evidence still points to `processing_core_color` / `processing_core_creative` as the remaining meaningful buckets, but this exact fusion shape is not a keeper.
+
+## 2026-05-31 - rejected creative contrast+gradation fusion probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by fusing the always-on contrast and gradation passes inside `apply_processing_object()` into one combined loop:
+  - `pre_calc_curve_r`
+  - `gcurve_y`
+  - `gcurve_r`
+  - `gcurve_g`
+  - `gcurve_b`
+- The release tree was rebuilt from the probe build, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it did not beat the committed `processing_core` keeper on the three-clip gate, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 5:06:49 AM`
+  - `Length=8796672`
+  - `SHA256=6E05F59BD555441621D4E4A77764911D47627074D843834C0D401777FA1CB62B`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-contrast-gradation-gui-smoke/`:
+  - `M16-1327`: `presented_fps=6.239`, `avg_render_total_ms=147.64`, `avg_llrawproc_ms=61.8`, `avg_processed16_ms=139.08`, `avg_processing_ms=54.76`, `avg_processing_core_ms=32.28`, `avg_processing_core_levels_ms=3.56`, `avg_processing_core_color_ms=14.9`, `avg_processing_core_creative_ms=11.36`, `avg_processing_core_output_ms=1.16`, `avg_processing_core_other_ms=3.46`, `avg_processing_shadows_highlights_prep_ms=22.48`, `processed8_direct_path_frames=0`, `lookAssist.wait_ms=2765`
+  - `M16-1347`: `presented_fps=5.615`, `avg_render_total_ms=166.778`, `avg_llrawproc_ms=71.333`, `avg_processed16_ms=157.844`, `avg_processing_ms=60.956`, `avg_processing_core_ms=38.089`, `avg_processing_core_levels_ms=6.333`, `avg_processing_core_color_ms=16.822`, `avg_processing_core_creative_ms=12.933`, `avg_processing_core_output_ms=1.311`, `avg_processing_core_other_ms=3.489`, `avg_processing_shadows_highlights_prep_ms=22.867`, `processed8_direct_path_frames=0`, `lookAssist.wait_ms=1136`
+  - `M16-1446`: `presented_fps=6.858`, `avg_render_total_ms=137.018`, `avg_llrawproc_ms=38.473`, `avg_processed16_ms=128.382`, `avg_processing_ms=62.164`, `avg_processing_core_ms=38.182`, `avg_processing_core_levels_ms=5.491`, `avg_processing_core_color_ms=15.564`, `avg_processing_core_creative_ms=12.636`, `avg_processing_core_output_ms=1.309`, `avg_processing_core_other_ms=5.655`, `avg_processing_shadows_highlights_prep_ms=23.945`, `processed8_direct_path_frames=0`, `lookAssist.wait_ms=1404`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- The probe lost on all three clips, so it is a throughput reject rather than a keeper.
+- The visual state stayed intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Needs runtime profiling
+
+- If we keep probing `processing_core_color` or `processing_core_creative`, the next candidate should be materially different from this contrast+gradation fusion.
+- The current evidence still points to `processing_core_color` / `processing_core_creative` as the remaining meaningful buckets, but this exact fusion shape is not a keeper.
