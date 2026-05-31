@@ -5289,6 +5289,38 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 2. Medium impact / low risk: keep the same three-clip visible smoke gate and x1 Quality / Auto Look Assist checks unchanged so any later probe stays comparable.
 3. Low impact / low risk: keep the direct8 guard intact while the retained fallback path remains the active optimization target.
 
+## 2026-05-30 - rejected `processed16_to_8bit` SSE2 packdown probe
+
+### Verified locally
+
+- I replaced the scalar row packdown in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) with a manual SSE2 row helper that packs the high byte of each `uint16_t` into the output `uint8_t` row, then reran the same visible GUI smoke gate on the three canonical clips.
+- The probe build completed cleanly and preserved x1 Quality / settled Auto Look Assist, with the direct8 guard still intact and `processed8_direct_path_frames=0`, but it did not improve the gate enough to keep.
+- Rebuilt release executable metadata for the probe build:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/30/2026 10:50:17 PM`
+  - `Length=8793088`
+  - `SHA256=F2C417918C51DCCA905293335F1EFCA145D43E8C2E1C7ABC830EECDDDC07BB08`
+- Probe smoke results from `.claude-state/profiling/20260531-sse2-packdown-M16-1327.json`, `.claude-state/profiling/20260531-sse2-packdown-M16-1347.json`, and `.claude-state/profiling/20260531-sse2-packdown-M16-1446.json`:
+  - `M16-1327`: `presented_fps=4.863`, `avg_render_total_ms=196.077`, `avg_llrawproc_ms=66.667`, `avg_processed16_to_8bit_ms=2.077`, `avg_mix_chroma_ms=27.231`, `avg_final_blend_ms=7.872`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=4.873`, `avg_render_total_ms=193.667`, `avg_llrawproc_ms=66.795`, `avg_processed16_to_8bit_ms=1.974`, `avg_mix_chroma_ms=29.154`, `avg_final_blend_ms=8.538`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=5.491`, `avg_render_total_ms=172.000`, `avg_llrawproc_ms=39.295`, `avg_processed16_to_8bit_ms=1.955`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=7.409`, `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The accepted nearby baseline for the same three-clip gate is still stronger:
+  - `M16-1327`: `presented_fps=6.101`, `avg_render_total_ms=153.413`, `avg_mix_chroma_ms=23.224`, `avg_final_blend_ms=5.348`, `processed8_direct_path_frames=0`
+  - `M16-1347`: `presented_fps=5.983`, `avg_render_total_ms=157.022`, `avg_mix_chroma_ms=23.522`, `avg_final_blend_ms=6.333`, `processed8_direct_path_frames=0`
+  - `M16-1446`: `presented_fps=6.865`, `avg_render_total_ms=133.659`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=5.663`, `processed8_direct_path_frames=0`
+- The restored-baseline rerun stayed visually valid with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0`, but it still did not beat the accepted baseline:
+  - `M16-1327`: `presented_fps=5.245`, `avg_render_total_ms=177.452`, `avg_processed16_to_8bit_ms=2.143`, `avg_mix_chroma_ms=26.071`, `avg_final_blend_ms=6.714`
+  - `M16-1347`: `presented_fps=5.243`, `avg_render_total_ms=178.738`, `avg_processed16_to_8bit_ms=1.929`, `avg_mix_chroma_ms=26.500`, `avg_final_blend_ms=7.619`
+  - `M16-1446`: `presented_fps=5.871`, `avg_render_total_ms=160.106`, `avg_processed16_to_8bit_ms=2.191`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=6.383`
+- The manual SSE2 packdown is rejected rather than promoted.
+
+### Needs runtime profiling
+
+- If we keep exploring `processed16_to_8bit`, the next candidate should be a different structural reduction in the packdown stage rather than another row-local byte-pack helper.
+
 ## 2026-05-31 - rejected dualiso alias-map grayscale row-pointer probe
 
 ### Verified locally
