@@ -6461,3 +6461,40 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we keep probing `processing_core_color`, the next candidate should be materially different from this AgX-specialization shape.
 - The current evidence still points to `processing_core_color` / `processing_core_creative` as the remaining meaningful buckets, but this exact branch split is not a keeper.
+
+## 2026-05-31 - rejected creative vibrance+saturation fusion probe
+
+### Verified locally
+
+- I probed [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) by fusing the separate vibrance and saturation passes inside `apply_processing_object()` into a single combined loop:
+  - added `use_vibrance` and `use_saturation` locals
+  - combined the two hot passes under `if( use_vibrance || use_saturation )`
+  - left toning, contrast, gradation, and the rest of the creative stack in their original structure
+- The release tree was rebuilt from the probe build, then the same sequential visible GUI smoke gate was rerun with x1 Quality and settled Auto Look Assist preserved. The probe kept the visual gate valid, but it lost the three-clip gate versus the committed `processing_core` keeper, so it is not a keeper.
+- Probe release executable metadata:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=5/31/2026 4:59:21 AM`
+  - `Length=8793600`
+  - `SHA256=158DB5FF9B8CA13DF131AC530040ED1DF84C8E2E1AA21BBBF26A7E72FEA16889`
+- Probe smoke results from `.claude-state/profiling/20260531-creative-vibrance-saturation-gui-smoke/`:
+  - `M16-1327`: `presented_fps=5.874`, `avg_render_total_ms=161.021`, `avg_llrawproc_ms=68.0`, `avg_processing_ms=58.447`, `avg_processing_core_ms=33.702`, `avg_processing_core_levels_ms=3.766`, `avg_processing_core_color_ms=15.043`, `avg_processing_core_creative_ms=11.447`, `avg_processing_core_output_ms=1.149`, `avg_processing_core_other_ms=4.766`, `avg_processing_shadows_highlights_prep_ms=24.745`, `processed8_direct_path_frames=0`, `lookAssist.wait_ms=3060`
+  - `M16-1347`: `presented_fps=5.354`, `avg_render_total_ms=177.186`, `avg_llrawproc_ms=76.209`, `avg_processing_ms=65.721`, `avg_processing_core_ms=40.209`, `avg_processing_core_levels_ms=4.488`, `avg_processing_core_color_ms=16.884`, `avg_processing_core_creative_ms=13.186`, `avg_processing_core_output_ms=1.163`, `avg_processing_core_other_ms=6.674`, `avg_processing_shadows_highlights_prep_ms=25.512`, `processed8_direct_path_frames=0`, `lookAssist.wait_ms=1169`
+  - `M16-1446`: `presented_fps=5.874`, `avg_render_total_ms=159.128`, `avg_llrawproc_ms=48.83`, `avg_processing_ms=71.745`, `avg_processing_core_ms=43.277`, `avg_processing_core_levels_ms=7.957`, `avg_processing_core_color_ms=15.851`, `avg_processing_core_creative_ms=13.319`, `avg_processing_core_output_ms=1.426`, `avg_processing_core_other_ms=7.681`, `avg_processing_shadows_highlights_prep_ms=28.468`, `processed8_direct_path_frames=0`, `lookAssist.wait_ms=1703`
+
+### Cross-checked from prior analysis
+
+- The committed `processing_core` keeper for the same three-clip gate remains stronger:
+  - `M16-1327`: `presented_fps=6.373`
+  - `M16-1347`: `presented_fps=6.613`
+  - `M16-1446`: `presented_fps=7.242`
+- The probe lost badly on all three clips, so it is a throughput reject rather than a keeper.
+- The visual state stayed intact throughout:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Needs runtime profiling
+
+- If we keep probing `processing_core_color` or `processing_core_creative`, the next candidate should be materially different from this vibrance+saturation fusion.
+- The current evidence still points to `processing_core_color` / `processing_core_creative` as the remaining meaningful buckets, but this exact fusion shape is not a keeper.
