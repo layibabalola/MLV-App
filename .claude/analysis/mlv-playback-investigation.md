@@ -9998,3 +9998,27 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next useful `mix_chroma` probe should be structurally different from this combined-write timer.
 - If the next probe is still flat, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
+
+## 2026-06-01 - SH RBF detail timing is live, but the leaves stay balanced
+
+### Verified locally
+
+- I reran the built-in `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=1` path with `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING=1` on the current keeper and kept the visible smoke gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The halfres SH path is still the live path on the hot clips, and the detail timer now exposes the internal RBF leaves:
+  - `M16-1327`: `processing_shadows_highlights_filter_halfres_rbf_ms=16/34`, `rbf_left_ms=3/4`, `rbf_right_ms=3/3`, `rbf_horizontal_average_ms=3/3`, `rbf_vertical_down_ms=4/5`, `rbf_vertical_up_ms=5/6`, `rbf_output_ms=2/4`
+  - `M16-1347`: `processing_shadows_highlights_filter_halfres_rbf_ms=26/21`, `rbf_left_ms=3/4`, `rbf_right_ms=4/5`, `rbf_horizontal_average_ms=4/4`, `rbf_vertical_down_ms=5/4`, `rbf_vertical_up_ms=5/7`, `rbf_output_ms=4/8`
+  - `M16-1446`: `processing_shadows_highlights_filter_halfres_rbf_ms=24/21`, `rbf_left_ms=4/4`, `rbf_right_ms=2/3`, `rbf_horizontal_average_ms=3/4`, `rbf_vertical_down_ms=3/4`, `rbf_vertical_up_ms=8/7`, `rbf_output_ms=6/3`
+
+### Cross-checked from prior analysis
+
+- The built-in SH split no longer leaves the RBF timing opaque, so we can rule out another “zero detail” dead end.
+- The leaves are still broadly balanced across the hot clips; `vertical_up` and `output` are the largest single leaves on some frames, but not consistently enough to justify a patch yet.
+- This confirms SH is a real fallback bucket, but still not a keeper-shaped patch target from the current data.
+
+### Needs runtime profiling
+
+- If we stay in SH, the next probe should be a more structural split around the RBF `vertical_up`/`output` tail, not another broad outer-bucket timer.
+- If we don’t stay in SH, the honest move is still to pivot to another retained bucket instead of forcing more SH instrumentation.
