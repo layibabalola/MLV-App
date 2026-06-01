@@ -1,3 +1,32 @@
+## 2026-06-01 - final_blend rebaseline holds on the current keeper; mix_chroma is still hot but mixed
+
+### Verified locally
+
+- I reran the three visible smoke clips on the current keeper build from [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) with the normal no-probe path and kept the visible gate intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The fused `final_blend` path remains intact and still cheap on the current keeper:
+  - `M16-1327`: `llrawproc_ms=90.2`, `dual_iso_full20_final_blend_ms=9.3`, `dual_iso_full20_mix_chroma_ms=50.0`
+  - `M16-1347`: `llrawproc_ms=81.4`, `dual_iso_full20_final_blend_ms=10.0`, `dual_iso_full20_mix_chroma_ms=45.7`
+  - `M16-1446`: `llrawproc_ms=28.0`, `dual_iso_full20_final_blend_ms=7.2`, `dual_iso_full20_mix_chroma_ms=0.0`
+- I then reran the hot `mix_chroma` halfres write probes on the same keeper baseline:
+  - Mode `9` (`write_r`): `M16-1327` halfres store lookups `2.9/2.8 ms`, `M16-1347` `5.0/5.1 ms`
+  - Mode `10` (`write_b`): `M16-1327` halfres store lookups `3.4/3.2 ms`, `M16-1347` `5.5/4.5 ms`
+  - `M16-1446` bypassed `mix_chroma` in both modes
+- The halfres write split is still mixed on the current keeper, so there is no stable write-side winner to patch yet.
+
+### Cross-checked from prior analysis
+
+- The prior keeper already showed `mix_chroma` as the hottest retained bucket on the chroma-heavy clips, and the current keeper rebaseline preserves that shape.
+- The `final_blend` fusion remains a keeper-shaped win and did not regress while the AgX helper was trimmed.
+- The current mix-chroma branch skew still does not justify a narrow write-side specialization on its own.
+
+### Needs runtime profiling
+
+- If we keep iterating in `mix_chroma`, the next useful move needs a different structural split than the current halfres write probes.
+- If the next split is still mixed, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
+
 ## 2026-06-01 - AgX matrix low-check refinement keeps the keeper and trims a dead branch
 
 ### Verified locally
