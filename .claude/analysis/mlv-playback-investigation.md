@@ -1,3 +1,31 @@
+## 2026-06-01 - Shadows/Highlights 3-channel RBFilter specialization rejected; restored baseline is clean
+
+### Verified locally
+
+- I specialized [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) for `channel == 3`, rebuilding the release tree and rerunning the same three visible smoke clips against the updated binary.
+- The release tree is current again at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 11:53:08 PM`
+  - `Length=8890880`
+  - `SHA256=6E48AFC6F0799CAE0B2F41F6D4C4EAEAED4B9568A5A210885B4E0A2D3A25276E`
+- The restored baseline kept the visible smoke gate intact on the three clips:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled-frame comparisons did not justify keeping the specialization:
+  - `M16-1327`: `llrawproc_ms=141/139`, `processing_shadows_highlights_prep_ms=26/29`, `processing_shadows_highlights_filter_ms=26/29`
+  - `M16-1347`: `llrawproc_ms=141/178`, `processing_shadows_highlights_prep_ms=28/30`, `processing_shadows_highlights_filter_ms=28/30`
+  - `M16-1446`: `llrawproc_ms=46/40`, `processing_shadows_highlights_prep_ms=36/25`, `processing_shadows_highlights_filter_ms=36/25`
+
+### Cross-checked from prior analysis
+
+- The pre-change Shadows/Highlights detail profile showed the RBF sub-buckets were already fairly balanced, so a broad 3-channel specialization was a risky shape to begin with.
+- The rejection confirmed that this optimization shape is not the next keeper and should stay out of the worktree.
+
+### Needs runtime profiling
+
+- The next useful move is still to look for a narrower Shadows/Highlights leaf or to switch buckets if that family stays flat.
+- Do not retry the same `channel == 3` specialization shape; the current smoke evidence says it is not a keeper.
+
 ## 2026-06-01 - cam AgX result-scalarization rejected; restored baseline is clean and Shadows/Highlights is the next live bucket
 
 ### Verified locally
