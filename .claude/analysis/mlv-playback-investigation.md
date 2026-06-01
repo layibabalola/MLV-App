@@ -1,3 +1,38 @@
+## 2026-06-01 - cam AgX in-range matrix store fast path is a keeper; smoke gate stayed intact
+
+### Verified locally
+
+- I added a narrow AgX matrix store helper in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) that keeps the existing `LIMIT16` fallback but uses a direct cast when the matrix output is already in range, and I applied it to both the main and gradient AgX store paths.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 4:01:02 AM`
+  - `Length=8930816`
+  - `SHA256=656EBE049D1C44D64D05779E0EFC3F3950B16F569DC605C8F808742488C73904`
+- I reran the three visible smoke clips on the rebuilt binary and preserved the smoke gate:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=0`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The current keeper baseline is materially better than the previous keeper on the same three clips:
+  - `M16-1327`: `llrawproc_ms=64.0`, `final_blend_ms=6.182`, `mix_chroma_ms=40.091`, `cam_agx_ms=145.0`, `cam_agx_matrix_ms=97.454`
+  - `M16-1347`: `llrawproc_ms=77.5`, `final_blend_ms=9.9`, `mix_chroma_ms=42.3`, `cam_agx_ms=136.8`, `cam_agx_matrix_ms=92.6`
+  - `M16-1446`: `llrawproc_ms=26.636`, `final_blend_ms=6.273`, `mix_chroma_ms=0.0`, `cam_agx_ms=140.818`, `cam_agx_matrix_ms=95.818`
+- The AgX matrix saturation counters show the red row is the only one with material saturation pressure on the hot clip, but the fast path still improves the overall smoke baseline:
+  - `M16-1327`: `avg_processing_core_color_cam_agx_matrix_r_hi_count=299.727`, `avg_processing_core_color_cam_agx_matrix_g_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_b_hi_count=8.455`
+  - `M16-1347`: `avg_processing_core_color_cam_agx_matrix_r_hi_count=1.1`, `avg_processing_core_color_cam_agx_matrix_g_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_b_hi_count=0.0`
+  - `M16-1446`: all three matrix hi counts stayed at `0.0`
+
+### Cross-checked from prior analysis
+
+- The earlier cam AgX matrix row-detail probe already showed the matrix side was live and the clamp/saturation branch was a no-op on the smoke clips.
+- The new fast path is narrow enough to keep the fallback correct, but it now has a clear keeper-shaped outcome on the same three-clip smoke gate.
+- The previous keeper build is now superseded on the same smoke set, so the investigation should continue from this new baseline rather than the old one.
+
+### Needs runtime profiling
+
+- The next move should rebaseline the fused `final_blend` path against this new keeper, then decide whether there is any remaining high-value work in `mix_chroma` or another retained bucket.
+- If the next probe is flat, pivot away cleanly instead of forcing another AgX matrix micro-optimization.
+
 ## 2026-06-01 - cam AgX matrix row detail is live, but saturation counts are zero; no keeper-shaped matrix patch yet
 
 ### Verified locally

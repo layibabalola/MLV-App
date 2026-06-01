@@ -462,6 +462,15 @@ double agx_compressed_matrix[9] = {
     0.04237565, 0.0784336, 0.87914297
 };
 
+static inline uint16_t agx_store_u16_fast(const double value)
+{
+    if( value >= 0.0 && value <= 65535.0 )
+    {
+        return (uint16_t)value;
+    }
+    return (uint16_t)LIMIT16(value);
+}
+
 #ifndef __APPLE__
 #define M_PI 3.14159265358979323846 /* pi */
 #endif
@@ -2606,7 +2615,7 @@ void apply_processing_object( processingObject_t * processing,
                     const double agx_out_r = result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2;
                     const double color_cam_agx_matrix_r_start =
                         (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                    pix[0] = LIMIT16(agx_out_r);
+                    pix[0] = agx_store_u16_fast(agx_out_r);
                     if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                     {
                         core_timing->color_cam_agx_matrix_r_ms +=
@@ -2619,7 +2628,7 @@ void apply_processing_object( processingObject_t * processing,
                     const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
                     const double color_cam_agx_matrix_g_start =
                         (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                    pix[1] = LIMIT16(agx_out_g);
+                    pix[1] = agx_store_u16_fast(agx_out_g);
                     if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                     {
                         core_timing->color_cam_agx_matrix_g_ms +=
@@ -2632,7 +2641,7 @@ void apply_processing_object( processingObject_t * processing,
                     const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
                     const double color_cam_agx_matrix_b_start =
                         (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                    pix[2] = LIMIT16(agx_out_b);
+                    pix[2] = agx_store_u16_fast(agx_out_b);
                     if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                     {
                         core_timing->color_cam_agx_matrix_b_ms +=
@@ -2790,7 +2799,7 @@ void apply_processing_object( processingObject_t * processing,
                         const double agx_out_r = result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2;
                         const double color_cam_agx_matrix_r_start =
                             (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        pixg[0] = LIMIT16(agx_out_r);
+                        pixg[0] = agx_store_u16_fast(agx_out_r);
                         if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                         {
                             core_timing->color_cam_agx_matrix_r_ms +=
@@ -2803,7 +2812,7 @@ void apply_processing_object( processingObject_t * processing,
                         const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
                         const double color_cam_agx_matrix_g_start =
                             (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        pixg[1] = LIMIT16(agx_out_g);
+                        pixg[1] = agx_store_u16_fast(agx_out_g);
                         if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                         {
                             core_timing->color_cam_agx_matrix_g_ms +=
@@ -2816,7 +2825,7 @@ void apply_processing_object( processingObject_t * processing,
                         const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
                         const double color_cam_agx_matrix_b_start =
                             (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        pixg[2] = LIMIT16(agx_out_b);
+                        pixg[2] = agx_store_u16_fast(agx_out_b);
                         if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                         {
                             core_timing->color_cam_agx_matrix_b_ms +=
