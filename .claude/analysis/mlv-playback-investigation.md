@@ -1,3 +1,63 @@
+## 2026-06-01 - restored baseline after the helper regression; low-bound clamp remains dead but the helper is rejected
+
+### Verified locally
+
+- I reverted the nonnegative `mix_chroma` store helper trial in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) and rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- The restored release executable is:
+  - `LastWriteTime=6/1/2026 5:41:52 AM`
+  - `Length=8932352`
+  - `SHA256=92694500ECB16948B790353CFAC722395EB5517033EB673EC0DB9734DF10EA4F`
+- A plain three-clip smoke rerun on the restored binary kept the visible gate intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The restored baseline on the same three clips is back in the expected keeper shape:
+  - `M16-1327`: `llrawproc_ms=140.5`, `final_blend_ms=28.5`, `mix_chroma_ms=72.5`
+  - `M16-1347`: `llrawproc_ms=159.5`, `final_blend_ms=20.5`, `mix_chroma_ms=86.5`
+  - `M16-1446`: `llrawproc_ms=50.0`, `final_blend_ms=10.0`, `mix_chroma_ms=0.0`
+- The direct `mix_chroma` clamp probe remains valid on the live frames:
+  - modes `11` and `12` still report zero low-clamp hits on the hot clips
+
+### Cross-checked from prior analysis
+
+- The helper trial itself regressed badly on the hot store path, so that shape is rejected.
+- The low-bound clamp diagnosis still stands, which means the dead branch is real even though the nonnegative helper wrapper was not a keeper.
+- The hot retained `mix_chroma` surface remains the next live bucket, but the specific helper shape tried here should stay closed.
+
+### Needs runtime profiling
+
+- The next useful `mix_chroma` probe should be structurally different from the rejected helper shape.
+- If the next store-side probe is still mixed, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
+## 2026-06-01 - nonnegative `mix_chroma` store helper regresses; low-bound clamp stays dead, but this helper shape is not a keeper
+
+### Verified locally
+
+- I tried a narrow nonnegative fast path for the halfres `mix_chroma` store lookup in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- The rebuilt release executable after the helper trial was:
+  - `LastWriteTime=6/1/2026 5:16:07 AM`
+  - `Length=8932352`
+  - `SHA256=0BB6ABD272E2BC6D13A7F037D4CBFD4041F33D98DF70F734EC54F5D727F4DC2A`
+- The helper trial was a regression on the hot store path, not a keeper:
+  - `M16-1327` mode `9`: `llrawproc_ms=444.0`, `final_blend_ms=14.0`, `mix_chroma_ms=387.5`, `store_ms=138.5`, `store_r_lookup_ms=33.0`, `store_b_lookup_ms=33.5`
+  - `M16-1327` mode `10`: `llrawproc_ms=410.0`, `final_blend_ms=17.5`, `mix_chroma_ms=353.0`, `store_ms=124.5`, `store_r_lookup_ms=31.0`, `store_b_lookup_ms=27.5`
+  - `M16-1347` mode `9`: `llrawproc_ms=427.5`, `final_blend_ms=21.0`, `mix_chroma_ms=362.0`, `store_ms=127.5`, `store_r_lookup_ms=27.5`, `store_b_lookup_ms=27.0`
+  - `M16-1347` mode `10`: `llrawproc_ms=425.0`, `final_blend_ms=19.5`, `mix_chroma_ms=365.5`, `store_ms=129.0`, `store_r_lookup_ms=33.5`, `store_b_lookup_ms=28.5`
+- I reverted the helper and restored the known-good `chroma_smooth_ev2raw_lookup` path after the measurement came back worse.
+
+### Cross-checked from prior analysis
+
+- The low-bound clamp counters from modes `11` and `12` are still zero on the hot clips, so the dead branch diagnosis stands.
+- The helper regression means the next `mix_chroma` step should not be another blind lookup-wrapper tweak.
+- The underlying hot surface remains the halfres store path, but this specific helper shape is rejected.
+
+### Needs runtime profiling
+
+- The next useful `mix_chroma` probe should be structurally different from this helper shape, or we should pivot to another retained bucket if the store path does not yield a clean narrower win.
+- The current evidence is enough to reject this patch, but not enough to justify a new store helper yet.
+
 ## 2026-06-01 - halfres `mix_chroma` low-bound clamp is dead on the hot clips; store-side clamp work is not the next win
 
 ### Verified locally
