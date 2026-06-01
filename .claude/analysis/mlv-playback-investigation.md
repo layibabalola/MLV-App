@@ -1,3 +1,29 @@
+# 2026-06-01 - dead-offset cleanup in the hot write-both store path is a reject; keep the earlier keeper
+
+### Verified locally
+
+- I removed two dead locals from the hot combined non-average `write_r && write_b` store path in `src/mlv/llrawproc/chroma_smooth.c`, then rebuilt the user-facing release tree and reran the same three visible GUI smoke clips.
+- The visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The cleanup was not keeper-shaped overall:
+  - `M16-1327`: `avg_llrawproc_ms=84.5`, `avg_mix_chroma_ms=45.5`, `avg_final_blend_ms=8.9`, `presented_fps=1.248`
+  - `M16-1347`: `avg_llrawproc_ms=68.1`, `avg_mix_chroma_ms=38.1`, `avg_final_blend_ms=7.8`, `presented_fps=1.249`
+  - `M16-1446`: `avg_llrawproc_ms=26.1`, `avg_mix_chroma_ms=0.0`, `avg_final_blend_ms=6.2`, `presented_fps=1.249`
+- The hot clips regressed versus the current keeper baseline, so I reverted the dead-offset cleanup and kept the earlier write-both dispatch keeper intact.
+
+### Cross-checked from prior analysis
+
+- The earlier hot write-both dispatch hint remains the keeper-shaped store-side leaf in this sequence.
+- The dead-offset removal only touched unused locals, but it did not improve the keeper comparison.
+
+### Needs runtime profiling
+
+- Rebaseline from the earlier hot write-both dispatch keeper.
+- If we stay in `mix_chroma`, the next probe should be a materially different store-side shape rather than another light cleanup of the same branch.
+
 # 2026-06-01 - no-probe branch hint in the hot write-both store path is a reject; revert to the keeper baseline
 
 ### Verified locally
