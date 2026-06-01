@@ -1,3 +1,43 @@
+# 2026-06-01 - final_blend rebaseline on the current keeper still leaves mix_chroma as the hotter bucket
+
+### Verified locally
+
+- I reran the plain smoke set on the current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:49:35 AM`
+  - `Length=8952320`
+  - `SHA256=E5ED0BC9628B5AB7C99E8B7A73D89E01342A9F8514B7B0D6F8E7E1B3A5B4E2B9`
+- I reran the fused `final_blend` probe on the same build with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`.
+- The visible smoke gate stayed intact on both runs:
+  - `processed8_direct_path_frames=false` on the later visible frames after the initial bypass frame
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- Settled-frame averages from the current keeper rerun:
+  - `M16-1327`: `llrawproc_ms=223.00`, `final_blend_ms=92.00`, `mix_chroma_ms=85.50`, `fb_row_kernel_ms=92.00`, `fb_raw2ev_ms=8.50`, `fb_curve_ms=12.50`, `fb_store_ms=25.50`
+  - `M16-1347`: `llrawproc_ms=243.50`, `final_blend_ms=104.50`, `mix_chroma_ms=94.50`, `fb_row_kernel_ms=104.50`, `fb_raw2ev_ms=14.00`, `fb_curve_ms=11.00`, `fb_store_ms=36.00`
+  - `M16-1446`: `llrawproc_ms=146.00`, `final_blend_ms=90.50`, `mix_chroma_ms=0.00`, `fb_row_kernel_ms=90.50`, `fb_raw2ev_ms=14.00`, `fb_curve_ms=5.50`, `fb_store_ms=24.50`
+- Aggregate settled-frame averages on the rerun:
+  - `llrawproc_ms=204.167`
+  - `final_blend_ms=95.667`
+  - `mix_chroma_ms=60.000`
+  - `fb_row_kernel_ms=95.667`
+  - `fb_raw2ev_ms=12.167`
+  - `fb_curve_ms=9.667`
+  - `fb_store_ms=28.667`
+- The rerun is still diagnostic rather than keeper-shaped: `fb_row_kernel` remains the dominant slice, but `final_blend` still does not overtake `mix_chroma` as the hotter retained bucket on the real smoke path.
+
+### Cross-checked from prior analysis
+
+- The direct combined halfres `mix_chroma` write-both path remains the current keeper baseline.
+- The fused `final_blend` path remains diagnostic rather than keeper-shaped.
+- The in-range lookup shortcut inside the `mix_chroma` write-both block was rejected and reverted, so that shape stays closed.
+
+### Needs runtime profiling
+
+- The next meaningful candidate is still the `mix_chroma` store side.
+- If the next `mix_chroma` probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - rejected the mix_chroma branch-hint cleanup; direct combined write-both remains the keeper
 
 ### Verified locally
