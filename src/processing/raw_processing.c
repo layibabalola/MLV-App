@@ -217,7 +217,7 @@ static int processing_main_prelude_creative_probe_mode(void)
         {
             char * end = NULL;
             long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 2 )
+            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 4 )
             {
                 probe_mode = (int)parsed;
             }
