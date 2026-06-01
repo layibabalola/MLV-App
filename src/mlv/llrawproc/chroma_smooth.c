@@ -73,9 +73,13 @@ static void CHROMA_SMOOTH_FUNC(int w,
         const int probe_horiz = probe_detail && (probe_mode == 0 || probe_mode == 1);
         const int probe_vert = probe_detail && (probe_mode == 0 || probe_mode == 2);
         const int probe_stage = g_dualiso_full20bit_timing.mix_chroma_probe_stage;
-        const int probe_center_fullres = probe_detail && (probe_mode == 0 || probe_mode == 3) && probe_stage == 1;
-        const int probe_center_halfres = probe_detail && (probe_mode == 0 || probe_mode == 3) && probe_stage == 2;
+        const int probe_center_fullres =
+            probe_detail && (probe_mode == 0 || probe_mode == 3 || probe_mode == 5 || probe_mode == 6) && probe_stage == 1;
+        const int probe_center_halfres =
+            probe_detail && (probe_mode == 0 || probe_mode == 3 || probe_mode == 5 || probe_mode == 6) && probe_stage == 2;
         const int probe_center = probe_center_fullres || probe_center_halfres;
+        const int probe_average_branch = probe_detail && probe_mode == 5;
+        const int probe_non_average_branch = probe_detail && probe_mode == 6;
         const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m2 = inp + (size_t)(y - 2) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m1 = inp + (size_t)(y - 1) * (size_t)w;
@@ -193,6 +197,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
             double chroma_center_store_r_lookup_start = 0.0;
             double chroma_center_store_b_lookup_start = 0.0;
             double chroma_center_store_lookup_elapsed_ms = 0.0;
+            double chroma_center_average_start = 0.0;
+            double chroma_center_non_average_start = 0.0;
             if (probe_center) chroma_center_gather_start = mlv_stage_timing_now();
             if (probe_center)
             {
@@ -357,6 +363,14 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                     chroma_center_store_r_start = write_start;
                 }
+                if (probe_average_branch && use_average)
+                {
+                    chroma_center_average_start = mlv_stage_timing_now();
+                }
+                else if (probe_non_average_branch && !use_average)
+                {
+                    chroma_center_non_average_start = mlv_stage_timing_now();
+                }
                 out_y[x] = out_r;
                 if (probe_center)
                 {
@@ -368,6 +382,30 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     else
                     {
                         g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_probe_ms += elapsed_ms;
+                    }
+                }
+                if (probe_average_branch && use_average)
+                {
+                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_average_start) * 1000.0;
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_average_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_average_probe_ms += elapsed_ms;
+                    }
+                }
+                else if (probe_non_average_branch && !use_average)
+                {
+                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_non_average_start) * 1000.0;
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_non_average_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_probe_ms += elapsed_ms;
                     }
                 }
             }
@@ -393,6 +431,14 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                     chroma_center_store_b_start = write_start;
                 }
+                if (probe_average_branch && use_average)
+                {
+                    chroma_center_average_start = mlv_stage_timing_now();
+                }
+                else if (probe_non_average_branch && !use_average)
+                {
+                    chroma_center_non_average_start = mlv_stage_timing_now();
+                }
                 out_y_p1[x + 1] = out_b;
                 if (probe_center)
                 {
@@ -404,6 +450,30 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     else
                     {
                         g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms += elapsed_ms;
+                    }
+                }
+                if (probe_average_branch && use_average)
+                {
+                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_average_start) * 1000.0;
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_average_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_average_probe_ms += elapsed_ms;
+                    }
+                }
+                else if (probe_non_average_branch && !use_average)
+                {
+                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_non_average_start) * 1000.0;
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_non_average_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_probe_ms += elapsed_ms;
                     }
                 }
             }

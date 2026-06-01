@@ -1,3 +1,33 @@
+## 2026-06-01 - mix_chroma average-vs-non-average probe says the non-average path is the hot case, but not yet patch-worthy
+
+### Verified locally
+
+- I added probe-only `mix_chroma` average-vs-non-average branch timing in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), wired the new counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp), then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:10:29 AM`
+  - `Length=8908800`
+  - `SHA256=78E2063C9BB5D60A79DCA10695B2CBAAF33F0D428D71CBA2527F29B075DA0963`
+- The visible smoke gate stayed intact on the three-clip rerun:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled-frame probe data says the average branch is cheap, but the non-average branch is the hot case:
+  - `M16-1327`: average `1.000 ms`, non-average `72.000 ms`, `center_use_average_count=40758`
+  - `M16-1347`: average `1.999 ms`, non-average `63.999 ms`, `center_use_average_count=66203`
+  - `M16-1446`: `mix_chroma` bypassed
+- The same split held in halfres:
+  - `M16-1327`: average `6.999 ms`, non-average `59.999 ms`
+  - `M16-1347`: average `9.000 ms`, non-average `68.001 ms`
+
+### Cross-checked from prior analysis
+
+- The existing `write_both` / lookup-fast-path ideas remain rejected and were not reopened.
+- The probe shows the minority average branch is not the next lever; the common non-average path is where the bucket still spends its time.
+
+### Needs runtime profiling
+
+- The next useful probe, if we stay in `mix_chroma`, is a narrower look inside the non-average path rather than another average-branch tweak.
+- If that does not reveal a keeper-shaped leaf, move to a different retained bucket instead of forcing more `mix_chroma` work.
+
 ## 2026-06-01 - mix_chroma write-both fast path rejected; restored baseline remains the current keeper
 
 ### Verified locally
