@@ -9942,3 +9942,15 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `LastWriteTime=6/1/2026 7:42:39 AM`
   - `Length=8932352`
   - `SHA256=B4A93D4D708D7A9F180BC86DAFBA3310A87C8BA903F4D84B32C3D5AC1D70F110`
+## 2026-06-01 - Shadows/Highlights probe confirms the bucket is live, but the current split still does not expose a keeper-shaped leaf
+
+- I ran the built-in `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=1` timing path on the current keeper build and kept the visible smoke gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The SH path is clearly live on the hot clips, and the outer prep/filter buckets are material:
+  - `M16-1327`: `processing_shadows_highlights_prep_ms=38/28`, `processing_shadows_highlights_filter_ms=38/28`, `filter_halfres_downsample_ms=4/3`, `filter_halfres_rbf_ms=22/16`, `filter_halfres_upsample_ms=10/9`
+  - `M16-1347`: `processing_shadows_highlights_prep_ms=33/29`, `processing_shadows_highlights_filter_ms=33/29`, `filter_halfres_downsample_ms=3/2`, `filter_halfres_rbf_ms=20/19`, `filter_halfres_upsample_ms=9/8`
+  - `M16-1446`: `processing_shadows_highlights_prep_ms=29/27`, `processing_shadows_highlights_filter_ms=29/27`, `filter_halfres_downsample_ms=2/3`, `filter_halfres_rbf_ms=17/16`, `filter_halfres_upsample_ms=9/9`
+- The built-in RBF detail fields stayed at zero in this probe, so the current probe shape does not yet expose a narrower SH leaf to optimize.
+- That means SH is a real retained bucket, but this current probe does not justify a patch by itself. It is a useful fallback bucket if `mix_chroma` remains mixed, not yet a keeper candidate on its own.
