@@ -964,6 +964,13 @@ private:
     double m_playbackSmokeProcessingCoreColorGammaMainSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorGammaGradientSumMs = 0.0;
     double m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreCreativeHueVsSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreCreativeVibranceSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreCreativeSaturationSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreCreativeToningSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreCreativeCurveSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreCreativeGradationSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs = 0.0;
     double m_playbackSmokeProcessingCoreOutputSumMs = 0.0;
     double m_playbackSmokeProcessingCoreOtherSumMs = 0.0;
     double m_playbackSmokeProcessingChromaSumMs = 0.0;

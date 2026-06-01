@@ -2476,6 +2476,20 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingDirect8CurvesMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_ms"),
                                       processingCoreCreativeMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_hue_vs_ms"),
+                                      processingGetLastCoreCreativeHueVsMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_vibrance_ms"),
+                                      processingGetLastCoreCreativeVibranceMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_saturation_ms"),
+                                      processingGetLastCoreCreativeSaturationMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_toning_ms"),
+                                      processingGetLastCoreCreativeToningMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_curve_ms"),
+                                      processingGetLastCoreCreativeCurveMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_gradation_ms"),
+                                      processingGetLastCoreCreativeGradationMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_creative_agx_inverse_ms"),
+                                      processingGetLastCoreCreativeAgxInverseMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_output_ms"),
                                       processingCoreOutputMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_other_ms"),

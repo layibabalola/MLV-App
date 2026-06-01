@@ -15579,6 +15579,13 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingCoreColorGammaMainSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorGammaGradientSumMs = 0.0;
     m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeHueVsSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeVibranceSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeSaturationSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeToningSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeCurveSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeGradationSumMs = 0.0;
+    m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs = 0.0;
     m_playbackSmokeProcessingCoreOutputSumMs = 0.0;
     m_playbackSmokeProcessingCoreOtherSumMs = 0.0;
     m_playbackSmokeProcessingChromaSumMs = 0.0;
@@ -16067,6 +16074,20 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_core_color_gamma_gradient_ms" );
     m_playbackSmokeProcessingCoreCreativeSumMs +=
         telemetryDoubleValue( timing, "processing_core_creative_ms" );
+    m_playbackSmokeProcessingCoreCreativeHueVsSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_hue_vs_ms" );
+    m_playbackSmokeProcessingCoreCreativeVibranceSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_vibrance_ms" );
+    m_playbackSmokeProcessingCoreCreativeSaturationSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_saturation_ms" );
+    m_playbackSmokeProcessingCoreCreativeToningSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_toning_ms" );
+    m_playbackSmokeProcessingCoreCreativeCurveSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_curve_ms" );
+    m_playbackSmokeProcessingCoreCreativeGradationSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_gradation_ms" );
+    m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs +=
+        telemetryDoubleValue( timing, "processing_core_creative_agx_inverse_ms" );
     m_playbackSmokeProcessingCoreOutputSumMs +=
         telemetryDoubleValue( timing, "processing_core_output_ms" );
     m_playbackSmokeProcessingCoreOtherSumMs +=
@@ -16499,7 +16520,14 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processing_core_color_cam_agx_matrix_ms=%78 "
                "avg_processing_core_color_gamma_ms=%79 "
                "avg_processing_core_color_gamma_main_ms=%80 "
-               "avg_processing_core_color_gamma_gradient_ms=%81" )
+               "avg_processing_core_color_gamma_gradient_ms=%81 "
+               "avg_processing_core_creative_hue_vs_ms=%82 "
+               "avg_processing_core_creative_vibrance_ms=%83 "
+               "avg_processing_core_creative_saturation_ms=%84 "
+               "avg_processing_core_creative_toning_ms=%85 "
+               "avg_processing_core_creative_curve_ms=%86 "
+               "avg_processing_core_creative_gradation_ms=%87 "
+               "avg_processing_core_creative_agx_inverse_ms=%88" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16585,7 +16613,14 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxMatrixSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaMainSumMs ), 0, 'f', 3 )
-               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaGradientSumMs ), 0, 'f', 3 );
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaGradientSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeHueVsSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeVibranceSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeSaturationSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeToningSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeCurveSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeGradationSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs ), 0, 'f', 3 );
 
     qInfo().noquote()
         << QStringLiteral(
