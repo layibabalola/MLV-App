@@ -15531,6 +15531,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseTrueProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageWriteBothProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;
@@ -15839,6 +15840,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_non_average_choose_true_probe_ms" );
     const double dualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_non_average_choose_false_probe_ms" );
+    const double dualIsoFull20MixChromaHalfresCenterNonAverageWriteBothProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_non_average_write_both_probe_ms" );
     const int dualIsoFull20MixChromaProbeMode =
         telemetryIntValue( timing, "dual_iso_full20_mix_chroma_probe_mode" );
     const double dualIsoFull20MixAliasMapMs =
@@ -16035,6 +16038,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
             dualIsoFull20MixChromaHalfresCenterNonAverageChooseTrueProbeMs;
         m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeSumMs +=
             dualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeMs;
+        m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageWriteBothProbeSumMs +=
+            dualIsoFull20MixChromaHalfresCenterNonAverageWriteBothProbeMs;
         m_playbackSmokeDualIsoFull20MixAliasMapSumMs += dualIsoFull20MixAliasMapMs;
         m_playbackSmokeDualIsoFull20MixOverexposedSumMs += dualIsoFull20MixOverexposedMs;
         m_playbackSmokeDualIsoFull20FinalBlendSumMs += dualIsoFull20FinalBlendMs;
@@ -16869,9 +16874,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "avg_chroma_center_non_average_choose_false_probe_ms=%15 "
                    "avg_chroma_halfres_center_non_average_choose_true_probe_ms=%16 "
                    "avg_chroma_halfres_center_non_average_choose_false_probe_ms=%17 "
-                   "avg_chroma_halfres_center_store_probe_ms=%18 "
-                   "avg_chroma_halfres_center_store_r_probe_ms=%19 "
-                   "avg_chroma_halfres_center_store_b_probe_ms=%20" )
+                   "avg_chroma_halfres_center_non_average_write_both_probe_ms=%18 "
+                   "avg_chroma_halfres_center_store_probe_ms=%19 "
+                   "avg_chroma_halfres_center_store_r_probe_ms=%20 "
+                   "avg_chroma_halfres_center_store_b_probe_ms=%21" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokeDualIsoFull20ValidFrames )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaSumMs ), 0, 'f', 3 )
@@ -16889,6 +16895,7 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaCenterNonAverageChooseFalseProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseTrueProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageWriteBothProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBProbeSumMs ), 0, 'f', 3 );

@@ -156,6 +156,7 @@ void dualiso_debug_reset_full20bit_timing(void)
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_choose_false_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_r_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_b_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_both_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_halfres_probe_mode = -1;
     g_dualiso_full20bit_timing.final_blend_probe_mode = -1;
     g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
@@ -245,6 +246,10 @@ int dualiso_mix_chroma_probe_mode(void)
             else if (!strcmp(v, "nonaverage-store-b-clamp") || !strcmp(v, "NONAVERAGE-STORE-B-CLAMP") || !strcmp(v, "non-average-store-b-clamp") || !strcmp(v, "NON-AVERAGE-STORE-B-CLAMP"))
             {
                 g_dualiso_mix_chroma_probe_mode_cache = 12;
+            }
+            else if (!strcmp(v, "nonaverage-write-both") || !strcmp(v, "NONAVERAGE-WRITE-BOTH") || !strcmp(v, "non-average-write-both") || !strcmp(v, "NON-AVERAGE-WRITE-BOTH"))
+            {
+                g_dualiso_mix_chroma_probe_mode_cache = 13;
             }
             else
             {

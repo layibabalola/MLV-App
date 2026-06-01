@@ -198,6 +198,7 @@ typedef struct
     double mix_chroma_halfres_center_non_average_choose_false_probe_ms;
     double mix_chroma_halfres_center_non_average_write_r_probe_ms;
     double mix_chroma_halfres_center_non_average_write_b_probe_ms;
+    double mix_chroma_halfres_center_non_average_write_both_probe_ms;
     double mix_chroma_halfres_center_write_both_count;
     double mix_chroma_halfres_center_write_r_only_count;
     double mix_chroma_halfres_center_write_b_only_count;

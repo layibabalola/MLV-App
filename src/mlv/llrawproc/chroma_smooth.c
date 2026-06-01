@@ -87,7 +87,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
         const int probe_center_fullres =
             probe_detail && (probe_mode == 0 || probe_mode == 3 || probe_mode == 5 || probe_mode == 6) && probe_stage == 1;
         const int probe_center_halfres =
-            probe_detail && (probe_mode == 0 || probe_mode == 3 || probe_mode == 5 || probe_mode == 6 || probe_mode == 9 || probe_mode == 10) && probe_stage == 2;
+            probe_detail && (probe_mode == 0 || probe_mode == 3 || probe_mode == 5 || probe_mode == 6 || probe_mode == 9 || probe_mode == 10 || probe_mode == 13) && probe_stage == 2;
         const int probe_center = probe_center_fullres || probe_center_halfres;
         const int probe_average_branch = probe_detail && probe_mode == 5;
         const int probe_non_average_branch = probe_detail && probe_mode == 6;
@@ -97,6 +97,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
         const int probe_non_average_write_b_branch = probe_detail && probe_mode == 10 && probe_center_halfres;
         const int probe_non_average_store_r_clamp_branch = probe_detail && probe_mode == 11 && probe_center_halfres;
         const int probe_non_average_store_b_clamp_branch = probe_detail && probe_mode == 12 && probe_center_halfres;
+        const int probe_non_average_write_both_branch = probe_detail && probe_mode == 13 && probe_center_halfres;
         const int ev2raw_lo = -10 * EV_RESOLUTION;
         const int ev2raw_hi = 14 * EV_RESOLUTION - 1;
         const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
@@ -221,6 +222,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
             double chroma_center_non_average_choose_start = 0.0;
             double chroma_center_non_average_write_r_start = 0.0;
             double chroma_center_non_average_write_b_start = 0.0;
+            double chroma_center_non_average_write_both_start = 0.0;
             if (probe_center) chroma_center_gather_start = mlv_stage_timing_now();
             if (probe_center)
             {
@@ -370,6 +372,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     g_dualiso_full20bit_timing.mix_chroma_halfres_center_arithmetic_probe_ms += elapsed_ms;
                 }
                 chroma_center_store_start = mlv_stage_timing_now();
+            }
+            if (probe_non_average_write_both_branch && write_r && write_b)
+            {
+                chroma_center_non_average_write_both_start = mlv_stage_timing_now();
             }
 
             if (write_r)
@@ -540,6 +546,11 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_b_probe_ms +=
                         (mlv_stage_timing_now() - chroma_center_non_average_write_b_start) * 1000.0;
                 }
+            }
+            if (probe_non_average_write_both_branch && write_r && write_b)
+            {
+                g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_both_probe_ms +=
+                    (mlv_stage_timing_now() - chroma_center_non_average_write_both_start) * 1000.0;
             }
             if (probe_non_average_choose_branch)
             {
