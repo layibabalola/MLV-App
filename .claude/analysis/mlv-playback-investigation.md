@@ -1,3 +1,32 @@
+# 2026-06-01 - store-pointer cleanup in the hot non-average write-both path is a reject
+
+### Verified locally
+
+- I tried replacing the direct indexed stores in the hot halfres `mix_chroma` non-average write-both path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) with precomputed destination pointers (`out_rp` / `out_bp`) and pointer stores.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:38:40 PM`
+  - `Length=8956416`
+  - `SHA256=49A82AA6A5B9CA28012626A0E0D5A8F5E33B871D1F3C9649B5B6B119EC7A0412`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages did not beat the current keeper baseline overall, so the store-pointer tweak is not a keeper:
+  - `M16-1327`: `llrawproc_ms=138.0` (`fps≈7.25`), `mix_chroma_ms=63.0` (`fps≈15.87`), `final_blend_ms=23.5` (`fps≈42.55`)
+  - `M16-1347`: `llrawproc_ms=123.0` (`fps≈8.13`), `mix_chroma_ms=61.5` (`fps≈16.26`), `final_blend_ms=16.0` (`fps≈62.50`)
+  - `M16-1446`: `llrawproc_ms=44.5` (`fps≈22.47`), `mix_chroma_ms=0.0`, `final_blend_ms=8.5` (`fps≈117.65`)
+
+### Cross-checked from prior analysis
+
+- The hot path is still backlog-bound, so the GUI can continue to show `0 fps` even when the smoke harness records non-zero throughput.
+- The pointer cleanup moved the work around, but it did not improve the full three-clip shape enough to displace the current keeper.
+
+### Needs runtime profiling
+
+- Rebaseline from the restored per-channel fallback keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next probe is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - explicit four-way mixed-range split in the hot non-average write-both path is a reject
 
 ### Verified locally
