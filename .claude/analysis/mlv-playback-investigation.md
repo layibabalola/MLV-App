@@ -1,3 +1,43 @@
+# 2026-06-01 - final_blend rebaseline on the current keeper still leaves mix_chroma as the hotter bucket
+
+### Verified locally
+
+- I reran the plain smoke set on the current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:37:16 AM`
+  - `Length=8952320`
+  - `SHA256=23B0BEF998104EAD1BB3A5BFD85086B1A020F1E5EFBFEE557D5A8F5D39C5CE98`
+- I reran the fused `final_blend` probe on the same build with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`.
+- The visible smoke gate stayed intact on both runs:
+  - `processed8_direct_path_frames=false` on the later visible frames after the initial bypass frame
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- Settled-frame averages from the plain smoke set:
+  - `M16-1327`: `llrawproc_ms=177.00`, `mix_chroma_ms=95.00`, `final_blend_ms=38.50`
+  - `M16-1347`: `llrawproc_ms=179.00`, `mix_chroma_ms=93.00`, `final_blend_ms=36.50`
+  - `M16-1446`: `llrawproc_ms=62.00`, `mix_chroma_ms=0.00`, `final_blend_ms=10.00`
+- Aggregate settled-frame averages on the plain smoke set:
+  - `llrawproc_ms=139.333`
+  - `mix_chroma_ms=62.667`
+  - `final_blend_ms=28.333`
+- Aggregate settled-frame averages from the diagnostic `final_blend` probe:
+  - `llrawproc_ms=361.167`
+  - `mix_chroma_ms=70.833`
+  - `final_blend_ms=106.833`
+- The diagnostic probe is still much slower than the plain keeper on `final_blend`, and `mix_chroma` remains the hotter retained bucket on the real smoke path.
+
+### Cross-checked from prior analysis
+
+- The direct combined halfres `mix_chroma` write-both path remains the current keeper baseline.
+- The fused `final_blend` path remains diagnostic rather than keeper-shaped.
+- The in-range lookup shortcut inside the `mix_chroma` write-both block was rejected and reverted, so that shape stays closed.
+
+### Needs runtime profiling
+
+- The next meaningful candidate is still the `mix_chroma` store side.
+- If the next `mix_chroma` probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - reverted the in-range lookup shortcut; direct combined write-both remains the keeper
 
 ### Verified locally
