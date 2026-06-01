@@ -1,3 +1,35 @@
+# 2026-06-01 - current-keeper mix_chroma probes point to store lookups, but not yet a new patch
+
+### Verified locally
+
+- I reran the current keeper through the `mix_chroma` mode `9` / `10` branch probes and the mode `6` store-detail probe.
+- The visible smoke gate stayed intact on those probe runs:
+  - `processed8_direct_path_frames=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The single-write tails remain effectively dead on the hot clips, while the lookup side of the combined store path is still material:
+  - `M16-1327` mode `9`: `mix_chroma_ms=361.50`, `store_r_lookup_ms=35.50`, `store_b_lookup_ms=34.00`
+  - `M16-1327` mode `10`: `mix_chroma_ms=350.50`, `store_r_lookup_ms=27.50`, `store_b_lookup_ms=22.50`
+  - `M16-1347` mode `9`: `mix_chroma_ms=389.00`, `store_r_lookup_ms=45.50`, `store_b_lookup_ms=38.00`
+  - `M16-1347` mode `10`: `mix_chroma_ms=415.00`, `store_r_lookup_ms=41.50`, `store_b_lookup_ms=46.50`
+- The mode `6` store-detail probe on the current keeper also shows the combined store body is still the live work, but the per-lookup pieces dominate that remainder:
+  - `M16-1327`: `center_store_ms=125.50`, `store_r_lookup_ms=28.00`, `store_b_lookup_ms=22.50`, `store_r_ms=24.50`, `store_b_ms=25.00`
+  - `M16-1347`: `center_store_ms=134.50`, `store_r_lookup_ms=39.00`, `store_b_lookup_ms=50.50`, `store_r_ms=28.00`, `store_b_ms=27.50`
+- The current keepers’ branch-hint win remains valid, but the next narrow optimization is not justified yet because the remaining hot piece is still the lookup-heavy store body, not a clearly skewed new branch.
+
+### Cross-checked from prior analysis
+
+- The combined halfres `write_r && write_b` branch hint still holds as the current keeper-shaped win.
+- The earlier `final_blend` rebaseline still leaves `mix_chroma` as the hotter retained bucket.
+- The current probe data moves the hotspot map one level deeper, but not enough to justify another source change.
+
+### Needs runtime profiling
+
+- If we keep pushing `mix_chroma`, the next useful probe should target the lookup-heavy combined store body more directly.
+- If that probe stays mixed, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - combined halfres mix_chroma write-both branch hint is the new keeper
 
 ### Verified locally
