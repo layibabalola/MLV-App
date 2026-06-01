@@ -1,3 +1,40 @@
+# 2026-06-01 - direct combined halfres mix_chroma write-both fast path is the new keeper
+
+### Verified locally
+
+- I replaced the hot halfres `mix_chroma` write-both goto with a direct combined fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), so the common `write_r && write_b` case now runs as one direct store path instead of flowing through the per-channel fallback branches.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:17:47 AM`
+  - `Length=8952320`
+  - `SHA256=D3969678079050BCFEE9AAC89358BE116A6521B1402676A0748AA386AAF43BBB`
+- I reran the three visible smoke clips on the rebuilt binary and preserved the smoke gate:
+  - `processed8_direct_path_active=false` on the later visible frames after the initial bypass frame
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The plain no-probe replay is a real keeper-shaped win versus the restored baseline:
+  - `M16-1327`: `llrawproc_ms=119/156`, `mix_chroma_ms=70/97`, `final_blend_ms=13/20`
+  - `M16-1347`: `llrawproc_ms=139/163`, `mix_chroma_ms=81/102`, `final_blend_ms=17/19`
+  - `M16-1446`: `llrawproc_ms=45/53`, `mix_chroma_ms=0/0`, `final_blend_ms=11/10`
+  - aggregate averages across the three clips moved from `llrawproc_ms=149.5` / `mix_chroma_ms=95.0` / `final_blend_ms=24.0` to `llrawproc_ms=112.5` / `mix_chroma_ms=58.3` / `final_blend_ms=15.0`
+- I also reran the fused `final_blend` probe on the same build with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`:
+  - `M16-1327`: `final_blend_ms=87/86`, `fb_row_kernel_ms=87/86`, `fb_raw2ev_ms=12/9`, `fb_curve_ms=6/8`, `fb_store_ms=15/26`
+  - `M16-1347`: `final_blend_ms=103/99`, `fb_row_kernel_ms=103/99`, `fb_raw2ev_ms=6/10`, `fb_curve_ms=15/16`, `fb_store_ms=44/26`
+  - `M16-1446`: `final_blend_ms=91/82`, `fb_row_kernel_ms=91/82`, `fb_raw2ev_ms=8/5`, `fb_curve_ms=9/6`, `fb_store_ms=17/21`
+- The final-blend probe average improved overall versus the restored baseline probe (`106.8` -> `91.3`), even though `M16-1446` regressed a bit on that diagnostic path.
+
+### Cross-checked from prior analysis
+
+- The previous keeper was the combined halfres `mix_chroma` write-both store path without the direct combined fast path.
+- The structural direct path is the first `mix_chroma` change in this branch that clearly improves the real no-probe hot clips overall.
+- The fused `final_blend` path remains intact and stays in the rebaseline loop, but it is still not the hotter retained bucket on the real smoke path.
+
+### Needs runtime profiling
+
+- The next highest-value residual is still the `mix_chroma` store surface, but the current direct write-both shape is now the keeper to rebaseline from.
+- If the next `mix_chroma` probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - restored baseline after reverting the halfres mix_chroma branch-hint cleanup
 
 ### Verified locally
