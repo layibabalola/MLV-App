@@ -2502,6 +2502,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingGetLastCoreColorCamAgxMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_clip_ms"),
                                       processingGetLastCoreColorCamAgxClipMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_clip_neg_r_count"),
+                                      processingGetLastCoreColorCamAgxClipNegRCount() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_clip_neg_g_count"),
+                                      processingGetLastCoreColorCamAgxClipNegGCount() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_clip_neg_b_count"),
+                                      processingGetLastCoreColorCamAgxClipNegBCount() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_ms"),
                                       processingGetLastCoreColorCamAgxMatrixMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_gamma_ms"),

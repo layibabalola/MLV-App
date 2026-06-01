@@ -9443,3 +9443,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next step should stay in the cam family only if we have a structurally different hypothesis for either the clip or matrix side.
 - Otherwise, the honest move is to pivot to another retained bucket instead of forcing a patch out of a balanced AgX split.
+
+## 2026-06-01 - cam AgX clip clamp is a no-op on smoke clips; branch reduction kept
+
+### Verified locally
+
+- I widened the cam WB probe parser in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so mode `5` can select the AgX clip-detail path, and I added clip-negative-count telemetry for the AgX clamp branch.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:29:59 AM`
+  - `Length=8921600`
+  - `SHA256=7A55F617316D47BCC449C0995604D26A79C9904EC0849A6A257E9B7A430E5E4D`
+- I reran the three smoke clips with `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=5`, and the visible gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The new counters stayed at zero across all three clips:
+  - `avg_processing_core_color_cam_agx_clip_neg_r_count=0.0`
+  - `avg_processing_core_color_cam_agx_clip_neg_g_count=0.0`
+  - `avg_processing_core_color_cam_agx_clip_neg_b_count=0.0`
+- Because the clamp never actually clips on these smoke clips, I reduced the AgX clip loop to a branch that first checks whether any channel is negative before entering the per-channel clamp work.
+
+### Cross-checked from prior analysis
+
+- The mode-4 AgX probe already showed the clip and matrix pieces are both live, but the clamp itself was not the work source.
+- The zero negative-count result confirms the clip branch is a no-op on these clips, so the branch reduction is a reasonable structural cleanup rather than a speculative rewrite.
+- The direct no-probe smoke comparison is still noisy because the probe plumbing changed the surrounding measurement shape, so the key evidence here is the zero-count telemetry rather than a single raw FPS delta.
+
+### Needs runtime profiling
+
+- If the next AgX pass stays in this family, it should target the matrix-side work rather than the clamp branch.
+- If the matrix side also fails to yield a keeper-shaped patch, the honest move is to pivot to another retained bucket instead of forcing more AgX micro-optimizations.

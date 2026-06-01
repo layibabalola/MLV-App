@@ -16123,6 +16123,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_core_color_cam_agx_ms" );
     m_playbackSmokeProcessingCoreColorCamAgxClipSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_agx_clip_ms" );
+    m_playbackSmokeProcessingCoreColorCamAgxClipNegRCountSum +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_agx_clip_neg_r_count" );
+    m_playbackSmokeProcessingCoreColorCamAgxClipNegGCountSum +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_agx_clip_neg_g_count" );
+    m_playbackSmokeProcessingCoreColorCamAgxClipNegBCountSum +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_agx_clip_neg_b_count" );
     m_playbackSmokeProcessingCoreColorCamAgxMatrixSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_agx_matrix_ms" );
     m_playbackSmokeProcessingCoreColorGammaSumMs +=
@@ -16605,16 +16611,19 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processing_core_color_cam_agx_ms=%76 "
                "avg_processing_core_color_cam_agx_clip_ms=%77 "
                "avg_processing_core_color_cam_agx_matrix_ms=%78 "
-               "avg_processing_core_color_gamma_ms=%79 "
-               "avg_processing_core_color_gamma_main_ms=%80 "
-               "avg_processing_core_color_gamma_gradient_ms=%81 "
-               "avg_processing_core_creative_hue_vs_ms=%82 "
-               "avg_processing_core_creative_vibrance_ms=%83 "
-               "avg_processing_core_creative_saturation_ms=%84 "
-               "avg_processing_core_creative_toning_ms=%85 "
-               "avg_processing_core_creative_curve_ms=%86 "
-               "avg_processing_core_creative_gradation_ms=%87 "
-               "avg_processing_core_creative_agx_inverse_ms=%88" )
+               "avg_processing_core_color_cam_agx_clip_neg_r_count=%79 "
+               "avg_processing_core_color_cam_agx_clip_neg_g_count=%80 "
+               "avg_processing_core_color_cam_agx_clip_neg_b_count=%81 "
+               "avg_processing_core_color_gamma_ms=%82 "
+               "avg_processing_core_color_gamma_main_ms=%83 "
+               "avg_processing_core_color_gamma_gradient_ms=%84 "
+               "avg_processing_core_creative_hue_vs_ms=%85 "
+               "avg_processing_core_creative_vibrance_ms=%86 "
+               "avg_processing_core_creative_saturation_ms=%87 "
+               "avg_processing_core_creative_toning_ms=%88 "
+               "avg_processing_core_creative_curve_ms=%89 "
+               "avg_processing_core_creative_gradation_ms=%90 "
+               "avg_processing_core_creative_agx_inverse_ms=%91" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16698,6 +16707,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxClipSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxMatrixSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxClipNegRCountSum ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxClipNegGCountSum ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxClipNegBCountSum ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaMainSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaGradientSumMs ), 0, 'f', 3 )
