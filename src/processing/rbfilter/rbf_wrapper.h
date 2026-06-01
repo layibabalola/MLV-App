@@ -23,6 +23,8 @@ typedef struct recursive_bf_timing_t
         double right_ms;
         double horizontal_average_ms;
         double vertical_down_ms;
+        double vertical_up_first_line_ms;
+        double vertical_up_body_ms;
         double vertical_up_ms;
         double output_ms;
 } recursive_bf_timing_t;

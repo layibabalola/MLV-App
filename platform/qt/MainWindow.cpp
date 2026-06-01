@@ -15554,6 +15554,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingShadowsHighlightsRbfRightSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfHorizontalAverageSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpFirstLineSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodySumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs = 0.0;
     m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
@@ -15920,6 +15922,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_horizontal_average_ms" );
     const double processingShadowsHighlightsRbfVerticalDownMs =
         telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_down_ms" );
+    const double processingShadowsHighlightsRbfVerticalUpFirstLineMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_first_line_ms" );
+    const double processingShadowsHighlightsRbfVerticalUpBodyMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_body_ms" );
     const double processingShadowsHighlightsRbfVerticalUpMs =
         telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_ms" );
     const double processingShadowsHighlightsRbfOutputMs =
@@ -16070,6 +16076,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeProcessingShadowsHighlightsRbfRightSumMs += processingShadowsHighlightsRbfRightMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfHorizontalAverageSumMs += processingShadowsHighlightsRbfHorizontalAverageMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs += processingShadowsHighlightsRbfVerticalDownMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpFirstLineSumMs +=
+        processingShadowsHighlightsRbfVerticalUpFirstLineMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodySumMs +=
+        processingShadowsHighlightsRbfVerticalUpBodyMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs += processingShadowsHighlightsRbfVerticalUpMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs += processingShadowsHighlightsRbfOutputMs;
     m_playbackSmokeProcessingHighestGreenSumMs += processingHighestGreenMs;
@@ -16769,7 +16779,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "playback_smoke.rbf_detail_summary session=%1 frames=%2 "
                    "avg_total_ms=%3 avg_boundary_ms=%4 avg_range_table_ms=%5 "
                    "avg_left_ms=%6 avg_right_ms=%7 avg_horizontal_average_ms=%8 "
-                   "avg_vertical_down_ms=%9 avg_vertical_up_ms=%10 avg_output_ms=%11" )
+                   "avg_vertical_down_ms=%9 avg_vertical_up_first_line_ms=%10 "
+                   "avg_vertical_up_body_ms=%11 avg_vertical_up_ms=%12 avg_output_ms=%13" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs ), 0, 'f', 3 )
@@ -16779,6 +16790,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfRightSumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfHorizontalAverageSumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpFirstLineSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodySumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs ), 0, 'f', 3 );
     }

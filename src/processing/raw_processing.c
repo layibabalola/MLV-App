@@ -60,6 +60,8 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_r
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_right_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_horizontal_average_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_down_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_first_line_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_body_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_output_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_highest_green_ms = 0.0;
@@ -326,6 +328,8 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_shadows_highlights_rbf_right_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_horizontal_average_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_vertical_down_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_first_line_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_vertical_up_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_output_ms = 0.0;
     g_processing_last_highest_green_ms = 0.0;
@@ -1672,6 +1676,10 @@ static void processing_capture_last_shadows_highlights_rbf_timing(void)
         timing.horizontal_average_ms;
     g_processing_last_shadows_highlights_rbf_vertical_down_ms =
         timing.vertical_down_ms;
+    g_processing_last_shadows_highlights_rbf_vertical_up_first_line_ms =
+        timing.vertical_up_first_line_ms;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_ms =
+        timing.vertical_up_body_ms;
     g_processing_last_shadows_highlights_rbf_vertical_up_ms =
         timing.vertical_up_ms;
     g_processing_last_shadows_highlights_rbf_output_ms = timing.output_ms;
@@ -3375,6 +3383,16 @@ double processingGetLastShadowsHighlightsRbfHorizontalAverageMilliseconds(void)
 double processingGetLastShadowsHighlightsRbfVerticalDownMilliseconds(void)
 {
     return g_processing_last_shadows_highlights_rbf_vertical_down_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfVerticalUpFirstLineMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_vertical_up_first_line_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfVerticalUpBodyMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_vertical_up_body_ms;
 }
 
 double processingGetLastShadowsHighlightsRbfVerticalUpMilliseconds(void)

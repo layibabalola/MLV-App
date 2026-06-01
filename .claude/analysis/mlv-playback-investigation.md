@@ -10022,3 +10022,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in SH, the next probe should be a more structural split around the RBF `vertical_up`/`output` tail, not another broad outer-bucket timer.
 - If we don’t stay in SH, the honest move is still to pivot to another retained bucket instead of forcing more SH instrumentation.
+
+## 2026-06-01 - SH `vertical_up` tail split shows the body carries the work; the first line is effectively zero
+
+### Verified locally
+
+- I split the SH RBF `vertical_up` timing into `vertical_up_first_line` and `vertical_up_body` in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp), with the new fields wired through [`src/processing/rbfilter/RBFilterPlain.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.h), [`src/processing/rbfilter/rbf_wrapper.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/rbf_wrapper.h), [`src/processing/rbfilter/rbf_wrapper.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/rbf_wrapper.cpp), [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 8:28:15 AM`
+  - `Length=8936960`
+  - `SHA256=BBB91AD75BFC0095D8397CF448753CE9DF76F361BEF779013967F521629B17C8`
+- I reran the three smoke clips with `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=1` and `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING=1`, and the visible smoke gate stayed intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The tail split shows `vertical_up_first_line` is effectively zero, while `vertical_up_body` matches the total `vertical_up` cost on the hot clips:
+  - `M16-1327`: `rbf_ms=16.000`, `left=3.000`, `right=2.000`, `horizontal_average=4.000`, `vertical_down=3.000`, `vertical_up_first_line=0.000`, `vertical_up_body=4.000`, `vertical_up=4.000`, `output=2.000`
+  - `M16-1347`: `rbf_ms=16.999`, `left=3.000`, `right=4.000`, `horizontal_average=2.000`, `vertical_down=4.000`, `vertical_up_first_line=0.000`, `vertical_up_body=5.000`, `vertical_up=5.000`, `output=3.000`
+  - `M16-1446`: `rbf_ms=16.000`, `left=3.000`, `right=3.000`, `horizontal_average=3.000`, `vertical_down=4.000`, `vertical_up_first_line=0.000`, `vertical_up_body=4.000`, `vertical_up=4.000`, `output=3.000`
+
+### Cross-checked from prior analysis
+
+- The earlier SH detail probe already showed the RBF leaves were balanced enough that no single leaf clearly dominated.
+- This tail split confirms the interesting work is in the body of `vertical_up`, not the first-line special case.
+- It also means the split was a measurement win, but not yet a keeper-shaped optimization target.
+
+### Needs runtime profiling
+
+- If we stay in SH, the next probe should focus on the `vertical_up_body` remainder or the `output` tail.
+- If that remains balanced, the honest move is still to pivot to another retained bucket rather than forcing more SH rewrites.
