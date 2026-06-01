@@ -1,3 +1,38 @@
+# 2026-06-01 - final_blend rebaseline on the current keeper; mix_chroma still remains the live retained hotspot
+
+### Verified locally
+
+- I reran the plain no-probe smoke set on the current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:46:09 AM`
+  - `Length=8947712`
+  - `SHA256=C6F2796E615ED47425F9F8C472BCF33A55F634DAA64D19F83C69DB190EF93762`
+- The visible smoke gate stayed intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The plain smoke frames still show the same overall shape:
+  - `M16-1327`: `llrawproc_ms=175.00` / `238.00`, `mix_chroma_ms=86.00` / `102.00`, `final_blend_ms=13.00` / `18.00`
+  - `M16-1347`: `llrawproc_ms=236.00` / `177.00`, `mix_chroma_ms=131.00` / `113.00`, `final_blend_ms=21.00` / `23.00`
+  - `M16-1446`: `llrawproc_ms=195.00` / `74.00`, `mix_chroma_ms=0.00` / `0.00`, `final_blend_ms=10.00` / `11.00`
+- I also reran the fused `final_blend` probe on the same current keeper build with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`:
+  - `M16-1327`: `final_blend_ms=97.00`, `fb_row_kernel_ms=97.00`, `fb_raw2ev_ms=16.00`, `fb_curve_ms=10.00`, `fb_store_ms=30.00`
+  - `M16-1347`: `final_blend_ms=207.00`, `fb_row_kernel_ms=207.00`, `fb_raw2ev_ms=19.00`, `fb_curve_ms=19.00`, `fb_store_ms=92.00`
+  - `M16-1446`: `final_blend_ms=92.00`, `fb_row_kernel_ms=92.00`, `fb_raw2ev_ms=10.00`, `fb_curve_ms=14.00`, `fb_store_ms=13.00`
+- The probe confirms `final_blend` is still material, but the row kernel is the obvious probe-dominant slice and `mix_chroma` remains the hotter retained bucket on the real smoke path.
+
+### Cross-checked from prior analysis
+
+- The current keeper remains the combined halfres `mix_chroma` write-both store path.
+- The `final_blend` probe is useful for map clarity, but it does not yet justify a new optimization patch over the current hot `mix_chroma` store path.
+- The visible smoke gate is still green on the current build, so the loop remains valid for the next turn.
+
+### Needs runtime profiling
+
+- The next meaningful candidate is still the `mix_chroma` store side.
+- If the next `mix_chroma` probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - combined halfres mix_chroma write-both store path is the new keeper baseline
 
 ### Verified locally
