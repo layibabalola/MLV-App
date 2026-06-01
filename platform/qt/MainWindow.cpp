@@ -15501,6 +15501,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDualIsoFull20MixCurveFloatSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixEvLutSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixHalfresSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixHalfresAvx2BulkSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixHalfresScalarTailSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaCopySumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaFullresSumMs = 0.0;
@@ -15616,6 +15618,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDualIsoFull20ValidFrames = 0;
     m_playbackSmokeDualIsoFull20LastInterpMethod = -1;
     m_playbackSmokeDualIsoFull20LastMixChromaProbeMode = -1;
+    m_playbackSmokeDualIsoFull20LastMixHalfresProbeMode = -1;
     m_playbackSmokeDualIsoFull20LastThreads = 0;
     m_playbackSmokeDualIsoFull20LastAliasMap = false;
     m_playbackSmokeDualIsoFull20LastFullres = false;
@@ -15767,6 +15770,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_mix_ev_lut_ms" );
     const double dualIsoFull20MixHalfresMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_halfres_ms" );
+    const double dualIsoFull20MixHalfresAvx2BulkMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_halfres_avx2_bulk_ms" );
+    const double dualIsoFull20MixHalfresScalarTailMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_halfres_scalar_tail_ms" );
     const double dualIsoFull20MixChromaMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_ms" );
     const double dualIsoFull20MixChromaCopyMs =
@@ -15835,6 +15842,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_other_ms" );
     const int dualIsoFull20InterpMethod =
         telemetryIntValue( timing, "dual_iso_full20_interp_method" );
+    const int dualIsoFull20MixHalfresProbeMode =
+        telemetryIntValue( timing, "dual_iso_full20_mix_halfres_probe_mode" );
     const int dualIsoFull20FinalBlendProbeMode =
         telemetryIntValue( timing, "dual_iso_full20_final_blend_probe_mode" );
     const int dualIsoFull20Threads =
@@ -15948,6 +15957,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         m_playbackSmokeDualIsoFull20MixCurveFloatSumMs += dualIsoFull20MixCurveFloatMs;
         m_playbackSmokeDualIsoFull20MixEvLutSumMs += dualIsoFull20MixEvLutMs;
         m_playbackSmokeDualIsoFull20MixHalfresSumMs += dualIsoFull20MixHalfresMs;
+        m_playbackSmokeDualIsoFull20MixHalfresAvx2BulkSumMs += dualIsoFull20MixHalfresAvx2BulkMs;
+        m_playbackSmokeDualIsoFull20MixHalfresScalarTailSumMs += dualIsoFull20MixHalfresScalarTailMs;
         m_playbackSmokeDualIsoFull20MixChromaSumMs += dualIsoFull20MixChromaMs;
         m_playbackSmokeDualIsoFull20MixChromaCopySumMs += dualIsoFull20MixChromaCopyMs;
         m_playbackSmokeDualIsoFull20MixChromaFullresSumMs += dualIsoFull20MixChromaFullresMs;
@@ -15985,6 +15996,7 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         m_playbackSmokeDualIsoFull20LastInterpMethod =
             dualIsoFull20InterpMethod;
         m_playbackSmokeDualIsoFull20LastMixChromaProbeMode = dualIsoFull20MixChromaProbeMode;
+        m_playbackSmokeDualIsoFull20LastMixHalfresProbeMode = dualIsoFull20MixHalfresProbeMode;
         m_playbackSmokeDualIsoFull20LastThreads = dualIsoFull20Threads;
         m_playbackSmokeDualIsoFull20LastAliasMap = dualIsoFull20AliasMap;
         m_playbackSmokeDualIsoFull20LastFullres = dualIsoFull20Fullres;
@@ -16665,19 +16677,20 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "avg_interp_ms=%9 avg_fullres_ms=%10 avg_mix_ms=%11 "
                    "avg_mix_curve_select_ms=%12 avg_mix_curve_build_ms=%13 "
                    "avg_mix_curve_float_ms=%14 avg_mix_ev_lut_ms=%15 "
-                   "avg_mix_halfres_ms=%16 avg_mix_chroma_ms=%17 "
-                   "avg_mix_chroma_horiz_probe_ms=%18 "
-                   "avg_mix_chroma_vert_probe_ms=%19 "
-                   "avg_mix_chroma_center_probe_ms=%20 "
-                   "avg_mix_chroma_halfres_center_probe_ms=%21 "
-                   "avg_mix_chroma_center_store_r_lookup_probe_ms=%22 "
-                   "avg_mix_chroma_center_store_b_lookup_probe_ms=%23 "
-                   "avg_mix_chroma_halfres_center_store_r_lookup_probe_ms=%24 "
-                   "avg_mix_chroma_halfres_center_store_b_lookup_probe_ms=%25 "
-                   "avg_mix_alias_map_ms=%26 avg_mix_overexposed_ms=%27 "
-                   "avg_final_blend_ms=%28 avg_convert16_ms=%29 avg_other_ms=%30 "
-                   "last_interp_method=%31 last_mix_chroma_probe_mode=%32 "
-                   "last_alias_map=%33 last_fullres=%34 last_threads=%35" )
+                   "avg_mix_halfres_ms=%16 avg_mix_halfres_avx2_bulk_ms=%17 "
+                   "avg_mix_halfres_scalar_tail_ms=%18 avg_mix_chroma_ms=%19 "
+                   "avg_mix_chroma_horiz_probe_ms=%20 "
+                   "avg_mix_chroma_vert_probe_ms=%21 "
+                   "avg_mix_chroma_center_probe_ms=%22 "
+                   "avg_mix_chroma_halfres_center_probe_ms=%23 "
+                   "avg_mix_chroma_center_store_r_lookup_probe_ms=%24 "
+                   "avg_mix_chroma_center_store_b_lookup_probe_ms=%25 "
+                   "avg_mix_chroma_halfres_center_store_r_lookup_probe_ms=%26 "
+                   "avg_mix_chroma_halfres_center_store_b_lookup_probe_ms=%27 "
+                   "avg_mix_alias_map_ms=%28 avg_mix_overexposed_ms=%29 "
+                   "avg_final_blend_ms=%30 avg_convert16_ms=%31 avg_other_ms=%32 "
+                   "last_interp_method=%33 last_mix_chroma_probe_mode=%34 "
+                   "last_alias_map=%35 last_fullres=%36 last_threads=%37" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokeDualIsoFull20ValidFrames )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20TotalSumMs ), 0, 'f', 3 )
@@ -16694,6 +16707,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixCurveFloatSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixEvLutSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixHalfresSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixHalfresAvx2BulkSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixHalfresScalarTailSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHorizProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaVertProbeSumMs ), 0, 'f', 3 )

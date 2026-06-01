@@ -9175,6 +9175,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The next step should be another retained bucket or a narrower `mix_chroma` hypothesis that is materially different from the rejected write-both/lookup-fast-path shapes.
 - For now, the data supports continuing the investigation without landing a new optimization patch yet.
 
+## 2026-06-01 - `mix_halfres` bulk/tail probe shows no scalar tail leverage
+
+### Verified locally
+
+- I added probe-only timing around the retained `mix_halfres` stage in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c) and threaded the new counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 12:50:34 AM`
+  - `Length=8896512`
+  - `SHA256=20F7A8A735DE0CDB63CEC08FDFB78F19BC7F67D21394F526E7A1D7907AFF656D`
+- I reran the same three smoke clips with `MLVAPP_DUALISO_MIX_HALFRES_PROBE=1`, and the visible gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new probe shows the `mix_halfres` stage is entirely AVX2 bulk on the smoke clips:
+  - `M16-1327`: `mix_halfres_ms=5.000`, `mix_halfres_avx2_bulk_ms=3.000`, `mix_halfres_scalar_tail_ms=0`
+  - `M16-1347`: `mix_halfres_ms=7.999`, `mix_halfres_avx2_bulk_ms=7.999`, `mix_halfres_scalar_tail_ms=0`
+  - `M16-1446`: `mix_halfres_ms=6.000`, `mix_halfres_avx2_bulk_ms=4.999`, `mix_halfres_scalar_tail_ms=0`
+
+### Cross-checked from prior analysis
+
+- The new measurement confirms there is no meaningful scalar tail left to shave in `mix_halfres` on the smoke clips.
+- That makes `mix_halfres` a poor next optimization target compared with the still-larger `mix_chroma` or Shadows/Highlights buckets.
+- The exact `mix_chroma` write-both fast path remains a closed idea, so this probe does not reopen it.
+
+### Needs runtime profiling
+
+- If we stay in the mix stack, the next step should be another `mix_chroma` hypothesis that is materially different from the rejected write-both/lookup-fast-path shapes.
+- Otherwise, move to a different retained bucket instead of forcing `mix_halfres`.
+
 ### Cross-checked from prior analysis
 
 - The previous creative gradation hoist remains the current keeper baseline.

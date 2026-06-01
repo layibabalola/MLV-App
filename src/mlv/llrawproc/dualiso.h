@@ -154,6 +154,8 @@ typedef struct
     double mix_curve_float_ms;
     double mix_ev_lut_ms;
     double mix_halfres_ms;
+    double mix_halfres_avx2_bulk_ms;
+    double mix_halfres_scalar_tail_ms;
     double mix_chroma_ms;
     double mix_chroma_copy_ms;
     double mix_chroma_fullres_ms;
@@ -207,6 +209,7 @@ typedef struct
     double mix_curve_overlap;
     int mix_chroma_probe_mode;
     int mix_chroma_probe_stage;
+    int mix_halfres_probe_mode;
     int final_blend_probe_mode;
     int mix_curve_rebuilt;
     int mix_curve_global_hit;

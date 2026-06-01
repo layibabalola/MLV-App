@@ -68,6 +68,7 @@ static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_fullres_blend_taken_cou
 DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing = {0};
 static int g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
 static int g_dualiso_mix_chroma_probe_stage_cache = 0;
+static int g_dualiso_mix_halfres_probe_mode_cache = INT_MIN;
 static int g_dualiso_final_blend_probe_mode_cache = INT_MIN;
 
 enum
@@ -141,9 +142,11 @@ void dualiso_debug_reset_full20bit_timing(void)
     g_dualiso_full20bit_timing.mix_chroma_center_store_b_lookup_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_halfres_probe_mode = -1;
     g_dualiso_full20bit_timing.final_blend_probe_mode = -1;
     g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
     g_dualiso_mix_chroma_probe_stage_cache = 0;
+    g_dualiso_mix_halfres_probe_mode_cache = INT_MIN;
     g_dualiso_final_blend_probe_mode_cache = INT_MIN;
 }
 
@@ -161,6 +164,8 @@ static void dualiso_debug_set_full20bit_path(int interp_method, int use_alias_ma
     g_dualiso_full20bit_timing.threads = threads;
     g_dualiso_full20bit_timing.valid = 1;
 }
+
+static int dualiso_env_truthy(const char * v);
 
 int dualiso_mix_chroma_probe_mode(void)
 {
@@ -206,6 +211,16 @@ int dualiso_mix_chroma_probe_mode(void)
         }
     }
     return g_dualiso_mix_chroma_probe_mode_cache;
+}
+
+static int dualiso_mix_halfres_probe_mode(void)
+{
+    if (g_dualiso_mix_halfres_probe_mode_cache == INT_MIN)
+    {
+        g_dualiso_mix_halfres_probe_mode_cache =
+            dualiso_env_truthy(getenv("MLVAPP_DUALISO_MIX_HALFRES_PROBE")) ? 1 : -1;
+    }
+    return g_dualiso_mix_halfres_probe_mode_cache;
 }
 
 static int dualiso_final_blend_probe_mode(void)
@@ -3786,6 +3801,9 @@ static inline int mix_images(struct raw_info raw_info,
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
     if (g_dualiso_hq_use_avx2)
     {
+        const int mix_halfres_probe_mode = dualiso_mix_halfres_probe_mode();
+        const int mix_halfres_probe_detail = mix_halfres_probe_mode >= 0;
+        g_dualiso_full20bit_timing.mix_halfres_probe_mode = mix_halfres_probe_mode;
         const int x_start = w & ~7;
         mix_stage_start = mlv_stage_timing_now();
         float * mix_curve_float = ensure_mix_curve_float_cache_slot(scratch,
@@ -3807,11 +3825,18 @@ static inline int mix_images(struct raw_info raw_info,
             const uint32_t *bright_row = &bright[row_offset];
             const uint32_t *dark_row = &dark[row_offset];
 
+            const double row_bulk_start = mix_halfres_probe_detail ? mlv_stage_timing_now() : 0.0;
             mix_images_row_avx2(halfres_row,
                                 bright_row,
                                 dark_row,
                                 raw2ev_float, raw2ev, ev2raw, mix_curve_float, w);
+            if (mix_halfres_probe_detail)
+            {
+                g_dualiso_full20bit_timing.mix_halfres_avx2_bulk_ms +=
+                    dualiso_debug_elapsed_ms(row_bulk_start);
+            }
             /* tail: pixels not covered by SIMD bulk */
+            const double row_tail_start = mix_halfres_probe_detail ? mlv_stage_timing_now() : 0.0;
             for (int x = x_start; x < w; x ++) {
                 int b = bright_row[x];
                 int d = dark_row[x];
@@ -3821,6 +3846,11 @@ static inline int mix_images(struct raw_info raw_info,
                 int mixed = bev * (1-k) + dev * k;
                 halfres_row[x] = ev2raw[mixed];
             }
+            if (mix_halfres_probe_detail)
+            {
+                g_dualiso_full20bit_timing.mix_halfres_scalar_tail_ms +=
+                    dualiso_debug_elapsed_ms(row_tail_start);
+            }
         }
         g_dualiso_full20bit_timing.mix_halfres_ms +=
             dualiso_debug_elapsed_ms(mix_stage_start);
@@ -3828,7 +3858,11 @@ static inline int mix_images(struct raw_info raw_info,
     else
 #endif
     {
+        const int mix_halfres_probe_mode = dualiso_mix_halfres_probe_mode();
+        const int mix_halfres_probe_detail = mix_halfres_probe_mode >= 0;
+        g_dualiso_full20bit_timing.mix_halfres_probe_mode = mix_halfres_probe_mode;
         mix_stage_start = mlv_stage_timing_now();
+        const double scalar_tail_start = mix_halfres_probe_detail ? mlv_stage_timing_now() : 0.0;
         #pragma omp parallel for collapse(2)
         for (int y = 0; y < h; y ++)
         {
@@ -3851,6 +3885,11 @@ static inline int mix_images(struct raw_info raw_info,
                 int mixed = bev * (1-k) + dev * k;
                 halfres[x + y*w] = ev2raw[mixed];
             }
+        }
+        if (mix_halfres_probe_detail)
+        {
+            g_dualiso_full20bit_timing.mix_halfres_scalar_tail_ms +=
+                dualiso_debug_elapsed_ms(scalar_tail_start);
         }
         g_dualiso_full20bit_timing.mix_halfres_ms +=
             dualiso_debug_elapsed_ms(mix_stage_start);
