@@ -9390,3 +9390,25 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in the WB family, the next probe should be a different live leaf shape than the rejected coefficient hoist.
 - Otherwise, keep the restored baseline and move to a different retained bucket rather than forcing more WB micro-optimizations.
+
+## 2026-06-01 - fullres `mix_chroma` write split rejected; smoke helper now supports injected env vars
+
+### Verified locally
+
+- I repaired the smoke helper in [`tools/profiling/run-release-gui-smoke.ps1`](C:/!Layi%20Wkspc%20MLV-App/tools/profiling/run-release-gui-smoke.ps1) so it accepts `-ExtraEnvironment KEY=VALUE` pairs and forwards them into the launch environment.
+- I added and then rejected probe-only fullres `mix_chroma` write counters in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp), and [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), then removed the remaining probe-only GUI telemetry so only the durable smoke-helper fix remains.
+- The fullres write split did not earn a keeper slot on the smoke clip:
+  - `M16-1327` mode 11: `avg_mix_chroma_ms=81.000`, `avg_chroma_fullres_ms=38.500`, `avg_chroma_halfres_ms=38.500`, all new write counters `0.000`
+  - `M16-1327` mode 12: `avg_mix_chroma_ms=85.500`, `avg_chroma_fullres_ms=41.000`, `avg_chroma_halfres_ms=40.000`, all new write counters `0.000`
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) after the probe edits, then reverted the probe-only C++ changes and kept the helper fix.
+
+### Cross-checked from prior analysis
+
+- The helper fix is durable and useful because it restores the ability to inject arbitrary probe env vars into the release smoke harness.
+- The fullres write split was a dead end: the new counters stayed zero on the target smoke clip, so it is not the next optimization target.
+- The current retained hot bucket remains `mix_chroma`, but this specific fullres non-average write shape should stay closed.
+
+### Needs runtime profiling
+
+- If we keep investigating `mix_chroma`, the next probe should be a different structural split that is not just another write-side counter.
+- Otherwise, move to a different retained bucket and leave the helper fix in place for future probes.

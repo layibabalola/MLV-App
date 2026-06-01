@@ -20,6 +20,7 @@ param(
     [switch]$FrameTelemetry,
     [switch]$RbfDetailTiming,
     [switch]$PreserveExperimentalEnvironment,
+    [string[]]$ExtraEnvironment = @(),
     [string]$Receipt = "",
     [string]$Scope = "",
     [ValidateSet("", "on", "off")]
@@ -153,6 +154,32 @@ function Get-ObjectPropertyValue {
     $null
 }
 
+function Add-EnvironmentPairs {
+    param(
+        [object]$Target,
+        [string[]]$Pairs
+    )
+
+    foreach ($pair in $Pairs) {
+        if ([string]::IsNullOrWhiteSpace($pair)) {
+            continue
+        }
+
+        $separatorIndex = $pair.IndexOf("=")
+        if ($separatorIndex -lt 1) {
+            throw "Invalid -ExtraEnvironment entry '$pair'. Use KEY=VALUE."
+        }
+
+        $key = $pair.Substring(0, $separatorIndex).Trim()
+        $value = $pair.Substring($separatorIndex + 1)
+        if ([string]::IsNullOrWhiteSpace($key)) {
+            throw "Invalid -ExtraEnvironment entry '$pair'. The key cannot be empty."
+        }
+
+        $Target[$key] = $value
+    }
+}
+
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $root "platform\qt\build-release\release\MLVApp.exe"
@@ -218,6 +245,7 @@ if ($PreferHqMean23) {
 if ($RbfDetailTiming) {
     $launchEnv["MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"] = "1"
 }
+Add-EnvironmentPairs -Target $launchEnv -Pairs $ExtraEnvironment
 if (-not [string]::IsNullOrWhiteSpace($env:OMP_NUM_THREADS)) {
     $launchEnv["OMP_NUM_THREADS"] = $env:OMP_NUM_THREADS
 }
@@ -321,6 +349,7 @@ if ($RbfDetailTiming) {
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")
 }
+Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 if (-not $PreserveExperimentalEnvironment) {
     foreach ($name in $experimentalEnvironmentToClear) {
         [void]$envBlock.Remove($name)
