@@ -9147,6 +9147,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - If we stay in Shadows/Highlights, the next probe should focus on the halfres RBF slice rather than the downsample or upsample helpers.
 - If we leave this bucket, the next candidate should be a different retained bucket rather than another `mix_chroma` rewrite.
 
+## 2026-06-01 - refreshed `mix_chroma` probe: store-heavy center and halfres remain the live residual
+
+### Verified locally
+
+- I refreshed the detailed `mix_chroma` probe on the current keeper baseline with `MLVAPP_DUALISO_MIX_CHROMA_PROBE=3` and reran the same three smoke clips.
+- The visible smoke gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The current settled-frame mix results are still dominated by the center and halfres center store-heavy slices:
+  - `M16-1327`: `mix_ms=599`, `center_ms=244.999`, `center_store_ms=101`, `halfres_ms=301`, `halfres_center_ms=273`, `halfres_center_store_ms=114.001`
+  - `M16-1347`: `mix_ms=594`, `center_ms=240.999`, `center_store_ms=110`, `halfres_ms=299`, `halfres_center_ms=245`, `halfres_center_store_ms=97.001`
+  - `M16-1446`: `mix_ms=0`
+- The detailed store split shows no single leaf that is obviously cleanly dominant enough for an immediate narrow rewrite:
+  - `center_store_r_ms` and `center_store_b_ms` are individually small compared with the total store bucket
+  - `halfres_center_store_r_ms` and `halfres_center_store_b_ms` are likewise split, with no clear slam-dunk winner
+
+### Cross-checked from prior analysis
+
+- The earlier `mix_chroma` write-both specialization and lookup-fast-path attempts remain rejected, so this refreshed map does not reopen those shapes.
+- The refreshed probe confirms `mix_chroma` remains larger than the current Shadows/Highlights bucket on the smoke clips, but the inner leaf is still too balanced for a justified patch.
+- The earlier Shadows/Highlights Phase 0 probe is still useful: it tells us that bucket is real, but not larger than `mix_chroma` and not yet patch-ready.
+
+### Needs runtime profiling
+
+- The next step should be another retained bucket or a narrower `mix_chroma` hypothesis that is materially different from the rejected write-both/lookup-fast-path shapes.
+- For now, the data supports continuing the investigation without landing a new optimization patch yet.
+
 ### Cross-checked from prior analysis
 
 - The previous creative gradation hoist remains the current keeper baseline.
