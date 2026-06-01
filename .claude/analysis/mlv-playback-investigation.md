@@ -10109,3 +10109,39 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in SH, the next probe should be a different store-color hypothesis, not another assignment timer.
 - If we do not have a concrete store-color hypothesis, the honest move is still to pivot to another retained bucket instead of forcing more SH rewrites.
+
+## 2026-06-01 - SH 3-channel specialization is a keeper under the GUI smoke harness
+
+### Verified locally
+
+- I re-ran the GUI smoke harness against the baseline and candidate builds for the same three clips and compared the SH tail directly.
+- The candidate build is the one with the `channel == 3` specialization in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp).
+- The visible smoke gate stayed intact on both runs:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The aggregate top-line playback metric nudged in the right direction:
+  - `avg_llrawproc_ms`: `127.000` baseline -> `126.000` candidate
+- The SH tail got materially better overall, especially in `vertical_up_body_store_color`:
+  - `avg_vertical_up_body_store_color_ms`: `285.667` baseline -> `277.000` candidate
+  - `avg_vertical_up_body_store_color_src_ms`: `43.500` baseline -> `38.833` candidate
+  - `avg_vertical_up_body_store_color_assign_ms`: `42.333` baseline -> `40.667` candidate
+  - `avg_vertical_up_body_store_color_prev_ms`: `41.500` baseline -> `44.333` candidate
+  - `avg_vertical_up_body_store_ms`: `329.833` baseline -> `326.333` candidate
+  - `avg_vertical_up_body_ms`: `376.833` baseline -> `376.500` candidate
+- Clip-level behavior remained mixed, but the hot-store improvement was strong enough to keep the specialization:
+  - `M16-1327` got slightly worse in the store-color leaf, but `llrawproc_ms` still improved
+  - `M16-1347` and `M16-1446` both improved in the store-color leaf
+
+### Cross-checked from prior analysis
+
+- The earlier GUI-smoke baseline had already shown that the SH `vertical_up_body_store_color` tail is the live residual.
+- The assignment sub-split stayed flat, so this keeper result is driven by the broader 3-channel specialization rather than the assignment timer itself.
+- This is the first SH leaf change in this sequence that earns a keeper label on the GUI smoke harness.
+
+### Needs runtime profiling
+
+- The next probe, if we stay in SH, should be a different store-color hypothesis than the assignment timer.
+- If the next probe is still mixed, the honest move is to pivot to another retained bucket instead of forcing more SH rewrites.
