@@ -1,3 +1,32 @@
+## 2026-06-01 - WB matrix channel split stayed flat; no single channel dominates enough for a new patch
+
+### Verified locally
+
+- I split the main WB matrix lookup timing in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) into separate per-channel counters for the red, green, and blue row lookups, and threaded the new telemetry through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 8:09:08 PM`
+  - `Length=8869888`
+  - `SHA256=69D6866E1502A3FAED9429A5BC13598181D87848B23FBCF37E503F7FC0527027`
+- I reran the three visible smoke clips under `MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_WB_PROBE=1` and kept the visible smoke gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The per-channel split stayed in the same band on all three clips, so no single lookup is the next obvious narrow patch:
+  - `M16-1327`: `wb_matrix_r_ms=53.000`, `wb_matrix_g_ms=55.999`, `wb_matrix_b_ms=63.999`
+  - `M16-1347`: `wb_matrix_r_ms=61.001`, `wb_matrix_g_ms=43.000`, `wb_matrix_b_ms=61.000`
+  - `M16-1446`: `wb_matrix_r_ms=57.999`, `wb_matrix_g_ms=63.000`, `wb_matrix_b_ms=66.001`
+- The aggregate main matrix and exposure counters are still broad and probe-inflated, but the channel split itself did not reveal a dominant hot row access.
+
+### Cross-checked from prior analysis
+
+- The general WB row-pointer hoist remains the keeper-shaped win in this family.
+- The main matrix path is still live, but the channel split shows the residual is not concentrated enough in one row lookup to justify a follow-up micro-patch.
+
+### Needs runtime profiling
+
+- If we stay in WB, the next useful probe should move away from channel lookup splitting and toward a different sub-family, or we should switch buckets entirely.
+- Do not force a matrix-channel rewrite unless later evidence makes one of the row lookups clearly dominant.
+
 ## 2026-06-01 - WB row-pointer hoist in the general prelude path is a keeper; main matrix still remains the live residual
 
 ### Verified locally
