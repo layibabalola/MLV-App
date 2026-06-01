@@ -10145,3 +10145,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next probe, if we stay in SH, should be a different store-color hypothesis than the assignment timer.
 - If the next probe is still mixed, the honest move is to pivot to another retained bucket instead of forcing more SH rewrites.
+
+## 2026-06-01 - rejected SH store-color branch hoist; baseline restored after no-probe rerun
+
+### Verified locally
+
+- I tried hoisting the `channel == 3` decision out of the hot SH `vertical_up_body_store_color` inner loop in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp), keeping the fixed-3 path separate from the generic path.
+- The rebuilt release tree is back on the keeper shape after reverting that branch-hoist:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/1/2026 9:40:58 AM`
+  - `Length=8946176`
+  - `SHA256=4A69F60DC58B589F964C3414F0F59A24CF951A252B9911D34F879D8F62EBE84E`
+- The three-clip no-probe smoke rerun stayed green on the visible gate:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The no-probe top-line results were worse than the prior keeper shape on the hot clips:
+  - `M16-1327`: `frame1_llrawproc_ms=143.00`, `frame2_llrawproc_ms=150.00`
+  - `M16-1347`: `frame1_llrawproc_ms=189.00`, `frame2_llrawproc_ms=161.00`
+  - `M16-1446`: `frame1_llrawproc_ms=135.00`, `frame2_llrawproc_ms=48.00`
+- The candidate branch-hoist is therefore rejected rather than kept.
+
+### Cross-checked from prior analysis
+
+- The earlier keeper result for the SH 3-channel specialization still stands, and the branch-hoist did not improve on it cleanly.
+- The SH store-color tail remains the live residual, but this specific structural change was the wrong shape.
+- The code has already been reverted back to the keeper shape, so no invalid branch-hoist remains in the tree.
+
+### Needs runtime profiling
+
+- If we stay in SH, the next probe should be a different store-color hypothesis, not another `channel == 3` hoist.
+- If we do not have a concrete store-color hypothesis, the honest move is still to pivot to another retained bucket instead of forcing more SH rewrites.
