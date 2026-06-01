@@ -12,6 +12,7 @@ param(
     [switch]$ShowWindow,
     [switch]$WaitForPaint,
     [string[]]$AdditionalArgs = @(),
+    [string[]]$ExtraEnvironment = @(),
     [switch]$DryRun
 )
 
@@ -33,6 +34,32 @@ if (-not (Test-Path -LiteralPath $qwindows)) {
 $previousPlatform = $env:QT_QPA_PLATFORM
 $previousPlatformPluginPath = $env:QT_QPA_PLATFORM_PLUGIN_PATH
 $previousPluginPath = $env:QT_PLUGIN_PATH
+
+function Add-EnvironmentPairs {
+    param(
+        [object]$Target,
+        [string[]]$Pairs
+    )
+
+    foreach ($pair in $Pairs) {
+        if ([string]::IsNullOrWhiteSpace($pair)) {
+            continue
+        }
+
+        $separatorIndex = $pair.IndexOf("=")
+        if ($separatorIndex -lt 1) {
+            throw "Invalid -ExtraEnvironment entry '$pair'. Use KEY=VALUE."
+        }
+
+        $key = $pair.Substring(0, $separatorIndex).Trim()
+        $value = $pair.Substring($separatorIndex + 1)
+        if ([string]::IsNullOrWhiteSpace($key)) {
+            throw "Invalid -ExtraEnvironment entry '$pair'. The key cannot be empty."
+        }
+
+        $Target[$key] = $value
+    }
+}
 
 try {
     # The user-facing Windows release deploys qwindows.dll, not qoffscreen.dll.
@@ -96,6 +123,10 @@ try {
     foreach ($argument in $arguments) {
         [void]$startInfo.ArgumentList.Add($argument)
     }
+
+    $envBlock = $startInfo.EnvironmentVariables
+    $envBlock["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
+    Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 
     $process = [System.Diagnostics.Process]::Start($startInfo)
     $process.WaitForExit()

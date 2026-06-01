@@ -16868,7 +16868,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "avg_chroma_center_non_average_choose_true_probe_ms=%14 "
                    "avg_chroma_center_non_average_choose_false_probe_ms=%15 "
                    "avg_chroma_halfres_center_non_average_choose_true_probe_ms=%16 "
-                   "avg_chroma_halfres_center_non_average_choose_false_probe_ms=%17" )
+                   "avg_chroma_halfres_center_non_average_choose_false_probe_ms=%17 "
+                   "avg_chroma_halfres_center_store_probe_ms=%18 "
+                   "avg_chroma_halfres_center_store_r_probe_ms=%19 "
+                   "avg_chroma_halfres_center_store_b_probe_ms=%20" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokeDualIsoFull20ValidFrames )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaSumMs ), 0, 'f', 3 )
@@ -16885,7 +16888,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaCenterNonAverageChooseTrueProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaCenterNonAverageChooseFalseProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseTrueProbeSumMs ), 0, 'f', 3 )
-                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeSumMs ), 0, 'f', 3 );
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBProbeSumMs ), 0, 'f', 3 );
     }
 }
 

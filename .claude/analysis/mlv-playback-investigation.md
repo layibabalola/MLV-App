@@ -1,3 +1,35 @@
+## 2026-06-01 - playback-profile helper now forwards `ExtraEnvironment`; halfres `mix_chroma` store leaf is confirmed live
+
+### Verified locally
+
+- I fixed [`tools/profiling/run-release-playback-profile.ps1`](C:/!Layi%20Wkspc%20MLV-App/tools/profiling/run-release-playback-profile.ps1) so it now accepts `-ExtraEnvironment` and forwards those pairs into the launched playback-profile process, matching the existing GUI smoke helper behavior.
+- I rebuilt the user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 4:53:21 AM`
+  - `Length=8932352`
+  - `SHA256=76DFDDB77555627069B06FE5B691247C58E7A7AE1700DF392D181FFDCBE6570D`
+- The visible smoke gate stayed intact on the mode-9 and mode-10 playback-profile runs:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new concise `mix_chroma` summary now exposes the halfres store fields, and the mode-9 / mode-10 probe runs show that the halfres center store leaf is real and material:
+  - `M16-1327` mode `9`: `avg_mix_chroma_ms=230`, `avg_chroma_halfres_center_probe_ms=181.667`, `avg_chroma_halfres_center_store_probe_ms=87.334`, `avg_chroma_halfres_center_store_r_probe_ms=10.333`, `avg_chroma_halfres_center_store_b_probe_ms=7.667`, `avg_chroma_halfres_center_non_average_write_r_probe_ms=61.667`
+  - `M16-1327` mode `10`: `avg_mix_chroma_ms=242.667`, `avg_chroma_halfres_center_probe_ms=187`, `avg_chroma_halfres_center_store_probe_ms=91.333`, `avg_chroma_halfres_center_store_r_probe_ms=9.667`, `avg_chroma_halfres_center_store_b_probe_ms=9.333`, `avg_chroma_halfres_center_non_average_write_b_probe_ms=52`
+  - `M16-1347` mode `9`: `avg_mix_chroma_ms=249.667`, `avg_chroma_halfres_center_store_probe_ms=87.666`, `avg_chroma_halfres_center_non_average_write_r_probe_ms=57`
+  - `M16-1347` mode `10`: `avg_mix_chroma_ms=259.667`, `avg_chroma_halfres_center_store_probe_ms=94.334`, `avg_chroma_halfres_center_non_average_write_b_probe_ms=54.666`
+  - `M16-1446` still bypasses `mix_chroma`
+- The playback-profile helper gap is now closed, so future probe-mode work can use the higher-level profile wrapper instead of forcing ad-hoc env injection.
+
+### Cross-checked from prior analysis
+
+- The current keeper still had the `mix_chroma` store leaf as the next best target before this turn.
+- The old write/lookup branch probes were not enough to justify a patch on their own; the new store telemetry now makes the store leaf visible in the concise summary, which is the missing piece we needed.
+- The earlier `mix_chroma` mode-6 and mode-7/8 probes still stand: the hot halfres non-average path is real, but the store leaf is the largest measurable remainder on the current keeper.
+
+### Needs runtime profiling
+
+- The next useful `mix_chroma` probe should go one level deeper on the halfres store helper, now that the summary exposes it cleanly.
+- If the next store-side probe is still mixed, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
+
 ## 2026-06-01 - mix_chroma branch probes show halfres non-average choose-true is faster, but the store leaf still looks like the next hotspot
 
 ### Verified locally
