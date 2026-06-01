@@ -1,3 +1,37 @@
+# 2026-06-01 - current keeper rebaseline after rebuild; mix_chroma store leaf still dominates
+
+### Verified locally
+
+- I reran the plain no-probe smoke set on the freshly rebuilt current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:49:28 AM`
+  - `Length=8947712`
+  - `SHA256=A0CCA2B8DD157D13EDAAF5C079404C50CD7FEDE2A8C76CE67BC0A34F546CCDBE`
+- The visible smoke gate stayed intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The current exe rebaseline is noisier than the earlier keeper comparison, but it still shows the SH path live and the hot mix bucket intact:
+  - `M16-1327`: `llrawproc_ms=151.00`, `mix_chroma_ms=96.00`, `final_blend_ms=14.00`
+  - `M16-1347`: `llrawproc_ms=161.00`, `mix_chroma_ms=91.00`, `final_blend_ms=26.00`
+  - `M16-1446`: `llrawproc_ms=38.00`, `mix_chroma_ms=0.00`, `final_blend_ms=8.00`
+- I refreshed the detailed `mix_chroma` mode-6 probe on this current build, and it still points at the store-heavy halfres center path:
+  - `M16-1327`: `dual_iso_full20_mix_chroma_center_store_probe_ms=151.999`, `dual_iso_full20_mix_chroma_halfres_center_store_probe_ms=176.001`, `dual_iso_full20_mix_chroma_halfres_center_write_both_count=1017000`
+  - `M16-1347`: `dual_iso_full20_mix_chroma_center_store_probe_ms=174.000`, `dual_iso_full20_mix_chroma_halfres_center_store_probe_ms=154.001`, `dual_iso_full20_mix_chroma_halfres_center_write_both_count=1017000`
+  - `M16-1446`: `mix_chroma` bypassed
+
+### Cross-checked from prior analysis
+
+- The SH store-color branch hint remains the current keeper-shaped improvement, but this fresh rebuild shows the overall hot-path numbers can still move around enough that the current build needs to be treated as a fresh rebaseline, not a new conclusion.
+- The detailed `mix_chroma` ranking still says the hot leaf is store-heavy and write-both dominated.
+- The attempted C++-lambda combined-store rewrite does not count as evidence; it was reverted before validation.
+
+### Needs runtime profiling
+
+- The next real `mix_chroma` candidate is still the store side, but the next implementation shape must be C-compatible and materially different from the rejected lookup/helper/branch-hint shapes.
+- If we do not have a concrete C-shaped store fast path, the honest move is to pivot to another retained bucket rather than forcing another `mix_chroma` rewrite.
+
 # 2026-06-01 - SH hot store-color channel hint is a keeper on the smoke clips
 
 ### Verified locally
