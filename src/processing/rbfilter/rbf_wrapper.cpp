@@ -139,6 +139,9 @@ void recursive_bf_get_last_timing(recursive_bf_timing_t * timing)
     timing->vertical_up_body_store_ms = last.vertical_up_body_store_ms;
     timing->vertical_up_body_store_factor_ms = last.vertical_up_body_store_factor_ms;
     timing->vertical_up_body_store_color_ms = last.vertical_up_body_store_color_ms;
+    timing->vertical_up_body_store_color_src_ms = last.vertical_up_body_store_color_src_ms;
+    timing->vertical_up_body_store_color_prev_ms = last.vertical_up_body_store_color_prev_ms;
+    timing->vertical_up_body_store_color_assign_ms = last.vertical_up_body_store_color_assign_ms;
     timing->vertical_up_ms = last.vertical_up_ms;
     timing->output_ms = last.output_ms;
 }

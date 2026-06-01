@@ -15560,6 +15560,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreFactorSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorSrcSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorPrevSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorAssignSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs = 0.0;
     m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
@@ -15938,6 +15941,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_body_store_factor_ms" );
     const double processingShadowsHighlightsRbfVerticalUpBodyStoreColorMs =
         telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_body_store_color_ms" );
+    const double processingShadowsHighlightsRbfVerticalUpBodyStoreColorSrcMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_body_store_color_src_ms" );
+    const double processingShadowsHighlightsRbfVerticalUpBodyStoreColorPrevMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_body_store_color_prev_ms" );
+    const double processingShadowsHighlightsRbfVerticalUpBodyStoreColorAssignMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_body_store_color_assign_ms" );
     const double processingShadowsHighlightsRbfVerticalUpMs =
         telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_vertical_up_ms" );
     const double processingShadowsHighlightsRbfOutputMs =
@@ -16100,6 +16109,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         processingShadowsHighlightsRbfVerticalUpBodyStoreFactorMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorSumMs +=
         processingShadowsHighlightsRbfVerticalUpBodyStoreColorMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorSrcSumMs +=
+        processingShadowsHighlightsRbfVerticalUpBodyStoreColorSrcMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorPrevSumMs +=
+        processingShadowsHighlightsRbfVerticalUpBodyStoreColorPrevMs;
+    m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorAssignSumMs +=
+        processingShadowsHighlightsRbfVerticalUpBodyStoreColorAssignMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs += processingShadowsHighlightsRbfVerticalUpMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs += processingShadowsHighlightsRbfOutputMs;
     m_playbackSmokeProcessingHighestGreenSumMs += processingHighestGreenMs;
@@ -16802,7 +16817,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "avg_vertical_down_ms=%9 avg_vertical_up_first_line_ms=%10 "
                    "avg_vertical_up_body_ms=%11 avg_vertical_up_body_diff_ms=%12 "
                    "avg_vertical_up_body_store_ms=%13 avg_vertical_up_body_store_factor_ms=%14 "
-                   "avg_vertical_up_body_store_color_ms=%15 avg_vertical_up_ms=%16 avg_output_ms=%17" )
+                   "avg_vertical_up_body_store_color_ms=%15 avg_vertical_up_body_store_color_src_ms=%16 "
+                   "avg_vertical_up_body_store_color_prev_ms=%17 avg_vertical_up_body_store_color_assign_ms=%18 "
+                   "avg_vertical_up_ms=%19 avg_output_ms=%20" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs ), 0, 'f', 3 )
@@ -16818,6 +16835,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreSumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreFactorSumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorSrcSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorPrevSumMs ), 0, 'f', 3 )
+                   .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorAssignSumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs ), 0, 'f', 3 )
                    .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs ), 0, 'f', 3 );
     }
