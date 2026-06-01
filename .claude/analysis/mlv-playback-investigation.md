@@ -1,3 +1,29 @@
+# 2026-06-01 - direct-final-EV store shaping in the hot write-both path is a reject; keep the earlier keeper
+
+### Verified locally
+
+- I rewired the hot non-average write-both store path in `src/mlv/llrawproc/chroma_smooth.c` to compute direct final EVs for the R/B outputs instead of reconstructing them from the selected intermediates, then rebuilt the user-facing release tree and reran the same three visible GUI smoke clips.
+- The visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The candidate did not beat the keeper baseline on the hot clips:
+  - `M16-1327`: `llrawproc_ms=71.667`, `mix_chroma_ms=37.0`, `final_blend_ms=8.889`, `presented_fps=1.123`
+  - `M16-1347`: `llrawproc_ms=93.375`, `mix_chroma_ms=42.625`, `final_blend_ms=10.375`, `presented_fps=1`
+  - `M16-1446`: `llrawproc_ms=31.182`, `mix_chroma_ms=0.0`, `final_blend_ms=6.455`, `presented_fps=1.374`
+- The hot clips regressed versus the current keeper baseline, so I reverted the direct-final-EV store shaping and kept the earlier write-both dispatch keeper intact.
+
+### Cross-checked from prior analysis
+
+- The earlier hot write-both dispatch hint remains the keeper-shaped store-side leaf in this sequence.
+- The direct-clamped non-average fallback remains the retained store shape beneath that dispatch.
+
+### Needs runtime profiling
+
+- Rebaseline from the earlier hot write-both dispatch keeper.
+- If we stay in `mix_chroma`, the next probe should be a materially different store-side shape rather than another arithmetic reshaping of the same hot store branch.
+
 # 2026-06-01 - hot non-average in-range write-both fast path is a reject; keep the earlier keeper
 
 ### Verified locally
