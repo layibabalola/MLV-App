@@ -8767,3 +8767,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in this family, the next question is whether `agx_inverse` or one of the remaining curve/gradation leaves is worth a probe.
 - If the next probe does not reveal another clear winner, we should shift to a different retained bucket instead of forcing more creative rewrites.
+
+## 2026-06-01 - agx_inverse cleanup is rejected; revert restores the known keeper shape
+
+### Verified locally
+
+- I tried the remaining creative `agx_inverse` leaf by hoisting its matrix coefficients out of the per-pixel loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), while leaving the rest of the creative split in place.
+- The patch was not keeper-shaped: the post-patch settled smoke rerun regressed the retained path badly relative to the validated vibrance keeper.
+- I reverted the `agx_inverse` cleanup and rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 9:30:35 PM`
+  - `Length=8889856`
+  - `SHA256=0C0BC2725FE28816A94D2D37822EC98A07B357745927DC62F5D010C0D0531449`
+- The revert rerun preserved the visible smoke gate:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+
+### Cross-checked from prior analysis
+
+- The validated keeper remains the positive-vibrance cleanup inside the creative family.
+- `agx_inverse` is live enough to measure, but the direct-hoist variant did not survive a keeper comparison and should stay rejected.
+- The revert build is back in the same retained-path shape as before the AgX attempt, so the next creative question should not start from this patch.
+
+### Needs runtime profiling
+
+- If we stay in creative, the remaining untested leaves are `curve` and `gradation`, but the current data says neither is likely to beat the vibrance keeper without a more structural change.
+- The safer next move is probably to shift to the next retained bucket rather than keep forcing creative micro-optimizations.
