@@ -2868,11 +2868,12 @@ void apply_processing_object( processingObject_t * processing,
         /* Contrast Curve (OMG putting this after gamma made it 999x better) */
         const double creative_curve_start =
             (capture_breakdown && creative_probe_curve) ? omp_get_wtime() : 0.0;
+        const uint16_t * const creative_curve_lut = processing->pre_calc_curve_r;
         for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
-            pix[0] = processing->pre_calc_curve_r[ pix[0] ];
-            pix[1] = processing->pre_calc_curve_r[ pix[1] ];
-            pix[2] = processing->pre_calc_curve_r[ pix[2] ];
+            pix[0] = creative_curve_lut[ pix[0] ];
+            pix[1] = creative_curve_lut[ pix[1] ];
+            pix[2] = creative_curve_lut[ pix[2] ];
         }
         if( capture_breakdown && creative_probe_curve )
         {
@@ -2886,14 +2887,18 @@ void apply_processing_object( processingObject_t * processing,
         //Gradation curve
         const double creative_gradation_start =
             (capture_breakdown && creative_probe_gradation) ? omp_get_wtime() : 0.0;
+        const uint16_t * const creative_gradation_y_lut = processing->gcurve_y;
+        const uint16_t * const creative_gradation_r_lut = processing->gcurve_r;
+        const uint16_t * const creative_gradation_g_lut = processing->gcurve_g;
+        const uint16_t * const creative_gradation_b_lut = processing->gcurve_b;
         for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
-            pix[0] = processing->gcurve_y[ pix[0] ];
-            pix[1] = processing->gcurve_y[ pix[1] ];
-            pix[2] = processing->gcurve_y[ pix[2] ];
-            pix[0] = processing->gcurve_r[ pix[0] ];
-            pix[1] = processing->gcurve_g[ pix[1] ];
-            pix[2] = processing->gcurve_b[ pix[2] ];
+            pix[0] = creative_gradation_y_lut[ pix[0] ];
+            pix[1] = creative_gradation_y_lut[ pix[1] ];
+            pix[2] = creative_gradation_y_lut[ pix[2] ];
+            pix[0] = creative_gradation_r_lut[ pix[0] ];
+            pix[1] = creative_gradation_g_lut[ pix[1] ];
+            pix[2] = creative_gradation_b_lut[ pix[2] ];
         }
         if( capture_breakdown && creative_probe_gradation )
         {
