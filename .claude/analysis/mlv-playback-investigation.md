@@ -10950,6 +10950,36 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `M16-1446`: `frame1_llrawproc_ms=135.00`, `frame2_llrawproc_ms=48.00`
 - The candidate branch-hoist is therefore rejected rather than kept.
 
+## 2026-06-01 - halfres `mix_chroma` non-average branch hint is a reject; revert to the store-side baseline
+
+### Verified locally
+
+- I reran the same three visible GUI smoke clips against the current `LIKELY(!use_average)` branch hint in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) using the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- The visible smoke gate stayed intact on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The hot clips were not keeper-shaped against the current baseline:
+  - `M16-1327`: `llrawproc_ms=128.5` (`fps=7.78`) versus baseline `125.0` (`fps=8.00`); `mix_chroma_ms=69.0` (`fps=14.49`) versus baseline `61.5` (`fps=16.26`); `final_blend_ms=14.0` (`fps=71.43`) versus baseline `19.5` (`fps=51.28`)
+  - `M16-1347`: `llrawproc_ms=173.5` (`fps=5.76`) versus baseline `175.0` (`fps=5.71`); `mix_chroma_ms=77.5` (`fps=12.90`) versus baseline `75.0` (`fps=13.33`); `final_blend_ms=20.0` (`fps=50.00`) versus baseline `21.5` (`fps=46.51`)
+  - `M16-1446`: `llrawproc_ms=65.0` (`fps=15.38`) versus baseline `44.0` (`fps=22.73`); `mix_chroma_ms=0.0`; `final_blend_ms=12.0` (`fps=83.33`) versus baseline `11.0` (`fps=90.91`)
+- I reverted the hint and rebuilt the user-facing release tree back to the baseline shape:
+  - `LastWriteTime=6/1/2026 12:49:53 PM`
+  - `Length=8953344`
+  - `SHA256=D75689E3B6531EF281D838A14F077702FE123F7188E68A1E5C9CB9AC8E701227`
+
+### Cross-checked from prior analysis
+
+- The store-side `mix_chroma` residual is still the right bucket to keep probing, but this particular non-average branch hint did not improve the three-clip keeper comparison.
+- The hot clip pair is mixed in a way that does not justify keeping the hint: `M16-1327` lost on `llrawproc_ms` and `mix_chroma_ms`, `M16-1347` was only marginally better on `llrawproc_ms` and slightly worse on `mix_chroma_ms`, and `M16-1446` regressed materially.
+- Because the visible gate stayed intact, this was a throughput rejection rather than a visual regression.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next probe should be a different store-side shape rather than another branch-prediction hint.
+- With the CPU already busy, additional smoke reruns should wait until the machine is calmer so the next comparison is worth trusting.
+
 ### Cross-checked from prior analysis
 
 - The earlier keeper result for the SH 3-channel specialization still stands, and the branch-hoist did not improve on it cleanly.
@@ -10960,3 +10990,114 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in SH, the next probe should be a different store-color hypothesis, not another `channel == 3` hoist.
 - If we do not have a concrete store-color hypothesis, the honest move is still to pivot to another retained bucket instead of forcing more SH rewrites.
+
+## 2026-06-01 - halfres write-both non-average `gb` select removal is a reject; revert to the store-side baseline
+
+### Verified locally
+
+- I restored [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) back to the baseline halfres `write_r && write_b` shape, including the non-average `gb = choose_ev_lt_eh ? gbv : gbh;` store path.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:06:32 PM`
+  - `Length=8953344`
+  - `SHA256=F035D0F5C5E9EA825D7C7436E38E1D1AAA8E37B4888245DF8E5B2D4C7F13F262`
+- I did not rerun the smoke set after the revert because the current recommendation is to hold off while the machine is already busy.
+
+### Cross-checked from prior analysis
+
+- The previous keeper baseline still applies; this revert only removes the rejected `gb`-select removal from the non-average both-write path.
+- The earlier smoke data already showed that the candidate shape was not keeper-shaped overall, especially with `M16-1446` regressing hard.
+
+### Needs runtime profiling
+
+- The next probe should stay in `mix_chroma`, but it should be a different store-side hypothesis rather than another branch-prediction tweak.
+- If CPU pressure is still high, wait until the machine is calmer before rerunning the three-clip smoke set so the comparison stays trustworthy.
+
+## 2026-06-01 - narrowed fast-path temp-scope variant is a reject after live visual feedback; baseline restored
+
+### Verified locally
+
+- I tried a narrower lifetime variant of the hot halfres combined `mix_chroma` write-both fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then rebuilt the user-facing release tree and watched the live playback.
+- The visible smoke gate still held:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The live playback appearance looked wrong, and the three-clip smoke comparison did not support keeping the candidate:
+  - `M16-1327`: `llrawproc_ms=160.5` (`fps≈6.23`), `mix_chroma_ms=98.0` (`fps≈10.20`), `final_blend_ms=25.5` (`fps≈39.22`)
+  - `M16-1347`: `llrawproc_ms=158.0` (`fps≈6.33`), `mix_chroma_ms=98.0` (`fps≈10.20`), `final_blend_ms=13.5` (`fps≈74.07`)
+  - `M16-1446`: `llrawproc_ms=53.5` (`fps≈18.69`), `mix_chroma_ms=0.0`, `final_blend_ms=11.5` (`fps≈86.96`)
+- I reverted the change and rebuilt the user-facing release tree back to the baseline shape:
+  - `LastWriteTime=6/1/2026 1:20:25 PM`
+  - `Length=8953344`
+  - `SHA256=ED9886CFE3D31AFE5A11B385A65F92E6191A380A423FDEF906709C5DD64B0581`
+
+### Cross-checked from prior analysis
+
+- The direct-store attempt already showed that this combined-path family is sensitive to small store-shape changes, and this narrower temp-scope tweak also failed to beat the keeper.
+- The live visual feedback confirms we should treat this fast-path variant as closed, not as a keeper candidate.
+
+### Needs runtime profiling
+
+- The next `mix_chroma` probe needs to be structurally different from the rejected fast-path temp-scope/store variants.
+- If we cannot come up with a concrete new store-side hypothesis, the honest move is to pivot out of `mix_chroma` rather than forcing more small rewrites.
+
+## 2026-06-01 - halfres both-write direct-split is a reject; baseline restored
+
+### Verified locally
+
+- I tried a direct-store split in the hot halfres `write_r && write_b` fast path inside [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), where `R` and `B` could each take the direct EV lookup independently instead of sharing one combined fast-path gate.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:36:40 PM`
+  - `Length=8953344`
+  - `SHA256=7E3BE223A365EA050E5A57BC1685492329C8066AE46B0B5FC0B7CE5C47E73392`
+- The visible smoke gate stayed intact on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The throughput comparison was worse than the keeper baseline across the board, so this is a reject:
+  - `M16-1327`: `llrawproc_ms=155.0` (`fps=6.45`) vs baseline `125.0` (`fps=8.00`); `mix_chroma_ms=97.5` (`fps=10.26`) vs baseline `61.5` (`fps=16.26`); `final_blend_ms=17.0` (`fps=58.82`) vs baseline `19.5` (`fps=51.28`)
+  - `M16-1347`: `llrawproc_ms=216.5` (`fps=4.62`) vs baseline `175.0` (`fps=5.71`); `mix_chroma_ms=139.0` (`fps=7.19`) vs baseline `75.0` (`fps=13.33`); `final_blend_ms=24.0` (`fps=41.67`) vs baseline `21.5` (`fps=46.51`)
+  - `M16-1446`: `llrawproc_ms=64.5` (`fps=15.50`) vs baseline `44.0` (`fps=22.73`); `mix_chroma_ms=0.0`; `final_blend_ms=20.5` (`fps=48.78`) vs baseline `11.0` (`fps=90.91`)
+- I reverted the direct-split change and rebuilt back to the baseline store shape.
+
+### Cross-checked from prior analysis
+
+- This was the first store-side change in this streak that tried to let the two direct EV stores diverge independently, and it still lost badly against the keeper.
+- The hot clip pair is clearly not benefiting from extra per-channel splitting in the both-write path.
+- The visible playback looked no better, so there is no reason to keep this candidate.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next probe should avoid another per-channel direct-store split and should look for a different store-side shape.
+- The store-side direct-path bucket is still the right area, but the next candidate needs a materially different control shape than this one.
+
+## 2026-06-01 - halfres `mix_chroma` choose-true store split is noisy; revert to the baseline
+
+### Verified locally
+
+- I tested the explicit `choose_ev_lt_eh` branch split in the hot halfres `write_r && write_b` non-average path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then reverted it back to the ternary store shape after the repeat smoke pass looked too mixed to keep.
+- The repeat smoke pass kept the visible gate intact on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The repeat numbers were mixed against the keeper baseline:
+  - `M16-1327`: `llrawproc_ms=111.5` (`fps=8.97`) versus baseline `125.0` (`fps=8.00`); `mix_chroma_ms=64.5` (`fps=15.50`) versus baseline `61.5` (`fps=16.26`); `final_blend_ms=13.0` (`fps=76.92`) versus baseline `19.5` (`fps=51.28`)
+  - `M16-1347`: `llrawproc_ms=116.5` (`fps=8.58`) versus baseline `175.0` (`fps=5.71`); `mix_chroma_ms=58.0` (`fps=17.24`) versus baseline `75.0` (`fps=13.33`); `final_blend_ms=14.0` (`fps=71.43`) versus baseline `21.5` (`fps=46.51`)
+  - `M16-1446`: `llrawproc_ms=60.0` (`fps=16.67`) versus baseline `44.0` (`fps=22.73`); `mix_chroma_ms=0.0`; `final_blend_ms=15.5` (`fps=64.52`) versus baseline `11.0` (`fps=90.91`)
+- I rebuilt the user-facing release tree after the revert and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:48:10 PM`
+  - `Length=8953344`
+  - `SHA256=19D8328477242206A030B9B62C74784326B3B51C7AFC1BE09A58712F6E06C05C`
+
+### Cross-checked from prior analysis
+
+- The hot pair improved, but the third clip regressed enough that the combined shape still does not feel keeper-stable.
+- The first and second passes on the same binary were not close enough to call the result a clean win, which is the sort of signal we have been treating as a reject in this bucket.
+- The store-side `mix_chroma` residual is still the right area to probe next, but this particular branch split is back out.
+
+### Needs runtime profiling
+
+- If we keep investigating `mix_chroma`, the next probe should be a materially different store-side shape rather than another branch split.
+- The current user-facing baseline is back on the reverted ternary path, so the next smoke run should compare from that shape if we resume soon.
