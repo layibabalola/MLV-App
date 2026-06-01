@@ -9412,3 +9412,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we keep investigating `mix_chroma`, the next probe should be a different structural split that is not just another write-side counter.
 - Otherwise, move to a different retained bucket and leave the helper fix in place for future probes.
+
+## 2026-06-01 - cam WB probe mode 4 exposed the AgX clip/matrix split
+
+### Verified locally
+
+- I widened the cam WB probe parser in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=4` now activates the already-built AgX probe leaf.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:15:19 AM`
+  - `Length=8918016`
+  - `SHA256=CBE3BD6E0BD822E35E36ED54E17D74B13D134F2F4BEC0FEB24E8303C683B68CB`
+- I reran the same three smoke clips with `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=4`, and the visible gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The AgX leaf is live on the smoke clips, and the clip and matrix pieces are both material:
+  - `M16-1327`: `avg_processing_core_color_cam_agx_ms=68.750`, `avg_processing_core_color_cam_agx_clip_ms=17.917`, `avg_processing_core_color_cam_agx_matrix_ms=15.750`
+  - `M16-1347`: `avg_processing_core_color_cam_agx_ms=68.363`, `avg_processing_core_color_cam_agx_clip_ms=16.182`, `avg_processing_core_color_cam_agx_matrix_ms=18.818`
+  - `M16-1446`: `avg_processing_core_color_cam_agx_ms=68.750`, `avg_processing_core_color_cam_agx_clip_ms=17.917`, `avg_processing_core_color_cam_agx_matrix_ms=15.750`
+
+### Cross-checked from prior analysis
+
+- The parser was previously capping `processing_cam_wb_probe_mode()` at `2`, which meant the AgX-specific leaf was present in code but not selectable as a dedicated probe mode.
+- The mode-4 run confirms the AgX leaf itself is real, but the hot work is split across both the clip and matrix pieces rather than collapsing cleanly into one obvious winner.
+- This does not reopen the rejected WB, gamma, or `mix_chroma` shapes; it only sharpens the cam-family map.
+
+### Needs runtime profiling
+
+- The next step should stay in the cam family only if we have a structurally different hypothesis for either the clip or matrix side.
+- Otherwise, the honest move is to pivot to another retained bucket instead of forcing a patch out of a balanced AgX split.
