@@ -1,3 +1,34 @@
+# 2026-06-01 - no-branch always-clamped write-both path is a reject; revert to the direct-clamped keeper
+
+### Verified locally
+
+- I tested an always-clamped no-branch variant in the hot halfres `write_r && write_b` store path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then reverted it back to the direct-clamped keeper after the smoke set lost the comparison.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:17:09 PM`
+  - `Length=8956416`
+  - `SHA256=7F03FF1F6C57E8EF70BEFE7E6B02F7F5D3E35BC5E73E8EB0A8F5F8E8B9B0E0E8`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages regressed versus the current keeper baseline, so the no-branch write-both shape is not a keeper:
+  - `M16-1327`: `llrawproc_ms=134.0` (`fps≈7.46`), `mix_chroma_ms=67.0` (`fps≈14.93`), `final_blend_ms=15.0` (`fps≈66.67`)
+  - `M16-1347`: `llrawproc_ms=129.0` (`fps≈7.75`), `mix_chroma_ms=61.0` (`fps≈16.39`), `final_blend_ms=15.5` (`fps≈64.52`)
+  - `M16-1446`: `llrawproc_ms=67.0` (`fps≈14.93`), `mix_chroma_ms=0.0`, `final_blend_ms=19.0` (`fps≈52.63`)
+  - Aggregate: `llrawproc_ms=110.0` (`fps≈9.09`), `mix_chroma_ms=42.667` (`fps≈23.44`), `final_blend_ms=16.5` (`fps≈60.61`)
+
+### Cross-checked from prior analysis
+
+- The current keeper is still the direct-clamped store fallback, and this no-branch candidate regressed from it on the full three-clip smoke set.
+- `M16-1446` slowed enough on `llrawproc_ms` that the aggregate no longer supports this shape, even though the visible gate stayed valid.
+- The no-branch write-both idea is now ruled out; the next store-side probe should start from the restored keeper shape, not this flat variant.
+
+### Needs runtime profiling
+
+- Rebaseline from the restored direct-clamped keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next candidate is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - direct-clamped `ev2raw` access in the hot store fallback is a keeper
 
 ### Verified locally
