@@ -1,3 +1,35 @@
+# 2026-06-01 - rejected the mix_chroma branch-hint cleanup; direct combined write-both remains the keeper
+
+### Verified locally
+
+- I tried biasing the hot `mix_chroma` non-average branch in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) with `LIKELY` / `UNLIKELY`, then reverted it after the settled replay regressed versus the current keeper.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 12:08:29 PM`
+  - `Length=8952320`
+  - `SHA256=C69A01DBD6C040B7AC378E28598028202B402E4EE83B2FA2BD1A41A6B6246615`
+- The visible smoke gate stayed intact on the restored baseline:
+  - `processed8_direct_path_frames=false` on the later visible frames after the initial bypass frame
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The restored settled-frame averages were back in the keeper range:
+  - `M16-1327`: `llrawproc_ms=169.50`, `mix_chroma_ms=93.00`, `final_blend_ms=21.00`
+  - `M16-1347`: `llrawproc_ms=172.00`, `mix_chroma_ms=103.50`, `final_blend_ms=23.50`
+  - `M16-1446`: `llrawproc_ms=43.50`, `mix_chroma_ms=0.00`, `final_blend_ms=10.50`
+- The branch-hint cleanup did not earn a keeper slot, so I reverted it and restored the direct combined halfres write-both path as the keeper baseline.
+
+### Cross-checked from prior analysis
+
+- The branch counts showed `write_both` is still the dominant retained shape, but this specific non-average branch hint regressed the real smoke path.
+- The current keeper baseline remains the direct combined halfres `mix_chroma` write-both store path without the branch hints.
+- The hot retained bucket is still `mix_chroma`, but the next structural idea needs to be better targeted than this one.
+
+### Needs runtime profiling
+
+- If we keep pushing `mix_chroma`, the next probe needs a different structural shape than the rejected branch-hint cleanup.
+- If the next probe is still flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - final_blend rebaseline on the current keeper still leaves mix_chroma as the hotter bucket
 
 ### Verified locally
