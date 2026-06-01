@@ -1,3 +1,29 @@
+# 2026-06-01 - hot non-average in-range write-both fast path is a reject; keep the earlier keeper
+
+### Verified locally
+
+- I tried replacing the hot non-average write-both clamp path in `src/mlv/llrawproc/chroma_smooth.c` with an in-range fast path that skips the clamp math when both outputs are already in range, then rebuilt the user-facing release tree and reran the same three visible GUI smoke clips.
+- The visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The in-range fast path did not beat the current keeper baseline:
+  - `M16-1327`: `llrawproc_ms=71.8`, `mix_chroma_ms=38.5`, `final_blend_ms=7.1`, `presented_fps=1.249`
+  - `M16-1347`: `llrawproc_ms=66.3`, `mix_chroma_ms=37.5`, `final_blend_ms=6.9`, `presented_fps=1.25`
+  - `M16-1446`: `llrawproc_ms=35.667`, `mix_chroma_ms=0.0`, `final_blend_ms=8.333`, `presented_fps=1.123`
+- The hot clips regressed versus the current keeper baseline, so I reverted the in-range fast path and kept the earlier write-both dispatch keeper intact.
+
+### Cross-checked from prior analysis
+
+- The earlier hot write-both dispatch hint remains the keeper-shaped store-side leaf in this sequence.
+- The direct-clamped non-average fallback remains the retained store shape beneath that dispatch.
+
+### Needs runtime profiling
+
+- Rebaseline from the earlier hot write-both dispatch keeper.
+- If we stay in `mix_chroma`, the next probe should be a materially different store-side shape rather than another nearby clamp refactor.
+
 # 2026-06-01 - dead-offset cleanup in the hot write-both store path is a reject; keep the earlier keeper
 
 ### Verified locally
