@@ -1,3 +1,29 @@
+## 2026-06-01 - final_blend rebaseline on the current keeper confirms the fused path is still intact
+
+### Verified locally
+
+- I reran the same three visible smoke clips on the current keeper build with the fused `final_blend` path left at its default no-probe mode, so the retained-path timings are comparable to the current keeper baseline rather than being inflated by the probe harness.
+- The release tree remained current at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) and the visible gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The fused path is still active on the current build and the default smoke averages moved in the right direction compared with the previous keeper build:
+  - `llrawproc_ms` average across the three clips improved from `193.33` to `134.67`
+  - `dual_iso_full20_final_blend_ms` average improved from `35.67` to `15.33`
+- Clip-level movement was mixed, but the aggregate change is a net improvement:
+  - `M16-1327` regressed relative to the prior keeper
+  - `M16-1347` and `M16-1446` both improved
+
+### Cross-checked from prior analysis
+
+- The `final_blend -> convert_20_to_16bit` fusion remains preserved, and the smoke gate still validates the exact visible constraints the synthesis note called out.
+- The retained-path probe still shows gather/store pressure rather than a pure ALU wall, so the fusion remains the right structural shape for now.
+
+### Needs runtime profiling
+
+- The next highest-value bottleneck is still inside the WB prelude family, with `processing_core_color_main_prelude_wb_ms` remaining the largest stable sub-bucket after the exposure hoist.
+- Within that family, the remaining matrix/reconstruction work is the likeliest next narrow probe target before considering a move to a different retained bucket.
+
 ## 2026-05-31 - WB exposure hoist is the first narrow keeper candidate; net smoke-set gain is real
 
 ### Verified locally
