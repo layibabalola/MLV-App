@@ -1,3 +1,35 @@
+# 2026-06-01 - rejected color loop probe hoist; baseline restored after settled smoke rerun
+
+### Verified locally
+
+- I tried hoisting the invariant color probe lookups out of the hot pixel loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), covering the main prelude, WB, cam WB, and gamma probe flags.
+- The rebuilt release tree is back on the restored baseline after reverting that hoist:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/1/2026 10:10:48 AM`
+  - `Length=8947712`
+  - `SHA256=E5B5811453039D75F865A83F31A4E522EC34C883803E43A9E28BFFA8AA4984AB`
+- The three-clip settled smoke rerun stayed green on the visible gate:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The restored baseline beat the hoist on the key settled-frame `llrawproc_ms` average, so the hoist is rejected:
+  - hoist: `M16-1327=148.5`, `M16-1347=164.5`, `M16-1446=45.5`
+  - restored baseline: `M16-1327=148.0`, `M16-1347=156.0`, `M16-1446=44.0`
+- I left the note below in place because the prior keeper remains the `mix_chroma` write-both reorder, and this probe did not beat it.
+
+### Cross-checked from prior analysis
+
+- The current keeper is still the halfres `mix_chroma` write-both reorder, not this color-loop hoist.
+- The prelude/cam/WB family remains live, but this specific structural change did not improve the hot clips.
+- The hoist has been reverted, so no invalid cleanup remains in the tree.
+
+### Needs runtime profiling
+
+- If we keep digging in the color-family loops, the next probe should be structurally different from this invariant-lookup hoist.
+- If we don’t have a concrete next hypothesis, the honest move is to pivot to another retained bucket instead of forcing more color-loop rewrites.
+
 # 2026-06-01 - halfres `mix_chroma` write-both reorder is a keeper on the hot settled frames
 
 ### Verified locally
