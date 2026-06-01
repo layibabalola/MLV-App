@@ -347,8 +347,16 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 }
                 else
                 {
-                    gr = choose_ev_lt_eh ? grv : grh;
-                    gb = choose_ev_lt_eh ? gbv : gbh;
+                    if (choose_ev_lt_eh)
+                    {
+                        gr = grv;
+                        gb = gbv;
+                    }
+                    else
+                    {
+                        gr = grh;
+                        gb = gbh;
+                    }
                 }
             }
             else
@@ -362,7 +370,14 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     }
                     else
                     {
-                        gr = choose_ev_lt_eh ? grv : grh;
+                        if (choose_ev_lt_eh)
+                        {
+                            gr = grv;
+                        }
+                        else
+                        {
+                            gr = grh;
+                        }
                     }
                 }
                 if (write_b)
@@ -374,7 +389,14 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     }
                     else
                     {
-                        gb = choose_ev_lt_eh ? gbv : gbh;
+                        if (choose_ev_lt_eh)
+                        {
+                            gb = gbv;
+                        }
+                        else
+                        {
+                            gb = gbh;
+                        }
                     }
                 }
             }
@@ -396,25 +418,35 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 chroma_center_non_average_write_both_start = mlv_stage_timing_now();
             }
 
-            if (LIKELY(write_r && write_b))
+            if (LIKELY(write_r && write_b) && !use_average)
             {
                 uint16_t out_r = 0;
                 uint16_t out_b = 0;
                 const int out_r_ev = gr + dr;
                 const int out_b_ev = gr + db;
                 const unsigned int ev2raw_range = (unsigned int)(ev2raw_hi - ev2raw_lo);
+                const unsigned int out_r_ev_offset = (unsigned int)(out_r_ev - ev2raw_lo);
+                const unsigned int out_b_ev_offset = (unsigned int)(out_b_ev - ev2raw_lo);
 
-                if (probe_non_average_write_both_branch && !use_average)
+                if (probe_non_average_write_both_branch)
                 {
                     chroma_center_non_average_write_both_start = mlv_stage_timing_now();
                 }
 
-                if (!probe_center &&
-                    LIKELY((unsigned int)(out_r_ev - ev2raw_lo) <= ev2raw_range &&
-                           (unsigned int)(out_b_ev - ev2raw_lo) <= ev2raw_range))
+                if (!probe_center)
                 {
-                    out_r = (uint16_t)ev2raw[out_r_ev];
-                    out_b = (uint16_t)ev2raw[out_b_ev];
+                    if (LIKELY(out_r_ev_offset <= ev2raw_range && out_b_ev_offset <= ev2raw_range))
+                    {
+                        out_r = (uint16_t)ev2raw[out_r_ev];
+                        out_b = (uint16_t)ev2raw[out_b_ev];
+                    }
+                    else
+                    {
+                        out_r = (out_r_ev_offset <= ev2raw_range) ? (uint16_t)ev2raw[out_r_ev]
+                                                                   : chroma_smooth_ev2raw_lookup(ev2raw, out_r_ev);
+                        out_b = (out_b_ev_offset <= ev2raw_range) ? (uint16_t)ev2raw[out_b_ev]
+                                                                   : chroma_smooth_ev2raw_lookup(ev2raw, out_b_ev);
+                    }
                 }
                 else
                 {
@@ -436,11 +468,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_r_start = write_start;
                     }
-                    if (probe_average_branch && use_average)
-                    {
-                        chroma_center_average_start = mlv_stage_timing_now();
-                    }
-                    else if (probe_non_average_branch && !use_average)
+                    if (probe_non_average_branch)
                     {
                         chroma_center_non_average_start = mlv_stage_timing_now();
                     }
@@ -475,13 +503,105 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_b_start = write_start;
                     }
-                    if (probe_average_branch && use_average)
+                    if (probe_non_average_branch)
+                    {
+                        chroma_center_non_average_start = mlv_stage_timing_now();
+                    }
+                    out_y_p1[x + 1] = out_b;
+                    if (probe_center)
+                    {
+                        const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_b_probe_ms += elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms += elapsed_ms;
+                        }
+                    }
+                }
+                goto chroma_mix_store_done;
+            }
+
+            if (write_r && write_b)
+            {
+                uint16_t out_r = 0;
+                uint16_t out_b = 0;
+                const int out_r_ev = gr + dr;
+                const int out_b_ev = gr + db;
+                const unsigned int ev2raw_range = (unsigned int)(ev2raw_hi - ev2raw_lo);
+
+                if (probe_average_branch)
+                {
+                    chroma_center_average_start = mlv_stage_timing_now();
+                }
+
+                if (!probe_center &&
+                    LIKELY((unsigned int)(out_r_ev - ev2raw_lo) <= ev2raw_range &&
+                           (unsigned int)(out_b_ev - ev2raw_lo) <= ev2raw_range))
+                {
+                    out_r = (uint16_t)ev2raw[out_r_ev];
+                    out_b = (uint16_t)ev2raw[out_b_ev];
+                }
+                else
+                {
+                    if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
+                    out_r = chroma_smooth_ev2raw_lookup(ev2raw, out_r_ev);
+                    if (probe_center)
+                    {
+                        const double lookup_elapsed_ms =
+                            (mlv_stage_timing_now() - chroma_center_store_r_lookup_start) * 1000.0;
+                        const double write_start = mlv_stage_timing_now();
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
+                        chroma_center_store_r_start = write_start;
+                    }
+                    if (probe_average_branch)
                     {
                         chroma_center_average_start = mlv_stage_timing_now();
                     }
-                    else if (probe_non_average_branch && !use_average)
+                    out_y[x] = out_r;
+                    if (probe_center)
                     {
-                        chroma_center_non_average_start = mlv_stage_timing_now();
+                        const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_r_probe_ms += elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_probe_ms += elapsed_ms;
+                        }
+                    }
+                    if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();
+                    out_b = chroma_smooth_ev2raw_lookup(ev2raw, out_b_ev);
+                    if (probe_center)
+                    {
+                        const double lookup_elapsed_ms =
+                            (mlv_stage_timing_now() - chroma_center_store_b_lookup_start) * 1000.0;
+                        const double write_start = mlv_stage_timing_now();
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
+                        chroma_center_store_b_start = write_start;
+                    }
+                    if (probe_average_branch)
+                    {
+                        chroma_center_average_start = mlv_stage_timing_now();
                     }
                     out_y_p1[x + 1] = out_b;
                     if (probe_center)
