@@ -2292,6 +2292,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.mix_chroma_halfres_center_non_average_choose_true_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_non_average_choose_false_probe_ms"),
                                       dualIsoFull20.mix_chroma_halfres_center_non_average_choose_false_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_non_average_write_r_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_non_average_write_r_probe_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_non_average_write_b_probe_ms"),
+                                      dualIsoFull20.mix_chroma_halfres_center_non_average_write_b_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_write_both_count"),
                                       dualIsoFull20.mix_chroma_halfres_center_write_both_count );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_write_r_only_count"),
