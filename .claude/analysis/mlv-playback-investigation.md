@@ -1,3 +1,42 @@
+# 2026-06-01 - final_blend rebaseline on the shared-lookup mix_chroma keeper still leaves mix_chroma hotter
+
+### Verified locally
+
+- I reran the fused `final_blend` diagnostic on the current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`:
+  - `LastWriteTime=6/1/2026 12:20:23 PM`
+  - `Length=8953344`
+  - `SHA256=D1BFD0E5AB198320855BDB993D52B9326C515D3B848F541FD4CB73000486E862`
+- The visible smoke gate stayed intact on the diagnostic rerun:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- Current-keeper diagnostic settled averages for the hot frames:
+  - `M16-1327`: `llrawproc_ms=262.00`, `final_blend_ms=115.50`, `mix_chroma_ms=84.00`, `fb_row_kernel_ms=115.50`, `fb_raw2ev_ms=13.00`, `fb_curve_ms=14.50`, `fb_store_ms=28.50`
+  - `M16-1347`: `llrawproc_ms=223.00`, `final_blend_ms=101.50`, `mix_chroma_ms=67.50`, `fb_row_kernel_ms=101.50`, `fb_raw2ev_ms=16.00`, `fb_curve_ms=14.50`, `fb_store_ms=30.50`
+  - `M16-1446`: `llrawproc_ms=205.50`, `final_blend_ms=97.00`, `mix_chroma_ms=0.00`, `fb_row_kernel_ms=97.00`, `fb_raw2ev_ms=12.50`, `fb_curve_ms=13.00`, `fb_store_ms=18.50`
+- Aggregate diagnostic averages on the current keeper:
+  - `llrawproc_ms=230.167`
+  - `final_blend_ms=104.667`
+  - `mix_chroma_ms=50.500`
+  - `fb_row_kernel_ms=104.667`
+  - `fb_raw2ev_ms=13.167`
+  - `fb_curve_ms=14.000`
+  - `fb_store_ms=25.833`
+- The diagnostic rerun is still much slower than the plain keeper smoke replay, so `final_blend` remains diagnostic rather than keeper-shaped.
+
+### Cross-checked from prior analysis
+
+- The current keeper is the shared lookup fast path in the hot combined halfres `mix_chroma` write-both body.
+- The hot `mix_chroma` bucket still leads the retained residues on the real smoke path.
+- The final-blend row kernel is still the dominant slice within `final_blend`, but it remains behind `mix_chroma` in the overall hotspot ranking.
+
+### Needs runtime profiling
+
+- The next probe should stay on the shared-lookup keeper and look for the next surviving hot leaf inside `mix_chroma`, or pivot to another retained bucket if that leaf is flat.
+- No additional code change is justified until the next profile points to a narrower, surviving bottleneck.
+
 # 2026-06-01 - shared lookup fast path in the hot mix_chroma write-both body is a keeper
 
 ### Verified locally
