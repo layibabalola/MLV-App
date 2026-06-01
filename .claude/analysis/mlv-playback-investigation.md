@@ -1,5 +1,30 @@
 # 2026-06-01 - final_blend rebaseline on the current keeper with fps reporting still leaves mix_chroma hotter
 
+# 2026-06-01 - current keeper mix_chroma mode 6 still says write-both dominates and the single-write tails stay zero
+
+### Verified locally
+
+- I reran the current keeper through `MLVAPP_DUALISO_MIX_CHROMA_PROBE=6` and the visible smoke gate stayed intact on the probe runs:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The current keeper plain smoke replay stayed in the improved range and is still easier to compare when reported as `ms` plus derived `fps`:
+  - `M16-1327`: `llrawproc_ms=125.0` (`fps≈8.00`), `mix_chroma_ms=61.5` (`fps≈16.26`), `final_blend_ms=19.5` (`fps≈51.28`)
+  - `M16-1347`: `llrawproc_ms=175.0` (`fps≈5.71`), `mix_chroma_ms=75.0` (`fps≈13.33`), `final_blend_ms=21.5` (`fps≈46.51`)
+  - `M16-1446`: `llrawproc_ms=44.0` (`fps≈22.73`), `mix_chroma_ms=0.0`, `final_blend_ms=11.0` (`fps≈90.91`)
+  - Aggregate: `llrawproc_ms=114.667` (`fps≈8.72`), `mix_chroma_ms=45.5` (`fps≈21.98`), `final_blend_ms=17.333` (`fps≈57.69`)
+- The mode `6` store-detail probe still says the combined write-both path is the live work and the single-write tails are effectively dead on the hot clips:
+  - `M16-1327`: `write_both_count=1017000`, `write_r_only_count=0`, `write_b_only_count=0`, `write_none_count=0`
+  - `M16-1347`: `write_both_count=1017000`, `write_r_only_count=0`, `write_b_only_count=0`, `write_none_count=0`
+- The detailed probe numbers show the lookup-heavy combined store body is still the remaining residue inside `mix_chroma`:
+  - `M16-1327`: `store_r_lookup_ms=40.0`, `store_b_lookup_ms=34.0`, `store_r_ms=27.0`, `store_b_ms=31.0`
+  - `M16-1347`: `store_r_lookup_ms=42.0`, `store_b_lookup_ms=50.0`, `store_r_ms=33.0`, `store_b_ms=23.0`
+- That means the next highest-value bottleneck is still inside `mix_chroma`, and it is not the single-write tails or `final_blend`.
+
+# 2026-06-01 - final_blend rebaseline on the current keeper with fps reporting still leaves mix_chroma hotter
+
 ### Verified locally
 
 - I reran the plain smoke set on the current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
