@@ -8913,3 +8913,36 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in the color family, the next probe should pick a different live leaf than the rejected AgX branch-hoist path.
 - The remaining work should continue from the gamma-LUT keeper baseline, not from this rejected branch-hoist shape.
+
+## 2026-06-01 - creative gradation LUT hoist is a keeper-shaped win
+
+### Verified locally
+
+- I hoisted the creative curve and gradation LUT pointers in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c):
+  - `processing->pre_calc_curve_r` in the creative curve loop
+  - `processing->gcurve_y`, `processing->gcurve_r`, `processing->gcurve_g`, and `processing->gcurve_b` in the gradation loop
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 10:53:56 PM`
+  - `Length=8890880`
+  - `SHA256=4D831FEF2A4A60ED8FA17C3265E9A7B99BD7D955C902C65E1D99BBC6966B265C`
+- I reran the three visible smoke clips on the same x1 Quality / settled Auto Look Assist gate, and the visible smoke gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The rerun confirmed a keeper-shaped average win versus the current gamma-LUT baseline:
+  - `llrawproc_ms` average: `104.667` -> `99.333`
+  - `color_ms` average: `2773.000` -> `2708.000`
+- Clip-level behavior was mixed, so this is a measurement win rather than a blanket structural guarantee:
+  - `M16-1327` and `M16-1347` improved on the final settled sample
+  - `M16-1446` regressed on `llrawproc_ms` but the three-clip average still moved in the right direction
+
+### Cross-checked from prior analysis
+
+- The gamma LUT hoist remains the main reference keeper before this change.
+- The creative gradation leaf was one of the last untested creative subpaths, and the LUT-hoist shape is the smallest reasonable change for that leaf.
+- The smoke gate stayed green throughout, so this is a throughput win rather than a quality regression.
+
+### Needs runtime profiling
+
+- The next highest-value residual still appears to be in the cam AgX / cam WB family, but the rejected branch-hoist shape should stay closed.
+- If we continue, the next probe should stay narrow and pick a different live leaf than the rejected AgX branch-hoist path.
