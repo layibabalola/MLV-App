@@ -605,34 +605,85 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
                     timing_enabled ? omp_get_wtime() : 0.0;
                 if( LIKELY(channel == 3) )
                 {
-                    for (int c = 0; c < 3; c++)
+                    const double vertical_up_body_store_color_src_start_0 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    const float src_term_0 = inv_alpha_f * (*src_color_hor--);
+                    if( timing_enabled )
                     {
-                        const double vertical_up_body_store_color_src_start =
-                            timing_enabled ? omp_get_wtime() : 0.0;
-                        const float src_term = inv_alpha_f * (*src_color_hor--);
-                        if( timing_enabled )
-                        {
-                            vertical_up_body_store_color_src_ms +=
-                                (omp_get_wtime() - vertical_up_body_store_color_src_start) * 1000.0;
-                        }
+                        vertical_up_body_store_color_src_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_src_start_0) * 1000.0;
+                    }
 
-                        const double vertical_up_body_store_color_prev_start =
-                            timing_enabled ? omp_get_wtime() : 0.0;
-                        const float prev_term = alpha_f * (*prev_color--);
-                        if( timing_enabled )
-                        {
-                            vertical_up_body_store_color_prev_ms +=
-                                (omp_get_wtime() - vertical_up_body_store_color_prev_start) * 1000.0;
-                        }
+                    const double vertical_up_body_store_color_prev_start_0 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    const float prev_term_0 = alpha_f * (*prev_color--);
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_prev_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_prev_start_0) * 1000.0;
+                    }
 
-                        const double vertical_up_body_store_color_assign_start =
-                            timing_enabled ? omp_get_wtime() : 0.0;
-                        *up_pass_color-- = src_term + prev_term;
-                        if( timing_enabled )
-                        {
-                            vertical_up_body_store_color_assign_ms +=
-                                (omp_get_wtime() - vertical_up_body_store_color_assign_start) * 1000.0;
-                        }
+                    const double vertical_up_body_store_color_assign_start_0 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    *up_pass_color-- = src_term_0 + prev_term_0;
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_assign_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_assign_start_0) * 1000.0;
+                    }
+
+                    const double vertical_up_body_store_color_src_start_1 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    const float src_term_1 = inv_alpha_f * (*src_color_hor--);
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_src_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_src_start_1) * 1000.0;
+                    }
+
+                    const double vertical_up_body_store_color_prev_start_1 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    const float prev_term_1 = alpha_f * (*prev_color--);
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_prev_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_prev_start_1) * 1000.0;
+                    }
+
+                    const double vertical_up_body_store_color_assign_start_1 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    *up_pass_color-- = src_term_1 + prev_term_1;
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_assign_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_assign_start_1) * 1000.0;
+                    }
+
+                    const double vertical_up_body_store_color_src_start_2 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    const float src_term_2 = inv_alpha_f * (*src_color_hor--);
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_src_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_src_start_2) * 1000.0;
+                    }
+
+                    const double vertical_up_body_store_color_prev_start_2 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    const float prev_term_2 = alpha_f * (*prev_color--);
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_prev_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_prev_start_2) * 1000.0;
+                    }
+
+                    const double vertical_up_body_store_color_assign_start_2 =
+                        timing_enabled ? omp_get_wtime() : 0.0;
+                    *up_pass_color-- = src_term_2 + prev_term_2;
+                    if( timing_enabled )
+                    {
+                        vertical_up_body_store_color_assign_ms +=
+                            (omp_get_wtime() - vertical_up_body_store_color_assign_start_2) * 1000.0;
                     }
                 }
                 else
