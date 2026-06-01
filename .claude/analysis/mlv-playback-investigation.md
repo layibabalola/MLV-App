@@ -9929,3 +9929,16 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If the next AgX pass stays in this family, it should target the matrix-side work rather than the clamp branch.
 - If the matrix side also fails to yield a keeper-shaped patch, the honest move is to pivot to another retained bucket instead of forcing more AgX micro-optimizations.
+## 2026-06-01 - cam AgX combined-store collapse regresses settled smoke and is rejected
+
+- Tried collapsing the AgX matrix store checks into a single combined fast-path test in `src/processing/raw_processing.c` for both the main and gradient branches, then reverted the experiment.
+- The settled replay frames were worse than the current keeper baseline on the hot clips:
+  - `M16-1327`: settled `llrawproc_ms` stayed around `147/146 ms` with `final_blend_ms` around `14/16 ms`
+  - `M16-1347`: settled `llrawproc_ms` stayed around `145/158 ms` with `final_blend_ms` around `15/28 ms`
+  - `M16-1446`: the clip is still much cheaper and does not change the hot-bucket ranking
+- The direct-path smoke gate stayed intact, but the structural AgX store collapse did not beat the keeper and should stay closed.
+- The baseline executable after the revert is:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=6/1/2026 7:42:39 AM`
+  - `Length=8932352`
+  - `SHA256=B4A93D4D708D7A9F180BC86DAFBA3310A87C8BA903F4D84B32C3D5AC1D70F110`
