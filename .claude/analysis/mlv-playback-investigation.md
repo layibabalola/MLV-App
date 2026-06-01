@@ -1,3 +1,68 @@
+# 2026-06-01 - restored baseline after reverting the halfres mix_chroma branch-hint cleanup
+
+### Verified locally
+
+- I reverted the branch-hint cleanup in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) and rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:59:27 AM`
+  - `Length=8947712`
+  - `SHA256=C1CB3991045446CA4D80B547AD7677387645596425FD332712D4FD0BF17284B8`
+- The rerun on the restored baseline kept the visible smoke gate intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The restored baseline settles to the following hot-clip timings:
+  - `M16-1327`: `llrawproc_ms=152.00` / `185.00`, `mix_chroma_ms=84.00` / `106.00`, `final_blend_ms=28.00` / `20.00`
+  - `M16-1347`: `llrawproc_ms=164.00` / `207.00`, `mix_chroma_ms=86.00` / `149.00`, `final_blend_ms=25.00` / `18.00`
+  - `M16-1446`: `llrawproc_ms=85.00` / `104.00`, `mix_chroma_ms=0.00` / `0.00`, `final_blend_ms=11.00` / `18.00`
+- This restored-baseline rerun confirms the branch-hint cleanup was not a keeper and should stay out of the tree.
+
+### Cross-checked from prior analysis
+
+- The combined-store `mix_chroma` shape remains the current keeper baseline in code; the branch-hint tweak was reverted.
+- The new hash here is the rebuilt restored baseline, not the rejected branch-hint build.
+- The visible smoke gate is still green, so the investigation can continue from this restored baseline.
+
+### Needs runtime profiling
+
+- The next meaningful candidate is still the `mix_chroma` store side, but the next implementation shape needs to be more structural than branch hints.
+- If the next candidate is not clearly better than the current keeper, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
+# 2026-06-01 - halfres mix_chroma branch-hint cleanup was a regression and is reverted
+
+### Verified locally
+
+- I tried adding `LIKELY(write_r)` and `LIKELY(write_b)` hints around the hot halfres `mix_chroma` write-both store path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:56:26 AM`
+  - `Length=8947712`
+  - `SHA256=4BE0B13AE8E7FAFE5B8BEB1DD1FD8A4DAE1D5F2A43CFDCE3FAF3CC14A5ED7C8C`
+- I reran the three visible smoke clips and the visible gate stayed intact, but the hot-path timings regressed versus the current keeper baseline:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The settled-frame comparison on the hot clips was worse:
+  - `M16-1327`: `llrawproc_ms=147.00` / `164.00`, `mix_chroma_ms=88.00` / `98.00`, `final_blend_ms=14.00` / `23.00`
+  - `M16-1347`: `llrawproc_ms=164.00` / `167.00`, `mix_chroma_ms=93.00` / `98.00`, `final_blend_ms=24.00` / `21.00`
+  - `M16-1446`: `llrawproc_ms=54.00` / `42.00`, `mix_chroma_ms=0.00` / `0.00`, `final_blend_ms=8.00` / `10.00`
+- Aggregate settled-frame averages across the three clips regressed:
+  - `llrawproc_ms`: `113.83` -> `121.50`
+  - `mix_chroma_ms`: `58.33` -> `62.00`
+  - `final_blend_ms`: `16.00` -> `18.00`
+- The branch-hint cleanup is therefore rejected and reverted; the keeper baseline remains the combined-store `mix_chroma` shape.
+
+### Cross-checked from prior analysis
+
+- The detailed `mix_chroma` probe still says the store-heavy halfres center path is the live residual.
+- This regression shows the next `mix_chroma` improvement needs a materially different structure than simple branch hints around `write_r` / `write_b`.
+- The branch-hint attempt does not change the higher-level hotspot ranking; it only confirms the current keeper was better.
+
+### Needs runtime profiling
+
+- The next useful step is still the `mix_chroma` store side, but the next implementation shape needs to be more structural than this branch-hint cleanup.
+- If the next candidate is not obviously better than the current keeper, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - final_blend rebaseline on the current keeper; mix_chroma still remains the live retained hotspot
 
 ### Verified locally
