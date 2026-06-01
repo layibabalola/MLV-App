@@ -2,6 +2,35 @@
 
 ### Verified locally
 
+- I kept the earlier correctness fix and then tightened the hot no-probe combined `write_r && write_b` store path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so it now takes the in-range direct lookup fast lane before falling back to the clamp helper.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 6:27:01 PM`
+  - `Length=8956928`
+  - `SHA256=548DD9ED9FA64A284C11DBA1E180F1403CB747581B668044A5D76F6CA87302FB`
+- I reran the same small playback-profile shape on the rebuilt release tree and compared the warm frames (`frames[1..2]`, since `frames[0]` is the startup outlier):
+  - `latency_ms=137.73165 -> 127.08875`
+  - `engine_latency_ms=126.08475 -> 115.7579`
+  - `llrawproc_ms=98.4998941421509 -> 91.5000438690186`
+  - `processed16_total_ms=119.500041007996 -> 108.999967575073`
+  - `processed8_total_ms=125.499963760376 -> 114.499926567078`
+  - `processing_ms=16.0000324249268 -> 13.0000114440918`
+  - `processing_core_color_ms=16.0000324249268 -> 13.0000114440918`
+  - `raw_uint16_ms=1.0000467300415 -> 0.499963760375977`
+  - `draw_frame_ready_total_ms=11.5001201629639 -> 10.4999542236328`
+- The first frame remains a startup outlier, so the comparison above intentionally uses the warm frames only.
+
+### Cross-checked from prior analysis
+
+- The current hot `mix_chroma` surface is still the right place to look, and the halfres store leaf remains the measurable remainder behind the visible smoke gate.
+- The new no-probe fast lane is the kind of probe-free split the earlier synthesis kept recommending, but this pass is still a small store-shape improvement rather than a final answer.
+
+### Needs runtime profiling
+
+- Rebaseline this no-probe fast lane on the real host before treating the improvement as a stable keeper.
+- If the next store-side idea is only a minor branch hint or arithmetic reshuffle, skip it and pivot to another retained bucket instead of forcing more `mix_chroma` churn.
+
+### Verified locally
+
 - I added the small `ev2raw` clamp helpers in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the hot halfres store leaves can call a shared clamp helper instead of repeating the inline clamp expression.
 - I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
   - `LastWriteTime=6/1/2026 5:40:17 PM`
