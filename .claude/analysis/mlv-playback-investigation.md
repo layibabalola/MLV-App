@@ -1,3 +1,32 @@
+## 2026-06-01 - mix_chroma halfres non-average write split is mixed; no stable write-side winner yet
+
+### Verified locally
+
+- I added a narrower `mix_chroma` probe in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) that times the halfres non-average `write_r` and `write_b` branches, wired the new counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h) and [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:43:17 AM`
+  - `Length=8918016`
+  - `SHA256=E24E931E53E42C36A66940C1840A62E8A463982351F279091AFB7C0E0123CFEF`
+- The visible smoke gate stayed intact on the probe runs:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The write split is live, but the branch skew is mixed across clips:
+  - `M16-1327`: `write_r_probe_ms=90.001` on mode 9, `write_b_probe_ms=82.001` on mode 10
+  - `M16-1347`: `write_r_probe_ms=73.001` on mode 9, `write_b_probe_ms=115.000` on mode 10
+  - `M16-1446`: `mix_chroma` bypassed, both probes stayed at `0`
+- By inspection, both write sides are real costs, but neither side is a stable clip-to-clip winner yet.
+
+### Cross-checked from prior analysis
+
+- The earlier average-vs-non-average and choose-true/false splits already showed that the non-average halfres surface is the hot case.
+- The new write split confirms that the remaining hot surface is still mixed internally, so there is not yet a keeper-shaped branch specialization.
+- The closed `mix_chroma` lookup-fast-path / write-both ideas remain closed; this probe does not reopen them.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next useful move is a different structural split inside the hot halfres non-average surface.
+- If the next split is still mixed, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
+
 ## 2026-06-01 - Shadows/Highlights RBF detail is live but balanced; no single leaf is patch-worthy yet
 
 ### Verified locally
