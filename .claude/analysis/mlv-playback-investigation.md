@@ -9359,3 +9359,34 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in the cam family, the next probe should pick a different live leaf than the rejected cam WB scalar-hoist shape.
 - Otherwise, the honest move is to keep the creative/gamma keepers and move to the next retained bucket rather than forcing more WB micro-optimizations.
+
+## 2026-06-01 - WB matrix coefficient hoist rejected, restored baseline smoke stays green
+
+### Verified locally
+
+- I tried the WB coefficient hoist in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) by lifting `proper_wb_0..8` out of the inner WB loops and sharing them across the hot path.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:23:22 AM`
+  - `Length=8918016`
+  - `SHA256=BE202F339F86FA464071DEBF2324A1A2C172C1746845C781FE4B8A63E328041D`
+- I reran the same three smoke clips on the restored baseline and kept the visible gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The restored smoke averages are consistent with the prior keeper baseline and do not support keeping the hoist:
+  - `M16-1327`: `llrawproc_ms=73.182`, `mix_chroma_ms=45.364`, `final_blend_ms=7.364`
+  - `M16-1347`: `llrawproc_ms=81.455`, `mix_chroma_ms=49.545`, `final_blend_ms=9.364`
+  - `M16-1446`: `llrawproc_ms=25.833`, `mix_chroma_ms=0.0`, `final_blend_ms=7.083`
+
+### Cross-checked from prior analysis
+
+- The post-hoist WB probe averages were worse than the pre-hoist baselines across the same three probe modes, so the hoist did not earn a keeper slot.
+- The heaviest live bucket in this family is still the WB matrix/exposure path, but this specific coefficient-hoist shape is not a win.
+- The earlier WB matrix findings remain useful for narrowing future probes, even though this patch is now rejected.
+
+### Needs runtime profiling
+
+- If we stay in the WB family, the next probe should be a different live leaf shape than the rejected coefficient hoist.
+- Otherwise, keep the restored baseline and move to a different retained bucket rather than forcing more WB micro-optimizations.
