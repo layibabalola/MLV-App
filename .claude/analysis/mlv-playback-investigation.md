@@ -1,3 +1,32 @@
+# 2026-06-01 - store-tail pointer cleanup in the actual write-both playback path is a reject
+
+### Verified locally
+
+- I tried replacing the direct indexed stores in the actual halfres `mix_chroma` write-both playback tail in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) with precomputed destination pointers (`out_rp` / `out_bp`) and pointer stores in the real playback path, not the probe-only branch.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:47:04 PM`
+  - `Length=8955904`
+  - `SHA256=205C21CB1E90516B23EF0348C6F65CAC09F051640E2B0AAB20D29399F9A12F0`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages did not beat the current keeper baseline overall, so the store-tail pointer cleanup is not a keeper:
+  - `M16-1327`: `llrawproc_ms=128.0` (`fps≈7.81`), `mix_chroma_ms=65.5` (`fps≈15.27`), `final_blend_ms=16.0` (`fps≈62.50`)
+  - `M16-1347`: `llrawproc_ms=128.0` (`fps≈7.81`), `mix_chroma_ms=71.5` (`fps≈13.99`), `final_blend_ms=15.0` (`fps≈66.67`)
+  - `M16-1446`: `llrawproc_ms=49.5` (`fps≈20.20`), `mix_chroma_ms=0.0`, `final_blend_ms=14.5` (`fps≈68.97`)
+
+### Cross-checked from prior analysis
+
+- The real playback path is the one that matters here, and this pointer cleanup still regressed the full three-clip shape.
+- The hot path remains backlog-bound, so the GUI can still round to `0 fps` even while the harness records non-zero throughput.
+
+### Needs runtime profiling
+
+- Rebaseline from the restored per-channel fallback keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next probe is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - store-pointer cleanup in the hot non-average write-both path is a reject
 
 ### Verified locally
