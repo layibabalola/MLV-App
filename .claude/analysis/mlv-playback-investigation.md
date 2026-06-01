@@ -1,3 +1,33 @@
+# 2026-06-01 - explicit four-way mixed-range split in the hot non-average write-both path is a reject
+
+### Verified locally
+
+- I tried making the hot halfres `mix_chroma` non-average write-both fallback in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) an explicit four-way split (`both direct`, `r direct / b lookup`, `r lookup / b direct`, `both lookup`) on top of the existing per-channel fallback keeper.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:29:56 PM`
+  - `Length=8956416`
+  - `SHA256=E3C1614EA85CC6CCB946078D76A72E48A4EC053AADFB80E736B76DBC0C54E51E`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages regressed versus the current keeper baseline, so the four-way branch shape is not a keeper:
+  - `M16-1327`: `llrawproc_ms=133.0` (`fps≈7.52`), `mix_chroma_ms=68.5` (`fps≈14.60`), `final_blend_ms=12.5` (`fps≈80.00`)
+  - `M16-1347`: `llrawproc_ms=141.5` (`fps≈7.07`), `mix_chroma_ms=64.5` (`fps≈15.50`), `final_blend_ms=18.5` (`fps≈54.05`)
+  - `M16-1446`: `llrawproc_ms=62.5` (`fps≈16.00`), `mix_chroma_ms=0.0`, `final_blend_ms=10.0` (`fps≈100.00`)
+  - Aggregate: `llrawproc_ms=112.333` (`fps≈8.90`), `mix_chroma_ms=44.333` (`fps≈22.56`), `final_blend_ms=13.667` (`fps≈73.17`)
+
+### Cross-checked from prior analysis
+
+- The per-channel fallback keeper was already the right direction because the hot clips are dominated by write-both and the remaining residue is still inside the store body.
+- The four-way explicit split did not improve the hot three-clip replay, so it should not become the new baseline.
+
+### Needs runtime profiling
+
+- Rebaseline from the restored per-channel fallback keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next probe is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - per-channel fallback in the hot non-average write-both path is a keeper
 
 ### Verified locally
