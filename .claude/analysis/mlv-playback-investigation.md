@@ -8883,3 +8883,33 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next highest-value residual is still in the color family, but the direct gamma LUT indexing cost is no longer the best immediate lever.
 - If we keep going, the next probe should be a different live leaf than the gamma LUT path rather than another array-hoist variant.
+
+## 2026-06-01 - cam AgX branch-hoist is rejected; revert restores the gamma LUT keeper baseline
+
+### Verified locally
+
+- I tried hoisting the clip-level `processing->AgX` decision out of the per-pixel cam loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the main and gradient branches would reuse a single `color_cam_agx_enabled` flag.
+- The patch compiled and the visible smoke gate stayed intact, but the settled three-clip rerun did not beat the current gamma-LUT keeper baseline, so I reverted it.
+- The reverted user-facing release tree was rebuilt at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 10:45:10 PM`
+  - `Length=8889856`
+  - `SHA256` matched the prior keeper build after the revert
+- The branch-hoist smoke rerun stayed green on the visible gate:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- Settled-frame results for the branch-hoist attempt were worse than the current keeper on all three clips:
+  - `M16-1327`: `llrawproc_ms=157.000` vs `123.999`
+  - `M16-1347`: `llrawproc_ms=147.000` vs `138.000`
+  - `M16-1446`: `llrawproc_ms=46.999` vs `52.000`
+
+### Cross-checked from prior analysis
+
+- The gamma LUT hoist remains the current keeper-shaped win.
+- The cam AgX branch-hoist is now explicitly rejected and should not be retried as the next narrow optimization.
+- The visible smoke gate stayed green throughout, so this was a performance rejection rather than a quality regression.
+
+### Needs runtime profiling
+
+- If we stay in the color family, the next probe should pick a different live leaf than the rejected AgX branch-hoist path.
+- The remaining work should continue from the gamma-LUT keeper baseline, not from this rejected branch-hoist shape.
