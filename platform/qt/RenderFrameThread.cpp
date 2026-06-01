@@ -2510,6 +2510,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingGetLastCoreColorCamAgxClipNegBCount() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_ms"),
                                       processingGetLastCoreColorCamAgxMatrixMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_r_ms"),
+                                      processingGetLastCoreColorCamAgxMatrixRMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_g_ms"),
+                                      processingGetLastCoreColorCamAgxMatrixGMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_b_ms"),
+                                      processingGetLastCoreColorCamAgxMatrixBMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_r_hi_count"),
+                                      processingGetLastCoreColorCamAgxMatrixRHiCount() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_g_hi_count"),
+                                      processingGetLastCoreColorCamAgxMatrixGHiCount() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_matrix_b_hi_count"),
+                                      processingGetLastCoreColorCamAgxMatrixBHiCount() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_gamma_ms"),
                                       processingGetLastCoreColorGammaMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_gamma_main_ms"),

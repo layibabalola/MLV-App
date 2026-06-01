@@ -973,6 +973,12 @@ private:
     double m_playbackSmokeProcessingCoreColorCamAgxClipNegGCountSum = 0.0;
     double m_playbackSmokeProcessingCoreColorCamAgxClipNegBCountSum = 0.0;
     double m_playbackSmokeProcessingCoreColorCamAgxMatrixSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamAgxMatrixRSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamAgxMatrixGSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamAgxMatrixBSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamAgxMatrixRHiCountSum = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamAgxMatrixGHiCountSum = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamAgxMatrixBHiCountSum = 0.0;
     double m_playbackSmokeProcessingCoreColorGammaSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorGammaMainSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorGammaGradientSumMs = 0.0;
