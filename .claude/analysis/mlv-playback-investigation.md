@@ -1,3 +1,35 @@
+# 2026-06-01 - halfres `mix_chroma` write-both reorder is a keeper on the hot settled frames
+
+### Verified locally
+
+- I reordered the hot halfres `mix_chroma` write path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the combined `write_r && write_b` case is handled first, with the single-write fallback branches left intact.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 9:48:53 AM`
+  - `Length=8947712`
+  - `SHA256=F8A277207A115A40AB7B56067367C186C179A46B3BA74F5854C1FFC762BE7B8E`
+- I reran the same three smoke clips on the reordered build and preserved the visible gate:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The settled-frame averages beat the prior keeper on the hot clips:
+  - `M16-1327`: `llrawproc_ms=155.00` vs `188.50`, `mix_chroma_ms=91.00` vs `105.50`
+  - `M16-1347`: `llrawproc_ms=170.00` vs `203.00`, `mix_chroma_ms=93.50` vs `107.00`
+  - `M16-1446`: `llrawproc_ms=65.50` vs `237.50`, `mix_chroma_ms=0.00` vs `0.00`
+- The hot `mix_chroma` store leaf is still the retained bottleneck, but this write-both reorder is the first shape in this branch that clearly improves the hot settled frames overall.
+
+### Cross-checked from prior analysis
+
+- The earlier `mix_chroma` store-side probes had already established that the halfres store surface is the live retained bucket.
+- The new reorder changes the branch ordering on that exact hot path, rather than reopening the rejected clamp/helper shapes.
+- The improvement is broad enough across the three smoke clips to keep the reorder rather than reverting it.
+
+### Needs runtime profiling
+
+- The next `mix_chroma` probe, if we keep going, should still stay structurally distinct from the rejected helper/clamp shapes.
+- If the next store-side probe is still mixed, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - halfres `mix_chroma` average-branch hint regresses; revert back to the keeper baseline
 
 ### Verified locally

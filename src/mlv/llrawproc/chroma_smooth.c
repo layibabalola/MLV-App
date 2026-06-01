@@ -335,29 +335,47 @@ static void CHROMA_SMOOTH_FUNC(int w,
             }
 
             int gr = 0;
-            if (LIKELY(write_r))
+            int gb = 0;
+            if (LIKELY(write_r && write_b))
             {
                 if (use_average)
                 {
                     dr = (drv+drh)/2;
                     gr = (g1+g2+g3+g4)/4;
-                }
-                else
-                {
-                    gr = choose_ev_lt_eh ? grv : grh;
-                }
-            }
-            int gb = 0;
-            if (LIKELY(write_b))
-            {
-                if (use_average)
-                {
                     db = (dbv+dbh)/2;
                     gb = (g1+g2+g5+g6)/4;
                 }
                 else
                 {
+                    gr = choose_ev_lt_eh ? grv : grh;
                     gb = choose_ev_lt_eh ? gbv : gbh;
+                }
+            }
+            else
+            {
+                if (LIKELY(write_r))
+                {
+                    if (use_average)
+                    {
+                        dr = (drv+drh)/2;
+                        gr = (g1+g2+g3+g4)/4;
+                    }
+                    else
+                    {
+                        gr = choose_ev_lt_eh ? grv : grh;
+                    }
+                }
+                if (LIKELY(write_b))
+                {
+                    if (use_average)
+                    {
+                        db = (dbv+dbh)/2;
+                        gb = (g1+g2+g5+g6)/4;
+                    }
+                    else
+                    {
+                        gb = choose_ev_lt_eh ? gbv : gbh;
+                    }
                 }
             }
             if (probe_center)
