@@ -66,6 +66,9 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_r
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_body_store_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_body_store_factor_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_src_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_prev_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_assign_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_vertical_up_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_output_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_highest_green_ms = 0.0;
@@ -338,6 +341,9 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_shadows_highlights_rbf_vertical_up_body_store_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_vertical_up_body_store_factor_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_src_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_prev_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_assign_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_vertical_up_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_output_ms = 0.0;
     g_processing_last_highest_green_ms = 0.0;
@@ -1696,6 +1702,12 @@ static void processing_capture_last_shadows_highlights_rbf_timing(void)
         timing.vertical_up_body_store_factor_ms;
     g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_ms =
         timing.vertical_up_body_store_color_ms;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_src_ms =
+        timing.vertical_up_body_store_color_src_ms;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_prev_ms =
+        timing.vertical_up_body_store_color_prev_ms;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_assign_ms =
+        timing.vertical_up_body_store_color_assign_ms;
     g_processing_last_shadows_highlights_rbf_vertical_up_ms =
         timing.vertical_up_ms;
     g_processing_last_shadows_highlights_rbf_output_ms = timing.output_ms;
@@ -3429,6 +3441,21 @@ double processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreFactorMillisecond
 double processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreColorMilliseconds(void)
 {
     return g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreColorSrcMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_src_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreColorPrevMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_prev_ms;
+}
+
+double processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreColorAssignMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_assign_ms;
 }
 
 double processingGetLastShadowsHighlightsRbfVerticalUpMilliseconds(void)

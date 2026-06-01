@@ -10080,3 +10080,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in SH, the next probe should split the store side further only if we have a plausible code-shape hypothesis for the factor/color branch.
 - If we do not have that hypothesis, the honest move is still to pivot to another retained bucket instead of forcing more SH rewrites.
+
+## 2026-06-01 - SH store-color assignment probe stayed flat; the store-color tail still looks like the live residual, but this split did not expose a new leaf
+
+### Verified locally
+
+- I added an `assign` timer to the SH `vertical_up_body_store_color` loop in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp), with the new field wired through [`src/processing/rbfilter/RBFilterPlain.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.h), [`src/processing/rbfilter/rbf_wrapper.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/rbf_wrapper.h), [`src/processing/rbfilter/rbf_wrapper.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/rbf_wrapper.cpp), [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 8:53:27 AM`
+  - `Length=8945152`
+  - `SHA256=2A8ADDFD5B773F417CC33A550404A087DAB4AAAD9FCFC8EA30612271FBF906AE`
+- I reran the three smoke clips with `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=1` and `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING=1`, and the visible smoke gate stayed intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new assignment field stayed at zero on the smoke traces, so this split did not expose a new hot leaf:
+  - `M16-1327`: `vertical_up_body_store_color_assign_ms=0`
+  - `M16-1347`: `vertical_up_body_store_color_assign_ms=0`
+  - `M16-1446`: `vertical_up_body_store_color_assign_ms=0`
+
+### Cross-checked from prior analysis
+
+- The prior store-color split still stands: the SH `vertical_up_body_store_color` tail remains the live residual in the store-side body.
+- This assignment probe did not change the ranking, it only confirmed that the next obvious sub-split is not the assignment store itself.
+- The smoke traces still point us back to the broader store-color tail if we stay in SH.
+
+### Needs runtime profiling
+
+- If we stay in SH, the next probe should be a different store-color hypothesis, not another assignment timer.
+- If we do not have a concrete store-color hypothesis, the honest move is still to pivot to another retained bucket instead of forcing more SH rewrites.
