@@ -15550,9 +15550,16 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingCoreColorMainPreludeSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorMainPreludeVignetteSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorMainPreludeCreativeSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeCreativeShadowsSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeCreativeContrastSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeWbMatrixSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeWbGamutSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeWbReconSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamWbSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorCamWbMatrixSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorCamWbGamutSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamAgxSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorGammaSumMs = 0.0;
     m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
@@ -15978,12 +15985,26 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_core_color_main_prelude_vignette_ms" );
     m_playbackSmokeProcessingCoreColorMainPreludeCreativeSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_main_prelude_creative_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeCreativeShadowsSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_creative_shadows_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeCreativeContrastSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_creative_contrast_ms" );
     m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_main_prelude_wb_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeWbMatrixSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_wb_matrix_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeWbGamutSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_wb_gamut_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeWbReconSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_wb_recon_ms" );
     m_playbackSmokeProcessingCoreColorCamSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_ms" );
     m_playbackSmokeProcessingCoreColorCamWbSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_wb_ms" );
+    m_playbackSmokeProcessingCoreColorCamWbMatrixSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_wb_matrix_ms" );
+    m_playbackSmokeProcessingCoreColorCamWbGamutSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_wb_gamut_ms" );
     m_playbackSmokeProcessingCoreColorCamAgxSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_agx_ms" );
     m_playbackSmokeProcessingCoreColorGammaSumMs +=
@@ -16395,11 +16416,18 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processing_core_color_main_prelude_ms=%55 "
                "avg_processing_core_color_main_prelude_vignette_ms=%56 "
                "avg_processing_core_color_main_prelude_creative_ms=%57 "
-               "avg_processing_core_color_main_prelude_wb_ms=%58 "
-               "avg_processing_core_color_cam_ms=%59 "
-               "avg_processing_core_color_cam_wb_ms=%60 "
-               "avg_processing_core_color_cam_agx_ms=%61 "
-               "avg_processing_core_color_gamma_ms=%62" )
+               "avg_processing_core_color_main_prelude_creative_shadows_ms=%58 "
+               "avg_processing_core_color_main_prelude_creative_contrast_ms=%59 "
+               "avg_processing_core_color_main_prelude_wb_ms=%60 "
+               "avg_processing_core_color_main_prelude_wb_matrix_ms=%61 "
+               "avg_processing_core_color_main_prelude_wb_gamut_ms=%62 "
+               "avg_processing_core_color_main_prelude_wb_recon_ms=%63 "
+               "avg_processing_core_color_cam_ms=%64 "
+               "avg_processing_core_color_cam_wb_ms=%65 "
+               "avg_processing_core_color_cam_wb_matrix_ms=%66 "
+               "avg_processing_core_color_cam_wb_gamut_ms=%67 "
+               "avg_processing_core_color_cam_agx_ms=%68 "
+               "avg_processing_core_color_gamma_ms=%69" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16462,9 +16490,16 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeVignetteSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeCreativeSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeCreativeShadowsSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeCreativeContrastSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeWbMatrixSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeWbGamutSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeWbReconSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbMatrixSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbGamutSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaSumMs ), 0, 'f', 3 );
 
