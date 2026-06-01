@@ -1,3 +1,35 @@
+# 2026-06-01 - reverted the in-range lookup shortcut; direct combined write-both remains the keeper
+
+### Verified locally
+
+- I tried a direct in-range fast path inside the hot combined halfres `mix_chroma` write-both block in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then reverted it after the settled smoke replay regressed versus the current keeper.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:37:16 AM`
+  - `Length=8952320`
+  - `SHA256=23B0BEF998104EAD1BB3A5BFD85086B1A020F1E5EFBFEE557D5A8F5D39C5CE98`
+- The visible smoke gate stayed intact on the restored baseline:
+  - `processed8_direct_path_frames=false` on the later visible frames after the initial bypass frame
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The reverted shortcut did not beat the keeper on the settled hot clips:
+  - `M16-1327`: `llrawproc_ms=177.00`, `mix_chroma_ms=95.00`, `final_blend_ms=38.50`
+  - `M16-1347`: `llrawproc_ms=179.00`, `mix_chroma_ms=93.00`, `final_blend_ms=36.50`
+  - `M16-1446`: `llrawproc_ms=62.00`, `mix_chroma_ms=0.00`, `final_blend_ms=10.00`
+- I reverted the shortcut and restored the direct combined halfres write-both path as the keeper baseline.
+
+### Cross-checked from prior analysis
+
+- The clamp-hit evidence still says the low-bound clamp branch is dead on the hot clips, but this direct in-range fast path was not a keeper when tested.
+- The current keeper baseline remains the direct combined halfres `mix_chroma` write-both store path without this in-range lookup shortcut.
+- The hot retained bucket is still `mix_chroma`, but the next structural idea needs to be better targeted than this one.
+
+### Needs runtime profiling
+
+- If we keep pushing `mix_chroma`, the next probe needs a different structural shape than the rejected in-range lookup shortcut.
+- If the next probe is still flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - direct combined halfres mix_chroma write-both fast path is the new keeper
 
 ### Verified locally
