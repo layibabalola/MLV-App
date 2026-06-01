@@ -1,3 +1,29 @@
+# 2026-06-01 - no-probe branch hint in the hot write-both store path is a reject; revert to the keeper baseline
+
+### Verified locally
+
+- I tried biasing the hot combined `mix_chroma` store bodies toward the no-probe case with `LIKELY(!probe_center)` in `src/mlv/llrawproc/chroma_smooth.c`, then rebuilt the user-facing release tree and reran the same three visible GUI smoke clips.
+- The visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The no-probe branch hint was not keeper-shaped overall:
+  - `M16-1327`: `llrawproc_ms=65.1` (`fps≈15.36`), `mix_chroma_ms=36.7` (`fps≈27.25`), `final_blend_ms=5.7` (`fps≈175.44`), `presented_fps=1.249`
+  - `M16-1347`: `llrawproc_ms=67.1` (`fps≈14.90`), `mix_chroma_ms=39.9` (`fps≈25.06`), `final_blend_ms=6.5` (`fps≈153.85`), `presented_fps=1.249`
+  - `M16-1446`: `llrawproc_ms=27.1` (`fps≈36.90`), `mix_chroma_ms=0.0`, `final_blend_ms=6.6` (`fps≈151.52`), `presented_fps=1.250`
+- The hot clips regressed versus the current keeper baseline, so I reverted the hint and kept the earlier write-both dispatch keeper intact.
+
+### Cross-checked from prior analysis
+
+- The earlier hot write-both dispatch hint remains the keeper-shaped store-side leaf in this sequence.
+- The hot store/write probe still says `write_both_count` dominates, but this no-probe hint did not improve the keeper comparison.
+
+### Needs runtime profiling
+
+- Rebaseline from the earlier hot write-both dispatch keeper.
+- If we stay in `mix_chroma`, the next probe should be a structurally different store-side shape rather than another branch-prediction hint.
+
 # 2026-06-01 - later hot write-both dispatch hint is a reject; keep the earlier keeper
 
 ### Verified locally
