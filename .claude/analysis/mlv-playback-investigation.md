@@ -1,3 +1,38 @@
+# 2026-06-01 - restored current keeper rebaseline with final_blend probe; mix_chroma remains the hotter retained bucket
+
+### Verified locally
+
+- I reran the plain no-probe smoke set on the restored current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:59:27 AM`
+  - `Length=8947712`
+  - `SHA256=C1CB3991045446CA4D80B547AD7677387645596425FD332712D4FD0BF17284B8`
+- The visible smoke gate stayed intact on the restored baseline:
+  - `processed8_direct_path_frames=true` on the first bypass frame, then `false` on later frames as expected
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The restored plain smoke frames still show the same overall shape:
+  - `M16-1327`: `llrawproc_ms=152.00` / `185.00`, `mix_chroma_ms=84.00` / `106.00`, `final_blend_ms=28.00` / `20.00`
+  - `M16-1347`: `llrawproc_ms=164.00` / `207.00`, `mix_chroma_ms=86.00` / `149.00`, `final_blend_ms=25.00` / `18.00`
+  - `M16-1446`: `llrawproc_ms=85.00` / `104.00`, `mix_chroma_ms=0.00` / `0.00`, `final_blend_ms=11.00` / `18.00`
+- I also reran the fused `final_blend` probe on the same restored baseline with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`:
+  - `M16-1327`: `final_blend_ms=119.00` / `99.00`, `fb_row_kernel_ms=119.00` / `99.00`, `fb_raw2ev_ms=8.00` / `10.00`, `fb_curve_ms=12.00` / `8.00`, `fb_store_ms=41.00` / `30.00`
+  - `M16-1347`: `final_blend_ms=168.00` / `106.00`, `fb_row_kernel_ms=168.00` / `106.00`, `fb_raw2ev_ms=23.00` / `15.00`, `fb_curve_ms=15.00` / `10.00`, `fb_store_ms=39.00` / `40.00`
+  - `M16-1446`: `final_blend_ms=77.00` / `72.00`, `fb_row_kernel_ms=77.00` / `72.00`, `fb_raw2ev_ms=10.00` / `12.00`, `fb_curve_ms=8.00` / `14.00`, `fb_store_ms=18.00` / `9.00`
+- The probe confirms `final_blend` remains material, but the row kernel dominates the probe mode and `mix_chroma` remains the hotter retained bucket on the real smoke path.
+
+### Cross-checked from prior analysis
+
+- The current keeper remains the combined halfres `mix_chroma` write-both store path.
+- The restored baseline rebuild simply re-establishes the expected source/binary pair after reverting the branch-hint rejection.
+- The visible smoke gate is still green on the current build, so the loop remains valid for the next turn.
+
+### Needs runtime profiling
+
+- The next meaningful candidate is still the `mix_chroma` store side.
+- If the next `mix_chroma` probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - restored baseline after reverting the halfres mix_chroma branch-hint cleanup
 
 ### Verified locally
