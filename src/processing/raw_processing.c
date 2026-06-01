@@ -92,6 +92,8 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_ma
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_gamut_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_desat_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_clip_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
@@ -139,7 +141,7 @@ static int processing_main_prelude_probe_mode(void)
         {
             char * end = NULL;
             long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 3 )
+            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 4 )
             {
                 probe_mode = (int)parsed;
             }
@@ -271,6 +273,8 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_cam_wb_gamut_ms = 0.0;
     g_processing_last_core_color_cam_wb_desat_ms = 0.0;
     g_processing_last_core_color_cam_agx_ms = 0.0;
+    g_processing_last_core_color_cam_agx_clip_ms = 0.0;
+    g_processing_last_core_color_cam_agx_matrix_ms = 0.0;
     g_processing_last_core_color_gamma_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
     g_processing_last_core_output_ms = 0.0;
@@ -319,6 +323,8 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->color_cam_wb_gamut_ms = 0.0;
     timing->color_cam_wb_desat_ms = 0.0;
     timing->color_cam_agx_ms = 0.0;
+    timing->color_cam_agx_clip_ms = 0.0;
+    timing->color_cam_agx_matrix_ms = 0.0;
     timing->color_gamma_ms = 0.0;
     timing->creative_ms = 0.0;
     timing->output_ms = 0.0;
@@ -1020,6 +1026,8 @@ void applyProcessingObject( processingObject_t * processing,
         g_processing_last_core_color_cam_wb_gamut_ms = core_timing.color_cam_wb_gamut_ms;
         g_processing_last_core_color_cam_wb_desat_ms = core_timing.color_cam_wb_desat_ms;
         g_processing_last_core_color_cam_agx_ms = core_timing.color_cam_agx_ms;
+        g_processing_last_core_color_cam_agx_clip_ms = core_timing.color_cam_agx_clip_ms;
+        g_processing_last_core_color_cam_agx_matrix_ms = core_timing.color_cam_agx_matrix_ms;
         g_processing_last_core_color_gamma_ms = core_timing.color_gamma_ms;
         g_processing_last_core_creative_ms = core_timing.creative_ms;
         g_processing_last_core_output_ms = core_timing.output_ms;
@@ -1119,6 +1127,10 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_color_cam_wb_desat_ms, core_timings[t].color_cam_wb_desat_ms);
             g_processing_last_core_color_cam_agx_ms =
                 MAX(g_processing_last_core_color_cam_agx_ms, core_timings[t].color_cam_agx_ms);
+            g_processing_last_core_color_cam_agx_clip_ms =
+                MAX(g_processing_last_core_color_cam_agx_clip_ms, core_timings[t].color_cam_agx_clip_ms);
+            g_processing_last_core_color_cam_agx_matrix_ms =
+                MAX(g_processing_last_core_color_cam_agx_matrix_ms, core_timings[t].color_cam_agx_matrix_ms);
             g_processing_last_core_color_gamma_ms =
                 MAX(g_processing_last_core_color_gamma_ms, core_timings[t].color_gamma_ms);
             g_processing_last_core_creative_ms =
@@ -2270,6 +2282,8 @@ void apply_processing_object( processingObject_t * processing,
                 (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 2);
             const int color_cam_wb_probe_desat =
                 (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 3);
+            const int color_cam_wb_probe_agx =
+                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 4);
             if( use_cam_matrix )
             {
                 const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
@@ -2339,13 +2353,27 @@ void apply_processing_object( processingObject_t * processing,
                 if (processing->AgX)
                 {
                     const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                    const double color_cam_agx_clip_start =
+                        (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                     // Clip. Just in case other footprint compression did not happen.
                     for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
+                    if( capture_breakdown && color_cam_wb_probe_agx )
+                    {
+                        core_timing->color_cam_agx_clip_ms +=
+                            (omp_get_wtime() - color_cam_agx_clip_start) * 1000.0;
+                    }
+                    const double color_cam_agx_matrix_start =
+                        (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                     // AgX compress chroma through matrix.
                     double * m = agx_compressed_matrix;
                     pix[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
                     pix[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
                     pix[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                    if( capture_breakdown && color_cam_wb_probe_agx )
+                    {
+                        core_timing->color_cam_agx_matrix_ms +=
+                            (omp_get_wtime() - color_cam_agx_matrix_start) * 1000.0;
+                    }
                     if( capture_breakdown )
                     {
                         core_timing->color_cam_agx_ms += (omp_get_wtime() - color_cam_agx_start) * 1000.0;
@@ -2443,13 +2471,27 @@ void apply_processing_object( processingObject_t * processing,
                     if (processing->AgX)
                     {
                         const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                        const double color_cam_agx_clip_start =
+                            (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                         // Clip. Just in case other footprint compression did not happen.
                         for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
+                        if( capture_breakdown && color_cam_wb_probe_agx )
+                        {
+                            core_timing->color_cam_agx_clip_ms +=
+                                (omp_get_wtime() - color_cam_agx_clip_start) * 1000.0;
+                        }
+                        const double color_cam_agx_matrix_start =
+                            (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                         // AgX compress chroma through matrix.
                         double * m = agx_compressed_matrix;
                         pixg[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
                         pixg[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
                         pixg[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                        if( capture_breakdown && color_cam_wb_probe_agx )
+                        {
+                            core_timing->color_cam_agx_matrix_ms +=
+                                (omp_get_wtime() - color_cam_agx_matrix_start) * 1000.0;
+                        }
                         if( capture_breakdown )
                         {
                             core_timing->color_cam_agx_ms += (omp_get_wtime() - color_cam_agx_start) * 1000.0;
@@ -3065,6 +3107,16 @@ double processingGetLastCoreColorCamWbDesatMilliseconds(void)
 double processingGetLastCoreColorCamAgxMilliseconds(void)
 {
     return g_processing_last_core_color_cam_agx_ms;
+}
+
+double processingGetLastCoreColorCamAgxClipMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_agx_clip_ms;
+}
+
+double processingGetLastCoreColorCamAgxMatrixMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_agx_matrix_ms;
 }
 
 double processingGetLastCoreColorGammaMilliseconds(void)

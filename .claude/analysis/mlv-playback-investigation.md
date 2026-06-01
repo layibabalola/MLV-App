@@ -8681,3 +8681,25 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in the cam family, the next probe should target the matrix-side residual rather than the desaturation block.
 - If the next probe is also flat, we should move to another retained bucket instead of forcing more cam WB instrumentation.
+
+## 2026-06-01 - cam AgX split is noisy; no keeper-shaped winner yet
+
+### Verified locally
+
+- I split the live cam AgX branch in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) into `processing_core_color_cam_agx_clip_ms` and `processing_core_color_cam_agx_matrix_ms`, and threaded the new counters through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 8:52:40 PM`
+  - `Length=8880640`
+  - `SHA256=<recorded in the shell output>`
+- I reran the three visible smoke clips under `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=4` and kept the visible gate intact.
+- The isolated AgX split was informative but noisy: `processing_core_color_cam_agx_ms` rose sharply relative to the earlier coarse probe, while the new clip/matrix sub-buckets remained close together rather than exposing a single dominant leaf.
+
+### Cross-checked from prior analysis
+
+- The earlier coarse cam probe already showed matrix, AgX, and gamma all live, and this finer split did not change that basic picture.
+- The new data does not justify a cam-family optimization patch yet.
+
+### Needs runtime profiling
+
+- If we stay in this family, the next probe should either isolate gamma more cleanly or move to a different retained bucket.
+- Because the leaves are still close, the honest next step may be to shift buckets rather than force another cam rewrite.

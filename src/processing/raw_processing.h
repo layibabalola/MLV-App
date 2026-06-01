@@ -154,6 +154,8 @@ double processingGetLastCoreColorCamWbMatrixMilliseconds(void);
 double processingGetLastCoreColorCamWbGamutMilliseconds(void);
 double processingGetLastCoreColorCamWbDesatMilliseconds(void);
 double processingGetLastCoreColorCamAgxMilliseconds(void);
+double processingGetLastCoreColorCamAgxClipMilliseconds(void);
+double processingGetLastCoreColorCamAgxMatrixMilliseconds(void);
 double processingGetLastCoreColorGammaMilliseconds(void);
 double processingGetLastCoreCreativeMilliseconds(void);
 double processingGetLastCoreOutputMilliseconds(void);
@@ -404,6 +406,8 @@ typedef struct {
     double color_cam_wb_gamut_ms;
     double color_cam_wb_desat_ms;
     double color_cam_agx_ms;
+    double color_cam_agx_clip_ms;
+    double color_cam_agx_matrix_ms;
     double color_gamma_ms;
     double creative_ms;
     double output_ms;
