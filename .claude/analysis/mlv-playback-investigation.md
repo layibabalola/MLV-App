@@ -10051,3 +10051,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in SH, the next probe should focus on the `vertical_up_body` remainder or the `output` tail.
 - If that remains balanced, the honest move is still to pivot to another retained bucket rather than forcing more SH rewrites.
+
+## 2026-06-01 - SH `vertical_up_body` store split shows the store side is the live bottleneck, but the subleaves are still mixed
+
+### Verified locally
+
+- I split the SH `vertical_up_body` timing into `diff`, `store`, `store_factor`, and `store_color` in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp), with the new fields wired through [`src/processing/rbfilter/RBFilterPlain.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.h), [`src/processing/rbfilter/rbf_wrapper.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/rbf_wrapper.h), [`src/processing/rbfilter/rbf_wrapper.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/rbf_wrapper.cpp), [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 8:39:42 AM`
+  - `Length=8941056`
+  - `SHA256=70C9805C5D2163ACA1FC64B66BEB3D7D82A6AA09D0FF1445DAF23EF024E7BBE5`
+- I reran the three smoke clips with `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=1` and `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING=1`, and the visible smoke gate stayed intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled tail split now shows the store side is the live SH residual, but the subleaves are still mixed:
+  - `M16-1327`: `vertical_up_body=109.9999`, `vertical_up_body_diff=13.0005`, `vertical_up_body_store=65.0001`, `vertical_up_body_store_factor=10.9999`, `vertical_up_body_store_color=15.9988`, `vertical_up=109.9999`, `output=3.9999`
+  - `M16-1347`: `vertical_up_body=106.9999`, `vertical_up_body_diff=17.0007`, `vertical_up_body_store=53.9994`, `vertical_up_body_store_factor=13.0000`, `vertical_up_body_store_color=16.0003`, `vertical_up=106.9999`, `output=3.0000`
+  - `M16-1446`: `vertical_up_body=111.9999`, `vertical_up_body_diff=27.0002`, `vertical_up_body_store=55.0003`, `vertical_up_body_store_factor=9.0001`, `vertical_up_body_store_color=13.0000`, `vertical_up=111.9999`, `output=3.9999`
+
+### Cross-checked from prior analysis
+
+- The previous `vertical_up_first_line` split already proved the first line is effectively a zero leaf.
+- This store split shows the body is where the real work lives, and the store side is more expensive than the diff side on the hot clips.
+- But the store factor/color leaves are still mixed enough that this remains a measurement win, not a keeper-shaped patch target.
+
+### Needs runtime profiling
+
+- If we stay in SH, the next probe should split the store side further only if we have a plausible code-shape hypothesis for the factor/color branch.
+- If we do not have that hypothesis, the honest move is still to pivot to another retained bucket instead of forcing more SH rewrites.

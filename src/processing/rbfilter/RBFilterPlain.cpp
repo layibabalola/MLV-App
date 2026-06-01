@@ -553,12 +553,18 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
 
         const double vertical_up_body_start =
             timing_enabled ? omp_get_wtime() : 0.0;
+        double vertical_up_body_diff_ms = 0.0;
+        double vertical_up_body_store_ms = 0.0;
+        double vertical_up_body_store_factor_ms = 0.0;
+        double vertical_up_body_store_color_ms = 0.0;
 
         // handle other lines
         for (int y = 1; y < height; y++)
         {
             for (int x = 0; x < width-1; x++)
             {
+                const double vertical_up_body_diff_start =
+                    timing_enabled ? omp_get_wtime() : 0.0;
                 // determine difference in pixel color between current and previous
                 // calculation is different depending on number of channels
                 src_color -= channel;
@@ -567,17 +573,42 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
                     : getDiffFactor(src_color, src_color + width * channel);
 
                 float alpha_f = range_table_f[diff];
+                if( timing_enabled )
+                {
+                    vertical_up_body_diff_ms +=
+                        (omp_get_wtime() - vertical_up_body_diff_start) * 1000.0;
+                }
 
+                const double vertical_up_body_store_start =
+                    timing_enabled ? omp_get_wtime() : 0.0;
                 *up_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
+                if( timing_enabled )
+                {
+                    vertical_up_body_store_factor_ms +=
+                        (omp_get_wtime() - vertical_up_body_store_start) * 1000.0;
+                }
 
+                const double vertical_up_body_store_color_start =
+                    timing_enabled ? omp_get_wtime() : 0.0;
                 for (int c = 0; c < channel; c++)
                 {
                     *up_pass_color-- = inv_alpha_f * (*src_color_hor--) + alpha_f * (*prev_color--);
+                }
+                if( timing_enabled )
+                {
+                    vertical_up_body_store_color_ms +=
+                        (omp_get_wtime() - vertical_up_body_store_color_start) * 1000.0;
+                    vertical_up_body_store_ms +=
+                        (omp_get_wtime() - vertical_up_body_store_start) * 1000.0;
                 }
             }
         }
         if( timing_enabled )
         {
+            m_last_timing.vertical_up_body_diff_ms = vertical_up_body_diff_ms;
+            m_last_timing.vertical_up_body_store_ms = vertical_up_body_store_ms;
+            m_last_timing.vertical_up_body_store_factor_ms = vertical_up_body_store_factor_ms;
+            m_last_timing.vertical_up_body_store_color_ms = vertical_up_body_store_color_ms;
             m_last_timing.vertical_up_body_ms =
                 (omp_get_wtime() - vertical_up_body_start) * 1000.0;
             up_ms = (omp_get_wtime() - vertical_pass_start) * 1000.0;

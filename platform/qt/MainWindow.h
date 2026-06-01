@@ -941,6 +941,10 @@ private:
     double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalDownSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpFirstLineSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodySumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyDiffSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreFactorSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpBodyStoreColorSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsRbfVerticalUpSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsRbfOutputSumMs = 0.0;
     double m_playbackSmokeProcessingHighestGreenSumMs = 0.0;
