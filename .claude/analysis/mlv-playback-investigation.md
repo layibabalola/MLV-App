@@ -1,3 +1,39 @@
+## 2026-06-01 - WB row-pointer hoist in the general prelude path is a keeper; main matrix still remains the live residual
+
+### Verified locally
+
+- I hoisted the repeated `pm`/`pmg` row pointers in the general WB prelude path inside [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), so the general branch no longer re-indexes the WB lookup tables every time it touches the same row within a pixel.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 8:03:22 PM`
+  - `Length=8867328`
+  - `SHA256=A6CF94827EC63FF64F7B5BE26FDD304FCEFB03B14F8DE746659823413030A0C9`
+- I reran the same three visible smoke clips with the normal no-probe path, and the visible smoke gate stayed intact:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The no-probe smoke averages improved materially versus the previous keeper:
+  - `llrawproc_ms` average across the three clips improved from `193.33` to `112.67`
+  - `dual_iso_full20_final_blend_ms` average improved from `35.67` to `18.00`
+- Clip-level results were all better or flat:
+  - `M16-1327`: `llrawproc_ms=148.00`
+  - `M16-1347`: `llrawproc_ms=146.00`
+  - `M16-1446`: `llrawproc_ms=44.00`
+- The WB matrix probe still shows the main matrix slice as live, while the gradient-matrix leaf remains dead:
+  - `M16-1327`: `processing_core_color_main_prelude_wb_matrix_ms=123.001`, `processing_core_color_main_prelude_wb_gradient_matrix_ms=0`
+  - `M16-1347`: `processing_core_color_main_prelude_wb_matrix_ms=129.999`, `processing_core_color_main_prelude_wb_gradient_matrix_ms=0`
+  - `M16-1446`: `processing_core_color_main_prelude_wb_matrix_ms=117.999`, `processing_core_color_main_prelude_wb_gradient_matrix_ms=0`
+
+### Cross-checked from prior analysis
+
+- This aligns with the earlier WB exposure hoist: the general WB prelude path is still where the remaining leverage lives.
+- The gradient-matrix side remains a dead branch on these smoke clips, so the matrix residual is concentrated in the main WB path.
+
+### Needs runtime profiling
+
+- The current keeper is better than the previous one, but the main WB matrix slice is still live enough that another narrow probe could be justified.
+- If the next probe does not expose a smaller, clearly dominant matrix leaf, move on instead of forcing another WB rewrite.
+
 ## 2026-06-01 - WB gradient-matrix probe stayed dead; main matrix remains the live WB residual
 
 ### Verified locally

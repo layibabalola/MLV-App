@@ -1952,6 +1952,12 @@ void apply_processing_object( processingObject_t * processing,
             uint16_t * pix = img + (px * 3);
             uint16_t * bpix = blurImage + (px * 3);
             uint16_t * gmpix = gm + px;
+            int32_t * pm0 = pm[0];
+            int32_t * pm4 = pm[4];
+            int32_t * pm8 = pm[8];
+            int32_t * pmg0 = pmg[0];
+            int32_t * pmg4 = pmg[4];
+            int32_t * pmg8 = pmg[8];
 
             double expo_correction = 1.0;
             double expo_correction_gradient = 1.0;
@@ -2007,9 +2013,9 @@ void apply_processing_object( processingObject_t * processing,
                     }
                     else
                     {
-                        bval = ( ((pm[0][bpix[0]] /* + pm[1][bpix[1]] + pm[2][bpix[2]] */) << 2)
-                              + ((/* pm[3][bpix[0]] + */ pm[4][bpix[1]] /* + pm[5][bpix[2]] */) * 11)
-                              +  (/* pm[6][bpix[0]] + pm[7][bpix[1]] + */ pm[8][bpix[2]]) ) >> 4;
+                        bval = ( ((pm0[bpix[0]] /* + pm[1][bpix[1]] + pm[2][bpix[2]] */) << 2)
+                              + ((/* pm[3][bpix[0]] + */ pm4[bpix[1]] /* + pm[5][bpix[2]] */) * 11)
+                              +  (/* pm[6][bpix[0]] + pm[7][bpix[1]] + */ pm8[bpix[2]]) ) >> 4;
                     }
 
                     if( processing->clarity <= -0.01 || processing->clarity >= 0.01 )
@@ -2076,9 +2082,9 @@ void apply_processing_object( processingObject_t * processing,
             const double color_main_prelude_wb_exposure_start =
                 (capture_breakdown && color_main_prelude_probe_wb) ? omp_get_wtime() : 0.0;
             /* white balance & exposure */
-            const float wb_r = pm[0][pix[0]];
-            const float wb_g = pm[4][pix[1]];
-            const float wb_b = pm[8][pix[2]];
+            const float wb_r = pm0[pix[0]];
+            const float wb_g = pm4[pix[1]];
+            const float wb_b = pm8[pix[2]];
             float pix0 = wb_r * expo_correction;
             float pix1 = wb_g * expo_correction;
             float pix2 = wb_b * expo_correction;
@@ -2105,9 +2111,9 @@ void apply_processing_object( processingObject_t * processing,
                     (capture_breakdown && color_main_prelude_probe_wb) ? omp_get_wtime() : 0.0;
                 const double color_main_prelude_wb_gradient_matrix_start =
                     (capture_breakdown && color_main_prelude_wb_probe_matrix) ? omp_get_wtime() : 0.0;
-                const float wbg_r = pmg[0][pix[0]];
-                const float wbg_g = pmg[4][pix[1]];
-                const float wbg_b = pmg[8][pix[2]];
+                const float wbg_r = pmg0[pix[0]];
+                const float wbg_g = pmg4[pix[1]];
+                const float wbg_b = pmg8[pix[2]];
                 float pix0g = wbg_r * expo_correction * expo_correction_gradient;
                 float pix1g = wbg_g * expo_correction * expo_correction_gradient;
                 float pix2g = wbg_b * expo_correction * expo_correction_gradient;
