@@ -1,3 +1,46 @@
+## 2026-05-31 - cam-WB gamut is gated out on the smoke path; matrix remains the live residual
+
+### Verified locally
+
+- I checked the new cam-WB probe wiring in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) and confirmed the gamut timer is present in both the main and gradient cam branches, with the telemetry threaded through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I reran a one-frame manual smoke profile for `M16-1327` with `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=2` forced from the shell, writing to [`X:\.claude-state\profiling\cam-wb-gamut-manual\M16-1327.json`](X:\.claude-state\profiling\cam-wb-gamut-manual\M16-1327.json).
+- That run still recorded `processing_core_color_cam_wb_gamut_ms=0`, while the matrix-only mode continued to show a live `processing_core_color_cam_wb_matrix_ms` value on the same clip.
+
+### Cross-checked from prior analysis
+
+- The zero gamut result is consistent with the code path being gated by `!exr_mode`, so the smoke clips are likely exercising a path where the desaturation branch is not live.
+- The same clip’s matrix-only run shows `processing_core_color_cam_wb_matrix_ms` is still material, so the cam-family residual is now matrix/AgX/gamma rather than gamut.
+
+### Needs runtime profiling
+
+- If we keep probing this family, the next useful split is inside the live matrix/AgX/gamma work rather than trying to make gamut look expensive.
+- If the matrix/AgX/gamma leaves stay flat together, it is time to move to the next retained bucket instead of forcing another cam-family rewrite.
+
+## 2026-05-31 - creative split remains mixed; no keeper-shaped patch yet
+
+### Verified locally
+
+- I split the remaining creative prelude bucket one level deeper in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the probe can separate shadows/highlights from contrast/gradient-contrast using `MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_CREATIVE_PROBE`. The plumbing was threaded through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 7:15:17 PM`
+  - `Length=8861696`
+  - `SHA256=<recorded in the shell output>`
+- The visible smoke gate stayed intact on the three clips.
+- The creative family is still mixed rather than keeper-shaped:
+  - `creative-shadows`: settled averages across the smoke set were `llrawproc_avg=130.83`, `prelude_avg=638.00`, `creative_avg=221.50`, `shadows_avg=69.67`
+  - `creative-contrast`: settled averages were `llrawproc_avg=207.00`, `prelude_avg=604.50`, `creative_avg=204.83`, `contrast_avg=67.33`
+- The WB family also stayed mixed in the previous pass, with matrix and reconstruction remaining close enough that neither was an obvious immediate optimization target.
+
+### Cross-checked from prior analysis
+
+- The `final_blend -> convert_20_to_16bit` fusion remains preserved, and the visible smoke gate did not regress.
+- The deeper prelude probes are still useful as steering signals, but they have not yet produced a narrow patch that deserves landing.
+
+### Needs runtime profiling
+
+- If we keep improving locally, the next candidate should come from a different retained bucket rather than trying to force another prelude rewrite immediately.
+- If we stay in this color core, the next sensible probe target is the broader `processing_core_color_cam` family rather than another creative/WB micro-split.
+
 ## 2026-05-31 - probe-mode prelude split points to WB/reconstruction as the likelier next bucket
 
 ### Verified locally
