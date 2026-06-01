@@ -2029,6 +2029,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
         processingGetLastShadowsHighlightsCopyMilliseconds();
     const double processingShadowsHighlightsFilterMs =
         processingGetLastShadowsHighlightsFilterMilliseconds();
+    const double processingShadowsHighlightsFilterFullresMs =
+        processingGetLastShadowsHighlightsFilterFullresMilliseconds();
+    const double processingShadowsHighlightsFilterHalfresDownsampleMs =
+        processingGetLastShadowsHighlightsFilterHalfresDownsampleMilliseconds();
+    const double processingShadowsHighlightsFilterHalfresRbfMs =
+        processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds();
+    const double processingShadowsHighlightsFilterHalfresUpsampleMs =
+        processingGetLastShadowsHighlightsFilterHalfresUpsampleMilliseconds();
     const double processingShadowsHighlightsRbfTotalMs =
         processingGetLastShadowsHighlightsRbfTotalMilliseconds();
     const double processingShadowsHighlightsRbfBoundaryMs =
@@ -2370,6 +2378,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingShadowsHighlightsCopyMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_ms"),
                                       processingShadowsHighlightsFilterMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_fullres_ms"),
+                                      processingShadowsHighlightsFilterFullresMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_halfres_downsample_ms"),
+                                      processingShadowsHighlightsFilterHalfresDownsampleMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_halfres_rbf_ms"),
+                                      processingShadowsHighlightsFilterHalfresRbfMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_halfres_upsample_ms"),
+                                      processingShadowsHighlightsFilterHalfresUpsampleMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_total_ms"),
                                       processingShadowsHighlightsRbfTotalMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_boundary_ms"),

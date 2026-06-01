@@ -9078,6 +9078,75 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `cam_agx_ms` average: `299.9992` vs `294.3341`
 - The likely conclusion is that the cam WB scalar-hoist shape is not the next keeper; the existing gamma/creative keepers remain the stronger baseline for now.
 
+## 2026-06-01 - rejected mix_chroma lookup fast path; restored keeper baseline
+
+### Verified locally
+
+- I started work block `wb-a6d5e4cd67944c19` from clean `master` and tried a narrow `mix_chroma` lookup-focused fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c).
+- The fast path was a clear regression on the no-probe smoke rerun, so I reverted it and restored the keeper baseline.
+- The user-facing release tree was rebuilt at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 12:18:51 AM`
+  - `Length=8890880`
+  - `SHA256=43D92EC1D2C82F6A9C79C14D66B87D285A25852C4BECA2014574B0B2A10C14B0`
+- The restored baseline smoke rerun stayed green on the visible gate:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- Settled-frame restored-baseline numbers on the three clips were:
+  - `M16-1327`: `llrawproc_ms=131`, `mix_chroma_ms=73`, `final_blend_ms=19`
+  - `M16-1347`: `llrawproc_ms=148`, `mix_chroma_ms=88`, `final_blend_ms=15`
+  - `M16-1446`: `llrawproc_ms=36`, `mix_chroma_ms=0`, `final_blend_ms=7`
+- The three-clip average was:
+  - `llrawproc_ms=105`
+  - `mix_chroma_ms=53.667`
+  - `final_blend_ms=13.667`
+
+### Cross-checked from prior analysis
+
+- The previous `mix_chroma` write-both specialization was already rejected, and this lookup-fast-path shape also failed the keeper test.
+- `mix_chroma` still appears to be the largest retained Dual ISO bucket on the hot clips, but this specific shape is not a keeper.
+- The smoke gate stayed green throughout, so the rejection is purely a throughput decision.
+
+### Needs runtime profiling
+
+- The next probe should move to a different retained bucket unless we find a narrower `mix_chroma` subpath with a stronger reason to expect a win.
+- Based on the current map, `processing_shadows_highlights_prep_ms` / `processing_shadows_highlights_filter_ms` is the most plausible next target if we leave `mix_chroma` alone.
+
+## 2026-06-01 - Shadows/Highlights Phase 0 probe: halfres RBF dominates on the smoke clips
+
+### Verified locally
+
+- I added a probe-only split in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) behind `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=1` that separates the active Shadows/Highlights filter path into:
+  - `processing_shadows_highlights_filter_fullres_ms`
+  - `processing_shadows_highlights_filter_halfres_downsample_ms`
+  - `processing_shadows_highlights_filter_halfres_rbf_ms`
+  - `processing_shadows_highlights_filter_halfres_upsample_ms`
+- I threaded the new counters through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), and the release build.
+- The user-facing release tree was rebuilt at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 12:58:48 AM`
+  - `Length=8895488`
+  - `SHA256=7A03F7B0D1E6D6D8F56B91F9E19B96E9E0E3C00B9AC1A0A77A9C69D3D7D4A5E2`
+- The visible smoke gate stayed intact on the probe rerun:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled-frame probe results show the current smoke clips are using the halfres path, not the fullres path:
+  - `M16-1327`: `filter_halfres_downsample_ms=2`, `filter_halfres_rbf_ms=16`, `filter_halfres_upsample_ms=8`, `filter_fullres_ms=0`
+  - `M16-1347`: `filter_halfres_downsample_ms=3`, `filter_halfres_rbf_ms=17`, `filter_halfres_upsample_ms=8`, `filter_fullres_ms=0`
+  - `M16-1446`: `filter_halfres_downsample_ms=3`, `filter_halfres_rbf_ms=17`, `filter_halfres_upsample_ms=8`, `filter_fullres_ms=0`
+- `processing_shadows_highlights_filter_ms` and `processing_shadows_highlights_prep_ms` stayed materially live on the smoke set, so this bucket is real rather than a zero bucket.
+
+### Cross-checked from prior analysis
+
+- The earlier RBF detail counters were zero on the smoke clips, which meant we did not yet have a trustworthy split inside the live Shadows/Highlights filter path.
+- This probe resolves that ambiguity: halfres is the active path on the smoke clips, and the halfres RBF slice is the largest sub-bucket.
+- The `mix_chroma` lookup fast path remains rejected and should not be retried as the next step.
+
+### Needs runtime profiling
+
+- If we stay in Shadows/Highlights, the next probe should focus on the halfres RBF slice rather than the downsample or upsample helpers.
+- If we leave this bucket, the next candidate should be a different retained bucket rather than another `mix_chroma` rewrite.
+
 ### Cross-checked from prior analysis
 
 - The previous creative gradation hoist remains the current keeper baseline.
