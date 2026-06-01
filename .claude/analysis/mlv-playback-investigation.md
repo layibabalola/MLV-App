@@ -8851,3 +8851,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next question is whether the remaining cam AgX cost is still matrix-dominated enough to justify one more narrow pass, or whether we should now move to the next retained bucket.
 - If we stay in `cam_agx`, the next probe should be narrowly about the remaining matrix-side work rather than reintroducing array-shape experiments.
+
+## 2026-06-01 - cam gamma LUT hoist is a keeper-shaped win
+
+### Verified locally
+
+- I reverted the rejected WB matrix coefficient hoist and instead hoisted the cam gamma LUT pointers in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c):
+  - `processing->pre_calc_gamma` in the main cam gamma loop
+  - `processing->pre_calc_gamma_gradient` in the gradient cam gamma loop
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 10:35:41 PM`
+  - `Length=8889856`
+  - `SHA256=8BC6D61E1AAB2D2153D4F35F22FEB7859310159C6B2D0240568F6D9F425CC244`
+- I reran the three visible smoke clips on the same x1 Quality / settled Auto Look Assist gate, and the visible smoke gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled frames improved versus the current cam AgX matrix-hoist keeper:
+  - `M16-1327`: `llrawproc_ms=2792.000` vs `2798.000`
+  - `M16-1347`: `llrawproc_ms=2786.000` vs `2812.000`
+  - `M16-1446`: `llrawproc_ms=2783.000` vs `2781.000`
+- The net three-clip average moved in the right direction, so the gamma LUT hoist is a keeper-shaped win even though the clip-level result remains mixed.
+
+### Cross-checked from prior analysis
+
+- The cam AgX matrix hoist remains valid, but this gamma LUT hoist now appears to be the better current keeper on the three-clip smoke gate.
+- The visible smoke gate stayed green, and `dual_iso_full20_convert16_ms` stayed at zero.
+- The WB matrix coefficient hoist was rejected and reverted before this keeper comparison, so it should stay out of the retained path.
+
+### Needs runtime profiling
+
+- The next highest-value residual is still in the color family, but the direct gamma LUT indexing cost is no longer the best immediate lever.
+- If we keep going, the next probe should be a different live leaf than the gamma LUT path rather than another array-hoist variant.

@@ -2503,9 +2503,10 @@ void apply_processing_object( processingObject_t * processing,
                 (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 1);
             const double color_gamma_main_start =
                 (capture_breakdown && color_gamma_probe_main) ? omp_get_wtime() : 0.0;
+            const uint16_t * const color_gamma_lut = processing->pre_calc_gamma;
             for( int i = 0; i < 3; i++ )
             {
-                pix[i] = processing->pre_calc_gamma[ LIMIT16((uint32_t)pix[i]) ]; /* Not float-> int is done here */
+                pix[i] = color_gamma_lut[ LIMIT16((uint32_t)pix[i]) ]; /* Not float-> int is done here */
             }
             if( capture_breakdown && color_gamma_probe_main )
             {
@@ -2637,9 +2638,10 @@ void apply_processing_object( processingObject_t * processing,
                 const double color_gamma_gradient_start =
                     (capture_breakdown && (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 2))
                     ? omp_get_wtime() : 0.0;
+                const uint16_t * const color_gamma_gradient_lut = processing->pre_calc_gamma_gradient;
                 for( int i = 0; i < 3; i++ )
                 {
-                    pixg[i] = processing->pre_calc_gamma_gradient[ LIMIT16((uint32_t)pixg[i]) ];
+                    pixg[i] = color_gamma_gradient_lut[ LIMIT16((uint32_t)pixg[i]) ];
                 }
                 if( capture_breakdown && (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 2) )
                 {
