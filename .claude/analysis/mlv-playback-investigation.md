@@ -10921,6 +10921,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The next highest-value residual is still in the color family, but the direct gamma LUT indexing cost is no longer the best immediate lever.
 - If we keep going, the next probe should be a different live leaf than the gamma LUT path rather than another array-hoist variant.
 
+## 2026-06-01 - cam WB pointer hoist is a keeper-shaped win
+
+### Verified locally
+
+- I hoisted the cam WB matrix pointer and cached the `rgb_to_Y` coefficients once at the outer color scope in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), then reused those locals in both the main and gradient cam branches instead of re-reading the arrays each time.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 6:48:28 PM`
+  - `Length=8956928`
+  - `SHA256=5B4C322E36C8BB23DB8BB6581324048F17E4CC60DD7C6C0FCD00348F045CA568`
+- I reran the same three visible smoke clips on the rebuilt release tree twice, and both reruns beat the prior keeper on the hot clip:
+  - first rerun: `latency_ms=122.2304`, `engine_latency_ms=110.0917`, `llrawproc_ms=85.0000381469727`, `dual_iso_full20_final_blend_ms=9.00006294250488`
+  - second rerun: `latency_ms=123.825`, `engine_latency_ms=112.9033`, `llrawproc_ms=88.0000591278076`, `dual_iso_full20_final_blend_ms=9.00006294250488`
+  - prior keeper reference on the same clip set: `latency_ms=127.08875`, `engine_latency_ms=115.7579`, `llrawproc_ms=91.5000438690186`, `dual_iso_full20_final_blend_ms=9.50002670288086`
+- The visible smoke gate stayed intact on both reruns:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+
+### Cross-checked from prior analysis
+
+- The earlier cam AgX matrix coefficient hoist remains a valid keeper-shaped win, but this pointer hoist is a narrower follow-on that still moves the same hot family in the right direction.
+- The rejected WB matrix coefficient hoist stays rejected; this change only hoists the pointer and cached luminance coefficients used by the live cam branches.
+- The cam residual still sits in the matrix/AgX/gamma family, so this is still consistent with the broader retained-bucket map.
+
+### Needs runtime profiling
+
+- Rebaseline from this cam pointer hoist before deciding whether the next probe should stay in the cam family or move to another retained bucket.
+- If the next cam-family probe is flat, pivot away cleanly rather than forcing another array-shape variant.
+
 ## 2026-06-01 - cam AgX branch-hoist is rejected; revert restores the gamma LUT keeper baseline
 
 ### Verified locally

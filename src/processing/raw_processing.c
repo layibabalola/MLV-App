@@ -2174,6 +2174,10 @@ void apply_processing_object( processingObject_t * processing,
      || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 );
     const double inv_65535 = 1.0 / 65535.0;
     const int pixel_count = img_s / 3;
+    const double * const proper_wb = processing->proper_wb_matrix;
+    const float rgb_to_y0 = rgb_to_Y[0];
+    const float rgb_to_y1 = rgb_to_Y[1];
+    const float rgb_to_y2 = rgb_to_Y[2];
     const double color_main_start = capture_breakdown ? omp_get_wtime() : 0.0;
 
     /* white balance & exposure & highlights & gamma & highlight reconstruction */
@@ -2557,9 +2561,9 @@ void apply_processing_object( processingObject_t * processing,
                 /* WB correction */
                 float pix0b = pix[0], pix1b = pix[1], pix2b = pix[2];
                 float result[3];
-                result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
-                result[1] = pix0b * processing->proper_wb_matrix[3] + pix1b * processing->proper_wb_matrix[4] + pix2b * processing->proper_wb_matrix[5];
-                result[2] = pix0b * processing->proper_wb_matrix[6] + pix1b * processing->proper_wb_matrix[7] + pix2b * processing->proper_wb_matrix[8];
+                result[0] = pix0b * proper_wb[0] + pix1b * proper_wb[1] + pix2b * proper_wb[2];
+                result[1] = pix0b * proper_wb[3] + pix1b * proper_wb[4] + pix2b * proper_wb[5];
+                result[2] = pix0b * proper_wb[6] + pix1b * proper_wb[7] + pix2b * proper_wb[8];
                 if( capture_breakdown && color_cam_wb_probe_matrix )
                 {
                     core_timing->color_cam_wb_matrix_ms +=
@@ -2573,9 +2577,9 @@ void apply_processing_object( processingObject_t * processing,
                 if (!exr_mode)
                 {
                     /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
-                    float Y = rgb_to_Y[0] * result[0]
-                            + rgb_to_Y[1] * result[1]
-                            + rgb_to_Y[2] * result[2];
+                    float Y = rgb_to_y0 * result[0]
+                            + rgb_to_y1 * result[1]
+                            + rgb_to_y2 * result[2];
                     float min_channel = MIN(MIN(result[0],result[1]),result[2]);
 
                     float result2[3];
@@ -2746,9 +2750,9 @@ void apply_processing_object( processingObject_t * processing,
                         (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
                     float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
                     double result[3];
-                    result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
-                    result[1] = pix0b * processing->proper_wb_matrix[3] + pix1b * processing->proper_wb_matrix[4] + pix2b * processing->proper_wb_matrix[5];
-                    result[2] = pix0b * processing->proper_wb_matrix[6] + pix1b * processing->proper_wb_matrix[7] + pix2b * processing->proper_wb_matrix[8];
+                    result[0] = pix0b * proper_wb[0] + pix1b * proper_wb[1] + pix2b * proper_wb[2];
+                    result[1] = pix0b * proper_wb[3] + pix1b * proper_wb[4] + pix2b * proper_wb[5];
+                    result[2] = pix0b * proper_wb[6] + pix1b * proper_wb[7] + pix2b * proper_wb[8];
                     if( capture_breakdown && color_cam_wb_probe_matrix )
                     {
                         core_timing->color_cam_wb_matrix_ms +=
@@ -2761,9 +2765,9 @@ void apply_processing_object( processingObject_t * processing,
                     if (!exr_mode)
                     {
                         /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
-                        float Y = rgb_to_Y[0] * result[0]
-                                + rgb_to_Y[1] * result[1]
-                                + rgb_to_Y[2] * result[2];
+                        float Y = rgb_to_y0 * result[0]
+                                + rgb_to_y1 * result[1]
+                                + rgb_to_y2 * result[2];
                         float min_channel = MIN(MIN(result[0],result[1]),result[2]);
                         float result2[3];
                         for (int i = 0; i < 3; ++i) {
