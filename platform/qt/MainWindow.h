@@ -961,6 +961,8 @@ private:
     double m_playbackSmokeProcessingCoreColorCamAgxClipSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorCamAgxMatrixSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorGammaSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorGammaMainSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorGammaGradientSumMs = 0.0;
     double m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
     double m_playbackSmokeProcessingCoreOutputSumMs = 0.0;
     double m_playbackSmokeProcessingCoreOtherSumMs = 0.0;

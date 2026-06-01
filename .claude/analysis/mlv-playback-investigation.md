@@ -8703,3 +8703,30 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in this family, the next probe should either isolate gamma more cleanly or move to a different retained bucket.
 - Because the leaves are still close, the honest next step may be to shift buckets rather than force another cam rewrite.
+
+## 2026-06-01 - gamma main leaf is live; gradient leaf is dead on the settled smoke clips
+
+- I fixed the gamma probe wiring in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so `MLVAPP_PROCESSING_CORE_COLOR_GAMMA_PROBE=1` now records the main gamma loop and `=2` records the gradient gamma loop, with the new counters threaded through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 9:05:23 PM`
+  - `Length=8882688`
+  - `SHA256=12C81E02977082953ACC90AE9CD44C164DBEBBE90E93A82761346250E0EEA90A`
+- I reran the three visible smoke clips under `MLVAPP_PROCESSING_CORE_COLOR_GAMMA_PROBE=1` and kept the visible gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled-frame gamma split now shows the main gamma leaf is live while the gradient leaf is effectively dead on all three clips:
+  - `M16-1327`: `processing_core_color_gamma_ms=195.000`, `processing_core_color_gamma_main_ms=60.000`, `processing_core_color_gamma_gradient_ms=0.000`, `llrawproc_ms=128.000`, `dual_iso_full20_final_blend_ms=13.000`
+  - `M16-1347`: `processing_core_color_gamma_ms=162.000`, `processing_core_color_gamma_main_ms=47.000`, `processing_core_color_gamma_gradient_ms=0.000`, `llrawproc_ms=153.000`, `dual_iso_full20_final_blend_ms=22.000`
+  - `M16-1446`: `processing_core_color_gamma_ms=205.000`, `processing_core_color_gamma_main_ms=55.000`, `processing_core_color_gamma_gradient_ms=0.000`, `llrawproc_ms=44.000`, `dual_iso_full20_final_blend_ms=8.000`
+
+### Cross-checked from prior analysis
+
+- The gamma probe now behaves as intended, so the main/gradient split is trustworthy.
+- Gradient is not the next gamma optimization target on these smoke clips.
+- The live residual inside this bucket is the main gamma loop, but the data does not yet point to a structurally better patch than the current keeper baseline.
+
+### Needs runtime profiling
+
+- If we stay in `processing_core_color`, the next useful move is either a lower-overhead look inside the main gamma loop or a shift to a different retained bucket.
+- The honest default right now is to avoid a premature gamma rewrite unless a narrower probe reveals a clear winner.

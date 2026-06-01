@@ -15576,6 +15576,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingCoreColorCamAgxClipSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamAgxMatrixSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorGammaSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorGammaMainSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorGammaGradientSumMs = 0.0;
     m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
     m_playbackSmokeProcessingCoreOutputSumMs = 0.0;
     m_playbackSmokeProcessingCoreOtherSumMs = 0.0;
@@ -16059,6 +16061,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_core_color_cam_agx_matrix_ms" );
     m_playbackSmokeProcessingCoreColorGammaSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_gamma_ms" );
+    m_playbackSmokeProcessingCoreColorGammaMainSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_gamma_main_ms" );
+    m_playbackSmokeProcessingCoreColorGammaGradientSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_gamma_gradient_ms" );
     m_playbackSmokeProcessingCoreCreativeSumMs +=
         telemetryDoubleValue( timing, "processing_core_creative_ms" );
     m_playbackSmokeProcessingCoreOutputSumMs +=
@@ -16491,7 +16497,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processing_core_color_cam_agx_ms=%76 "
                "avg_processing_core_color_cam_agx_clip_ms=%77 "
                "avg_processing_core_color_cam_agx_matrix_ms=%78 "
-               "avg_processing_core_color_gamma_ms=%79" )
+               "avg_processing_core_color_gamma_ms=%79 "
+               "avg_processing_core_color_gamma_main_ms=%80 "
+               "avg_processing_core_color_gamma_gradient_ms=%81" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16575,7 +16583,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxClipSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxMatrixSumMs ), 0, 'f', 3 )
-               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaSumMs ), 0, 'f', 3 );
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaMainSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaGradientSumMs ), 0, 'f', 3 );
 
     qInfo().noquote()
         << QStringLiteral(
