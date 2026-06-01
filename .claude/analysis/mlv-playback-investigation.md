@@ -9954,3 +9954,18 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `M16-1446`: `processing_shadows_highlights_prep_ms=29/27`, `processing_shadows_highlights_filter_ms=29/27`, `filter_halfres_downsample_ms=2/3`, `filter_halfres_rbf_ms=17/16`, `filter_halfres_upsample_ms=9/9`
 - The built-in RBF detail fields stayed at zero in this probe, so the current probe shape does not yet expose a narrower SH leaf to optimize.
 - That means SH is a real retained bucket, but this current probe does not justify a patch by itself. It is a useful fallback bucket if `mix_chroma` remains mixed, not yet a keeper candidate on its own.
+## 2026-06-01 - current keeper rebaseline still points at `mix_chroma`; SH remains a live fallback but not yet a patch target
+
+- I reran the standard no-probe smoke set on the current keeper and kept the visible gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled frames on the current keeper are still dominated by the hot `mix_chroma` clips:
+  - `M16-1327`: `llrawproc_ms=154/171`, `dual_iso_full20_final_blend_ms=16/26`, `dual_iso_full20_mix_chroma_ms=94/85`
+  - `M16-1347`: `llrawproc_ms=177/203`, `dual_iso_full20_final_blend_ms=23/21`, `dual_iso_full20_mix_chroma_ms=108/127`
+  - `M16-1446`: `llrawproc_ms=44/50`, `dual_iso_full20_final_blend_ms=8/9`, `dual_iso_full20_mix_chroma_ms=0`
+- The fresh SH probe from the same keeper showed a real but still unshaped fallback bucket:
+  - outer `processing_shadows_highlights_prep_ms` / `filter_ms` is material
+  - the nested RBF detail fields remained zero in this probe
+  - that means SH is live, but not yet patch-ready from the current probe shape
+- Net: `mix_chroma` remains the next highest-value retained bucket for structural work, while SH stays as the fallback bucket if `mix_chroma` keeps refusing keeper-shaped wins.
