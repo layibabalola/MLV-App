@@ -170,6 +170,8 @@ typedef struct
     double mix_chroma_center_store_b_probe_ms;
     double mix_chroma_center_store_r_lookup_probe_ms;
     double mix_chroma_center_store_b_lookup_probe_ms;
+    double mix_chroma_center_average_probe_ms;
+    double mix_chroma_center_non_average_probe_ms;
     double mix_chroma_center_write_both_count;
     double mix_chroma_center_write_r_only_count;
     double mix_chroma_center_write_b_only_count;
@@ -184,6 +186,8 @@ typedef struct
     double mix_chroma_halfres_center_store_b_probe_ms;
     double mix_chroma_halfres_center_store_r_lookup_probe_ms;
     double mix_chroma_halfres_center_store_b_lookup_probe_ms;
+    double mix_chroma_halfres_center_average_probe_ms;
+    double mix_chroma_halfres_center_non_average_probe_ms;
     double mix_chroma_halfres_center_write_both_count;
     double mix_chroma_halfres_center_write_r_only_count;
     double mix_chroma_halfres_center_write_b_only_count;

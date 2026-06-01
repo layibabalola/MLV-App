@@ -140,8 +140,12 @@ void dualiso_debug_reset_full20bit_timing(void)
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_center_store_r_lookup_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_center_store_b_lookup_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_center_average_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_center_non_average_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_average_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_halfres_probe_mode = -1;
     g_dualiso_full20bit_timing.final_blend_probe_mode = -1;
     g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
@@ -176,7 +180,7 @@ int dualiso_mix_chroma_probe_mode(void)
         {
             char * end = NULL;
             long parsed = strtol(v, &end, 10);
-            if (end != v && *end == '\0' && parsed >= -1 && parsed <= 4)
+            if (end != v && *end == '\0' && parsed >= -1 && parsed <= 6)
             {
                 g_dualiso_mix_chroma_probe_mode_cache = (int)parsed;
             }
@@ -199,6 +203,14 @@ int dualiso_mix_chroma_probe_mode(void)
             else if (!strcmp(v, "fullres") || !strcmp(v, "FULLRES"))
             {
                 g_dualiso_mix_chroma_probe_mode_cache = 4;
+            }
+            else if (!strcmp(v, "average") || !strcmp(v, "AVERAGE"))
+            {
+                g_dualiso_mix_chroma_probe_mode_cache = 5;
+            }
+            else if (!strcmp(v, "nonaverage") || !strcmp(v, "NONAVERAGE") || !strcmp(v, "non-average") || !strcmp(v, "NON-AVERAGE"))
+            {
+                g_dualiso_mix_chroma_probe_mode_cache = 6;
             }
             else
             {
