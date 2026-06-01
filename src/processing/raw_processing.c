@@ -95,6 +95,8 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_m
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_clip_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_main_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_gradient_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_matrix_ms = 0.0;
@@ -214,6 +216,27 @@ static int processing_cam_wb_probe_mode(void)
     return probe_mode;
 }
 
+static int processing_cam_gamma_probe_mode(void)
+{
+    static int initialized = 0;
+    static int probe_mode = 0;
+    if( !initialized )
+    {
+        const char * value = getenv("MLVAPP_PROCESSING_CORE_COLOR_GAMMA_PROBE");
+        if( value && *value )
+        {
+            char * end = NULL;
+            long parsed = strtol(value, &end, 10);
+            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 2 )
+            {
+                probe_mode = (int)parsed;
+            }
+        }
+        initialized = 1;
+    }
+    return probe_mode;
+}
+
 typedef struct
 {
     double matrix_ms;
@@ -276,6 +299,8 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_cam_agx_clip_ms = 0.0;
     g_processing_last_core_color_cam_agx_matrix_ms = 0.0;
     g_processing_last_core_color_gamma_ms = 0.0;
+    g_processing_last_core_color_gamma_main_ms = 0.0;
+    g_processing_last_core_color_gamma_gradient_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
     g_processing_last_core_output_ms = 0.0;
     g_processing_last_direct8_matrix_ms = 0.0;
@@ -326,6 +351,8 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->color_cam_agx_clip_ms = 0.0;
     timing->color_cam_agx_matrix_ms = 0.0;
     timing->color_gamma_ms = 0.0;
+    timing->color_gamma_main_ms = 0.0;
+    timing->color_gamma_gradient_ms = 0.0;
     timing->creative_ms = 0.0;
     timing->output_ms = 0.0;
 }
@@ -1029,6 +1056,8 @@ void applyProcessingObject( processingObject_t * processing,
         g_processing_last_core_color_cam_agx_clip_ms = core_timing.color_cam_agx_clip_ms;
         g_processing_last_core_color_cam_agx_matrix_ms = core_timing.color_cam_agx_matrix_ms;
         g_processing_last_core_color_gamma_ms = core_timing.color_gamma_ms;
+        g_processing_last_core_color_gamma_main_ms = core_timing.color_gamma_main_ms;
+        g_processing_last_core_color_gamma_gradient_ms = core_timing.color_gamma_gradient_ms;
         g_processing_last_core_creative_ms = core_timing.creative_ms;
         g_processing_last_core_output_ms = core_timing.output_ms;
     }
@@ -1133,6 +1162,10 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_color_cam_agx_matrix_ms, core_timings[t].color_cam_agx_matrix_ms);
             g_processing_last_core_color_gamma_ms =
                 MAX(g_processing_last_core_color_gamma_ms, core_timings[t].color_gamma_ms);
+            g_processing_last_core_color_gamma_main_ms =
+                MAX(g_processing_last_core_color_gamma_main_ms, core_timings[t].color_gamma_main_ms);
+            g_processing_last_core_color_gamma_gradient_ms =
+                MAX(g_processing_last_core_color_gamma_gradient_ms, core_timings[t].color_gamma_gradient_ms);
             g_processing_last_core_creative_ms =
                 MAX(g_processing_last_core_creative_ms, core_timings[t].creative_ms);
             g_processing_last_core_output_ms =
@@ -2394,9 +2427,19 @@ void apply_processing_object( processingObject_t * processing,
 
             /* Gamma and expo correction (shadows&highlights, contrast, clarity) */
             const double color_gamma_start = capture_breakdown ? omp_get_wtime() : 0.0;
+            const int color_gamma_probe_mode = processing_cam_gamma_probe_mode();
+            const int color_gamma_probe_main =
+                (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 1);
+            const double color_gamma_main_start =
+                (capture_breakdown && color_gamma_probe_main) ? omp_get_wtime() : 0.0;
             for( int i = 0; i < 3; i++ )
             {
                 pix[i] = processing->pre_calc_gamma[ LIMIT16((uint32_t)pix[i]) ]; /* Not float-> int is done here */
+            }
+            if( capture_breakdown && color_gamma_probe_main )
+            {
+                core_timing->color_gamma_main_ms +=
+                    (omp_get_wtime() - color_gamma_main_start) * 1000.0;
             }
             if( capture_breakdown )
             {
@@ -2512,9 +2555,17 @@ void apply_processing_object( processingObject_t * processing,
 
                 /* Gamma and expo correction (shadows&highlights, contrast, clarity) gradient layer*/
                 const double color_gamma_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                const double color_gamma_gradient_start =
+                    (capture_breakdown && (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 2))
+                    ? omp_get_wtime() : 0.0;
                 for( int i = 0; i < 3; i++ )
                 {
                     pixg[i] = processing->pre_calc_gamma_gradient[ LIMIT16((uint32_t)pixg[i]) ];
+                }
+                if( capture_breakdown && (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 2) )
+                {
+                    core_timing->color_gamma_gradient_ms +=
+                        (omp_get_wtime() - color_gamma_gradient_start) * 1000.0;
                 }
                 if( capture_breakdown )
                 {
@@ -3122,6 +3173,16 @@ double processingGetLastCoreColorCamAgxMatrixMilliseconds(void)
 double processingGetLastCoreColorGammaMilliseconds(void)
 {
     return g_processing_last_core_color_gamma_ms;
+}
+
+double processingGetLastCoreColorGammaMainMilliseconds(void)
+{
+    return g_processing_last_core_color_gamma_main_ms;
+}
+
+double processingGetLastCoreColorGammaGradientMilliseconds(void)
+{
+    return g_processing_last_core_color_gamma_gradient_ms;
 }
 
 double processingGetLastCoreCreativeMilliseconds(void)

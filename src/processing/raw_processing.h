@@ -157,6 +157,8 @@ double processingGetLastCoreColorCamAgxMilliseconds(void);
 double processingGetLastCoreColorCamAgxClipMilliseconds(void);
 double processingGetLastCoreColorCamAgxMatrixMilliseconds(void);
 double processingGetLastCoreColorGammaMilliseconds(void);
+double processingGetLastCoreColorGammaMainMilliseconds(void);
+double processingGetLastCoreColorGammaGradientMilliseconds(void);
 double processingGetLastCoreCreativeMilliseconds(void);
 double processingGetLastCoreOutputMilliseconds(void);
 double processingGetLastDirect8MatrixMilliseconds(void);
@@ -409,6 +411,8 @@ typedef struct {
     double color_cam_agx_clip_ms;
     double color_cam_agx_matrix_ms;
     double color_gamma_ms;
+    double color_gamma_main_ms;
+    double color_gamma_gradient_ms;
     double creative_ms;
     double output_ms;
 } processing_core_timing_t;
