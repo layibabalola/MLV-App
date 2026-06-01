@@ -435,20 +435,12 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
                 if (!probe_center)
                 {
-                    if (LIKELY(out_r_ev_offset <= ev2raw_range && out_b_ev_offset <= ev2raw_range))
-                    {
-                        out_r = (uint16_t)ev2raw[out_r_ev];
-                        out_b = (uint16_t)ev2raw[out_b_ev];
-                    }
-                    else
-                    {
-                        const int out_r_ev_clamped =
-                            out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
-                        const int out_b_ev_clamped =
-                            out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
-                        out_r = (uint16_t)ev2raw[out_r_ev_clamped];
-                        out_b = (uint16_t)ev2raw[out_b_ev_clamped];
-                    }
+                    const int out_r_ev_clamped =
+                        out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
+                    const int out_b_ev_clamped =
+                        out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
+                    out_r = (uint16_t)ev2raw[out_r_ev_clamped];
+                    out_b = (uint16_t)ev2raw[out_b_ev_clamped];
                 }
                 else
                 {

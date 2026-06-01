@@ -1,3 +1,93 @@
+# 2026-06-01 - write_r/write_b branch-hint restore is a reject; keep the direct-clamped store fallback
+
+### Verified locally
+
+- I reran the three-clip smoke set on the branch-hint restore in `src/mlv/llrawproc/chroma_smooth.c`, and the visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The branch-hint restore was worse than the current direct-clamped keeper baseline, so it is not a keeper:
+  - `M16-1327`: `llrawproc_ms=121.0` (`fps≈8.26`), `mix_chroma_ms=64.5` (`fps≈15.50`), `final_blend_ms=13.0` (`fps≈76.92`)
+  - `M16-1347`: `llrawproc_ms=130.0` (`fps≈7.69`), `mix_chroma_ms=65.5` (`fps≈15.27`), `final_blend_ms=15.0` (`fps≈66.67`)
+  - `M16-1446`: `llrawproc_ms=56.5` (`fps≈17.70`), `mix_chroma_ms=0.0`, `final_blend_ms=18.0` (`fps≈55.56`)
+  - Aggregate: `llrawproc_ms=102.5` (`fps≈9.76`), `mix_chroma_ms=43.333` (`fps≈23.08`), `final_blend_ms=15.333` (`fps≈65.22`)
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:43:23 PM`
+  - `Length=8956416`
+  - `SHA256=1A905B5AD7914C880E394C76E8EF5D5A4F5E8AE32BDD32F5187F1480923342DB`
+
+### Cross-checked from prior analysis
+
+- The current direct-clamped store fallback remains the better store-side shape from the earlier smoke set.
+- This branch-hint restore regressed from that keeper on both `llrawproc_ms` and `mix_chroma_ms`, so the hinting layer does not hold.
+
+### Needs runtime profiling
+
+- Keep the direct-clamped fallback and look for a materially different store-side hypothesis if we stay in `mix_chroma`.
+- If we do not have a stronger store-side idea, pivot to another retained bucket rather than forcing another nearby hint shape.
+
+# 2026-06-01 - halfres write-both probe 13 stays noisy; the direct-clamped keeper remains the baseline
+
+### Verified locally
+
+- I reran the current keeper through `MLVAPP_DUALISO_MIX_CHROMA_PROBE=13` to measure the halfres write-both leaf directly, and the visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The probe was badly noisy rather than keeper-shaped:
+  - `M16-1327`: `llrawproc_ms=275.0` (`fps≈3.64`), `mix_chroma_ms=119.0` (`fps≈8.40`), `final_blend_ms=27.0` (`fps≈37.04`)
+  - `M16-1347`: `llrawproc_ms=154.0` (`fps≈6.49`), `mix_chroma_ms=72.0` (`fps≈13.89`), `final_blend_ms=24.5` (`fps≈40.82`)
+  - `M16-1446`: `llrawproc_ms=60.0` (`fps≈16.67`), `mix_chroma_ms=0.0`, `final_blend_ms=33.0` (`fps≈30.30`)
+  - Aggregate: `llrawproc_ms=163.0` (`fps≈6.13`), `mix_chroma_ms=63.667` (`fps≈15.71`), `final_blend_ms=28.167` (`fps≈35.50`)
+- The write-both probe did not surface a useful new leaf:
+  - `write_both_probe_ms=0.0` on the parsed summaries
+  - `processed8_direct_path_frames=0`
+- The current keeper remains the direct-clamped store fallback, and this probe is not a keeper.
+
+### Cross-checked from prior analysis
+
+- The previous nested clamp split was already rejected, and probe `13` makes the write-both leaf look even less promising.
+- `M16-1327` is the clearest reject signal here: the first-present frame landed much later and the average `llrawproc_ms` more than doubled versus the keeper baseline.
+- The current direct-clamped keeper is still the only store-side shape in this sequence that has improved the full three-clip comparison.
+
+### Needs runtime profiling
+
+- Rebaseline from the direct-clamped keeper and stop forcing the write-both leaf.
+- If we stay in `mix_chroma`, the next probe should be a materially different store-side hypothesis, not another write-both measurement pass.
+
+# 2026-06-01 - nested hot write-both clamp split is a reject; revert to the direct-clamped keeper
+
+### Verified locally
+
+- I tried splitting the hot halfres `write_r && write_b && !use_average` store path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) into a nested `out_r` / `out_b` clamp check, then reverted it back to the direct-clamped keeper after the smoke set lost the comparison.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:20:22 PM`
+  - `Length=8956416`
+  - `SHA256=E194762E9A23B9B2ACB936C059AB20CA6586CA6028446B1C56543EC5ABF24383`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages regressed versus the current keeper baseline, so the nested write-both clamp split is not a keeper:
+  - `M16-1327`: `llrawproc_ms=119.5` (`fps≈8.37`), `mix_chroma_ms=59.0` (`fps≈16.95`), `final_blend_ms=12.0` (`fps≈83.33`)
+  - `M16-1347`: `llrawproc_ms=123.0` (`fps≈8.13`), `mix_chroma_ms=66.0` (`fps≈15.15`), `final_blend_ms=15.0` (`fps≈66.67`)
+  - `M16-1446`: `llrawproc_ms=56.0` (`fps≈17.86`), `mix_chroma_ms=0.0`, `final_blend_ms=25.0` (`fps≈40.00`)
+  - Aggregate: `llrawproc_ms=99.5` (`fps≈10.05`), `mix_chroma_ms=41.667` (`fps≈24.00`), `final_blend_ms=17.333` (`fps≈57.69`)
+
+### Cross-checked from prior analysis
+
+- The current keeper is still the direct-clamped store fallback, and this nested clamp split regressed from it on the full three-clip smoke set.
+- `M16-1446` slowed enough on `final_blend_ms` that the aggregate no longer supports this shape, even though the visible gate stayed valid.
+- The nested write-both clamp idea is now ruled out; the next store-side probe should start from the restored keeper shape, not this flatter variant.
+
+### Needs runtime profiling
+
+- Rebaseline from the restored direct-clamped keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next candidate is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - no-branch always-clamped write-both path is a reject; revert to the direct-clamped keeper
 
 ### Verified locally
