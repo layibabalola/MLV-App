@@ -1,3 +1,30 @@
+# 2026-06-01 - halfres `mix_chroma` average-branch hint regresses; revert back to the keeper baseline
+
+### Verified locally
+
+- I tried a narrow `UNLIKELY(use_average)` hint inside the hot halfres `mix_chroma` write branches in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then reran the same three-clip no-probe smoke set.
+- The rebuilt release executable after the average-branch trial was:
+  - `LastWriteTime=6/1/2026 6:25:19 AM`
+  - `Length=8932864`
+  - `SHA256=72444323A912CB94D2318B5D5111D2DDFA8EDF2305509A7555A6F1F7B15F3D59`
+- The hot no-probe smoke set regressed versus the branch-hinted keeper, so this branch-hint shape is not a keeper:
+  - `M16-1327`: `llrawproc_ms=134.0` vs `140.5`, `final_blend_ms=19.0` vs `14.0`, `mix_chroma_ms=76.5` vs `89.0`
+  - `M16-1347`: `llrawproc_ms=138.5` vs `151.0`, `final_blend_ms=19.0` vs `16.5`, `mix_chroma_ms=81.0` vs `85.0`
+  - `M16-1446`: `llrawproc_ms=45.0` vs `45.0`, `final_blend_ms=9.5` vs `11.0`, `mix_chroma_ms=0.0` vs `0.0`
+- The branch hint on `use_average` was the wrong shape for this hot path, so I reverted it back to the prior keeper baseline.
+- A repeat rerun on the same restored keeper binary produced `llrawproc_ms=122.5`, `142.0`, and `47.0` on the three smoke clips, which keeps the restored keeper baseline viable and shows the first rerun was noisy.
+
+### Cross-checked from prior analysis
+
+- The write-path branch hints on `write_r` / `write_b` remain the current keeper-shaped improvement.
+- The `use_average` branch is rare, but the no-probe hot set still did not benefit from an explicit unlikely hint here.
+- The hot store/write path is still the dominant retained `mix_chroma` leaf, but this specific branch hint is rejected.
+
+### Needs runtime profiling
+
+- The next useful `mix_chroma` probe should be structurally different from this average-branch hint.
+- If the next store-side probe is still mixed, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - write-path branch hints on halfres `mix_chroma` are a keeper; no-probe smoke improves again
 
 ### Verified locally
