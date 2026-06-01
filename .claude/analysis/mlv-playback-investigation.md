@@ -1,3 +1,31 @@
+## 2026-06-01 - mix_chroma mode 6 on the current keeper shows center store dominates, not lookup or arithmetic
+
+### Verified locally
+
+- I reran the three visible smoke clips on the current keeper build from [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) with `MLVAPP_DUALISO_MIX_CHROMA_PROBE=6` and preserved the visible gate:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The current keeper is still clean on the smoke set, and the `mix_chroma` mode-6 probe now gives a clearer ranking of the hot work:
+  - `M16-1327`: `avg_mix_chroma_ms=121.0`, `avg_chroma_fullres_ms=59.3`, `avg_chroma_halfres_ms=57.0`, `avg_chroma_center_gather_probe_ms=4.8`, `avg_chroma_center_arithmetic_probe_ms=2.5`, `avg_chroma_center_store_probe_ms=26.7`
+  - `M16-1347`: `avg_mix_chroma_ms=125.667`, `avg_chroma_fullres_ms=62.556`, `avg_chroma_halfres_ms=58.333`, `avg_chroma_center_gather_probe_ms=5.111`, `avg_chroma_center_arithmetic_probe_ms=1.889`, `avg_chroma_center_store_probe_ms=26.222`
+  - `M16-1446`: `mix_chroma` bypassed
+- The same probe also shows the halfres non-average branch is still the live path inside the bucket:
+  - `M16-1327`: `avg_chroma_halfres_center_non_average_probe_ms=13.0`, `avg_chroma_halfres_center_store_r_lookup_probe_ms=2.7`, `avg_chroma_halfres_center_store_b_lookup_probe_ms=2.0`
+  - `M16-1347`: `avg_chroma_halfres_center_non_average_probe_ms=10.889`, `avg_chroma_halfres_center_store_r_lookup_probe_ms=3.0`, `avg_chroma_halfres_center_store_b_lookup_probe_ms=2.333`
+- The center store block is the largest measurable leaf in the hot `mix_chroma` surface on the current keeper, which makes it the next plausible place to probe more narrowly.
+
+### Cross-checked from prior analysis
+
+- The earlier halfres write-side probes were mixed, but they were only looking at the lookup-heavy part of the write path.
+- The new mode-6 rebaseline shows the remaining store block is still materially larger than gather or arithmetic, so the hot spot is now more clearly store-side than lookup-side.
+- `M16-1446` still bypasses `mix_chroma`, so the chroma-heavy clips remain the right comparison set.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next useful probe should target the store-side remainder more directly, not the already-small lookup slice.
+- If that store-side probe is still mixed, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
+
 ## 2026-06-01 - final_blend rebaseline holds on the current keeper; mix_chroma is still hot but mixed
 
 ### Verified locally
