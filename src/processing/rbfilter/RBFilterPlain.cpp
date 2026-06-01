@@ -521,6 +521,8 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
     {
         const double vertical_pass_start =
             timing_enabled ? omp_get_wtime() : 0.0;
+        const double vertical_up_first_line_start =
+            timing_enabled ? omp_get_wtime() : 0.0;
         // start from end and then go up to begining
         int last_index = width * height * channel - 1;
         const uint16_t* src_color = img_src + last_index;
@@ -542,6 +544,15 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
             }
             src_color -= channel;
         }
+        double vertical_up_first_line_ms = 0.0;
+        if( timing_enabled )
+        {
+            vertical_up_first_line_ms = (omp_get_wtime() - vertical_up_first_line_start) * 1000.0;
+            m_last_timing.vertical_up_first_line_ms = vertical_up_first_line_ms;
+        }
+
+        const double vertical_up_body_start =
+            timing_enabled ? omp_get_wtime() : 0.0;
 
         // handle other lines
         for (int y = 1; y < height; y++)
@@ -567,6 +578,8 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
         }
         if( timing_enabled )
         {
+            m_last_timing.vertical_up_body_ms =
+                (omp_get_wtime() - vertical_up_body_start) * 1000.0;
             up_ms = (omp_get_wtime() - vertical_pass_start) * 1000.0;
         }
     };

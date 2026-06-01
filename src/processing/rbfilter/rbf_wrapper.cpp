@@ -133,6 +133,8 @@ void recursive_bf_get_last_timing(recursive_bf_timing_t * timing)
     timing->right_ms = last.right_ms;
     timing->horizontal_average_ms = last.horizontal_average_ms;
     timing->vertical_down_ms = last.vertical_down_ms;
+    timing->vertical_up_first_line_ms = last.vertical_up_first_line_ms;
+    timing->vertical_up_body_ms = last.vertical_up_body_ms;
     timing->vertical_up_ms = last.vertical_up_ms;
     timing->output_ms = last.output_ms;
 }
