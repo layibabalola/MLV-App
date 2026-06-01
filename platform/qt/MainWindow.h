@@ -886,6 +886,8 @@ private:
     double m_playbackSmokeDualIsoFull20MixCurveFloatSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixEvLutSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixHalfresSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixHalfresAvx2BulkSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixHalfresScalarTailSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaCopySumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaFullresSumMs = 0.0;
@@ -1001,6 +1003,7 @@ private:
     int m_playbackSmokeDualIsoFull20ValidFrames = 0;
     int m_playbackSmokeDualIsoFull20LastInterpMethod = -1;
     int m_playbackSmokeDualIsoFull20LastMixChromaProbeMode = -1;
+    int m_playbackSmokeDualIsoFull20LastMixHalfresProbeMode = -1;
     int m_playbackSmokeDualIsoFull20LastThreads = 0;
     bool m_playbackSmokeDualIsoFull20LastAliasMap = false;
     bool m_playbackSmokeDualIsoFull20LastFullres = false;
