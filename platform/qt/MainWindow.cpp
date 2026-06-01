@@ -15571,6 +15571,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingCoreColorCamWbSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamWbMatrixSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamWbGamutSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorCamWbDesatSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamAgxSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorGammaSumMs = 0.0;
     m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
@@ -16046,6 +16047,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_core_color_cam_wb_matrix_ms" );
     m_playbackSmokeProcessingCoreColorCamWbGamutSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_wb_gamut_ms" );
+    m_playbackSmokeProcessingCoreColorCamWbDesatSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_wb_desat_ms" );
     m_playbackSmokeProcessingCoreColorCamAgxSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_agx_ms" );
     m_playbackSmokeProcessingCoreColorGammaSumMs +=
@@ -16478,8 +16481,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processing_core_color_cam_wb_ms=%72 "
                "avg_processing_core_color_cam_wb_matrix_ms=%73 "
                "avg_processing_core_color_cam_wb_gamut_ms=%74 "
-               "avg_processing_core_color_cam_agx_ms=%75 "
-               "avg_processing_core_color_gamma_ms=%76" )
+               "avg_processing_core_color_cam_wb_desat_ms=%75 "
+               "avg_processing_core_color_cam_agx_ms=%76 "
+               "avg_processing_core_color_gamma_ms=%77" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16559,6 +16563,7 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbMatrixSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbGamutSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbDesatSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaSumMs ), 0, 'f', 3 );
 
