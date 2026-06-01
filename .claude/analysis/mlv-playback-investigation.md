@@ -1,3 +1,27 @@
+## 2026-06-01 - WB matrix stays live; reconstruction is effectively dead on the smoke clips
+
+### Verified locally
+
+- I ran the existing `MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_WB_PROBE` split in matrix-only mode (`1`) and reconstruction-only mode (`2`) on the same three visible smoke clips, using the current keeper build.
+- The visible smoke gate stayed intact on both probe sets, with `processed8_direct_path_active=false`, `dual_iso_full20_use_alias_map=false`, and `dual_iso_full20_convert16_ms=0` preserved.
+- The matrix-only runs show a material live matrix slice:
+  - `M16-1327`: `processing_core_color_main_prelude_wb_matrix_ms=116.33`
+  - `M16-1347`: `processing_core_color_main_prelude_wb_matrix_ms=92.00`
+  - `M16-1446`: `processing_core_color_main_prelude_wb_matrix_ms=85.00`
+- The reconstruction-only runs do not show a live reconstruction slice on these clips:
+  - `processing_core_color_main_prelude_wb_recon_ms=0.00` on all three clips
+- That means the remaining meaningful work inside the WB family is still the matrix/exposure side, not reconstruction.
+
+### Cross-checked from prior analysis
+
+- The WB exposure hoist remains a real win, but it did not eliminate the whole WB family.
+- The matrix path is still the largest live WB residual after the exposure hoist, so if we stay in this bucket the next probe should stay near matrix rather than trying to force a reconstruction rewrite.
+
+### Needs runtime profiling
+
+- The matrix path is now the best remaining WB probe target, but it is not yet obvious that another narrow patch there will beat the current keeper.
+- If the next measurement round does not reveal a clean matrix-specific win, move on to a different retained bucket instead of forcing another WB rewrite.
+
 ## 2026-06-01 - final_blend rebaseline on the current keeper confirms the fused path is still intact
 
 ### Verified locally
