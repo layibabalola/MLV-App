@@ -1,3 +1,36 @@
+## 2026-05-31 - WB exposure hoist is the first narrow keeper candidate; net smoke-set gain is real
+
+### Verified locally
+
+- I split the remaining `processing_core_color_main_prelude_wb` work one level deeper in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) by adding a dedicated `processing_core_color_main_prelude_wb_exposure_ms` timer around the repeated WB/exposure lookup math on both the main and gradient paths. The new telemetry is threaded through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 7:39:49 PM`
+  - `Length=8866304`
+  - `SHA256=4C0E0F7F6D410603B882DFAF5B07B2ACFC3529919DBE51B795F3C1693F3C3539`
+- The visible smoke gate stayed intact on the three clips:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new WB exposure probe confirmed the missing WB time was real and material:
+  - `M16-1327`: `processing_core_color_main_prelude_wb_exposure_ms=82.33`
+  - `M16-1347`: `processing_core_color_main_prelude_wb_exposure_ms=89.33`
+  - `M16-1446`: `processing_core_color_main_prelude_wb_exposure_ms=86.00`
+- The first optimization patch, hoisting the repeated green-channel WB lookup in the main and gradient paths, produced a net smoke-set win even though the clip-level result was mixed:
+  - `llrawproc_ms` average across the three clips improved from `306.44` to `282.22`
+  - `processing_core_color_main_prelude_wb_ms` average improved from `305.67` to `287.33`
+  - `processing_core_color_main_prelude_wb_exposure_ms` average improved from `89.44` to `85.89`
+  - `M16-1327` regressed slightly, while `M16-1347` and `M16-1446` both improved
+
+### Cross-checked from prior analysis
+
+- The earlier cam-family probe still looks broad: the gradient side is effectively absent on these smoke clips, and the live cam residual remains matrix/AgX/gamma rather than a single clean leaf.
+- The WB exposure slice is a better keeper candidate than the cam family because it is both material and directly related to a concrete repeated lookup the code can eliminate.
+
+### Needs runtime profiling
+
+- The next useful step is to compare the hoisted WB lookup against any remaining WB exposure or highlight-reconstruction sub-buckets, rather than reopening the cam family first.
+- If the WB family still doesn’t yield a clearly dominant leaf after this, move to the next retained bucket instead of forcing a broader rewrite.
+
 ## 2026-05-31 - cam-WB gamut is gated out on the smoke path; matrix remains the live residual
 
 ### Verified locally
