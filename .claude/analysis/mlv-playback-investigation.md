@@ -1,3 +1,27 @@
+## 2026-06-01 - cam AgX result-scalarization rejected; restored baseline is clean and Shadows/Highlights is the next live bucket
+
+### Verified locally
+
+- I reverted the current cam AgX result-scalarization probe in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) and rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 11:38:30 PM`
+  - `Length=8890880`
+  - `SHA256=EF01F5BFE548EBFB3B5BC4C58AEB0A086A1B21F3A144BFB273647804F398F3C6`
+- I reran the three visible smoke clips on the restored baseline and kept the visible gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The restored baseline playback profiles were captured under [`/.claude-state/profiling/2026-06-01-restored-baseline/`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/2026-06-01-restored-baseline/).
+
+### Cross-checked from prior analysis
+
+- The current cam AgX result-scalarization shape did not beat the keeper baseline, so it is rejected and should stay out of the worktree.
+- The broader analysis still points to `processing_shadows_highlights_prep_ms` / `processing_shadows_highlights_filter_ms` as the next live retained bucket worth probing.
+
+### Needs runtime profiling
+
+- The next step should move into Shadows/Highlights prep/filter rather than trying another cam AgX micro-shape.
+- If that bucket also fails to yield a keeper-shaped win, move on to another retained bucket instead of forcing a broader rewrite.
+
 ## 2026-06-01 - WB matrix channel split stayed flat; no single channel dominates enough for a new patch
 
 ### Verified locally
