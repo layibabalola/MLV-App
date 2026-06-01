@@ -220,6 +220,36 @@
 
 ## 2026-05-31 - probe-mode prelude split points to WB/reconstruction as the likelier next bucket
 
+## 2026-05-31 - mix_chroma lookup/write split confirms center and halfres are both still store-heavy
+
+### Verified locally
+
+- I extended the retained `mix_chroma` center probe in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) to split the writeback path into lookup time versus write time, and carried the new counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 8:20:56 PM`
+  - `Length=8877056`
+  - `SHA256=61832FD38215E78574D6501F0A31121E80472A233ABD628A322648AAB707D5B2`
+- I reran the same three visible smoke clips with the no-probe path, and the visible smoke gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- I then reran the same three clips with `MLVAPP_DUALISO_MIX_CHROMA_PROBE=3` to measure the center and halfres lookup/write split on the hot `mix_chroma` path:
+  - `M16-1327`: `mix_chroma_center_probe_ms=249.999`, `mix_chroma_center_lookup_ms=54.999`, `mix_chroma_center_store_write_ms=94.000`, `mix_chroma_halfres_probe_ms=258.999`, `mix_chroma_halfres_lookup_ms=45.999`, `mix_chroma_halfres_store_write_ms=113.001`
+  - `M16-1347`: `mix_chroma_center_probe_ms=245.001`, `mix_chroma_center_lookup_ms=51.001`, `mix_chroma_center_store_write_ms=106.000`, `mix_chroma_halfres_probe_ms=250.000`, `mix_chroma_halfres_lookup_ms=47.000`, `mix_chroma_halfres_store_write_ms=108.001`
+  - `M16-1446`: `mix_chroma` stayed bypassed, so the probe counters remained at `0`
+- The writeback split is now explicit: lookup is material, but the write-only remainder is still larger on both center and halfres on the chroma-heavy clips.
+
+### Cross-checked from prior analysis
+
+- The earlier `mix_chroma` center and stage splits already showed store pressure, and this new split confirms the lookup helper is not the whole story.
+- The closed offset-pointer EV lookup idea remains closed; this measurement does not reopen it.
+- The current no-probe smoke rerun stayed on the visible gate, so the instrumentation change did not break the basic smoke path.
+
+### Needs runtime profiling
+
+- The next decision is not a broad rewrite inside this lookup helper.
+- If we stay in `mix_chroma`, the next probe should be structurally different from this lookup/write split, or we should move to another retained bucket instead of forcing another center-path micro-patch.
+
 ### Verified locally
 
 - I added a selective probe mode in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the main-prelude split can time vignette, creative adjustments, and WB/reconstruction one family at a time via `MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_PROBE`. The plumbing remains in [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).

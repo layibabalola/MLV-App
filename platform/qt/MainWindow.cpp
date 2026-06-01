@@ -15511,12 +15511,16 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDualIsoFull20MixChromaCenterGatherProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaCenterArithmeticProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaCenterStoreProbeSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaCenterStoreRLookupProbeSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaCenterStoreBLookupProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterGatherProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterArithmeticProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBProbeSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRLookupProbeSumMs = 0.0;
+    m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBLookupProbeSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;
@@ -15775,8 +15779,16 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_store_r_probe_ms" );
     const double dualIsoFull20MixChromaCenterStoreBProbeMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_store_b_probe_ms" );
+    const double dualIsoFull20MixChromaCenterStoreRLookupProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_store_r_lookup_probe_ms" );
+    const double dualIsoFull20MixChromaCenterStoreBLookupProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_center_store_b_lookup_probe_ms" );
     const double dualIsoFull20MixChromaHalfresCenterProbeMs =
         telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_probe_ms" );
+    const double dualIsoFull20MixChromaHalfresCenterStoreRLookupProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_store_r_lookup_probe_ms" );
+    const double dualIsoFull20MixChromaHalfresCenterStoreBLookupProbeMs =
+        telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_store_b_lookup_probe_ms" );
     const int dualIsoFull20MixChromaProbeMode =
         telemetryIntValue( timing, "dual_iso_full20_mix_chroma_probe_mode" );
     const double dualIsoFull20MixAliasMapMs =
@@ -15934,6 +15946,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         m_playbackSmokeDualIsoFull20MixChromaCenterGatherProbeSumMs += dualIsoFull20MixChromaCenterGatherProbeMs;
         m_playbackSmokeDualIsoFull20MixChromaCenterArithmeticProbeSumMs += dualIsoFull20MixChromaCenterArithmeticProbeMs;
         m_playbackSmokeDualIsoFull20MixChromaCenterStoreProbeSumMs += dualIsoFull20MixChromaCenterStoreProbeMs;
+        m_playbackSmokeDualIsoFull20MixChromaCenterStoreRLookupProbeSumMs +=
+            dualIsoFull20MixChromaCenterStoreRLookupProbeMs;
+        m_playbackSmokeDualIsoFull20MixChromaCenterStoreBLookupProbeSumMs +=
+            dualIsoFull20MixChromaCenterStoreBLookupProbeMs;
         m_playbackSmokeDualIsoFull20MixChromaHalfresCenterProbeSumMs += dualIsoFull20MixChromaHalfresCenterProbeMs;
         m_playbackSmokeDualIsoFull20MixChromaHalfresCenterGatherProbeSumMs +=
             telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_gather_probe_ms" );
@@ -15945,6 +15961,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
             telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_store_r_probe_ms" );
         m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBProbeSumMs +=
             telemetryDoubleValue( timing, "dual_iso_full20_mix_chroma_halfres_center_store_b_probe_ms" );
+        m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRLookupProbeSumMs +=
+            dualIsoFull20MixChromaHalfresCenterStoreRLookupProbeMs;
+        m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBLookupProbeSumMs +=
+            dualIsoFull20MixChromaHalfresCenterStoreBLookupProbeMs;
         m_playbackSmokeDualIsoFull20MixAliasMapSumMs += dualIsoFull20MixAliasMapMs;
         m_playbackSmokeDualIsoFull20MixOverexposedSumMs += dualIsoFull20MixOverexposedMs;
         m_playbackSmokeDualIsoFull20FinalBlendSumMs += dualIsoFull20FinalBlendMs;
@@ -16191,15 +16211,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        "mix_chroma_ms=%17 mix_alias_map_ms=%18 mix_overexposed_ms=%19 "
                        "mix_chroma_center_store_r_probe_ms=%20 "
                        "mix_chroma_center_store_b_probe_ms=%21 "
-                       "final_blend_setup_ms=%22 final_blend_row_kernel_ms=%23 "
-                       "final_blend_raw2ev_gather_probe_ms=%24 "
-                       "final_blend_fullres_curve_gather_probe_ms=%25 "
-                       "final_blend_ev2raw_store_probe_ms=%26 "
-                       "final_blend_arithmetic_probe_ms=%27 "
-                       "final_blend_overexposed_density=%28 final_blend_cap_clamp_pct=%29 "
-                       "final_blend_f_near_0_pct=%30 final_blend_f_near_1_pct=%31 "
-                       "final_blend_ms=%32 convert16_ms=%33 other_ms=%34 "
-                       "interp_method=%35 final_blend_probe_mode=%36 alias_map=%37 fullres=%38 threads=%39" )
+                       "mix_chroma_center_store_r_lookup_probe_ms=%22 "
+                       "mix_chroma_center_store_b_lookup_probe_ms=%23 "
+                       "final_blend_setup_ms=%24 final_blend_row_kernel_ms=%25 "
+                       "final_blend_raw2ev_gather_probe_ms=%26 "
+                       "final_blend_fullres_curve_gather_probe_ms=%27 "
+                       "final_blend_ev2raw_store_probe_ms=%28 "
+                       "final_blend_arithmetic_probe_ms=%29 "
+                       "final_blend_overexposed_density=%30 final_blend_cap_clamp_pct=%31 "
+                       "final_blend_f_near_0_pct=%32 final_blend_f_near_1_pct=%33 "
+                       "final_blend_ms=%34 convert16_ms=%35 other_ms=%36 "
+                       "interp_method=%37 final_blend_probe_mode=%38 alias_map=%39 fullres=%40 threads=%41" )
                        .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                        .arg( m_playbackSmokePresentedFrames )
                        .arg( dualIsoFull20TotalMs, 0, 'f', 3 )
@@ -16221,6 +16243,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        .arg( dualIsoFull20MixOverexposedMs, 0, 'f', 3 )
                        .arg( dualIsoFull20MixChromaCenterStoreRProbeMs, 0, 'f', 3 )
                        .arg( dualIsoFull20MixChromaCenterStoreBProbeMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixChromaCenterStoreRLookupProbeMs, 0, 'f', 3 )
+                       .arg( dualIsoFull20MixChromaCenterStoreBLookupProbeMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendSetupMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendRowKernelMs, 0, 'f', 3 )
                        .arg( dualIsoFull20FinalBlendRaw2EvGatherProbeMs, 0, 'f', 3 )
@@ -16586,10 +16610,14 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    "avg_mix_chroma_vert_probe_ms=%19 "
                    "avg_mix_chroma_center_probe_ms=%20 "
                    "avg_mix_chroma_halfres_center_probe_ms=%21 "
-                   "avg_mix_alias_map_ms=%22 avg_mix_overexposed_ms=%23 "
-                   "avg_final_blend_ms=%24 avg_convert16_ms=%25 avg_other_ms=%26 "
-                   "last_interp_method=%27 last_mix_chroma_probe_mode=%28 "
-                   "last_alias_map=%29 last_fullres=%30 last_threads=%31" )
+                   "avg_mix_chroma_center_store_r_lookup_probe_ms=%22 "
+                   "avg_mix_chroma_center_store_b_lookup_probe_ms=%23 "
+                   "avg_mix_chroma_halfres_center_store_r_lookup_probe_ms=%24 "
+                   "avg_mix_chroma_halfres_center_store_b_lookup_probe_ms=%25 "
+                   "avg_mix_alias_map_ms=%26 avg_mix_overexposed_ms=%27 "
+                   "avg_final_blend_ms=%28 avg_convert16_ms=%29 avg_other_ms=%30 "
+                   "last_interp_method=%31 last_mix_chroma_probe_mode=%32 "
+                   "last_alias_map=%33 last_fullres=%34 last_threads=%35" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokeDualIsoFull20ValidFrames )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20TotalSumMs ), 0, 'f', 3 )
@@ -16611,6 +16639,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaVertProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaCenterProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaCenterStoreRLookupProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaCenterStoreBLookupProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRLookupProbeSumMs ), 0, 'f', 3 )
+                   .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBLookupProbeSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixAliasMapSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20MixOverexposedSumMs ), 0, 'f', 3 )
                    .arg( avgDualIsoFull20Ms( m_playbackSmokeDualIsoFull20FinalBlendSumMs ), 0, 'f', 3 )

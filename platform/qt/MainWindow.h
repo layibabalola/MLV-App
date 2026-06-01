@@ -896,12 +896,16 @@ private:
     double m_playbackSmokeDualIsoFull20MixChromaCenterGatherProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaCenterArithmeticProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaCenterStoreProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterStoreRLookupProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterStoreBLookupProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterGatherProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterArithmeticProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreRLookupProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBLookupProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;

@@ -137,6 +137,10 @@ void dualiso_debug_reset_full20bit_timing(void)
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_center_store_r_lookup_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_center_store_b_lookup_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms = 0;
     g_dualiso_full20bit_timing.final_blend_probe_mode = -1;
     g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
     g_dualiso_mix_chroma_probe_stage_cache = 0;
