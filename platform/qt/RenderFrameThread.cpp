@@ -2420,12 +2420,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingGetLastCoreColorMainPreludeWbMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_matrix_ms"),
                                       processingGetLastCoreColorMainPreludeWbMatrixMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_exposure_ms"),
+                                      processingGetLastCoreColorMainPreludeWbExposureMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_gamut_ms"),
                                       processingGetLastCoreColorMainPreludeWbGamutMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_recon_ms"),
                                       processingGetLastCoreColorMainPreludeWbReconMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_ms"),
                                       processingGetLastCoreColorCamMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_main_ms"),
+                                      processingGetLastCoreColorCamMainMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_gradient_ms"),
+                                      processingGetLastCoreColorCamGradientMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_wb_ms"),
                                       processingGetLastCoreColorCamWbMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_wb_matrix_ms"),

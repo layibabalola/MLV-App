@@ -77,9 +77,12 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prel
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_creative_contrast_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_matrix_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_exposure_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_gamut_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_recon_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_main_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_gradient_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_gamut_ms = 0.0;
@@ -248,9 +251,12 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_main_prelude_creative_contrast_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_matrix_ms = 0.0;
+    g_processing_last_core_color_main_prelude_wb_exposure_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_gamut_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_recon_ms = 0.0;
     g_processing_last_core_color_cam_ms = 0.0;
+    g_processing_last_core_color_cam_main_ms = 0.0;
+    g_processing_last_core_color_cam_gradient_ms = 0.0;
     g_processing_last_core_color_cam_wb_ms = 0.0;
     g_processing_last_core_color_cam_wb_matrix_ms = 0.0;
     g_processing_last_core_color_cam_wb_gamut_ms = 0.0;
@@ -288,9 +294,12 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->color_main_prelude_creative_contrast_ms = 0.0;
     timing->color_main_prelude_wb_ms = 0.0;
     timing->color_main_prelude_wb_matrix_ms = 0.0;
+    timing->color_main_prelude_wb_exposure_ms = 0.0;
     timing->color_main_prelude_wb_gamut_ms = 0.0;
     timing->color_main_prelude_wb_recon_ms = 0.0;
     timing->color_cam_ms = 0.0;
+    timing->color_cam_main_ms = 0.0;
+    timing->color_cam_gradient_ms = 0.0;
     timing->color_cam_wb_ms = 0.0;
     timing->color_cam_wb_matrix_ms = 0.0;
     timing->color_cam_wb_gamut_ms = 0.0;
@@ -981,9 +990,12 @@ void applyProcessingObject( processingObject_t * processing,
         g_processing_last_core_color_main_prelude_creative_contrast_ms = core_timing.color_main_prelude_creative_contrast_ms;
         g_processing_last_core_color_main_prelude_wb_ms = core_timing.color_main_prelude_wb_ms;
         g_processing_last_core_color_main_prelude_wb_matrix_ms = core_timing.color_main_prelude_wb_matrix_ms;
+        g_processing_last_core_color_main_prelude_wb_exposure_ms = core_timing.color_main_prelude_wb_exposure_ms;
         g_processing_last_core_color_main_prelude_wb_gamut_ms = core_timing.color_main_prelude_wb_gamut_ms;
         g_processing_last_core_color_main_prelude_wb_recon_ms = core_timing.color_main_prelude_wb_recon_ms;
         g_processing_last_core_color_cam_ms = core_timing.color_cam_ms;
+        g_processing_last_core_color_cam_main_ms = core_timing.color_cam_main_ms;
+        g_processing_last_core_color_cam_gradient_ms = core_timing.color_cam_gradient_ms;
         g_processing_last_core_color_cam_wb_ms = core_timing.color_cam_wb_ms;
         g_processing_last_core_color_cam_wb_matrix_ms = core_timing.color_cam_wb_matrix_ms;
         g_processing_last_core_color_cam_wb_gamut_ms = core_timing.color_cam_wb_gamut_ms;
@@ -1057,12 +1069,18 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_color_main_prelude_wb_ms, core_timings[t].color_main_prelude_wb_ms);
             g_processing_last_core_color_main_prelude_wb_matrix_ms =
                 MAX(g_processing_last_core_color_main_prelude_wb_matrix_ms, core_timings[t].color_main_prelude_wb_matrix_ms);
+            g_processing_last_core_color_main_prelude_wb_exposure_ms =
+                MAX(g_processing_last_core_color_main_prelude_wb_exposure_ms, core_timings[t].color_main_prelude_wb_exposure_ms);
             g_processing_last_core_color_main_prelude_wb_gamut_ms =
                 MAX(g_processing_last_core_color_main_prelude_wb_gamut_ms, core_timings[t].color_main_prelude_wb_gamut_ms);
             g_processing_last_core_color_main_prelude_wb_recon_ms =
                 MAX(g_processing_last_core_color_main_prelude_wb_recon_ms, core_timings[t].color_main_prelude_wb_recon_ms);
             g_processing_last_core_color_cam_ms =
                 MAX(g_processing_last_core_color_cam_ms, core_timings[t].color_cam_ms);
+            g_processing_last_core_color_cam_main_ms =
+                MAX(g_processing_last_core_color_cam_main_ms, core_timings[t].color_cam_main_ms);
+            g_processing_last_core_color_cam_gradient_ms =
+                MAX(g_processing_last_core_color_cam_gradient_ms, core_timings[t].color_cam_gradient_ms);
             g_processing_last_core_color_cam_wb_ms =
                 MAX(g_processing_last_core_color_cam_wb_ms, core_timings[t].color_cam_wb_ms);
             g_processing_last_core_color_cam_wb_matrix_ms =
@@ -2049,16 +2067,26 @@ void apply_processing_object( processingObject_t * processing,
                 (capture_breakdown && color_main_prelude_probe_wb) ? omp_get_wtime() : 0.0;
             const double color_main_prelude_wb_matrix_start =
                 (capture_breakdown && color_main_prelude_wb_probe_matrix) ? omp_get_wtime() : 0.0;
+            const double color_main_prelude_wb_exposure_start =
+                (capture_breakdown && color_main_prelude_probe_wb) ? omp_get_wtime() : 0.0;
             /* white balance & exposure */
-            float pix0 = (pm[0][pix[0]] /* + pm[1][pix[1]] + pm[2][pix[2]] */)*expo_correction;
-            float pix1 = (/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */)*expo_correction;
-            float pix2 = (/* pm[6][pix[0]] + pm[7][pix[1]] + */ pm[8][pix[2]])*expo_correction;
-            float tmp1 = (/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */);
+            const float wb_r = pm[0][pix[0]];
+            const float wb_g = pm[4][pix[1]];
+            const float wb_b = pm[8][pix[2]];
+            float pix0 = wb_r * expo_correction;
+            float pix1 = wb_g * expo_correction;
+            float pix2 = wb_b * expo_correction;
+            float tmp1 = wb_g;
 
             if( capture_breakdown && color_main_prelude_wb_probe_matrix )
             {
                 core_timing->color_main_prelude_wb_matrix_ms +=
                     (omp_get_wtime() - color_main_prelude_wb_matrix_start) * 1000.0;
+            }
+            if( capture_breakdown && color_main_prelude_probe_wb )
+            {
+                core_timing->color_main_prelude_wb_exposure_ms +=
+                    (omp_get_wtime() - color_main_prelude_wb_exposure_start) * 1000.0;
             }
 
             /* Gradient variables and part 1 */
@@ -2067,10 +2095,15 @@ void apply_processing_object( processingObject_t * processing,
             {
                 /* do the same for gradient as for the pic itself, but before the values are overwritten */
                 /* white balance & exposure */
-                float pix0g = (pmg[0][pix[0]] /* + pmg[1][pix[1]] + pmg[2][pix[2]] */) * expo_correction * expo_correction_gradient;
-                float pix1g = (/* pmg[3][pix[0]] + */ pmg[4][pix[1]] /* + pmg[5][pix[2]] */) * expo_correction * expo_correction_gradient;
-                float pix2g = (/* pmg[6][pix[0]] + pmg[7][pix[1]] */ + pmg[8][pix[2]]) * expo_correction * expo_correction_gradient;
-                float tmp1g = (/* pmg[3][pix[0]] + */ pmg[4][pix[1]] /* + pmg[5][pix[2]] */);
+                const double color_main_prelude_wb_exposure_start =
+                    (capture_breakdown && color_main_prelude_probe_wb) ? omp_get_wtime() : 0.0;
+                const float wbg_r = pmg[0][pix[0]];
+                const float wbg_g = pmg[4][pix[1]];
+                const float wbg_b = pmg[8][pix[2]];
+                float pix0g = wbg_r * expo_correction * expo_correction_gradient;
+                float pix1g = wbg_g * expo_correction * expo_correction_gradient;
+                float pix2g = wbg_b * expo_correction * expo_correction_gradient;
+                float tmp1g = wbg_g;
 
                 pixg[0] = LIMIT16(pix0g);
                 pixg[1] = LIMIT16(pix1g);
@@ -2100,6 +2133,11 @@ void apply_processing_object( processingObject_t * processing,
                             pixg[1] = (pixg[0] + pixg[2]) / 2;
                         }
                     }
+                }
+                if( capture_breakdown && color_main_prelude_probe_wb )
+                {
+                    core_timing->color_main_prelude_wb_exposure_ms +=
+                        (omp_get_wtime() - color_main_prelude_wb_exposure_start) * 1000.0;
                 }
             }
 
@@ -2169,6 +2207,7 @@ void apply_processing_object( processingObject_t * processing,
             if( use_cam_matrix )
             {
                 const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                const double color_cam_main_start = capture_breakdown ? omp_get_wtime() : 0.0;
                 const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
                 const double color_cam_wb_matrix_start =
                     (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
@@ -2248,6 +2287,7 @@ void apply_processing_object( processingObject_t * processing,
                 if( capture_breakdown )
                 {
                     core_timing->color_cam_ms += (omp_get_wtime() - color_cam_start) * 1000.0;
+                    core_timing->color_cam_main_ms += (omp_get_wtime() - color_cam_main_start) * 1000.0;
                 }
             }
 
@@ -2270,6 +2310,7 @@ void apply_processing_object( processingObject_t * processing,
                 if( use_cam_matrix )
                 {
                     const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                    const double color_cam_gradient_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     const double color_cam_wb_matrix_start =
                         (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
@@ -2343,6 +2384,7 @@ void apply_processing_object( processingObject_t * processing,
                     if( capture_breakdown )
                     {
                         core_timing->color_cam_ms += (omp_get_wtime() - color_cam_start) * 1000.0;
+                        core_timing->color_cam_gradient_ms += (omp_get_wtime() - color_cam_gradient_start) * 1000.0;
                     }
                 }
 
@@ -2870,6 +2912,11 @@ double processingGetLastCoreColorMainPreludeWbMatrixMilliseconds(void)
     return g_processing_last_core_color_main_prelude_wb_matrix_ms;
 }
 
+double processingGetLastCoreColorMainPreludeWbExposureMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_wb_exposure_ms;
+}
+
 double processingGetLastCoreColorMainPreludeWbGamutMilliseconds(void)
 {
     return g_processing_last_core_color_main_prelude_wb_gamut_ms;
@@ -2883,6 +2930,16 @@ double processingGetLastCoreColorMainPreludeWbReconMilliseconds(void)
 double processingGetLastCoreColorCamMilliseconds(void)
 {
     return g_processing_last_core_color_cam_ms;
+}
+
+double processingGetLastCoreColorCamMainMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_main_ms;
+}
+
+double processingGetLastCoreColorCamGradientMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_gradient_ms;
 }
 
 double processingGetLastCoreColorCamWbMilliseconds(void)

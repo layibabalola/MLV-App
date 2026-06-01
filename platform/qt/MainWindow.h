@@ -939,9 +939,12 @@ private:
     double m_playbackSmokeProcessingCoreColorMainPreludeCreativeContrastSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbMatrixSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorMainPreludeWbExposureSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbGamutSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbReconSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorCamSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamMainSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorCamGradientSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorCamWbSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorCamWbMatrixSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorCamWbGamutSumMs = 0.0;
