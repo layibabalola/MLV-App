@@ -1,3 +1,33 @@
+# 2026-06-01 - restored baseline after reverting the halfres mix_chroma branch-hint cleanup
+
+### Verified locally
+
+- I reverted the branch-hint cleanup in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) and rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:11:28 AM`
+  - `Length=8947712`
+  - `SHA256=4A435FEE96C3F394F237AE61812EBC7F99E514F67E1D9FB2BF6CC4687E8DC34B`
+- I reran the three visible smoke clips on the restored baseline. The launch and smoke gate stayed intact:
+  - `processed8_direct_path_frames=true` on the initial bypass frame, then `false` on later frames as expected
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The current no-probe rerun is noisy enough that I am not promoting it as a keeper on the basis of a single settled-frame extraction, but the retained-path map still points at `mix_chroma` as the next live bucket:
+  - `M16-1327`: `llrawproc_ms=249`, `mix_chroma_ms=151`, `final_blend_ms=20`
+  - `M16-1347`: `llrawproc_ms=390`, `mix_chroma_ms=142`, `final_blend_ms=55`
+  - `M16-1446`: `llrawproc_ms=47`, `mix_chroma_ms=0`, `final_blend_ms=13`
+
+### Cross-checked from prior analysis
+
+- The branch-hint cleanup was already identified as a regression and is now fully reverted again.
+- The current keeper baseline remains the combined halfres `mix_chroma` write-both store path, not the branch-hinted cleanup.
+- The visible smoke gate is still green on the rebuilt release tree, so the loop remains valid for the next turn.
+
+### Needs runtime profiling
+
+- The next meaningful candidate is still the `mix_chroma` store side.
+- If the next `mix_chroma` probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - restored current keeper rebaseline with final_blend probe; mix_chroma remains the hotter retained bucket
 
 ### Verified locally

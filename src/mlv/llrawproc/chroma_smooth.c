@@ -336,7 +336,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             int gr = 0;
             int gb = 0;
-            if (LIKELY(write_r && write_b))
+            if (write_r && write_b)
             {
                 if (use_average)
                 {
@@ -353,7 +353,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
             }
             else
             {
-                if (LIKELY(write_r))
+                if (write_r)
                 {
                     if (use_average)
                     {
@@ -365,7 +365,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         gr = choose_ev_lt_eh ? grv : grh;
                     }
                 }
-                if (LIKELY(write_b))
+                if (write_b)
                 {
                     if (use_average)
                     {
@@ -396,7 +396,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 chroma_center_non_average_write_both_start = mlv_stage_timing_now();
             }
 
-            if (LIKELY(write_r && write_b))
+            if (write_r && write_b)
             {
                 goto chroma_mix_store_r_path;
             }
