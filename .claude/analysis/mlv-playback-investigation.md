@@ -8793,3 +8793,29 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in creative, the remaining untested leaves are `curve` and `gradation`, but the current data says neither is likely to beat the vibrance keeper without a more structural change.
 - The safer next move is probably to shift to the next retained bucket rather than keep forcing creative micro-optimizations.
+
+## 2026-06-01 - cam AgX scalarization is rejected; revert restores the keeper baseline
+
+### Verified locally
+
+- I tried a representation-only cleanup in the cam WB/AgX path inside [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) by scalarizing the small result arrays in the main and gradient branches.
+- The patch compiled, but the settled smoke rerun regressed hard compared with the known keeper baseline, so I reverted it.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 10:16:03 PM`
+  - `Length=8889856`
+  - `SHA256=57A17F6D93F34E1B1ABAA43D03DAFB2EF4F68C019CB379CDF6AB3990EF17A948`
+- The visible smoke gate stayed intact on the restored build:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+
+### Cross-checked from prior analysis
+
+- The revert restored the same keeper-shaped baseline that had already validated on the three-clips smoke set.
+- The scalarized representation did not expose a better retained-path shape, so it should stay rejected.
+- The next useful work should stay in the color family, but not by retrying the same AgX scalarization idea.
+
+### Needs runtime profiling
+
+- If we stay in the color family, the next probe should pick a different live leaf than the reverted cam AgX scalarization path.
+- The reverted build is now the reference baseline again.
