@@ -1,3 +1,39 @@
+# 2026-06-01 - combined halfres mix_chroma write-both store path is the new keeper baseline
+
+### Verified locally
+
+- I added a C-safe combined `write_r && write_b` fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) for the hot halfres `mix_chroma` store path.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:46:09 AM`
+  - `Length=8947712`
+  - `SHA256=C6F2796E615ED47425F9F8C472BCF33A55F634DAA64D19F83C69DB190EF93762`
+- I reran the same three visible smoke clips on the rebuilt binary and the smoke gate stayed intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The settled frames on the hot clips improved overall versus the current keeper rebaseline:
+  - `M16-1327`: `llrawproc_ms=144.00` / `143.00`, `mix_chroma_ms=87.00` / `87.00`, `final_blend_ms=15.00` / `16.00`
+  - `M16-1347`: `llrawproc_ms=155.00` / `150.00`, `mix_chroma_ms=92.00` / `84.00`, `final_blend_ms=19.00` / `23.00`
+  - `M16-1446`: `llrawproc_ms=42.00` / `49.00`, `mix_chroma_ms=0.00` / `0.00`, `final_blend_ms=9.00` / `14.00`
+- Aggregate settled-frame averages across the three clips:
+  - `llrawproc_ms`: `116.67` -> `113.83`
+  - `mix_chroma_ms`: `62.33` -> `58.33`
+  - `final_blend_ms`: `16.00` -> `16.00`
+- The detailed `mix_chroma` probe still says the store-heavy halfres center path is the live residual; this patch is a shape win on that path, not a new bucket.
+
+### Cross-checked from prior analysis
+
+- The current keeper before this change was the SH store-color branch hint, and the fresh smoke rerun shows the combined-store `mix_chroma` fast path now beats that baseline on the hot clips overall.
+- The earlier `mix_chroma` store-side probes still stand: the branch count is dominated by `write_both`, and the next candidate needed a C-compatible store-path shape.
+- The C++-lambda attempt is still rejected and should stay out of the tree; this C-safe label/goto shape is the one that actually validated.
+
+### Needs runtime profiling
+
+- The next useful step is to rebaseline from this new keeper and continue the measurement loop from here.
+- If the next probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - current keeper rebaseline after rebuild; mix_chroma store leaf still dominates
 
 ### Verified locally

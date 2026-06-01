@@ -396,8 +396,14 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 chroma_center_non_average_write_both_start = mlv_stage_timing_now();
             }
 
+            if (LIKELY(write_r && write_b))
+            {
+                goto chroma_mix_store_r_path;
+            }
+
             if (write_r)
             {
+chroma_mix_store_r_path:
                 if (probe_non_average_write_r_branch && !use_average)
                 {
                     chroma_center_non_average_write_r_start = mlv_stage_timing_now();
@@ -479,10 +485,15 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_r_probe_ms +=
                         (mlv_stage_timing_now() - chroma_center_non_average_write_r_start) * 1000.0;
                 }
+                if (write_b)
+                {
+                    goto chroma_mix_store_b_path;
+                }
             }
 
             if (write_b)
             {
+chroma_mix_store_b_path:
                 if (probe_non_average_write_b_branch && !use_average)
                 {
                     chroma_center_non_average_write_b_start = mlv_stage_timing_now();
@@ -564,7 +575,9 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_b_probe_ms +=
                         (mlv_stage_timing_now() - chroma_center_non_average_write_b_start) * 1000.0;
                 }
+                goto chroma_mix_store_done;
             }
+chroma_mix_store_done:
             if (probe_non_average_write_both_branch && write_r && write_b)
             {
                 g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_write_both_probe_ms +=
