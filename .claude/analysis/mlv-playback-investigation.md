@@ -1,3 +1,36 @@
+# 2026-06-01 - store-clamp helper is a keeper; keep the direct-clamped fallback shape
+
+### Verified locally
+
+- I added the small `ev2raw` clamp helpers in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the hot halfres store leaves can call a shared clamp helper instead of repeating the inline clamp expression.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 5:40:17 PM`
+  - `Length=8955904`
+  - `SHA256=18FC36DDC14A244ADFA6D577CA628E6576BB077EBDA346E621C4B4A4AB967947`
+- The visible smoke gate stayed intact in the raw profile telemetry:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The raw profile runs are keeper-shaped when compared on the steady-state frames only (`frames[1..2]`, because `frames[0]` is the startup outlier):
+  - `M16-1327`: `llrawproc_ms=125.5` (`fps≈7.97`), `mix_chroma_ms=69.5` (`fps≈14.39`), `final_blend_ms=14.0` (`fps≈71.43`)
+  - `M16-1347`: `llrawproc_ms=137.5` (`fps≈7.27`), `mix_chroma_ms=65.0` (`fps≈15.38`), `final_blend_ms=22.5` (`fps≈44.44`)
+  - `M16-1446`: `llrawproc_ms=45.0` (`fps≈22.22`), `mix_chroma_ms=0.0`, `final_blend_ms=11.5` (`fps≈86.96`)
+  - Aggregate across the three clips: `llrawproc_ms=102.667` (`fps≈9.74`), `mix_chroma_ms=44.833` (`fps≈22.31`), `final_blend_ms=16.0` (`fps≈62.50`)
+- The same steady-state comparison against the current raw-telemetry keeper baseline is strongly positive:
+  - current keeper aggregate: `llrawproc_ms=480.667`, `mix_chroma_ms=143.5`, `final_blend_ms=23.333`
+  - helper aggregate: `llrawproc_ms=102.667`, `mix_chroma_ms=44.833`, `final_blend_ms=16.0`
+
+### Cross-checked from prior analysis
+
+- The startup frame is a clear outlier in both the helper build and the current keeper raw telemetry, so I excluded it from the keeper comparison.
+- The direct-clamped store fallback remains the retained store shape beneath the helper.
+
+### Needs runtime profiling
+
+- Rebaseline from this helper keeper and keep probing the remaining store-side residue only if we still have a concrete next hypothesis.
+- If the next store-side idea is only a minor branch bias or arithmetic reshuffle, skip it and pivot instead.
+
 # 2026-06-01 - write-both dispatch collapse is a reject; keep the earlier keeper
 
 ### Verified locally

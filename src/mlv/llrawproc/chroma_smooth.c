@@ -63,6 +63,24 @@ static inline uint16_t chroma_smooth_ev2raw_lookup(const int * ev2raw, int ev)
     return (uint16_t)ev2raw[ev];
 }
 
+static inline uint16_t chroma_smooth_ev2raw_clamped(const int * ev2raw, const int lo, const int hi, const int ev)
+{
+    const int clamped_ev = ev < lo ? lo : (ev > hi ? hi : ev);
+    return (uint16_t)ev2raw[clamped_ev];
+}
+
+static inline void chroma_smooth_ev2raw_clamped_pair(const int * ev2raw,
+                                                     const int lo,
+                                                     const int hi,
+                                                     const int ev_r,
+                                                     const int ev_b,
+                                                     uint16_t * __restrict out_r,
+                                                     uint16_t * __restrict out_b)
+{
+    *out_r = chroma_smooth_ev2raw_clamped(ev2raw, lo, hi, ev_r);
+    *out_b = chroma_smooth_ev2raw_clamped(ev2raw, lo, hi, ev_b);
+}
+
 static void CHROMA_SMOOTH_FUNC(int w,
                                int h,
                                CHROMA_SMOOTH_TYPE * __restrict inp,
@@ -435,12 +453,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
                 if (!probe_center)
                 {
-                    const int out_r_ev_clamped =
-                        out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
-                    const int out_b_ev_clamped =
-                        out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
-                    out_r = (uint16_t)ev2raw[out_r_ev_clamped];
-                    out_b = (uint16_t)ev2raw[out_b_ev_clamped];
+                    chroma_smooth_ev2raw_clamped_pair(ev2raw, ev2raw_lo, ev2raw_hi, out_r_ev, out_b_ev, &out_r, &out_b);
                 }
                 else
                 {
@@ -558,12 +571,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_r_start = write_start;
                     }
-                    else
-                    {
-                        const int out_r_ev_clamped =
-                            out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
-                        out_r = (uint16_t)ev2raw[out_r_ev_clamped];
-                    }
+                else
+                {
+                    out_r = chroma_smooth_ev2raw_clamped(ev2raw, ev2raw_lo, ev2raw_hi, out_r_ev);
+                }
                     if (probe_average_branch)
                     {
                         chroma_center_average_start = mlv_stage_timing_now();
@@ -599,12 +610,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_b_start = write_start;
                     }
-                    else
-                    {
-                        const int out_b_ev_clamped =
-                            out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
-                        out_b = (uint16_t)ev2raw[out_b_ev_clamped];
-                    }
+                else
+                {
+                    out_b = chroma_smooth_ev2raw_clamped(ev2raw, ev2raw_lo, ev2raw_hi, out_b_ev);
+                }
                     if (probe_average_branch)
                     {
                         chroma_center_average_start = mlv_stage_timing_now();
