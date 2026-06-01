@@ -464,7 +464,7 @@ double agx_compressed_matrix[9] = {
 
 static inline uint16_t agx_store_u16_fast(const double value)
 {
-    if( value >= 0.0 && value <= 65535.0 )
+    if( value <= 65535.0 )
     {
         return (uint16_t)value;
     }
