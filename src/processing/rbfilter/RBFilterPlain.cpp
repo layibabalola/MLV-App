@@ -33,6 +33,16 @@ Added dual threading by masc4ii (c) 2021
 
 using namespace std;
 
+#if defined(__GNUC__) || defined(__clang__)
+#ifndef LIKELY
+#define LIKELY(x) __builtin_expect(!!(x), 1)
+#endif
+#else
+#ifndef LIKELY
+#define LIKELY(x) (x)
+#endif
+#endif
+
 #define QX_DEF_U16_MAX 65535
 
 static inline int getDiffFactorRgb3(const uint16_t *color1, const uint16_t *color2)
@@ -593,7 +603,7 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
 
                 const double vertical_up_body_store_color_start =
                     timing_enabled ? omp_get_wtime() : 0.0;
-                if( channel == 3 )
+                if( LIKELY(channel == 3) )
                 {
                     for (int c = 0; c < 3; c++)
                     {

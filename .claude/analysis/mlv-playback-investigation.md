@@ -1,3 +1,35 @@
+# 2026-06-01 - SH hot store-color channel hint is a keeper on the smoke clips
+
+### Verified locally
+
+- I made the hot SH store-color branch hint compile in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) by using the repo's existing `LIKELY` convention for the `channel == 3` branch.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:33:10 AM`
+  - `Length=8947712`
+  - `SHA256=3CC5548D5FF247CD309F96C0899EC057B54281DFF9EB02AB185760137CAD3FC9`
+- The three-clip no-probe smoke rerun stayed green on the visible gate:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The hot settled-frame averages improved versus the current keeper baseline:
+  - `M16-1327`: `llrawproc_ms=135.00`, `mix_chroma_ms=75.00`, `final_blend_ms=13.00`
+  - `M16-1347`: `llrawproc_ms=133.00`, `mix_chroma_ms=71.00`, `final_blend_ms=17.00`
+  - `M16-1446`: `llrawproc_ms=51.00`, `mix_chroma_ms=0.00`, `final_blend_ms=8.00`
+- The hot halfres `mix_chroma` store write counters stayed structurally consistent with the prior ranking, so the branch hint is a clean shape change rather than a new bucket.
+
+### Cross-checked from prior analysis
+
+- The previous keeper was the halfres `mix_chroma` write-both reorder, and this branch-hinted SH store-color change beats it on the hot smoke clips.
+- The earlier compile error was just a macro-availability issue in this translation unit, not a bad performance signal.
+- The SH store-color tail remains live and this branch-hint shape is the first SH refinement that clearly improves the hot clips overall.
+
+### Needs runtime profiling
+
+- If we keep going, the next SH probe should stay structurally different from this branch-hint shape.
+- If the next SH probe is mixed, the honest move is to pivot to another retained bucket rather than forcing more SH rewrites.
+
 # 2026-06-01 - rejected color loop probe hoist; baseline restored after settled smoke rerun
 
 ### Verified locally
