@@ -139,6 +139,7 @@ double processingGetLastCoreColorMainPreludeCreativeShadowsMilliseconds(void);
 double processingGetLastCoreColorMainPreludeCreativeContrastMilliseconds(void);
 double processingGetLastCoreColorMainPreludeWbMilliseconds(void);
 double processingGetLastCoreColorMainPreludeWbMatrixMilliseconds(void);
+double processingGetLastCoreColorMainPreludeWbGradientMatrixMilliseconds(void);
 double processingGetLastCoreColorMainPreludeWbExposureMilliseconds(void);
 double processingGetLastCoreColorMainPreludeWbGamutMilliseconds(void);
 double processingGetLastCoreColorMainPreludeWbReconMilliseconds(void);
@@ -384,6 +385,7 @@ typedef struct {
     double color_main_prelude_creative_contrast_ms;
     double color_main_prelude_wb_ms;
     double color_main_prelude_wb_matrix_ms;
+    double color_main_prelude_wb_gradient_matrix_ms;
     double color_main_prelude_wb_exposure_ms;
     double color_main_prelude_wb_gamut_ms;
     double color_main_prelude_wb_recon_ms;

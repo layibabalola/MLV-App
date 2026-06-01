@@ -939,6 +939,7 @@ private:
     double m_playbackSmokeProcessingCoreColorMainPreludeCreativeContrastSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbMatrixSumMs = 0.0;
+    double m_playbackSmokeProcessingCoreColorMainPreludeWbGradientMatrixSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbExposureSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbGamutSumMs = 0.0;
     double m_playbackSmokeProcessingCoreColorMainPreludeWbReconSumMs = 0.0;
