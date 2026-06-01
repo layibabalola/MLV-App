@@ -916,6 +916,7 @@ private:
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseTrueProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageWriteBothProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;

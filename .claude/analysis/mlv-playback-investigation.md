@@ -9969,3 +9969,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - the nested RBF detail fields remained zero in this probe
   - that means SH is live, but not yet patch-ready from the current probe shape
 - Net: `mix_chroma` remains the next highest-value retained bucket for structural work, while SH stays as the fallback bucket if `mix_chroma` keeps refusing keeper-shaped wins.
+
+## 2026-06-01 - `mix_chroma` combined write-both timer stayed at zero on the hot halfres clips
+
+### Verified locally
+
+- I added a probe-only `mix_chroma` mode `13` for the combined write-both halfres center path and wired the new timer through the playback smoke telemetry.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 8:07:05 AM`
+  - `Length=8934912`
+  - `SHA256=6A48443C0B2EBC8910672642F62094EA9793E56C94319E1EBA4C108295E5E582`
+- I reran the three smoke clips with `MLVAPP_DUALISO_MIX_CHROMA_PROBE=13`, and the visible gate stayed intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new combined write-both timer stayed at `0` on all three clips:
+  - `M16-1327`: `dual_iso_full20_mix_chroma_halfres_center_non_average_write_both_probe_ms=0`
+  - `M16-1347`: `dual_iso_full20_mix_chroma_halfres_center_non_average_write_both_probe_ms=0`
+  - `M16-1446`: `dual_iso_full20_mix_chroma_halfres_center_non_average_write_both_probe_ms=0`
+
+### Cross-checked from prior analysis
+
+- The earlier `mix_chroma` evidence still says the halfres store-side residual is real, but this combined-write probe did not surface a new hot leaf.
+- Because the new timer stayed at zero, the write-both combined shape is not the next patch target on these smoke clips.
+- The existing store-side branch counts are still useful, but they need a different probe shape if we want a keeper-shaped result.
+
+### Needs runtime profiling
+
+- The next useful `mix_chroma` probe should be structurally different from this combined-write timer.
+- If the next probe is still flat, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
