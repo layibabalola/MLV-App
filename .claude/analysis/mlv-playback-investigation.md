@@ -1,3 +1,33 @@
+# 2026-06-01 - wider store-pointer cleanup across the store branches is a reject
+
+### Verified locally
+
+- I tried broadening the actual halfres `mix_chroma` store cleanup in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the store-pointer reuse covered the write-both, write-r, and write-b branches instead of just the write-both tail.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:58:35 PM`
+  - `Length=8955904`
+  - `SHA256=45BE1A16F364CC6545777423E77E30254674851CE8E3055B33736501C02B6927`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages regressed hard enough on the hot clips that the broader pointer sweep is not a keeper:
+  - `M16-1327`: `llrawproc_ms=135.0` (`fps≈7.41`), `mix_chroma_ms=78.5` (`fps≈12.74`), `final_blend_ms=22.0` (`fps≈45.45`)
+  - `M16-1347`: `llrawproc_ms=158.5` (`fps≈6.31`), `mix_chroma_ms=75.0` (`fps≈13.33`), `final_blend_ms=17.0` (`fps≈58.82`)
+  - `M16-1446`: `llrawproc_ms=52.5` (`fps≈19.05`), `mix_chroma_ms=0.0`, `final_blend_ms=13.0` (`fps≈76.92`)
+  - Aggregate: `llrawproc_ms=115.333` (`fps≈8.67`), `mix_chroma_ms=51.167` (`fps≈19.55`), `final_blend_ms=17.333` (`fps≈57.69`)
+
+### Cross-checked from prior analysis
+
+- The per-channel fallback keeper remains the last store-side shape that improved the full three-clip replay.
+- This broader pointer sweep pushed the hot clip the wrong way rather than tightening the keeper shape.
+
+### Needs runtime profiling
+
+- Rebaseline from the restored per-channel fallback keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next probe is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - store-tail pointer cleanup in the actual write-both playback path is a reject
 
 ### Verified locally
