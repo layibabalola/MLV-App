@@ -1,3 +1,37 @@
+# 2026-06-01 - mix_chroma branch-hinted helper is a keeper; no-probe smoke improves on the restored baseline
+
+### Verified locally
+
+- I kept the branch-hinted fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), which uses a likely in-range `ev2raw` lookup and falls back to the existing clamp only when the value is out of range.
+- I kept the new high-clamp counters for the halfres non-average store path in [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), and [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 6:01:22 AM`
+  - `Length=8932352`
+  - `SHA256=1718D2C5ADD6A189B57C92C3A6FA6DD5F79FB72339AFCD9C9C1B5B4DEEC1E137`
+- A plain three-clip smoke rerun on the current keeper build kept the visible gate intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The no-probe settled averages improved versus the restored baseline:
+  - `M16-1327`: `llrawproc_ms=144.5` vs `140.5`, `final_blend_ms=13.0` vs `28.5`, `mix_chroma_ms=85.0` vs `72.5`
+  - `M16-1347`: `llrawproc_ms=155.0` vs `159.5`, `final_blend_ms=20.0` vs `20.5`, `mix_chroma_ms=89.5` vs `86.5`
+  - `M16-1446`: `llrawproc_ms=44.5` vs `50.0`, `final_blend_ms=9.5` vs `10.0`, `mix_chroma_ms=0.0` vs `0.0`
+- The net effect is a small overall win on the hot smoke set, even though `mix_chroma` is mixed clip-to-clip.
+- The direct probe data still shows the halfres non-average store leaf is live, but the low/high clamp counters remain zero on the hot clips, so the branch hint is the meaningful change here, not the clamp branch.
+
+### Cross-checked from prior analysis
+
+- The earlier low-bound clamp diagnosis still stands, and the high-bound counters added in this turn are also zero on the hot clips.
+- The no-probe smoke set is the right keeper check here, and it improved overall on the current branch-hinted build.
+- The branch-hinted helper is materially different from the rejected nonnegative wrapper; this version is the in-range fast path for the existing lookup helper, not a new wrapper shape.
+
+### Needs runtime profiling
+
+- If we keep pushing `mix_chroma`, the next probe should stay structurally distinct from the rejected helper wrapper and the dead-clamp branch.
+- The current data says the branch-hinted helper is worth keeping, but the next improvement still needs to come from a narrower store-side or structural split, not from the clamp paths.
+
 ## 2026-06-01 - restored baseline after the helper regression; low-bound clamp remains dead but the helper is rejected
 
 ### Verified locally

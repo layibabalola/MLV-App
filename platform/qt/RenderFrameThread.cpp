@@ -2288,6 +2288,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.mix_chroma_halfres_center_store_r_low_clamp_count );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_store_b_low_clamp_count"),
                                       dualIsoFull20.mix_chroma_halfres_center_store_b_low_clamp_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_store_r_high_clamp_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_store_r_high_clamp_count );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_store_b_high_clamp_count"),
+                                      dualIsoFull20.mix_chroma_halfres_center_store_b_high_clamp_count );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_average_probe_ms"),
                                       dualIsoFull20.mix_chroma_halfres_center_average_probe_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_chroma_halfres_center_non_average_probe_ms"),

@@ -190,6 +190,8 @@ typedef struct
     double mix_chroma_halfres_center_store_b_lookup_probe_ms;
     double mix_chroma_halfres_center_store_r_low_clamp_count;
     double mix_chroma_halfres_center_store_b_low_clamp_count;
+    double mix_chroma_halfres_center_store_r_high_clamp_count;
+    double mix_chroma_halfres_center_store_b_high_clamp_count;
     double mix_chroma_halfres_center_average_probe_ms;
     double mix_chroma_halfres_center_non_average_probe_ms;
     double mix_chroma_halfres_center_non_average_choose_true_probe_ms;
