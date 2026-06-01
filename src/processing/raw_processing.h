@@ -160,6 +160,13 @@ double processingGetLastCoreColorGammaMilliseconds(void);
 double processingGetLastCoreColorGammaMainMilliseconds(void);
 double processingGetLastCoreColorGammaGradientMilliseconds(void);
 double processingGetLastCoreCreativeMilliseconds(void);
+double processingGetLastCoreCreativeHueVsMilliseconds(void);
+double processingGetLastCoreCreativeVibranceMilliseconds(void);
+double processingGetLastCoreCreativeSaturationMilliseconds(void);
+double processingGetLastCoreCreativeToningMilliseconds(void);
+double processingGetLastCoreCreativeCurveMilliseconds(void);
+double processingGetLastCoreCreativeGradationMilliseconds(void);
+double processingGetLastCoreCreativeAgxInverseMilliseconds(void);
 double processingGetLastCoreOutputMilliseconds(void);
 double processingGetLastDirect8MatrixMilliseconds(void);
 double processingGetLastDirect8GammaMilliseconds(void);
@@ -414,6 +421,13 @@ typedef struct {
     double color_gamma_main_ms;
     double color_gamma_gradient_ms;
     double creative_ms;
+    double creative_hue_vs_ms;
+    double creative_vibrance_ms;
+    double creative_saturation_ms;
+    double creative_toning_ms;
+    double creative_curve_ms;
+    double creative_gradation_ms;
+    double creative_agx_inverse_ms;
     double output_ms;
 } processing_core_timing_t;
 

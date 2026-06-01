@@ -98,6 +98,13 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_ms 
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_main_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_gradient_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_hue_vs_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_vibrance_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_saturation_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_toning_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_curve_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_gradation_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_agx_inverse_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_gamma_ms = 0.0;
@@ -237,6 +244,27 @@ static int processing_cam_gamma_probe_mode(void)
     return probe_mode;
 }
 
+static int processing_creative_probe_mode(void)
+{
+    static int initialized = 0;
+    static int probe_mode = 0;
+    if( !initialized )
+    {
+        const char * value = getenv("MLVAPP_PROCESSING_CORE_CREATIVE_PROBE");
+        if( value && *value )
+        {
+            char * end = NULL;
+            long parsed = strtol(value, &end, 10);
+            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 7 )
+            {
+                probe_mode = (int)parsed;
+            }
+        }
+        initialized = 1;
+    }
+    return probe_mode;
+}
+
 typedef struct
 {
     double matrix_ms;
@@ -302,6 +330,13 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_gamma_main_ms = 0.0;
     g_processing_last_core_color_gamma_gradient_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
+    g_processing_last_core_creative_hue_vs_ms = 0.0;
+    g_processing_last_core_creative_vibrance_ms = 0.0;
+    g_processing_last_core_creative_saturation_ms = 0.0;
+    g_processing_last_core_creative_toning_ms = 0.0;
+    g_processing_last_core_creative_curve_ms = 0.0;
+    g_processing_last_core_creative_gradation_ms = 0.0;
+    g_processing_last_core_creative_agx_inverse_ms = 0.0;
     g_processing_last_core_output_ms = 0.0;
     g_processing_last_direct8_matrix_ms = 0.0;
     g_processing_last_direct8_gamma_ms = 0.0;
@@ -354,6 +389,13 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->color_gamma_main_ms = 0.0;
     timing->color_gamma_gradient_ms = 0.0;
     timing->creative_ms = 0.0;
+    timing->creative_hue_vs_ms = 0.0;
+    timing->creative_vibrance_ms = 0.0;
+    timing->creative_saturation_ms = 0.0;
+    timing->creative_toning_ms = 0.0;
+    timing->creative_curve_ms = 0.0;
+    timing->creative_gradation_ms = 0.0;
+    timing->creative_agx_inverse_ms = 0.0;
     timing->output_ms = 0.0;
 }
 
@@ -1059,6 +1101,13 @@ void applyProcessingObject( processingObject_t * processing,
         g_processing_last_core_color_gamma_main_ms = core_timing.color_gamma_main_ms;
         g_processing_last_core_color_gamma_gradient_ms = core_timing.color_gamma_gradient_ms;
         g_processing_last_core_creative_ms = core_timing.creative_ms;
+        g_processing_last_core_creative_hue_vs_ms = core_timing.creative_hue_vs_ms;
+        g_processing_last_core_creative_vibrance_ms = core_timing.creative_vibrance_ms;
+        g_processing_last_core_creative_saturation_ms = core_timing.creative_saturation_ms;
+        g_processing_last_core_creative_toning_ms = core_timing.creative_toning_ms;
+        g_processing_last_core_creative_curve_ms = core_timing.creative_curve_ms;
+        g_processing_last_core_creative_gradation_ms = core_timing.creative_gradation_ms;
+        g_processing_last_core_creative_agx_inverse_ms = core_timing.creative_agx_inverse_ms;
         g_processing_last_core_output_ms = core_timing.output_ms;
     }
     else
@@ -1168,6 +1217,20 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_color_gamma_gradient_ms, core_timings[t].color_gamma_gradient_ms);
             g_processing_last_core_creative_ms =
                 MAX(g_processing_last_core_creative_ms, core_timings[t].creative_ms);
+            g_processing_last_core_creative_hue_vs_ms =
+                MAX(g_processing_last_core_creative_hue_vs_ms, core_timings[t].creative_hue_vs_ms);
+            g_processing_last_core_creative_vibrance_ms =
+                MAX(g_processing_last_core_creative_vibrance_ms, core_timings[t].creative_vibrance_ms);
+            g_processing_last_core_creative_saturation_ms =
+                MAX(g_processing_last_core_creative_saturation_ms, core_timings[t].creative_saturation_ms);
+            g_processing_last_core_creative_toning_ms =
+                MAX(g_processing_last_core_creative_toning_ms, core_timings[t].creative_toning_ms);
+            g_processing_last_core_creative_curve_ms =
+                MAX(g_processing_last_core_creative_curve_ms, core_timings[t].creative_curve_ms);
+            g_processing_last_core_creative_gradation_ms =
+                MAX(g_processing_last_core_creative_gradation_ms, core_timings[t].creative_gradation_ms);
+            g_processing_last_core_creative_agx_inverse_ms =
+                MAX(g_processing_last_core_creative_agx_inverse_ms, core_timings[t].creative_agx_inverse_ms);
             g_processing_last_core_output_ms =
                 MAX(g_processing_last_core_output_ms, core_timings[t].output_ms);
         }
@@ -2593,6 +2656,21 @@ void apply_processing_object( processingObject_t * processing,
     }
 
     const double creative_start = capture_breakdown ? omp_get_wtime() : 0.0;
+    const int creative_probe_mode = processing_creative_probe_mode();
+    const int creative_probe_hue_vs =
+        (creative_probe_mode == 0 || creative_probe_mode == 1);
+    const int creative_probe_vibrance =
+        (creative_probe_mode == 0 || creative_probe_mode == 2);
+    const int creative_probe_saturation =
+        (creative_probe_mode == 0 || creative_probe_mode == 3);
+    const int creative_probe_toning =
+        (creative_probe_mode == 0 || creative_probe_mode == 4);
+    const int creative_probe_curve =
+        (creative_probe_mode == 0 || creative_probe_mode == 5);
+    const int creative_probe_gradation =
+        (creative_probe_mode == 0 || creative_probe_mode == 6);
+    const int creative_probe_agx_inverse =
+        (creative_probe_mode == 0 || creative_probe_mode == 7);
     //Code for HueVs...
     if( allow_creative_adjustments
      && ( processing->hue_vs_luma_used
@@ -2600,6 +2678,8 @@ void apply_processing_object( processingObject_t * processing,
        || processing->hue_vs_hue_used
        || processing->luma_vs_saturation_used ) )
     {
+        const double creative_hue_vs_start =
+            (capture_breakdown && creative_probe_hue_vs) ? omp_get_wtime() : 0.0;
         for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
             float hsl[3];
@@ -2649,47 +2729,56 @@ void apply_processing_object( processingObject_t * processing,
             fromHSVtoRGB( hsl, rgb );
             for( int i = 0; i < 3; i++ ) pix[i] = LIMIT16( rgb[i] * 65535.0f + 0.5f );
         }
+        if( capture_breakdown && creative_probe_hue_vs )
+        {
+            core_timing->creative_hue_vs_ms +=
+                (omp_get_wtime() - creative_hue_vs_start) * 1000.0;
+        }
     }
 
     if (allow_creative_adjustments)
     {
         if( processing->vibrance > 1.01 || processing->vibrance < 0.99 )
         {
+            const double creative_vibrance_start =
+                (capture_breakdown && creative_probe_vibrance) ? omp_get_wtime() : 0.0;
+            const int creative_vibrance_positive = processing->vibrance > 1.0;
+            const int32_t * const creative_vibrance_curve = processing->pre_calc_vibrance;
             /* Now vibrance, before saturation, because we need untouched colors (in terms of saturation) */
             for (uint16_t * pix = img; pix < img_end; pix += 3)
             {
                 /* Pixel brightness = 4/16 R, 11/16 G, 1/16 blue; Try swapping the channels, it will look worse */
-                int32_t Y1 = ((pix[0] << 2) + (pix[1] * 11) + pix[2]) >> 4;
+                const uint16_t r = pix[0];
+                const uint16_t g = pix[1];
+                const uint16_t b = pix[2];
+                int32_t Y1 = ((r << 2) + (g * 11) + b) >> 4;
                 int32_t Y2 = Y1 - 65536;
 
                 /* Increase difference between channels and the saturation midpoint */
-                int32_t pix0 = processing->pre_calc_vibrance[pix[0] - Y2] + Y1;
-                int32_t pix1 = processing->pre_calc_vibrance[pix[1] - Y2] + Y1;
-                int32_t pix2 = processing->pre_calc_vibrance[pix[2] - Y2] + Y1;
+                int32_t pix0 = creative_vibrance_curve[r - Y2] + Y1;
+                int32_t pix1 = creative_vibrance_curve[g - Y2] + Y1;
+                int32_t pix2 = creative_vibrance_curve[b - Y2] + Y1;
 
                 /* Positive vibrance in dependency to raw saturation */
-                if( processing->vibrance > 1.0 )
+                if( creative_vibrance_positive )
                 {
                     /* Calculate saturation value of untouched pixel */
                     double sat = 0;
-                    if( !( pix[0] == 0 && pix[1] == 0 && pix[2] == 0 ) )
+                    if( !( r == 0 && g == 0 && b == 0 ) )
                     {
-                        uint16_t biggest = 0;
-                        uint16_t smallest = 65535;
-                        for( int i = 0; i < 3; i++ )
-                        {
-                            if( pix[i] > biggest ) biggest = pix[i];
-                            if( pix[i] < smallest ) smallest = pix[i];
-                        }
+                        uint16_t biggest = r > g ? r : g;
+                        if( b > biggest ) biggest = b;
+                        uint16_t smallest = r < g ? r : g;
+                        if( b < smallest ) smallest = b;
                         sat = ((double)biggest - (double)smallest) / (double)biggest;
                     }
                     /* Some cheat factor to make the effect more visible */
                     sat = 2.0 * sat / ( sat * sat + 1 );
                     if( sat > 1.0 ) sat = 1.0;
                     /* The less saturated the pixel was, the more saturation it gets */
-                    pix[0] = LIMIT16( pix[0] * sat + pix0 * ( 1.0 - sat ) );
-                    pix[1] = LIMIT16( pix[1] * sat + pix1 * ( 1.0 - sat ) );
-                    pix[2] = LIMIT16( pix[2] * sat + pix2 * ( 1.0 - sat ) );
+                    pix[0] = LIMIT16( r * sat + pix0 * ( 1.0 - sat ) );
+                    pix[1] = LIMIT16( g * sat + pix1 * ( 1.0 - sat ) );
+                    pix[2] = LIMIT16( b * sat + pix2 * ( 1.0 - sat ) );
                 }
                 /* Negative vibrance is the same as (un)saturation */
                 else
@@ -2699,10 +2788,17 @@ void apply_processing_object( processingObject_t * processing,
                     pix[2] = LIMIT16(pix2);
                 }
             }
+            if( capture_breakdown && creative_probe_vibrance )
+            {
+                core_timing->creative_vibrance_ms +=
+                    (omp_get_wtime() - creative_vibrance_start) * 1000.0;
+            }
         }
 
         if( processing->saturation > 1.01 || processing->saturation < 0.99 )
         {
+            const double creative_saturation_start =
+                (capture_breakdown && creative_probe_saturation) ? omp_get_wtime() : 0.0;
             /* Now saturation (looks way better after gamma) */
             for (uint16_t * pix = img; pix < img_end; pix += 3)
             {
@@ -2719,6 +2815,11 @@ void apply_processing_object( processingObject_t * processing,
                 pix[1] = LIMIT16(pix1);
                 pix[2] = LIMIT16(pix2);
             }
+            if( capture_breakdown && creative_probe_saturation )
+            {
+                core_timing->creative_saturation_ms +=
+                    (omp_get_wtime() - creative_saturation_start) * 1000.0;
+            }
         }
     }
 
@@ -2727,6 +2828,8 @@ void apply_processing_object( processingObject_t * processing,
     {
         if( processing->toning_dry < 99.8 )
         {
+            const double creative_toning_start =
+                (capture_breakdown && creative_probe_toning) ? omp_get_wtime() : 0.0;
             for (uint16_t * pix = img; pix < img_end; pix += 3)
             {
                 for( int i = 0; i < 3; i++ )
@@ -2734,23 +2837,37 @@ void apply_processing_object( processingObject_t * processing,
                     pix[i] = pix[i] * processing->toning_dry + pix[i] * processing->toning_wet[i];
                 }
             }
+            if( capture_breakdown && creative_probe_toning )
+            {
+                core_timing->creative_toning_ms +=
+                    (omp_get_wtime() - creative_toning_start) * 1000.0;
+            }
         }
     }
 
     if (allow_creative_adjustments)
     {
         /* Contrast Curve (OMG putting this after gamma made it 999x better) */
+        const double creative_curve_start =
+            (capture_breakdown && creative_probe_curve) ? omp_get_wtime() : 0.0;
         for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
             pix[0] = processing->pre_calc_curve_r[ pix[0] ];
             pix[1] = processing->pre_calc_curve_r[ pix[1] ];
             pix[2] = processing->pre_calc_curve_r[ pix[2] ];
         }
+        if( capture_breakdown && creative_probe_curve )
+        {
+            core_timing->creative_curve_ms +=
+                (omp_get_wtime() - creative_curve_start) * 1000.0;
+        }
     }
 
     if (allow_creative_adjustments)
     {
         //Gradation curve
+        const double creative_gradation_start =
+            (capture_breakdown && creative_probe_gradation) ? omp_get_wtime() : 0.0;
         for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
             pix[0] = processing->gcurve_y[ pix[0] ];
@@ -2760,11 +2877,18 @@ void apply_processing_object( processingObject_t * processing,
             pix[1] = processing->gcurve_g[ pix[1] ];
             pix[2] = processing->gcurve_b[ pix[2] ];
         }
+        if( capture_breakdown && creative_probe_gradation )
+        {
+            core_timing->creative_gradation_ms +=
+                (omp_get_wtime() - creative_gradation_start) * 1000.0;
+        }
     }
 
     if (processing->AgX)
     {
         //Gradation curve
+        const double creative_agx_inverse_start =
+            (capture_breakdown && creative_probe_agx_inverse) ? omp_get_wtime() : 0.0;
         for (uint16_t * pix = img; pix < img_end; pix += 3)
         {
             float as_float[3] = {pix[0], pix[1], pix[2]};
@@ -2772,6 +2896,11 @@ void apply_processing_object( processingObject_t * processing,
             pix[0] = LIMIT16(as_float[0]*m[0]+as_float[1]*m[1]+as_float[2]*m[2]);
             pix[1] = LIMIT16(as_float[0]*m[3]+as_float[1]*m[4]+as_float[2]*m[5]);
             pix[2] = LIMIT16(as_float[0]*m[6]+as_float[1]*m[7]+as_float[2]*m[8]);
+        }
+        if( capture_breakdown && creative_probe_agx_inverse )
+        {
+            core_timing->creative_agx_inverse_ms +=
+                (omp_get_wtime() - creative_agx_inverse_start) * 1000.0;
         }
     }
     if( capture_breakdown )
@@ -3188,6 +3317,41 @@ double processingGetLastCoreColorGammaGradientMilliseconds(void)
 double processingGetLastCoreCreativeMilliseconds(void)
 {
     return g_processing_last_core_creative_ms;
+}
+
+double processingGetLastCoreCreativeHueVsMilliseconds(void)
+{
+    return g_processing_last_core_creative_hue_vs_ms;
+}
+
+double processingGetLastCoreCreativeVibranceMilliseconds(void)
+{
+    return g_processing_last_core_creative_vibrance_ms;
+}
+
+double processingGetLastCoreCreativeSaturationMilliseconds(void)
+{
+    return g_processing_last_core_creative_saturation_ms;
+}
+
+double processingGetLastCoreCreativeToningMilliseconds(void)
+{
+    return g_processing_last_core_creative_toning_ms;
+}
+
+double processingGetLastCoreCreativeCurveMilliseconds(void)
+{
+    return g_processing_last_core_creative_curve_ms;
+}
+
+double processingGetLastCoreCreativeGradationMilliseconds(void)
+{
+    return g_processing_last_core_creative_gradation_ms;
+}
+
+double processingGetLastCoreCreativeAgxInverseMilliseconds(void)
+{
+    return g_processing_last_core_creative_agx_inverse_ms;
 }
 
 double processingGetLastCoreOutputMilliseconds(void)

@@ -8730,3 +8730,40 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in `processing_core_color`, the next useful move is either a lower-overhead look inside the main gamma loop or a shift to a different retained bucket.
 - The honest default right now is to avoid a premature gamma rewrite unless a narrower probe reveals a clear winner.
+
+## 2026-06-01 - creative vibrance cleanup is a keeper-shaped win
+
+### Verified locally
+
+- I split the remaining `processing_core_creative` bucket into `hue_vs`, `vibrance`, `saturation`, `toning`, `curve`, `gradation`, and `agx_inverse` sub-buckets in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), and threaded the new timing keys through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The probe showed `vibrance` was the dominant creative leaf on the chroma-heavy smoke clips:
+  - `M16-1327`: `creative_ms=50.0`, `vibrance_ms=25.0`, `agx_inverse_ms=11.0`
+  - `M16-1347`: `creative_ms=51.0`, `vibrance_ms=27.0`, `agx_inverse_ms=10.0`
+  - `M16-1446`: `creative_ms=48.0`, `vibrance_ms=25.0`, `agx_inverse_ms=11.0`
+- I applied a narrow vibrance cleanup in the positive-vibrance branch: hoisted the sign check, cached `r/g/b`, replaced the 3-value min/max loop with direct comparisons, and reused the vibrance lookup pointer.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 9:19:44 PM`
+  - `Length=8889856`
+  - `SHA256=11AC20523B931A9F08AA7DF726956DE207A6820E6B76ED22F5F1AD2362F73CBE`
+- I reran the same three smoke clips with `MLVAPP_PROCESSING_CORE_CREATIVE_PROBE=0` and kept the visible gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The post-cleanup settled frames improved the retained path:
+  - `M16-1327`: `llrawproc_ms=118.0`, `final_blend_ms=12.0`, `creative_ms=50.0`, `vibrance_ms=25.0`
+  - `M16-1347`: `llrawproc_ms=138.0`, `final_blend_ms=16.0`, `creative_ms=51.0`, `vibrance_ms=27.0`
+  - `M16-1446`: `llrawproc_ms=57.0`, `final_blend_ms=17.0`, `creative_ms=48.0`, `vibrance_ms=25.0`
+
+### Cross-checked from prior analysis
+
+- Compared with the pre-cleanup creative split, the settled averages improved:
+  - `llrawproc_ms`: `113.0` -> `104.333`
+  - `creative_ms`: `54.333` -> `49.667`
+  - `vibrance_ms`: `29.0` -> `25.667`
+- The visible smoke gate stayed green, so this was not a quality regression.
+- `agx_inverse`, `curve`, `gradation`, and `saturation` are still live enough to be measured later, but `vibrance` is the first keeper-shaped creative leaf we actually justified.
+
+### Needs runtime profiling
+
+- If we stay in this family, the next question is whether `agx_inverse` or one of the remaining curve/gradation leaves is worth a probe.
+- If the next probe does not reveal another clear winner, we should shift to a different retained bucket instead of forcing more creative rewrites.
