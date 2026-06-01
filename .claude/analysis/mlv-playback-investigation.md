@@ -1,3 +1,30 @@
+## 2026-06-01 - mix_chroma branch probes show halfres non-average choose-true is faster, but the store leaf still looks like the next hotspot
+
+### Verified locally
+
+- I reran the three visible smoke clips on the current keeper build from [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) with the non-average branch probes `MLVAPP_DUALISO_MIX_CHROMA_PROBE=7` and `=8`, and preserved the visible gate:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- On the hot chroma clips, the halfres non-average choose-true path is consistently faster than choose-false in the probe runs:
+  - `M16-1327`: mode `7` `avg_mix_chroma_ms=60.9`, `avg_chroma_halfres_center_non_average_choose_true_probe_ms=10.9`; mode `8` `avg_mix_chroma_ms=66.3`, `avg_chroma_halfres_center_non_average_choose_false_probe_ms=20.5`
+  - `M16-1347`: mode `7` `avg_mix_chroma_ms=67.7`, `avg_chroma_halfres_center_non_average_choose_true_probe_ms=16.5`; mode `8` `avg_mix_chroma_ms=69.111`, `avg_chroma_halfres_center_non_average_choose_false_probe_ms=17.222`
+- The probe still leaves the center store bucket as the largest measurable leaf from the previous mode-6 rebaseline:
+  - `M16-1327`: `avg_chroma_center_store_probe_ms=26.7`, `avg_chroma_center_gather_probe_ms=4.8`, `avg_chroma_center_arithmetic_probe_ms=2.5`
+  - `M16-1347`: `avg_chroma_center_store_probe_ms=26.222`, `avg_chroma_center_gather_probe_ms=5.111`, `avg_chroma_center_arithmetic_probe_ms=1.889`
+- `M16-1446` still bypasses `mix_chroma`, so the chroma-heavy clips remain the right comparison set.
+
+### Cross-checked from prior analysis
+
+- The mode-6 rebaseline already showed `mix_chroma` center store dominating over lookup and arithmetic on the current keeper.
+- The new choose-true / choose-false probes do not overturn that ranking; they only show the halfres non-average branch has a stable skew between the two paths.
+- The current probe data is useful for narrowing the next target, but it still does not justify a concrete code patch by itself.
+
+### Needs runtime profiling
+
+- The next useful `mix_chroma` probe should be store-side, not lookup-side, because the store leaf still looks like the highest-value residual.
+- If the next store-side probe is still mixed, the honest move is to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites.
+
 ## 2026-06-01 - mix_chroma mode 6 on the current keeper shows center store dominates, not lookup or arithmetic
 
 ### Verified locally
