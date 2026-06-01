@@ -9807,6 +9807,66 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - If we keep investigating `mix_chroma`, the next probe should be a different structural split that is not just another write-side counter.
 - Otherwise, move to a different retained bucket and leave the helper fix in place for future probes.
 
+## 2026-06-01 - halfres `mix_chroma` choose-branch hint is noisy and should stay closed
+
+### Verified locally
+
+- I added a narrow `LIKELY(choose_ev_lt_eh)` hint inside the hot halfres `mix_chroma` non-average write paths in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then reran the same three-clip no-probe smoke set.
+- I repeated the same smoke run on the same binary to reduce noise before drawing a conclusion.
+- The build used for the reruns was [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) at `LastWriteTime=6/1/2026 7:05:17 AM`, `Length=8932352`, `SHA256=6EAB80EF3B6FA6A557134E19A7D8ED7F1C6565B5A89D9141E769843A7A35DF9A`.
+- The first rerun was worse on the hot clips:
+  - `M16-1327`: `llrawproc_ms=135.0`, `final_blend_ms=14.0`, `mix_chroma_ms=81.0`
+  - `M16-1347`: `llrawproc_ms=164.5`, `final_blend_ms=22.5`, `mix_chroma_ms=89.0`
+  - `M16-1446`: `llrawproc_ms=42.5`, `final_blend_ms=9.5`, `mix_chroma_ms=0.0`
+- The repeat rerun was still mixed/noisy rather than a clean keeper:
+  - `M16-1327`: `llrawproc_ms=129.5`, `final_blend_ms=12.5`, `mix_chroma_ms=81.5`
+  - `M16-1347`: `llrawproc_ms=133.5`, `final_blend_ms=18.5`, `mix_chroma_ms=76.5`
+  - `M16-1446`: `llrawproc_ms=48.0`, `final_blend_ms=9.0`, `mix_chroma_ms=0.0`
+- After reverting the hint, I rebuilt the user-facing release tree so the executable now matches the restored baseline again:
+  - `LastWriteTime=6/1/2026 7:14:32 AM`
+  - `Length=8932352`
+  - `SHA256=5BB0E48D32339D85E65C1B62B1FEE155F71376B6B5C6554C245EAC6038ACCD80`
+
+### Cross-checked from prior analysis
+
+- The current `mix_chroma` store-side map already points at halfres center/store work as the live residual, so a branch-prediction tweak should have been a plausible small win if it were going to pay off.
+- The reruns did not show a stable keeper-shaped improvement, so this specific `choose_ev_lt_eh` hint is rejected.
+- The helper-derived `mix_chroma` shape remains the best retained bucket to inspect if we stay in this pipeline, but this branch hint should stay closed.
+
+### Needs runtime profiling
+
+- If we keep investigating `mix_chroma`, the next probe should be a structurally different store-side split rather than another branch hint.
+- Otherwise, pivot to a different retained bucket instead of forcing more `mix_chroma` rewrites.
+
+## 2026-06-01 - cam AgX store-helper branch hint regresses on repeat smoke; restore baseline
+
+### Verified locally
+
+- I tried a narrow `__builtin_expect(value <= 65535.0, 1)` hint in `agx_store_u16_fast()` inside [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), then reran the same three-clip no-probe smoke set twice on the same build.
+- The first pass was already worse than the prior keeper on the hot clips:
+  - `M16-1327`: `llrawproc_ms=143.5`, `mix_chroma_ms=80.5`, `final_blend_ms=17.0`
+  - `M16-1347`: `llrawproc_ms=141.5`, `mix_chroma_ms=86.0`, `final_blend_ms=14.5`
+  - `M16-1446`: `llrawproc_ms=95.5`, `mix_chroma_ms=0.0`, `final_blend_ms=11.5`
+- The repeat rerun was even worse / noisier rather than confirming a keeper:
+  - `M16-1327`: `llrawproc_ms=182.5`, `mix_chroma_ms=96.0`, `final_blend_ms=18.0`
+  - `M16-1347`: `llrawproc_ms=218.5`, `mix_chroma_ms=113.5`, `final_blend_ms=31.0`
+  - `M16-1446`: `llrawproc_ms=61.0`, `mix_chroma_ms=0.0`, `final_blend_ms=10.5`
+- The cam AgX matrix saturation counter was definitely exercised on the hot clip, but the branch hint still did not pay off:
+  - `M16-1327`: `avg_processing_core_color_cam_agx_matrix_g_hi_count=1683`
+  - `M16-1347`: `avg_processing_core_color_cam_agx_matrix_g_hi_count=0`
+  - `M16-1446`: `avg_processing_core_color_cam_agx_matrix_g_hi_count=0`
+
+### Cross-checked from prior analysis
+
+- The matrix-side AgX leaf is live, but a common-path store prediction hint by itself is not the lever here.
+- The repeat run makes this shape look like a regression, not a keeper.
+- The earlier cam-family map still stands: if we stay in AgX, we need a different structural idea than a store-helper branch hint.
+
+### Needs runtime profiling
+
+- If we stay in the cam family, the next probe should be a different matrix-side shape, not another store-helper branch hint.
+- Otherwise, pivot to a different retained bucket instead of forcing more AgX micro-optimizations.
+
 ## 2026-06-01 - cam WB probe mode 4 exposed the AgX clip/matrix split
 
 ### Verified locally
