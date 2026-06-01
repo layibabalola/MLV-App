@@ -1,3 +1,29 @@
+## 2026-06-01 - halfres `mix_chroma` low-bound clamp is dead on the hot clips; store-side clamp work is not the next win
+
+### Verified locally
+
+- I added probe-only low-bound clamp counters for the halfres non-average `mix_chroma` store branches in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), wired the counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c) and [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), and kept the existing store lookup timing splits intact.
+- I reran the three visible smoke clips from the current keeper build on the settled three-frame playback path and preserved the visible gate:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new clamp counters are zero on the hot clips, which means the low-bound clamp branch is dead on this smoke set:
+  - `M16-1327` mode `11`: `dual_iso_full20_mix_chroma_probe_mode=11`, `dual_iso_full20_mix_chroma_ms=84.0`, `dual_iso_full20_mix_chroma_halfres_center_store_r_low_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_b_low_clamp_count=0`
+  - `M16-1327` mode `12`: `dual_iso_full20_mix_chroma_probe_mode=12`, `dual_iso_full20_mix_chroma_ms=80.0`, `dual_iso_full20_mix_chroma_halfres_center_store_r_low_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_b_low_clamp_count=0`
+  - `M16-1347` mode `12`: `dual_iso_full20_mix_chroma_probe_mode=12`, `dual_iso_full20_mix_chroma_ms=89.0` / `105.0`, `dual_iso_full20_mix_chroma_halfres_center_store_r_low_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_b_low_clamp_count=0`
+- The direct profile launch path is now confirmed to see the probe env when the frame sequence reaches the live `mix_chroma` path, so the earlier `probe_mode=-1` result was a frame-path bypass, not an env-forwarding failure.
+
+### Cross-checked from prior analysis
+
+- The earlier mode-6/7/8/9/10 probe family already showed the hot `mix_chroma` work is in the halfres store surface, not in lookup-only or average-only shapes.
+- This clamp pass now rules out the low-bound branch inside that surface on the current smoke clips.
+- The store-side remainder is still the next live `mix_chroma` leaf, but it is not clamp-driven.
+
+### Needs runtime profiling
+
+- The next useful probe inside `mix_chroma` should target the remaining store-side work that still survives after the low-bound clamp is removed from consideration.
+- If that next store-side probe is still mixed, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 ## 2026-06-01 - playback-profile helper now forwards `ExtraEnvironment`; halfres `mix_chroma` store leaf is confirmed live
 
 ### Verified locally
