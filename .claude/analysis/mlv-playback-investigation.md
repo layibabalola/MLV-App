@@ -1,3 +1,52 @@
+# 2026-06-01 - combined halfres mix_chroma write-both branch hint is the new keeper
+
+### Verified locally
+
+- I added a narrow branch-prediction hint to the hot combined halfres `mix_chroma` store path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c): `if (LIKELY(write_r && write_b))`.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:59:59 AM`
+  - `Length=8952320`
+  - `SHA256=670F0D40947DE3F8BA0FBEC9D5C431692C30AFEBB5A72C848CCBB447DE25032A`
+- The visible smoke gate stayed intact on the new build:
+  - `processed8_direct_path_frames=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- Settled-frame averages on the plain smoke rerun:
+  - `M16-1327`: `llrawproc_ms=160.00`, `mix_chroma_ms=98.00`, `final_blend_ms=17.00`, `mix_halfres_ms=8.50`
+  - `M16-1347`: `llrawproc_ms=191.50`, `mix_chroma_ms=98.50`, `final_blend_ms=48.00`, `mix_halfres_ms=7.00`
+  - `M16-1446`: `llrawproc_ms=71.00`, `mix_chroma_ms=0.00`, `final_blend_ms=9.50`, `mix_halfres_ms=5.00`
+- Aggregate settled-frame averages on the plain smoke rerun:
+  - `llrawproc_ms=140.833`
+  - `mix_chroma_ms=65.5`
+  - `final_blend_ms=24.833`
+  - `mix_halfres_ms=6.833`
+- The same build also improved the diagnostic fused `final_blend` rerun versus the current-keeper rebaseline:
+  - `M16-1327`: `llrawproc_ms=217.00`, `final_blend_ms=86.00`, `mix_chroma_ms=84.50`
+  - `M16-1347`: `llrawproc_ms=205.00`, `final_blend_ms=81.50`, `mix_chroma_ms=83.00`
+  - `M16-1446`: `llrawproc_ms=115.00`, `final_blend_ms=78.00`, `mix_chroma_ms=0.00`
+- Aggregate settled-frame averages on the diagnostic rerun:
+  - `llrawproc_ms=179.0`
+  - `final_blend_ms=81.833`
+  - `mix_chroma_ms=55.833`
+  - `fb_row_kernel_ms=81.833`
+  - `fb_raw2ev_ms=11.333`
+  - `fb_curve_ms=9.5`
+  - `fb_store_ms=18.0`
+- The hot `mix_chroma` write-both branch hint is now the keeper-shaped win from this turn; `final_blend` remains diagnostic rather than the hotter retained bucket.
+
+### Cross-checked from prior analysis
+
+- The earlier `final_blend` rebaseline still established that `mix_chroma` was the hotter retained bucket, and that remains true after this write-both hint.
+- The branch-hint change is narrower than the rejected non-average branch hint cleanup, and this time it improved the real hot clips instead of regressing them.
+- The combined direct halfres `mix_chroma` write-both path remains the live hotspot after the hint, so future work should rebaseline from this new keeper.
+
+### Needs runtime profiling
+
+- The next highest-value residual is still the `mix_chroma` store side.
+- If the next `mix_chroma` probe is flat, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - final_blend rebaseline on the current keeper still leaves mix_chroma as the hotter bucket
 
 ### Verified locally

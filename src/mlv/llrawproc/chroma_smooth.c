@@ -396,7 +396,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 chroma_center_non_average_write_both_start = mlv_stage_timing_now();
             }
 
-            if (write_r && write_b)
+            if (LIKELY(write_r && write_b))
             {
                 uint16_t out_r = 0;
                 uint16_t out_b = 0;
