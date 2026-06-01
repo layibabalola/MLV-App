@@ -1,3 +1,64 @@
+## 2026-06-01 - Shadows/Highlights RBF detail is live but balanced; no single leaf is patch-worthy yet
+
+### Verified locally
+
+- I reran the existing Shadows/Highlights detail probe against the current keeper build with `MLVAPP_PLAYBACK_RBF_DETAIL_TIMING=1` and the same three smoke clips, using the current user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:25:43 AM`
+  - `Length=8915456`
+  - `SHA256=4944DF568247BE10B5A90CBF13432914296FD7FEC5E4EAE5DE69E1AD41400FF0`
+- The visible smoke gate stayed intact on the profile runs:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The RBF detail split is live, but the individual phases remain broadly balanced:
+  - `M16-1327`: `processing_shadows_highlights_rbf_left_ms=6.99997`, `processing_shadows_highlights_rbf_right_ms=2.00009`, `processing_shadows_highlights_rbf_horizontal_average_ms=1.99986`, `processing_shadows_highlights_rbf_vertical_down_ms=3.99995`, `processing_shadows_highlights_rbf_vertical_up_ms=3.99995`, `processing_shadows_highlights_rbf_output_ms=1.99986`
+  - `M16-1347`: `processing_shadows_highlights_rbf_left_ms=4.00019`, `processing_shadows_highlights_rbf_right_ms=3.99995`, `processing_shadows_highlights_rbf_horizontal_average_ms=6.00004`, `processing_shadows_highlights_rbf_vertical_down_ms=3.99995`, `processing_shadows_highlights_rbf_vertical_up_ms=7.99990`, `processing_shadows_highlights_rbf_output_ms=3.99995`
+  - `M16-1446`: `processing_shadows_highlights_rbf_left_ms=2.00009`, `processing_shadows_highlights_rbf_right_ms=4.99988`, `processing_shadows_highlights_rbf_horizontal_average_ms=3.00002`, `processing_shadows_highlights_rbf_vertical_down_ms=3.99995`, `processing_shadows_highlights_rbf_vertical_up_ms=3.99995`, `processing_shadows_highlights_rbf_output_ms=3.00002`
+- By inspection, `vertical_up` is the largest single phase on one clip, but the clip-to-clip skew is not stable enough to justify a targeted optimization patch yet.
+
+### Cross-checked from prior analysis
+
+- The earlier `mix_chroma` non-average choose split stayed mixed, so `mix_chroma` still does not have a branch-skew keeper shape.
+- The existing Shadows/Highlights notes already pointed at the prep bucket as live, but the RBF detail shows the recurrence itself is still internally balanced enough that a one-leaf patch is not obvious.
+- The closed `mix_chroma` lookup-fast-path / write-both ideas remain closed; this probe does not reopen them.
+
+### Needs runtime profiling
+
+- If we keep going in Shadows/Highlights, the next candidate needs a more structural shape than the current left/right/vertical/output split.
+- Otherwise, the honest move is to pivot to another retained bucket instead of forcing a `RBFilterPlain` micro-patch.
+
+## 2026-06-01 - mix_chroma non-average choose split is mixed; halfres remains the hot surface but not yet patch-worthy
+
+### Verified locally
+
+- I added a narrower `mix_chroma` probe in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) that times the non-average `choose_ev_lt_eh` true vs false paths, wired the new counters through [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp), then rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:25:43 AM`
+  - `Length=8915456`
+  - `SHA256=4944DF568247BE10B5A90CBF13432914296FD7FEC5E4EAE5DE69E1AD41400FF0`
+- I reran the normal no-probe smoke set on that build and kept the visible gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The current no-probe settled-frame averages on the rebuilt executable are:
+  - `M16-1327`: `llrawproc_ms=124.00007`, `final_blend_ms=15.00010`
+  - `M16-1347`: `llrawproc_ms=135.99992`, `final_blend_ms=21.99984`
+  - `M16-1446`: `llrawproc_ms=46.00000`, `final_blend_ms=13.00001`
+- The choose-split probe shows the hot work is still in `mix_chroma` halfres non-average, but the branch skew is mixed across clips:
+  - choose-true run: `M16-1327` halfres non-average `27.000 ms`, `M16-1347` halfres non-average `30.999 ms`
+  - choose-false run: `M16-1327` halfres non-average `33.999 ms`, `M16-1347` halfres non-average `15.999 ms`
+  - center non-average stayed at `0` in both runs, so the live residual is the halfres path
+
+### Cross-checked from prior analysis
+
+- The earlier `mix_chroma` average-vs-non-average split still holds: the non-average side is the hot case.
+- The new choose split does not provide a stable branch-skew winner, so it does not justify a new patch yet.
+- The closed `mix_chroma` lookup-fast-path / offset-pointer idea remains closed; this probe does not reopen it.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next useful move is a deeper look inside the halfres non-average surface, but only if it reveals a narrow keeper-shaped leaf.
+- If the next split is still mixed, the honest move is to pivot to another retained bucket instead of forcing a new `mix_chroma` rewrite.
+
 ## 2026-06-01 - mix_chroma average-vs-non-average probe says the non-average path is the hot case, but not yet patch-worthy
 
 ### Verified locally

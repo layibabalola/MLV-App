@@ -902,6 +902,8 @@ private:
     double m_playbackSmokeDualIsoFull20MixChromaCenterStoreBLookupProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaCenterAverageProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaCenterNonAverageProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterNonAverageChooseTrueProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaCenterNonAverageChooseFalseProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterGatherProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterArithmeticProbeSumMs = 0.0;
@@ -912,6 +914,8 @@ private:
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterStoreBLookupProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterAverageProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseTrueProbeSumMs = 0.0;
+    double m_playbackSmokeDualIsoFull20MixChromaHalfresCenterNonAverageChooseFalseProbeSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixAliasMapSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20MixOverexposedSumMs = 0.0;
     double m_playbackSmokeDualIsoFull20FinalBlendSumMs = 0.0;

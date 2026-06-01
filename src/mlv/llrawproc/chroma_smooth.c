@@ -80,6 +80,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
         const int probe_center = probe_center_fullres || probe_center_halfres;
         const int probe_average_branch = probe_detail && probe_mode == 5;
         const int probe_non_average_branch = probe_detail && probe_mode == 6;
+        const int probe_non_average_choose_true_branch = probe_detail && probe_mode == 7;
+        const int probe_non_average_choose_false_branch = probe_detail && probe_mode == 8;
         const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m2 = inp + (size_t)(y - 2) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m1 = inp + (size_t)(y - 1) * (size_t)w;
@@ -199,6 +201,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
             double chroma_center_store_lookup_elapsed_ms = 0.0;
             double chroma_center_average_start = 0.0;
             double chroma_center_non_average_start = 0.0;
+            double chroma_center_non_average_choose_start = 0.0;
             if (probe_center) chroma_center_gather_start = mlv_stage_timing_now();
             if (probe_center)
             {
@@ -300,6 +303,14 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 {
                     g_dualiso_full20bit_timing.mix_chroma_halfres_center_use_average_count += 1.0;
                 }
+            }
+            const int probe_non_average_choose_branch =
+                !use_average
+                && ((probe_non_average_choose_true_branch && choose_ev_lt_eh)
+                 || (probe_non_average_choose_false_branch && !choose_ev_lt_eh));
+            if (probe_non_average_choose_branch)
+            {
+                chroma_center_non_average_choose_start = mlv_stage_timing_now();
             }
 
             int gr = 0;
@@ -474,6 +485,33 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     else
                     {
                         g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_probe_ms += elapsed_ms;
+                    }
+                }
+            }
+            if (probe_non_average_choose_branch)
+            {
+                const double elapsed_ms =
+                    (mlv_stage_timing_now() - chroma_center_non_average_choose_start) * 1000.0;
+                if (probe_center_fullres)
+                {
+                    if (choose_ev_lt_eh)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_non_average_choose_true_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_non_average_choose_false_probe_ms += elapsed_ms;
+                    }
+                }
+                else
+                {
+                    if (choose_ev_lt_eh)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_choose_true_probe_ms += elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_choose_false_probe_ms += elapsed_ms;
                     }
                 }
             }
