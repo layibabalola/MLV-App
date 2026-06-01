@@ -9452,7 +9452,7 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
   - `LastWriteTime=6/1/2026 3:29:59 AM`
   - `Length=8921600`
-  - `SHA256=7A55F617316D47BCC449C0995604D26A79C9904EC0849A6A257E9B7A430E5E4D`
+  - `SHA256=A3D443253C75C906851EC1F35F68728584906E110C3FDB7FBCC64713F5DD988D`
 - I reran the three smoke clips with `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=5`, and the visible gate stayed intact:
   - `processed8_direct_path_active=false`
   - `dual_iso_full20_use_alias_map=false`
