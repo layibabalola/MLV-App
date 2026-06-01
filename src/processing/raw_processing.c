@@ -2451,6 +2451,15 @@ void apply_processing_object( processingObject_t * processing,
                     const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     const double color_cam_agx_clip_start =
                         (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
+                    const double agx_m0 = agx_compressed_matrix[0];
+                    const double agx_m1 = agx_compressed_matrix[1];
+                    const double agx_m2 = agx_compressed_matrix[2];
+                    const double agx_m3 = agx_compressed_matrix[3];
+                    const double agx_m4 = agx_compressed_matrix[4];
+                    const double agx_m5 = agx_compressed_matrix[5];
+                    const double agx_m6 = agx_compressed_matrix[6];
+                    const double agx_m7 = agx_compressed_matrix[7];
+                    const double agx_m8 = agx_compressed_matrix[8];
                     // Clip. Just in case other footprint compression did not happen.
                     for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
                     if( capture_breakdown && color_cam_wb_probe_agx )
@@ -2461,10 +2470,9 @@ void apply_processing_object( processingObject_t * processing,
                     const double color_cam_agx_matrix_start =
                         (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                     // AgX compress chroma through matrix.
-                    double * m = agx_compressed_matrix;
-                    pix[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
-                    pix[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
-                    pix[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                    pix[0] = LIMIT16(result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2);
+                    pix[1] = LIMIT16(result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5);
+                    pix[2] = LIMIT16(result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8);
                     if( capture_breakdown && color_cam_wb_probe_agx )
                     {
                         core_timing->color_cam_agx_matrix_ms +=
@@ -2579,6 +2587,15 @@ void apply_processing_object( processingObject_t * processing,
                         const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
                         const double color_cam_agx_clip_start =
                             (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
+                        const double agx_m0 = agx_compressed_matrix[0];
+                        const double agx_m1 = agx_compressed_matrix[1];
+                        const double agx_m2 = agx_compressed_matrix[2];
+                        const double agx_m3 = agx_compressed_matrix[3];
+                        const double agx_m4 = agx_compressed_matrix[4];
+                        const double agx_m5 = agx_compressed_matrix[5];
+                        const double agx_m6 = agx_compressed_matrix[6];
+                        const double agx_m7 = agx_compressed_matrix[7];
+                        const double agx_m8 = agx_compressed_matrix[8];
                         // Clip. Just in case other footprint compression did not happen.
                         for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
                         if( capture_breakdown && color_cam_wb_probe_agx )
@@ -2589,10 +2606,9 @@ void apply_processing_object( processingObject_t * processing,
                         const double color_cam_agx_matrix_start =
                             (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                         // AgX compress chroma through matrix.
-                        double * m = agx_compressed_matrix;
-                        pixg[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
-                        pixg[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
-                        pixg[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                        pixg[0] = LIMIT16(result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2);
+                        pixg[1] = LIMIT16(result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5);
+                        pixg[2] = LIMIT16(result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8);
                         if( capture_breakdown && color_cam_wb_probe_agx )
                         {
                             core_timing->color_cam_agx_matrix_ms +=

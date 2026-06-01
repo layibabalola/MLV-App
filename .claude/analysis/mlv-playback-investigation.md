@@ -8819,3 +8819,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in the color family, the next probe should pick a different live leaf than the reverted cam AgX scalarization path.
 - The reverted build is now the reference baseline again.
+
+## 2026-06-01 - cam AgX matrix coefficient hoist is a keeper-shaped win
+
+### Verified locally
+
+- I hoisted the `agx_compressed_matrix` coefficients out of the per-pixel cam AgX path in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) for both the main and gradient branches, without changing the math.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 10:23:55 PM`
+  - `Length=8890368`
+  - `SHA256=F9880F8964E6E44DDEA3BE2B089500D67D9BC45736CAE0206704700942D9D414`
+- I reran the three visible smoke clips on the same x1 Quality / settled Auto Look Assist gate, and the visible smoke gate stayed intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The settled frames improved across all three clips versus the restored baseline:
+  - `M16-1327`: `llrawproc_ms=2798.000` vs `2849.000`
+  - `M16-1347`: `llrawproc_ms=2812.000` vs `2868.000`
+  - `M16-1446`: `llrawproc_ms=2781.000` vs `2833.000`
+- The aggregate improvement is real, even though the `cam_agx` sub-buckets moved in a mixed way clip-to-clip:
+  - `cam_agx_matrix_ms` remained material on all three clips
+  - `cam_agx_clip_ms` is still non-trivial but not the only live cost
+
+### Cross-checked from prior analysis
+
+- This is a different shape from the earlier rejected scalarization attempt: the math stayed the same, only the matrix coefficients were hoisted into locals.
+- The hoist fits the current hotspot map, because `cam_agx` was still the largest live bucket after the creative and WB probes had already been reduced or rejected.
+- The visible smoke gate stayed green, so this is a keeper-shaped optimization rather than a quality regression.
+
+### Needs runtime profiling
+
+- The next question is whether the remaining cam AgX cost is still matrix-dominated enough to justify one more narrow pass, or whether we should now move to the next retained bucket.
+- If we stay in `cam_agx`, the next probe should be narrowly about the remaining matrix-side work rather than reintroducing array-shape experiments.
