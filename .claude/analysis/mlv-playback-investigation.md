@@ -8947,6 +8947,37 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The next highest-value residual still appears to be in the cam AgX / cam WB family, but the rejected branch-hoist shape should stay closed.
 - If we continue, the next probe should stay narrow and pick a different live leaf than the rejected AgX branch-hoist path.
 
+## 2026-06-01 - rejected cam AgX rgb_to_Y hoist / clip-guard probe; restored baseline
+
+### Verified locally
+
+- I tried a narrow cam-family cleanup in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) that hoisted the repeated `rgb_to_Y` taps in the cam WB desat/gamut path and briefly tested a clip guard around the AgX clamp.
+- The visible smoke gate stayed intact on the three-clip rerun, but the settled three-clip averages did not justify keeping the probe, so I reverted it and restored the baseline shape.
+- The restored release executable is current at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 11:26:03 PM`
+  - `Length=8890880`
+  - `SHA256=741D16FBFC4224EABBD064FF53D029CF2A30665D6D840FF0721669438D4D305E`
+- Restored-baseline smoke summaries remained green:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The restored-baseline averages were:
+  - `llrawproc_ms` average: `96.3333`
+  - `color_ms` average: `2690.6667`
+  - `cam_agx_ms` average: `317.3331`
+- The probe itself was not a keeper because the rejected cam AgX shape still regressed the overall retained path when compared against the current creative-gradation keeper baseline.
+
+### Cross-checked from prior analysis
+
+- The current creative-gradation keeper baseline remains the reference shape for now.
+- The cam WB scalar-hoist and row-pointer probes remain rejected, so the family has now been exercised in multiple low-level shapes without a keeper-level win.
+- The smoke gate stayed green throughout, so this is strictly a throughput decision.
+
+### Needs runtime profiling
+
+- If we stay in the cam family, the next probe should pick a different live leaf than the rejected AgX rgb_to_Y / clip-guard shape.
+- Otherwise, the honest move is to move to a different retained bucket rather than forcing more cam micro-optimizations.
+
 ## 2026-06-01 - rejected cam WB scalar-hoist probe; restored the keeper baseline
 
 ### Verified locally
