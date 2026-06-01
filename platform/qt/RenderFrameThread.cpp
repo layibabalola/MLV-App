@@ -2055,6 +2055,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
         processingGetLastShadowsHighlightsRbfVerticalUpFirstLineMilliseconds();
     const double processingShadowsHighlightsRbfVerticalUpBodyMs =
         processingGetLastShadowsHighlightsRbfVerticalUpBodyMilliseconds();
+    const double processingShadowsHighlightsRbfVerticalUpBodyDiffMs =
+        processingGetLastShadowsHighlightsRbfVerticalUpBodyDiffMilliseconds();
+    const double processingShadowsHighlightsRbfVerticalUpBodyStoreMs =
+        processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreMilliseconds();
+    const double processingShadowsHighlightsRbfVerticalUpBodyStoreFactorMs =
+        processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreFactorMilliseconds();
+    const double processingShadowsHighlightsRbfVerticalUpBodyStoreColorMs =
+        processingGetLastShadowsHighlightsRbfVerticalUpBodyStoreColorMilliseconds();
     const double processingShadowsHighlightsRbfVerticalUpMs =
         processingGetLastShadowsHighlightsRbfVerticalUpMilliseconds();
     const double processingShadowsHighlightsRbfOutputMs =
@@ -2444,6 +2452,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingShadowsHighlightsRbfVerticalUpFirstLineMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_up_body_ms"),
                                       processingShadowsHighlightsRbfVerticalUpBodyMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_up_body_diff_ms"),
+                                      processingShadowsHighlightsRbfVerticalUpBodyDiffMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_up_body_store_ms"),
+                                      processingShadowsHighlightsRbfVerticalUpBodyStoreMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_up_body_store_factor_ms"),
+                                      processingShadowsHighlightsRbfVerticalUpBodyStoreFactorMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_up_body_store_color_ms"),
+                                      processingShadowsHighlightsRbfVerticalUpBodyStoreColorMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_vertical_up_ms"),
                                       processingShadowsHighlightsRbfVerticalUpMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_output_ms"),

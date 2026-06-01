@@ -39,6 +39,10 @@ struct RBFilterPlainTiming
     double vertical_down_ms = 0.0;
     double vertical_up_first_line_ms = 0.0;
     double vertical_up_body_ms = 0.0;
+    double vertical_up_body_diff_ms = 0.0;
+    double vertical_up_body_store_ms = 0.0;
+    double vertical_up_body_store_factor_ms = 0.0;
+    double vertical_up_body_store_color_ms = 0.0;
     double vertical_up_ms = 0.0;
     double output_ms = 0.0;
 };
