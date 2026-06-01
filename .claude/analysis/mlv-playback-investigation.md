@@ -1,3 +1,32 @@
+## 2026-06-01 - WB gradient-matrix probe stayed dead; main matrix remains the live WB residual
+
+### Verified locally
+
+- I added a narrow WB gradient-matrix timer in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) and threaded it through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 7:56:48 PM`
+  - `Length=8866816`
+  - `SHA256=9C47361306393DC19354B7103E4460B9B5C2A09E2BFF1D9EB336DD754014E44F`
+- I reran the three visible smoke clips under `MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_WB_PROBE=1` and kept the visible smoke gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new gradient-matrix leaf stayed at zero on the settled frame of all three clips, while the main matrix and exposure slices stayed live:
+  - `M16-1327`: `processing_core_color_main_prelude_wb_matrix_ms=136.998`, `processing_core_color_main_prelude_wb_gradient_matrix_ms=0`, `processing_core_color_main_prelude_wb_exposure_ms=165.999`
+  - `M16-1347`: `processing_core_color_main_prelude_wb_matrix_ms=111.999`, `processing_core_color_main_prelude_wb_gradient_matrix_ms=0`, `processing_core_color_main_prelude_wb_exposure_ms=120.999`
+  - `M16-1446`: `processing_core_color_main_prelude_wb_matrix_ms=107.002`, `processing_core_color_main_prelude_wb_gradient_matrix_ms=0`, `processing_core_color_main_prelude_wb_exposure_ms=111.001`
+- That leaves the main WB matrix path as the live residual inside the WB prelude family; the new gradient-matrix split did not expose a separate optimization target.
+
+### Cross-checked from prior analysis
+
+- The WB exposure hoist remains the only narrow keeper-shaped WB win so far.
+- The main matrix path still carries real cost, but the gradient side does not appear to be the next source of leverage on these clips.
+
+### Needs runtime profiling
+
+- If we stay in the WB family, the next probe should focus on the main matrix path itself rather than the gradient side.
+- If the next round still does not reveal a clean matrix-specific win, move on to a different retained bucket instead of forcing another WB rewrite.
+
 ## 2026-06-01 - WB matrix stays live; reconstruction is effectively dead on the smoke clips
 
 ### Verified locally

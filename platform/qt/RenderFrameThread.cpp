@@ -2420,6 +2420,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingGetLastCoreColorMainPreludeWbMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_matrix_ms"),
                                       processingGetLastCoreColorMainPreludeWbMatrixMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_gradient_matrix_ms"),
+                                      processingGetLastCoreColorMainPreludeWbGradientMatrixMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_exposure_ms"),
                                       processingGetLastCoreColorMainPreludeWbExposureMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_main_prelude_wb_gamut_ms"),
