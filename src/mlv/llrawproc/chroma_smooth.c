@@ -84,6 +84,9 @@ static void CHROMA_SMOOTH_FUNC(int w,
         const int probe_non_average_choose_false_branch = probe_detail && probe_mode == 8;
         const int probe_non_average_write_r_branch = probe_detail && probe_mode == 9 && probe_center_halfres;
         const int probe_non_average_write_b_branch = probe_detail && probe_mode == 10 && probe_center_halfres;
+        const int probe_non_average_store_r_clamp_branch = probe_detail && probe_mode == 11 && probe_center_halfres;
+        const int probe_non_average_store_b_clamp_branch = probe_detail && probe_mode == 12 && probe_center_halfres;
+        const int ev2raw_lo = -10 * EV_RESOLUTION;
         const CHROMA_SMOOTH_TYPE *row_y_m3 = inp + (size_t)(y - 3) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m2 = inp + (size_t)(y - 2) * (size_t)w;
         const CHROMA_SMOOTH_TYPE *row_y_m1 = inp + (size_t)(y - 1) * (size_t)w;
@@ -363,6 +366,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 {
                     chroma_center_non_average_write_r_start = mlv_stage_timing_now();
                 }
+                if (probe_non_average_store_r_clamp_branch && !use_average && (gr + dr) < ev2raw_lo)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_low_clamp_count += 1.0;
+                }
                 uint16_t out_r = 0;
                 if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
                 out_r = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
@@ -439,6 +446,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 if (probe_non_average_write_b_branch && !use_average)
                 {
                     chroma_center_non_average_write_b_start = mlv_stage_timing_now();
+                }
+                if (probe_non_average_store_b_clamp_branch && !use_average && (gb + db) < ev2raw_lo)
+                {
+                    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_low_clamp_count += 1.0;
                 }
                 uint16_t out_b = 0;
                 if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();

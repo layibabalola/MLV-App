@@ -146,6 +146,8 @@ void dualiso_debug_reset_full20bit_timing(void)
     g_dualiso_full20bit_timing.mix_chroma_center_non_average_choose_false_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_low_clamp_count = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_low_clamp_count = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_average_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_probe_ms = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_center_non_average_choose_true_probe_ms = 0;
@@ -186,7 +188,7 @@ int dualiso_mix_chroma_probe_mode(void)
         {
             char * end = NULL;
             long parsed = strtol(v, &end, 10);
-            if (end != v && *end == '\0' && parsed >= -1 && parsed <= 10)
+            if (end != v && *end == '\0' && parsed >= -1 && parsed <= 12)
             {
                 g_dualiso_mix_chroma_probe_mode_cache = (int)parsed;
             }
@@ -233,6 +235,14 @@ int dualiso_mix_chroma_probe_mode(void)
             else if (!strcmp(v, "nonaverage-write-b") || !strcmp(v, "NONAVERAGE-WRITE-B") || !strcmp(v, "non-average-write-b") || !strcmp(v, "NON-AVERAGE-WRITE-B"))
             {
                 g_dualiso_mix_chroma_probe_mode_cache = 10;
+            }
+            else if (!strcmp(v, "nonaverage-store-r-clamp") || !strcmp(v, "NONAVERAGE-STORE-R-CLAMP") || !strcmp(v, "non-average-store-r-clamp") || !strcmp(v, "NON-AVERAGE-STORE-R-CLAMP"))
+            {
+                g_dualiso_mix_chroma_probe_mode_cache = 11;
+            }
+            else if (!strcmp(v, "nonaverage-store-b-clamp") || !strcmp(v, "NONAVERAGE-STORE-B-CLAMP") || !strcmp(v, "non-average-store-b-clamp") || !strcmp(v, "NON-AVERAGE-STORE-B-CLAMP"))
+            {
+                g_dualiso_mix_chroma_probe_mode_cache = 12;
             }
             else
             {
