@@ -77,6 +77,9 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prel
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_creative_contrast_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_matrix_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_matrix_r_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_matrix_g_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_matrix_b_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_gradient_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_exposure_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_gamut_ms = 0.0;
@@ -252,6 +255,9 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_main_prelude_creative_contrast_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_matrix_ms = 0.0;
+    g_processing_last_core_color_main_prelude_wb_matrix_r_ms = 0.0;
+    g_processing_last_core_color_main_prelude_wb_matrix_g_ms = 0.0;
+    g_processing_last_core_color_main_prelude_wb_matrix_b_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_gradient_matrix_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_exposure_ms = 0.0;
     g_processing_last_core_color_main_prelude_wb_gamut_ms = 0.0;
@@ -296,6 +302,9 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->color_main_prelude_creative_contrast_ms = 0.0;
     timing->color_main_prelude_wb_ms = 0.0;
     timing->color_main_prelude_wb_matrix_ms = 0.0;
+    timing->color_main_prelude_wb_matrix_r_ms = 0.0;
+    timing->color_main_prelude_wb_matrix_g_ms = 0.0;
+    timing->color_main_prelude_wb_matrix_b_ms = 0.0;
     timing->color_main_prelude_wb_gradient_matrix_ms = 0.0;
     timing->color_main_prelude_wb_exposure_ms = 0.0;
     timing->color_main_prelude_wb_gamut_ms = 0.0;
@@ -993,6 +1002,9 @@ void applyProcessingObject( processingObject_t * processing,
         g_processing_last_core_color_main_prelude_creative_contrast_ms = core_timing.color_main_prelude_creative_contrast_ms;
         g_processing_last_core_color_main_prelude_wb_ms = core_timing.color_main_prelude_wb_ms;
         g_processing_last_core_color_main_prelude_wb_matrix_ms = core_timing.color_main_prelude_wb_matrix_ms;
+        g_processing_last_core_color_main_prelude_wb_matrix_r_ms = core_timing.color_main_prelude_wb_matrix_r_ms;
+        g_processing_last_core_color_main_prelude_wb_matrix_g_ms = core_timing.color_main_prelude_wb_matrix_g_ms;
+        g_processing_last_core_color_main_prelude_wb_matrix_b_ms = core_timing.color_main_prelude_wb_matrix_b_ms;
         g_processing_last_core_color_main_prelude_wb_gradient_matrix_ms = core_timing.color_main_prelude_wb_gradient_matrix_ms;
         g_processing_last_core_color_main_prelude_wb_exposure_ms = core_timing.color_main_prelude_wb_exposure_ms;
         g_processing_last_core_color_main_prelude_wb_gamut_ms = core_timing.color_main_prelude_wb_gamut_ms;
@@ -1073,6 +1085,12 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_color_main_prelude_wb_ms, core_timings[t].color_main_prelude_wb_ms);
             g_processing_last_core_color_main_prelude_wb_matrix_ms =
                 MAX(g_processing_last_core_color_main_prelude_wb_matrix_ms, core_timings[t].color_main_prelude_wb_matrix_ms);
+            g_processing_last_core_color_main_prelude_wb_matrix_r_ms =
+                MAX(g_processing_last_core_color_main_prelude_wb_matrix_r_ms, core_timings[t].color_main_prelude_wb_matrix_r_ms);
+            g_processing_last_core_color_main_prelude_wb_matrix_g_ms =
+                MAX(g_processing_last_core_color_main_prelude_wb_matrix_g_ms, core_timings[t].color_main_prelude_wb_matrix_g_ms);
+            g_processing_last_core_color_main_prelude_wb_matrix_b_ms =
+                MAX(g_processing_last_core_color_main_prelude_wb_matrix_b_ms, core_timings[t].color_main_prelude_wb_matrix_b_ms);
             g_processing_last_core_color_main_prelude_wb_gradient_matrix_ms =
                 MAX(g_processing_last_core_color_main_prelude_wb_gradient_matrix_ms, core_timings[t].color_main_prelude_wb_gradient_matrix_ms);
             g_processing_last_core_color_main_prelude_wb_exposure_ms =
@@ -2082,9 +2100,30 @@ void apply_processing_object( processingObject_t * processing,
             const double color_main_prelude_wb_exposure_start =
                 (capture_breakdown && color_main_prelude_probe_wb) ? omp_get_wtime() : 0.0;
             /* white balance & exposure */
+            const double color_main_prelude_wb_matrix_r_start =
+                (capture_breakdown && color_main_prelude_wb_probe_matrix) ? omp_get_wtime() : 0.0;
             const float wb_r = pm0[pix[0]];
+            if( capture_breakdown && color_main_prelude_wb_probe_matrix )
+            {
+                core_timing->color_main_prelude_wb_matrix_r_ms +=
+                    (omp_get_wtime() - color_main_prelude_wb_matrix_r_start) * 1000.0;
+            }
+            const double color_main_prelude_wb_matrix_g_start =
+                (capture_breakdown && color_main_prelude_wb_probe_matrix) ? omp_get_wtime() : 0.0;
             const float wb_g = pm4[pix[1]];
+            if( capture_breakdown && color_main_prelude_wb_probe_matrix )
+            {
+                core_timing->color_main_prelude_wb_matrix_g_ms +=
+                    (omp_get_wtime() - color_main_prelude_wb_matrix_g_start) * 1000.0;
+            }
+            const double color_main_prelude_wb_matrix_b_start =
+                (capture_breakdown && color_main_prelude_wb_probe_matrix) ? omp_get_wtime() : 0.0;
             const float wb_b = pm8[pix[2]];
+            if( capture_breakdown && color_main_prelude_wb_probe_matrix )
+            {
+                core_timing->color_main_prelude_wb_matrix_b_ms +=
+                    (omp_get_wtime() - color_main_prelude_wb_matrix_b_start) * 1000.0;
+            }
             float pix0 = wb_r * expo_correction;
             float pix1 = wb_g * expo_correction;
             float pix2 = wb_b * expo_correction;
@@ -2929,6 +2968,21 @@ double processingGetLastCoreColorMainPreludeWbMilliseconds(void)
 double processingGetLastCoreColorMainPreludeWbMatrixMilliseconds(void)
 {
     return g_processing_last_core_color_main_prelude_wb_matrix_ms;
+}
+
+double processingGetLastCoreColorMainPreludeWbMatrixRMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_wb_matrix_r_ms;
+}
+
+double processingGetLastCoreColorMainPreludeWbMatrixGMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_wb_matrix_g_ms;
+}
+
+double processingGetLastCoreColorMainPreludeWbMatrixBMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_wb_matrix_b_ms;
 }
 
 double processingGetLastCoreColorMainPreludeWbGradientMatrixMilliseconds(void)
