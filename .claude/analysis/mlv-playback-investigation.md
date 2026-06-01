@@ -1,3 +1,29 @@
+# 2026-06-01 - write-both dispatch collapse is a reject; keep the earlier keeper
+
+### Verified locally
+
+- I collapsed the hot combined `write_r && write_b` dispatch in `src/mlv/llrawproc/chroma_smooth.c` so the non-average path sat under a single outer branch with the average path nested beneath it, then rebuilt the user-facing release tree and reran the same three visible GUI smoke clips.
+- The visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The collapse did not beat the keeper baseline on the hot clips:
+  - `M16-1327`: `avg_llrawproc_ms=119.857`, `avg_mix_chroma_ms=44.714`, `avg_final_blend_ms=13.572`, `presented_fps=0.874`
+  - `M16-1347`: `avg_llrawproc_ms=126.000`, `avg_mix_chroma_ms=52.857`, `avg_final_blend_ms=14.429`, `presented_fps=0.874`
+  - `M16-1446`: `avg_llrawproc_ms=62.571`, `avg_mix_chroma_ms=0.000`, `avg_final_blend_ms=11.857`, `presented_fps=0.874`
+- The hot clips regressed versus the current keeper baseline, so I reverted the collapse and kept the earlier write-both dispatch keeper intact.
+
+### Cross-checked from prior analysis
+
+- The earlier hot write-both dispatch hint remains the keeper-shaped store-side leaf in this sequence.
+- The direct-clamped non-average fallback remains the retained store shape beneath that dispatch.
+
+### Needs runtime profiling
+
+- Rebaseline from the earlier hot write-both dispatch keeper.
+- If we stay in `mix_chroma`, the next probe should be a materially different store-side shape rather than another branch-shape collapse.
+
 # 2026-06-01 - non-average fallthrough hint in the hot write-both store path is a reject; keep the earlier keeper
 
 ### Verified locally
