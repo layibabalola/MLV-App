@@ -1,3 +1,28 @@
+## 2026-06-01 - current keeper rebaseline keeps fused final_blend intact, but mix_chroma remains the hottest retained bucket
+
+### Verified locally
+
+- I reran the three visible smoke clips on the current keeper build from [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) with the normal no-probe path and kept the visible gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The current keeper rebaseline shows the fused `final_blend` path is still intact and materially cheaper than the earlier keeper on the hot clips:
+  - `M16-1327`: `llrawproc_ms=118.00003`, `dual_iso_full20_final_blend_ms=12.00008`, `dual_iso_full20_mix_chroma_ms=69.00001`
+  - `M16-1347`: `llrawproc_ms=140.00010`, `dual_iso_full20_final_blend_ms=19.99998`, `dual_iso_full20_mix_chroma_ms=78.00007`
+  - `M16-1446`: `llrawproc_ms=45.00008`, `dual_iso_full20_final_blend_ms=9.00006`, `dual_iso_full20_mix_chroma_ms=0`
+- The current no-probe build still has `mix_chroma` as the larger retained Dual ISO bucket on the chroma-heavy clips, but the bucket is internally mixed and has not yet yielded a stable narrow optimization shape.
+
+### Cross-checked from prior analysis
+
+- The earlier `final_blend -> convert_20_to_16bit` fusion remains a valid keeper-shaped win.
+- The latest `mix_chroma` write-side split stayed mixed, so there is still no branch-skew or write-side winner to patch.
+- The Shadows/Highlights recurrence detail remains balanced, so it is not the next obvious narrow patch either.
+
+### Needs runtime profiling
+
+- The next move should stay evidence-led inside the live Dual ISO surface rather than forcing a patch from a mixed write split.
+- If the next structural split in `mix_chroma` is still mixed, the honest move is to pivot to another retained bucket instead of squeezing this one harder.
+
 ## 2026-06-01 - mix_chroma halfres non-average write split is mixed; no stable write-side winner yet
 
 ### Verified locally
