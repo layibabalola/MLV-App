@@ -442,10 +442,12 @@ static void CHROMA_SMOOTH_FUNC(int w,
                     }
                     else
                     {
-                        out_r = (out_r_ev_offset <= ev2raw_range) ? (uint16_t)ev2raw[out_r_ev]
-                                                                   : chroma_smooth_ev2raw_lookup(ev2raw, out_r_ev);
-                        out_b = (out_b_ev_offset <= ev2raw_range) ? (uint16_t)ev2raw[out_b_ev]
-                                                                   : chroma_smooth_ev2raw_lookup(ev2raw, out_b_ev);
+                        const int out_r_ev_clamped =
+                            out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
+                        const int out_b_ev_clamped =
+                            out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
+                        out_r = (uint16_t)ev2raw[out_r_ev_clamped];
+                        out_b = (uint16_t)ev2raw[out_b_ev_clamped];
                     }
                 }
                 else
@@ -547,9 +549,9 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 else
                 {
                     if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
-                    out_r = chroma_smooth_ev2raw_lookup(ev2raw, out_r_ev);
                     if (probe_center)
                     {
+                        out_r = chroma_smooth_ev2raw_lookup(ev2raw, out_r_ev);
                         const double lookup_elapsed_ms =
                             (mlv_stage_timing_now() - chroma_center_store_r_lookup_start) * 1000.0;
                         const double write_start = mlv_stage_timing_now();
@@ -563,6 +565,12 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         }
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_r_start = write_start;
+                    }
+                    else
+                    {
+                        const int out_r_ev_clamped =
+                            out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
+                        out_r = (uint16_t)ev2raw[out_r_ev_clamped];
                     }
                     if (probe_average_branch)
                     {
@@ -582,9 +590,9 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         }
                     }
                     if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();
-                    out_b = chroma_smooth_ev2raw_lookup(ev2raw, out_b_ev);
                     if (probe_center)
                     {
+                        out_b = chroma_smooth_ev2raw_lookup(ev2raw, out_b_ev);
                         const double lookup_elapsed_ms =
                             (mlv_stage_timing_now() - chroma_center_store_b_lookup_start) * 1000.0;
                         const double write_start = mlv_stage_timing_now();
@@ -598,6 +606,12 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         }
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_b_start = write_start;
+                    }
+                    else
+                    {
+                        const int out_b_ev_clamped =
+                            out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
+                        out_b = (uint16_t)ev2raw[out_b_ev_clamped];
                     }
                     if (probe_average_branch)
                     {
@@ -637,9 +651,9 @@ chroma_mix_store_r_path:
                 }
                 uint16_t out_r = 0;
                 if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
-                out_r = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
                 if (probe_center)
                 {
+                    out_r = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
                     const double lookup_elapsed_ms =
                         (mlv_stage_timing_now() - chroma_center_store_r_lookup_start) * 1000.0;
                     const double write_start = mlv_stage_timing_now();
@@ -653,6 +667,13 @@ chroma_mix_store_r_path:
                     }
                     chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                     chroma_center_store_r_start = write_start;
+                }
+                else
+                {
+                    const int out_r_ev = gr + dr;
+                    const int out_r_ev_clamped =
+                        out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
+                    out_r = (uint16_t)ev2raw[out_r_ev_clamped];
                 }
                 if (probe_average_branch && use_average)
                 {
@@ -727,9 +748,9 @@ chroma_mix_store_b_path:
                 }
                 uint16_t out_b = 0;
                 if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();
-                out_b = chroma_smooth_ev2raw_lookup(ev2raw, gb + db);
                 if (probe_center)
                 {
+                    out_b = chroma_smooth_ev2raw_lookup(ev2raw, gb + db);
                     const double lookup_elapsed_ms =
                         (mlv_stage_timing_now() - chroma_center_store_b_lookup_start) * 1000.0;
                     const double write_start = mlv_stage_timing_now();
@@ -743,6 +764,13 @@ chroma_mix_store_b_path:
                     }
                     chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                     chroma_center_store_b_start = write_start;
+                }
+                else
+                {
+                    const int out_b_ev = gb + db;
+                    const int out_b_ev_clamped =
+                        out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
+                    out_b = (uint16_t)ev2raw[out_b_ev_clamped];
                 }
                 if (probe_average_branch && use_average)
                 {

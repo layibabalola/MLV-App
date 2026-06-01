@@ -1,3 +1,34 @@
+# 2026-06-01 - direct-clamped `ev2raw` access in the hot store fallback is a keeper
+
+### Verified locally
+
+- I replaced the non-probe store fallback lookups in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) with direct clamped `ev2raw[...]` reads in the hot halfres `mix_chroma` store branches.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:02:03 PM`
+  - `Length=8956416`
+  - `SHA256=CC052380702972E30A3CF6B8145714BA8536260197EA2B74766B1B1D9D8C2C95`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages improved overall versus the current keeper baseline:
+  - `M16-1327`: `llrawproc_ms=113.5` (`fps≈8.81`), `mix_chroma_ms=56.5` (`fps≈17.70`), `final_blend_ms=12.5` (`fps≈80.00`)
+  - `M16-1347`: `llrawproc_ms=124.5` (`fps≈8.03`), `mix_chroma_ms=61.0` (`fps≈16.39`), `final_blend_ms=17.0` (`fps≈58.82`)
+  - `M16-1446`: `llrawproc_ms=52.5` (`fps≈19.05`), `mix_chroma_ms=0.0`, `final_blend_ms=10.5` (`fps≈95.24`)
+  - Aggregate: `llrawproc_ms=96.833` (`fps≈10.33`), `mix_chroma_ms=39.167` (`fps≈25.53`), `final_blend_ms=13.333` (`fps≈75.00`)
+
+### Cross-checked from prior analysis
+
+- The old helper call path was still part of the hot store body, but the direct array access now wins on the full three-clip aggregate.
+- `M16-1347` regressed relative to the immediately previous keeper on `llrawproc_ms`, but the other two clips improved enough that the aggregate still moved the right way.
+- The visible playback still looked aligned with the smoke gate, so this is keeper-shaped rather than just a raw microprofile win.
+
+### Needs runtime profiling
+
+- Rebaseline from this direct-clamped keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next candidate is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - wider store-pointer cleanup across the store branches is a reject
 
 ### Verified locally
