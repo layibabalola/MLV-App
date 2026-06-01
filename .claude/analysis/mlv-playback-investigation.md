@@ -8656,3 +8656,28 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - The next Dual ISO probe should avoid this two-pass OpenMP shape.
 - If we stay in `mix_chroma`, the next candidate needs to cut actual work, not just region overhead.
+
+## 2026-05-31 - cam WB desat probe and instrumentation repair
+
+### Verified locally
+
+- I added a new cam WB probe leaf for the desaturation block in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c), exported it through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.h), and threaded the telemetry through [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/RenderFrameThread.cpp) and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp).
+- The first run exposed an instrumentation bug: `processing_core_timing_reset()` was not zeroing the new `color_cam_wb_desat_ms` field, so the initial values were stale and unusable.
+- I fixed the reset path and widened the `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE` parser so mode `3` is accepted as the desat probe.
+- The release executable was rebuilt at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) and rerun on the same three smoke clips with the isolated desat mode enabled.
+- The isolated rerun kept the visible smoke gate intact:
+  - x1 Quality
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+
+### Cross-checked from prior analysis
+
+- The cam WB matrix / AgX / gamma side remains live.
+- The desaturation leaf itself stayed at `0 ms` on the isolated rerun, which means it is not the next meaningful optimization target on these smoke clips.
+- The measurement therefore confirms the earlier suspicion that the residual cam WB work is elsewhere in the matrix-side path, not in the desaturation block.
+
+### Needs runtime profiling
+
+- If we stay in the cam family, the next probe should target the matrix-side residual rather than the desaturation block.
+- If the next probe is also flat, we should move to another retained bucket instead of forcing more cam WB instrumentation.

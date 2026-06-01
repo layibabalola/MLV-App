@@ -2454,6 +2454,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingGetLastCoreColorCamWbMatrixMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_wb_gamut_ms"),
                                       processingGetLastCoreColorCamWbGamutMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_wb_desat_ms"),
+                                      processingGetLastCoreColorCamWbDesatMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_cam_agx_ms"),
                                       processingGetLastCoreColorCamAgxMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_core_color_gamma_ms"),

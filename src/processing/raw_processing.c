@@ -90,6 +90,7 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_gradi
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_gamut_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_desat_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
@@ -159,7 +160,7 @@ static int processing_main_prelude_wb_probe_mode(void)
         {
             char * end = NULL;
             long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 2 )
+            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 3 )
             {
                 probe_mode = (int)parsed;
             }
@@ -268,6 +269,7 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_cam_wb_ms = 0.0;
     g_processing_last_core_color_cam_wb_matrix_ms = 0.0;
     g_processing_last_core_color_cam_wb_gamut_ms = 0.0;
+    g_processing_last_core_color_cam_wb_desat_ms = 0.0;
     g_processing_last_core_color_cam_agx_ms = 0.0;
     g_processing_last_core_color_gamma_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
@@ -315,6 +317,7 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->color_cam_wb_ms = 0.0;
     timing->color_cam_wb_matrix_ms = 0.0;
     timing->color_cam_wb_gamut_ms = 0.0;
+    timing->color_cam_wb_desat_ms = 0.0;
     timing->color_cam_agx_ms = 0.0;
     timing->color_gamma_ms = 0.0;
     timing->creative_ms = 0.0;
@@ -1015,6 +1018,7 @@ void applyProcessingObject( processingObject_t * processing,
         g_processing_last_core_color_cam_wb_ms = core_timing.color_cam_wb_ms;
         g_processing_last_core_color_cam_wb_matrix_ms = core_timing.color_cam_wb_matrix_ms;
         g_processing_last_core_color_cam_wb_gamut_ms = core_timing.color_cam_wb_gamut_ms;
+        g_processing_last_core_color_cam_wb_desat_ms = core_timing.color_cam_wb_desat_ms;
         g_processing_last_core_color_cam_agx_ms = core_timing.color_cam_agx_ms;
         g_processing_last_core_color_gamma_ms = core_timing.color_gamma_ms;
         g_processing_last_core_creative_ms = core_timing.creative_ms;
@@ -1111,6 +1115,8 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_color_cam_wb_matrix_ms, core_timings[t].color_cam_wb_matrix_ms);
             g_processing_last_core_color_cam_wb_gamut_ms =
                 MAX(g_processing_last_core_color_cam_wb_gamut_ms, core_timings[t].color_cam_wb_gamut_ms);
+            g_processing_last_core_color_cam_wb_desat_ms =
+                MAX(g_processing_last_core_color_cam_wb_desat_ms, core_timings[t].color_cam_wb_desat_ms);
             g_processing_last_core_color_cam_agx_ms =
                 MAX(g_processing_last_core_color_cam_agx_ms, core_timings[t].color_cam_agx_ms);
             g_processing_last_core_color_gamma_ms =
@@ -2262,6 +2268,8 @@ void apply_processing_object( processingObject_t * processing,
                 (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 1);
             const int color_cam_wb_probe_gamut =
                 (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 2);
+            const int color_cam_wb_probe_desat =
+                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 3);
             if( use_cam_matrix )
             {
                 const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
@@ -2283,6 +2291,8 @@ void apply_processing_object( processingObject_t * processing,
 
                 const double color_cam_wb_gamut_start =
                     (capture_breakdown && color_cam_wb_probe_gamut && !exr_mode) ? omp_get_wtime() : 0.0;
+                const double color_cam_wb_desat_start =
+                    (capture_breakdown && color_cam_wb_probe_desat && !exr_mode) ? omp_get_wtime() : 0.0;
                 if (!exr_mode)
                 {
                     /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
@@ -2315,6 +2325,11 @@ void apply_processing_object( processingObject_t * processing,
                 {
                     core_timing->color_cam_wb_gamut_ms +=
                         (omp_get_wtime() - color_cam_wb_gamut_start) * 1000.0;
+                }
+                if( capture_breakdown && color_cam_wb_probe_desat && !exr_mode )
+                {
+                    core_timing->color_cam_wb_desat_ms +=
+                        (omp_get_wtime() - color_cam_wb_desat_start) * 1000.0;
                 }
                 if( capture_breakdown )
                 {
@@ -2384,6 +2399,8 @@ void apply_processing_object( processingObject_t * processing,
                     }
                     const double color_cam_wb_gamut_start =
                         (capture_breakdown && color_cam_wb_probe_gamut && !exr_mode) ? omp_get_wtime() : 0.0;
+                    const double color_cam_wb_desat_start =
+                        (capture_breakdown && color_cam_wb_probe_desat && !exr_mode) ? omp_get_wtime() : 0.0;
                     if (!exr_mode)
                     {
                         /* Bring the colour back in to gamut by desaturating it, this will preserve hue and avoid ugliest clipping */
@@ -2411,6 +2428,11 @@ void apply_processing_object( processingObject_t * processing,
                     {
                         core_timing->color_cam_wb_gamut_ms +=
                             (omp_get_wtime() - color_cam_wb_gamut_start) * 1000.0;
+                    }
+                    if( capture_breakdown && color_cam_wb_probe_desat && !exr_mode )
+                    {
+                        core_timing->color_cam_wb_desat_ms +=
+                            (omp_get_wtime() - color_cam_wb_desat_start) * 1000.0;
                     }
                     if( capture_breakdown )
                     {
@@ -3033,6 +3055,11 @@ double processingGetLastCoreColorCamWbMatrixMilliseconds(void)
 double processingGetLastCoreColorCamWbGamutMilliseconds(void)
 {
     return g_processing_last_core_color_cam_wb_gamut_ms;
+}
+
+double processingGetLastCoreColorCamWbDesatMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_wb_desat_ms;
 }
 
 double processingGetLastCoreColorCamAgxMilliseconds(void)
