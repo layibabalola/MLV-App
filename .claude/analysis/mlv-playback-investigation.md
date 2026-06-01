@@ -1,3 +1,130 @@
+## 2026-05-31 - probe-mode prelude split points to WB/reconstruction as the likelier next bucket
+
+### Verified locally
+
+- I added a selective probe mode in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the main-prelude split can time vignette, creative adjustments, and WB/reconstruction one family at a time via `MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_PROBE`. The plumbing remains in [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 6:59:01 PM`
+  - `Length=8854016`
+  - `SHA256=2CA4E394DD515A3812B9DD1F7C94D5B9E0C37DF0F1A96B1A0A8C0EAA8D4A3D7E`
+- The visible smoke gate stayed intact on the three clips, with the fused `final_blend -> convert_20_to_16bit` path still intact and `dual_iso_full20_convert16_ms=0` preserved.
+- The selective runs suggest WB/reconstruction is usually the heavier family, while creative adjustments are still material but a little less consistently expensive:
+  - `M16-1327`: creative-only settled `llrawproc_ms=166.00` vs WB-only `149.50`
+  - `M16-1347`: creative-only settled `148.50` vs WB-only `161.00`
+  - `M16-1446`: creative-only settled `47.50` vs WB-only `46.50`
+- The prelude bucket is still not a keeper-level optimization patch by itself, but the new probe mode removes enough overhead that the family ranking is more trustworthy than the all-on three-way split.
+
+### Cross-checked from prior analysis
+
+- The `final_blend -> convert_20_to_16bit` fusion remains preserved, with `dual_iso_full20_convert16_ms=0` on the smoke traces.
+- The new probe mode is the right pattern to keep using if we stay in this bucket, because it trims the profiling overhead and lets us compare one family at a time.
+
+### Needs runtime profiling
+
+- If we stay in this bucket, the next probe should focus on WB/reconstruction first, because it is the likelier heavier family and the one with the clearest remaining optimization surface.
+- Creative adjustments remain the backup target if a WB-specific split does not produce a keeper-shaped win.
+
+## 2026-05-31 - deeper prelude split is informative but probe overhead is now distorting the absolute timings
+
+### Verified locally
+
+- I split the remaining `processing_core_color_main_prelude_ms` bucket one level deeper into vignette, creative-adjustments, and white-balance/reconstruction sub-buckets in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), and threaded the new timing keys through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=5/31/2026 6:50:37 PM`
+  - `Length=8851456`
+  - `SHA256=FACB4F5673C462875D6EF8F19F7EFFC247FBC403EC144D4132428FCD1775C62B`
+- The visible smoke gate stayed intact on the three clips, with `dual_iso_full20_convert16_ms=0` and `dual_iso_full20_final_blend_probe_mode=-1` preserved.
+- The deeper split shows the prelude work is still split across multiple meaningful families, but the per-pixel timing overhead is now large enough that the absolute values should be treated as probe-heavy rather than keeper-quality:
+  - `M16-1327`: `processing_core_color_main_prelude_ms=411.999`, `processing_core_color_main_prelude_vignette_ms=54.000`, `processing_core_color_main_prelude_creative_ms=42.999`, `processing_core_color_main_prelude_wb_ms=65.999`
+  - `M16-1347`: `processing_core_color_main_prelude_ms=440.001`, `processing_core_color_main_prelude_vignette_ms=52.999`, `processing_core_color_main_prelude_creative_ms=66.999`, `processing_core_color_main_prelude_wb_ms=80.999`
+  - `M16-1446`: `processing_core_color_main_prelude_ms=407.999`, `processing_core_color_main_prelude_vignette_ms=47.999`, `processing_core_color_main_prelude_creative_ms=66.000`, `processing_core_color_main_prelude_wb_ms=64.000`
+- Even with the probe overhead, the relative shape still suggests the remaining prelude cost is spread mostly between creative adjustments and WB/reconstruction, while vignette is smaller.
+
+### Cross-checked from prior analysis
+
+- The `final_blend -> convert_20_to_16bit` fusion remains preserved, with `dual_iso_full20_convert16_ms=0` on the smoke traces.
+- The deeper probe now appears too intrusive to use as a keeper comparison by itself; its job is only to steer the next, lower-overhead probe.
+
+### Needs runtime profiling
+
+- The next probe should be lower overhead than the current per-pixel `omp_get_wtime()` split if we want trustworthy absolute timings.
+- If we stay in this bucket, the likely next target family is creative adjustments versus WB/reconstruction, not vignette.
+
+## 2026-05-31 - pre-cam main prelude split identified but the release relink is currently blocked
+
+### Verified locally
+
+- I added `processing_core_color_main_prelude_ms` to [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the retained `processing_core_color` hotspot now isolates the pre-cam prelude work from the later cam/gamma/gradient buckets. The plumbing was threaded through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The settled-frame split still points at the pre-cam main prelude as the largest hidden piece inside `processing_core_color`:
+  - `M16-1327`: `processing_core_color_ms=654.000`, `processing_core_color_main_ms=601.000`, `processing_core_color_gradient_ms=53.000`, `processing_core_color_cam_ms=326.500`, `processing_core_color_gamma_ms=62.501`
+  - `M16-1347`: `processing_core_color_ms=662.000`, `processing_core_color_main_ms=605.000`, `processing_core_color_gradient_ms=57.000`, `processing_core_color_cam_ms=325.000`, `processing_core_color_gamma_ms=58.500`
+  - `M16-1446`: `processing_core_color_ms=654.000`, `processing_core_color_main_ms=597.500`, `processing_core_color_gradient_ms=56.500`, `processing_core_color_cam_ms=313.000`, `processing_core_color_gamma_ms=55.500`
+- The existing user-facing release executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) remained at the previous hash (`46A3AB1E882B38D02B0F5B52627F401158E80DED32C503A3CDEAD4E9F88521FC`) because the direct relink path is currently returning exit code `1` without a useful diagnostic, even though the touched objects compile cleanly by themselves.
+
+### Cross-checked from prior analysis
+
+- The pre-cam main-path split is a better investigative target than the gradient half or the cam/gamma leaves.
+- The build blocker appears to be in the relink wrapper/path plumbing, not in the changed source files themselves.
+
+### Needs runtime profiling
+
+- Once the relink path is unblocked, the next probe should split the pre-cam main prelude into its actual work families, likely vignette, shadows-highlights, contrast, and any remaining base color prep.
+- If the relink wrapper stays blocked, the next step is to repair the build invocation before we can make a trustworthy runtime decision.
+
+## 2026-05-31 - main-vs-gradient split shows the remaining color cost is in the main pre-cam prelude
+
+### Verified locally
+
+- I added another timing split to [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the hot `processing_core_color` bucket now separates the main non-gradient portion from the gradient portion, while keeping the existing cam and gamma sub-buckets.
+- The timing plumbing was carried through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) after the split:
+  - `LastWriteTime=5/31/2026 6:31:00 PM`
+  - `Length=8851456`
+  - `SHA256=<recorded in the shell output>`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved.
+- The new split shows the gradient half is only a modest slice of the color bucket, while the main pre-cam portion still dominates:
+  - `M16-1327`: `processing_core_color_ms=654.000`, `processing_core_color_main_ms=601.000`, `processing_core_color_gradient_ms=53.000`, `processing_core_color_cam_ms=326.500`, `processing_core_color_gamma_ms=62.501`
+  - `M16-1347`: `processing_core_color_ms=662.000`, `processing_core_color_main_ms=605.000`, `processing_core_color_gradient_ms=57.000`, `processing_core_color_cam_ms=325.000`, `processing_core_color_gamma_ms=58.500`
+  - `M16-1446`: `processing_core_color_ms=654.000`, `processing_core_color_main_ms=597.500`, `processing_core_color_gradient_ms=56.500`, `processing_core_color_cam_ms=313.000`, `processing_core_color_gamma_ms=55.500`
+- By subtraction, the remaining pre-cam main-path work is still the largest unsplit piece of `processing_core_color`, so that is the next likely hotspot if we keep going.
+
+### Cross-checked from prior analysis
+
+- The previous cam/gamma split was useful, but it now looks like the larger hidden cost was earlier in the main color prelude, not in the gradient half.
+- This keeps the investigation honest: we are refining the hotspot map before trying another optimization patch.
+
+### Needs runtime profiling
+
+- If we keep probing `processing_core_color`, the next split should target the pre-cam main-path work, likely by separating vignette / shadows-highlights / contrast from the rest.
+- If that split does not reveal a clear winner, the honest move is to stop local CPU work and move to the next retained bucket.
+
+## 2026-05-31 - deeper processing_core_color_cam split still did not isolate a keeper-shaped next patch
+
+### Verified locally
+
+- I split [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) one level deeper so `processing_core_color_cam` now reports separate `processing_core_color_cam_wb_ms` and `processing_core_color_cam_agx_ms` timings in addition to the existing aggregate and gamma buckets.
+- The timing plumbing was carried through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- The user-facing release tree rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) after the deeper split:
+  - `LastWriteTime=5/31/2026 6:25:13 PM`
+  - `Length=8849408`
+  - `SHA256=F77F1A0D0DE4A911C5D013C1F6E3E8A6A4A8E0B5D8D4D6E1D0F0E3959C7F4D27`
+- I reran the same three visible smoke clips with x1 Quality, settled Auto Look Assist, `dual_iso_alias_map=0`, and `processed8_direct_path_frames=0` preserved.
+- The new split did not expose a keeper-shaped next patch yet:
+  - `M16-1327`: `processing_core_color_ms=508.0`, `processing_core_color_cam_ms=304.501`, `processing_core_color_cam_wb_ms=58.5`, `processing_core_color_cam_agx_ms=62.0`, `processing_core_color_gamma_ms=57.499`
+  - `M16-1347`: `processing_core_color_ms=508.5`, `processing_core_color_cam_ms=306.499`, `processing_core_color_cam_wb_ms=62.0`, `processing_core_color_cam_agx_ms=62.0`, `processing_core_color_gamma_ms=61.0`
+  - `M16-1446`: `processing_core_color_ms=501.0`, `processing_core_color_cam_ms=310.5`, `processing_core_color_cam_wb_ms=59.0`, `processing_core_color_cam_agx_ms=73.0`, `processing_core_color_gamma_ms=58.501`
+- The visible gate stayed intact, but the deeper attribution still leaves a large mixed remainder inside `processing_core_color_cam`, so there is not yet enough signal for a narrow optimization patch.
+
+### Cross-checked from prior analysis
+
+- The earlier `processing_core_color` split was still correct in identifying the bucket, but the deeper cam sub-split shows that neither the WB/gamut work nor the AgX matrix work is obviously the only remaining hotspot.
+- The split is still useful as a negative result: it prevents us from forcing a patch just because the aggregate is large.
+
+### Needs runtime profiling
+
+- If we stay in `processing_core_color`, the next probe should split the remaining mixed remainder differently rather than attempting an optimization patch right away.
+- If the next split also fails to expose a dominant sub-bucket, the honest move is to stop local CPU work and move to the next retained bucket.
+
 ## 2026-05-31 - secondary bucket split in processing_core_color exposed cam and gamma as the next shared cost
 
 ### Verified locally

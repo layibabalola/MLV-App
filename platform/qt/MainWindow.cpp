@@ -15545,7 +15545,15 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingCoreSumMs = 0.0;
     m_playbackSmokeProcessingCoreLevelsSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorGradientSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeVignetteSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeCreativeSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorCamSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorCamWbSumMs = 0.0;
+    m_playbackSmokeProcessingCoreColorCamAgxSumMs = 0.0;
     m_playbackSmokeProcessingCoreColorGammaSumMs = 0.0;
     m_playbackSmokeProcessingCoreCreativeSumMs = 0.0;
     m_playbackSmokeProcessingCoreOutputSumMs = 0.0;
@@ -15960,8 +15968,24 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_core_levels_ms" );
     m_playbackSmokeProcessingCoreColorSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_ms" );
+    m_playbackSmokeProcessingCoreColorMainSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_ms" );
+    m_playbackSmokeProcessingCoreColorGradientSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_gradient_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeVignetteSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_vignette_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeCreativeSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_creative_ms" );
+    m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_main_prelude_wb_ms" );
     m_playbackSmokeProcessingCoreColorCamSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_cam_ms" );
+    m_playbackSmokeProcessingCoreColorCamWbSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_wb_ms" );
+    m_playbackSmokeProcessingCoreColorCamAgxSumMs +=
+        telemetryDoubleValue( timing, "processing_core_color_cam_agx_ms" );
     m_playbackSmokeProcessingCoreColorGammaSumMs +=
         telemetryDoubleValue( timing, "processing_core_color_gamma_ms" );
     m_playbackSmokeProcessingCoreCreativeSumMs +=
@@ -16366,8 +16390,16 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "borrowed_prepared_rgb8_bytes=%47 owned_prepared_rgb8_bytes=%48 "
                "moved_prepared_rgb8_frames=%49 moved_prepared_rgb8_bytes=%50 "
                "qimage_prepared_rgb8_frames=%51 qimage_prepared_rgb8_bytes=%52 "
-               "avg_processing_core_color_cam_ms=%53 "
-               "avg_processing_core_color_gamma_ms=%54" )
+               "avg_processing_core_color_main_ms=%53 "
+               "avg_processing_core_color_gradient_ms=%54 "
+               "avg_processing_core_color_main_prelude_ms=%55 "
+               "avg_processing_core_color_main_prelude_vignette_ms=%56 "
+               "avg_processing_core_color_main_prelude_creative_ms=%57 "
+               "avg_processing_core_color_main_prelude_wb_ms=%58 "
+               "avg_processing_core_color_cam_ms=%59 "
+               "avg_processing_core_color_cam_wb_ms=%60 "
+               "avg_processing_core_color_cam_agx_ms=%61 "
+               "avg_processing_core_color_gamma_ms=%62" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -16425,7 +16457,15 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( static_cast<qulonglong>( m_playbackSmokeMovedPreparedRgb8Bytes ) )
                .arg( m_playbackSmokeQImagePreparedRgb8Frames )
                .arg( static_cast<qulonglong>( m_playbackSmokeQImagePreparedRgb8Bytes ) )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGradientSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeVignetteSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeCreativeSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorMainPreludeWbSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamWbSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorCamAgxSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreColorGammaSumMs ), 0, 'f', 3 );
 
     qInfo().noquote()

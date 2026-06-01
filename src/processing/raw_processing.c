@@ -68,7 +68,15 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_sharpen_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_grain_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_levels_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gradient_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_vignette_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_creative_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_main_prelude_wb_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_wb_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_creative_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0;
@@ -103,6 +111,27 @@ static int processing_shadows_highlights_curve_index_mask_enabled(void)
         initialized = 1;
     }
     return enabled;
+}
+
+static int processing_main_prelude_probe_mode(void)
+{
+    static int initialized = 0;
+    static int probe_mode = 0;
+    if( !initialized )
+    {
+        const char * value = getenv("MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_PROBE");
+        if( value && *value )
+        {
+            char * end = NULL;
+            long parsed = strtol(value, &end, 10);
+            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 3 )
+            {
+                probe_mode = (int)parsed;
+            }
+        }
+        initialized = 1;
+    }
+    return probe_mode;
 }
 
 typedef struct
@@ -140,7 +169,15 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_grain_ms = 0.0;
     g_processing_last_core_levels_ms = 0.0;
     g_processing_last_core_color_ms = 0.0;
+    g_processing_last_core_color_main_ms = 0.0;
+    g_processing_last_core_color_gradient_ms = 0.0;
+    g_processing_last_core_color_main_prelude_ms = 0.0;
+    g_processing_last_core_color_main_prelude_vignette_ms = 0.0;
+    g_processing_last_core_color_main_prelude_creative_ms = 0.0;
+    g_processing_last_core_color_main_prelude_wb_ms = 0.0;
     g_processing_last_core_color_cam_ms = 0.0;
+    g_processing_last_core_color_cam_wb_ms = 0.0;
+    g_processing_last_core_color_cam_agx_ms = 0.0;
     g_processing_last_core_color_gamma_ms = 0.0;
     g_processing_last_core_creative_ms = 0.0;
     g_processing_last_core_output_ms = 0.0;
@@ -165,7 +202,15 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
 
     timing->levels_ms = 0.0;
     timing->color_ms = 0.0;
+    timing->color_main_ms = 0.0;
+    timing->color_gradient_ms = 0.0;
+    timing->color_main_prelude_ms = 0.0;
+    timing->color_main_prelude_vignette_ms = 0.0;
+    timing->color_main_prelude_creative_ms = 0.0;
+    timing->color_main_prelude_wb_ms = 0.0;
     timing->color_cam_ms = 0.0;
+    timing->color_cam_wb_ms = 0.0;
+    timing->color_cam_agx_ms = 0.0;
     timing->color_gamma_ms = 0.0;
     timing->creative_ms = 0.0;
     timing->output_ms = 0.0;
@@ -843,7 +888,15 @@ void applyProcessingObject( processingObject_t * processing,
                                 &core_timing);
         g_processing_last_core_levels_ms = core_timing.levels_ms;
         g_processing_last_core_color_ms = core_timing.color_ms;
+        g_processing_last_core_color_main_ms = core_timing.color_main_ms;
+        g_processing_last_core_color_gradient_ms = core_timing.color_gradient_ms;
+        g_processing_last_core_color_main_prelude_ms = core_timing.color_main_prelude_ms;
+        g_processing_last_core_color_main_prelude_vignette_ms = core_timing.color_main_prelude_vignette_ms;
+        g_processing_last_core_color_main_prelude_creative_ms = core_timing.color_main_prelude_creative_ms;
+        g_processing_last_core_color_main_prelude_wb_ms = core_timing.color_main_prelude_wb_ms;
         g_processing_last_core_color_cam_ms = core_timing.color_cam_ms;
+        g_processing_last_core_color_cam_wb_ms = core_timing.color_cam_wb_ms;
+        g_processing_last_core_color_cam_agx_ms = core_timing.color_cam_agx_ms;
         g_processing_last_core_color_gamma_ms = core_timing.color_gamma_ms;
         g_processing_last_core_creative_ms = core_timing.creative_ms;
         g_processing_last_core_output_ms = core_timing.output_ms;
@@ -895,8 +948,24 @@ void applyProcessingObject( processingObject_t * processing,
                 MAX(g_processing_last_core_levels_ms, core_timings[t].levels_ms);
             g_processing_last_core_color_ms =
                 MAX(g_processing_last_core_color_ms, core_timings[t].color_ms);
+            g_processing_last_core_color_main_ms =
+                MAX(g_processing_last_core_color_main_ms, core_timings[t].color_main_ms);
+            g_processing_last_core_color_gradient_ms =
+                MAX(g_processing_last_core_color_gradient_ms, core_timings[t].color_gradient_ms);
+            g_processing_last_core_color_main_prelude_ms =
+                MAX(g_processing_last_core_color_main_prelude_ms, core_timings[t].color_main_prelude_ms);
+            g_processing_last_core_color_main_prelude_vignette_ms =
+                MAX(g_processing_last_core_color_main_prelude_vignette_ms, core_timings[t].color_main_prelude_vignette_ms);
+            g_processing_last_core_color_main_prelude_creative_ms =
+                MAX(g_processing_last_core_color_main_prelude_creative_ms, core_timings[t].color_main_prelude_creative_ms);
+            g_processing_last_core_color_main_prelude_wb_ms =
+                MAX(g_processing_last_core_color_main_prelude_wb_ms, core_timings[t].color_main_prelude_wb_ms);
             g_processing_last_core_color_cam_ms =
                 MAX(g_processing_last_core_color_cam_ms, core_timings[t].color_cam_ms);
+            g_processing_last_core_color_cam_wb_ms =
+                MAX(g_processing_last_core_color_cam_wb_ms, core_timings[t].color_cam_wb_ms);
+            g_processing_last_core_color_cam_agx_ms =
+                MAX(g_processing_last_core_color_cam_agx_ms, core_timings[t].color_cam_agx_ms);
             g_processing_last_core_color_gamma_ms =
                 MAX(g_processing_last_core_color_gamma_ms, core_timings[t].color_gamma_ms);
             g_processing_last_core_creative_ms =
@@ -1683,6 +1752,7 @@ void apply_processing_object( processingObject_t * processing,
      || ( processing->gradient_contrast       < -0.01 || processing->gradient_contrast       > 0.01 );
     const double inv_65535 = 1.0 / 65535.0;
     const int pixel_count = img_s / 3;
+    const double color_main_start = capture_breakdown ? omp_get_wtime() : 0.0;
 
     /* white balance & exposure & highlights & gamma & highlight reconstruction */
     if( use_basic_matrix_fast_path )
@@ -1740,6 +1810,10 @@ void apply_processing_object( processingObject_t * processing,
             pix[1] = pre_calc_gamma[LIMIT16((uint32_t)result1)];
             pix[2] = pre_calc_gamma[LIMIT16((uint32_t)result2)];
         }
+        if( capture_breakdown )
+        {
+            core_timing->color_main_ms += (omp_get_wtime() - color_main_start) * 1000.0;
+        }
     }
     else
     {
@@ -1752,6 +1826,16 @@ void apply_processing_object( processingObject_t * processing,
 
             double expo_correction = 1.0;
             double expo_correction_gradient = 1.0;
+            const double color_main_prelude_start = capture_breakdown ? omp_get_wtime() : 0.0;
+            const int color_main_prelude_probe_mode = processing_main_prelude_probe_mode();
+            const int color_main_prelude_probe_vignette =
+                (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 1);
+            const int color_main_prelude_probe_creative =
+                (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 2);
+            const int color_main_prelude_probe_wb =
+                (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 3);
+            const double color_main_prelude_vignette_start =
+                (capture_breakdown && color_main_prelude_probe_vignette) ? omp_get_wtime() : 0.0;
 
             /* Vignette correction */
             if( use_vignette )
@@ -1762,7 +1846,14 @@ void apply_processing_object( processingObject_t * processing,
                     expo_correction *= pow( 1.0 + ( vmpix[0] * processing->vignette_strength / 128.0 ), 4 );
                 }
             }
+            if( capture_breakdown && color_main_prelude_probe_vignette )
+            {
+                core_timing->color_main_prelude_vignette_ms +=
+                    (omp_get_wtime() - color_main_prelude_vignette_start) * 1000.0;
+            }
 
+            const double color_main_prelude_creative_start =
+                (capture_breakdown && color_main_prelude_probe_creative) ? omp_get_wtime() : 0.0;
             if (allow_creative_adjustments)
             {
                 /* shadows & highlights, clarity part 1 */
@@ -1819,7 +1910,14 @@ void apply_processing_object( processingObject_t * processing,
                     }
                 }
             }
+            if( capture_breakdown && color_main_prelude_probe_creative )
+            {
+                core_timing->color_main_prelude_creative_ms +=
+                    (omp_get_wtime() - color_main_prelude_creative_start) * 1000.0;
+            }
 
+            const double color_main_prelude_wb_start =
+                (capture_breakdown && color_main_prelude_probe_wb) ? omp_get_wtime() : 0.0;
             /* white balance & exposure */
             float pix0 = (pm[0][pix[0]] /* + pm[1][pix[1]] + pm[2][pix[2]] */)*expo_correction;
             float pix1 = (/* pm[3][pix[0]] + */ pm[4][pix[1]] /* + pm[5][pix[2]] */)*expo_correction;
@@ -1888,10 +1986,10 @@ void apply_processing_object( processingObject_t * processing,
                         }
                     }
                 }
-                else
-                {
-                    /* Check if its the highest green value possible */
-                    if (tmp1 == processing->highest_green)
+            else
+            {
+                /* Check if its the highest green value possible */
+                if (tmp1 == processing->highest_green)
                     {
                         pix[1] = (pix[0] + pix[2]) / 2;
                     }
@@ -1905,11 +2003,23 @@ void apply_processing_object( processingObject_t * processing,
                     }*/
                 }
             }
+            if( capture_breakdown && color_main_prelude_probe_wb )
+            {
+                core_timing->color_main_prelude_wb_ms +=
+                    (omp_get_wtime() - color_main_prelude_wb_start) * 1000.0;
+            }
+
+            if( capture_breakdown )
+            {
+                core_timing->color_main_prelude_ms +=
+                    (omp_get_wtime() - color_main_prelude_start) * 1000.0;
+            }
 
             /* I really don't like how this if is in a big loop :(( */
             if( use_cam_matrix )
             {
                 const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
                 /* WB correction */
                 float pix0b = pix[0], pix1b = pix[1], pix2b = pix[2];
                 float result[3];
@@ -1945,9 +2055,14 @@ void apply_processing_object( processingObject_t * processing,
 
                     for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * desaturate_factor + Y;
                 }
+                if( capture_breakdown )
+                {
+                    core_timing->color_cam_wb_ms += (omp_get_wtime() - color_cam_wb_start) * 1000.0;
+                }
 
                 if (processing->AgX)
                 {
+                    const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     // Clip. Just in case other footprint compression did not happen.
                     for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
                     // AgX compress chroma through matrix.
@@ -1955,6 +2070,10 @@ void apply_processing_object( processingObject_t * processing,
                     pix[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
                     pix[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
                     pix[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                    if( capture_breakdown )
+                    {
+                        core_timing->color_cam_agx_ms += (omp_get_wtime() - color_cam_agx_start) * 1000.0;
+                    }
                 }
                 else
                 {
@@ -1980,12 +2099,14 @@ void apply_processing_object( processingObject_t * processing,
             }
 
             /* Gradient part 2 & blending */
+            const double color_gradient_start = capture_breakdown ? omp_get_wtime() : 0.0;
             if( processing->gradient_enable && gmpix[0] != 0 && use_gradient_adjustments )
             {
                 /* WB correction gradient layer*/
                 if( use_cam_matrix )
                 {
                     const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                    const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
                     double result[3];
                     result[0] = pix0b * processing->proper_wb_matrix[0] + pix1b * processing->proper_wb_matrix[1] + pix2b * processing->proper_wb_matrix[2];
@@ -2014,10 +2135,15 @@ void apply_processing_object( processingObject_t * processing,
                         if (Y <= 0.0f) desaturate_factor = 1;
                         for (int i = 0; i < 3; ++i) result[i] = (result[i] - Y) * desaturate_factor + Y; 
                     }
+                    if( capture_breakdown )
+                    {
+                        core_timing->color_cam_wb_ms += (omp_get_wtime() - color_cam_wb_start) * 1000.0;
+                    }
 
                     /* obligatory code duplication */
                     if (processing->AgX)
                     {
+                        const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
                         // Clip. Just in case other footprint compression did not happen.
                         for (int i = 0; i < 3; ++i) if (result[i] < 0.0) result[i] = 0.0;
                         // AgX compress chroma through matrix.
@@ -2025,6 +2151,10 @@ void apply_processing_object( processingObject_t * processing,
                         pixg[0] = LIMIT16(result[0]*m[0]+result[1]*m[1]+result[2]*m[2]);
                         pixg[1] = LIMIT16(result[0]*m[3]+result[1]*m[4]+result[2]*m[5]);
                         pixg[2] = LIMIT16(result[0]*m[6]+result[1]*m[7]+result[2]*m[8]);
+                        if( capture_breakdown )
+                        {
+                            core_timing->color_cam_agx_ms += (omp_get_wtime() - color_cam_agx_start) * 1000.0;
+                        }
                     }
                     else
                     {
@@ -2056,11 +2186,17 @@ void apply_processing_object( processingObject_t * processing,
                 pix[1] = blend * pixg[1] + inv_blend * pix[1];
                 pix[2] = blend * pixg[2] + inv_blend * pix[2];
             }
+            if( capture_breakdown )
+            {
+                core_timing->color_gradient_ms += (omp_get_wtime() - color_gradient_start) * 1000.0;
+            }
         }
     }
     if( capture_breakdown )
     {
         core_timing->color_ms = (omp_get_wtime() - color_start) * 1000.0;
+        core_timing->color_main_ms =
+            MAX(core_timing->color_ms - core_timing->color_gradient_ms, 0.0);
     }
 
     const double creative_start = capture_breakdown ? omp_get_wtime() : 0.0;
@@ -2511,9 +2647,49 @@ double processingGetLastCoreColorMilliseconds(void)
     return g_processing_last_core_color_ms;
 }
 
+double processingGetLastCoreColorMainMilliseconds(void)
+{
+    return g_processing_last_core_color_main_ms;
+}
+
+double processingGetLastCoreColorGradientMilliseconds(void)
+{
+    return g_processing_last_core_color_gradient_ms;
+}
+
+double processingGetLastCoreColorMainPreludeMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_ms;
+}
+
+double processingGetLastCoreColorMainPreludeVignetteMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_vignette_ms;
+}
+
+double processingGetLastCoreColorMainPreludeCreativeMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_creative_ms;
+}
+
+double processingGetLastCoreColorMainPreludeWbMilliseconds(void)
+{
+    return g_processing_last_core_color_main_prelude_wb_ms;
+}
+
 double processingGetLastCoreColorCamMilliseconds(void)
 {
     return g_processing_last_core_color_cam_ms;
+}
+
+double processingGetLastCoreColorCamWbMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_wb_ms;
+}
+
+double processingGetLastCoreColorCamAgxMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_agx_ms;
 }
 
 double processingGetLastCoreColorGammaMilliseconds(void)
