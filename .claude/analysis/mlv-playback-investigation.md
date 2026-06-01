@@ -1,3 +1,42 @@
+# 2026-06-01 - fused final_blend rebaseline on the current keeper still leaves mix_chroma hotter
+
+### Verified locally
+
+- I reran the fused `final_blend` diagnostic on the current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`:
+  - `LastWriteTime=6/1/2026 11:59:59 AM`
+  - `Length=8952320`
+  - `SHA256=670F0D40947DE3F8BA0FBEC9D5C431692C30AFEBB5A72C848CCBB447DE25032A`
+- The visible smoke gate stayed intact on the diagnostic rerun:
+  - `processed8_direct_path_frames=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- Current-keeper diagnostic settled averages:
+  - `M16-1327`: `llrawproc_ms=235.00`, `final_blend_ms=97.50`, `mix_chroma_ms=89.00`, `fb_row_kernel_ms=97.50`, `fb_raw2ev_ms=11.00`, `fb_curve_ms=10.00`, `fb_store_ms=31.00`
+  - `M16-1347`: `llrawproc_ms=330.00`, `final_blend_ms=128.00`, `mix_chroma_ms=124.50`, `fb_row_kernel_ms=127.50`, `fb_raw2ev_ms=14.00`, `fb_curve_ms=15.00`, `fb_store_ms=56.00`
+  - `M16-1446`: `llrawproc_ms=105.50`, `final_blend_ms=71.00`, `mix_chroma_ms=0.00`, `fb_row_kernel_ms=71.00`, `fb_raw2ev_ms=4.50`, `fb_curve_ms=8.50`, `fb_store_ms=14.00`
+- Aggregate diagnostic averages on the current keeper:
+  - `llrawproc_ms=223.500`
+  - `final_blend_ms=98.833`
+  - `mix_chroma_ms=71.167`
+  - `fb_row_kernel_ms=98.667`
+  - `fb_raw2ev_ms=9.833`
+  - `fb_curve_ms=11.167`
+  - `fb_store_ms=33.667`
+- The diagnostic rerun is still slower than the plain keeper smoke replay, so `final_blend` remains diagnostic rather than keeper-shaped.
+
+### Cross-checked from prior analysis
+
+- The current keeper remains the hot combined halfres `mix_chroma` write-both path with the `LIKELY(write_r && write_b)` hint.
+- The newer `mix_chroma` mode `9` / `10` / `6` probes show the store-lookup body is still the hottest retained residue.
+- This final-blend rebaseline does not change the hotspot ranking: `mix_chroma` still leads, and `final_blend` stays behind it.
+
+### Needs runtime profiling
+
+- If we keep pushing `mix_chroma`, the next useful probe should target the lookup-heavy combined store body more directly.
+- If that probe stays mixed, the honest move is to pivot to another retained bucket rather than forcing more `mix_chroma` rewrites.
+
 # 2026-06-01 - current-keeper mix_chroma probes point to store lookups, but not yet a new patch
 
 ### Verified locally
