@@ -1,3 +1,31 @@
+## 2026-06-01 - mix_chroma write-both fast path rejected; restored baseline remains the current keeper
+
+### Verified locally
+
+- I tried specializing the retained `mix_chroma` center write path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the common `write_r && write_b` case would take a dedicated fast path, then rebuilt the user-facing release tree and reran the same three visible smoke clips.
+- The release tree is current again at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 12:03:14 AM`
+  - `Length=8890880`
+  - `SHA256=50AA5D4C59DFF8A9DDB5C7FCEBF2E8FA1E0B2B5CF15E0F9CC76C9A0E94A45F0A`
+- The normal no-probe smoke gate stayed intact after the revert:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The current no-probe settled-frame averages are back on the restored keeper shape:
+  - `M16-1327`: `llrawproc_ms=134.99999`, `mix_chroma_ms=80.99997`, `final_blend_ms=13.49997`
+  - `M16-1347`: `llrawproc_ms=143.00001`, `mix_chroma_ms=80.00004`, `final_blend_ms=19.50002`
+  - `M16-1446`: `llrawproc_ms=46.49997`, `mix_chroma_ms=0`, `final_blend_ms=11.00004`
+
+### Cross-checked from prior analysis
+
+- The fresh `mix_chroma` detail probe showed `write_both` dominates the hot chroma clips, but the fast path that specialized for that case made the probe runs worse rather than better.
+- The current evidence still says `mix_chroma` is the highest-value retained bucket, but this exact write-both specialization is not the next keeper and should stay out of the worktree.
+
+### Needs runtime profiling
+
+- The next useful move is either a different structural `mix_chroma` probe or a bucket shift if that family keeps failing to produce a keeper-shaped optimization.
+- Do not retry the same `write_both` fast path shape; it is rejected.
+
 ## 2026-06-01 - Shadows/Highlights 3-channel RBFilter specialization rejected; restored baseline is clean
 
 ### Verified locally
