@@ -1,3 +1,63 @@
+# 2026-06-01 - per-channel fallback in the hot non-average write-both path is a keeper
+
+### Verified locally
+
+- I narrowed the hot halfres `mix_chroma` non-average write-both fallback in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so that a mixed-range pair no longer forces both channels through lookup mode when only one side is out of range.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:22:37 PM`
+  - `Length=8955904`
+  - `SHA256=DC9FD59BE748E8F326D5AD034E6C63F4B5FF9122B9750D1523918D72F100B94A`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages improved overall versus the current keeper baseline:
+  - `M16-1327`: `llrawproc_ms=123.5` (`fps≈8.10`), `mix_chroma_ms=62.0` (`fps≈16.13`), `final_blend_ms=18.0` (`fps≈55.56`)
+  - `M16-1347`: `llrawproc_ms=113.5` (`fps≈8.81`), `mix_chroma_ms=56.5` (`fps≈17.70`), `final_blend_ms=15.5` (`fps≈64.52`)
+  - `M16-1446`: `llrawproc_ms=62.5` (`fps≈16.00`), `mix_chroma_ms=0.0`, `final_blend_ms=15.5` (`fps≈64.52`)
+  - Aggregate: `llrawproc_ms=99.833` (`fps≈10.02`), `mix_chroma_ms=39.500` (`fps≈25.32`), `final_blend_ms=16.333` (`fps≈61.22`)
+
+### Cross-checked from prior analysis
+
+- The current keeper still points at the halfres non-average store surface as the hot `mix_chroma` residue, so this per-channel fallback stays aligned with the existing probe direction.
+- The three-clip replay remains visually valid, and the aggregate improvement is real even though `M16-1446` itself is not a win.
+
+### Needs runtime profiling
+
+- Rebaseline from this keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next probe is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
+# 2026-06-01 - explicit choose_ev_lt_eh split in the hot halfres non-average store path is a keeper
+
+### Verified locally
+
+- I split the hot halfres `mix_chroma` non-average store-side ternaries in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) into explicit `choose_ev_lt_eh` branches for the combined `write_r && write_b` path and the single-write fallbacks.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:11:31 PM`
+  - `Length=8953344`
+  - `SHA256=BA91E3AA9CC2D6C598709F88A5D3B47384163B3B29B954C2E78141D757A8A319`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages improved overall versus the current keeper baseline:
+  - `M16-1327`: `llrawproc_ms=128.5` (`fps≈7.78`), `mix_chroma_ms=62.5` (`fps≈16.00`), `final_blend_ms=20.0` (`fps≈50.00`)
+  - `M16-1347`: `llrawproc_ms=131.0` (`fps≈7.63`), `mix_chroma_ms=61.5` (`fps≈16.26`), `final_blend_ms=18.5` (`fps≈54.05`)
+  - `M16-1446`: `llrawproc_ms=45.0` (`fps≈22.22`), `mix_chroma_ms=0.0`, `final_blend_ms=10.5` (`fps≈95.24`)
+  - Aggregate: `llrawproc_ms=101.5` (`fps≈9.85`), `mix_chroma_ms=41.333` (`fps≈24.19`), `final_blend_ms=16.333` (`fps≈61.22`)
+
+### Cross-checked from prior analysis
+
+- The earlier mode-6 and choose-true/false probes still say the halfres non-average surface is the hot case, and the store leaf remains the biggest measurable remainder.
+- This explicit split is narrower than the rejected branch-hint cleanup and it improved the full three-clip replay rather than just one hot clip.
+
+### Needs runtime profiling
+
+- Rebaseline from this keeper before deciding whether the next probe should stay in `mix_chroma` or pivot to another retained bucket.
+- If the next probe is flat, the honest move is to stop forcing nearby rewrites and move to a different hotspot.
+
 # 2026-06-01 - SH fixed-3 store-color unroll is a keeper under the GUI smoke harness
 
 ### Verified locally
