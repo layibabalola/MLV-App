@@ -400,88 +400,101 @@ static void CHROMA_SMOOTH_FUNC(int w,
             {
                 uint16_t out_r = 0;
                 uint16_t out_b = 0;
+                const int out_r_ev = gr + dr;
+                const int out_b_ev = gr + db;
+                const unsigned int ev2raw_range = (unsigned int)(ev2raw_hi - ev2raw_lo);
 
                 if (probe_non_average_write_both_branch && !use_average)
                 {
                     chroma_center_non_average_write_both_start = mlv_stage_timing_now();
                 }
 
-                if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
-                out_r = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
-                if (probe_center)
+                if (!probe_center &&
+                    LIKELY((unsigned int)(out_r_ev - ev2raw_lo) <= ev2raw_range &&
+                           (unsigned int)(out_b_ev - ev2raw_lo) <= ev2raw_range))
                 {
-                    const double lookup_elapsed_ms =
-                        (mlv_stage_timing_now() - chroma_center_store_r_lookup_start) * 1000.0;
-                    const double write_start = mlv_stage_timing_now();
-                    if (probe_center_fullres)
-                    {
-                        g_dualiso_full20bit_timing.mix_chroma_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
-                    }
-                    else
-                    {
-                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
-                    }
-                    chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
-                    chroma_center_store_r_start = write_start;
+                    out_r = (uint16_t)ev2raw[out_r_ev];
+                    out_b = (uint16_t)ev2raw[out_b_ev];
                 }
-                if (probe_average_branch && use_average)
+                else
                 {
-                    chroma_center_average_start = mlv_stage_timing_now();
-                }
-                else if (probe_non_average_branch && !use_average)
-                {
-                    chroma_center_non_average_start = mlv_stage_timing_now();
-                }
-                out_y[x] = out_r;
-                if (probe_center)
-                {
-                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
-                    if (probe_center_fullres)
+                    if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
+                    out_r = chroma_smooth_ev2raw_lookup(ev2raw, out_r_ev);
+                    if (probe_center)
                     {
-                        g_dualiso_full20bit_timing.mix_chroma_center_store_r_probe_ms += elapsed_ms;
+                        const double lookup_elapsed_ms =
+                            (mlv_stage_timing_now() - chroma_center_store_r_lookup_start) * 1000.0;
+                        const double write_start = mlv_stage_timing_now();
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
+                        chroma_center_store_r_start = write_start;
                     }
-                    else
+                    if (probe_average_branch && use_average)
                     {
-                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_probe_ms += elapsed_ms;
+                        chroma_center_average_start = mlv_stage_timing_now();
                     }
-                }
-                if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();
-                out_b = chroma_smooth_ev2raw_lookup(ev2raw, gr + db);
-                if (probe_center)
-                {
-                    const double lookup_elapsed_ms =
-                        (mlv_stage_timing_now() - chroma_center_store_b_lookup_start) * 1000.0;
-                    const double write_start = mlv_stage_timing_now();
-                    if (probe_center_fullres)
+                    else if (probe_non_average_branch && !use_average)
                     {
-                        g_dualiso_full20bit_timing.mix_chroma_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                        chroma_center_non_average_start = mlv_stage_timing_now();
                     }
-                    else
+                    out_y[x] = out_r;
+                    if (probe_center)
                     {
-                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                        const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_r_probe_ms += elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_probe_ms += elapsed_ms;
+                        }
                     }
-                    chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
-                    chroma_center_store_b_start = write_start;
-                }
-                if (probe_average_branch && use_average)
-                {
-                    chroma_center_average_start = mlv_stage_timing_now();
-                }
-                else if (probe_non_average_branch && !use_average)
-                {
-                    chroma_center_non_average_start = mlv_stage_timing_now();
-                }
-                out_y_p1[x + 1] = out_b;
-                if (probe_center)
-                {
-                    const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
-                    if (probe_center_fullres)
+                    if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();
+                    out_b = chroma_smooth_ev2raw_lookup(ev2raw, out_b_ev);
+                    if (probe_center)
                     {
-                        g_dualiso_full20bit_timing.mix_chroma_center_store_b_probe_ms += elapsed_ms;
+                        const double lookup_elapsed_ms =
+                            (mlv_stage_timing_now() - chroma_center_store_b_lookup_start) * 1000.0;
+                        const double write_start = mlv_stage_timing_now();
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                        }
+                        chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
+                        chroma_center_store_b_start = write_start;
                     }
-                    else
+                    if (probe_average_branch && use_average)
                     {
-                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms += elapsed_ms;
+                        chroma_center_average_start = mlv_stage_timing_now();
+                    }
+                    else if (probe_non_average_branch && !use_average)
+                    {
+                        chroma_center_non_average_start = mlv_stage_timing_now();
+                    }
+                    out_y_p1[x + 1] = out_b;
+                    if (probe_center)
+                    {
+                        const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
+                        if (probe_center_fullres)
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_center_store_b_probe_ms += elapsed_ms;
+                        }
+                        else
+                        {
+                            g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_probe_ms += elapsed_ms;
+                        }
                     }
                 }
                 goto chroma_mix_store_done;

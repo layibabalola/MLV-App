@@ -1,3 +1,42 @@
+# 2026-06-01 - shared lookup fast path in the hot mix_chroma write-both body is a keeper
+
+### Verified locally
+
+- I tightened the hot combined halfres `mix_chroma` write-both body in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) so the common in-range case performs a shared direct `ev2raw` lookup for the paired `r` and `b` writes, while preserving the existing fallback helper for out-of-range values and the probe instrumentation for measurement runs.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 12:20:23 PM`
+  - `Length=8953344`
+  - `SHA256=D1BFD0E5AB198320855BDB993D52B9326C515D3B848F541FD4CB73000486E862`
+- I reran the three visible smoke clips on the rebuilt release tree with no probe env, and the visible gate stayed intact on the settled frames:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- I also reran the hot-clips clamp probe with `MLVAPP_DUALISO_MIX_CHROMA_PROBE=11` and confirmed the direct fast-path precondition is safe on both hot clips:
+  - `M16-1327`: `dual_iso_full20_mix_chroma_halfres_center_store_r_low_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_r_high_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_b_low_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_b_high_clamp_count=0`
+  - `M16-1347`: `dual_iso_full20_mix_chroma_halfres_center_store_r_low_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_r_high_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_b_low_clamp_count=0`, `dual_iso_full20_mix_chroma_halfres_center_store_b_high_clamp_count=0`
+- The settled two-frame smoke averages improved versus the previous keeper baseline:
+  - `M16-1327`: `llrawproc_ms=133.0`, `mix_chroma_ms=68.0`, `final_blend_ms=15.0`
+  - `M16-1347`: `llrawproc_ms=138.5`, `mix_chroma_ms=79.5`, `final_blend_ms=13.5`
+  - `M16-1446`: `llrawproc_ms=51.0`, `mix_chroma_ms=0.0`, `final_blend_ms=11.0`
+- Aggregate settled averages across the three clips:
+  - `llrawproc_ms=107.5`
+  - `mix_chroma_ms=49.1667`
+  - `final_blend_ms=13.1667`
+- Compared with the previous keeper baseline, the shared lookup fast path cut the chroma-heavy hot clips materially instead of just moving work around.
+
+### Cross-checked from prior analysis
+
+- The earlier store-heavy `mix_chroma` map still held: the combined write-both body was the hottest retained residual.
+- The low-clamp probe had already shown the clamp branch was dead on the hot clips; this new run confirms the high-clamp side is dead too, so the shared fast path is safe on the hot path.
+- The fused `final_blend` rerun remains diagnostic rather than keeper-shaped, and `mix_chroma` still leads the retained hot buckets overall.
+
+### Needs runtime profiling
+
+- The next probe should rebaseline from this shared-lookup keeper and then look for the next residual inside `mix_chroma`, or pivot to another retained bucket if the next store-side leaf is flat.
+- No further code change is justified until the next profile identifies a narrower surviving hot leaf.
+
 # 2026-06-01 - fused final_blend rebaseline on the current keeper still leaves mix_chroma hotter
 
 ### Verified locally
