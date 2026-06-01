@@ -1,3 +1,33 @@
+# 2026-06-01 - write-both dispatch hint at the hot store entry is a keeper
+
+### Verified locally
+
+- I added a branch hint to the hot halfres write-both dispatch in `src/mlv/llrawproc/chroma_smooth.c`, keeping the direct-clamped non-average store fallback intact.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:49:24 PM`
+  - `Length=8955904`
+  - `SHA256=87FF194C4EA742433F1A378F00AA4D65A08A5F1AAAD6EDDEABA7D99F6BA52D97`
+- I reran the same three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages improved overall versus the current direct-clamped keeper baseline, so this is a keeper:
+  - `M16-1327`: `llrawproc_ms=62.4` (`fps≈16.03`), `mix_chroma_ms=37.6` (`fps≈26.60`), `final_blend_ms=4.2` (`fps≈238.10`)
+  - `M16-1347`: `llrawproc_ms=62.9` (`fps≈15.90`), `mix_chroma_ms=38.6` (`fps≈25.91`), `final_blend_ms=5.4` (`fps≈185.19`)
+  - `M16-1446`: `llrawproc_ms=29.6` (`fps≈33.78`), `mix_chroma_ms=0.0`, `final_blend_ms=5.9` (`fps≈169.49`)
+  - Aggregate: `llrawproc_ms=51.633` (`fps≈19.37`), `mix_chroma_ms=25.400` (`fps≈39.37`), `final_blend_ms=5.167` (`fps≈193.55`)
+
+### Cross-checked from prior analysis
+
+- The earlier branch-hint restore on the non-average hot store path was a reject, but this hint on the hot write-both dispatch is the first variant in this sequence that improves the full three-clip smoke comparison.
+- The direct-clamped non-average store fallback remains a useful retained shape, but the hot dispatch itself is still a live store-side leaf and now looks keeper-shaped.
+
+### Needs runtime profiling
+
+- Rebaseline from this write-both dispatch keeper and keep probing the remaining hot `mix_chroma` store-side residue.
+- If the next store-side candidate is flat, pivot to another retained bucket instead of forcing a nearby hint reshuffle.
+
 # 2026-06-01 - write_r/write_b branch-hint restore is a reject; keep the direct-clamped store fallback
 
 ### Verified locally

@@ -336,7 +336,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             int gr = 0;
             int gb = 0;
-            if (write_r && write_b)
+            if (LIKELY(write_r && write_b))
             {
                 if (use_average)
                 {
