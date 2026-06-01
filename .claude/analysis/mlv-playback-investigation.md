@@ -1,3 +1,32 @@
+## 2026-06-01 - cam AgX matrix row detail is live, but saturation counts are zero; no keeper-shaped matrix patch yet
+
+### Verified locally
+
+- I extended the cam WB probe parser in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) to allow AgX matrix detail modes through `7`, and added the new AgX matrix row counters and saturation-count telemetry through [`src/processing/raw_processing.h`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.h), [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp), [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.h), and [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp).
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 3:50:58 AM`
+  - `Length=8931328`
+  - `SHA256=63567DCAC1B1F961C72CD3EAD9A9E634036F35EB3EC228F206F862191A477A26`
+- I reran the same three smoke clips with the AgX matrix detail probes and kept the visible smoke gate intact:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+- The new row-detail probe shows the AgX matrix work is live, with a slight red-row skew, but the clamp/saturation side is a no-op on these clips:
+  - `M16-1327`: `avg_processing_core_color_cam_agx_matrix_r_ms=21.6`, `avg_processing_core_color_cam_agx_matrix_g_ms=17.3`, `avg_processing_core_color_cam_agx_matrix_b_ms=16.5`, `avg_processing_core_color_cam_agx_matrix_r_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_g_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_b_hi_count=0.0`
+  - `M16-1347`: `avg_processing_core_color_cam_agx_matrix_r_ms=25.0`, `avg_processing_core_color_cam_agx_matrix_g_ms=19.222`, `avg_processing_core_color_cam_agx_matrix_b_ms=15.333`, `avg_processing_core_color_cam_agx_matrix_r_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_g_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_b_hi_count=0.0`
+  - `M16-1446`: `avg_processing_core_color_cam_agx_matrix_r_ms=21.6`, `avg_processing_core_color_cam_agx_matrix_g_ms=17.3`, `avg_processing_core_color_cam_agx_matrix_b_ms=18.2`, `avg_processing_core_color_cam_agx_matrix_r_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_g_hi_count=0.0`, `avg_processing_core_color_cam_agx_matrix_b_hi_count=0.0`
+
+### Cross-checked from prior analysis
+
+- The cam AgX clamp branch is still a no-op on these smoke clips, so it is not the next optimization target.
+- The matrix side remains live and materially larger than the clip/clamp side, but the saturation-count probe staying at zero means the row skew is not a clamp-driven win.
+- The result is a sharper map of the cam AgX surface, not a keeper-shaped optimization patch.
+
+### Needs runtime profiling
+
+- If we stay in the cam family, the next probe should target the matrix-side arithmetic or access pattern, not the clamp branch.
+- If the next matrix-side probe is still flat, the honest move is to pivot to another retained bucket rather than forcing more AgX micro-optimizations.
+
 ## 2026-06-01 - current keeper rebaseline keeps fused final_blend intact, but mix_chroma remains the hottest retained bucket
 
 ### Verified locally

@@ -101,6 +101,12 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_c
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_clip_neg_g_count = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_clip_neg_b_count = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_r_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_g_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_b_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_r_hi_count = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_g_hi_count = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_cam_agx_matrix_b_hi_count = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_main_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_color_gamma_gradient_ms = 0.0;
@@ -241,7 +247,7 @@ static int processing_cam_wb_probe_mode(void)
         {
             char * end = NULL;
             long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 5 )
+            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 7 )
             {
                 probe_mode = (int)parsed;
             }
@@ -361,6 +367,12 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_core_color_cam_agx_clip_neg_g_count = 0.0;
     g_processing_last_core_color_cam_agx_clip_neg_b_count = 0.0;
     g_processing_last_core_color_cam_agx_matrix_ms = 0.0;
+    g_processing_last_core_color_cam_agx_matrix_r_ms = 0.0;
+    g_processing_last_core_color_cam_agx_matrix_g_ms = 0.0;
+    g_processing_last_core_color_cam_agx_matrix_b_ms = 0.0;
+    g_processing_last_core_color_cam_agx_matrix_r_hi_count = 0.0;
+    g_processing_last_core_color_cam_agx_matrix_g_hi_count = 0.0;
+    g_processing_last_core_color_cam_agx_matrix_b_hi_count = 0.0;
     g_processing_last_core_color_gamma_ms = 0.0;
     g_processing_last_core_color_gamma_main_ms = 0.0;
     g_processing_last_core_color_gamma_gradient_ms = 0.0;
@@ -423,6 +435,12 @@ static void processing_core_timing_reset(processing_core_timing_t * timing)
     timing->color_cam_agx_clip_neg_g_count = 0.0;
     timing->color_cam_agx_clip_neg_b_count = 0.0;
     timing->color_cam_agx_matrix_ms = 0.0;
+    timing->color_cam_agx_matrix_r_ms = 0.0;
+    timing->color_cam_agx_matrix_g_ms = 0.0;
+    timing->color_cam_agx_matrix_b_ms = 0.0;
+    timing->color_cam_agx_matrix_r_hi_count = 0.0;
+    timing->color_cam_agx_matrix_g_hi_count = 0.0;
+    timing->color_cam_agx_matrix_b_hi_count = 0.0;
     timing->color_gamma_ms = 0.0;
     timing->color_gamma_main_ms = 0.0;
     timing->color_gamma_gradient_ms = 0.0;
@@ -1177,6 +1195,12 @@ void applyProcessingObject( processingObject_t * processing,
         g_processing_last_core_color_cam_agx_clip_neg_g_count = core_timing.color_cam_agx_clip_neg_g_count;
         g_processing_last_core_color_cam_agx_clip_neg_b_count = core_timing.color_cam_agx_clip_neg_b_count;
         g_processing_last_core_color_cam_agx_matrix_ms = core_timing.color_cam_agx_matrix_ms;
+        g_processing_last_core_color_cam_agx_matrix_r_ms = core_timing.color_cam_agx_matrix_r_ms;
+        g_processing_last_core_color_cam_agx_matrix_g_ms = core_timing.color_cam_agx_matrix_g_ms;
+        g_processing_last_core_color_cam_agx_matrix_b_ms = core_timing.color_cam_agx_matrix_b_ms;
+        g_processing_last_core_color_cam_agx_matrix_r_hi_count = core_timing.color_cam_agx_matrix_r_hi_count;
+        g_processing_last_core_color_cam_agx_matrix_g_hi_count = core_timing.color_cam_agx_matrix_g_hi_count;
+        g_processing_last_core_color_cam_agx_matrix_b_hi_count = core_timing.color_cam_agx_matrix_b_hi_count;
         g_processing_last_core_color_gamma_ms = core_timing.color_gamma_ms;
         g_processing_last_core_color_gamma_main_ms = core_timing.color_gamma_main_ms;
         g_processing_last_core_color_gamma_gradient_ms = core_timing.color_gamma_gradient_ms;
@@ -1292,6 +1316,15 @@ void applyProcessingObject( processingObject_t * processing,
             g_processing_last_core_color_cam_agx_clip_neg_b_count += core_timings[t].color_cam_agx_clip_neg_b_count;
             g_processing_last_core_color_cam_agx_matrix_ms =
                 MAX(g_processing_last_core_color_cam_agx_matrix_ms, core_timings[t].color_cam_agx_matrix_ms);
+            g_processing_last_core_color_cam_agx_matrix_r_ms =
+                MAX(g_processing_last_core_color_cam_agx_matrix_r_ms, core_timings[t].color_cam_agx_matrix_r_ms);
+            g_processing_last_core_color_cam_agx_matrix_g_ms =
+                MAX(g_processing_last_core_color_cam_agx_matrix_g_ms, core_timings[t].color_cam_agx_matrix_g_ms);
+            g_processing_last_core_color_cam_agx_matrix_b_ms =
+                MAX(g_processing_last_core_color_cam_agx_matrix_b_ms, core_timings[t].color_cam_agx_matrix_b_ms);
+            g_processing_last_core_color_cam_agx_matrix_r_hi_count += core_timings[t].color_cam_agx_matrix_r_hi_count;
+            g_processing_last_core_color_cam_agx_matrix_g_hi_count += core_timings[t].color_cam_agx_matrix_g_hi_count;
+            g_processing_last_core_color_cam_agx_matrix_b_hi_count += core_timings[t].color_cam_agx_matrix_b_hi_count;
             g_processing_last_core_color_gamma_ms =
                 MAX(g_processing_last_core_color_gamma_ms, core_timings[t].color_gamma_ms);
             g_processing_last_core_color_gamma_main_ms =
@@ -2465,6 +2498,10 @@ void apply_processing_object( processingObject_t * processing,
                 (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 4 || color_cam_wb_probe_mode == 5);
             const int color_cam_wb_probe_agx_clip_detail =
                 (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 5);
+            const int color_cam_wb_probe_agx_matrix_detail =
+                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 6);
+            const int color_cam_wb_probe_agx_matrix_sat_detail =
+                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 7);
             if( use_cam_matrix )
             {
                 const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
@@ -2566,9 +2603,45 @@ void apply_processing_object( processingObject_t * processing,
                         if( result[1] < 0.0 ) ++core_timing->color_cam_agx_clip_neg_g_count;
                         if( result[2] < 0.0 ) ++core_timing->color_cam_agx_clip_neg_b_count;
                     }
-                    pix[0] = LIMIT16(result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2);
-                    pix[1] = LIMIT16(result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5);
-                    pix[2] = LIMIT16(result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8);
+                    const double agx_out_r = result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2;
+                    const double color_cam_agx_matrix_r_start =
+                        (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                    pix[0] = LIMIT16(agx_out_r);
+                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
+                    {
+                        core_timing->color_cam_agx_matrix_r_ms +=
+                            (omp_get_wtime() - color_cam_agx_matrix_r_start) * 1000.0;
+                    }
+                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_r > 65535.0 )
+                    {
+                        ++core_timing->color_cam_agx_matrix_r_hi_count;
+                    }
+                    const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
+                    const double color_cam_agx_matrix_g_start =
+                        (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                    pix[1] = LIMIT16(agx_out_g);
+                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
+                    {
+                        core_timing->color_cam_agx_matrix_g_ms +=
+                            (omp_get_wtime() - color_cam_agx_matrix_g_start) * 1000.0;
+                    }
+                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_g > 65535.0 )
+                    {
+                        ++core_timing->color_cam_agx_matrix_g_hi_count;
+                    }
+                    const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
+                    const double color_cam_agx_matrix_b_start =
+                        (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                    pix[2] = LIMIT16(agx_out_b);
+                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
+                    {
+                        core_timing->color_cam_agx_matrix_b_ms +=
+                            (omp_get_wtime() - color_cam_agx_matrix_b_start) * 1000.0;
+                    }
+                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_b > 65535.0 )
+                    {
+                        ++core_timing->color_cam_agx_matrix_b_hi_count;
+                    }
                     if( capture_breakdown && color_cam_wb_probe_agx )
                     {
                         core_timing->color_cam_agx_matrix_ms +=
@@ -2714,9 +2787,45 @@ void apply_processing_object( processingObject_t * processing,
                             if( result[1] < 0.0 ) ++core_timing->color_cam_agx_clip_neg_g_count;
                             if( result[2] < 0.0 ) ++core_timing->color_cam_agx_clip_neg_b_count;
                         }
-                        pixg[0] = LIMIT16(result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2);
-                        pixg[1] = LIMIT16(result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5);
-                        pixg[2] = LIMIT16(result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8);
+                        const double agx_out_r = result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2;
+                        const double color_cam_agx_matrix_r_start =
+                            (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                        pixg[0] = LIMIT16(agx_out_r);
+                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
+                        {
+                            core_timing->color_cam_agx_matrix_r_ms +=
+                                (omp_get_wtime() - color_cam_agx_matrix_r_start) * 1000.0;
+                        }
+                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_r > 65535.0 )
+                        {
+                            ++core_timing->color_cam_agx_matrix_r_hi_count;
+                        }
+                        const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
+                        const double color_cam_agx_matrix_g_start =
+                            (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                        pixg[1] = LIMIT16(agx_out_g);
+                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
+                        {
+                            core_timing->color_cam_agx_matrix_g_ms +=
+                                (omp_get_wtime() - color_cam_agx_matrix_g_start) * 1000.0;
+                        }
+                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_g > 65535.0 )
+                        {
+                            ++core_timing->color_cam_agx_matrix_g_hi_count;
+                        }
+                        const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
+                        const double color_cam_agx_matrix_b_start =
+                            (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                        pixg[2] = LIMIT16(agx_out_b);
+                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
+                        {
+                            core_timing->color_cam_agx_matrix_b_ms +=
+                                (omp_get_wtime() - color_cam_agx_matrix_b_start) * 1000.0;
+                        }
+                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_b > 65535.0 )
+                        {
+                            ++core_timing->color_cam_agx_matrix_b_hi_count;
+                        }
                         if( capture_breakdown && color_cam_wb_probe_agx )
                         {
                             core_timing->color_cam_agx_matrix_ms +=
@@ -3462,6 +3571,36 @@ double processingGetLastCoreColorCamAgxClipNegBCount(void)
 double processingGetLastCoreColorCamAgxMatrixMilliseconds(void)
 {
     return g_processing_last_core_color_cam_agx_matrix_ms;
+}
+
+double processingGetLastCoreColorCamAgxMatrixRMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_agx_matrix_r_ms;
+}
+
+double processingGetLastCoreColorCamAgxMatrixGMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_agx_matrix_g_ms;
+}
+
+double processingGetLastCoreColorCamAgxMatrixBMilliseconds(void)
+{
+    return g_processing_last_core_color_cam_agx_matrix_b_ms;
+}
+
+double processingGetLastCoreColorCamAgxMatrixRHiCount(void)
+{
+    return g_processing_last_core_color_cam_agx_matrix_r_hi_count;
+}
+
+double processingGetLastCoreColorCamAgxMatrixGHiCount(void)
+{
+    return g_processing_last_core_color_cam_agx_matrix_g_hi_count;
+}
+
+double processingGetLastCoreColorCamAgxMatrixBHiCount(void)
+{
+    return g_processing_last_core_color_cam_agx_matrix_b_hi_count;
 }
 
 double processingGetLastCoreColorGammaMilliseconds(void)
