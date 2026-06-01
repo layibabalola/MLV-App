@@ -1,3 +1,35 @@
+## 2026-06-01 - AgX matrix low-check refinement keeps the keeper and trims a dead branch
+
+### Verified locally
+
+- I simplified the AgX store helper in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the fast path only checks the upper bound, since the AgX inputs are already clipped nonnegative and the matrix coefficients are positive.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 4:01:02 AM`
+  - `Length=8930816`
+  - `SHA256=656EBE049D1C44D64D05779E0EFC3F3950B16F569DC605C8F808742488C73904`
+- I reran the same three visible smoke clips on the rebuilt binary and kept the smoke gate intact:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=0`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The low-check refinement improved the same three-clip baseline again:
+  - `M16-1327`: `llrawproc_ms=61.636`, `final_blend_ms=5.727`, `mix_chroma_ms=39.455`, `cam_agx_ms=141.273`, `cam_agx_matrix_ms=93.273`
+  - `M16-1347`: `llrawproc_ms=63.455`, `final_blend_ms=7.000`, `mix_chroma_ms=40.091`, `cam_agx_ms=136.545`, `cam_agx_matrix_ms=91.455`
+  - `M16-1446`: `llrawproc_ms=22.455`, `final_blend_ms=4.273`, `mix_chroma_ms=0.0`, `cam_agx_ms=130.091`, `cam_agx_matrix_ms=85.545`
+- Compared with the prior keeper, the low-check branch trim preserved correctness and shaved a little more cost off the AgX path without changing the visible smoke gate.
+
+### Cross-checked from prior analysis
+
+- The earlier full in-range store helper was already a keeper on the same smoke set, and the lower-bound check had no functional value because AgX inputs are clipped nonnegative before the matrix multiply.
+- The new timings confirm that trimming the dead lower-bound branch is still worth keeping, not just an aesthetic cleanup.
+- The current retained hot buckets are still `cam_agx` and `mix_chroma`, but the immediate optimization shape remains narrow and valid.
+
+### Needs runtime profiling
+
+- The next move should rebaseline the fused `final_blend` path against this refined keeper, then decide whether the next highest-value residual belongs in `mix_chroma` or somewhere else.
+- If the next probe is flat, pivot cleanly rather than forcing another micro-branch inside AgX.
+
 ## 2026-06-01 - cam AgX in-range matrix store fast path is a keeper; smoke gate stayed intact
 
 ### Verified locally
