@@ -1,3 +1,38 @@
+# 2026-06-01 - write-path branch hints on halfres `mix_chroma` are a keeper; no-probe smoke improves again
+
+### Verified locally
+
+- I added narrow branch-prediction hints in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c):
+  - `UNLIKELY(!write_r && !write_b)` on the dead no-write continue
+  - `LIKELY(write_r)` and `LIKELY(write_b)` on the hot halfres store branches
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 6:16:45 AM`
+  - `Length=8932352`
+  - `SHA256=E5C3C655404FAAFFEA2B8A847D70C08E04AD90CD678303F68800D8274CF39B04`
+- I reran the three visible smoke clips on the rebuilt binary and preserved the smoke gate:
+  - `processed8_direct_path_frames=0`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The no-probe settled averages improved versus the previous keeper:
+  - `M16-1327`: `llrawproc_ms=140.5` vs `144.5`, `final_blend_ms=14.0` vs `13.0`, `mix_chroma_ms=89.0` vs `85.0`
+  - `M16-1347`: `llrawproc_ms=151.0` vs `155.0`, `final_blend_ms=16.5` vs `20.0`, `mix_chroma_ms=85.0` vs `89.5`
+  - `M16-1446`: `llrawproc_ms=45.0` vs `44.5`, `final_blend_ms=11.0` vs `9.5`, `mix_chroma_ms=0.0` vs `0.0`
+- The combined hot three-clip `llrawproc_ms` improved from `344.0` to `336.5`, so this branch-prediction cleanup is keeper-shaped overall.
+- The hot store/write probe still shows `write_both_count` dominating, which makes the write-path branch prediction the right next narrow lever rather than a clamp or lookup wrapper.
+
+### Cross-checked from prior analysis
+
+- The earlier branch-hinted `ev2raw` lookup remains a keeper and is still part of the current build.
+- The dead low/high clamp branch diagnosis still stands.
+- The hot halfres store path remains the dominant retained `mix_chroma` leaf, and the current write-prediction hint is a small but real improvement on top of the lookup hint.
+
+### Needs runtime profiling
+
+- If we keep iterating in `mix_chroma`, the next useful probe should stay structurally distinct from the rejected helper wrapper and clamp branches, and should focus on the remaining store/write path only if the data keeps pointing there.
+- The current evidence is enough to keep this patch, but the next improvement still needs measurement before we go broader.
+
 # 2026-06-01 - mix_chroma branch-hinted helper is a keeper; no-probe smoke improves on the restored baseline
 
 ### Verified locally

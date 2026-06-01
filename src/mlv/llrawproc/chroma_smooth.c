@@ -116,7 +116,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
             int b0 = row_y_p1[x + 1];
             const int write_r = (unsigned int)r0 < white_u;
             const int write_b = (unsigned int)b0 < white_u;
-            if (!write_r && !write_b)
+            if (UNLIKELY(!write_r && !write_b))
             {
                 if (probe_center)
                 {
@@ -333,7 +333,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
             }
 
             int gr = 0;
-            if (write_r)
+            if (LIKELY(write_r))
             {
                 if (use_average)
                 {
@@ -346,7 +346,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 }
             }
             int gb = 0;
-            if (write_b)
+            if (LIKELY(write_b))
             {
                 if (use_average)
                 {
