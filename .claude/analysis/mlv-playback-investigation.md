@@ -1,3 +1,34 @@
+# 2026-06-01 - SH fixed-3 store-color unroll is a keeper under the GUI smoke harness
+
+### Verified locally
+
+- I kept the SH `vertical_up_body_store_color` specialization in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp), but unrolled the fixed 3-channel hot path so it no longer pays the tiny `for (int c = 0; c < 3; c++)` loop.
+- I rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 2:03:52 PM`
+  - `Length=8953344`
+  - `SHA256=C909E1E586718D04C0ED8908A6FF0642E95711D1BCE5E3C26444721283F3F0FB`
+- I reran the three visible smoke clips, and the visible smoke gate stayed intact on all of them:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The settled smoke averages improved overall versus the current keeper baseline:
+  - `M16-1327`: `llrawproc_ms=117.0` (`fps≈8.55`), `mix_chroma_ms=66.5` (`fps≈15.04`), `final_blend_ms=12.0` (`fps≈83.33`)
+  - `M16-1347`: `llrawproc_ms=142.5` (`fps≈7.02`), `mix_chroma_ms=68.0` (`fps≈14.71`), `final_blend_ms=24.5` (`fps≈40.82`)
+  - `M16-1446`: `llrawproc_ms=61.0` (`fps≈16.39`), `mix_chroma_ms=0.0`, `final_blend_ms=15.0` (`fps≈66.67`)
+  - Aggregate: `llrawproc_ms=106.833` (`fps≈9.36`), `mix_chroma_ms=44.833` (`fps≈22.31`), `final_blend_ms=17.167` (`fps≈58.25`)
+- `M16-1446` did get slower on `llrawproc_ms`, but the full three-clip set still improved on the current keeper shape, so this is a keeper.
+
+### Cross-checked from prior analysis
+
+- The earlier SH 3-channel specialization was already a keeper, and this unroll keeps the same hot branch shape while shaving the tiny fixed-3 loop from the live store-color tail.
+- The earlier `mix_chroma` work remains the main `mix_chroma` backlog; this SH change is a separate residual that is now the newest keeper-shaped improvement.
+
+### Needs runtime profiling
+
+- Rebaseline from this SH keeper before deciding whether to stay on SH or return to `mix_chroma`.
+- If the next probe does not preserve the full three-clip win, the honest move is to revert and pivot rather than keep forcing nearby store-shape rewrites.
+
 # 2026-06-01 - final_blend rebaseline on the current keeper with fps reporting still leaves mix_chroma hotter
 
 # 2026-06-01 - current keeper mix_chroma mode 6 still says write-both dominates and the single-write tails stay zero
@@ -11101,3 +11132,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we keep investigating `mix_chroma`, the next probe should be a materially different store-side shape rather than another branch split.
 - The current user-facing baseline is back on the reverted ternary path, so the next smoke run should compare from that shape if we resume soon.
+
+## 2026-06-01 - halfres `mix_chroma` direct-store order split is a reject; revert to the baseline
+
+### Verified locally
+
+- I tested a store-order specialization in the hot halfres `write_r && write_b` fast path in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c), then reverted it after the full three-clip smoke set lost the keeper comparison.
+- The visible smoke gate stayed intact on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The three-clip results were worse than the keeper baseline on the hot clips:
+  - `M16-1327`: `llrawproc_ms=123.0` (`fps=8.13`) vs baseline `125.0` (`fps=8.00`); `mix_chroma_ms=66.0` (`fps=15.15`) vs baseline `61.5` (`fps=16.26`); `final_blend_ms=14.0` (`fps=71.43`) vs baseline `19.5` (`fps=51.28`)
+  - `M16-1347`: `llrawproc_ms=142.5` (`fps=7.02`) vs baseline `175.0` (`fps=5.71`); `mix_chroma_ms=68.0` (`fps=14.71`) vs baseline `75.0` (`fps=13.33`); `final_blend_ms=24.5` (`fps=40.82`) vs baseline `21.5` (`fps=46.51`)
+  - `M16-1446`: `llrawproc_ms=65.0` (`fps=15.38`) vs baseline `44.0` (`fps=22.73`); `mix_chroma_ms=0.0`; `final_blend_ms=15.0` (`fps=66.67`) vs baseline `11.0` (`fps=90.91`)
+- I rebuilt the user-facing release tree back to the baseline shape and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 1:58:08 PM`
+  - `Length=8953344`
+  - `SHA256=AEDE2202E78D54D8FF1802EE34E5C6DEE8CEFACD46FC5798EB22BB6DC3148EF0`
+
+### Cross-checked from prior analysis
+
+- The store-order split did not fix the full gate, and `M16-1446` still drifts the wrong way enough to keep the result from being keeper-stable.
+- The earlier repeat noise remains the right caution flag: a hot-clip improvement is not enough if the third clip slips and the overall comparison does not settle cleanly.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next probe should be a different store-side shape rather than another order shuffle.
+- Otherwise, it is time to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites that keep missing the full three-clip bar.
