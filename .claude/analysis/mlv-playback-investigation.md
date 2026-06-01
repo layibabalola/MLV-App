@@ -1,3 +1,51 @@
+# 2026-06-01 - final_blend rebaseline on the current keeper with fps reporting still leaves mix_chroma hotter
+
+### Verified locally
+
+- I reran the plain smoke set on the current keeper build at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 12:20:23 PM`
+  - `Length=8953344`
+  - `SHA256=D1BFD0E5AB198320855BDB993D52B9326C515D3B848F541FD4CB73000486E862`
+- I reran the fused `final_blend` diagnostic on the same build with `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=0`.
+- The visible smoke gate stayed intact on both runs:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- Plain smoke settled averages on the current keeper:
+  - `M16-1327`: `llrawproc_ms=125.0` (`fps≈8.00`), `mix_chroma_ms=61.5` (`fps≈16.26`), `final_blend_ms=19.5` (`fps≈51.28`)
+  - `M16-1347`: `llrawproc_ms=175.0` (`fps≈5.71`), `mix_chroma_ms=75.0` (`fps≈13.33`), `final_blend_ms=21.5` (`fps≈46.51`)
+  - `M16-1446`: `llrawproc_ms=44.0` (`fps≈22.73`), `mix_chroma_ms=0.0`, `final_blend_ms=11.0` (`fps≈90.91`)
+- Aggregate settled averages on the plain smoke set:
+  - `llrawproc_ms=114.667` (`fps≈8.72`)
+  - `mix_chroma_ms=45.5` (`fps≈21.98`)
+  - `final_blend_ms=17.333` (`fps≈57.69`)
+- Current-keeper diagnostic settled averages for the hot frames:
+  - `M16-1327`: `llrawproc_ms=181.0` (`fps≈5.52`), `final_blend_ms=82.5` (`fps≈12.12`), `mix_chroma_ms=59.0` (`fps≈16.95`), `fb_row_kernel_ms=82.5` (`fps≈12.12`), `fb_raw2ev_ms=6.5` (`fps≈153.85`), `fb_curve_ms=7.0` (`fps≈142.86`), `fb_store_ms=19.5` (`fps≈51.28`)
+  - `M16-1347`: `llrawproc_ms=228.5` (`fps≈4.38`), `final_blend_ms=84.0` (`fps≈11.90`), `mix_chroma_ms=60.0` (`fps≈16.67`), `fb_row_kernel_ms=84.0` (`fps≈11.90`), `fb_raw2ev_ms=7.5` (`fps≈133.33`), `fb_curve_ms=7.5` (`fps≈133.33`), `fb_store_ms=24.5` (`fps≈40.82`)
+  - `M16-1446`: `llrawproc_ms=160.5` (`fps≈6.23`), `final_blend_ms=108.0` (`fps≈9.26`), `mix_chroma_ms=0.0`, `fb_row_kernel_ms=108.0` (`fps≈9.26`), `fb_raw2ev_ms=6.5` (`fps≈153.85`), `fb_curve_ms=10.5` (`fps≈95.24`), `fb_store_ms=22.5` (`fps≈44.44`)
+- Aggregate diagnostic averages on the current keeper:
+  - `llrawproc_ms=190.0` (`fps≈5.26`)
+  - `final_blend_ms=91.5` (`fps≈10.93`)
+  - `mix_chroma_ms=39.667` (`fps≈25.21`)
+  - `fb_row_kernel_ms=91.5` (`fps≈10.93`)
+  - `fb_raw2ev_ms=6.833` (`fps≈146.34`)
+  - `fb_curve_ms=8.333` (`fps≈120.05`)
+  - `fb_store_ms=22.167` (`fps≈45.11`)
+- The diagnostic rerun is still much slower than the plain keeper smoke replay, so `final_blend` remains diagnostic rather than keeper-shaped.
+
+### Cross-checked from prior analysis
+
+- The current keeper is the shared lookup fast path in the hot combined halfres `mix_chroma` write-both body.
+- The hot `mix_chroma` bucket still leads the retained residues on the real smoke path.
+- The final-blend row kernel is still the dominant slice within `final_blend`, but it remains behind `mix_chroma` in the overall hotspot ranking.
+
+### Needs runtime profiling
+
+- The next probe should stay on the shared-lookup keeper and look for the next surviving hot leaf inside `mix_chroma`, or pivot to another retained bucket if that leaf is flat.
+- No additional code change is justified until the next profile points to a narrower, surviving bottleneck.
+
 # 2026-06-01 - final_blend rebaseline on the shared-lookup mix_chroma keeper still leaves mix_chroma hotter
 
 ### Verified locally
