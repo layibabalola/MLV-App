@@ -1,3 +1,29 @@
+# 2026-06-01 - later hot write-both dispatch hint is a reject; keep the earlier keeper
+
+### Verified locally
+
+- I tried moving the `LIKELY(write_r && write_b)` hint down into the later hot store-dispatch branch in `src/mlv/llrawproc/chroma_smooth.c`, but the three-clip smoke set showed a clear regression versus the earlier keeper.
+- The visible smoke gate still held on all three clips:
+  - `x1 Quality`
+  - settled Auto Look Assist
+  - `dual_iso_alias_map=0`
+  - `processed8_direct_path_frames=0`
+- The later store-dispatch hint was not keeper-shaped:
+  - `M16-1327`: `llrawproc_ms=101.429` (`fps≈9.86`), `mix_chroma_ms=39.0` (`fps≈25.64`), `final_blend_ms=19.714` (`fps≈50.72`), `presented_fps=0.875`
+  - `M16-1347`: `llrawproc_ms=66.667` (`fps≈15.00`), `mix_chroma_ms=36.222` (`fps≈27.61`), `final_blend_ms=7.111` (`fps≈140.62`), `presented_fps=1.124`
+  - `M16-1446`: `llrawproc_ms=90.167` (`fps≈11.09`), `mix_chroma_ms=0.0`, `final_blend_ms=9.5` (`fps≈105.26`), `presented_fps=0.745`
+- The regression was strongest on `M16-1327` and `M16-1446`, so I reverted the later dispatch hint and kept the earlier hot write-both dispatch keeper intact.
+
+### Cross-checked from prior analysis
+
+- The earlier hot write-both dispatch hint remains the keeper-shaped store-side leaf in this sequence.
+- The direct-clamped non-average fallback is still the retained store shape beneath that dispatch.
+
+### Needs runtime profiling
+
+- Rebaseline from the earlier hot write-both dispatch keeper.
+- If the next candidate stays in `mix_chroma`, it needs to be a materially different store-side shape rather than another nearby dispatch hint.
+
 # 2026-06-01 - write-both dispatch hint at the hot store entry is a keeper
 
 ### Verified locally
