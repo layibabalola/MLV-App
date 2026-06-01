@@ -441,11 +441,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 uint16_t out_r = 0;
                 uint16_t out_b = 0;
                 const int out_r_ev = gr + dr;
-                const int out_b_ev = gr + db;
-                const unsigned int ev2raw_range = (unsigned int)(ev2raw_hi - ev2raw_lo);
-                const unsigned int out_r_ev_offset = (unsigned int)(out_r_ev - ev2raw_lo);
-                const unsigned int out_b_ev_offset = (unsigned int)(out_b_ev - ev2raw_lo);
-
+                const int out_b_ev = gb + db;
                 if (probe_non_average_write_both_branch)
                 {
                     chroma_center_non_average_write_both_start = mlv_stage_timing_now();
@@ -454,6 +450,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 if (!probe_center)
                 {
                     chroma_smooth_ev2raw_clamped_pair(ev2raw, ev2raw_lo, ev2raw_hi, out_r_ev, out_b_ev, &out_r, &out_b);
+                    out_y[x] = out_r;
+                    out_y_p1[x + 1] = out_b;
                 }
                 else
                 {
@@ -536,7 +534,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                 uint16_t out_r = 0;
                 uint16_t out_b = 0;
                 const int out_r_ev = gr + dr;
-                const int out_b_ev = gr + db;
+                const int out_b_ev = gb + db;
                 const unsigned int ev2raw_range = (unsigned int)(ev2raw_hi - ev2raw_lo);
 
                 if (probe_average_branch)
