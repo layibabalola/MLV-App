@@ -190,6 +190,9 @@ static void CHROMA_SMOOTH_FUNC(int w,
             double chroma_center_store_start = 0.0;
             double chroma_center_store_r_start = 0.0;
             double chroma_center_store_b_start = 0.0;
+            double chroma_center_store_r_lookup_start = 0.0;
+            double chroma_center_store_b_lookup_start = 0.0;
+            double chroma_center_store_lookup_elapsed_ms = 0.0;
             if (probe_center) chroma_center_gather_start = mlv_stage_timing_now();
             if (probe_center)
             {
@@ -335,8 +338,26 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             if (write_r)
             {
-                if (probe_center) chroma_center_store_r_start = mlv_stage_timing_now();
-                out_y[x] = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
+                uint16_t out_r = 0;
+                if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
+                out_r = chroma_smooth_ev2raw_lookup(ev2raw, gr + dr);
+                if (probe_center)
+                {
+                    const double lookup_elapsed_ms =
+                        (mlv_stage_timing_now() - chroma_center_store_r_lookup_start) * 1000.0;
+                    const double write_start = mlv_stage_timing_now();
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_lookup_probe_ms += lookup_elapsed_ms;
+                    }
+                    chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
+                    chroma_center_store_r_start = write_start;
+                }
+                out_y[x] = out_r;
                 if (probe_center)
                 {
                     const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_r_start) * 1000.0;
@@ -353,8 +374,26 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             if (write_b)
             {
-                if (probe_center) chroma_center_store_b_start = mlv_stage_timing_now();
-                out_y_p1[x + 1] = chroma_smooth_ev2raw_lookup(ev2raw, gb + db);
+                uint16_t out_b = 0;
+                if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();
+                out_b = chroma_smooth_ev2raw_lookup(ev2raw, gb + db);
+                if (probe_center)
+                {
+                    const double lookup_elapsed_ms =
+                        (mlv_stage_timing_now() - chroma_center_store_b_lookup_start) * 1000.0;
+                    const double write_start = mlv_stage_timing_now();
+                    if (probe_center_fullres)
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                    }
+                    else
+                    {
+                        g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_lookup_probe_ms += lookup_elapsed_ms;
+                    }
+                    chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
+                    chroma_center_store_b_start = write_start;
+                }
+                out_y_p1[x + 1] = out_b;
                 if (probe_center)
                 {
                     const double elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_b_start) * 1000.0;
@@ -370,7 +409,15 @@ static void CHROMA_SMOOTH_FUNC(int w,
             }
             if (probe_center)
             {
-                const double store_elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_start) * 1000.0;
+                double store_elapsed_ms = (mlv_stage_timing_now() - chroma_center_store_start) * 1000.0;
+                if (store_elapsed_ms > chroma_center_store_lookup_elapsed_ms)
+                {
+                    store_elapsed_ms -= chroma_center_store_lookup_elapsed_ms;
+                }
+                else
+                {
+                    store_elapsed_ms = 0.0;
+                }
                 const double total_elapsed_ms = (mlv_stage_timing_now() - chroma_center_start) * 1000.0;
                 if (probe_center_fullres)
                 {
