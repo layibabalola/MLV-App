@@ -11922,3 +11922,4 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Restored baseline check
 
 - After reverting the staged rewrite, I reran the same GUI smoke trio on the rebuilt release tree and the visible gate stayed green on the restored baseline.
+- The smoke wrapper now also captures a per-run PNG screenshot beside the existing JSON output, so future playback passes have a direct visual artifact instead of relying on timing logs alone.
