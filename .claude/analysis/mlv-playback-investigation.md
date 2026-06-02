@@ -10950,6 +10950,30 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Rebaseline from this cam pointer hoist before deciding whether the next probe should stay in the cam family or move to another retained bucket.
 - If the next cam-family probe is flat, pivot away cleanly rather than forcing another array-shape variant.
 
+## 2026-06-01 - cam WB fast-path reuse is rejected; baseline restored
+
+### Verified locally
+
+- I tried reusing the outer cam-family `proper_wb` / `rgb_to_Y` locals inside the `use_basic_matrix_fast_path` branch in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), then rebuilt the user-facing release tree and reran the same `large_dual_iso` playback profile three times.
+- The rebuild completed and the release executable was restored to the baseline source shape.
+- The warm-frame results were mixed and unstable across the three passes, so this is not a keeper-shaped win:
+  - first run warm frames: `latency_ms=128.6893`, `engine_latency_ms=117.1997`, `llrawproc_ms=92.99993515014648`; `latency_ms=121.3505`, `engine_latency_ms=109.8894`, `llrawproc_ms=85.99996566772461`
+  - second run warm frames: `latency_ms=125.52`, `engine_latency_ms=112.5073`, `llrawproc_ms=88.00005912780762`; `latency_ms=118.5955`, `engine_latency_ms=106.8228`, `llrawproc_ms=83.00018310546875`
+  - third run warm frames: `latency_ms=137.1972`, `engine_latency_ms=126.1745`, `llrawproc_ms=95.00002861022949`; `latency_ms=186.6484`, `engine_latency_ms=174.4438`, `llrawproc_ms=133.99982452392578`
+- The visible smoke gate stayed intact in the profile runs, but the throughput swing was too noisy to keep:
+  - `dual_iso_full20_use_alias_map=true`
+  - `processed8_direct_path_active=true`
+  - `dual_iso_full20_final_blend_ms` stayed near `10-33 ms` on the warm frames
+
+### Cross-checked from prior analysis
+
+- The prior cam WB pointer hoist remains the keeper-shaped result in this family.
+- This reuse attempt only changed how the already-hoisted locals were referenced and did not reveal a stable new hot leaf.
+
+### Needs runtime profiling
+
+- Revert to the previous cam WB pointer-hoist baseline and pivot to a different retained bucket rather than retrying this reuse shape.
+
 ## 2026-06-01 - cam AgX branch-hoist is rejected; revert restores the gamma LUT keeper baseline
 
 ### Verified locally
