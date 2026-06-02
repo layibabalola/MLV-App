@@ -11867,3 +11867,27 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - `final_blend` still looks like a diagnostic bucket, not a strong next keeper candidate.
 - If we revisit it, the next hypothesis should be structural rather than another aliasing hint.
+
+## 2026-06-01 - SH store-color aliasing/local-reuse probe is a reject; baseline restored
+
+### Verified locally
+
+- I tried a low-risk aliasing/local-reuse tweak in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) by introducing local `__restrict` aliases for the `channel == 3` `vertical_up_body_store_color` path, then reverted it after the same three-frame smoke profile lost against the baseline.
+- I rebuilt the user-facing release tree after the revert and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) once the baseline shape was restored.
+- On the three-frame `large_dual_iso` playback profile, the aliasing/local-reuse hint was worse than the keeper baseline on every top-line metric I compared:
+  - `average_latency_ms`: `6565.1749` vs baseline `5470.3483`
+  - `average_cadence_ms`: `6002.9837` vs baseline `4849.9404`
+  - average `llrawproc_ms`: `347.3333` vs baseline `270.3333`
+  - average `engine_latency_ms`: `4230.2152` vs baseline `3434.9853`
+  - average `mix_chroma_ms`: `70.3333` vs baseline `44.0000`
+  - average `final_blend_ms`: `31.9999` vs baseline `18.3333`
+
+### Cross-checked from prior analysis
+
+- The `channel == 3` SH specialization remains the keeper-shaped leaf in this family, but this local aliasing tweak did not improve the current baseline.
+- The store-color tail is still the live residual, but this exact aliasing/local-reuse shape is not strong enough to keep.
+
+### Needs runtime profiling
+
+- If we stay in SH, the next probe should be a different store-color hypothesis, not another aliasing hint around the same fixed-3 branch.
+- Otherwise, pivot to another retained bucket instead of forcing more SH micro-optimizations.
