@@ -11890,4 +11890,35 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - If we stay in SH, the next probe should be a different store-color hypothesis, not another aliasing hint around the same fixed-3 branch.
+- Hold the next playback timing pass until host contention settles; high Chrome CPU can add enough jitter to make small SH deltas look better or worse than they really are.
 - Otherwise, pivot to another retained bucket instead of forcing more SH micro-optimizations.
+
+## 2026-06-01 - staged 3-channel SH store-color rewrite is a reject; baseline restored
+
+### Verified locally
+
+- I rewrote the `channel == 3` `vertical_up_body_store_color` hot path in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) to stage the three source values and three previous values before blending, then reran the visible GUI smoke trio on the rebuilt release tree.
+- The visible gate stayed green on the smoke trio:
+  - `processed8_direct_path_active=false`
+  - `dual_iso_full20_use_alias_map=false`
+  - `dual_iso_full20_convert16_ms=0`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+- The three-clip GUI smoke comparison did not justify keeping the staged rewrite:
+  - `M16-1327`: `avg_llrawproc_ms=91.167`, `avg_processing_shadows_highlights_prep_ms=419.5`, `avg_processing_shadows_highlights_rbf_vertical_up_body_store_color_ms=318.0`
+  - `M16-1347`: `avg_llrawproc_ms=37.667`, `avg_processing_shadows_highlights_prep_ms=433.0`, `avg_processing_shadows_highlights_rbf_vertical_up_body_store_color_ms=318.0`
+  - `M16-1446`: `avg_llrawproc_ms=37.667`, `avg_processing_shadows_highlights_prep_ms=433.0`, `avg_processing_shadows_highlights_rbf_vertical_up_body_store_color_ms=318.0`
+
+### Cross-checked from prior analysis
+
+- The earlier SH specialization note already identified `vertical_up_body_store_color` as the live residual, but this staged rewrite did not improve that leaf enough to beat the keeper baseline.
+- The visible gate remained valid, so this is a performance reject rather than a correctness failure.
+
+### Needs runtime profiling
+
+- Keep the restored baseline and do not reuse this staged load-then-store shape.
+- If we stay in SH, the next probe should be a materially different store-color hypothesis rather than another staging reshuffle.
+
+### Restored baseline check
+
+- After reverting the staged rewrite, I reran the same GUI smoke trio on the rebuilt release tree and the visible gate stayed green on the restored baseline.
