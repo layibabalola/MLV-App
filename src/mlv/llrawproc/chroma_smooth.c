@@ -579,10 +579,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_r_start = write_start;
                     }
-                else
-                {
-                    out_r = chroma_smooth_ev2raw_clamped(ev2raw, ev2raw_lo, ev2raw_hi, out_r_ev);
-                }
+                    else
+                    {
+                        out_r = chroma_smooth_ev2raw_clamped(ev2raw, ev2raw_lo, ev2raw_hi, out_r_ev);
+                    }
                     if (probe_average_branch)
                     {
                         chroma_center_average_start = mlv_stage_timing_now();
@@ -618,10 +618,10 @@ static void CHROMA_SMOOTH_FUNC(int w,
                         chroma_center_store_lookup_elapsed_ms += lookup_elapsed_ms;
                         chroma_center_store_b_start = write_start;
                     }
-                else
-                {
-                    out_b = chroma_smooth_ev2raw_clamped(ev2raw, ev2raw_lo, ev2raw_hi, out_b_ev);
-                }
+                    else
+                    {
+                        out_b = chroma_smooth_ev2raw_clamped(ev2raw, ev2raw_lo, ev2raw_hi, out_b_ev);
+                    }
                     if (probe_average_branch)
                     {
                         chroma_center_average_start = mlv_stage_timing_now();
