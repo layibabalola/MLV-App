@@ -9852,9 +9852,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
      && toolButtonChromaSmoothCurrentIndex() == 0
      && restrictedLosslessDualIsoOutputWhiteLevel() > getMlvOriginalWhiteLevel( m_pMlvObject ) )
     {
-        setToolButtonChromaSmooth( 2 );
+        setToolButtonChromaSmooth( 1 );
         toolButtonChromaSmoothChanged();
-        receipt->setChromaSmooth( 2 );
+        receipt->setChromaSmooth( 1 );
         m_lastLookAssistChromaSmoothAutoApplied = true;
     }
     LookAssistStats processedColorStats;
@@ -10220,9 +10220,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                          && postVisibleGreenAxis > 4.0 );
                 if( dualIsoGreenArtifact )
                 {
-                    setToolButtonChromaSmooth( 2 );
+                    setToolButtonChromaSmooth( 1 );
                     toolButtonChromaSmoothChanged();
-                    receipt->setChromaSmooth( 2 );
+                    receipt->setChromaSmooth( 1 );
                     m_lastLookAssistChromaSmoothAutoApplied = true;
                     postColorStatsValid = analyzePostAppliedLook();
                 }

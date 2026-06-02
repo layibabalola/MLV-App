@@ -1,3 +1,67 @@
+# 2026-06-01 - SH output-tail pointer increment probe is safe on the screenshot gate, but the store body still dominates
+
+### Verified locally
+
+- I tightened the `channel == 3` output walk in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) so the hot SH output pass uses per-pixel pointer offsets instead of repeated `i + i + i` index arithmetic in the 3-channel path.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:24:07 PM`
+  - `Length=8955904`
+  - `SHA256=35D3F446F208B8E378B201F27949F154C1FDE50B260D56CF10A769C1A870576D`
+- I reran the screenshot-backed three-clip GUI smoke trio and captured fresh PNGs for all three clips:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png)
+- The screenshot gate still looks acceptable on the fresh run:
+  - `M16-1347` reads neutral in the live screenshot
+  - `M16-1327` and `M16-1446` remain consistent with the corrected baseline rather than the earlier green-corrupt state
+- The SH detail counters show the output tail is still much smaller than the store body, so this probe does not change the fact that `vertical_up_body_store_color` is the dominant residual:
+  - `M16-1327`: `avg_output_ms=5.667`, `avg_vertical_up_body_store_color_ms=296.166`
+  - `M16-1347`: `avg_output_ms=4.5`, `avg_vertical_up_body_store_color_ms=292.833`
+  - `M16-1446`: `avg_output_ms=3.333`, `avg_vertical_up_body_store_color_ms=300.167`
+
+### Cross-checked from prior analysis
+
+- The SH halfres RBF slice is the right fallback bucket to keep probing, but the store-body leaf still dwarfs the output tail.
+- This means the output-tail pointer cleanup is safe to keep as a small follow-on, but it does not replace the need for a more meaningful `vertical_up_body_store_color` hypothesis if we stay in SH.
+- The visible smoke gate still matters here, and the screenshots stayed on the corrected side of the line.
+
+### Needs runtime profiling
+
+- Rebaseline this output-tail cleanup against the current SH keeper shape before calling it a final keeper.
+- If the next SH probe is still in the store-body family, it should target a materially different leaf than the output tail, because that is where the real cost still lives.
+
+# 2026-06-01 - auto-applying chroma smooth 1 instead of 2 reduced the visible green cast
+
+### Verified locally
+
+- I changed the look-assist auto-apply path in [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/MainWindow.cpp) so the green-artifact fallback now applies chroma smooth mode `1` (`CS_2x2`) instead of mode `2` (`CS_3x3`), while leaving the manual UI mapping unchanged.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 10:09:09 PM`
+  - `Length=8955904`
+- I reran the screenshot-backed three-clip GUI smoke trio and captured fresh PNGs for all three clips:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png)
+- The new screenshots are visibly less green-cast than the earlier `chroma_smooth=2` run.
+- `M16-1347` is the biggest improvement: it no longer reads as neon-green and now looks broadly neutral.
+- `M16-1327` is still warm, but it is no longer the same obvious green corruption.
+- `M16-1446` remains close to neutral.
+- The smoke telemetry stayed valid on the rerun:
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+  - `scaleRequestMatched=true`
+  - `qualityModeMatched=true`
+
+### Cross-checked from prior analysis
+
+- The older `chroma_smooth=2` auto-apply path was correlated with the worst-looking green frames in the screenshot trio.
+- Reducing the auto-applied mode to `1` is a better keeper than trying to retune the WB tint again, because the screenshot evidence improved directly at the same time the visible cast dropped.
+
+### Needs runtime profiling
+
+- Rebaseline this auto-apply change on the real host before calling it fully final.
+- If the remaining warm bias on `M16-1327` turns out to be a problem, investigate whether it should be an exposure/WB refinement rather than reverting the chroma-smooth auto-apply.
+
 # 2026-06-01 - cam WB gamut tonemap branch fix reduced the green cast, but screenshots still need review
 
 ### Verified locally
