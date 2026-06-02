@@ -11956,3 +11956,68 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The smoke wrapper now also captures a per-run PNG screenshot beside the existing JSON output, so future playback passes have a direct visual artifact instead of relying on timing logs alone.
 - The screenshot oracle is not clean yet: the current trio captures show a strong green cast in [`M16-1327.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png) and [`M16-1347.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png), with [`M16-1446.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png) looking less extreme but still visibly green-tinted.
 - That means the screenshot-backed visible smoke gate is useful, but it is not yet proving color correctness on this baseline; the next playback-color pass still needs to chase the visible cast rather than assuming the restored baseline is visually neutral.
+
+## 2026-06-01 - green-channel Reinhard helper alignment is a mixed improvement, not yet a keeper
+
+### Verified locally
+
+- I changed the green-channel local-tone desaturation helper in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) and [`src/processing/raw_processing_8bit_kernel.inc`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing_8bit_kernel.inc) from `Reinhard_for_blue(...)` to `ReinhardTonemap_f(...)`.
+- I rebuilt the user-facing release tree and verified the new executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 9:35:10 PM`
+  - `Length=8955904`
+  - `SHA256=8BD8477F9FDB8F451F1E5A63F594303E29844F6767C91C3DF9B6CD288F85A28B`
+- I reran the screenshot-backed GUI smoke trio on the fresh build and the validation gate passed:
+  - `validation.ok=true`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+  - `scaleRequestMatched=true`
+  - `qualityModeMatched=true`
+- The latest screenshots are mixed:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png) still shows a strong green cast
+  - [`M16-1347.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png) is still visibly green-dominant
+  - [`M16-1446.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png) is noticeably closer to neutral than before
+- A rough sampled average over the lower frame region still shows green dominance in the first two frames, but the third frame moved much closer to neutral:
+  - `M16-1327.png avg_rgb=(13.58,55.69,5.62)`
+  - `M16-1347.png avg_rgb=(29.76,102.39,43.02)`
+  - `M16-1446.png avg_rgb=(44.61,38.67,27.56)`
+
+### Cross-checked from prior analysis
+
+- The green helper swap is not a full reject, because it did improve at least one clip materially.
+- It is also not a keeper yet, because the two other clips still show an obvious green cast in the screenshot oracle.
+
+### Needs runtime profiling
+
+- Keep the screenshot oracle on every playback-color pass; it is now the primary visible gate.
+- If the next probe stays in the color path, it should target the remaining green dominance in the indoor frames rather than treating this helper alignment as solved.
+
+## 2026-06-01 - stronger green desaturation variant is a reject; restore the better mixed Tonemap baseline
+
+### Verified locally
+
+- I tested a stronger green-channel helper variant by changing the local-tone desaturation green path in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) and [`src/processing/raw_processing_8bit_kernel.inc`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing_8bit_kernel.inc) from `ReinhardTonemap_f(...)` to `Reinhard_for_colour(...)`.
+- The rebuilt release executable moved again at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 9:48:14 PM`
+  - `Length=8955904`
+  - `SHA256=0878A264772F2A3F60D472AD8D9954E6F4CD3F2D71754C39A5371DE1AE8DB196`
+- I reran the screenshot-backed GUI smoke trio on the restored baseline and validation passed again:
+  - `validation.ok=true`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+  - `scaleRequestMatched=true`
+  - `qualityModeMatched=true`
+- The screenshots still show the same overall shape as the earlier mixed result:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png) is still strongly green-dominant
+  - [`M16-1347.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png) is still strongly green-dominant
+  - [`M16-1446.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png) remains the closest to neutral
+- The stronger curve did not produce a keeper-shaped visual improvement, so the better mixed Tonemap variant is the one to keep for now.
+
+### Cross-checked from prior analysis
+
+- Compared with the Tonemap variant, the stronger `Reinhard_for_colour` variant did not reduce the visible cast enough to justify keeping it.
+- This confirms the green-helper branch is still only a partial correction, not the full color fix.
+
+### Needs runtime profiling
+
+- Hold the Tonemap baseline as the current best-known state unless a different color-path hypothesis has a stronger justification.
+- The next probe should leave this branch only if it targets a different residual, not another small reshuffle of the same local-tone helper.
