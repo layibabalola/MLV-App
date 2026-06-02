@@ -19,6 +19,11 @@ param(
     [switch]$PreferHqMean23,
     [switch]$FrameTelemetry,
     [switch]$RbfDetailTiming,
+    [switch]$CaptureScreenshot,
+    [string]$ScreenshotOutputDir = "",
+    [int]$ScreenshotDelayMs = 2000,
+    [int]$ScreenshotWindowWaitMs = 10000,
+    [int]$ScreenshotCaptureTimeoutMs = 2500,
     [switch]$PreserveExperimentalEnvironment,
     [string[]]$ExtraEnvironment = @(),
     [string]$Receipt = "",
@@ -180,6 +185,47 @@ function Add-EnvironmentPairs {
     }
 }
 
+function Wait-ForLogLineMatch {
+    param(
+        [string]$LogRoot,
+        [string]$Pattern,
+        [datetime]$NotBeforeUtc = [datetime]::MinValue,
+        [int]$TimeoutMs = 15000,
+        [int]$PollMs = 250
+    )
+
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($watch.ElapsedMilliseconds -lt $TimeoutMs) {
+        try {
+            $latestLog = Get-ChildItem -LiteralPath $LogRoot -Filter "mlvapp-*.log" |
+                Sort-Object LastWriteTimeUtc -Descending |
+                Select-Object -First 1
+            if ($latestLog) {
+                $match = Select-String -LiteralPath $latestLog.FullName -Pattern $Pattern -SimpleMatch |
+                    Select-Object -Last 1
+                if ($match) {
+                    $timestampUtc = Get-LogTimestampUtc -Line $match.Line
+                    if ($timestampUtc -and $timestampUtc -lt $NotBeforeUtc) {
+                        Start-Sleep -Milliseconds $PollMs
+                        continue
+                    }
+                    return [pscustomobject]@{
+                        path = $latestLog.FullName
+                        line = $match.Line
+                        timestampUtc = $timestampUtc
+                    }
+                }
+            }
+        }
+        catch {
+        }
+
+        Start-Sleep -Milliseconds $PollMs
+    }
+
+    return $null
+}
+
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $root "platform\qt\build-release\release\MLVApp.exe"
@@ -190,6 +236,7 @@ if ([string]::IsNullOrWhiteSpace($ClipPath)) {
     throw "Missing -Input <clip.mlv>."
 }
 $inputPath = (Resolve-Path -LiteralPath $ClipPath).Path
+$logRoot = Join-Path $env:APPDATA "magiclantern\MLVApp\logs"
 
 if ([string]::IsNullOrWhiteSpace($Output)) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -200,6 +247,17 @@ $outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromP
 $outputDir = Split-Path -Parent $outputPath
 if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+}
+
+$screenshotPath = $null
+if ($CaptureScreenshot) {
+    if ([string]::IsNullOrWhiteSpace($ScreenshotOutputDir)) {
+        $ScreenshotOutputDir = Join-Path $outputDir "screenshots"
+    }
+    $screenshotDirPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ScreenshotOutputDir)
+    New-Item -ItemType Directory -Force -Path $screenshotDirPath | Out-Null
+    $clipBase = [IO.Path]::GetFileNameWithoutExtension($inputPath)
+    $screenshotPath = Join-Path $screenshotDirPath ("{0}.png" -f $clipBase)
 }
 
 $arguments = @(
@@ -363,6 +421,19 @@ $preLaunchSystemCpuSettle = Wait-SystemCpuSettle `
 
 $startUtc = [datetime]::UtcNow
 $process = [System.Diagnostics.Process]::Start($startInfo)
+$screenshotCapture = $null
+if ($CaptureScreenshot) {
+    $playbackStartLog = Wait-ForLogLineMatch -LogRoot $logRoot -Pattern "playback_smoke.start" -NotBeforeUtc $startUtc -TimeoutMs ([Math]::Max(20000, $ScreenshotWindowWaitMs))
+    if ($null -eq $playbackStartLog) {
+        throw "Timed out waiting for playback start telemetry before taking a screenshot."
+    }
+    Start-Sleep -Milliseconds $ScreenshotDelayMs
+    $screenshotCapture = & (Join-Path $PSScriptRoot "capture-window-screenshot.ps1") `
+        -Process $process `
+        -OutputPath $screenshotPath `
+        -WindowWaitMs $ScreenshotWindowWaitMs `
+        -CaptureTimeoutMs $ScreenshotCaptureTimeoutMs
+}
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
 $process.WaitForExit()
@@ -370,7 +441,6 @@ $stdout = $stdoutTask.GetAwaiter().GetResult()
 $stderr = $stderrTask.GetAwaiter().GetResult()
 $endUtc = [datetime]::UtcNow
 
-$logRoot = Join-Path $env:APPDATA "magiclantern\MLVApp\logs"
 $logFile = Get-ChildItem -LiteralPath $logRoot -Filter "mlvapp-*.log" |
     Sort-Object LastWriteTimeUtc -Descending |
     Select-Object -First 1
@@ -570,6 +640,11 @@ $result = [pscustomobject]@{
         stdout = $stdout.Trim()
         stderr = $stderr.Trim()
     }
+    screenshot = [pscustomobject]@{
+        requested = [bool]$CaptureScreenshot
+        path = $screenshotPath
+        capture = $screenshotCapture
+    }
     log = [pscustomobject]@{
         path = if ($logFile) { $logFile.FullName } else { $null }
         runMetadata = $runMetadata
@@ -584,6 +659,7 @@ $result = [pscustomobject]@{
         lookAssistApply = $lookAssistApply
         visualState = $visualState
         cpuSettle = $cpuSettle
+        screenshot = $screenshotCapture
         raw = [pscustomobject]@{
             runMetadata = $runMetadataLine
             playbackStart = $playbackStartLine
@@ -597,6 +673,7 @@ $result = [pscustomobject]@{
             lookAssistApply = $lookAssistApplyLine
             visualState = $visualStateLine
             cpuSettle = $cpuSettleLine
+            screenshot = if ($screenshotCapture) { $screenshotCapture.outputPath } else { $null }
         }
     }
 }
