@@ -783,21 +783,23 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
                         {
                             // average color divided by average factor
                             float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
-                            int idx = i + i + i;
+                            const float* up_pass_color_ptr = up_pass_color + (i * 3);
+                            const float* down_pass_color_ptr = down_pass_color + (i * 3);
+                            uint16_t* img_dst_ptr = img_dst + (i * 3);
                             const uint16_t filtered_r =
-                                output_lut[(uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])))];
+                                output_lut[(uint16_t)(factor * ((up_pass_color_ptr[0]) + (down_pass_color_ptr[0])))];
                             const uint16_t filtered_g =
-                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 1]) + (down_pass_color[idx + 1])))];
+                                output_lut[(uint16_t)(factor * ((up_pass_color_ptr[1]) + (down_pass_color_ptr[1])))];
                             const uint16_t filtered_b =
-                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 2]) + (down_pass_color[idx + 2])))];
+                                output_lut[(uint16_t)(factor * ((up_pass_color_ptr[2]) + (down_pass_color_ptr[2])))];
                             const int32_t curve_index =
                                 ((output_curve_r[filtered_r] << 2)
                                + (output_curve_g[filtered_g] * 11)
                                +  output_curve_b[filtered_b]) >> 4;
                             const uint16_t mask_value = limitU16FromInt32(curve_index);
-                            img_dst[idx] = mask_value;
-                            img_dst[idx + 1] = mask_value;
-                            img_dst[idx + 2] = mask_value;
+                            img_dst_ptr[0] = mask_value;
+                            img_dst_ptr[1] = mask_value;
+                            img_dst_ptr[2] = mask_value;
                         }
                     }
                     else
@@ -807,13 +809,15 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
                         {
                             // average color divided by average factor
                             float factor = 1.f / ((up_pass_factor[i]) + (down_pass_factor[i]));
-                            int idx = i + i + i;
-                            img_dst[idx] =
-                                output_lut[(uint16_t)(factor * ((up_pass_color[idx]) + (down_pass_color[idx])))];
-                            img_dst[idx + 1] =
-                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 1]) + (down_pass_color[idx + 1])))];
-                            img_dst[idx + 2] =
-                                output_lut[(uint16_t)(factor * ((up_pass_color[idx + 2]) + (down_pass_color[idx + 2])))];
+                            const float* up_pass_color_ptr = up_pass_color + (i * 3);
+                            const float* down_pass_color_ptr = down_pass_color + (i * 3);
+                            uint16_t* img_dst_ptr = img_dst + (i * 3);
+                            img_dst_ptr[0] =
+                                output_lut[(uint16_t)(factor * ((up_pass_color_ptr[0]) + (down_pass_color_ptr[0])))];
+                            img_dst_ptr[1] =
+                                output_lut[(uint16_t)(factor * ((up_pass_color_ptr[1]) + (down_pass_color_ptr[1])))];
+                            img_dst_ptr[2] =
+                                output_lut[(uint16_t)(factor * ((up_pass_color_ptr[2]) + (down_pass_color_ptr[2])))];
                         }
                     }
                 }
