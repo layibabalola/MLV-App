@@ -1,3 +1,61 @@
+# 2026-06-02 - cam WB search-loop locals were not keeper-shaped; reverted to the hot cam baseline
+
+### Verified locally
+
+- I tried hoisting `processing->proper_wb_matrix` into local scalars inside the `processingSetWhiteBalance` cam-matrix search loop in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c), then reverted the change after the screenshot-backed trio failed to improve the playback timing baseline.
+- The screenshots stayed visually acceptable on the same three clips:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-cam-wb-search-locals/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-cam-wb-search-locals/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-cam-wb-search-locals/screenshots/M16-1446.png)
+- The runtime comparison was not keeper-shaped:
+  - current `avg_llrawproc_ms=42.143`
+  - current keeper `avg_llrawproc_ms=36.429`
+- That means the WB-search local hoist did not improve the playback path enough to keep.
+
+### Cross-checked from prior analysis
+
+- The search-loop path is part of the cam-family residual map, but this particular dereference cleanup was the wrong lever for the current playback objective.
+- The visible smoke gate was still fine, so this reject is about performance shape, not color regressions.
+
+### Needs runtime profiling
+
+- Keep the restored cam baseline and do not carry this WB-search local shape forward.
+- If the next cam-family probe exists, it should target a different residual than this search-loop dereference pattern.
+
+# 2026-06-02 - cam WB matrix locals in the hot cam branch are the new keeper baseline
+
+### Verified locally
+
+- I hoisted the 3x3 `proper_wb_matrix` coefficients into local scalars inside the hot `use_cam_matrix` branches in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so the main and gradient cam paths reuse the same local coefficients instead of repeatedly indexing the matrix in the hot loop body.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/2/2026 12:50:52 AM`
+  - `Length=8956416`
+  - `SHA256=88B4B778F2DE4BA3544D328A56349941EF6FDA5EDBE821564866ED20BD43C556`
+- I reran the screenshot-backed GUI smoke trio with `-FrameTelemetry`, `-RbfDetailTiming`, and screenshot capture enabled:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-cam-wb-matrix-locals/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-cam-wb-matrix-locals/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-cam-wb-matrix-locals/screenshots/M16-1446.png)
+- The visible smoke gate stayed acceptable on all three clips:
+  - `M16-1327` reads warm, but not visibly corrupted
+  - `M16-1347` looks broadly neutral
+  - `M16-1446` stays darker, but it still looks acceptable rather than visibly corrupted
+- The new aggregate timing is a small but real improvement over the current AgX keeper baseline:
+  - current aggregate `avg_llrawproc_ms=36.429`
+  - previous keeper aggregate `avg_llrawproc_ms=36.809`
+- The cam WB matrix slice stayed in the same general range and does not need to be sold as the reason this probe kept:
+  - per-clip values were `16.571`, `19.286`, and `15.286`
+- The current change is best treated as a hot-loop load-dereference cleanup in the cam color path, not as a color-logic change.
+
+### Cross-checked from prior analysis
+
+- The screenshot oracle still matters, and it remained acceptable on the same three clips.
+- This is a narrower follow-on than the AgX triplet helper, but it still aligns with the cam-family residuals rather than backsliding into `mix_chroma`.
+
+### Needs runtime profiling
+
+- Keep this as the current cam-family baseline unless a later rerun regresses the screenshots or the aggregate timing.
+- If the next probe stays in the cam family, it should target a different residual than the hot `proper_wb_matrix` dereference shape.
+
 # 2026-06-01 - SH row-stride hoist in the vertical-up body is the new keeper baseline
 
 ### Verified locally

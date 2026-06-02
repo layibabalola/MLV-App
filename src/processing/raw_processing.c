@@ -2566,12 +2566,21 @@ void apply_processing_object( processingObject_t * processing,
                 const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
                 const double color_cam_wb_matrix_start =
                     (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
+                const double proper_wb_0 = proper_wb[0];
+                const double proper_wb_1 = proper_wb[1];
+                const double proper_wb_2 = proper_wb[2];
+                const double proper_wb_3 = proper_wb[3];
+                const double proper_wb_4 = proper_wb[4];
+                const double proper_wb_5 = proper_wb[5];
+                const double proper_wb_6 = proper_wb[6];
+                const double proper_wb_7 = proper_wb[7];
+                const double proper_wb_8 = proper_wb[8];
                 /* WB correction */
                 float pix0b = pix[0], pix1b = pix[1], pix2b = pix[2];
                 float result[3];
-                result[0] = pix0b * proper_wb[0] + pix1b * proper_wb[1] + pix2b * proper_wb[2];
-                result[1] = pix0b * proper_wb[3] + pix1b * proper_wb[4] + pix2b * proper_wb[5];
-                result[2] = pix0b * proper_wb[6] + pix1b * proper_wb[7] + pix2b * proper_wb[8];
+                result[0] = pix0b * proper_wb_0 + pix1b * proper_wb_1 + pix2b * proper_wb_2;
+                result[1] = pix0b * proper_wb_3 + pix1b * proper_wb_4 + pix2b * proper_wb_5;
+                result[2] = pix0b * proper_wb_6 + pix1b * proper_wb_7 + pix2b * proper_wb_8;
                 if( capture_breakdown && color_cam_wb_probe_matrix )
                 {
                     core_timing->color_cam_wb_matrix_ms +=
@@ -2747,11 +2756,20 @@ void apply_processing_object( processingObject_t * processing,
                         const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     const double color_cam_wb_matrix_start =
                         (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
+                    const double proper_wb_0 = proper_wb[0];
+                    const double proper_wb_1 = proper_wb[1];
+                    const double proper_wb_2 = proper_wb[2];
+                    const double proper_wb_3 = proper_wb[3];
+                    const double proper_wb_4 = proper_wb[4];
+                    const double proper_wb_5 = proper_wb[5];
+                    const double proper_wb_6 = proper_wb[6];
+                    const double proper_wb_7 = proper_wb[7];
+                    const double proper_wb_8 = proper_wb[8];
                     float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
                     double result[3];
-                    result[0] = pix0b * proper_wb[0] + pix1b * proper_wb[1] + pix2b * proper_wb[2];
-                    result[1] = pix0b * proper_wb[3] + pix1b * proper_wb[4] + pix2b * proper_wb[5];
-                    result[2] = pix0b * proper_wb[6] + pix1b * proper_wb[7] + pix2b * proper_wb[8];
+                    result[0] = pix0b * proper_wb_0 + pix1b * proper_wb_1 + pix2b * proper_wb_2;
+                    result[1] = pix0b * proper_wb_3 + pix1b * proper_wb_4 + pix2b * proper_wb_5;
+                    result[2] = pix0b * proper_wb_6 + pix1b * proper_wb_7 + pix2b * proper_wb_8;
                     if( capture_breakdown && color_cam_wb_probe_matrix )
                     {
                         core_timing->color_cam_wb_matrix_ms +=
