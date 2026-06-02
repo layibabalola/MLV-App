@@ -11818,3 +11818,28 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in `mix_chroma`, the next probe should be a different store-side shape rather than another order shuffle.
 - Otherwise, it is time to pivot to another retained bucket instead of forcing more `mix_chroma` rewrites that keep missing the full three-clip bar.
+
+## 2026-06-01 - rejected mix_chroma pair-store helper; restored the baseline
+
+### Verified locally
+
+- I tried a small `mix_chroma` store-side helper in [`src/mlv/llrawproc/chroma_smooth.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/chroma_smooth.c) that collapsed the combined halfres `write_r && write_b` fast path into a pair store helper, then reverted it after the profile did not clear the keeper bar.
+- I rebuilt the user-facing release tree after the revert and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 7:19:50 PM`
+  - `Length=8956928`
+  - `SHA256=A5953CABFB9BF21E447C5D85E27531618C4C5F6AFD8E5FE192B447300B32F1B7`
+- On the three-frame `large_dual_iso` playback profile I ran for this helper, the average hot-path numbers did not justify keeping it:
+  - `llrawproc_ms=308.333`
+  - `dual_iso_full20_mix_chroma_halfres_ms=22.000`
+  - `latency_ms=5987.531`
+
+### Cross-checked from prior analysis
+
+- The pair helper did not produce a keeper-shaped win on the broad playback metric we care about.
+- The hot store path may still be the right area, but this exact pair-store factoring is not strong enough to keep.
+- I restored the previous direct-clamped baseline so the next probe starts from a known-good shape.
+
+### Needs runtime profiling
+
+- If we stay in `mix_chroma`, the next probe should be a structurally different store-side shape rather than another helper factoring of the same pair write.
+- The next candidate should be compared against the restored baseline, not this rejected helper.
