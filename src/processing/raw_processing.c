@@ -3921,31 +3921,6 @@ void processingSetSharpening(processingObject_t * processing, double sharpen)
     }
 }
 
-static void processing_get_cached_cam_to_xyz_matrices(processingObject_t * processing,
-                                                       const double ** cam_to_xyz_D_out,
-                                                       const double ** cam_to_xyz_A_out)
-{
-    static double cached_cam_matrix[9];
-    static double cached_cam_matrix_A[9];
-    static double cached_cam_to_xyz_D[9];
-    static double cached_cam_to_xyz_A[9];
-    static int cached_valid = 0;
-
-    if (!cached_valid ||
-        memcmp(cached_cam_matrix, processing->cam_matrix, sizeof(cached_cam_matrix)) != 0 ||
-        memcmp(cached_cam_matrix_A, processing->cam_matrix_A, sizeof(cached_cam_matrix_A)) != 0)
-    {
-        memcpy(cached_cam_matrix, processing->cam_matrix, sizeof(cached_cam_matrix));
-        memcpy(cached_cam_matrix_A, processing->cam_matrix_A, sizeof(cached_cam_matrix_A));
-        invertMatrix(processing->cam_matrix, cached_cam_to_xyz_D);
-        invertMatrix(processing->cam_matrix_A, cached_cam_to_xyz_A);
-        cached_valid = 1;
-    }
-
-    *cam_to_xyz_D_out = cached_cam_to_xyz_D;
-    *cam_to_xyz_A_out = cached_cam_to_xyz_A;
-}
-
 /* Set white balance by kelvin + tint value */
 void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin, double WBTint)
 {
@@ -4043,9 +4018,10 @@ void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin,
     double LMS_multipliers[3];
     for (int i = 0; i < 3; ++i) LMS_multipliers[i] = LMS_white[i]/LMS_temp[i];
 
-    const double * cam_to_xyz_D = NULL;
-    const double * cam_to_xyz_A = NULL;
-    processing_get_cached_cam_to_xyz_matrices(processing, &cam_to_xyz_D, &cam_to_xyz_A);
+    double cam_to_xyz_D[9]; /* For daylight */
+    double cam_to_xyz_A[9]; /* For tungsten (https://en.wikipedia.org/wiki/Standard_illuminant#Illuminant_A) */
+    invertMatrix(processing->cam_matrix, cam_to_xyz_D);
+    invertMatrix(processing->cam_matrix_A, cam_to_xyz_A);
 
     double cam_to_xyz_final[9];
 
