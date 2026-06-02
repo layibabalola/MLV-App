@@ -2178,6 +2178,15 @@ void apply_processing_object( processingObject_t * processing,
     const float rgb_to_y0 = rgb_to_Y[0];
     const float rgb_to_y1 = rgb_to_Y[1];
     const float rgb_to_y2 = rgb_to_Y[2];
+    const double agx_m0 = agx_compressed_matrix[0];
+    const double agx_m1 = agx_compressed_matrix[1];
+    const double agx_m2 = agx_compressed_matrix[2];
+    const double agx_m3 = agx_compressed_matrix[3];
+    const double agx_m4 = agx_compressed_matrix[4];
+    const double agx_m5 = agx_compressed_matrix[5];
+    const double agx_m6 = agx_compressed_matrix[6];
+    const double agx_m7 = agx_compressed_matrix[7];
+    const double agx_m8 = agx_compressed_matrix[8];
     const double color_main_start = capture_breakdown ? omp_get_wtime() : 0.0;
 
     /* white balance & exposure & highlights & gamma & highlight reconstruction */
@@ -2621,15 +2630,6 @@ void apply_processing_object( processingObject_t * processing,
                     const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     const double color_cam_agx_clip_start =
                         (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
-                    const double agx_m0 = agx_compressed_matrix[0];
-                    const double agx_m1 = agx_compressed_matrix[1];
-                    const double agx_m2 = agx_compressed_matrix[2];
-                    const double agx_m3 = agx_compressed_matrix[3];
-                    const double agx_m4 = agx_compressed_matrix[4];
-                    const double agx_m5 = agx_compressed_matrix[5];
-                    const double agx_m6 = agx_compressed_matrix[6];
-                    const double agx_m7 = agx_compressed_matrix[7];
-                    const double agx_m8 = agx_compressed_matrix[8];
                     // Clip. Just in case other footprint compression did not happen.
                     if( result[0] < 0.0 || result[1] < 0.0 || result[2] < 0.0 )
                     {
@@ -2740,11 +2740,11 @@ void apply_processing_object( processingObject_t * processing,
             if( processing->gradient_enable && gmpix[0] != 0 && use_gradient_adjustments )
             {
                 /* WB correction gradient layer*/
-                if( use_cam_matrix )
-                {
-                    const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
-                    const double color_cam_gradient_start = capture_breakdown ? omp_get_wtime() : 0.0;
-                    const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                    if( use_cam_matrix )
+                    {
+                        const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                        const double color_cam_gradient_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                        const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
                     const double color_cam_wb_matrix_start =
                         (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
                     float pix0b = pixg[0], pix1b = pixg[1], pix2b = pixg[2];
@@ -2794,26 +2794,17 @@ void apply_processing_object( processingObject_t * processing,
                         core_timing->color_cam_wb_desat_ms +=
                             (omp_get_wtime() - color_cam_wb_desat_start) * 1000.0;
                     }
-                    if( capture_breakdown )
-                    {
-                        core_timing->color_cam_wb_ms += (omp_get_wtime() - color_cam_wb_start) * 1000.0;
-                    }
+                        if( capture_breakdown )
+                        {
+                            core_timing->color_cam_wb_ms += (omp_get_wtime() - color_cam_wb_start) * 1000.0;
+                        }
 
-                    /* obligatory code duplication */
-                    if (processing->AgX)
-                    {
-                        const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
-                        const double color_cam_agx_clip_start =
-                            (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
-                        const double agx_m0 = agx_compressed_matrix[0];
-                        const double agx_m1 = agx_compressed_matrix[1];
-                        const double agx_m2 = agx_compressed_matrix[2];
-                        const double agx_m3 = agx_compressed_matrix[3];
-                        const double agx_m4 = agx_compressed_matrix[4];
-                        const double agx_m5 = agx_compressed_matrix[5];
-                        const double agx_m6 = agx_compressed_matrix[6];
-                        const double agx_m7 = agx_compressed_matrix[7];
-                        const double agx_m8 = agx_compressed_matrix[8];
+                        /* obligatory code duplication */
+                        if (processing->AgX)
+                        {
+                            const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                            const double color_cam_agx_clip_start =
+                                (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                         // Clip. Just in case other footprint compression did not happen.
                         if( result[0] < 0.0 || result[1] < 0.0 || result[2] < 0.0 )
                         {

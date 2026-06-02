@@ -1,4 +1,4 @@
-# 2026-06-01 - SH output-tail pointer increment probe is safe on the screenshot gate, but the store body still dominates
+# 2026-06-01 - SH output-tail pointer increment probe is safe on the screenshot gate, but it was not keeper-shaped and was reverted
 
 ### Verified locally
 
@@ -14,7 +14,7 @@
 - The screenshot gate still looks acceptable on the fresh run:
   - `M16-1347` reads neutral in the live screenshot
   - `M16-1327` and `M16-1446` remain consistent with the corrected baseline rather than the earlier green-corrupt state
-- The SH detail counters show the output tail is still much smaller than the store body, so this probe does not change the fact that `vertical_up_body_store_color` is the dominant residual:
+- The SH detail counters show the output tail is still much smaller than the store body, and the run did not beat the current keeper baseline on the hot clips, so this probe was reverted:
   - `M16-1327`: `avg_output_ms=5.667`, `avg_vertical_up_body_store_color_ms=296.166`
   - `M16-1347`: `avg_output_ms=4.5`, `avg_vertical_up_body_store_color_ms=292.833`
   - `M16-1446`: `avg_output_ms=3.333`, `avg_vertical_up_body_store_color_ms=300.167`
@@ -27,7 +27,7 @@
 
 ### Needs runtime profiling
 
-- Rebaseline this output-tail cleanup against the current SH keeper shape before calling it a final keeper.
+- Keep the restored baseline and do not revive this output-tail shape.
 - If the next SH probe is still in the store-body family, it should target a materially different leaf than the output tail, because that is where the real cost still lives.
 
 # 2026-06-01 - auto-applying chroma smooth 1 instead of 2 reduced the visible green cast
@@ -12085,3 +12085,15 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Hold the Tonemap baseline as the current best-known state unless a different color-path hypothesis has a stronger justification.
 - The next probe should leave this branch only if it targets a different residual, not another small reshuffle of the same local-tone helper.
+# 2026-06-01 - cam AgX matrix coefficient hoist is the current keeper on the screenshot-backed trio
+- I hoisted `agx_compressed_matrix[0..8]` into the outer color path in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) so both cam AgX branches reuse the same matrix coefficients instead of reloading them per pixel.
+- The release build was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) with `LastWriteTime=6/1/2026 11:01:07 PM`, `Length=8955904`, and `SHA256=A16276A05472CA82F1171C21DE81B52C86C1CD030350CB7D2E1C9BC039CF9011`.
+- The screenshot-backed trio stayed green and the visible frames still look materially better than the prior green-corrupt baseline:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png)
+- The visible cast is now mostly warm/neutral instead of neon green, and the telemetry also moved the right way:
+  - `avg_processing_core_color_cam_agx_ms=143.428`
+  - `avg_processing_core_color_cam_agx_matrix_ms=96.000`
+  - `avg_llrawproc_ms=46.286`
+- Keep this hoist as the baseline for the next playback/performance pass unless a later rerun regresses the screenshots or the timing repeatability.
