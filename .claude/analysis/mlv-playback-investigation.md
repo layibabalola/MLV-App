@@ -1,3 +1,32 @@
+# 2026-06-02 - cam WB matrix-local helper stays the keeper on the hot playback clip
+
+### Verified locally
+
+- I kept the `proper_wb_matrix` scalar hoist in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) and rebuilt the user-facing release tree with the corrected scratch build helper (`GCC_EXEC_PREFIX=C:\Qt\Tools\mingw1310_64\lib\gcc\`) so the MinGW sysroot resolves under `C:\Qt\Tools\mingw1310_64` instead of the broken `C:\Qt` prefix.
+- The rebuilt release executable is current at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/2/2026 2:35:37 AM`
+  - `Length=8956928`
+  - `SHA256=5B4132CB1AA5FD99D4F5D08DAFF48CFA44939D0E6EB40DB4C9665AEB73EAA62F`
+- I reran the screenshot-backed GUI smoke pass on [`large_dual_iso.mlv`](C:/!Layi%20Wkspc%20MLV-App/tests/fixtures/clips/large_dual_iso.mlv) and captured the live frame here:
+  - [`large_dual_iso.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-cam-wb-cache-recheck/screenshots/large_dual_iso.png)
+- The smoke validation stayed green:
+  - `validation.ok=true`
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+  - `scaleRequestMatched=true`
+  - `qualityModeMatched=true`
+- The visible frame looked acceptable: no obvious green corruption in the screenshot, and the hot-clip playback summary reported `avg_llrawproc_ms=35.0`.
+
+### Cross-checked from prior analysis
+
+- The current pass is still in the cam-family residual map, but this probe is about hot-loop matrix dereference cleanup, not a color-logic rewrite.
+- The `tiny_dual_iso` smoke capture timed out waiting for a main window handle, so I did not use that pass to judge the keeper call.
+
+### Needs runtime profiling
+
+- Keep this as the current cam-family baseline unless a later rerun regresses the screenshot or the hot-clip timing.
+- If the next probe stays in the cam family, it should target a different residual than the `proper_wb_matrix` local-scalar shape.
+
 # 2026-06-02 - cam WB search-loop locals were not keeper-shaped; reverted to the hot cam baseline
 
 ### Verified locally
