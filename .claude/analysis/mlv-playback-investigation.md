@@ -11843,3 +11843,27 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - If we stay in `mix_chroma`, the next probe should be a structurally different store-side shape rather than another helper factoring of the same pair write.
 - The next candidate should be compared against the restored baseline, not this rejected helper.
+
+## 2026-06-01 - final_blend row aliasing hint is a reject; baseline restored
+
+### Verified locally
+
+- I tried a low-risk aliasing/codegen hint in [`src/mlv/llrawproc/dualiso_avx2.inc`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso_avx2.inc) by adding `__restrict` to the hot `final_blend_row_avx2_no_alias` and `final_blend_row_avx2` parameters, then reverted it after the playback profile stayed mixed.
+- I rebuilt the user-facing release tree after the revert and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 7:29:32 PM`
+  - `Length=8956928`
+  - `SHA256=DC23EF7BACD4D9C4AE8EFB2F17EDA01BF8E8556B180F8FF229DF7B1E01421778`
+- On the three-frame `large_dual_iso` playback profile, the aliasing hint was not keeper-shaped:
+  - first run: `latency_ms=5470.348`, `llrawproc_ms=270.333`, `final_blend_ms=18.333`, `mix_chroma_ms=21.333`
+  - second run: `latency_ms=3798.647`, `llrawproc_ms=271.667`, `final_blend_ms=22.667`, `mix_chroma_ms=22.000`
+- The end-to-end latency bounced too much between runs, so this was treated as a reject rather than a keeper.
+
+### Cross-checked from prior analysis
+
+- The aliasing hint trimmed some local work, but not in a way that translated into a stable playback win.
+- This remains diagnostic rather than keeper-shaped, so the safe move was to restore the baseline and keep the optimization search honest.
+
+### Needs runtime profiling
+
+- `final_blend` still looks like a diagnostic bucket, not a strong next keeper candidate.
+- If we revisit it, the next hypothesis should be structural rather than another aliasing hint.
