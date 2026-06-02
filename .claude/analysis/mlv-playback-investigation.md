@@ -1,3 +1,65 @@
+# 2026-06-02 - HQ scale-4 Dual ISO should not raw-prefetch during full20 reconstruction
+
+### Verified locally
+
+- I profiled [`tests/fixtures/clips/large_dual_iso.mlv`](C:/!Layi%20Wkspc%20MLV-App/tests/fixtures/clips/large_dual_iso.mlv) with receipt debayer/processing, `MLVAPP_PLAYBACK_SCALE_FACTOR=4`, and the release-tree profiling helper.
+- The pre-change HQ scale-4 run showed raw uint16 prefetch hits, but the background decode worker competed with Dual ISO full20 reconstruction:
+  - [`large_dual_iso_hq_t4_scale4_baseline.json`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-hq-decode-baseline/large_dual_iso_hq_t4_scale4_baseline.json)
+  - `rawPrefetchHits=5`
+  - `avg_latency_ms=256.914`
+  - `avg_cadence_ms=257.581`
+  - `avg_render_work_ms=255.0`
+  - `avg_raw_uint16_ms=1.6`
+  - `avg_llrawproc_ms=247.8`
+  - `avg_dual_iso_full20_ms=246.4`
+- The explicit no-raw-prefetch HQ scale-4 run was faster even though foreground raw decode became visible:
+  - [`large_dual_iso_hq_t4_scale4_no_raw_prefetch.json`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-hq-decode-baseline/large_dual_iso_hq_t4_scale4_no_raw_prefetch.json)
+  - `rawPrefetchHits=0`
+  - `avg_latency_ms=188.629`
+  - `avg_cadence_ms=189.296`
+  - `avg_render_work_ms=185.6`
+  - `avg_raw_uint16_ms=16.8`
+  - `avg_llrawproc_ms=165.4`
+  - `avg_dual_iso_full20_ms=164.8`
+- I kept the narrow source change in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/video_mlv.c): raw uint16 prefetch remains globally enabled by default, but it is denied when the request is Dual ISO and active playback scale factor is 4 or higher.
+- The patched HQ scale-4 release run matched the no-prefetch shape:
+  - [`large_dual_iso_hq_t4_scale4_after_gate.json`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-hq-decode-baseline/large_dual_iso_hq_t4_scale4_after_gate.json)
+  - `rawPrefetchHits=0`
+  - `avg_latency_ms=186.956`
+  - `avg_cadence_ms=187.701`
+  - `avg_render_work_ms=184.8`
+  - `avg_raw_uint16_ms=16.8`
+  - `avg_llrawproc_ms=164.8`
+  - `avg_dual_iso_full20_ms=163.4`
+- The preview/fast receipt path stayed outside the gate and still used raw uint16 prefetch:
+  - [`large_dual_iso_preview_t4_after_gate.json`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-hq-decode-baseline/large_dual_iso_preview_t4_after_gate.json)
+  - `rawPrefetchHits=5`
+  - `avg_latency_ms=12.364`
+  - `avg_cadence_ms=12.972`
+  - `avg_raw_uint16_ms=0.6`
+  - `avg_llrawproc_ms=5.2`
+- I rebuilt the user-facing release executable after the source change:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/2/2026 6:05:57 PM`
+  - `Length=8955392`
+  - `SHA256=E4362BBF1E75428962DE7A351BF60482A48FD2DECD7AF10F720E0F7E2F58C410`
+
+### Cross-checked from prior analysis
+
+- This is not a color math or reconstruction change. The Dual ISO full20 path still runs; the patch only decides whether a raw uint16 decode-ahead worker is allowed for this playback request.
+- The existing receipt-mode profiling confirms the gate is narrow: HQ Dual ISO scale-4 disables raw prefetch, while the fast/preview receipt path keeps it.
+- A predictor-1 measurement run shows raw decompression is not the dominant remaining HQ cost on this clip:
+  - [`large_dual_iso_hq_t4_scale4_pred1_measure.json`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260602-hq-decode-baseline/large_dual_iso_hq_t4_scale4_pred1_measure.json)
+  - `avg_raw_decompress_ms=16.4`
+  - `avg_pred1_bitstream_ms=13.4`
+  - `avg_pred1_predictor_ms=3.0`
+
+### Needs runtime profiling
+
+- The next high-impact target is inside Dual ISO full20 reconstruction, especially `dual_iso_full20_interp_ms`, which still sits around 129 ms in the patched HQ scale-4 run.
+- Run a longer multi-clip A/B pass before broadening the prefetch gate beyond `dual_iso == 1 && playback_scale_factor_active >= 4`.
+- Add or extend a playback telemetry guard if the team wants this optimization protected by automated regression checks rather than release-profile evidence alone.
+
 # 2026-06-02 - cam WB matrix-local helper stays the keeper on the hot playback clip
 
 ### Verified locally

@@ -35,6 +35,16 @@ static QString clip_preview_receipt_path()
     return repo_file_path(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"));
 }
 
+static QString large_dual_iso_fixture_path()
+{
+    return repo_file_path(QStringLiteral("tests/fixtures/clips/large_dual_iso.mlv"));
+}
+
+static QString large_dual_iso_hq_receipt_path()
+{
+    return repo_file_path(QStringLiteral("tests/fixtures/receipts/large_dual_iso_hq.marxml"));
+}
+
 static bool write_look_assist_receipt_fixture(const QString & receipt_path)
 {
     QFile file(receipt_path);
@@ -210,6 +220,19 @@ static QJsonObject first_frame_with_raw_decode_telemetry(const QJsonArray & fram
         }
     }
     return QJsonObject();
+}
+
+static int count_raw_uint16_prefetch_hits(const QJsonArray & frames)
+{
+    int hits = 0;
+    for (const QJsonValue & value : frames) {
+        if (!value.isObject()) continue;
+        const QJsonObject sample = value.toObject();
+        if (sample.value(QStringLiteral("raw_uint16_prefetch_hit")).toBool()) {
+            ++hits;
+        }
+    }
+    return hits;
 }
 
 static std::map<std::string, std::string> load_expected_hashes(const QString & path)
@@ -1901,6 +1924,80 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileReceiptProcessingProducesJson
         ASSERT_TRUE(sample.contains(QStringLiteral("playback_processing_subset_active")));
         ASSERT_TRUE(!sample.value(QStringLiteral("playback_processing_subset_active")).toBool());
     }
+}
+
+TEST(ClipGolden, LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch)
+{
+    const QString fixture_path = large_dual_iso_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/large_dual_iso.mlv");
+    }
+
+    const QString receipt_path = large_dual_iso_hq_receipt_path();
+    if (!QFileInfo::exists(receipt_path)) {
+        SKIP_TEST("Missing fixture receipt tests/fixtures/receipts/large_dual_iso_hq.marxml");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("large-dual-iso-hq-scale4-prefetch-gate.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--receipt") << receipt_path
+            << QStringLiteral("--frames") << QStringLiteral("6")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("4")
+            << QStringLiteral("--playback-debayer") << QStringLiteral("receipt")
+            << QStringLiteral("--playback-processing") << QStringLiteral("receipt"),
+        {{QStringLiteral("MLVAPP_RAW_UINT16_PREFETCH"), QStringLiteral("1")},
+         {QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1")},
+         {QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QStringLiteral("4")}});
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_EQ(1, metadata.value(QStringLiteral("dual_iso_mode_effective")).toInt());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_debayer_effective")).toString()
+                == QStringLiteral("receipt"));
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_processing_effective")).toString()
+                == QStringLiteral("receipt"));
+
+    const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 2);
+    ASSERT_EQ(0, count_raw_uint16_prefetch_hits(frames));
+
+    bool saw_full20_frame = false;
+    for (const QJsonValue & value : frames) {
+        ASSERT_TRUE(value.isObject());
+        const QJsonObject sample = value.toObject();
+        ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+        ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+        saw_full20_frame = saw_full20_frame
+            || sample.value(QStringLiteral("dual_iso_full20_valid")).toBool();
+    }
+    ASSERT_TRUE(saw_full20_frame);
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePred1FastPathMeasurementProducesJson)
