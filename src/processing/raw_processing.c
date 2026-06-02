@@ -489,6 +489,29 @@ static inline uint16_t agx_store_u16_fast(const double value)
     return (uint16_t)LIMIT16(value);
 }
 
+static inline void agx_store_u16_triplet_fast(const double out_r,
+                                              const double out_g,
+                                              const double out_b,
+                                              uint16_t * const pix0,
+                                              uint16_t * const pix1,
+                                              uint16_t * const pix2)
+{
+    if( out_r >= 0.0 && out_r <= 65535.0 &&
+        out_g >= 0.0 && out_g <= 65535.0 &&
+        out_b >= 0.0 && out_b <= 65535.0 )
+    {
+        *pix0 = (uint16_t)out_r;
+        *pix1 = (uint16_t)out_g;
+        *pix2 = (uint16_t)out_b;
+    }
+    else
+    {
+        *pix0 = (uint16_t)LIMIT16(out_r);
+        *pix1 = (uint16_t)LIMIT16(out_g);
+        *pix2 = (uint16_t)LIMIT16(out_b);
+    }
+}
+
 #ifndef __APPLE__
 #define M_PI 3.14159265358979323846 /* pi */
 #endif
@@ -2229,6 +2252,7 @@ void apply_processing_object( processingObject_t * processing,
                 {
                     const float inv_y = 1.0f / Y;
                     const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
+                    /* Preserve the existing fast-path tone-map behavior for non-red channels. */
                     const float result2_1 = Y - (ReinhardTonemap_f((Y - result1) * inv_y) * Y);
                     const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
                     const float desaturate_factor =
@@ -2663,41 +2687,27 @@ void apply_processing_object( processingObject_t * processing,
                     const double agx_out_r = result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2;
                     const double color_cam_agx_matrix_r_start =
                         (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                    pix[0] = agx_store_u16_fast(agx_out_r);
+                    const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
+                    const double color_cam_agx_matrix_g_start =
+                        (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                    const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
+                    const double color_cam_agx_matrix_b_start =
+                        (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                    agx_store_u16_triplet_fast(agx_out_r, agx_out_g, agx_out_b, &pix[0], &pix[1], &pix[2]);
                     if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                     {
                         core_timing->color_cam_agx_matrix_r_ms +=
                             (omp_get_wtime() - color_cam_agx_matrix_r_start) * 1000.0;
-                    }
-                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_r > 65535.0 )
-                    {
-                        ++core_timing->color_cam_agx_matrix_r_hi_count;
-                    }
-                    const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
-                    const double color_cam_agx_matrix_g_start =
-                        (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                    pix[1] = agx_store_u16_fast(agx_out_g);
-                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
-                    {
                         core_timing->color_cam_agx_matrix_g_ms +=
                             (omp_get_wtime() - color_cam_agx_matrix_g_start) * 1000.0;
-                    }
-                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_g > 65535.0 )
-                    {
-                        ++core_timing->color_cam_agx_matrix_g_hi_count;
-                    }
-                    const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
-                    const double color_cam_agx_matrix_b_start =
-                        (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                    pix[2] = agx_store_u16_fast(agx_out_b);
-                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
-                    {
                         core_timing->color_cam_agx_matrix_b_ms +=
                             (omp_get_wtime() - color_cam_agx_matrix_b_start) * 1000.0;
                     }
-                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_b > 65535.0 )
+                    if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail )
                     {
-                        ++core_timing->color_cam_agx_matrix_b_hi_count;
+                        if( agx_out_r > 65535.0 ) ++core_timing->color_cam_agx_matrix_r_hi_count;
+                        if( agx_out_g > 65535.0 ) ++core_timing->color_cam_agx_matrix_g_hi_count;
+                        if( agx_out_b > 65535.0 ) ++core_timing->color_cam_agx_matrix_b_hi_count;
                     }
                     if( capture_breakdown && color_cam_wb_probe_agx )
                     {
@@ -2847,41 +2857,27 @@ void apply_processing_object( processingObject_t * processing,
                         const double agx_out_r = result[0]*agx_m0+result[1]*agx_m1+result[2]*agx_m2;
                         const double color_cam_agx_matrix_r_start =
                             (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        pixg[0] = agx_store_u16_fast(agx_out_r);
+                        const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
+                        const double color_cam_agx_matrix_g_start =
+                            (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                        const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
+                        const double color_cam_agx_matrix_b_start =
+                            (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
+                        agx_store_u16_triplet_fast(agx_out_r, agx_out_g, agx_out_b, &pixg[0], &pixg[1], &pixg[2]);
                         if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                         {
                             core_timing->color_cam_agx_matrix_r_ms +=
                                 (omp_get_wtime() - color_cam_agx_matrix_r_start) * 1000.0;
-                        }
-                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_r > 65535.0 )
-                        {
-                            ++core_timing->color_cam_agx_matrix_r_hi_count;
-                        }
-                        const double agx_out_g = result[0]*agx_m3+result[1]*agx_m4+result[2]*agx_m5;
-                        const double color_cam_agx_matrix_g_start =
-                            (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        pixg[1] = agx_store_u16_fast(agx_out_g);
-                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
-                        {
                             core_timing->color_cam_agx_matrix_g_ms +=
                                 (omp_get_wtime() - color_cam_agx_matrix_g_start) * 1000.0;
-                        }
-                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_g > 65535.0 )
-                        {
-                            ++core_timing->color_cam_agx_matrix_g_hi_count;
-                        }
-                        const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
-                        const double color_cam_agx_matrix_b_start =
-                            (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        pixg[2] = agx_store_u16_fast(agx_out_b);
-                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
-                        {
                             core_timing->color_cam_agx_matrix_b_ms +=
                                 (omp_get_wtime() - color_cam_agx_matrix_b_start) * 1000.0;
                         }
-                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail && agx_out_b > 65535.0 )
+                        if( capture_breakdown && color_cam_wb_probe_agx_matrix_sat_detail )
                         {
-                            ++core_timing->color_cam_agx_matrix_b_hi_count;
+                            if( agx_out_r > 65535.0 ) ++core_timing->color_cam_agx_matrix_r_hi_count;
+                            if( agx_out_g > 65535.0 ) ++core_timing->color_cam_agx_matrix_g_hi_count;
+                            if( agx_out_b > 65535.0 ) ++core_timing->color_cam_agx_matrix_b_hi_count;
                         }
                         if( capture_breakdown && color_cam_wb_probe_agx )
                         {
