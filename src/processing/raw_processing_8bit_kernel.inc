@@ -219,7 +219,7 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                               + rgb_to_y2 * result2;
                 const float min_channel = MIN(MIN(result0, result1), result2);
                 const float result2_0 = -(Reinhard_for_colour((Y - result0) / Y) * Y) + Y;
-                const float result2_1 = -(Reinhard_for_blue((Y - result1) / Y) * Y) + Y;
+                const float result2_1 = -(ReinhardTonemap_f((Y - result1) / Y) * Y) + Y;
                 const float result2_2 = -(Reinhard_for_blue((Y - result2) / Y) * Y) + Y;
                 float desaturate_factor =
                     (Y - MIN(MIN(result2_0, result2_1), result2_2)) / (Y - min_channel);
@@ -243,7 +243,7 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                     {
                         const float inv_y = 1.0f / Y;
                         const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
-                        const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
+                        const float result2_1 = Y - (ReinhardTonemap_f((Y - result1) * inv_y) * Y);
                         const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
                         const float desaturate_factor =
                             (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
@@ -450,7 +450,7 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                           + rgb_to_y2 * result2;
             const float min_channel = MIN(MIN(result0, result1), result2);
             const float result2_0 = -(Reinhard_for_colour((Y - result0) / Y) * Y) + Y;
-            const float result2_1 = -(Reinhard_for_blue((Y - result1) / Y) * Y) + Y;
+            const float result2_1 = -(ReinhardTonemap_f((Y - result1) / Y) * Y) + Y;
             const float result2_2 = -(Reinhard_for_blue((Y - result2) / Y) * Y) + Y;
             float desaturate_factor =
                 (Y - MIN(MIN(result2_0, result2_1), result2_2)) / (Y - min_channel);
@@ -474,7 +474,7 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                 {
                     const float inv_y = 1.0f / Y;
                     const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
-                    const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
+                    const float result2_1 = Y - (ReinhardTonemap_f((Y - result1) * inv_y) * Y);
                     const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
                     const float desaturate_factor =
                         (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
