@@ -1,3 +1,34 @@
+# 2026-06-01 - cam WB gamut tonemap branch fix reduced the green cast, but screenshots still need review
+
+### Verified locally
+
+- I fixed the duplicated cam WB gamut tonemap branch in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc%20MLV-App/src/processing/raw_processing.c) by changing the `if (i == 1) / if (i == 0) / else` chain to `if / else if / else` in both the main cam path and the gradient cam path.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 8:46:17 PM`
+  - `Length=8956928`
+  - `SHA256=801783A774BE3B98C7AABE4BCA065F435E319E247ED15475D1FE8516E28F947`
+- I reran the screenshot-backed three-clip GUI smoke trio and captured fresh PNGs for all three clips:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png)
+- The new screenshots are materially less neon-green than the prior run, especially on `M16-1446`, which now reads much closer to a normal scene.
+- The smoke telemetry stayed valid on the rerun:
+  - `lookAssistApplied=true`
+  - `cpuSettled=true`
+  - `scaleRequestMatched=true`
+  - `qualityModeMatched=true`
+
+### Cross-checked from prior analysis
+
+- The screenshots showed a real visible corruption before the fix, so this was not just a smoke-gate artifact.
+- The green cast appears to have come from the cam WB gamut logic, not from `mix_chroma`.
+- The remaining tint on the hot clips may still be scene or grade dependent, so the screenshots should stay part of every future check.
+
+### Needs runtime profiling
+
+- Rebaseline this fix on the real host and compare the screenshots side by side if we want to decide whether the remaining tint is acceptable.
+- If the cast still looks wrong in the next pass, the next probe should stay in the cam color path, not go back to `mix_chroma`.
+
 # 2026-06-01 - store-clamp helper is a keeper; keep the direct-clamped fallback shape
 
 ### Verified locally
@@ -11923,3 +11954,5 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - After reverting the staged rewrite, I reran the same GUI smoke trio on the rebuilt release tree and the visible gate stayed green on the restored baseline.
 - The smoke wrapper now also captures a per-run PNG screenshot beside the existing JSON output, so future playback passes have a direct visual artifact instead of relying on timing logs alone.
+- The screenshot oracle is not clean yet: the current trio captures show a strong green cast in [`M16-1327.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1327.png) and [`M16-1347.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1347.png), with [`M16-1446.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260530-processed16-packdown-avx2-gui-smoke/screenshots/M16-1446.png) looking less extreme but still visibly green-tinted.
+- That means the screenshot-backed visible smoke gate is useful, but it is not yet proving color correctness on this baseline; the next playback-color pass still needs to chase the visible cast rather than assuming the restored baseline is visually neutral.

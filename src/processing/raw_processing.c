@@ -2588,7 +2588,7 @@ void apply_processing_object( processingObject_t * processing,
                         float tonemapped;
                         if (i == 1)
                             tonemapped = ReinhardTonemap_f(Y_to_min_channel);
-                        if (i == 0)
+                        else if (i == 0)
                             tonemapped = Reinhard_for_colour(Y_to_min_channel);
                         else
                             tonemapped = Reinhard_for_blue(Y_to_min_channel);
@@ -2775,7 +2775,7 @@ void apply_processing_object( processingObject_t * processing,
                             float tonemapped;
                             if (i == 1)
                                 tonemapped = ReinhardTonemap_f(Y_to_min_channel);
-                            if (i == 0)
+                            else if (i == 0)
                                 tonemapped = Reinhard_for_colour(Y_to_min_channel);
                             else
                                 tonemapped = Reinhard_for_blue(Y_to_min_channel);
