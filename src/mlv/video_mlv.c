@@ -226,6 +226,29 @@ static int mlv_raw_uint16_prefetch_enabled(void)
     return enabled;
 }
 
+static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video)
+{
+    if (!mlv_raw_uint16_prefetch_enabled())
+    {
+        return 0;
+    }
+
+    if (!video || !video->llrawproc)
+    {
+        return 1;
+    }
+
+    /* On HQ Dual ISO scale-4 playback, the prefetch worker competes with the
+     * full20 reconstruction threads; foreground decode is cheaper here. */
+    if (video->llrawproc->dual_iso == 1
+        && video->playback_scale_factor_active >= 4)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
 static int mlv_processed8_prefetch_enabled(void)
 {
     static int enabled = -1;
@@ -2462,7 +2485,7 @@ int getMlvRawFrameUint16(mlvObject_t * video, uint64_t frameIndex, uint16_t * un
 {
     const int compressedRaw = isMcrawLoaded(video)
         || (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92);
-    const int prefetchEnabled = compressedRaw && mlv_raw_uint16_prefetch_enabled();
+    const int prefetchEnabled = compressedRaw && mlv_raw_uint16_prefetch_allowed_for_request(video);
 
     g_mlv_last_raw_uint16_prefetch_hit = 0;
 
