@@ -1,3 +1,72 @@
+# 2026-06-01 - SH row-stride hoist in the vertical-up body is the new keeper baseline
+
+### Verified locally
+
+- I replaced the repeated `src_color + width * channel` address arithmetic in the hot SH `vertical_up_body_store_color` loop in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) with a companion `src_color_prev` pointer that advances in lockstep with `src_color`.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:31:33 PM`
+  - `Length=8956416`
+  - `SHA256=BF0D2E351FFFD5132F5333E642D827F66DBCFDC0E446BA5AFAC31BD5EC985EB9`
+- I reran the same screenshot-backed GUI smoke trio with `-FrameTelemetry`, `-RbfDetailTiming`, and screenshot capture enabled:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260601-sh-storebody-rowstride/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260601-sh-storebody-rowstride/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260601-sh-storebody-rowstride/screenshots/M16-1446.png)
+- The visible smoke gate stayed acceptable on all three clips:
+  - `M16-1327` remains warm but not visibly corrupted
+  - `M16-1347` looks broadly neutral
+  - `M16-1446` remains on the acceptable side of the line
+- The new aggregate timing is better than the previous SH specialization keeper:
+  - current aggregate `avg_llrawproc_ms=37.056`
+  - previous keeper aggregate `avg_llrawproc_ms=43.889`
+  - current aggregate `avg_processing_shadows_highlights_prep_ms=398.389`
+  - previous keeper aggregate `avg_processing_shadows_highlights_prep_ms=412.667`
+- The RBF store-color sub-slice also moved in the right direction:
+  - current aggregate `avg_vertical_up_body_store_color_ms=289.944`
+  - previous keeper aggregate `avg_vertical_up_body_store_color_ms=297.111`
+
+### Cross-checked from prior analysis
+
+- The live SH residual is still the vertical-up body store-color family, but the row-stride reuse is a cleaner data-path improvement than the earlier output-tail or branch reshuffle probes.
+- The screenshot oracle still matters, and it remained acceptable on the same three clips.
+
+### Needs runtime profiling
+
+- Keep this as the current SH baseline unless a later rerun regresses the screenshots or the aggregate timing.
+- If we continue probing SH, the next hypothesis should target a different store-color cost center than the row-stride arithmetic we just removed.
+
+# 2026-06-01 - SH vertical-up body channel split removes the inner branch and improves the screenshot-backed trio
+
+### Verified locally
+
+- I specialized the hot SH `vertical_up_body_store_color` path in [`src/processing/rbfilter/RBFilterPlain.cpp`](C:/!Layi%20Wkspc%20MLV-App/src/processing/rbfilter/RBFilterPlain.cpp) so the `rgb3` case now runs as its own outer path instead of checking `channel == 3` inside the inner `x` loop on every pixel.
+- I rebuilt the user-facing release tree and verified the executable at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/1/2026 11:17:29 PM`
+  - `Length=8956416`
+  - `SHA256=BF0D2E351FFFD5132F5333E642D827F66DBCFDC0E446BA5AFAC31BD5EC985EB9`
+- I reran the same screenshot-backed GUI smoke trio with `-FrameTelemetry`, `-RbfDetailTiming`, and screenshot capture enabled:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260601-sh-storebody-channel-split/screenshots/M16-1327.png)
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260601-sh-storebody-channel-split/screenshots/M16-1347.png)
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260601-sh-storebody-channel-split/screenshots/M16-1446.png)
+- The visible smoke gate stayed acceptable on all three clips, and the screenshots look on the corrected side of the line:
+  - `M16-1327` is warm but no longer reads as neon-green corruption
+  - `M16-1347` looks broadly neutral
+  - `M16-1446` stays darker, but it still looks acceptable rather than visibly corrupted
+- The three-clip playback timing improved versus the previous keeper baseline from the cam AgX matrix hoist:
+  - `M16-1327`: `avg_llrawproc_ms=41.5`, `avg_processing_shadows_highlights_prep_ms=404.5`, `avg_vertical_up_body_store_color_ms=293.167`
+  - `M16-1347`: `avg_llrawproc_ms=52.667`, `avg_processing_shadows_highlights_prep_ms=415.833`, `avg_vertical_up_body_store_color_ms=299.167`
+  - `M16-1446`: `avg_llrawproc_ms=37.5`, `avg_processing_shadows_highlights_prep_ms=417.667`, `avg_vertical_up_body_store_color_ms=299.0`
+  - aggregate `avg_llrawproc_ms=43.889`, which is better than the previous keeper's `46.286`
+
+### Cross-checked from prior analysis
+
+- The old `channel == 3` inner-loop branch was the live residual in this SH leaf, so pulling that specialization up one level was a materially different hypothesis than the earlier output-tail and staging probes.
+- The screenshot gate still matters, and the visual result stayed acceptable on the same three clips.
+
+### Needs runtime profiling
+
+- Hold this as the current SH baseline unless a rerun on the real host regresses the screenshots or the aggregate playback timing.
+- If the next SH probe exists, it should target a different store-color hypothesis rather than another nearby branch reshuffle.
+
 # 2026-06-01 - SH output-tail pointer increment probe is safe on the screenshot gate, but it was not keeper-shaped and was reverted
 
 ### Verified locally
