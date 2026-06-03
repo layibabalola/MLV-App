@@ -66,9 +66,8 @@ public:
             bool zoomFitEnabled = false;
             bool fastPlaybackScaleEligible = false;
             uint64_t presentationGeneration = 0;
-            /* Requested playback scale factor (1, 2, or 4). The renderer may
-             * promote this to a safer effective factor, for example Dual ISO
-             * HQ x2 -> x4. */
+            /* Requested playback scale factor (1, 2, 4, or 8). The renderer may
+             * reject incompatible clip dimensions and report the active scale. */
             int playbackScaleFactor = 1;
             MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;

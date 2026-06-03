@@ -8,8 +8,8 @@
  * The pipeline still runs the full LJ92 decode + full llrawproc at native
  * resolution (these need the complete bitstream and Bayer pattern). After
  * llrawproc completes, the unpacked uint16 RGGB bayer image is fed into
- * pl_downsample_bayer_to_rgb_<2x|4x>, which produces a half-/quarter-res
- * RGB image directly via per-2x2-block channel averaging. The debayer
+ * pl_downsample_bayer_to_rgb_<2x|4x|8x>, which produces a half-/quarter-/
+ * eighth-res RGB image directly via per-channel block averaging. The debayer
  * step is skipped entirely on the scaled path.
  *
  * Strategy: per 2x2 block of the source RGGB pattern, output one RGB pixel
@@ -18,9 +18,10 @@
  *   B := bayer[(1,1)]
  *
  * For scale=4, the 4x4 source region collapses to one RGB output pixel,
- * averaging 4 R taps, 8 G taps, and 4 B taps. The 4-row block stride
- * preserves the dual-ISO `iso_patterns[4][4]` cycle exactly — this is the
- * scale at which dual-ISO playback is correct.
+ * averaging 4 R taps, 8 G taps, and 4 B taps. For scale=8, the 8x8 source
+ * region collapses to one RGB output pixel, averaging 16 R taps, 32 G taps,
+ * and 16 B taps. The 4-row bayer-preserving pre-recon path remains scale=4;
+ * scale=8 is the conservative post-llrawproc preview path.
  *
  * Output layout: AoS-3 (RGB interleaved per pixel), uint16 per channel.
  * The output bit depth is normalized to 16-bit; if the bayer input is in
@@ -28,8 +29,9 @@
  * Today video_mlv passes 0 because llrawproc has already widened to
  * 16-bit by the time we run.
  *
- * All kernels are AVX2-vectorised on x86_64 hosts; scalar fallback is
- * used otherwise. Dispatch is pthread_once-latched. Kill switches:
+ * The 2x/4x kernels are AVX2-vectorised on x86_64 hosts; scalar fallback is
+ * used otherwise. The 8x kernel is scalar and OMP-parallel by row because
+ * the output is already small. Dispatch is pthread_once-latched. Kill switches:
  *   MLVAPP_DISABLE_AVX2                — disables every AVX2 kernel
  *   MLVAPP_DISABLE_AVX2_DOWNSAMPLE     — disables only this kernel
  */
@@ -41,7 +43,8 @@ extern "C" {
 typedef enum {
     PL_DOWNSAMPLE_NONE         = 1, /* scaleFactor=1, no-op (caller bypasses) */
     PL_DOWNSAMPLE_2x_BLOCK_AVG = 2, /* per-channel 2x2 block average */
-    PL_DOWNSAMPLE_4x_BLOCK_AVG = 4  /* per-channel 4x4 block average (preserves 4-row dual ISO pattern) */
+    PL_DOWNSAMPLE_4x_BLOCK_AVG = 4, /* per-channel 4x4 block average (preserves 4-row dual ISO pattern) */
+    PL_DOWNSAMPLE_8x_BLOCK_AVG = 8  /* per-channel 8x8 block average, post-llrawproc preview path */
 } pl_downsample_strategy_t;
 
 /* RGGB Bayer -> RGB16 via 2x2 block averaging.
@@ -76,6 +79,30 @@ void pl_downsample_bayer_to_rgb_2x(const uint16_t * bayer_in,
  *   B := mean of {bayer[(1,1)], bayer[(1,3)], bayer[(3,1)], bayer[(3,3)]}
  */
 void pl_downsample_bayer_to_rgb_4x(const uint16_t * bayer_in,
+                                   int in_w,
+                                   int in_h,
+                                   uint16_t * rgb_out,
+                                   int bit_shift,
+                                   int threads);
+
+/* RGGB Bayer -> RGB16 via 8x8 block averaging.
+ *
+ * Conservative preview-only path for explicit 1/8-resolution playback.
+ * Operates after llrawproc/recon has produced a full-resolution bayer buffer.
+ *   output width  = floor(in_w/8)
+ *   output height = floor(in_h/8)
+ *
+ * Any trailing partial 8x8 blocks on the right or bottom edge are ignored.
+ * This keeps common 4-aligned Magic Lantern frame sizes eligible for an x8
+ * preview without changing full-resolution export or the x4 Dual ISO fast
+ * path.
+ *
+ * Per output pixel:
+ *   R := mean of the 16 red positions in the 8x8 RGGB tile
+ *   G := mean of the 32 green positions in the 8x8 RGGB tile
+ *   B := mean of the 16 blue positions in the 8x8 RGGB tile
+ */
+void pl_downsample_bayer_to_rgb_8x(const uint16_t * bayer_in,
                                    int in_w,
                                    int in_h,
                                    uint16_t * rgb_out,

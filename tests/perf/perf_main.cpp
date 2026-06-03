@@ -274,7 +274,7 @@ public:
         char * end = NULL;
         long parsed = strtol(v, &end, 10);
         if( end == v ) return 1;
-        if( parsed == 1 || parsed == 2 || parsed == 4 ) return (int)parsed;
+        if( parsed == 1 || parsed == 2 || parsed == 4 || parsed == 8 ) return (int)parsed;
         return 1;
     }
 

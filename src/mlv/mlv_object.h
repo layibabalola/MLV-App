@@ -183,10 +183,9 @@ typedef struct {
     uint64_t processed_16bit_cache_frame[MLV_PROCESSED_16BIT_CACHE_SLOTS];
     int processed_16bit_cache_threads[MLV_PROCESSED_16BIT_CACHE_SLOTS];
     uint64_t processed_16bit_cache_signature[MLV_PROCESSED_16BIT_CACHE_SLOTS];
-    /* Phase 4A: per-slot playback scale factor (1, 2, or 4). Always 1 today
-     * because the pipeline still renders at full resolution; the field is
-     * compared in slot-match logic so scale=1 and scale=2 entries cannot
-     * collide once Phase 4B starts producing scaled output. */
+    /* Phase 4A: per-slot playback scale factor (1, 2, 4, or 8). The field
+     * is compared in slot-match logic so different preview scales cannot
+     * collide. */
     int processed_16bit_cache_scale[MLV_PROCESSED_16BIT_CACHE_SLOTS];
     uint32_t processed_16bit_cache_next_slot;
     /* Phase 4B: rgb_frame_size in uint16 words that the slot offsets in
@@ -204,10 +203,9 @@ typedef struct {
     uint64_t processed_8bit_cache_frame[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     int processed_8bit_cache_threads[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint64_t processed_8bit_cache_signature[MLV_PROCESSED_8BIT_CACHE_SLOTS];
-    /* Phase 4A: per-slot playback scale factor (1, 2, or 4). Always 1 today
-     * because the pipeline still renders at full resolution; the field is
+    /* Phase 4A: per-slot playback scale factor (1, 2, 4, or 8). The field is
      * compared in slot-match logic and folded into the state signature so a
-     * scale=1 entry never satisfies a scale=2 lookup. */
+     * scale=1 entry never satisfies a reduced-scale lookup. */
     int processed_8bit_cache_scale[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint8_t processed_8bit_cache_state[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint8_t processed_8bit_cache_prefetched[MLV_PROCESSED_8BIT_CACHE_SLOTS];
@@ -218,7 +216,7 @@ typedef struct {
      * between scale=1 and scale=2), the cache must be reset because the
      * slot offsets in the backing buffer are stale. */
     uint64_t processed_8bit_cache_unit_size;
-    /* Phase 4A: most recently requested playback scale factor (1, 2, or 4). */
+    /* Phase 4A: most recently requested playback scale factor (1, 2, 4, or 8). */
     int playback_scale_factor_active;
     pthread_mutex_t processed8_prefetch_mutex;
     pthread_cond_t processed8_prefetch_cond;

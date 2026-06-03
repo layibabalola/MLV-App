@@ -1762,7 +1762,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
         const double playbackScaleStart = mlv_stage_timing_now();
 
         /* Phase 4D: when the render path returns a downsampled buffer
-         * (Phase 4B's scale=2/4 path), nearest-neighbour presentation makes
+         * (Phase 4B's scale=2/4/8 path), nearest-neighbour presentation makes
          * the lower-res preview look blocky and aliased. Use bilinear for any
          * playback-scaled buffer that needs a final presentation resize; keep
          * nearest only for the scaleFactor==1 path so full-res playback stays
