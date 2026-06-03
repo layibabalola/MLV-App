@@ -3527,11 +3527,24 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         if( failureReason ) failureReason->clear();
 
         const bool previousDontDraw = m_dontDraw;
+        trace(QStringLiteral("render-prep-begin frame=%1 sample=%2 warmup=%3 slider=%4")
+              .arg( frameIndex )
+              .arg( sampleIndex )
+              .arg( warmup ? 1 : 0 )
+              .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 ) );
         m_dontDraw = true;
         ui->horizontalSliderPosition->setValue( frameIndex );
-        qApp->processEvents( QEventLoop::AllEvents );
+        trace(QStringLiteral("render-prep-slider-set frame=%1 frame_changed=%2 dont_draw=%3")
+              .arg( frameIndex )
+              .arg( m_frameChanged ? 1 : 0 )
+              .arg( m_dontDraw ? 1 : 0 ) );
         m_dontDraw = previousDontDraw;
+        m_frameChanged = false;
         m_playbackFrameAdvancePending = false;
+        trace(QStringLiteral("render-prep-complete frame=%1 slider=%2 frame_changed=%3")
+              .arg( frameIndex )
+              .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 )
+              .arg( m_frameChanged ? 1 : 0 ) );
 
         QEventLoop loop;
         QTimer timeout;
@@ -3541,6 +3554,19 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         std::atomic<qint64> engineCompletionNs(-1);
         const qint64 requestNs = monotonicClock.nsecsElapsed();
         const uint64_t requestSerialFloor = m_nextRenderRequestSerial;
+        const int lastPresentedFrameBeforeDraw = m_lastPresentedRequestContextValid
+            ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+            : -1;
+        trace(QStringLiteral("render-wait-begin frame=%1 sample=%2 warmup=%3 request_floor=%4 slider=%5 next_serial=%6 last_serial=%7 last_frame=%8 thread_idle=%9")
+              .arg( frameIndex )
+              .arg( sampleIndex )
+              .arg( warmup ? 1 : 0 )
+              .arg( static_cast<qulonglong>( requestSerialFloor ) )
+              .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 )
+              .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+              .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+              .arg( lastPresentedFrameBeforeDraw )
+              .arg( ( m_pRenderThread && m_pRenderThread->isIdle() ) ? 1 : 0 ) );
 
         QMetaObject::Connection engineReadyConnection = connect(
             m_pRenderThread,
@@ -3559,20 +3585,70 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             {
                 if( !isFrameSettledForAnalysis( frameIndex, requestSerialFloor ) )
                 {
+                    const int lastPresentedFrame = m_lastPresentedRequestContextValid
+                        ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                        : -1;
+                    trace(QStringLiteral("frame-ready-rejected frame=%1 request_floor=%2 last_serial=%3 last_frame=%4")
+                          .arg( frameIndex )
+                          .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                          .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                          .arg( lastPresentedFrame ) );
                     return;
                 }
+                trace(QStringLiteral("frame-ready-accepted frame=%1 request_floor=%2 last_serial=%3")
+                      .arg( frameIndex )
+                      .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                      .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
                 frameCompleted = true;
+                timeout.stop();
                 loop.quit();
             } );
         QMetaObject::Connection timeoutConnection = connect(
             &timeout,
             &QTimer::timeout,
             &loop,
-            &QEventLoop::quit );
+            [&]()
+            {
+                const int lastPresentedFrame = m_lastPresentedRequestContextValid
+                    ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+                    : -1;
+                trace(QStringLiteral("render-wait-timeout frame=%1 request_floor=%2 last_serial=%3 last_frame=%4 engine_ready_ns=%5 thread_idle=%6")
+                      .arg( frameIndex )
+                      .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                      .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                      .arg( lastPresentedFrame )
+                      .arg( static_cast<qlonglong>( engineCompletionNs.load() ) )
+                      .arg( ( m_pRenderThread && m_pRenderThread->isIdle() ) ? 1 : 0 ) );
+                loop.quit();
+            } );
 
-        timeout.start( 300000 );
+        timeout.start( 30000 );
         drawFrame();
-        loop.exec();
+        trace(QStringLiteral("drawFrame-return frame=%1 request_floor=%2 next_serial=%3 last_serial=%4 thread_idle=%5 frame_still_drawing=%6")
+              .arg( frameIndex )
+              .arg( static_cast<qulonglong>( requestSerialFloor ) )
+              .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+              .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+              .arg( ( m_pRenderThread && m_pRenderThread->isIdle() ) ? 1 : 0 )
+              .arg( m_frameStillDrawing ? 1 : 0 ) );
+        if( frameCompleted )
+        {
+            trace(QStringLiteral("render-wait-satisfied-before-loop frame=%1 last_serial=%2")
+                  .arg( frameIndex )
+                  .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
+        }
+        else
+        {
+            trace(QStringLiteral("render-wait-loop-enter frame=%1 request_floor=%2")
+                  .arg( frameIndex )
+                  .arg( static_cast<qulonglong>( requestSerialFloor ) ) );
+            loop.exec();
+            trace(QStringLiteral("render-wait-loop-exit frame=%1 completed=%2 last_serial=%3")
+                  .arg( frameIndex )
+                  .arg( frameCompleted ? 1 : 0 )
+                  .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
+        }
+        timeout.stop();
 
         disconnect( engineReadyConnection );
         disconnect( readyConnection );
