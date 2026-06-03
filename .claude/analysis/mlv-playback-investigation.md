@@ -13020,3 +13020,49 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Repeat the normal gated smoke across the other standard M16 clips (`M16-1347`, `M16-1446`) before treating the new `5.8 fps` screenshot sample as a stable multi-clip average.
 - If more color-path detail is needed, pass one probe env at a time through `-ExtraEnvironment` and expect the FPS/ms numbers to be slower because the probe is intentionally timing per-pixel leaves.
 - The next real playback hotspot after removing probe overhead is back to actual work: M16 normal smoke now points at debayer/processed16/render composition (`avg_debayered_frame_ms=99.740`, `avg_processed16_ms=147.460`) rather than fake color timing overhead.
+
+## 2026-06-03 - debayer detail telemetry and visible FPS proof
+
+### Verified locally
+
+- Added playback smoke telemetry for the existing debayer substage timers and engine flags so future reports can tell whether the broad `debayered_frame_ms` bucket is actual debayer kernel time or surrounding pipeline work:
+  - `playback_smoke.debayer_detail_summary`
+  - `avg_debayer_wb_prepare_ms`
+  - `avg_debayer_ca_ms`
+  - `avg_debayer_kernel_ms`
+  - `avg_debayer_wb_undo_ms`
+  - `avg_debayer_pipeline_other_ms`
+  - `debayer_engine_mode_last`
+  - `debayer_basic_u16_avx2_available_frames`
+  - `debayer_basic_u16_avx2_used_frames`
+- Added per-frame profile assertions in `tests/console/test_clip_golden.cpp` for `debayer_engine_mode`, `debayer_basic_u16_avx2_available`, and `debayer_basic_u16_avx2_used`, so schema regressions are caught by the console golden test.
+- Validation commands:
+  - `git diff --check`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$script = Get-Content -Raw -LiteralPath "tools\profiling\run-release-gui-smoke.ps1"; [void][scriptblock]::Create($script); "syntax-ok"'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH="C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;" + $env:PATH; & "C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe" -C platform\qt\build-release -B release -j4'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH="C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;" + $env:PATH; & "C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe" -C tests\build-ci-pipeline -B release -j4'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH="C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;" + $env:PATH; & ".\tests\build-ci-pipeline\release\pipeline_tests.exe" --gtest_filter=DualIsoPipeline.DebayerBasicU16_AVX2ByteIdentity:DualIsoPipeline.DebayerBasicU16_Avx2PathActiveOnCapableHost'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH="C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;" + $env:PATH; & "C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe" -C tests\build-ci-console -B release -j4'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH="C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;" + $env:PATH; $env:MLVAPP_PROFILE_EXE=(Resolve-Path "platform\qt\build-release\release\MLVApp.exe").Path; & ".\tests\build-ci-console\release\console_tests.exe" --gtest_filter=ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson'`
+- User-facing release tree rebuilt successfully:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03T07:13:17.8755011-05:00`
+  - `Length=9005056`
+  - `SHA256=74CBF199D9D5000B97E56987BDEA30E917BFD8F8C0E139896BFD1CFFBD9FD52B`
+- Three-clip screenshot-backed smoke command pattern:
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . -Input <clip> -Output .claude-state\profiling\20260603-debayer-detail-telemetry\three-clip\<clip>\<clip>.json -CaptureScreenshot -FrameTelemetry -ScreenshotOutputDir .claude-state\profiling\20260603-debayer-detail-telemetry\three-clip\<clip>\screenshots`
+- Fresh three-clip GUI smoke results all passed `validation.ok=true` and include both the readable bottom-left FPS proof crop and the presented-frame quality/color screenshot:
+  - `M16-1327`: `visibleBottomLeftGuiFps=6.9` / `Playback: 6.9 fps`, `smokePresentedFps=4.502`, `smokeTimelineFps=19.284`, `avg_render_work_ms=134.550` (`7.432 FPS-equivalent`), `avg_llrawproc_total_ms=42.200` (`23.697 FPS-equivalent`), `avg_debayered_frame_ms=62.883` (`15.903 FPS-equivalent`), `avg_debayer_exclusive_ms=8.650`, `avg_debayer_kernel_ms=2.433`, `avg_processing_ms=52.183` (`19.163 FPS-equivalent`), `avg_processed16_ms=124.367` (`8.041 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=25.283`, `debayer_engine_mode_last=0`, `debayer_basic_u16_avx2_used_frames=60/60`, presented screenshot `.claude-state/profiling/20260603-debayer-detail-telemetry/three-clip/M16-1327/screenshots/M16-1327.png` `SHA256=F01B88204BDC9B34BF2CE079BDED92AC2793DC96A0A8FD30354C572D6576A476`, readable FPS proof `.claude-state/profiling/20260603-debayer-detail-telemetry/three-clip/M16-1327/screenshots/M16-1327-fps-status.png` `SHA256=EF6120D07289163CC1890FA16FA9D4EB7A6E8FADA198074DE61B404D1B654BC9`.
+  - `M16-1347`: `visibleBottomLeftGuiFps=5.7` / `Playback: 5.7 fps`, `smokePresentedFps=3.820`, `smokeTimelineFps=19.237`, `avg_render_work_ms=140.491` (`7.118 FPS-equivalent`), `avg_llrawproc_total_ms=44.018` (`22.718 FPS-equivalent`), `avg_debayered_frame_ms=70.091` (`14.267 FPS-equivalent`), `avg_debayer_exclusive_ms=9.091`, `avg_debayer_kernel_ms=2.345`, `avg_processing_ms=51.436` (`19.442 FPS-equivalent`), `avg_processed16_ms=130.745` (`7.648 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=24.582`, `debayer_engine_mode_last=0`, `debayer_basic_u16_avx2_used_frames=55/55`, presented screenshot `.claude-state/profiling/20260603-debayer-detail-telemetry/three-clip/M16-1347/screenshots/M16-1347.png` `SHA256=E1BBFBE9A6A3C64F2E98F0687A61FEBFEB9D4B781B8F4A07B23B2FD91037D1A9`, readable FPS proof `.claude-state/profiling/20260603-debayer-detail-telemetry/three-clip/M16-1347/screenshots/M16-1347-fps-status.png` `SHA256=BDAE21C9D83406CF6DA90A0CF3815ED4D1B03CB096D4D89932DD873ADF448ADF`.
+  - `M16-1446`: `visibleBottomLeftGuiFps=7.9` / `Playback: 7.9 fps`, `smokePresentedFps=4.231`, `smokeTimelineFps=20.426`, `avg_render_work_ms=133.000` (`7.519 FPS-equivalent`), `avg_llrawproc_total_ms=33.707` (`29.667 FPS-equivalent`), `avg_debayered_frame_ms=58.362` (`17.134 FPS-equivalent`), `avg_debayer_exclusive_ms=8.603`, `avg_debayer_kernel_ms=2.655`, `avg_processing_ms=54.724` (`18.274 FPS-equivalent`), `avg_processed16_ms=122.500` (`8.163 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=26.362`, `debayer_engine_mode_last=0`, `debayer_basic_u16_avx2_used_frames=58/58`, presented screenshot `.claude-state/profiling/20260603-debayer-detail-telemetry/three-clip/M16-1446/screenshots/M16-1446.png` `SHA256=BD478822C4532ED57FD5BE123ABA8A74F9223880FF9EA6BD3E91382F45B269F4`, readable FPS proof `.claude-state/profiling/20260603-debayer-detail-telemetry/three-clip/M16-1446/screenshots/M16-1446-fps-status.png` `SHA256=03E44C8CE4C6B2857F74C03FA03FEB962E924B26934BCD2C4E3577CA386724B6`.
+- Visual inspection confirmed the `*-fps-status.png` crops visibly show the cited bottom-left GUI label. The presented-frame `*.png` files intentionally omit GUI chrome/status text and should be treated as color/aspect/quality screenshots, not as FPS proof.
+
+### Cross-checked from prior analysis
+
+- Earlier reports could be misread because they listed FPS beside the presented-frame screenshot. Going forward, the bottom-left GUI claim should cite `visibleBottomLeftGuiFps` plus `visibleBottomLeftGuiProofPath`, while quality/color claims should cite the presented-frame path.
+- The fresh debayer detail data shows the broad `debayered_frame_ms` bucket was not mostly the bilinear AVX2 kernel. On these three M16 smokes, `debayer_engine_mode_last=0` and `debayer_basic_u16_avx2_used_frames` equaled all presented frames, while `avg_debayer_kernel_ms` stayed around `2.345` to `2.655` ms (`376` to `426 FPS-equivalent`). The larger cost is surrounding pipeline work, especially `llrawproc_total_ms`, `processed16_ms`, and `processing_shadows_highlights_prep_ms`.
+
+### Needs runtime profiling
+
+- Do not spend the next optimization round on `debayerBasicU16` kernel math unless a different clip/mode proves it hot. The better next targets from this smoke are `llrawproc` dual ISO/full20 work, shadows/highlights prep, and render/present queue behavior.
+- Keep reporting both FPS families in future smoke summaries: visible bottom-left GUI FPS from the screenshot crop, and wrapper/profile FPS such as `smokePresentedFps` plus per-stage FPS-equivalent values from `1000 / ms`.

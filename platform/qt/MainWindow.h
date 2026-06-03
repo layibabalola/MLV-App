@@ -928,6 +928,11 @@ private:
     double m_playbackSmokeLlrawprocOtherSumMs = 0.0;
     double m_playbackSmokeDebayeredFrameSumMs = 0.0;
     double m_playbackSmokeDebayerExclusiveSumMs = 0.0;
+    double m_playbackSmokeDebayerWbPrepareSumMs = 0.0;
+    double m_playbackSmokeDebayerCaSumMs = 0.0;
+    double m_playbackSmokeDebayerKernelSumMs = 0.0;
+    double m_playbackSmokeDebayerWbUndoSumMs = 0.0;
+    double m_playbackSmokeDebayerPipelineOtherSumMs = 0.0;
     double m_playbackSmokeProcessingSumMs = 0.0;
     double m_playbackSmokeProcessingSetupSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsPrepSumMs = 0.0;
@@ -1036,6 +1041,9 @@ private:
     int m_playbackSmokeDualIsoFull20LastThreads = 0;
     bool m_playbackSmokeDualIsoFull20LastAliasMap = false;
     bool m_playbackSmokeDualIsoFull20LastFullres = false;
+    int m_playbackSmokeLastDebayerEngineMode = -1;
+    int m_playbackSmokeDebayerBasicU16Avx2AvailableFrames = 0;
+    int m_playbackSmokeDebayerBasicU16Avx2UsedFrames = 0;
     int m_playbackSmokeProcessed8PrefetchHits = 0;
     int m_playbackSmokeRawPrefetchHits = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropSum = 0;
