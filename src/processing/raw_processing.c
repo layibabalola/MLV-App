@@ -145,6 +145,20 @@ static int processing_env_flag_enabled(const char * value)
     return 0;
 }
 
+static int processing_parse_probe_mode(const char * value, int max_mode)
+{
+    if( value && *value )
+    {
+        char * end = NULL;
+        long parsed = strtol(value, &end, 10);
+        if( end != value && *end == '\0' && parsed >= 0 && parsed <= max_mode )
+        {
+            return (int)parsed;
+        }
+    }
+    return -1;
+}
+
 static int processing_shadows_highlights_curve_index_mask_enabled(void)
 {
     static int initialized = 0;
@@ -185,19 +199,11 @@ static int processing_shadows_highlights_probe_mode(void)
 static int processing_main_prelude_probe_mode(void)
 {
     static int initialized = 0;
-    static int probe_mode = 0;
+    static int probe_mode = -1;
     if( !initialized )
     {
-        const char * value = getenv("MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_PROBE");
-        if( value && *value )
-        {
-            char * end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 4 )
-            {
-                probe_mode = (int)parsed;
-            }
-        }
+        probe_mode = processing_parse_probe_mode(
+            getenv("MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_PROBE"), 4);
         initialized = 1;
     }
     return probe_mode;
@@ -206,19 +212,11 @@ static int processing_main_prelude_probe_mode(void)
 static int processing_main_prelude_wb_probe_mode(void)
 {
     static int initialized = 0;
-    static int probe_mode = 0;
+    static int probe_mode = -1;
     if( !initialized )
     {
-        const char * value = getenv("MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_WB_PROBE");
-        if( value && *value )
-        {
-            char * end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 3 )
-            {
-                probe_mode = (int)parsed;
-            }
-        }
+        probe_mode = processing_parse_probe_mode(
+            getenv("MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_WB_PROBE"), 3);
         initialized = 1;
     }
     return probe_mode;
@@ -227,19 +225,11 @@ static int processing_main_prelude_wb_probe_mode(void)
 static int processing_main_prelude_creative_probe_mode(void)
 {
     static int initialized = 0;
-    static int probe_mode = 0;
+    static int probe_mode = -1;
     if( !initialized )
     {
-        const char * value = getenv("MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_CREATIVE_PROBE");
-        if( value && *value )
-        {
-            char * end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 4 )
-            {
-                probe_mode = (int)parsed;
-            }
-        }
+        probe_mode = processing_parse_probe_mode(
+            getenv("MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_CREATIVE_PROBE"), 4);
         initialized = 1;
     }
     return probe_mode;
@@ -248,19 +238,11 @@ static int processing_main_prelude_creative_probe_mode(void)
 static int processing_cam_wb_probe_mode(void)
 {
     static int initialized = 0;
-    static int probe_mode = 0;
+    static int probe_mode = -1;
     if( !initialized )
     {
-        const char * value = getenv("MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE");
-        if( value && *value )
-        {
-            char * end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 7 )
-            {
-                probe_mode = (int)parsed;
-            }
-        }
+        probe_mode = processing_parse_probe_mode(
+            getenv("MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE"), 7);
         initialized = 1;
     }
     return probe_mode;
@@ -269,19 +251,11 @@ static int processing_cam_wb_probe_mode(void)
 static int processing_cam_gamma_probe_mode(void)
 {
     static int initialized = 0;
-    static int probe_mode = 0;
+    static int probe_mode = -1;
     if( !initialized )
     {
-        const char * value = getenv("MLVAPP_PROCESSING_CORE_COLOR_GAMMA_PROBE");
-        if( value && *value )
-        {
-            char * end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 2 )
-            {
-                probe_mode = (int)parsed;
-            }
-        }
+        probe_mode = processing_parse_probe_mode(
+            getenv("MLVAPP_PROCESSING_CORE_COLOR_GAMMA_PROBE"), 2);
         initialized = 1;
     }
     return probe_mode;
@@ -290,19 +264,11 @@ static int processing_cam_gamma_probe_mode(void)
 static int processing_creative_probe_mode(void)
 {
     static int initialized = 0;
-    static int probe_mode = 0;
+    static int probe_mode = -1;
     if( !initialized )
     {
-        const char * value = getenv("MLVAPP_PROCESSING_CORE_CREATIVE_PROBE");
-        if( value && *value )
-        {
-            char * end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 7 )
-            {
-                probe_mode = (int)parsed;
-            }
-        }
+        probe_mode = processing_parse_probe_mode(
+            getenv("MLVAPP_PROCESSING_CORE_CREATIVE_PROBE"), 7);
         initialized = 1;
     }
     return probe_mode;
@@ -2211,6 +2177,60 @@ void apply_processing_object( processingObject_t * processing,
     const double agx_m7 = agx_compressed_matrix[7];
     const double agx_m8 = agx_compressed_matrix[8];
     const double color_main_start = capture_breakdown ? omp_get_wtime() : 0.0;
+    const int color_main_prelude_probe_mode = processing_main_prelude_probe_mode();
+    const int color_main_prelude_wb_requested_mode = processing_main_prelude_wb_probe_mode();
+    const int color_main_prelude_creative_requested_mode =
+        processing_main_prelude_creative_probe_mode();
+    const int color_main_prelude_probe_vignette =
+        (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 1);
+    const int color_main_prelude_probe_creative =
+        (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 2
+         || color_main_prelude_creative_requested_mode >= 0);
+    const int color_main_prelude_probe_wb =
+        (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 3
+         || color_main_prelude_wb_requested_mode >= 0);
+    const int color_main_prelude_probe_any =
+        (color_main_prelude_probe_vignette
+         || color_main_prelude_probe_creative
+         || color_main_prelude_probe_wb);
+    const int color_main_prelude_wb_probe_mode =
+        (color_main_prelude_wb_requested_mode >= 0)
+            ? color_main_prelude_wb_requested_mode
+            : (color_main_prelude_probe_wb ? 0 : -1);
+    const int color_main_prelude_wb_probe_matrix =
+        (color_main_prelude_wb_probe_mode == 0 || color_main_prelude_wb_probe_mode == 1);
+    const int color_main_prelude_wb_probe_recon =
+        (color_main_prelude_wb_probe_mode == 0 || color_main_prelude_wb_probe_mode == 2);
+    const int color_main_prelude_creative_probe_mode =
+        (color_main_prelude_creative_requested_mode >= 0)
+            ? color_main_prelude_creative_requested_mode
+            : (color_main_prelude_probe_creative ? 0 : -1);
+    const int color_main_prelude_creative_probe_shadows =
+        (color_main_prelude_creative_probe_mode == 0
+         || color_main_prelude_creative_probe_mode == 1);
+    const int color_main_prelude_creative_probe_contrast =
+        (color_main_prelude_creative_probe_mode == 0
+         || color_main_prelude_creative_probe_mode == 2);
+    const int color_cam_wb_probe_mode = processing_cam_wb_probe_mode();
+    const int color_cam_probe_any = color_cam_wb_probe_mode >= 0;
+    const int color_cam_wb_probe_matrix =
+        (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 1);
+    const int color_cam_wb_probe_gamut =
+        (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 2);
+    const int color_cam_wb_probe_desat =
+        (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 3);
+    const int color_cam_wb_probe_agx =
+        (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 4 || color_cam_wb_probe_mode == 5);
+    const int color_cam_wb_probe_agx_clip_detail =
+        (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 5);
+    const int color_cam_wb_probe_agx_matrix_detail =
+        (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 6);
+    const int color_cam_wb_probe_agx_matrix_sat_detail =
+        (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 7);
+    const int color_gamma_probe_mode = processing_cam_gamma_probe_mode();
+    const int color_gamma_probe_any = color_gamma_probe_mode >= 0;
+    const int color_gamma_probe_main =
+        (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 1);
 
     /* white balance & exposure & highlights & gamma & highlight reconstruction */
     if( use_basic_matrix_fast_path )
@@ -2290,24 +2310,8 @@ void apply_processing_object( processingObject_t * processing,
 
             double expo_correction = 1.0;
             double expo_correction_gradient = 1.0;
-            const double color_main_prelude_start = capture_breakdown ? omp_get_wtime() : 0.0;
-            const int color_main_prelude_probe_mode = processing_main_prelude_probe_mode();
-            const int color_main_prelude_probe_vignette =
-                (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 1);
-            const int color_main_prelude_probe_creative =
-                (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 2);
-            const int color_main_prelude_probe_wb =
-                (color_main_prelude_probe_mode == 0 || color_main_prelude_probe_mode == 3);
-            const int color_main_prelude_wb_probe_mode = processing_main_prelude_wb_probe_mode();
-            const int color_main_prelude_wb_probe_matrix =
-                (color_main_prelude_wb_probe_mode == 0 || color_main_prelude_wb_probe_mode == 1);
-            const int color_main_prelude_wb_probe_recon =
-                (color_main_prelude_wb_probe_mode == 0 || color_main_prelude_wb_probe_mode == 2);
-            const int color_main_prelude_creative_probe_mode = processing_main_prelude_creative_probe_mode();
-            const int color_main_prelude_creative_probe_shadows =
-                (color_main_prelude_creative_probe_mode == 0 || color_main_prelude_creative_probe_mode == 1);
-            const int color_main_prelude_creative_probe_contrast =
-                (color_main_prelude_creative_probe_mode == 0 || color_main_prelude_creative_probe_mode == 2);
+            const double color_main_prelude_start =
+                (capture_breakdown && color_main_prelude_probe_any) ? omp_get_wtime() : 0.0;
             const double color_main_prelude_vignette_start =
                 (capture_breakdown && color_main_prelude_probe_vignette) ? omp_get_wtime() : 0.0;
 
@@ -2561,33 +2565,21 @@ void apply_processing_object( processingObject_t * processing,
                     (omp_get_wtime() - color_main_prelude_wb_start) * 1000.0;
             }
 
-            if( capture_breakdown )
+            if( capture_breakdown && color_main_prelude_probe_any )
             {
                 core_timing->color_main_prelude_ms +=
                     (omp_get_wtime() - color_main_prelude_start) * 1000.0;
             }
 
             /* I really don't like how this if is in a big loop :(( */
-            const int color_cam_wb_probe_mode = processing_cam_wb_probe_mode();
-            const int color_cam_wb_probe_matrix =
-                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 1);
-            const int color_cam_wb_probe_gamut =
-                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 2);
-            const int color_cam_wb_probe_desat =
-                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 3);
-            const int color_cam_wb_probe_agx =
-                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 4 || color_cam_wb_probe_mode == 5);
-            const int color_cam_wb_probe_agx_clip_detail =
-                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 5);
-            const int color_cam_wb_probe_agx_matrix_detail =
-                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 6);
-            const int color_cam_wb_probe_agx_matrix_sat_detail =
-                (color_cam_wb_probe_mode == 0 || color_cam_wb_probe_mode == 7);
             if( use_cam_matrix )
             {
-                const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
-                const double color_cam_main_start = capture_breakdown ? omp_get_wtime() : 0.0;
-                const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                const double color_cam_start =
+                    (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
+                const double color_cam_main_start =
+                    (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
+                const double color_cam_wb_start =
+                    (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
                 const double color_cam_wb_matrix_start =
                     (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
                 const double proper_wb_0 = proper_wb[0];
@@ -2653,14 +2645,15 @@ void apply_processing_object( processingObject_t * processing,
                     core_timing->color_cam_wb_desat_ms +=
                         (omp_get_wtime() - color_cam_wb_desat_start) * 1000.0;
                 }
-                if( capture_breakdown )
+                if( capture_breakdown && color_cam_probe_any )
                 {
                     core_timing->color_cam_wb_ms += (omp_get_wtime() - color_cam_wb_start) * 1000.0;
                 }
 
                 if (processing->AgX)
                 {
-                    const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                    const double color_cam_agx_start =
+                        (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
                     const double color_cam_agx_clip_start =
                         (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                     // Clip. Just in case other footprint compression did not happen.
@@ -2714,7 +2707,7 @@ void apply_processing_object( processingObject_t * processing,
                         core_timing->color_cam_agx_matrix_ms +=
                             (omp_get_wtime() - color_cam_agx_matrix_start) * 1000.0;
                     }
-                    if( capture_breakdown )
+                    if( capture_breakdown && color_cam_probe_any )
                     {
                         core_timing->color_cam_agx_ms += (omp_get_wtime() - color_cam_agx_start) * 1000.0;
                     }
@@ -2725,7 +2718,7 @@ void apply_processing_object( processingObject_t * processing,
                     pix[1] = LIMIT16(result[1]);
                     pix[2] = LIMIT16(result[2]);
                 }
-                if( capture_breakdown )
+                if( capture_breakdown && color_cam_probe_any )
                 {
                     core_timing->color_cam_ms += (omp_get_wtime() - color_cam_start) * 1000.0;
                     core_timing->color_cam_main_ms += (omp_get_wtime() - color_cam_main_start) * 1000.0;
@@ -2733,10 +2726,8 @@ void apply_processing_object( processingObject_t * processing,
             }
 
             /* Gamma and expo correction (shadows&highlights, contrast, clarity) */
-            const double color_gamma_start = capture_breakdown ? omp_get_wtime() : 0.0;
-            const int color_gamma_probe_mode = processing_cam_gamma_probe_mode();
-            const int color_gamma_probe_main =
-                (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 1);
+            const double color_gamma_start =
+                (capture_breakdown && color_gamma_probe_any) ? omp_get_wtime() : 0.0;
             const double color_gamma_main_start =
                 (capture_breakdown && color_gamma_probe_main) ? omp_get_wtime() : 0.0;
             const uint16_t * const color_gamma_lut = processing->pre_calc_gamma;
@@ -2749,21 +2740,26 @@ void apply_processing_object( processingObject_t * processing,
                 core_timing->color_gamma_main_ms +=
                     (omp_get_wtime() - color_gamma_main_start) * 1000.0;
             }
-            if( capture_breakdown )
+            if( capture_breakdown && color_gamma_probe_any )
             {
                 core_timing->color_gamma_ms += (omp_get_wtime() - color_gamma_start) * 1000.0;
             }
 
             /* Gradient part 2 & blending */
-            const double color_gradient_start = capture_breakdown ? omp_get_wtime() : 0.0;
+            const double color_gradient_start =
+                (capture_breakdown && (color_cam_probe_any || color_gamma_probe_any))
+                    ? omp_get_wtime() : 0.0;
             if( processing->gradient_enable && gmpix[0] != 0 && use_gradient_adjustments )
             {
                 /* WB correction gradient layer*/
                     if( use_cam_matrix )
                     {
-                        const double color_cam_start = capture_breakdown ? omp_get_wtime() : 0.0;
-                        const double color_cam_gradient_start = capture_breakdown ? omp_get_wtime() : 0.0;
-                        const double color_cam_wb_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                        const double color_cam_start =
+                            (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
+                        const double color_cam_gradient_start =
+                            (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
+                        const double color_cam_wb_start =
+                            (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
                     const double color_cam_wb_matrix_start =
                         (capture_breakdown && color_cam_wb_probe_matrix) ? omp_get_wtime() : 0.0;
                     const double proper_wb_0 = proper_wb[0];
@@ -2822,7 +2818,7 @@ void apply_processing_object( processingObject_t * processing,
                         core_timing->color_cam_wb_desat_ms +=
                             (omp_get_wtime() - color_cam_wb_desat_start) * 1000.0;
                     }
-                        if( capture_breakdown )
+                        if( capture_breakdown && color_cam_probe_any )
                         {
                             core_timing->color_cam_wb_ms += (omp_get_wtime() - color_cam_wb_start) * 1000.0;
                         }
@@ -2830,7 +2826,8 @@ void apply_processing_object( processingObject_t * processing,
                         /* obligatory code duplication */
                         if (processing->AgX)
                         {
-                            const double color_cam_agx_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                            const double color_cam_agx_start =
+                                (capture_breakdown && color_cam_probe_any) ? omp_get_wtime() : 0.0;
                             const double color_cam_agx_clip_start =
                                 (capture_breakdown && color_cam_wb_probe_agx) ? omp_get_wtime() : 0.0;
                         // Clip. Just in case other footprint compression did not happen.
@@ -2884,7 +2881,7 @@ void apply_processing_object( processingObject_t * processing,
                             core_timing->color_cam_agx_matrix_ms +=
                                 (omp_get_wtime() - color_cam_agx_matrix_start) * 1000.0;
                         }
-                        if( capture_breakdown )
+                        if( capture_breakdown && color_cam_probe_any )
                         {
                             core_timing->color_cam_agx_ms += (omp_get_wtime() - color_cam_agx_start) * 1000.0;
                         }
@@ -2895,7 +2892,7 @@ void apply_processing_object( processingObject_t * processing,
                         pixg[1] = LIMIT16(result[1]);
                         pixg[2] = LIMIT16(result[2]);
                     }
-                    if( capture_breakdown )
+                    if( capture_breakdown && color_cam_probe_any )
                     {
                         core_timing->color_cam_ms += (omp_get_wtime() - color_cam_start) * 1000.0;
                         core_timing->color_cam_gradient_ms += (omp_get_wtime() - color_cam_gradient_start) * 1000.0;
@@ -2903,7 +2900,8 @@ void apply_processing_object( processingObject_t * processing,
                 }
 
                 /* Gamma and expo correction (shadows&highlights, contrast, clarity) gradient layer*/
-                const double color_gamma_start = capture_breakdown ? omp_get_wtime() : 0.0;
+                const double color_gamma_start =
+                    (capture_breakdown && color_gamma_probe_any) ? omp_get_wtime() : 0.0;
                 const double color_gamma_gradient_start =
                     (capture_breakdown && (color_gamma_probe_mode == 0 || color_gamma_probe_mode == 2))
                     ? omp_get_wtime() : 0.0;
@@ -2917,7 +2915,7 @@ void apply_processing_object( processingObject_t * processing,
                     core_timing->color_gamma_gradient_ms +=
                         (omp_get_wtime() - color_gamma_gradient_start) * 1000.0;
                 }
-                if( capture_breakdown )
+                if( capture_breakdown && color_gamma_probe_any )
                 {
                     core_timing->color_gamma_ms += (omp_get_wtime() - color_gamma_start) * 1000.0;
                 }
@@ -2929,7 +2927,7 @@ void apply_processing_object( processingObject_t * processing,
                 pix[1] = blend * pixg[1] + inv_blend * pix[1];
                 pix[2] = blend * pixg[2] + inv_blend * pix[2];
             }
-            if( capture_breakdown )
+            if( capture_breakdown && (color_cam_probe_any || color_gamma_probe_any) )
             {
                 core_timing->color_gradient_ms += (omp_get_wtime() - color_gradient_start) * 1000.0;
             }
