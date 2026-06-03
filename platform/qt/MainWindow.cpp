@@ -4967,6 +4967,45 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QThread::msleep( 10 );
     }
 
+    if( !options.windowScreenshotOutputPath.isEmpty() )
+    {
+        ui->statusBar->show();
+        if( m_pFpsStatus )
+        {
+            m_pFpsStatus->show();
+            m_pFpsStatus->update();
+        }
+        update();
+        repaint();
+        qApp->processEvents( QEventLoop::AllEvents );
+
+        QPixmap windowScreenshot = grab();
+        QFileInfo windowScreenshotInfo( options.windowScreenshotOutputPath );
+        if( !windowScreenshotInfo.absoluteDir().exists()
+         && !QDir().mkpath( windowScreenshotInfo.absolutePath() ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to create window screenshot directory: "
+                << windowScreenshotInfo.absolutePath() << "\n";
+            return 8;
+        }
+
+        if( windowScreenshot.isNull()
+         || !windowScreenshot.save( windowScreenshotInfo.absoluteFilePath(), "PNG" ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to save window screenshot: "
+                << windowScreenshotInfo.absoluteFilePath() << "\n";
+            return 9;
+        }
+
+        logInteractionEvent(
+            QStringLiteral("gui_smoke.window_screenshot"),
+            QStringLiteral("path=\"%1\" width=%2 height=%3 method=app_internal_window_grab fps_status=\"%4\"")
+                .arg( windowScreenshotInfo.absoluteFilePath() )
+                .arg( windowScreenshot.width() )
+                .arg( windowScreenshot.height() )
+                .arg( m_pFpsStatus ? m_pFpsStatus->text() : QStringLiteral("unavailable") ) );
+    }
+
     if( !options.screenshotOutputPath.isEmpty() )
     {
         qApp->processEvents( QEventLoop::AllEvents );
