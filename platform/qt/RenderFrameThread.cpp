@@ -2244,6 +2244,20 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.interp_amaze_lut_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_direction_ms"),
                                       dualIsoFull20.interp_amaze_edge_direction_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_simd_batches"),
+                                      dualIsoFull20.interp_amaze_edge_simd_batches );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_allskip_batches"),
+                                      dualIsoFull20.interp_amaze_edge_allskip_batches );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_mixed_batches"),
+                                      dualIsoFull20.interp_amaze_edge_mixed_batches );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_fullsearch_batches"),
+                                      dualIsoFull20.interp_amaze_edge_fullsearch_batches );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_fullsearch_pixels"),
+                                      dualIsoFull20.interp_amaze_edge_fullsearch_pixels );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_skip_pixels"),
+                                      dualIsoFull20.interp_amaze_edge_skip_pixels );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_scalar_pixels"),
+                                      dualIsoFull20.interp_amaze_edge_scalar_pixels );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_actual_interp_ms"),
                                       dualIsoFull20.interp_amaze_actual_interp_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_border_ms"),

@@ -159,7 +159,14 @@ static void amaze_edge_direction_estimator_row_avx2(
     const double * fullres_curve,
     double fullres_thr_v,
     uint32_t white_darkened,
-    uint8_t * edge_dir_row /* row pointer; this kernel writes [5, w-5) */)
+    uint8_t * edge_dir_row, /* row pointer; this kernel writes [5, w-5) */
+    uint64_t * simd_batches,
+    uint64_t * allskip_batches,
+    uint64_t * mixed_batches,
+    uint64_t * fullsearch_batches,
+    uint64_t * fullsearch_pixels,
+    uint64_t * skip_pixels,
+    uint64_t * scalar_pixels)
 {
     /* NUM_DIR matches the file-scope edge_directions[] table (11 entries,
      * 2 commented-out near-horizontal directions). D0 = NUM_DIR/2 = 5. */
@@ -217,9 +224,22 @@ static void amaze_edge_direction_estimator_row_avx2(
             full_search_mask = _mm256_xor_si256(skip_mask, _mm256_set1_epi32(-1));
         }
 
+        const unsigned int full_search_lane_mask =
+            (unsigned int)_mm256_movemask_ps(_mm256_castsi256_ps(full_search_mask)) & 0xffu;
+        const int full_search_lane_count = __builtin_popcount(full_search_lane_mask);
+        (*simd_batches)++;
+        (*fullsearch_pixels) += (uint64_t)full_search_lane_count;
+        (*skip_pixels) += (uint64_t)(8 - full_search_lane_count);
+
         if (_mm256_testz_si256(full_search_mask, full_search_mask)) {
+            (*allskip_batches)++;
             amaze_store_8_bytes_avx2(&edge_dir_row[x], v_d0);
             continue;
+        }
+        if (full_search_lane_count == 8) {
+            (*fullsearch_batches)++;
+        } else {
+            (*mixed_batches)++;
         }
 
         /* --- Per-direction sweep. ---
@@ -314,6 +334,13 @@ static void amaze_edge_direction_estimator_row_avx2(
             }
         } else if (raw_buffer_32[x + y * w] < white_darkened) {
             dmin = D0; dmax = D0;
+        }
+
+        (*scalar_pixels)++;
+        if (dmin == dmax) {
+            (*skip_pixels)++;
+        } else {
+            (*fullsearch_pixels)++;
         }
 
         if (dmin == dmax) {

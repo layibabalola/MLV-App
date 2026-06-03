@@ -2978,6 +2978,13 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         int not_overexposed = 0;
         int deep_shadow = 0;
         int not_shadow = 0;
+        uint64_t edge_simd_batches = 0;
+        uint64_t edge_allskip_batches = 0;
+        uint64_t edge_mixed_batches = 0;
+        uint64_t edge_fullsearch_batches = 0;
+        uint64_t edge_fullsearch_pixels = 0;
+        uint64_t edge_skip_pixels = 0;
+        uint64_t edge_scalar_pixels = 0;
 
         amaze_stage_start = mlv_stage_timing_now();
         if(black != previous_black)
@@ -3001,6 +3008,13 @@ static inline void amaze_interpolate(struct raw_info raw_info,
             {
                 int s = (is_bright[y%4] == is_bright[(y+1)%4]) ? -1 : 1;
                 int br = BRIGHT_ROW;
+                uint64_t row_simd_batches = 0;
+                uint64_t row_allskip_batches = 0;
+                uint64_t row_mixed_batches = 0;
+                uint64_t row_fullsearch_batches = 0;
+                uint64_t row_fullsearch_pixels = 0;
+                uint64_t row_skip_pixels = 0;
+                uint64_t row_scalar_pixels = 0;
                 /* Pass a row pointer into the per-row kernel so its writes
                  * land in edge_direction[x + y*w]. */
                 amaze_edge_direction_estimator_row_avx2(
@@ -3008,7 +3022,28 @@ static inline void amaze_interpolate(struct raw_info raw_info,
                     gray, raw_buffer_32, raw2ev,
                     fullres_curve, fullres_thr,
                     (uint32_t)white_darkened,
-                    &edge_direction[(size_t)y * (size_t)w]);
+                    &edge_direction[(size_t)y * (size_t)w],
+                    &row_simd_batches,
+                    &row_allskip_batches,
+                    &row_mixed_batches,
+                    &row_fullsearch_batches,
+                    &row_fullsearch_pixels,
+                    &row_skip_pixels,
+                    &row_scalar_pixels);
+#pragma omp atomic
+                edge_simd_batches += row_simd_batches;
+#pragma omp atomic
+                edge_allskip_batches += row_allskip_batches;
+#pragma omp atomic
+                edge_mixed_batches += row_mixed_batches;
+#pragma omp atomic
+                edge_fullsearch_batches += row_fullsearch_batches;
+#pragma omp atomic
+                edge_fullsearch_pixels += row_fullsearch_pixels;
+#pragma omp atomic
+                edge_skip_pixels += row_skip_pixels;
+#pragma omp atomic
+                edge_scalar_pixels += row_scalar_pixels;
             }
         }
         else
@@ -3065,6 +3100,19 @@ static inline void amaze_interpolate(struct raw_info raw_info,
 
                 if (dmin == dmax)
                 {
+#pragma omp atomic
+                    edge_skip_pixels++;
+                }
+                else
+                {
+#pragma omp atomic
+                    edge_fullsearch_pixels++;
+                }
+#pragma omp atomic
+                edge_scalar_pixels++;
+
+                if (dmin == dmax)
+                {
                     d_best = dmin;
                 }
                 else
@@ -3107,6 +3155,20 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         }
         g_dualiso_full20bit_timing.interp_amaze_edge_direction_ms +=
             dualiso_debug_elapsed_ms(amaze_stage_start);
+        g_dualiso_full20bit_timing.interp_amaze_edge_simd_batches +=
+            (double)edge_simd_batches;
+        g_dualiso_full20bit_timing.interp_amaze_edge_allskip_batches +=
+            (double)edge_allskip_batches;
+        g_dualiso_full20bit_timing.interp_amaze_edge_mixed_batches +=
+            (double)edge_mixed_batches;
+        g_dualiso_full20bit_timing.interp_amaze_edge_fullsearch_batches +=
+            (double)edge_fullsearch_batches;
+        g_dualiso_full20bit_timing.interp_amaze_edge_fullsearch_pixels +=
+            (double)edge_fullsearch_pixels;
+        g_dualiso_full20bit_timing.interp_amaze_edge_skip_pixels +=
+            (double)edge_skip_pixels;
+        g_dualiso_full20bit_timing.interp_amaze_edge_scalar_pixels +=
+            (double)edge_scalar_pixels;
 #ifndef STDOUT_SILENT
         printf("Semi-overexposed: %.02f%%\n", semi_overexposed * 100.0 / (semi_overexposed + not_overexposed));
         printf("Deep shadows    : %.02f%%\n", deep_shadow * 100.0 / (deep_shadow + not_shadow));
