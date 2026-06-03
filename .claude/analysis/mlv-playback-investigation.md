@@ -13506,3 +13506,90 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Run the standard M16 visual smoke set (`M16-1327`, `M16-1347`, `M16-1446`, optional `M16-1243`) before broad release claims; this turn validated the hot/warm `M16-1327` gate only.
 - Next ranked implementation candidate after this accepted Dual ISO change: build the pointer-drift-preserving RBF exact-equivalence harness, then evaluate drift-preserving SH halfres RBF vertical parallelization.
+
+## 2026-06-03 - odd-dimension SH halfres RBF candidate rejected
+
+### Verified locally
+
+- Started follow-up work block `wb-7e82b256aeb344e4` from clean `master` at `ac7936f4fce2e91b3e8b6b030973a24feb080ff5` to look for the next safe playback opportunity after the accepted direct-load `final_blend` float-table optimization.
+- The tested candidate allowed the shadows/highlights halfres RBF route on odd frame dimensions by using ceil half dimensions, clamping trailing downsample edges, guarding trailing upsample writes, adding a live kill switch `MLVAPP_DISABLE_SH_ODD_HALFRES_RBF=1`, and adding focused tests for the new route. The source/test candidate was reverted after the performance gate failed.
+- Focused candidate tests passed before rejection:
+  - `ProcessingFilters.ShadowsHighlightsOddDimensionsUseHalfresRbfByDefault`
+  - `ProcessingFilters.ShadowsHighlightsOddDimensionKillSwitchUsesFullresRbf`
+  - `ProcessingFilters.ShadowsHighlightsOddHalfresKillSwitchDoesNotAffectEvenDimensions`
+  - Existing `ProcessingFilters.ShadowsHighlightsProbeTelemetryIsOptInByDefault`
+  - Existing `ProcessingFilters.RbfFilter*`
+- Candidate release executable before rejection:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03 15:21:46 -05:00`, `Length=9008128`, `SHA256=308CEE0ED2A0E90C9818BF3CE3BE96A91F1BD09AC9F6710427B257C8D5E54187`
+- In-binary kill-switch baseline on `C:/temp/MLV/M16-1327.MLV` used the same candidate EXE with `MLVAPP_DISABLE_SH_ODD_HALFRES_RBF=1`:
+  - Artifact: `.claude-state/profiling/20260603-sh-odd-halfres/baseline-disabled/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=5.6`, `smoke presented FPS=7.700`, `timeline FPS=23.480`
+  - `avg_render_work_ms=115.885` (`8.629 FPS-equivalent`)
+  - `avg_llrawproc_ms=30.617` (`32.662 FPS-equivalent`)
+  - `avg_processed8_ms=114.601` (`8.726 FPS-equivalent`)
+  - `avg_processing_ms=49.259` (`20.301 FPS-equivalent`)
+  - `avg_processing_shadows_highlights_prep_ms=22.218` (`45.009 FPS-equivalent`)
+  - `avg_dual_iso_full20_total_ms=29.568` (`33.821 FPS-equivalent`)
+  - `avg_final_blend_ms=7.103` (`140.785 FPS-equivalent`)
+  - Presented screenshot: `.claude-state/profiling/20260603-sh-odd-halfres/baseline-disabled/screenshots/M16-1327.png` `SHA256=83D6E04F02939B71C15B780BCE414A805080D94BFD7A1C9AAB059392790A2074`
+  - FPS proof crop: `.claude-state/profiling/20260603-sh-odd-halfres/baseline-disabled/screenshots/M16-1327-fps-status.png` `SHA256=900A076343222E804A9D2376E17DCC3114B5D38FC8DE6B1463B10A3BEAB46E47`
+- Default candidate smoke on the same clip regressed:
+  - Artifact: `.claude-state/profiling/20260603-sh-odd-halfres/post-default/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=6.5`, `smoke presented FPS=5.529`, `timeline FPS=23.302`
+  - `avg_render_work_ms=162.215` (`6.164 FPS-equivalent`), delta `+46.330 ms`
+  - `avg_llrawproc_ms=45.588` (`21.936 FPS-equivalent`), delta `+14.971 ms`
+  - `avg_processed8_ms=160.085` (`6.247 FPS-equivalent`), delta `+45.484 ms`
+  - `avg_processing_ms=69.672` (`14.353 FPS-equivalent`), delta `+20.413 ms`
+  - `avg_processing_shadows_highlights_prep_ms=30.316` (`32.986 FPS-equivalent`), delta `+8.098 ms`
+  - `avg_dual_iso_full20_total_ms=43.520` (`22.978 FPS-equivalent`)
+  - `avg_final_blend_ms=10.034` (`99.661 FPS-equivalent`)
+  - Presented screenshot: `.claude-state/profiling/20260603-sh-odd-halfres/post-default/screenshots/M16-1327.png` `SHA256=1F07BA7326164D95C5461D9617D29E40E3A48B6511478E8F63FD8E262390F17C`
+  - FPS proof crop: `.claude-state/profiling/20260603-sh-odd-halfres/post-default/screenshots/M16-1327-fps-status.png` `SHA256=6C81EF9094026630EA843FA2B479BD2C8E3E14CAF73784200DF15C6E3A76986E`
+- Default candidate rerun still regressed against the kill-switch baseline:
+  - Artifact: `.claude-state/profiling/20260603-sh-odd-halfres/post-default-rerun/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=6.6`, `smoke presented FPS=6.494`, `timeline FPS=23.360`
+  - `avg_render_work_ms=137.670` (`7.263 FPS-equivalent`), delta `+21.785 ms`
+  - `avg_llrawproc_ms=36.417` (`27.460 FPS-equivalent`), delta `+5.800 ms`
+  - `avg_processed8_ms=136.024` (`7.352 FPS-equivalent`), delta `+21.423 ms`
+  - `avg_processing_ms=58.019` (`17.236 FPS-equivalent`), delta `+8.760 ms`
+  - `avg_processing_shadows_highlights_prep_ms=25.597` (`39.067 FPS-equivalent`), delta `+3.379 ms`
+  - `avg_dual_iso_full20_total_ms=35.107` (`28.484 FPS-equivalent`)
+  - `avg_final_blend_ms=8.660` (`115.473 FPS-equivalent`)
+  - Presented screenshot: `.claude-state/profiling/20260603-sh-odd-halfres/post-default-rerun/screenshots/M16-1327.png` `SHA256=6F07387B924B5683B21BE19336096210A432173CA98190F6B5AB9158FD4737DC`
+  - FPS proof crop: `.claude-state/profiling/20260603-sh-odd-halfres/post-default-rerun/screenshots/M16-1327-fps-status.png` `SHA256=611DA7B966223C0ECF8C070FBA3A5DCF07DD4534803E8E29F8E33D610A6BDD73`
+- Rejection status:
+  - Rejected: enabling SH halfres RBF on odd dimensions via clamp/ceil edge handling. It passed focused behavior checks but worsened the live M16 playback timing in two default runs.
+  - Preserved: the screenshots and JSON smoke artifacts above as evidence.
+  - Reverted: source and tests for the odd-dimension route before closeout.
+- Rebuilt the user-facing release tree after reverting the candidate:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03 15:37:07 -05:00`, `Length=9007104`, `SHA256=CF9BD526C7164AA96A471F3680CDEF2D921F9C1E3372F2F0A2188C1977E1B51C`
+- Post-revert default GUI smoke with screenshots:
+  - Artifact: `.claude-state/profiling/20260603-sh-odd-halfres/reverted-default/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=6.5`, `smoke presented FPS=6.324`, `timeline FPS=23.378`
+  - `avg_render_work_ms=141.876` (`7.049 FPS-equivalent`)
+  - `avg_llrawproc_ms=37.000` (`27.027 FPS-equivalent`)
+  - `avg_processed8_ms=140.328` (`7.126 FPS-equivalent`)
+  - `avg_processing_ms=60.124` (`16.632 FPS-equivalent`)
+  - `avg_processing_shadows_highlights_prep_ms=27.771` (`36.009 FPS-equivalent`)
+  - `avg_dual_iso_full20_total_ms=35.950` (`27.816 FPS-equivalent`)
+  - `avg_final_blend_ms=8.522` (`117.343 FPS-equivalent`)
+  - Presented screenshot: `.claude-state/profiling/20260603-sh-odd-halfres/reverted-default/screenshots/M16-1327.png` `SHA256=1F07BA7326164D95C5461D9617D29E40E3A48B6511478E8F63FD8E262390F17C`
+  - FPS proof crop: `.claude-state/profiling/20260603-sh-odd-halfres/reverted-default/screenshots/M16-1327-fps-status.png` `SHA256=6C81EF9094026630EA843FA2B479BD2C8E3E14CAF73784200DF15C6E3A76986E`
+  - Aspect evidence: mode `presented-playback-stretch`, `width=2555`, `height=1068`, `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+
+### Cross-checked from prior analysis
+
+- The M16 presented playback frame is `2555x1068`, so odd width currently sends SH through fullres RBF. That made odd-dimension halfres routing look plausible, but live smoke showed the added route was slower in this runtime shape.
+- Existing RBF code already has vertical down/up parallel sections; the next opportunity is not a simple "parallelize vertical RBF" patch.
+
+### Needs runtime profiling
+
+- Do not retry odd-dimension SH halfres RBF by edge-clamped ceil dimensions unless a new microbenchmark proves the downsample/RBF/upsample route beats fullres for the actual M16 frame geometry.
+- Next safer opportunity: add low-overhead route/substage telemetry for SH and processing-core time so the next source change targets the current dominant bucket instead of inferring from aggregate `avg_processing_shadows_highlights_prep_ms`.
+- Also worth profiling: current "processing core other" work after the accepted Dual ISO change, because the latest candidate regressions moved outside the narrow `final_blend` optimization surface.
