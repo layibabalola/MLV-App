@@ -12472,3 +12472,44 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Keep the exact semantic guard and byte-identity gate around any future filter rewrite. The current cascade is small enough to keep; a full AVX2 top-k kernel would need a stronger dedicated parity test.
 - Run the same candidate on the user's real M16 clips with screenshot-backed visual smoke when available. The fixture plus byte-identity evidence is strong for output preservation on this code path, but it is not a full scene-color oracle.
+
+## 2026-06-03 - Dual ISO interpolation split shows receipt HQ profile is AMaZE-bound
+
+### Verified locally
+
+- I added Dual ISO full20 interpolation split telemetry in [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), and [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp):
+  - `dual_iso_full20_interp_mean23_ms`
+  - `dual_iso_full20_interp_amaze_ms`
+  - `dual_iso_full20_interp_border_ms`
+- I extended [`tests/console/test_clip_golden.cpp`](C:/!Layi%20Wkspc%20MLV-App/tests/console/test_clip_golden.cpp) so playback-profile JSON asserts the new fields exist and are non-negative.
+- I also made the mean23 interpolation loop more compiler-friendly without changing its formula: explicit no-error mean helpers, row pointers/offsets cached per row, and the row-uniform RG/GB branch hoisted outside the inner x loop.
+- The large HQ receipt profile used:
+  - before: `.claude-state/profiling/20260603-next-hq-bottleneck/large_dual_iso_hq_receipt_t4_scale4_current16.json`
+  - after: `.claude-state/profiling/20260603-next-hq-bottleneck/large_dual_iso_hq_receipt_t4_scale4_mean23_rowcache16.json`
+  - explicit `MLVAPP_PLAYBACK_SCALE_FACTOR=4`, explicit `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`, `--playback-debayer receipt`, `--playback-processing receipt`, `--threads 4`, and 16 measured frames.
+- Warm-frame comparison, skipping the first 3 cold frames, showed the current receipt-backed fixture is AMaZE-bound rather than mean23-bound:
+  - `dual_iso_full20_interp_ms`: `244.00 avg / 249.00 median` -> `241.54 avg / 242.00 median`
+  - `dual_iso_full20_interp_amaze_ms`: `240.77 avg / 242.00 median`
+  - `dual_iso_full20_interp_mean23_ms`: `0.00 avg / 0.00 median`
+  - `dual_iso_full20_interp_border_ms`: `0.77 avg / 0.00 median`
+  - `dual_iso_full20_total_ms`: `309.38 avg / 317.00 median` -> `317.46 avg / 311.00 median`
+  - `render_thread_work_ms`: `336.69 avg / 346.00 median` -> `345.15 avg / 335.00 median`
+- Interpretation: the mean23 loop cleanup is safe and useful for true mean23 playback paths, but it is not the dominant path in this receipt-backed profile. The new keeper evidence is the AMaZE attribution, not a top-line FPS claim.
+- The user-facing release tree was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/3/2026 2:08:01 AM`
+  - `Length=8971776`
+  - `SHA256=B9094B58D7FAC77BFF5442D7994AE7A64BEB3665F9BE93BB9B140EC5F69CF72E`
+- Validation:
+  - `git diff --check` reported only the repo's usual LF-to-CRLF warnings for the four touched files.
+  - Rebuilt `tests/build-ci-pipeline/release/pipeline_tests.exe`; `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity` passed with `0/12301632 pixels differ, max|d|=0`.
+  - Rebuilt `tests/build-ci-console/release/console_tests.exe`; `ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch` passed with 31 assertions against the rebuilt release executable.
+
+### Cross-checked from prior analysis
+
+- Prior notes showed AMaZE costs can dominate HQ Dual ISO playback on large clips; this split confirms the current receipt-backed scale-4 fixture is in that AMaZE bucket.
+- The previous alias-map top5 keeper remains valid, but alias-map is now much smaller than interpolation on this receipt path.
+
+### Needs runtime profiling
+
+- Next targeted pass should split `amaze_interpolate(...)` internally before attempting another AMaZE rewrite. Candidate substages: scratch/clear, squeeze map, rawData load, demosaic worker join, post-clamp, grayscale, edge-direction estimation, and actual edge-directed interpolation.
+- If the goal is specifically playback FPS over authored AMaZE quality, re-check the policy path that sets `diso_playback_force_mean23` and profile a true mean23-active path separately; do not use this receipt-backed AMaZE run as evidence for mean23 speed.

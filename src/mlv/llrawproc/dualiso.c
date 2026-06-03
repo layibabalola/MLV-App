@@ -1844,32 +1844,21 @@ static void compute_black_noise(struct raw_info raw_info, uint16_t * image_data,
     *out_stdev = stdev;
 }
 
-static int mean2(int a, int b, int white, int* err)
+static inline int mean2_noerr(int a, int b, int white)
 {
     if (a >= white || b >= white)
-    {
-        if (err) *err = 10000000;
         return white;
-    }
-    
-    int m = (a + b) / 2;
-    
-    if (err)
-        *err = ABS(a - b);
-    
-    return m;
+
+    return (a + b) / 2;
 }
 
-static int mean3(int a, int b, int c, int white, int* err)
+static inline int mean3_noerr(int a, int b, int c, int white)
 {
     int m = (a + b + c) / 3;
-    
-    if (err)
-        *err = MAX(MAX(ABS(a - m), ABS(b - m)), ABS(c - m));
-    
+
     if (a >= white || b >= white || c >= white)
         return MAX(m, white);
-    
+
     return m;
 }
 
@@ -3135,50 +3124,58 @@ static inline void mean23_interpolate_with_lut(struct raw_info raw_info,
     #pragma omp parallel for
     for (int y = 2; y < h-2; y ++)
     {
-        uint32_t* native = BRIGHT_ROW ? bright : dark;
-        uint32_t* interp = BRIGHT_ROW ? dark : bright;
+        const int bright_row = BRIGHT_ROW;
+        const int row_offset = y * w;
+        const uint32_t * const raw_row = raw_buffer_32 + row_offset;
+        const uint32_t * const raw_y_minus_2 = raw_buffer_32 + (y - 2) * w;
+        const uint32_t * const raw_y_plus_2 = raw_buffer_32 + (y + 2) * w;
+        uint32_t* native = (bright_row ? bright : dark) + row_offset;
+        uint32_t* interp = (bright_row ? dark : bright) + row_offset;
         int is_rg = (y % 2 == 0); /* RG or GB? */
-        int row_white = !BRIGHT_ROW ? white_darkened : raw_info.white_level;
+        int row_white_ev = raw2ev[bright_row ? raw_info.white_level : white_darkened];
+        int s = (is_bright[y%4] == is_bright[(y+1)%4]) ? -1 : 1;
+        const uint32_t * const raw_y_s = raw_buffer_32 + (y + s) * w;
+        const uint32_t * const raw_y_far = raw_buffer_32 + (y - 2 * s) * w;
 
-        for (int x = 2; x < w-3; x += 2)
+        if (is_rg)
         {
-
-            /* red/blue: interpolate from (x,y+2) and (x,y-2) */
-            /* green: interpolate from (x+1,y+1),(x-1,y+1),(x,y-2) or (x+1,y-1),(x-1,y-1),(x,y+2), whichever has the correct brightness */
-
-            int s = (is_bright[y%4] == is_bright[(y+1)%4]) ? -1 : 1;
-
-            if (is_rg)
+            for (int x = 2; x < w-3; x += 2)
             {
-                int ra = raw_get_pixel32(x, y-2);
-                int rb = raw_get_pixel32(x, y+2);
-                int ri = mean2(raw2ev[ra], raw2ev[rb], raw2ev[row_white], 0);
+                /* red/blue: interpolate from (x,y+2) and (x,y-2) */
+                int ri = mean2_noerr(raw2ev[raw_y_minus_2[x]],
+                                      raw2ev[raw_y_plus_2[x]],
+                                      row_white_ev);
 
-                int ga = raw_get_pixel32(x+1+1, y+s);
-                int gb = raw_get_pixel32(x+1-1, y+s);
-                int gc = raw_get_pixel32(x+1, y-2*s);
-                int gi = mean3(raw2ev[ga], raw2ev[gb], raw2ev[gc], raw2ev[row_white], 0);
+                /* green: interpolate from the neighboring same-brightness row. */
+                int gi = mean3_noerr(raw2ev[raw_y_s[x + 2]],
+                                      raw2ev[raw_y_s[x]],
+                                      raw2ev[raw_y_far[x + 1]],
+                                      row_white_ev);
 
-                interp[x   + y * w] = ev2raw[ri];
-                interp[x+1 + y * w] = ev2raw[gi];
+                interp[x] = ev2raw[ri];
+                interp[x+1] = ev2raw[gi];
+                native[x] = raw_row[x];
+                native[x+1] = raw_row[x+1];
             }
-            else
+        }
+        else
+        {
+            for (int x = 2; x < w-3; x += 2)
             {
-                int ba = raw_get_pixel32(x+1  , y-2);
-                int bb = raw_get_pixel32(x+1  , y+2);
-                int bi = mean2(raw2ev[ba], raw2ev[bb], raw2ev[row_white], 0);
+                int bi = mean2_noerr(raw2ev[raw_y_minus_2[x + 1]],
+                                      raw2ev[raw_y_plus_2[x + 1]],
+                                      row_white_ev);
 
-                int ga = raw_get_pixel32(x+1, y+s);
-                int gb = raw_get_pixel32(x-1, y+s);
-                int gc = raw_get_pixel32(x, y-2*s);
-                int gi = mean3(raw2ev[ga], raw2ev[gb], raw2ev[gc], raw2ev[row_white], 0);
+                int gi = mean3_noerr(raw2ev[raw_y_s[x + 1]],
+                                      raw2ev[raw_y_s[x - 1]],
+                                      raw2ev[raw_y_far[x]],
+                                      row_white_ev);
 
-                interp[x   + y * w] = ev2raw[gi];
-                interp[x+1 + y * w] = ev2raw[bi];
+                interp[x] = ev2raw[gi];
+                interp[x+1] = ev2raw[bi];
+                native[x] = raw_row[x];
+                native[x+1] = raw_row[x+1];
             }
-
-            native[x   + y * w] = raw_get_pixel32(x, y);
-            native[x+1 + y * w] = raw_get_pixel32(x+1, y);
         }
     }
 }
@@ -4769,11 +4766,15 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     stage_start = mlv_stage_timing_now();
     if (interp_method == 0)
     {
+        double interp_stage_start = mlv_stage_timing_now();
         dualiso_debug_note_hq_path(0);
         amaze_interpolate(raw_info, raw_buffer_32, dark, bright, black, white, white_darkened, is_bright, threads, scratch);
+        g_dualiso_full20bit_timing.interp_amaze_ms +=
+            dualiso_debug_elapsed_ms(interp_stage_start);
     }
     else
     {
+        double interp_stage_start = mlv_stage_timing_now();
         dualiso_debug_note_hq_path(1);
         mean23_interpolate(raw_info,
                            raw_buffer_32,
@@ -4784,9 +4785,14 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
                            white_darkened,
                            is_bright,
                            scratch);
+        g_dualiso_full20bit_timing.interp_mean23_ms +=
+            dualiso_debug_elapsed_ms(interp_stage_start);
     }
 
+    double interp_border_start = mlv_stage_timing_now();
     border_interpolate(raw_info, raw_buffer_32, dark, bright, is_bright);
+    g_dualiso_full20bit_timing.interp_border_ms +=
+        dualiso_debug_elapsed_ms(interp_border_start);
     g_dualiso_full20bit_timing.interp_ms += dualiso_debug_elapsed_ms(stage_start);
 
     if (use_fullres)

@@ -147,6 +147,9 @@ typedef struct
     double convert20_ms;
     double match_ms;
     double interp_ms;
+    double interp_mean23_ms;
+    double interp_amaze_ms;
+    double interp_border_ms;
     double fullres_ms;
     double mix_ms;
     double mix_curve_select_ms;

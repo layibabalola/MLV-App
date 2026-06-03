@@ -2220,6 +2220,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.match_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_ms"),
                                       dualIsoFull20.interp_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_mean23_ms"),
+                                      dualIsoFull20.interp_mean23_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_ms"),
+                                      dualIsoFull20.interp_amaze_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_border_ms"),
+                                      dualIsoFull20.interp_border_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_fullres_ms"),
                                       dualIsoFull20.fullres_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_mix_ms"),
