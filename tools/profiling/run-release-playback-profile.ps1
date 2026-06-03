@@ -41,7 +41,22 @@ function Add-EnvironmentPairs {
         [string[]]$Pairs
     )
 
-    foreach ($pair in $Pairs) {
+    $expandedPairs = @()
+    foreach ($rawPair in $Pairs) {
+        if ([string]::IsNullOrWhiteSpace($rawPair)) {
+            continue
+        }
+
+        $parts = @($rawPair -split ',')
+        if ($parts.Count -gt 1 -and ($parts | Where-Object { $_.IndexOf("=") -lt 1 }).Count -eq 0) {
+            $expandedPairs += $parts
+        }
+        else {
+            $expandedPairs += $rawPair
+        }
+    }
+
+    foreach ($pair in $expandedPairs) {
         if ([string]::IsNullOrWhiteSpace($pair)) {
             continue
         }

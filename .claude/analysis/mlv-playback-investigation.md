@@ -13262,3 +13262,65 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - Continue looking for real remaining performance wins in Dual ISO/full20 mix/final blend and the normal Shadows/Highlights filter path. Any future substage timing for Shadows/Highlights should be explicitly opt-in and A/B'd against a clean default smoke.
+
+## 2026-06-03 - sustained smoke FPS reporting and SH probe default-off gate
+
+### Verified locally
+
+- Updated the GUI smoke harness so long playback runs report stable bottom-left GUI FPS explicitly:
+  - `requestedPlaybackSeconds` and `requestedPlaybackDurationMs` record the requested playback window.
+  - `sustainedBottomLeftGuiFps` / `sustainedBottomLeftGuiStatusText` mirror the screenshot-time bottom-left GUI label after the requested duration.
+  - `sustainedBottomLeftGuiProofPath` points at the enlarged `*-fps-status.png` proof crop.
+  - `smokePresentedFps` and `smokeTimelineFps` remain separate full-run telemetry numbers; they are not substitutes for the GUI status-bar label.
+- Updated both release playback profiling wrappers to split a single comma-joined `-ExtraEnvironment` value like `A=1,B=2,C=full` into separate environment pairs. This prevents a probe request from being silently jammed into one invalid environment assignment.
+- Added low-overhead Shadows/Highlights halfres split fields to GUI smoke logs:
+  - `avg_sh_filter_halfres_downsample_ms`
+  - `avg_sh_filter_halfres_rbf_ms`
+  - `avg_sh_filter_halfres_upsample_ms`
+- Fixed the hot-path gate in `src/processing/raw_processing.c`: `processing_shadows_highlights_probe_mode()` returns `-1` when unset, and `-1` is truthy in C. The playback path now treats the probe as enabled only when the returned mode is `>= 0`, so normal/default playback does not collect the opt-in halfres substage timings.
+- Added `ProcessingFilters.ShadowsHighlightsProbeTelemetryIsOptInByDefault` to prevent the default/off path from regressing. Validation passed:
+  - Focused test: `[PASS] ProcessingFilters.ShadowsHighlightsProbeTelemetryIsOptInByDefault`, `assertions=6`.
+  - Broader processing suite: `ProcessingFilters.*`, `assertions=21`, `failed=0`.
+- User-facing release tree rebuilt:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03T09:38:09-05:00`
+  - `Length=9006080`
+  - `SHA256=300385D090415C2F1DA2B5116A3500F81AE5918A69B2E3B76AB1772E2DF61B48`
+- Default/off 30s smoke after the fix:
+  - Artifact: `.claude-state/profiling/20260603-sh-probe-default-off-fix/default/M16-1327-30s.json`
+  - `validation.ok=true`
+  - `sustainedBottomLeftGuiFps=7.2` / `Playback: 7.2 fps`
+  - `smokePresentedFps=5.914`, `smokeTimelineFps=23.342`
+  - `avg_render_work_ms=151.397` (`6.605 FPS-equivalent`)
+  - `avg_llrawproc_ms=42.132` (`23.735 FPS-equivalent`)
+  - `avg_processed8_ms=149.656` (`6.682 FPS-equivalent`)
+  - `avg_draw_total_ms=35.534` (`28.142 FPS-equivalent`)
+  - Default/off SH sub-buckets are now zero: downsample `0.000`, RBF `0.000`, upsample `0.000`.
+  - Presented screenshot: `.claude-state/profiling/20260603-sh-probe-default-off-fix/default/screenshots/M16-1327.png` `SHA256=1F07BA7326164D95C5461D9617D29E40E3A48B6511478E8F63FD8E262390F17C`.
+  - Readable FPS proof crop: `.claude-state/profiling/20260603-sh-probe-default-off-fix/default/screenshots/M16-1327-fps-status.png` `SHA256=EBE6E5244F039C240E8B9497FA67999CDC795BF04AC108AF17C41F9112F17482`.
+- Explicit SH-probe 30s smoke after the fix:
+  - Artifact: `.claude-state/profiling/20260603-sh-probe-default-off-fix/probe/M16-1327-30s.json`
+  - `validation.ok=true`
+  - `sustainedBottomLeftGuiFps=4.5` / `Playback: 4.5 fps`
+  - `smokePresentedFps=5.754`, `smokeTimelineFps=23.360`
+  - `avg_render_work_ms=157.060` (`6.367 FPS-equivalent`)
+  - `avg_llrawproc_ms=45.148` (`22.150 FPS-equivalent`)
+  - Explicit probe SH split works: downsample `2.874`, RBF `26.191`, upsample `2.689`.
+  - Readable FPS proof crop: `.claude-state/profiling/20260603-sh-probe-default-off-fix/probe/screenshots/M16-1327-fps-status.png` `SHA256=2408BB9DDA6C5493930F18D98A55B2925B464D14CE660C5F19DEAFEB83740F78`.
+- The default-repeat run with `-SystemSettleCpuPercent 10` is host-load evidence, not a clean benchmark:
+  - Artifact: `.claude-state/profiling/20260603-sh-probe-default-off-fix/default-repeat/M16-1327-30s.json`
+  - `validation.ok=false` only because prelaunch system CPU did not settle: `settled=false`, `lastPercent=51.0`.
+  - The app-level result still confirmed default/off SH sub-buckets remained zero and the FPS crop showed `Playback: 7.1 fps`.
+- Visual inspection of the default/off presented-frame screenshot found no obvious channel swap, hue flip, severe color corruption, or aspect regression. Visual inspection of the FPS crop confirmed the bottom-left label visibly reads `Playback: 7.2 fps`.
+
+### Cross-checked from prior analysis
+
+- The apparent jump from roughly 4 fps earlier in the week to today's 7-9 fps GUI-label samples is a stack of changes: upstream v1.16 merge, removed Dual ISO copy-only chroma work, processed-frame helper trims, scope/update overhead cleanup, and now cleaner default/off instrumentation. Do not attribute the full gain to this SH-probe gate alone.
+- The SH halfres RBF core is the next interesting diagnostic bucket, but prior RBF micro-shape experiments were already rejected as noisy or slower. Avoid re-trying local pointer/unroll/store shuffles unless new evidence changes the shape.
+- Scope redraw throttling already had a measured keeper and a rejected wider throttle. Do not widen it again without a fresh A/B that includes screenshots and bottom-left FPS proof crops.
+
+### Needs runtime profiling
+
+- Repeat clean 30s default/off smokes when the host CPU can settle before launch. Use those for normal FPS claims.
+- Use explicit `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=0/1` only for diagnostic SH split runs, and cite the overhead risk when comparing against default/off playback.
+- Next optimization candidates should be structural rather than bookkeeping: SH halfres RBF core changes, Dual ISO final blend/mix costs, or another measured retained bucket. Do not chase direct8, processed8 prefetch, or already-rejected AMaZE/RBF micro-variants without a new profiling reason.

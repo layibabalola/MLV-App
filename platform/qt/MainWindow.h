@@ -939,6 +939,9 @@ private:
     double m_playbackSmokeProcessingShadowsHighlightsResizeSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsCopySumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsFilterSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsFilterHalfresDownsampleSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsFilterHalfresRbfSumMs = 0.0;
+    double m_playbackSmokeProcessingShadowsHighlightsFilterHalfresUpsampleSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsRbfBoundarySumMs = 0.0;
     double m_playbackSmokeProcessingShadowsHighlightsRbfRangeTableSumMs = 0.0;
