@@ -12747,3 +12747,48 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Future smoke reports must label all four playback-rate concepts separately when they appear: `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and `FPS-equivalent`.
 - If visual proof of the status-bar text becomes important, add an optional full-window screenshot mode in addition to the current presented-frame screenshot; keep the presented-frame capture as the color/aspect oracle.
+
+## 2026-06-03 - rejected AMaZE actual-interpolation row-cache specialization
+
+### Verified locally
+
+- I tested a contained `amaze_interpolate(...)` actual-interpolation candidate in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c): split the row loop by RG/GB row, precomputed `squeezed[...]` row indices for each edge direction once per row, and replaced per-pixel plane selection with explicit red/green/blue row bodies.
+- The candidate built in the user-facing release tree and the targeted Dual ISO correctness checks passed:
+  - `DualIsoPipeline.PhaseE1_AMaZEEdgeDirectionAvx2ByteIdentity`: `13` assertions, `0` failures, `0/12301632` pixels differ, `max|d|=0`
+  - `DualIsoPipeline.PhaseE1_AMaZEEdgeDirectionAvx2PathActiveOnCapableHost`: `1` assertion, `0` failures
+  - `DualIsoPipeline.DualIsoPlaybackForcesMean23WhenOverrideActive`: `24` assertions, `0` failures
+  - `DualIsoPipeline.TinyDualIsoFullFramesMatchGolden`: `10` assertions, `0` failures
+  - `DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull`: `10` assertions, `0` failures
+  - `DualIsoPipeline.ForcedReEntryFullDualIsoStabilizesFromFirstRender`: `9` assertions, `0` failures
+- The candidate was not performance-keeper shaped on the same 16-frame large Dual ISO HQ receipt profile:
+  - baseline: `.claude-state/profiling/20260603-amaze-followup/large_dual_iso_hq_receipt_t4_scale4_current16.json`
+  - candidate: `.claude-state/profiling/20260603-amaze-actual-interp-rowcache/large_dual_iso_hq_receipt_t4_rowcache16.json`
+  - `render_thread_work_ms`: `173.000` (`5.780 FPS-equivalent`) -> `266.800` (`3.748 FPS-equivalent`), `+54.2%`
+  - `dual_iso_full20_interp_amaze_ms`: `105.533` (`9.476 FPS-equivalent`) -> `159.733` (`6.260 FPS-equivalent`), `+51.4%`
+  - `dual_iso_full20_interp_amaze_actual_interp_ms`: `20.867` (`47.923 FPS-equivalent`) -> `28.067` (`35.629 FPS-equivalent`), `+34.5%`
+  - `dual_iso_full20_interp_amaze_edge_direction_ms`: `21.800` (`45.872 FPS-equivalent`) -> `40.000` (`25.000 FPS-equivalent`), `+83.5%`
+- I reverted the candidate completely; `git diff -- src/mlv/llrawproc/dualiso.c` is empty after the revert.
+- I rebuilt the user-facing release tree after reverting so [`MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe) no longer contains the rejected row-cache candidate:
+  - `LastWriteTime=2026-06-03T04:58:32.3513292-05:00`
+  - `Length=8985600`
+  - `SHA256=2F445E2911C0845DB6C882FCF6851749EAEFEBA28716F5DFE82FD8AE71D64B17`
+- I ran a screenshot-backed restore smoke on `C:\temp\MLV\M16-1327.MLV`; validation passed and the captured frame is [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-actual-interp-rowcache/m16-restore-smoke/screenshots/M16-1327.png):
+  - `validation.ok=true`
+  - `GUI FPS=0.9`
+  - `smoke presented FPS=0.681`
+  - `timeline FPS=18.844`
+  - `avg_render_work_ms=1143.833` (`0.874 FPS-equivalent`)
+  - `avg_llrawproc_ms=44.333` (`22.556 FPS-equivalent`)
+  - `avg_processed8_ms=1142.500` (`0.875 FPS-equivalent`)
+  - screenshot `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=A2F0F62E95DBB9397A4B7CB4367514A2C026BCD8FD32BFAB64D784B07B6BEB0A`
+- Visual inspection of the restore smoke screenshot showed the expected warm/night de-squeezed M16 frame and no obvious new hue flip, channel swap, or severe color corruption.
+
+### Cross-checked from prior analysis
+
+- This confirms that the actual-interpolation loop is not a good place for this specific row-cache/plane-specialization shape. The extra local arrays and duplicated row bodies appear to hurt optimizer/cache behavior more than the removed per-pixel branch/table work helps.
+- The remaining AMaZE hot order from the retained baseline is still demosaic worker time first, then actual edge-directed interpolation and residual edge-direction cost.
+
+### Needs runtime profiling
+
+- Do not retry the same actual-interpolation row-cache specialization. If actual interpolation is revisited, try a narrower arithmetic/tap helper change with a direct before/after render hash guard.
+- The next higher-impact AMaZE turn should split or instrument demosaic worker time before rewriting it, because the retained warm baseline still has `dual_iso_full20_interp_amaze_demosaic_ms=47.400` (`21.097 FPS-equivalent`).
