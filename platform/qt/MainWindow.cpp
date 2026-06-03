@@ -928,6 +928,12 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #define VERSION QString("%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 #define GITVERSION QString("QTv%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 
+static QString mlvAppUpdateReleasesUrl()
+{
+    // This fork should compare against fork releases, not upstream tags we may already supersede.
+    return QStringLiteral("https://api.github.com/repos/layibabalola/MLV-App/releases");
+}
+
 #define FACTOR_DS       22.5
 #define FACTOR_LS       11.2
 #define FACTOR_LIGHTEN  0.6
@@ -19373,7 +19379,7 @@ void MainWindow::on_lineEditDarkFrameFile_textChanged(const QString &arg1)
 //Check if there is an update availlable
 void MainWindow::on_actionCheckForUpdates_triggered( void )
 {
-    CUpdaterDialog dialog( this, QString( "https://api.github.com/repos/ilia3101/MLV-App/releases" ), GITVERSION, false );
+    CUpdaterDialog dialog( this, mlvAppUpdateReleasesUrl(), GITVERSION, false );
     dialog.exec();
 
     QSettings set( QSettings::UserScope, "magiclantern.MLVApp", "MLVApp" );
@@ -19385,7 +19391,7 @@ void MainWindow::on_actionCheckForUpdates_triggered( void )
 //Autocheck for updates told there is an update
 void MainWindow::updateCheck(void)
 {
-    Updater *pUpdater = new Updater(this, QString( "https://api.github.com/repos/ilia3101/MLV-App/releases" ), GITVERSION);
+    Updater *pUpdater = new Updater(this, mlvAppUpdateReleasesUrl(), GITVERSION);
     if( pUpdater->isUpdateAvailable() ) on_actionCheckForUpdates_triggered();
     else checkFocusPixelUpdate();
     delete pUpdater;
