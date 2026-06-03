@@ -12576,3 +12576,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Next highest AMaZE seams after this bypass are demosaic worker time and actual edge-directed interpolation; both are more correctness-sensitive than the all-skip bypass and should be split or optimized in separate micro-branches.
 - If pursuing another edge-direction improvement, first add low-overhead profiling for full-search batch density so we know whether mixed-lane batches are now the remaining cost.
 - Re-profile on the user's real M16 clips when available. The fixture evidence is strong for the hot path and byte identity, but scene-dependent full-search density will decide how much this bypass helps outside the test clip.
+
+## 2026-06-03 - Visual smoke aspect evidence is now self-contained
+
+### Verified locally
+
+- I corrected my interpretation of the M16 presented-frame smoke screenshots: `2555x1068` / aspect `2.392322` is correct for the active presented playback de-squeeze, because the smoke visual state reports `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, and `v_stretch_index=3`.
+- I updated [`tools/profiling/run-release-gui-smoke.ps1`](C:/!Layi%20Wkspc%20MLV-App/tools/profiling/run-release-gui-smoke.ps1) so screenshot captures record image metadata directly in JSON:
+  - `screenshot.capture.image.width`
+  - `screenshot.capture.image.height`
+  - `screenshot.capture.image.aspect`
+  - `screenshot.capture.image.pixelFormat`
+  - `screenshot.capture.image.sha256`
+  - `visualQuality.aspectEvidence`
+- I reran `M16-1327` through the corrected smoke wrapper:
+  - JSON: `.claude-state/profiling/20260603-aspect-evidence/M16-1327/M16-1327.json`
+  - PNG: [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-aspect-evidence/M16-1327/screenshots/M16-1327.png)
+  - `validation.ok=true`
+  - `visualQuality.aspectEvidence.mode=presented-playback-stretch`
+  - `width=2555`, `height=1068`, `aspect=2.392322`, `SHA256=A850FD43C07E71C34FAE696CC4EBF31CCE729603382CC297B7687CECCD833F1A`
+  - `presented_fps=0.668`; `avg_render_work_ms=1214.833` (`0.82 fps-equivalent`); `avg_llrawproc_ms=43.833` (`22.81 fps-equivalent`); `avg_processed8_ms=1213.000` (`0.82 fps-equivalent`); `avg_dual_iso_full20_total_ms=42.500` (`23.53 fps-equivalent`)
+- I updated [`AGENTS.md`](C:/!Layi%20Wkspc%20MLV-App/AGENTS.md) so future aspect/color smoke reviews use `visualQuality.aspectEvidence` before making a screenshot judgment.
+
+### Cross-checked from prior analysis
+
+- The previous M16 trio remains useful as a presented-playback/color smoke set; it should not be treated as a neutral source-aspect oracle unless a future run deliberately forces neutral stretch.
+
+### Needs runtime profiling
+
+- Continue the playback optimization loop at the next AMaZE seam: demosaic worker time, actual edge-directed interpolation, or full-search batch density instrumentation.

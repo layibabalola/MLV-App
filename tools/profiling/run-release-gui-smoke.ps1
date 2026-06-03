@@ -159,6 +159,107 @@ function Get-ObjectPropertyValue {
     $null
 }
 
+function Convert-ToNullableDouble {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $parsed = 0.0
+    if ([double]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        return $parsed
+    }
+
+    $null
+}
+
+function Get-ScreenshotImageMetadata {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    Add-Type -AssemblyName System.Drawing
+    $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
+    $item = Get-Item -LiteralPath $resolvedPath
+    $image = [System.Drawing.Image]::FromFile($resolvedPath)
+    try {
+        $aspect = $null
+        if ($image.Height -gt 0) {
+            $aspect = [Math]::Round($image.Width / $image.Height, 6)
+        }
+
+        [pscustomobject]@{
+            width = $image.Width
+            height = $image.Height
+            aspect = $aspect
+            pixelFormat = $image.PixelFormat.ToString()
+            length = $item.Length
+            sha256 = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256).Hash
+        }
+    }
+    finally {
+        $image.Dispose()
+    }
+}
+
+function New-ScreenshotAspectEvidence {
+    param(
+        [object]$ImageMetadata,
+        [object]$VisualState
+    )
+
+    $stretchX = Convert-ToNullableDouble (Get-ObjectPropertyValue $VisualState "stretch_x")
+    $stretchY = Convert-ToNullableDouble (Get-ObjectPropertyValue $VisualState "stretch_y")
+    $hStretchIndex = Get-ObjectPropertyValue $VisualState "h_stretch_index"
+    $vStretchIndex = Get-ObjectPropertyValue $VisualState "v_stretch_index"
+
+    $hasStretchTelemetry = $null -ne $stretchX -and $null -ne $stretchY
+    $activeStretch = $false
+    if ($hasStretchTelemetry) {
+        $activeStretch =
+            [Math]::Abs($stretchX - 1.0) -gt 0.0001 -or
+            [Math]::Abs($stretchY - 1.0) -gt 0.0001
+    }
+
+    $mode = "not-captured"
+    $interpretation = "No screenshot was captured."
+    if ($null -ne $ImageMetadata) {
+        if (-not $hasStretchTelemetry) {
+            $mode = "presented-frame-stretch-unknown"
+            $interpretation = "Screenshot dimensions are from the presented frame, but stretch telemetry was unavailable."
+        }
+        elseif ($activeStretch) {
+            $mode = "presented-playback-stretch"
+            $interpretation = "Screenshot dimensions include the active playback stretch/de-squeeze state."
+        }
+        else {
+            $mode = "neutral-presented-frame"
+            $interpretation = "Screenshot dimensions are the presented frame with neutral stretch."
+        }
+    }
+
+    [pscustomobject]@{
+        mode = $mode
+        interpretation = $interpretation
+        width = Get-ObjectPropertyValue $ImageMetadata "width"
+        height = Get-ObjectPropertyValue $ImageMetadata "height"
+        aspect = Get-ObjectPropertyValue $ImageMetadata "aspect"
+        stretchX = $stretchX
+        stretchY = $stretchY
+        hStretchIndex = $hStretchIndex
+        vStretchIndex = $vStretchIndex
+        activeStretch = $activeStretch
+        hasStretchTelemetry = $hasStretchTelemetry
+    }
+}
+
 function Add-EnvironmentPairs {
     param(
         [object]$Target,
@@ -437,11 +538,13 @@ if ($CaptureScreenshot) {
         throw "GUI smoke completed but did not write screenshot: $screenshotPath"
     }
     $screenshotItem = Get-Item -LiteralPath $screenshotPath
+    $screenshotImage = Get-ScreenshotImageMetadata -Path $screenshotPath
     $screenshotCapture = [pscustomobject]@{
         outputPath = $screenshotItem.FullName
         takenAtUtc = $screenshotItem.LastWriteTimeUtc.ToString("o")
         method = "app-internal-presented-frame-preferred"
         length = $screenshotItem.Length
+        image = $screenshotImage
         requestedDelayMs = $ScreenshotDelayMs
         windowWaitMs = $ScreenshotWindowWaitMs
         captureTimeoutMs = $ScreenshotCaptureTimeoutMs
@@ -580,6 +683,14 @@ if ($ExpectedQualityMode -ge 0 -and
     $validationFailures += "GUI visual state quality mode was $(Get-ObjectPropertyValue $visualState "quality_mode"); expected $ExpectedQualityMode."
 }
 
+$screenshotAspectEvidence = if ($CaptureScreenshot) {
+    New-ScreenshotAspectEvidence `
+        -ImageMetadata (Get-ObjectPropertyValue $screenshotCapture "image") `
+        -VisualState $visualState
+} else {
+    $null
+}
+
 $result = [pscustomobject]@{
     schema = "mlvapp-gui-smoke-result.v1"
     capturedAtUtc = $endUtc.ToString("o")
@@ -616,6 +727,7 @@ $result = [pscustomobject]@{
         qualityModeStart = $qualityModeStart
         qualityModeLast = $qualityModeLast
         visualState = $visualState
+        aspectEvidence = $screenshotAspectEvidence
         lookAssist = [pscustomobject]@{
             applied = [bool]$lookAssistApplied
             enabled = Get-ObjectPropertyValue $lookAssistSettle "enabled"
