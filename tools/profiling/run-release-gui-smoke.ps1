@@ -228,6 +228,82 @@ function Get-ScreenshotImageMetadata {
     }
 }
 
+function New-FpsStatusProofCrop {
+    param(
+        [string]$SourcePath,
+        [string]$OutputPath,
+        [int]$CropWidth = 720,
+        [int]$CropHeight = 72,
+        [int]$Scale = 3
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) {
+        return $null
+    }
+
+    Add-Type -AssemblyName System.Drawing
+    $resolvedSourcePath = (Resolve-Path -LiteralPath $SourcePath).Path
+    $resolvedOutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+    $outputDir = Split-Path -Parent $resolvedOutputPath
+    if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
+        New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+    }
+
+    $source = [System.Drawing.Image]::FromFile($resolvedSourcePath)
+    try {
+        $actualCropWidth = [Math]::Min($CropWidth, $source.Width)
+        $actualCropHeight = [Math]::Min($CropHeight, $source.Height)
+        $crop = [System.Drawing.Rectangle]::new(
+            0,
+            [Math]::Max(0, $source.Height - $actualCropHeight),
+            $actualCropWidth,
+            $actualCropHeight)
+        $scaledWidth = [Math]::Max(1, $actualCropWidth * $Scale)
+        $scaledHeight = [Math]::Max(1, $actualCropHeight * $Scale)
+        $target = [System.Drawing.Bitmap]::new($scaledWidth, $scaledHeight)
+        try {
+            $graphics = [System.Drawing.Graphics]::FromImage($target)
+            try {
+                $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+                $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+                $graphics.DrawImage(
+                    $source,
+                    [System.Drawing.Rectangle]::new(0, 0, $scaledWidth, $scaledHeight),
+                    $crop,
+                    [System.Drawing.GraphicsUnit]::Pixel)
+            }
+            finally {
+                $graphics.Dispose()
+            }
+
+            $target.Save($resolvedOutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+        }
+        finally {
+            $target.Dispose()
+        }
+
+        $item = Get-Item -LiteralPath $resolvedOutputPath
+        [pscustomobject]@{
+            outputPath = $item.FullName
+            takenAtUtc = $item.LastWriteTimeUtc.ToString("o")
+            method = "bottom-left-status-crop-from-window-grab"
+            sourcePath = $resolvedSourcePath
+            crop = [pscustomobject]@{
+                x = $crop.X
+                y = $crop.Y
+                width = $crop.Width
+                height = $crop.Height
+                scale = $Scale
+            }
+            length = $item.Length
+            image = Get-ScreenshotImageMetadata -Path $resolvedOutputPath
+        }
+    }
+    finally {
+        $source.Dispose()
+    }
+}
+
 function New-ScreenshotAspectEvidence {
     param(
         [object]$ImageMetadata,
@@ -371,6 +447,7 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
 
 $screenshotPath = $null
 $windowScreenshotPath = $null
+$fpsStatusCropPath = $null
 if ($CaptureScreenshot) {
     if ([string]::IsNullOrWhiteSpace($ScreenshotOutputDir)) {
         $ScreenshotOutputDir = Join-Path $outputDir "screenshots"
@@ -381,6 +458,7 @@ if ($CaptureScreenshot) {
     $screenshotPath = Join-Path $screenshotDirPath ("{0}.png" -f $clipBase)
     if (-not $SkipWindowScreenshot) {
         $windowScreenshotPath = Join-Path $screenshotDirPath ("{0}-window.png" -f $clipBase)
+        $fpsStatusCropPath = Join-Path $screenshotDirPath ("{0}-fps-status.png" -f $clipBase)
     }
 }
 
@@ -560,6 +638,7 @@ $startUtc = [datetime]::UtcNow
 $process = [System.Diagnostics.Process]::Start($startInfo)
 $screenshotCapture = $null
 $windowScreenshotCapture = $null
+$fpsStatusCropCapture = $null
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
 $process.WaitForExit()
@@ -596,6 +675,11 @@ if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
         method = "app-internal-window-grab"
         length = $windowScreenshotItem.Length
         image = $windowScreenshotImage
+    }
+    if (-not [string]::IsNullOrWhiteSpace($fpsStatusCropPath)) {
+        $fpsStatusCropCapture = New-FpsStatusProofCrop `
+            -SourcePath $windowScreenshotPath `
+            -OutputPath $fpsStatusCropPath
     }
 }
 
@@ -810,11 +894,13 @@ $result = [pscustomobject]@{
         guiStatusValue = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_value"
         visibleBottomLeftGuiStatusText = $windowScreenshotFpsStatusText
         visibleBottomLeftGuiFps = $windowScreenshotFpsStatusValue
+        visibleBottomLeftGuiProofPath = $fpsStatusCropPath
+        visibleBottomLeftGuiProof = $fpsStatusCropCapture
         screenshotGuiStatusText = $windowScreenshotFpsStatusText
         screenshotGuiStatusValue = $windowScreenshotFpsStatusValue
         smokePresentedFps = Get-ObjectPropertyValue $playbackSummary "presented_fps"
         smokeTimelineFps = Get-ObjectPropertyValue $playbackSummary "timeline_fps"
-        note = "visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible in screenshot.windowCapture; guiStatusValue is the later end-of-run summary sample; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
+        note = "visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible in screenshot.windowCapture and enlarged in playbackFps.visibleBottomLeftGuiProof; guiStatusValue is the later end-of-run summary sample; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
     }
     process = [pscustomobject]@{
         id = $process.Id
@@ -830,6 +916,8 @@ $result = [pscustomobject]@{
         capture = $screenshotCapture
         windowPath = $windowScreenshotPath
         windowCapture = $windowScreenshotCapture
+        fpsStatusCropPath = $fpsStatusCropPath
+        fpsStatusCrop = $fpsStatusCropCapture
     }
     log = [pscustomobject]@{
         path = if ($logFile) { $logFile.FullName } else { $null }
@@ -848,6 +936,7 @@ $result = [pscustomobject]@{
         screenshot = $screenshotCapture
         windowScreenshot = $windowScreenshotCapture
         windowScreenshotEvent = $windowScreenshotLog
+        fpsStatusCrop = $fpsStatusCropCapture
         raw = [pscustomobject]@{
             runMetadata = $runMetadataLine
             playbackStart = $playbackStartLine
@@ -863,6 +952,7 @@ $result = [pscustomobject]@{
             cpuSettle = $cpuSettleLine
             screenshot = if ($screenshotCapture) { $screenshotCapture.outputPath } else { $null }
             windowScreenshot = if ($windowScreenshotCapture) { $windowScreenshotCapture.outputPath } else { $null }
+            fpsStatusCrop = if ($fpsStatusCropCapture) { $fpsStatusCropCapture.outputPath } else { $null }
             windowScreenshotEvent = $windowScreenshotLine
         }
     }

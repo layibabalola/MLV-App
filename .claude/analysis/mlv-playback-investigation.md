@@ -12911,3 +12911,42 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Repeat adaptive-cap profiling on lower-core and laptop-class hosts before raising the hard upper bound above 16. The new policy remains bounded at 16 to avoid unbounded oversubscription on large desktop CPUs.
 - If users report UI contention while playing back and grading simultaneously, keep `MLVAPP_PLAYBACK_MAX_THREADS` as the supported override and profile the same smoke with explicit lower values.
 - Next math-level optimization should still target the AMaZE demosaic worker body or chunk balance internals; the adaptive cap is a scheduling win, not the end of the demosaic hotspot.
+
+## 2026-06-03 - readable GUI FPS proof crop
+
+### Verified locally
+
+- Investigated why the reported bottom-left GUI FPS was difficult to see in GUI smoke screenshots. The prior full-window screenshot did contain the label, but at `3158x2099` it was scaled down enough in chat/review surfaces that `Playback: 1.1 fps` was easy to miss.
+- Updated `tools/profiling/run-release-gui-smoke.ps1` so every `-CaptureScreenshot` run that also captures a full-window PNG writes an enlarged bottom-left status crop:
+  - `screenshot.fpsStatusCropPath`
+  - `screenshot.fpsStatusCrop`
+  - `playbackFps.visibleBottomLeftGuiProofPath`
+  - `playbackFps.visibleBottomLeftGuiProof`
+- The crop is generated from the same app-internal full-window screenshot used for `visibleBottomLeftGuiFps`, so it proves the bottom-left GUI label without changing playback/app behavior.
+- Validation commands:
+  - `git diff --check`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$script = Get-Content -Raw -LiteralPath "tools\profiling\run-release-gui-smoke.ps1"; [void][scriptblock]::Create($script); "syntax-ok"'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . -Input 'C:\temp\MLV\M16-1327.MLV' -Output '.claude-state\profiling\20260603-gui-fps-proof-crop\M16-1327.json' -CaptureScreenshot -FrameTelemetry -RbfDetailTiming -ScreenshotOutputDir '.claude-state\profiling\20260603-gui-fps-proof-crop\screenshots'`
+- The M16 smoke passed with `validation.ok=true`:
+  - `visibleBottomLeftGuiFps=1.0` / `visibleBottomLeftGuiStatusText="Playback: 1.0 fps"`
+  - `smokePresentedFps=0.646`
+  - `smokeTimelineFps=18.722`
+  - end-of-run summary sample `guiStatusValue=0.3`, which is intentionally separate from the screenshot-time visible label.
+- New readable GUI FPS proof crop:
+  - `.claude-state/profiling/20260603-gui-fps-proof-crop/screenshots/M16-1327-fps-status.png`
+  - `2160x216`
+  - `SHA256=2465DD4D4E5088FC4635722D21E46AC170D4A766EB6948769B481FD7BA1FEBF8`
+  - visually shows `Playback: 1.0 fps`, `Frame 158/1081`, `AMaZE`, and `Quality: HQ x1 [ui]`
+- Presented-frame color/aspect screenshot remained separate:
+  - `.claude-state/profiling/20260603-gui-fps-proof-crop/screenshots/M16-1327.png`
+  - `2555x1068`, aspect `2.392322`
+  - `SHA256=C41F2447128E492AACC6E0070DB602CD7B4F522FB79C56CF65A7FB3EFC834EB5`
+
+### Cross-checked from prior analysis
+
+- Keep the three screenshot roles distinct: presented-frame `*.png` is for color/aspect, full-window `*-window.png` is for UI context, and `*-fps-status.png` is the readable proof for bottom-left GUI FPS.
+- The previous `visibleBottomLeftGuiFps=1.1` was not fabricated; it came from the `gui_smoke.window_screenshot` event and matched the bottom-left label in the full-window PNG. The review problem was readability, not telemetry source.
+
+### Needs runtime profiling
+
+- Future smoke reports should include the readable `visibleBottomLeftGuiProofPath` image whenever claiming bottom-left GUI FPS, especially in chat surfaces that downscale large screenshots.
