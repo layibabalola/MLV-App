@@ -13143,3 +13143,44 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Next target remains actual work outside the tiny debayer kernel: `llrawproc` dual ISO/full20 mix/final blend and the normal shadows/highlights recursive filter path.
 - If shadows/highlights stays hot, add low-overhead substage telemetry around halfres resize versus recursive filter without enabling expensive per-pixel RBF detail timing by default.
+
+## 2026-06-03 - Dual ISO skips copy-only chroma smooth path
+
+### Verified locally
+
+- Investigated the next Dual ISO/full20 hotspot after the processed16 helper rewrite. The GUI/default M16 state reports `chroma_smooth=1`, but the Dual ISO full20 smoother only has active implementations for method `2`, `3`, and `5`. Before this change, method `1` still forced fullres/halfres smooth buffers to be copied and then did no actual smoothing.
+- Updated `src/mlv/llrawproc/dualiso.c` so Dual ISO full20 canonicalizes unsupported chroma-smooth methods to `0` locally before allocating/copying smooth buffers or calling `mix_images`. This preserves the previous method-`1` pixels while removing the copy-only hot path.
+- Kept non-Dual-ISO `pixelproc.c` behavior aligned with the UI enum by accepting method `1` as the existing 2x2 smoother there. A dedicated pipeline regression test keeps the Dual ISO full20 path from accidentally invoking the currently-broken method-`1` full20 smoother.
+- Rejected an earlier experiment that mapped GUI method `1` to real Dual ISO 2x2 full20 smoothing: the smoke run slowed to `visibleBottomLeftGuiFps=5.7`, `smokePresentedFps=3.932`, `avg_llrawproc_ms=75.077`, and the presented screenshot showed a severe green cast.
+- Focused validation passed:
+  - `DualIsoPipeline.DualIsoGuiChromaSmooth2x2IndexDoesNotInvokeFull20Smoother`
+  - `DualIsoPipeline.HQ_FullBlendAvx2ByteIdentity`
+  - `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity`
+  - `DualIsoPipeline.HeadlessDualIsoFull20BitReusesOuterScratchAcrossFrames`
+  - `DualIsoPipeline.Full20Mean23OutputIgnoresPoisonedOuterScratch`
+  - `DualIsoPipeline.Full20FrOffStillClearsFullresAfterScratchPoison`
+  - `DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull`
+  - `ProcessingFilters.ChromaSmooth2x2MatchesScalarReference`
+- User-facing release tree rebuilt:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03T08:33:50-05:00`
+  - `Length=9004544`
+  - `SHA256=EFB5252A66FEA8DA64199867A5F49811B31C1931D878E70A1488173081711443`
+- Screenshot-backed three-clip GUI smoke, all with `validation.ok=true`:
+  - `M16-1327`: `visibleBottomLeftGuiFps=7.1` / `Playback: 7.1 fps`, `smokePresentedFps=4.521`, `smokeTimelineFps=18.883`, `avg_render_work_ms=112.765` (`8.868 FPS-equivalent`), `avg_llrawproc_ms=28.824` (`34.693 FPS-equivalent`), `avg_dual_iso_full20_total_ms=28.118` (`35.564 FPS-equivalent`), `avg_chroma_copy_ms=0.000`, presented screenshot `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/screenshots/M16-1327.png` `SHA256=7B6E7F3F9E1162353B0B7C81B11DEEC2F394C2A1428F9FD0B6027C290BEC6510`, readable FPS proof `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/screenshots/M16-1327-fps-status.png` `SHA256=52EFA5DC819744BFF4497E1DBDEE12114D3396FEC838DACCE048DCFE06A0AACE`.
+  - `M16-1347`: `visibleBottomLeftGuiFps=7.3` / `Playback: 7.3 fps`, `smokePresentedFps=4.305`, `smokeTimelineFps=18.832`, `avg_render_work_ms=119.813` (`8.346 FPS-equivalent`), `avg_llrawproc_ms=30.125` (`33.195 FPS-equivalent`), `avg_dual_iso_full20_total_ms=29.500` (`33.898 FPS-equivalent`), `avg_chroma_copy_ms=0.000`, presented screenshot `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/three-clip/M16-1347/screenshots/M16-1347.png` `SHA256=C08FAE26C41DDF840E18D52752E792D6953E9AC7D1998F8C01903B7791935875`, readable FPS proof `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/three-clip/M16-1347/screenshots/M16-1347-fps-status.png` `SHA256=4A4561946D2A64DF9E7808C968E08AFE88173ABF7EBFDF2BC003E5275454559D`.
+  - `M16-1446`: `visibleBottomLeftGuiFps=8.1` / `Playback: 8.1 fps`, `smokePresentedFps=4.623`, `smokeTimelineFps=19.037`, `avg_render_work_ms=108.235` (`9.239 FPS-equivalent`), `avg_llrawproc_ms=24.412` (`40.964 FPS-equivalent`), `avg_dual_iso_full20_total_ms=24.412` (`40.964 FPS-equivalent`), `avg_chroma_copy_ms=0.000`, presented screenshot `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/three-clip/M16-1446/screenshots/M16-1446.png` `SHA256=7148AD08B60D2F5DC5FCDCC70F868FE7010F2D424ADF8DFF7BE9FCA343D14870`, readable FPS proof `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/three-clip/M16-1446/screenshots/M16-1446-fps-status.png` `SHA256=D126345E81C2DA4F1AFD0ED5FF70B77B74F9DC1F1454DC7E2F6EAD6B85FF24E7`.
+- Visual inspection of the three presented-frame screenshots found no obvious hue flip, channel swap, severe color corruption, or aspect regression. Visual inspection of the `*-fps-status.png` crops confirmed they visibly show the cited bottom-left GUI labels.
+- A fresh follow-up FPS visibility smoke at `.claude-state/profiling/20260603-gui-fps-visibility-current/M16-1327.json` confirmed the reporting convention: `visibleBottomLeftGuiFps=7.9` / `Playback: 7.9 fps` comes from the full-window screenshot-time label and proof crop, while `guiStatusValue=1.1` is a later end-of-run sample.
+- A post-rebuild current-executable smoke at `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/post-rebuild/M16-1327.json` passed `validation.ok=true` with `visibleBottomLeftGuiFps=6.3` / `Playback: 6.3 fps`, `smokePresentedFps=4.303`, `smokeTimelineFps=19.096`, `avg_llrawproc_ms=30.750`, `avg_dual_iso_full20_total_ms=29.500`, and `avg_chroma_copy_ms=0.000`. The readable FPS crop is `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/post-rebuild/screenshots/M16-1327-fps-status.png` `SHA256=FDEDA3EC0330615A79859669EB83ED78D2E26EBACC82E5C033A58879AA4C8439`; the presented-frame screenshot is `.claude-state/profiling/20260603-dualiso-skip-copy-only-chroma/post-rebuild/screenshots/M16-1327.png` `SHA256=217E8A5E8A4CAB7E1DD2FE54F00EC3B1E2430ACD3FAB26E1BABBA848381C0191`.
+
+### Cross-checked from prior analysis
+
+- Compared with the previous M16-1327 post-commit release smoke, the copy-only chroma path dropped from `avg_mix_chroma_ms=6.294` and `avg_chroma_copy_ms=6.294` to `0.000`, while `avg_llrawproc_ms` moved from `30.706` to `28.824`. `smokePresentedFps` was effectively flat-to-slightly-up (`4.499` to `4.521`), so the verified win is the removed wasted work, not a claimed large FPS jump from one noisy sample.
+- The bottom-left GUI FPS must keep using `visibleBottomLeftGuiFps` plus the readable `*-fps-status.png` proof crop. Presented-frame screenshots are still only color/aspect/quality evidence and intentionally omit GUI chrome.
+- The broad `DualIsoPipeline.*` suite still has unrelated known Direct8/cache failures, so this round relies on the focused tests above plus screenshot-backed runtime smoke instead of treating the broad suite as green.
+
+### Needs runtime profiling
+
+- Continue optimizing actual remaining Dual ISO/full20 cost: mix/final blend, overexposed handling, raw/debayer queue behavior, and shadows/highlights prep. Avoid re-enabling real Dual ISO full20 chroma smoothing for GUI method `1` until a color-correct implementation is proven by screenshots and focused tests.
+- If manual observation disagrees with the screenshot-time FPS label, capture a short repeated full-window screenshot sequence or video during playback. A single screenshot-time label can legitimately differ from the end-of-run summary sample on bursty playback.
