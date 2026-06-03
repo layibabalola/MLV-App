@@ -514,6 +514,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("llrawproc_chroma_smooth_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("llrawproc_other_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_total_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_mean23_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_border_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_setup_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_init_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_copy_ms")));
@@ -580,6 +583,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("llrawproc_dual_iso_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("llrawproc_chroma_smooth_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("llrawproc_other_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_mean23_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_border_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_setup_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_init_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_copy_ms")).toDouble() >= 0.0);
