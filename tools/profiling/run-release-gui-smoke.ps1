@@ -924,6 +924,8 @@ $result = [pscustomobject]@{
         windowCapture = $windowScreenshotCapture
         fpsStatusCropPath = $fpsStatusCropPath
         fpsStatusCrop = $fpsStatusCropCapture
+        visibleBottomLeftGuiProofPath = $fpsStatusCropPath
+        visibleBottomLeftGuiProof = $fpsStatusCropCapture
     }
     log = [pscustomobject]@{
         path = if ($logFile) { $logFile.FullName } else { $null }
