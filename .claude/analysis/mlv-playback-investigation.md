@@ -13373,3 +13373,69 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Next session should recreate the active goal, verify repo status, and run one fresh validation-clean default/off 30s smoke before editing.
 - If pursuing SH, inspect the halfres RBF implementation and existing rejected notes first; prefer structural reductions or reuse over pointer/unroll/store shuffles.
 - If pursuing Dual ISO, inspect final blend/mix/overexposed code paths and use screenshots plus focused tests to prevent color regressions.
+
+## 2026-06-03 - final_blend float fullres_curve candidate rejected
+
+### Verified locally
+
+- Started work block `wb-0e384d7e67d84769` on `codex/work-block/wb-0e384d7e67d84769` from protected `master` at `174e4a671caf61a8ed131186e6523d17636b557f`.
+- Read the current synthesis files under `.claude-state/handoff/Synthesis 6-3-26/` and verified the top accepted candidate was a Dual ISO `fullres_curve` float mirror for `final_blend` only.
+- Live-source anchors matched the candidate shape:
+  - `src/mlv/llrawproc/dualiso.c` has `build_fullres_curve`, `final_blend`, scalar `fullres_curve[...]` final-blend reads, and live `final_blend_row_avx2` call sites.
+  - `src/mlv/llrawproc/dualiso_avx2.inc` has the live `final_blend_row_avx2` double gather/conversion path.
+  - `_no_alias` exists but is not called by the live `dualiso.c` final-blend path, so it was not edited.
+- Baseline release executable before editing:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03 09:38:09`, `Length=9006080`, `SHA256=300385D090415C2F1DA2B5116A3500F81AE5918A69B2E3B76AB1772E2DF61B48`
+- Fresh 30s default/off baseline smoke on `C:/temp/MLV/M16-1327.MLV`:
+  - Artifact: `.claude-state/profiling/20260603-playback-float-curve-baseline/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=8.1`, `smoke presented FPS=7.478`, `timeline FPS=23.448`
+  - `avg_render_work_ms=119.085` (`8.397 FPS-equivalent`)
+  - `avg_llrawproc_ms=31.335` (`31.913 FPS-equivalent`)
+  - `avg_processed16_ms=110.114` (`9.081 FPS-equivalent`)
+  - `avg_dual_iso_full20_total_ms=30.250` (`33.058 FPS-equivalent`)
+  - `avg_mix_halfres_ms=4.691` (`213.174 FPS-equivalent`)
+  - `avg_mix_overexposed_ms=4.153` (`240.790 FPS-equivalent`)
+  - `avg_final_blend_ms=7.733` (`129.316 FPS-equivalent`)
+  - Presented screenshot: `.claude-state/profiling/20260603-playback-float-curve-baseline/screenshots/M16-1327.png` `SHA256=A9508234C500EC1D5056206675D09B3F97BDDFF3632C0A4B005C750587BB56F9`
+  - FPS proof crop: `.claude-state/profiling/20260603-playback-float-curve-baseline/screenshots/M16-1327-fps-status.png` `SHA256=CF879A24E371A404250AC5A075E50BD4552222459BC2B69F4678CEB5253D2C76`
+- Implemented the candidate in-session: added a `fullres_curve_f` mirror from the same formula/source values, threaded it only through the live `final_blend` AVX2/scalar lookup paths, and added a process-live kill switch `MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE=1`.
+- Focused quality gate passed while the candidate existed: `DualIsoPipeline.DualIsoFinalBlendFloatCurveMatchesDouble` reported `0/12301632 channels differ, max|d|=0`, so the float path matched the double path within the required `<= 1 LSB` gate. Existing focused checks `DualIsoPipeline.HQ_FullBlendAvx2ByteIdentity` and `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity` also passed.
+- Candidate release executable after the float-path build:
+  - `LastWriteTime=2026-06-03 14:13:02`, `Length=9007104`, `SHA256=C071D51DB9890B02DAD74B316F17B392478E7AD70FBD3CCDAEB5941B64E4DE96`
+- Candidate 30s default/off post-change smoke on `C:/temp/MLV/M16-1327.MLV`:
+  - Artifact: `.claude-state/profiling/20260603-playback-float-curve-post/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=5.0`, `smoke presented FPS=5.613`, `timeline FPS=23.359`
+  - `avg_render_work_ms=160.162` (`6.244 FPS-equivalent`), delta `+41.077 ms` from baseline
+  - `avg_llrawproc_ms=45.073` (`22.186 FPS-equivalent`), delta `+13.738 ms`
+  - `avg_processed16_ms=149.078` (`6.708 FPS-equivalent`), delta `+38.964 ms`
+  - `avg_dual_iso_full20_total_ms=43.218` (`23.139 FPS-equivalent`), delta `+12.968 ms`
+  - `avg_mix_halfres_ms=6.145` (`162.734 FPS-equivalent`), delta `+1.454 ms`
+  - `avg_mix_overexposed_ms=5.285` (`189.215 FPS-equivalent`), delta `+1.132 ms`
+  - `avg_final_blend_ms=9.458` (`105.731 FPS-equivalent`), delta `+1.725 ms` regression from baseline
+  - Presented screenshot: `.claude-state/profiling/20260603-playback-float-curve-post/screenshots/M16-1327.png` `SHA256=100862957CD20AA5EB0A2E9DE29FBE6485BE0CFDBFC8994442A1E9ED5101ABF5`
+  - FPS proof crop: `.claude-state/profiling/20260603-playback-float-curve-post/screenshots/M16-1327-fps-status.png` `SHA256=39EAC0A4B870E91A89F1AABC72D3403952DCF4CDA291D074CBDBFECD454A6F6A`
+  - Aspect evidence: mode `presented-playback-stretch`, `width=2555`, `height=1068`, `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Visual inspection of the post-change presented-frame screenshot found the expected de-squeezed waterfall scene, with no obvious channel swap, hue flip, severe color corruption, or aspect regression; the FPS crop visibly read `Playback: 5.0 fps`.
+- The candidate failed the performance gate and was reverted. The requested target was at least `1.0 ms` improvement in `avg_final_blend_ms`; the measured result was a `+1.725 ms` regression, with material total/playback regressions as well.
+- Rebuilt the user-facing release tree after the revert:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03 14:20:23`, `Length=9006080`, `SHA256=BD638B9C57957661252ED68ECE39C4E3C91831129F07E8EFF8FB5517089C957A`
+- Accepted/rejected/deferred status:
+  - Accepted: fresh baseline/post evidence, the quality-equivalence result, and the conclusion that the float mirror is numerically safe but not performant in this build/runtime.
+  - Rejected: Dual ISO `fullres_curve_f` for `final_blend` as implemented here, because it regressed `avg_final_blend_ms` and total playback timing.
+  - Deferred: RBF and `_no_alias` edits were intentionally not touched in this session.
+
+### Cross-checked from prior analysis
+
+- Round 7 synthesis selected the float `fullres_curve` mirror as the top accepted candidate, with RBF work deferred because pointer-drift and clean-grid rewrites had already produced unsafe or slower outcomes.
+- Prior notes already warned that local RBF micro-shape experiments are stale unless paired with exact-equivalence coverage and live call-site inspection.
+- This run supersedes the earlier `avg_final_blend_ms=9.023` next-hotspot baseline for this candidate decision, because it used the fresh default/off baseline requested immediately before editing.
+
+### Needs runtime profiling
+
+- Do not retry the float `fullres_curve_f` mirror in `final_blend` without a new reason, such as a different compiler/codegen shape or a narrower AVX2 experiment that avoids the observed gather-path regression.
+- Next ranked implementation path: first build an exact-equivalence RBF harness that preserves the current pointer-drift behavior, then use it to evaluate a drift-preserving SH halfres RBF vertical parallelization or equivalent structural RBF change. Do not begin with another pointer/unroll/store shuffle.
+- Keep the M16 visual smoke set in play for any RBF or processing change, with `M16-1327.MLV` as the hot/warm green-cast regression clip and app-internal presented-frame screenshot evidence as the first color/aspect check.
