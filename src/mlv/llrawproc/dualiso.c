@@ -2721,6 +2721,35 @@ static inline double * build_fullres_curve(int black)
     return fullres_curve;
 }
 
+static inline float * build_fullres_curve_float(int black)
+{
+    static float fullres_curve_f[1<<20];
+    static int previous_black = -1;
+
+    if(previous_black == black) return fullres_curve_f;
+
+    previous_black = black;
+
+    const double fullres_start = 4;
+    const double fullres_transition = 4;
+
+    #pragma omp parallel for
+    for (int i = 0; i < (1<<20); i++)
+    {
+        double ev2 = log2(MAX(i/64.0 - black/64.0, 1));
+        double c2 = -cos(COERCE(ev2 - fullres_start, 0, fullres_transition)*M_PI/fullres_transition);
+        double f = (c2+1) / 2;
+        fullres_curve_f[i] = (float)f;
+    }
+
+    return fullres_curve_f;
+}
+
+static inline int use_final_blend_float_fullres_curve(void)
+{
+    return !dualiso_env_truthy(getenv("MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE"));
+}
+
 /* define edge directions for interpolation */
 struct xy { int x; int y; };
 const struct
@@ -4325,6 +4354,8 @@ static inline int final_blend(struct raw_info raw_info,
     double final_blend_setup_start = mlv_stage_timing_now();
     /* fullres mixing curve */
     double * fullres_curve = build_fullres_curve(black);
+    const int use_float_fullres_curve = use_final_blend_float_fullres_curve();
+    float * fullres_curve_f = use_float_fullres_curve ? build_fullres_curve_float(black) : NULL;
     
     int w = raw_info.width;
     int h = raw_info.height;
@@ -4406,7 +4437,7 @@ static inline int final_blend(struct raw_info raw_info,
                                      bright_row,
                                      overexposed_row,
                                      alias_row,
-                                     raw2ev_float, raw2ev, ev2raw, fullres_curve,
+                                     raw2ev_float, raw2ev, ev2raw, fullres_curve, fullres_curve_f,
                                      black, dark_noise, w,
                                      randn_cache,
                                      &row_k,
@@ -4429,7 +4460,9 @@ static inline int final_blend(struct raw_info raw_info,
                     int hrev = raw2ev[hr];
                     int frev = raw2ev[fr];
                     int frsev = raw2ev[frs];
-                    double f = fullres_curve[b & 0xFFFFF];
+                    double f = use_float_fullres_curve
+                        ? (double)fullres_curve_f[b & 0xFFFFF]
+                        : fullres_curve[b & 0xFFFFF];
                     int co = alias_row[x];
                     double c = COERCE(co / (double) ALIAS_MAP_MAX, 0, 1);
                     double ovf = COERCE(overexposed_row[x] / 200.0, 0, 1);
@@ -4503,7 +4536,7 @@ static inline int final_blend(struct raw_info raw_info,
                                      bright_row,
                                      overexposed_row,
                                      NULL,
-                                     raw2ev_float, raw2ev, ev2raw, fullres_curve,
+                                     raw2ev_float, raw2ev, ev2raw, fullres_curve, fullres_curve_f,
                                      black, dark_noise, w,
                                      randn_cache,
                                      &row_k,
@@ -4526,7 +4559,9 @@ static inline int final_blend(struct raw_info raw_info,
                     int hrev = raw2ev[hr];
                     int frev = raw2ev[fr];
                     int frsev = raw2ev[frs];
-                    double f = fullres_curve[b & 0xFFFFF];
+                    double f = use_float_fullres_curve
+                        ? (double)fullres_curve_f[b & 0xFFFFF]
+                        : fullres_curve[b & 0xFFFFF];
                     double ovf = COERCE(overexposed_row[x] / 200.0, 0, 1);
                     double c = ovf;
                     double noisy_or_overexposed = MAX(ovf, 1-f);
@@ -4609,7 +4644,9 @@ static inline int final_blend(struct raw_info raw_info,
                 int output = 0;
 
                 /* blending factor */
-                double f = fullres_curve[b & 0xFFFFF];
+                double f = use_float_fullres_curve
+                    ? (double)fullres_curve_f[b & 0xFFFFF]
+                    : fullres_curve[b & 0xFFFFF];
 
                 double c = 0;
 

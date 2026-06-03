@@ -511,6 +511,83 @@ TEST(DualIsoPipeline, HQ_FullBlendAvx2ByteIdentity)
     dualisoHqReinitDispatchForTesting();
 }
 
+TEST(DualIsoPipeline, DualIsoFinalBlendFloatCurveMatchesDouble)
+{
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_HQ", "");
+    _putenv_s("MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE", "1");
+#else
+    unsetenv("MLVAPP_DISABLE_AVX2_DUALISO_HQ");
+    setenv("MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE", "1", 1);
+#endif
+    ASSERT_TRUE(dualisoHqReinitDispatchForTesting() != 0);
+
+    QString error_message;
+    MlvPipelineFixture double_fixture;
+    ASSERT_TRUE(double_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(double_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(double_fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(double_fixture.video()));
+    const std::vector<uint16_t> double_frame = double_fixture.renderFrame16(0, 1);
+
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE", "");
+#else
+    unsetenv("MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE");
+#endif
+
+    MlvPipelineFixture float_fixture;
+    ASSERT_TRUE(float_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(float_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                                          &error_message));
+    ASSERT_TRUE(float_fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(float_fixture.video()));
+    const std::vector<uint16_t> float_frame = float_fixture.renderFrame16(0, 1);
+
+    ASSERT_EQ(double_frame.size(), float_frame.size());
+
+    std::uint64_t differing = 0;
+    int max_abs = 0;
+    for (std::size_t i = 0; i < double_frame.size(); ++i) {
+        int d = static_cast<int>(double_frame[i]) - static_cast<int>(float_frame[i]);
+        if (d < 0) d = -d;
+        if (d) {
+            differing++;
+            if (d > max_abs) max_abs = d;
+        }
+    }
+    std::fprintf(stderr,
+                 "DualIsoFinalBlendFloatCurveMatchesDouble: %llu/%llu channels differ, max|d|=%d\n",
+                 static_cast<unsigned long long>(differing),
+                 static_cast<unsigned long long>(double_frame.size()),
+                 max_abs);
+    ASSERT_TRUE(max_abs <= 1);
+
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE", "");
+#else
+    unsetenv("MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE");
+#endif
+}
+
 /* Path-selection check: on a capable host with the kill switch unset,
  * the HQ dual ISO recon must latch the AVX2 fast path. */
 TEST(DualIsoPipeline, HQ_DualIsoAvx2PathActiveOnCapableHost)

@@ -343,6 +343,7 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
                                  const int * raw2ev_lut,
                                  const int * ev2raw_lut,        /* points to ev2raw_0 + 10*EV_RESOLUTION */
                                  const double * fullres_curve,
+                                 const float * fullres_curve_f,
                                  int black, int dark_noise,
                                  int total,
                                  const float * randn_cache,
@@ -397,14 +398,26 @@ static void final_blend_row_avx2(uint32_t * raw_buffer_32,
 
         stage_start = 0.0;
         if (probe_fullres_curve) stage_start = mlv_stage_timing_now();
-        __m256i b_idx = _mm256_and_si256(b, mask20);
-        __m128i b_idx_lo = _mm256_castsi256_si128(b_idx);
-        __m128i b_idx_hi = _mm256_extracti128_si256(b_idx, 1);
-        __m256d f_lo_d = _mm256_i32gather_pd(fullres_curve, b_idx_lo, 8);
-        __m256d f_hi_d = _mm256_i32gather_pd(fullres_curve, b_idx_hi, 8);
-        __m128 f_lo = _mm256_cvtpd_ps(f_lo_d);
-        __m128 f_hi = _mm256_cvtpd_ps(f_hi_d);
-        __m256 f = _mm256_insertf128_ps(_mm256_castps128_ps256(f_lo), f_hi, 1);
+        __m256 f;
+        if (fullres_curve_f) {
+            f = _mm256_setr_ps(fullres_curve_f[bright[x + 0] & 0xFFFFF],
+                               fullres_curve_f[bright[x + 1] & 0xFFFFF],
+                               fullres_curve_f[bright[x + 2] & 0xFFFFF],
+                               fullres_curve_f[bright[x + 3] & 0xFFFFF],
+                               fullres_curve_f[bright[x + 4] & 0xFFFFF],
+                               fullres_curve_f[bright[x + 5] & 0xFFFFF],
+                               fullres_curve_f[bright[x + 6] & 0xFFFFF],
+                               fullres_curve_f[bright[x + 7] & 0xFFFFF]);
+        } else {
+            __m256i b_idx = _mm256_and_si256(b, mask20);
+            __m128i b_idx_lo = _mm256_castsi256_si128(b_idx);
+            __m128i b_idx_hi = _mm256_extracti128_si256(b_idx, 1);
+            __m256d f_lo_d = _mm256_i32gather_pd(fullres_curve, b_idx_lo, 8);
+            __m256d f_hi_d = _mm256_i32gather_pd(fullres_curve, b_idx_hi, 8);
+            __m128 f_lo = _mm256_cvtpd_ps(f_lo_d);
+            __m128 f_hi = _mm256_cvtpd_ps(f_hi_d);
+            f = _mm256_insertf128_ps(_mm256_castps128_ps256(f_lo), f_hi, 1);
+        }
         if (probe_fullres_curve) *fullres_curve_probe_ms += dualiso_debug_elapsed_ms(stage_start);
 
         stage_start = 0.0;
