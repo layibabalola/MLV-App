@@ -12920,6 +12920,8 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Updated `tools/profiling/run-release-gui-smoke.ps1` so every `-CaptureScreenshot` run that also captures a full-window PNG writes an enlarged bottom-left status crop:
   - `screenshot.fpsStatusCropPath`
   - `screenshot.fpsStatusCrop`
+  - `screenshot.visibleBottomLeftGuiProofPath`
+  - `screenshot.visibleBottomLeftGuiProof`
   - `playbackFps.visibleBottomLeftGuiProofPath`
   - `playbackFps.visibleBottomLeftGuiProof`
 - The crop is generated from the same app-internal full-window screenshot used for `visibleBottomLeftGuiFps`, so it proves the bottom-left GUI label without changing playback/app behavior.
@@ -12941,6 +12943,9 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `.claude-state/profiling/20260603-gui-fps-proof-crop/screenshots/M16-1327.png`
   - `2555x1068`, aspect `2.392322`
   - `SHA256=C41F2447128E492AACC6E0070DB602CD7B4F522FB79C56CF65A7FB3EFC834EB5`
+- Follow-up investigation on the 2026-06-03 three-clip baseline confirmed the latest proof crops visibly show the cited bottom-left labels: `Playback: 5.3 fps` for `M16-1327`, `Playback: 5.1 fps` for `M16-1347`, and `Playback: 6.5 fps` for `M16-1446`. The presented-frame `*.png` files still intentionally omit the GUI chrome and should not be used as proof of the bottom-left status label.
+- After adding the screenshot-section aliases, a fresh `M16-1327` wrapper smoke passed with `validation.ok=true`, `visibleBottomLeftGuiFps=4.9`, `smokePresentedFps=3.479`, and `smokeTimelineFps=19.648`. Its readable crop is `.claude-state/profiling/20260603-gui-fps-proof-investigation/screenshots/M16-1327-fps-status.png`, `2160x216`, `SHA256=B8C0ACC1895EB69746AAB52EDF59E2AD4F5E3BD7C0530C51CCE752BCDC078144`.
+- The same fresh run intentionally differed from the later end-of-run sample: `visibleBottomLeftGuiFps=4.9` at window screenshot time versus `guiStatusValue=1.0` in the stop summary. Reports must cite the screenshot-time value when claiming what is visible in the bottom-left GUI.
 
 ### Cross-checked from prior analysis
 
