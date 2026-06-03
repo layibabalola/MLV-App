@@ -506,7 +506,7 @@ static int runPlaybackProfile(QApplication &app)
 
     const QCommandLineOption exerciseScaleFactorToggleFromOpt(
         QStringLiteral("exercise-scale-toggle-from"),
-        QStringLiteral("Starting playback scale for --exercise-scale-toggle. Supported values: 2 or 4."),
+        QStringLiteral("Starting playback scale for --exercise-scale-toggle. Supported values: 2, 4, or 8."),
         QStringLiteral("scale"),
         QStringLiteral("2"));
     parser.addOption(exerciseScaleFactorToggleFromOpt);
@@ -657,9 +657,9 @@ static int runPlaybackProfile(QApplication &app)
     }
 
     const int exerciseScaleToggleFrom = parser.value(exerciseScaleFactorToggleFromOpt).toInt(&ok);
-    if (!ok || (exerciseScaleToggleFrom != 2 && exerciseScaleToggleFrom != 4))
+    if (!ok || (exerciseScaleToggleFrom != 2 && exerciseScaleToggleFrom != 4 && exerciseScaleToggleFrom != 8))
     {
-        err << "[PROFILE] ERROR: --exercise-scale-toggle-from must be 2 or 4.\n";
+        err << "[PROFILE] ERROR: --exercise-scale-toggle-from must be 2, 4, or 8.\n";
         return 2;
     }
 

@@ -19,6 +19,7 @@
 #include <QCoreApplication>
 #include <QSettings>
 #include <cstdlib>
+#include <string>
 
 #include "../../platform/qt/PlaybackQualityPolicy.h"
 #include "../../platform/qt/DualIsoPlaybackPolicy.h"
@@ -32,6 +33,7 @@ void clearAllPlaybackQualityKeys()
                    PlaybackQualitySettings::kOrganization(),
                    PlaybackQualitySettings::kApplication() );
     set.remove( PlaybackQualitySettings::kKeyQualityMode() );
+    set.remove( PlaybackQualitySettings::kKeyScaleFactorOverride() );
     set.remove( PlaybackQualitySettings::kKeyAutoTargetFps() );
     set.remove( PlaybackQualitySettings::kKeyShowQualityIndicator() );
     set.remove( PlaybackQualitySettings::kKeyShowExperimentalPhase3Modes() );
@@ -58,6 +60,17 @@ void setEnvOn()
     _putenv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1");
 #else
     setenv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23", "1", 1);
+#endif
+}
+
+void setScaleEnv(const char * value)
+{
+#ifdef _WIN32
+    static std::string env;
+    env = std::string("MLVAPP_PLAYBACK_SCALE_FACTOR=") + value;
+    _putenv(env.c_str());
+#else
+    setenv("MLVAPP_PLAYBACK_SCALE_FACTOR", value, 1);
 #endif
 }
 
@@ -138,6 +151,22 @@ TEST(PlaybackQualitySettings, ScaleFactorForMode)
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Auto,        false ) );
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Phase3Fast,  false ) );
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Phase3HQ,    false ) );
+}
+
+TEST(PlaybackQualitySettings, ScaleFactorEnvAllowsEight)
+{
+    if ( !QCoreApplication::instance() ) SKIP_TEST( "Requires QCoreApplication" );
+    unsetEnv();
+
+    setScaleEnv("8");
+    ASSERT_EQ( 8, playbackQualityScaleFactorForMode( PlaybackQualityMode::Fast,        false ) );
+    ASSERT_EQ( 8, playbackQualityScaleFactorForMode( PlaybackQualityMode::HighQuality, false ) );
+    ASSERT_EQ( 8, playbackQualityScaleFactorForMode( PlaybackQualityMode::Auto,        false ) );
+
+    setScaleEnv("16");
+    ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Fast, false ) );
+
+    unsetEnv();
 }
 
 TEST(PlaybackQualitySettings, EnvVarOverridesGuiHqMean23)

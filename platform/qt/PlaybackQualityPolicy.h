@@ -438,7 +438,7 @@ inline bool playbackQualityWantsHqMean23( PlaybackQualityMode mode )
 }
 
 /* Effective playback scale factor considering env override + GUI fallback.
- * Returns 1, 2, or 4 (clamped). For Auto mode, the dynamic decision is
+ * Returns 1, 2, 4, or 8 (clamped). For Auto mode, the dynamic decision is
  * made by the cadence sampler; this returns the mode's *initial* scale
  * factor. */
 inline int playbackQualityScaleFactorForMode( PlaybackQualityMode mode,
@@ -449,7 +449,7 @@ inline int playbackQualityScaleFactorForMode( PlaybackQualityMode mode,
     if ( env && *env )
     {
         const int v = std::atoi(env);
-        if ( v == 1 || v == 2 || v == 4 ) return v;
+        if ( v == 1 || v == 2 || v == 4 || v == 8 ) return v;
     }
     switch ( mode )
     {
@@ -528,7 +528,7 @@ struct PlaybackQualityAutoSampler
      *   - else stay at HQ scale=4 */
     struct Decision
     {
-        int scaleFactor;       /* 1, 2, or 4 */
+        int scaleFactor;       /* 1, 2, 4, or 8 */
         bool useHqMean23;      /* true => HQ + mean23, false => Fast preview */
     };
 

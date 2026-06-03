@@ -683,8 +683,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
             sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt();
         const int effective_scale =
             sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt();
-        ASSERT_TRUE(requested_scale == 1 || requested_scale == 2 || requested_scale == 4);
-        ASSERT_TRUE(effective_scale == 1 || effective_scale == 2 || effective_scale == 4);
+        ASSERT_TRUE(requested_scale == 1 || requested_scale == 2 || requested_scale == 4 || requested_scale == 8);
+        ASSERT_TRUE(effective_scale == 1 || effective_scale == 2 || effective_scale == 4 || effective_scale == 8);
         ASSERT_EQ(effective_scale != requested_scale,
                   sample.value(QStringLiteral("render_thread_playback_scale_factor_clamped")).toBool());
         double processing_max_substage_ms = 0.0;

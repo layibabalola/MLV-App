@@ -326,7 +326,7 @@ TEST(PlaybackScaling, BilinearPreservesFlatFieldsAtPlaybackScales)
 
     BilinearPlaybackScaleCache cache;
     std::vector<uint8_t> scaled;
-    const int scales[] = { 1, 2, 4 };
+    const int scales[] = { 1, 2, 4, 8 };
 
     for( const int scale : scales )
     {
@@ -361,7 +361,7 @@ TEST(PlaybackScaling, BilinearImpulseResponseIsSmoothAtPlaybackScales)
     FastPlaybackScaleCache nearestCache;
     std::vector<uint8_t> bilinearScaled;
     std::vector<uint8_t> nearestScaled;
-    const int scales[] = { 2, 4 };
+    const int scales[] = { 2, 4, 8 };
 
     for( const int scale : scales )
     {

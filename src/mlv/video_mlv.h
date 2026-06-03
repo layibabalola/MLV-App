@@ -67,7 +67,7 @@ void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t *
 /* Phase 4A: scale-aware processed-frame getters.
  *
  * The scaleFactor contract is:
- *   - must be 1, 2, or 4
+ *   - must be 1, 2, 4, or 8
  *   - must be a power of two (Phase 4B will reject non-power-of-two values
  *     to preserve the 2x2 Bayer block alignment)
  *   - if scaleFactor is invalid, the call is treated as scaleFactor == 1
@@ -110,8 +110,10 @@ void getMlvProcessedFrame16Scaled(mlvObject_t * video,
 /* Reports the (width,height) a Phase-4-aware caller should size the output
  * buffer for. In Phase 4A this always returns the full sensor dimensions
  * (the pipeline still renders at scale=1 internally). In Phase 4B it will
- * return W/scaleFactor and H/scaleFactor when scaleFactor > 1.
- * scaleFactor must be 1, 2, or 4; invalid values are treated as 1. */
+ * return W/scaleFactor and H/scaleFactor when scaleFactor > 1. For x8,
+ * trailing partial 8x8 edge blocks are ignored in preview, so dimensions are
+ * floor(W/8) and floor(H/8).
+ * scaleFactor must be 1, 2, 4, or 8; invalid values are treated as 1. */
 void mlvFrameOutputDimensions(mlvObject_t * video,
                               int scaleFactor,
                               int * outWidth,

@@ -1,3 +1,72 @@
+# 2026-06-03 - explicit x8 reduced-resolution playback preview is available but not yet a full early-pipeline shortcut
+
+### Verified locally
+
+- I added an explicit Premiere-style deeper preview scale option: playback scale now accepts x1/x2/x4/x8 from the Qt menu, settings, `MLVAPP_PLAYBACK_SCALE_FACTOR`, console/perf tests, and the pipeline helpers.
+- The kept x8 implementation is conservative: it uses post-llrawproc Bayer-to-RGB 8x8 block averaging in [`src/processing/playback_downsample.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/playback_downsample.c) and routes through the existing safe render fallbacks in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c). It does not extend the x4 pre-reconstruction Dual ISO fast path, so Dual ISO color/reconstruction behavior stays close to the existing x2 fallback.
+- The first release GUI smoke with exact x8 divisibility still requested x8 but fell back to active x1 on [`C:\temp\MLV\M16-1327.MLV`](C:/temp/MLV/M16-1327.MLV), because that clip is not evenly divisible by 8. I changed only the new x8 path to use `floor(width / 8)` and `floor(height / 8)` output dimensions, cropping trailing partial right/bottom preview blocks. Existing x1/x2/x4 divisibility behavior is unchanged.
+- Focused tests passed after the crop fix:
+  - `console_tests.exe --check-golden`: `tests=87 assertions=313 skipped=27 failed=0`
+  - `pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B*`: `tests=134 assertions=411 skipped=0 failed=0`
+  - `pipeline_tests.exe --gtest_filter=PlaybackScaling*`: `tests=133 assertions=67715 skipped=1 failed=0`
+- The broad `pipeline_tests.exe --check-golden` run still has unrelated golden/direct8 failures, but the new x8 Dual ISO, non-Dual ISO, crop, and presentation-scaling tests passed inside the focused runs.
+- I rebuilt the user-facing release executable after the final UI/source state:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/3/2026 4:28:19 PM`
+  - `Length=9010176`
+  - `SHA256=92F800F60C8EFF1F138E3F1455FB2221520FCC1BEE20F0D87FCE3A7EFACB3AA1`
+- Final x8 release GUI smoke on [`C:\temp\MLV\M16-1327.MLV`](C:/temp/MLV/M16-1327.MLV) passed with frame telemetry and app-internal presented-frame capture:
+  - [`M16-1327-30s.json`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260603-playback-scale-x8/scale8-final-ui/M16-1327-30s.json)
+  - `validation.ok=true`
+  - `scaleRequestLast=8`
+  - `scaleActiveLast=8`
+  - GUI FPS label: `10 fps`
+  - smoke presented FPS: `10.845`
+  - timeline FPS: `23.283`
+  - `avg_render_work_ms=76.372` (`13.094 FPS-equivalent`)
+  - `avg_llrawproc_ms=32.317` (`30.943 FPS-equivalent`)
+  - `avg_processed8_ms=67.003` (`14.925 FPS-equivalent`)
+  - `avg_processing_ms=7.651` (`130.702 FPS-equivalent`)
+  - `avg_processing_shadows_highlights_prep_ms=4.752` (`210.438 FPS-equivalent`)
+  - `avg_playback_scale_ms=9.144` (`109.361 FPS-equivalent`)
+  - `avg_debayered_frame_ms=51.893` (`19.270 FPS-equivalent`)
+  - `avg_debayer_exclusive_ms=0.810` (`1234.568 FPS-equivalent`)
+  - `avg_dual_iso_full20_ms=31.467` (`31.779 FPS-equivalent`)
+  - `avg_final_blend_ms=7.879` (`126.920 FPS-equivalent`)
+- The final x8 screenshot artifacts are:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260603-playback-scale-x8/scale8-final-ui/screenshots/M16-1327.png), SHA256 `BF303AC8AF044B9E9D3B3B41CA50A9A74D33BC61807B2C0033401E694E6B1C42`
+  - [`M16-1327-fps-status.png`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260603-playback-scale-x8/scale8-final-ui/screenshots/M16-1327-fps-status.png), SHA256 `7EBF710CA380199B79AC0E9C1F3F0C40790140264E91076A55130EF89DCFBE6D`
+  - Aspect evidence is a presented-playback stretch check: `width=2555`, `height=1068`, `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Same-build x4 comparison on the same clip also passed:
+  - [`M16-1327-30s.json`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260603-playback-scale-x8/scale4-newbuild/M16-1327-30s.json)
+  - `scaleRequestLast=4`
+  - `scaleActiveLast=4`
+  - GUI FPS label: `14 fps`
+  - smoke presented FPS: `10.872`
+  - timeline FPS: `23.234`
+  - `avg_render_work_ms=85.760` (`11.660 FPS-equivalent`)
+  - `avg_processed8_ms=75.931` (`13.170 FPS-equivalent`)
+  - `avg_processing_ms=12.703` (`78.722 FPS-equivalent`)
+- Net local read: x8 reduces the per-frame render/processing work versus x4 on this clip, but it does not yet materially raise final presented FPS on the final run because the conservative path still pays full Dual ISO reconstruction/debayer cost and presentation cadence is dominated elsewhere.
+
+### Cross-checked from prior analysis
+
+- Defaults and Auto still choose the established x4 preview policy; x8 is opt-in only through the menu/settings/env/test harness.
+- The x4 Dual ISO pre-reconstruction fast path is intentionally untouched. That avoids changing the accepted color/cast behavior while giving users a manual deeper preview lever.
+- The UI wording now describes x8 as the deepest reduced-resolution preview, not as a guaranteed fastest mode, because the final GUI FPS label and smoke presented FPS can vary independently from the lower render-stage cost.
+
+### Needs runtime profiling
+
+- The big remaining opportunity is earlier reduction for x8, before full Dual ISO reconstruction/debayer, but that has higher color/aliasing risk and needs multi-clip screenshot/golden coverage before it should replace the conservative fallback.
+- The final x8 run still spends `avg_dual_iso_full20_ms=31.467` and `avg_debayered_frame_ms=51.893`, so a deeper late-stage preview cannot eliminate the dominant upstream work.
+- Re-run the M16 smoke set (`M16-1327`, `M16-1347`, `M16-1446`, optional `M16-1243`) before any attempt to make Auto choose x8 or to route Dual ISO through an x8 pre-reconstruction shortcut.
+
+### Ranked next steps
+
+1. High impact / medium-high risk: prototype an x8 early-pipeline Dual ISO preview shortcut that reduces raw/reconstruction work before full RGB processing, then gate it behind explicit x8 until multi-clip visual evidence is clean.
+2. Medium impact / low risk: keep the current explicit x8 mode and collect the full M16 smoke set to understand where it helps, matches x4, or visibly degrades preview detail.
+3. Low impact / low risk: leave Auto at x4 and keep x8 as a manual inspection/cadence tradeoff until the early-pipeline shortcut is proven.
+
 # 2026-06-02 - HQ scale-4 Dual ISO should not raw-prefetch during full20 reconstruction
 
 ### Verified locally

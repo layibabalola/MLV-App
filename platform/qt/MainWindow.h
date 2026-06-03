@@ -536,6 +536,7 @@ private slots:
     void on_actionPlaybackScale1_triggered();
     void on_actionPlaybackScale2_triggered();
     void on_actionPlaybackScale4_triggered();
+    void on_actionPlaybackScale8_triggered();
 
     void on_actionSelectExternalApplication_triggered();
     void openRecentSession( QString fileName );

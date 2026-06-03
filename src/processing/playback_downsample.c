@@ -122,6 +122,54 @@ static void pl_downsample_4x_row_scalar(const uint16_t * __restrict bayer_in,
     }
 }
 
+static void pl_downsample_8x_row_scalar(const uint16_t * __restrict bayer_in,
+                                        int in_w,
+                                        uint16_t * __restrict rgb_out,
+                                        int y_out,
+                                        int bit_shift)
+{
+    const int out_w = in_w >> 3;
+    const uint16_t * __restrict rows[8];
+    rows[0] = bayer_in + ((size_t)(y_out * 8) * (size_t)in_w);
+    for (int y = 1; y < 8; ++y)
+    {
+        rows[y] = rows[y - 1] + in_w;
+    }
+
+    for (int x_out = 0; x_out < out_w; ++x_out)
+    {
+        const int x_src = x_out * 8;
+        uint32_t r = 0;
+        uint32_t g = 0;
+        uint32_t b = 0;
+
+        for (int y = 0; y < 8; ++y)
+        {
+            const uint16_t * __restrict row = rows[y] + x_src;
+            if ((y & 1) == 0)
+            {
+                for (int x = 0; x < 8; x += 2)
+                {
+                    r += row[x];
+                    g += row[x + 1];
+                }
+            }
+            else
+            {
+                for (int x = 0; x < 8; x += 2)
+                {
+                    g += row[x];
+                    b += row[x + 1];
+                }
+            }
+        }
+
+        rgb_out[3 * x_out + 0] = (uint16_t)((r >> 4) << bit_shift);
+        rgb_out[3 * x_out + 1] = (uint16_t)((g >> 5) << bit_shift);
+        rgb_out[3 * x_out + 2] = (uint16_t)((b >> 4) << bit_shift);
+    }
+}
+
 /* ---------------------------------------------------------------------- */
 /* AVX2 fast paths. */
 
@@ -544,6 +592,36 @@ void pl_downsample_bayer_to_rgb_4x(const uint16_t * bayer_in,
         {
             uint16_t * __restrict dst_row = rgb_out + ((size_t)y_out * (size_t)(in_w >> 2) * 3u);
             g_pl_downsample_4x_row_fn(bayer_in, in_w, dst_row, y_out, bit_shift);
+        }
+    }
+}
+
+void pl_downsample_bayer_to_rgb_8x(const uint16_t * bayer_in,
+                                   int in_w,
+                                   int in_h,
+                                   uint16_t * rgb_out,
+                                   int bit_shift,
+                                   int threads)
+{
+    if (!bayer_in || !rgb_out || in_w < 8 || in_h < 8) return;
+
+    const int out_h = in_h >> 3;
+
+    if (threads > 1)
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            uint16_t * __restrict dst_row = rgb_out + ((size_t)y_out * (size_t)(in_w >> 3) * 3u);
+            pl_downsample_8x_row_scalar(bayer_in, in_w, dst_row, y_out, bit_shift);
+        }
+    }
+    else
+    {
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            uint16_t * __restrict dst_row = rgb_out + ((size_t)y_out * (size_t)(in_w >> 3) * 3u);
+            pl_downsample_8x_row_scalar(bayer_in, in_w, dst_row, y_out, bit_shift);
         }
     }
 }

@@ -227,6 +227,7 @@
       <addaction name="actionPlaybackScale1"/>
       <addaction name="actionPlaybackScale2"/>
       <addaction name="actionPlaybackScale4"/>
+      <addaction name="actionPlaybackScale8"/>
      </widget>
      <addaction name="actionPlaybackQualityFast"/>
      <addaction name="actionPlaybackQualityHQ"/>
@@ -11058,7 +11059,7 @@ QGroupBox::indicator:checked:disabled {
     <string>High Quality (cast-closed, slower)</string>
    </property>
    <property name="toolTip">
-    <string>Force HQ Dual ISO + mean23 reconstruction during playback. Defaults to scale=4, or use Playback Quality &gt; Scale Factor to inspect x1/x2/x4 tradeoffs.</string>
+    <string>Force HQ Dual ISO + mean23 reconstruction during playback. Defaults to scale=4, or use Playback Quality &gt; Scale Factor to inspect x1/x2/x4/x8 tradeoffs.</string>
    </property>
    <property name="statusTip">
     <string>Playback Quality: HQ + mean23; cast closed; slower cadence on big sensors, especially at lower scale factors.</string>
@@ -11170,6 +11171,20 @@ QGroupBox::indicator:checked:disabled {
    </property>
    <property name="statusTip">
     <string>Playback scale: force x4.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackScale8">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>x8</string>
+   </property>
+   <property name="toolTip">
+    <string>Force one-eighth-resolution playback scaling for the deepest reduced-resolution preview.</string>
+   </property>
+   <property name="statusTip">
+    <string>Playback scale: force x8.</string>
    </property>
   </action>
   <action name="actionPlaybackShowQualityIndicator">

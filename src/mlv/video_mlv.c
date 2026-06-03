@@ -454,12 +454,12 @@ static uint64_t mlv_hash_llrawproc_state(uint64_t hash, const llrawprocObject_t 
     return hash;
 }
 
-/* Phase 4A: validate the requested playback scale factor. Accepts 1, 2, or
- * 4; everything else is clamped to 1. Centralised so cache-key, slot
+/* Phase 4A: validate the requested playback scale factor. Accepts 1, 2, 4,
+ * or 8; everything else is clamped to 1. Centralised so cache-key, slot
  * match, and the dimensions helper all agree on what counts as valid. */
 static int mlv_normalize_playback_scale_factor(int scaleFactor)
 {
-    if (scaleFactor == 2 || scaleFactor == 4)
+    if (scaleFactor == 2 || scaleFactor == 4 || scaleFactor == 8)
     {
         return scaleFactor;
     }
@@ -467,12 +467,13 @@ static int mlv_normalize_playback_scale_factor(int scaleFactor)
 }
 
 /* Phase 4B: resolve the effective scale factor for a given video object.
- * Explicit scale=2 must stay scale=2. The fast pre-recon Dual ISO shortcut
- * remains scale=4-only, but the scale=2 renderer falls back to full-res recon
- * then post-recon downsample so the user gets a real half-res image instead
- * of being silently demoted to the quarter-res path. Reject scales that don't
- * divide the sensor dimensions evenly (we need clean 2x2 / 4x4 block
- * alignment). */
+ * Explicit scale=2/8 must stay at the requested scale. The fast pre-recon
+ * Dual ISO shortcut remains scale=4-only; other reduced scales fall back to
+ * full-res recon then post-recon downsample so the user gets a real reduced
+ * image instead of being silently demoted to the quarter-res path. Exact block
+ * alignment remains required for x2/x4. The explicit x8 preview path may crop
+ * trailing partial 8x8 edge blocks, so common 4-aligned clips can still use
+ * the deeper preview scale. */
 static int mlv_effective_playback_scale_factor(mlvObject_t * video, int requestedScale)
 {
     int s = mlv_normalize_playback_scale_factor(requestedScale);
@@ -484,9 +485,13 @@ static int mlv_effective_playback_scale_factor(mlvObject_t * video, int requeste
     const int height = (int)getMlvHeight(video);
     if (width <= 0 || height <= 0) return 1;
 
-    /* Block alignment: width and height must be a multiple of (s*1) for
-     * the 2x kernel and (s) for the 4x kernel. To be safe we require both
-     * to be a multiple of `s`. */
+    if (s == 8)
+    {
+        return (width >= 8 && height >= 8) ? 8 : 1;
+    }
+
+    /* Block alignment: width and height must be a multiple of the selected
+     * scale for the post-llrawproc 2x/4x kernels and the x4 pre-recon path. */
     if ((width % s) != 0 || (height % s) != 0)
     {
         return 1;
@@ -1065,7 +1070,7 @@ static void mlv_reset_processed_frame_16bit_cache(mlvObject_t * video)
     memset(video->processed_16bit_cache_threads, 0, sizeof(video->processed_16bit_cache_threads));
     memset(video->processed_16bit_cache_signature, 0, sizeof(video->processed_16bit_cache_signature));
     /* Phase 4A: scale lane resets to 0 (the "unset" sentinel). Real entries
-     * always store a normalised 1, 2, or 4 so a zero lane never matches
+     * always store a normalised 1, 2, 4, or 8 so a zero lane never matches
      * any live request. */
     memset(video->processed_16bit_cache_scale, 0, sizeof(video->processed_16bit_cache_scale));
     /* Phase 4B: clear the layout unit so the next prepare picks up the
@@ -3347,6 +3352,10 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
     {
         pl_downsample_bayer_to_rgb_4x(unpacked, width, height, outputFrame, bit_shift, threads);
     }
+    else if (scaleFactor == 8)
+    {
+        pl_downsample_bayer_to_rgb_8x(unpacked, width, height, outputFrame, bit_shift, threads);
+    }
     else
     {
         pl_downsample_bayer_to_rgb_2x(unpacked, width, height, outputFrame, bit_shift, threads);
@@ -3419,6 +3428,10 @@ static int mlv_render_scaled_rgb16(mlvObject_t * video,
     if (scaleFactor == 4)
     {
         pl_downsample_bayer_to_rgb_4x(unpacked, width, height, outputFrame, bit_shift, threads);
+    }
+    else if (scaleFactor == 8)
+    {
+        pl_downsample_bayer_to_rgb_8x(unpacked, width, height, outputFrame, bit_shift, threads);
     }
     else
     {
@@ -3736,6 +3749,11 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     if (eff_scale == 4)
     {
         pl_downsample_bayer_to_rgb_4x(reconnedRawFrame, full_w, full_h,
+                                      unprocessed_frame, bit_shift, threads);
+    }
+    else if (eff_scale == 8)
+    {
+        pl_downsample_bayer_to_rgb_8x(reconnedRawFrame, full_w, full_h,
                                       unprocessed_frame, bit_shift, threads);
     }
     else if (eff_scale == 2)

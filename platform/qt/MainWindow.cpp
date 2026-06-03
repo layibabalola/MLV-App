@@ -1130,10 +1130,10 @@ static bool playback_start_preroll_disabled_by_environment()
 }
 
 /* Read MLVAPP_PLAYBACK_SCALE_FACTOR once and cache the request.
- * Accepts "1", "2", or "4"; returns 0 when unset so the caller can fall
+ * Accepts "1", "2", "4", or "8"; returns 0 when unset so the caller can fall
  * back to the GUI dial. The render thread logs both this requested value
- * and the effective core value because some clip modes promote unsafe
- * requests, for example Dual ISO HQ x2 -> x4. */
+ * and the effective core value because clips with incompatible dimensions
+ * can reject unsafe requests. */
 static int playback_scale_factor_env_override()
 {
     static int cached_scale = -2; /* -2 == not yet probed, 0 == unset */
@@ -1149,7 +1149,7 @@ static int playback_scale_factor_env_override()
     {
         bool ok = false;
         const int parsed = raw.toInt(&ok);
-        if (ok && (parsed == 1 || parsed == 2 || parsed == 4))
+        if (ok && (parsed == 1 || parsed == 2 || parsed == 4 || parsed == 8))
         {
             requested = parsed;
         }
@@ -1157,7 +1157,7 @@ static int playback_scale_factor_env_override()
         {
             qWarning().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR ignored:"
                                  << raw
-                                 << "(must be 1, 2, or 4); falling back to GUI dial.";
+                                 << "(must be 1, 2, 4, or 8); falling back to GUI dial.";
         }
     }
     cached_scale = requested;
@@ -4072,7 +4072,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         playbackScaleToggleSmokeRan = true;
         trace(QStringLiteral("playback-scale-toggle-smoke-begin"));
         const int envScale = playback_scale_factor_env_override();
-        if( envScale == 1 || envScale == 2 || envScale == 4 )
+        if( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 )
         {
             playbackScaleToggleSmokeStable = false;
             playbackScaleToggleSmokeFailure =
@@ -4083,7 +4083,9 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         {
             QString scaleSettleFailure;
             const int toggleFromScale =
-                ( options.exerciseScaleFactorToggleFrom == 4 ) ? 4 : 2;
+                ( options.exerciseScaleFactorToggleFrom == 8 ) ? 8
+              : ( options.exerciseScaleFactorToggleFrom == 4 ) ? 4
+              : 2;
             applyPlaybackScaleFactorOverride( toggleFromScale, /*persist*/false );
             qApp->processEvents( QEventLoop::AllEvents );
             trace(QStringLiteral("playback-scale-toggle-smoke-x%1-settle-begin")
@@ -5713,6 +5715,7 @@ void MainWindow::initGui( void )
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale1 );
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale2 );
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale4 );
+    m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale8 );
 
     const QString phase3Tooltip = tr(
         "Experimental Phase 3 pipeline parallelism. Falls back to serial "
@@ -5914,6 +5917,7 @@ void MainWindow::initGui( void )
         pScaleFactorSub->addAction( ui->actionPlaybackScale1 );
         pScaleFactorSub->addAction( ui->actionPlaybackScale2 );
         pScaleFactorSub->addAction( ui->actionPlaybackScale4 );
+        pScaleFactorSub->addAction( ui->actionPlaybackScale8 );
         m_pPlaybackQualityToolButtonMenu->addMenu( pScaleFactorSub );
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackShowQualityIndicator );
         QMenu *pAutoTargetSub = new QMenu( tr( "Auto Target FPS" ),
@@ -5939,7 +5943,7 @@ void MainWindow::initGui( void )
         m_pPlaybackQualityToolButton->setToolTip(
             tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
                 "(HQ matched-pair, cast-closed), Auto (adapts to target fps), "
-                "and x1/x2/x4 playback scale.\n"
+                "and x1/x2/x4/x8 playback scale.\n"
                 "Keyboard shortcut: Q" ) );
         m_pPlaybackQualityToolButton->setCursor( Qt::PointingHandCursor );
         m_pPlaybackQualityToolButton->setContextMenuPolicy( Qt::CustomContextMenu );
@@ -13429,7 +13433,7 @@ void MainWindow::on_actionUseFastProcessingForPlayback_triggered()
  * The state machine:
  *   m_playbackQualityMode  : the user's persisted choice (0,1,2)
  *   m_playbackAutoTargetFps: the user's chosen target fps for Auto (24/30/60)
- *   m_playbackQualityActiveScale : effective scale for the next render (1/2/4)
+ *   m_playbackQualityActiveScale : effective scale for the next render (1/2/4/8)
  *   m_playbackQualityActiveHq    : effective HQ-mean23 desire for next render
  *
  * applyPlaybackQualityMode() sets the user choice and seeds the active
@@ -13557,7 +13561,7 @@ void MainWindow::initPlaybackScaleFactorFromSettings( void )
                    PlaybackQualitySettings::kApplication() );
     int rawScale = set.value( PlaybackQualitySettings::kKeyScaleFactorOverride(),
                               PlaybackQualitySettings::kDefaultScaleFactorOverride() ).toInt();
-    if ( rawScale != 0 && rawScale != 1 && rawScale != 2 && rawScale != 4 )
+    if ( rawScale != 0 && rawScale != 1 && rawScale != 2 && rawScale != 4 && rawScale != 8 )
     {
         rawScale = 0;
     }
@@ -13570,7 +13574,7 @@ void MainWindow::initPlaybackScaleFactorFromSettings( void )
 
 void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist )
 {
-    if ( scaleFactor != 0 && scaleFactor != 1 && scaleFactor != 2 && scaleFactor != 4 )
+    if ( scaleFactor != 0 && scaleFactor != 1 && scaleFactor != 2 && scaleFactor != 4 && scaleFactor != 8 )
     {
         scaleFactor = 0;
     }
@@ -13588,6 +13592,8 @@ void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist
         ui->actionPlaybackScale2->setChecked( scaleFactor == 2 );
     if ( ui->actionPlaybackScale4 )
         ui->actionPlaybackScale4->setChecked( scaleFactor == 4 );
+    if ( ui->actionPlaybackScale8 )
+        ui->actionPlaybackScale8->setChecked( scaleFactor == 8 );
 
     if ( persist )
     {
@@ -13604,7 +13610,7 @@ void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist
     else
     {
         const int envScale = playback_scale_factor_env_override();
-        const bool envScaleActive = envScale == 1 || envScale == 2 || envScale == 4;
+        const bool envScaleActive = envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8;
         qInfo().noquote() << "Playback scale override =" << scaleFactor
                           << ( envScaleActive
                                ? "(ui setting loaded; MLVAPP_PLAYBACK_SCALE_FACTOR currently has precedence)."
@@ -13781,17 +13787,17 @@ void MainWindow::updatePlaybackQualityIndicator( void )
      * with the same resolved scale the request builder uses. */
     const bool guiScaleSettingActive =
         ( m_playbackScaleFactorOverride == 1 || m_playbackScaleFactorOverride == 2
-       || m_playbackScaleFactorOverride == 4 );
+       || m_playbackScaleFactorOverride == 4 || m_playbackScaleFactorOverride == 8 );
     const int envScale = playback_scale_factor_env_override();
     const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
     const bool envOverrideActive =
-        ( envScale == 1 || envScale == 2 || envScale == 4 ) || envHq;
+        ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 ) || envHq;
     const bool guiScaleOverrideActive = !envOverrideActive && guiScaleSettingActive;
     auto playbackScaleLabel = [this]( int requestedScale ) -> QString
     {
         const int activeScale = m_lastPresentedPlaybackScaleFactorActive;
         const bool activeScaleValid =
-            activeScale == 1 || activeScale == 2 || activeScale == 4;
+            activeScale == 1 || activeScale == 2 || activeScale == 4 || activeScale == 8;
         const bool sameRequest =
             m_lastPresentedRequestContextValid
          && m_lastPresentedRequestContext.playbackScaleFactor == requestedScale;
@@ -13840,7 +13846,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     }
     else if ( envOverrideActive )
     {
-        const int effScale = ( envScale == 1 || envScale == 2 || envScale == 4 )
+        const int effScale = ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 )
                                  ? envScale
                                  : ( guiScaleSettingActive
                                          ? m_playbackScaleFactorOverride
@@ -13971,18 +13977,19 @@ void MainWindow::updatePlaybackQualityIndicator( void )
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
 {
     const int envScale = playback_scale_factor_env_override();
-    if ( envScale == 1 || envScale == 2 || envScale == 4 )
+    if ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 )
     {
         return envScale;
     }
     if ( m_playbackScaleFactorOverride == 1
       || m_playbackScaleFactorOverride == 2
-      || m_playbackScaleFactorOverride == 4 )
+      || m_playbackScaleFactorOverride == 4
+      || m_playbackScaleFactorOverride == 8 )
     {
         return m_playbackScaleFactorOverride;
     }
     const int active = m_playbackQualityActiveScale;
-    if ( active == 1 || active == 2 || active == 4 ) return active;
+    if ( active == 1 || active == 2 || active == 4 || active == 8 ) return active;
     return 1;
 }
 
@@ -14029,6 +14036,11 @@ void MainWindow::on_actionPlaybackScale2_triggered()
 void MainWindow::on_actionPlaybackScale4_triggered()
 {
     applyPlaybackScaleFactorOverride( 4, /*persist*/true );
+}
+
+void MainWindow::on_actionPlaybackScale8_triggered()
+{
+    applyPlaybackScaleFactorOverride( 8, /*persist*/true );
 }
 
 void MainWindow::on_actionPlaybackShowQualityIndicator_triggered()
