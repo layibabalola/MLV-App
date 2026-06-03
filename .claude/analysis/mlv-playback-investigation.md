@@ -12950,3 +12950,68 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - Future smoke reports should include the readable `visibleBottomLeftGuiProofPath` image whenever claiming bottom-left GUI FPS, especially in chat surfaces that downscale large screenshots.
+
+## 2026-06-03 - gated deep color timing probes restored normal smoke FPS
+
+### Verified locally
+
+- Investigated the next M16 playback hotspot after the readable FPS proof crop work. A normal `-FrameTelemetry` smoke was still slow because `apply_processing_object()` treated absent `MLVAPP_PROCESSING_CORE_*_PROBE` env vars as probe mode `0`, and the hot color loop interprets mode `0` as "time all detailed leaves".
+- Changed `src/processing/raw_processing.c` so detailed color/creative probe parsers default to `-1` (off) and only collect expensive per-pixel leaf timings when a probe env var is explicitly supplied.
+- Hoisted the color probe mode reads out of the hot pixel loop and gated the broad per-pixel color leaf timers behind the same opt-in checks. The normal CPU summary still keeps outer pass timing such as `processing_core_color_ms`; detailed fields like `processing_core_color_cam_agx_ms` are intentionally zero unless the matching probe is enabled.
+- Updated `tools/profiling/run-release-gui-smoke.ps1` to clear the color probe env vars during normal smoke unless they are intentionally passed with `-ExtraEnvironment`.
+- Validation commands:
+  - `git diff --check`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH=''C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;'' + $env:PATH; & ''C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe'' -C platform\qt\build-release -B release -j4'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . -Input 'C:\temp\MLV\M16-1327.MLV' -Output '.claude-state\profiling\20260603-next-hotspot\m16-color-probes-gated\M16-1327.json' -CaptureScreenshot -FrameTelemetry -ScreenshotOutputDir '.claude-state\profiling\20260603-next-hotspot\m16-color-probes-gated\screenshots'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . -Input 'C:\temp\MLV\M16-1327.MLV' -Output '.claude-state\profiling\20260603-next-hotspot\m16-cam-wb-probe-opt-in\M16-1327.json' -Seconds 4 -SettleMs 1500 -CaptureScreenshot -FrameTelemetry -ScreenshotOutputDir '.claude-state\profiling\20260603-next-hotspot\m16-cam-wb-probe-opt-in\screenshots' -ExtraEnvironment 'MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=4'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH=''C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;'' + $env:PATH; & ''C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe'' -C tests\build-ci-pipeline -j4'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH=''C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;'' + $env:PATH; & ''.\tests\build-ci-pipeline\release\pipeline_tests.exe'' --gtest_filter=DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH=''C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;'' + $env:PATH; & ''.\tests\build-ci-pipeline\release\pipeline_tests.exe'' --gtest_filter=ProcessingFilters.*'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '$env:PATH=''C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;'' + $env:PATH; $env:MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=''1''; & ''.\tests\build-ci-pipeline\release\pipeline_tests.exe'' --gtest_filter=DualIsoPipeline.DirectProcessed8FastPathMatchesShiftedProcessed16Reference'`
+- One direct8 parity check is still red under the current default AVX2-intrinsics direct8 path, matching the prior known-risk bucket rather than this timing change:
+  - `DualIsoPipeline.DirectProcessed8FastPathMatchesShiftedProcessed16Reference` without `MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1` failed with `pixels_exceeding_tolerance=11857729`.
+  - The same test passed with `MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8=1`, confirming the failure follows the direct8 intrinsics path and not the color-probe gating.
+- User-facing release tree rebuilt successfully:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03T06:35:42.1672662-05:00`
+  - `Length=8999936`
+  - `SHA256=F0E16054E0DB783EC5D6960225EEEBB983988E261FCE4FEF0DB44ACF9A6194FB`
+- Normal M16 screenshot-backed smoke passed with the probe env vars cleared:
+  - result JSON: `.claude-state/profiling/20260603-next-hotspot/m16-color-probes-gated/M16-1327.json`
+  - `validation.ok=true`
+  - `visibleBottomLeftGuiFps=5.8` / `visibleBottomLeftGuiStatusText="Playback: 5.8 fps"`
+  - `smokePresentedFps=5.090`
+  - `smokeTimelineFps=21.887`
+  - `avg_render_work_ms=155.120` (`6.446 FPS-equivalent`)
+  - `avg_llrawproc_total_ms=30.220` (`33.091 FPS-equivalent`)
+  - `avg_debayered_frame_ms=99.740` (`10.026 FPS-equivalent`)
+  - `avg_processing_ms=40.120` (`24.925 FPS-equivalent`)
+  - `avg_processing_core_color_ms=11.020` (`90.744 FPS-equivalent`)
+  - detailed color leaves are now off by default: `avg_processing_core_color_cam_agx_ms=0.000`, `avg_processing_core_color_gamma_ms=0.000`, `avg_processing_core_color_main_prelude_wb_matrix_ms=0.000`
+  - presented-frame screenshot: `.claude-state/profiling/20260603-next-hotspot/m16-color-probes-gated/screenshots/M16-1327.png`, `2555x1068`, aspect `2.392322`, `SHA256=E321770340DCDF044A5DF8B364080CF6ECF5DBD174332E81E386EEB0A0137C05`
+  - full-window screenshot: `.claude-state/profiling/20260603-next-hotspot/m16-color-probes-gated/screenshots/M16-1327-window.png`, `3158x2099`, `SHA256=E5B5EA1DE471A84B038E551B6C72F1BE46F93A52B485C5AD43280066C2B8584E`
+  - readable FPS proof crop: `.claude-state/profiling/20260603-next-hotspot/m16-color-probes-gated/screenshots/M16-1327-fps-status.png`, `2160x216`, `SHA256=A149B3892CDE7ECE2BD0DB30B4A197F662983FD21DEFB55D97A51F379A284698`
+- Opt-in cam WB probe smoke also passed, proving the detailed probe path still works when explicitly requested:
+  - result JSON: `.claude-state/profiling/20260603-next-hotspot/m16-cam-wb-probe-opt-in/M16-1327.json`
+  - `validation.ok=true`
+  - env: `MLVAPP_PROCESSING_CORE_COLOR_CAM_WB_PROBE=4`
+  - `visibleBottomLeftGuiFps=4.2` / `visibleBottomLeftGuiStatusText="Playback: 4.2 fps"`
+  - `smokePresentedFps=2.908`
+  - `smokeTimelineFps=20.530`
+  - `avg_processing_core_color_cam_agx_ms=46.000` (`21.739 FPS-equivalent`)
+  - `avg_processing_core_color_cam_agx_clip_ms=17.118` (`58.418 FPS-equivalent`)
+  - `avg_processing_core_color_cam_agx_matrix_ms=9.706` (`103.029 FPS-equivalent`)
+  - readable FPS proof crop: `.claude-state/profiling/20260603-next-hotspot/m16-cam-wb-probe-opt-in/screenshots/M16-1327-fps-status.png`, `2160x216`, `SHA256=C623F26E9E55C0BD0AD4F2C4B4C356F5A6AEEF6E71E35372852A2B71CECFC20A`
+
+### Cross-checked from prior analysis
+
+- Previous normal M16 baseline before gating was `visibleBottomLeftGuiFps=2.1`, `smokePresentedFps=1.600`, `avg_render_work_ms=526.750`, `avg_processing_ms=399.813`, and `avg_processing_core_color_ms=332.000`.
+- The no-`FrameTelemetry` baseline was similar enough (`visibleBottomLeftGuiFps=2.2`, `avg_render_work_ms=506.250`, `avg_processing_ms=384.938`, `avg_processing_core_color_ms=320.125`) to show the overhead was inside always-collected CPU timings, not the frame telemetry event stream.
+- The `-Threads 6` A/B was worse (`visibleBottomLeftGuiFps=1.2`, `avg_render_work_ms=755.727`, `avg_processing_ms=622.364`), so reverting the adaptive thread cap was not the answer.
+- Prior notes already separated the direct8 AVX2-intrinsics parity risk from the color/probe work; keep treating the direct8 intrinsics failure as its own candidate, not as evidence against this timing-gate patch.
+
+### Needs runtime profiling
+
+- Repeat the normal gated smoke across the other standard M16 clips (`M16-1347`, `M16-1446`) before treating the new `5.8 fps` screenshot sample as a stable multi-clip average.
+- If more color-path detail is needed, pass one probe env at a time through `-ExtraEnvironment` and expect the FPS/ms numbers to be slower because the probe is intentionally timing per-pixel leaves.
+- The next real playback hotspot after removing probe overhead is back to actual work: M16 normal smoke now points at debayer/processed16/render composition (`avg_debayered_frame_ms=99.740`, `avg_processed16_ms=147.460`) rather than fake color timing overhead.
