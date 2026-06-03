@@ -780,6 +780,12 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("path"));
     parser.addOption(screenshotOutputOpt);
 
+    const QCommandLineOption windowScreenshotOutputOpt(
+        QStringLiteral("window-screenshot-output"),
+        QStringLiteral("Optional PNG path for a full GUI window screenshot including the status bar."),
+        QStringLiteral("path"));
+    parser.addOption(windowScreenshotOutputOpt);
+
     const QCommandLineOption scopeOpt(
         QStringLiteral("scope"),
         QStringLiteral("Force a live scope during the smoke: none, histogram, waveform, parade, vectorscope. If omitted, the user's persisted GUI state is used."),
@@ -881,6 +887,9 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.screenshotOutputPath = parser.value(screenshotOutputOpt).isEmpty()
         ? QString()
         : QFileInfo(parser.value(screenshotOutputOpt)).absoluteFilePath();
+    options.windowScreenshotOutputPath = parser.value(windowScreenshotOutputOpt).isEmpty()
+        ? QString()
+        : QFileInfo(parser.value(windowScreenshotOutputOpt)).absoluteFilePath();
     options.scope = scope;
     options.forceScope = parser.isSet(scopeOpt);
     options.zebras = parser.isSet(zebrasOpt);

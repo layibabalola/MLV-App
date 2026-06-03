@@ -12733,20 +12733,24 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - The GUI smoke screenshot is an app-internal presented-frame capture, not a full-window/status-bar capture. That is correct for color/aspect verification, but it cannot visually prove the bottom-left status text by itself.
 - I changed the live label formatter so playback below 10 FPS keeps one decimal place, e.g. `Playback: 0.6 fps`, while higher FPS still uses whole numbers.
 - I added `gui_fps_status_text` and `gui_fps_status_value` to the playback smoke summary, and surfaced those as `playbackFps.guiStatusText` and `playbackFps.guiStatusValue` in `tools/profiling/run-release-gui-smoke.ps1`.
+- I then added a second app-internal full-window screenshot path for GUI smoke (`--window-screenshot-output`). `tools/profiling/run-release-gui-smoke.ps1 -CaptureScreenshot` now writes both the presented-frame PNG for color/aspect QA and a `*-window.png` GUI proof shot that includes the status bar.
+- The wrapper now parses the `gui_smoke.window_screenshot` log event and exposes `playbackFps.screenshotGuiStatusText` / `playbackFps.screenshotGuiStatusValue` for the FPS label that is actually visible in `screenshot.windowCapture`.
 - Before the decimal-label fix, the M16-1327 smoke run reported `playbackFps.guiStatusText="Playback: 0 fps"` while smoke telemetry reported `smokePresentedFps=0.558` and `smokeTimelineFps=17.392`.
 - After the fix, the M16-1327 smoke run reported `playbackFps.guiStatusText="Playback: 0.6 fps"`, `playbackFps.guiStatusValue=0.6`, `smokePresentedFps=0.420`, and `smokeTimelineFps=15.760`.
+- After the full-window capture fix, the M16-1327 smoke run reported visible screenshot-time `playbackFps.screenshotGuiStatusText="Playback: 0.8 fps"` / `playbackFps.screenshotGuiStatusValue=0.8`, while the later end-of-run sample was `playbackFps.guiStatusText="Playback: 0.3 fps"`.
+- The same run wrote the visible GUI proof shot at [`M16-1327-window.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-gui-fps-window-smoke-v2/screenshots/M16-1327-window.png): `3158x2099`, `SHA256=973F497CD042CB05B9F168C36599EAB1C2A1E4DC50B6DBDF2E3358ED05D8DDEA`.
 - The same post-fix run captured the presented frame at [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-gui-fps-status/M16-1327-decimal/screenshots/M16-1327.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=C80BB108B3A67E3BDA68DF82EFD3DF421F9BD7C8928F8719EB4AD50FCBF7746D`.
 - Visual inspection of that post-fix screenshot showed the expected de-squeezed wide M16 frame and no obvious new color corruption from this telemetry/UI formatting change.
 
 ### Cross-checked from prior analysis
 
 - Earlier `fps≈...` values beside `llrawproc_ms`, `mix_chroma_ms`, `render_thread_work_ms`, and similar stage timings should be read as per-stage FPS-equivalent (`1000 / ms`), not as the GUI bottom-left playback FPS.
-- The smoke-run `presented_fps` is a run-level presented-frame rate over the smoke window, and `timeline_fps` is timeline advance rate; neither should be described as the bottom-left GUI FPS unless the smoke artifact's `playbackFps.guiStatusValue` says so.
+- The smoke-run `presented_fps` is a run-level presented-frame rate over the smoke window, and `timeline_fps` is timeline advance rate. Neither should be described as the visible bottom-left GUI FPS. When a full-window screenshot exists, use `playbackFps.screenshotGuiStatusValue` for the visible label and reserve `playbackFps.guiStatusValue` for the later end-of-run summary sample.
 
 ### Needs runtime profiling
 
 - Future smoke reports must label all four playback-rate concepts separately when they appear: `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and `FPS-equivalent`.
-- If visual proof of the status-bar text becomes important, add an optional full-window screenshot mode in addition to the current presented-frame screenshot; keep the presented-frame capture as the color/aspect oracle.
+- Keep the dual screenshot convention for playback/color QA: presented-frame `*.png` is the color/aspect oracle; full-window `*-window.png` is the visible GUI/status/FPS proof.
 
 ## 2026-06-03 - rejected AMaZE actual-interpolation row-cache specialization
 

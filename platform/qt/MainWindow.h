@@ -139,6 +139,7 @@ public:
         int settleCpuStableMs = 1000;
         int settleCpuMaxMs = 45000;
         QString screenshotOutputPath;
+        QString windowScreenshotOutputPath;
         PlaybackProfileScope scope = PlaybackProfileScope::None;
         bool forceScope = false;
         bool zebras = false;

@@ -20,6 +20,7 @@ param(
     [switch]$FrameTelemetry,
     [switch]$RbfDetailTiming,
     [switch]$CaptureScreenshot,
+    [switch]$SkipWindowScreenshot,
     [string]$ScreenshotOutputDir = "",
     [int]$ScreenshotDelayMs = 2000,
     [int]$ScreenshotWindowWaitMs = 10000,
@@ -176,6 +177,24 @@ function Convert-ToNullableDouble {
     }
 
     $null
+}
+
+function Convert-FpsStatusTextToValue {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $match = [regex]::Match(
+        [string]$Value,
+        '([-+]?[0-9]+(?:\.[0-9]+)?)\s*fps',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) {
+        return $null
+    }
+
+    Convert-ToNullableDouble $match.Groups[1].Value
 }
 
 function Get-ScreenshotImageMetadata {
@@ -351,6 +370,7 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
 }
 
 $screenshotPath = $null
+$windowScreenshotPath = $null
 if ($CaptureScreenshot) {
     if ([string]::IsNullOrWhiteSpace($ScreenshotOutputDir)) {
         $ScreenshotOutputDir = Join-Path $outputDir "screenshots"
@@ -359,6 +379,9 @@ if ($CaptureScreenshot) {
     New-Item -ItemType Directory -Force -Path $screenshotDirPath | Out-Null
     $clipBase = [IO.Path]::GetFileNameWithoutExtension($inputPath)
     $screenshotPath = Join-Path $screenshotDirPath ("{0}.png" -f $clipBase)
+    if (-not $SkipWindowScreenshot) {
+        $windowScreenshotPath = Join-Path $screenshotDirPath ("{0}-window.png" -f $clipBase)
+    }
 }
 
 $arguments = @(
@@ -381,6 +404,9 @@ if (-not [string]::IsNullOrWhiteSpace($Scope)) {
 }
 if ($CaptureScreenshot) {
     $arguments += @("--screenshot-output", $screenshotPath)
+    if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
+        $arguments += @("--window-screenshot-output", $windowScreenshotPath)
+    }
 }
 if ($Zebras -eq "on") {
     $arguments += "--zebras"
@@ -526,6 +552,7 @@ $preLaunchSystemCpuSettle = Wait-SystemCpuSettle `
 $startUtc = [datetime]::UtcNow
 $process = [System.Diagnostics.Process]::Start($startInfo)
 $screenshotCapture = $null
+$windowScreenshotCapture = $null
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
 $process.WaitForExit()
@@ -548,6 +575,20 @@ if ($CaptureScreenshot) {
         requestedDelayMs = $ScreenshotDelayMs
         windowWaitMs = $ScreenshotWindowWaitMs
         captureTimeoutMs = $ScreenshotCaptureTimeoutMs
+    }
+}
+if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
+    if (-not (Test-Path -LiteralPath $windowScreenshotPath)) {
+        throw "GUI smoke completed but did not write window screenshot: $windowScreenshotPath"
+    }
+    $windowScreenshotItem = Get-Item -LiteralPath $windowScreenshotPath
+    $windowScreenshotImage = Get-ScreenshotImageMetadata -Path $windowScreenshotPath
+    $windowScreenshotCapture = [pscustomobject]@{
+        outputPath = $windowScreenshotItem.FullName
+        takenAtUtc = $windowScreenshotItem.LastWriteTimeUtc.ToString("o")
+        method = "app-internal-window-grab"
+        length = $windowScreenshotItem.Length
+        image = $windowScreenshotImage
     }
 }
 
@@ -602,6 +643,9 @@ $visualStateLine = $recentLines |
 $cpuSettleLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.cpu_settle*" } |
     Select-Object -Last 1
+$windowScreenshotLine = $recentLines |
+    Where-Object { $_ -like "*gui_smoke.window_screenshot*" } |
+    Select-Object -Last 1
 
 $runMetadata = $null
 if ($runMetadataLine -and $runMetadataLine -match 'run_metadata=(?<json>\{.*\})') {
@@ -619,6 +663,9 @@ $lookAssistSettle = if ($lookAssistSettleLine) { Convert-PlaybackLogLineToObject
 $lookAssistApply = if ($lookAssistApplyLine) { Convert-PlaybackLogLineToObject $lookAssistApplyLine } else { $null }
 $visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualStateLine } else { $null }
 $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
+$windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
+$windowScreenshotFpsStatusText = Get-ObjectPropertyValue $windowScreenshotLog "fps_status"
+$windowScreenshotFpsStatusValue = Convert-FpsStatusTextToValue $windowScreenshotFpsStatusText
 
 $lookAssistApplied =
     ($null -ne $lookAssistApply) -and
@@ -754,9 +801,11 @@ $result = [pscustomobject]@{
     playbackFps = [pscustomobject]@{
         guiStatusText = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_text"
         guiStatusValue = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_value"
+        screenshotGuiStatusText = $windowScreenshotFpsStatusText
+        screenshotGuiStatusValue = $windowScreenshotFpsStatusValue
         smokePresentedFps = Get-ObjectPropertyValue $playbackSummary "presented_fps"
         smokeTimelineFps = Get-ObjectPropertyValue $playbackSummary "timeline_fps"
-        note = "guiStatusValue is the bottom-left Playback FPS label; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
+        note = "screenshotGuiStatusValue is the bottom-left Playback FPS label visible in screenshot.windowCapture; guiStatusValue is the later end-of-run summary sample; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
     }
     process = [pscustomobject]@{
         id = $process.Id
@@ -770,6 +819,8 @@ $result = [pscustomobject]@{
         requested = [bool]$CaptureScreenshot
         path = $screenshotPath
         capture = $screenshotCapture
+        windowPath = $windowScreenshotPath
+        windowCapture = $windowScreenshotCapture
     }
     log = [pscustomobject]@{
         path = if ($logFile) { $logFile.FullName } else { $null }
@@ -786,6 +837,8 @@ $result = [pscustomobject]@{
         visualState = $visualState
         cpuSettle = $cpuSettle
         screenshot = $screenshotCapture
+        windowScreenshot = $windowScreenshotCapture
+        windowScreenshotEvent = $windowScreenshotLog
         raw = [pscustomobject]@{
             runMetadata = $runMetadataLine
             playbackStart = $playbackStartLine
@@ -800,6 +853,8 @@ $result = [pscustomobject]@{
             visualState = $visualStateLine
             cpuSettle = $cpuSettleLine
             screenshot = if ($screenshotCapture) { $screenshotCapture.outputPath } else { $null }
+            windowScreenshot = if ($windowScreenshotCapture) { $windowScreenshotCapture.outputPath } else { $null }
+            windowScreenshotEvent = $windowScreenshotLine
         }
     }
 }
