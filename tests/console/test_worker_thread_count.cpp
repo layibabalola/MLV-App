@@ -97,6 +97,15 @@ TEST(WorkerThreadCount, PlaybackWorkerCountCanDisableCap)
               mlvappEffectivePlaybackWorkerThreadCount());
 }
 
+TEST(WorkerThreadCount, DefaultPlaybackCapScalesToSixteenThreads)
+{
+    ASSERT_EQ(1, mlvappDefaultPlaybackWorkerThreadCapFor(1));
+    ASSERT_EQ(6, mlvappDefaultPlaybackWorkerThreadCapFor(6));
+    ASSERT_EQ(8, mlvappDefaultPlaybackWorkerThreadCapFor(8));
+    ASSERT_EQ(16, mlvappDefaultPlaybackWorkerThreadCapFor(16));
+    ASSERT_EQ(16, mlvappDefaultPlaybackWorkerThreadCapFor(32));
+}
+
 TEST(WorkerThreadCount, PlaybackOpenMpTargetCapsOversubscribedTeams)
 {
     ASSERT_EQ(6, mlvappPlaybackOpenMpThreadTargetFor(6, 16));

@@ -61,9 +61,19 @@ inline int mlvappEffectiveWorkerThreadCount()
     return ideal > 0 ? ideal : 1;
 }
 
-/* GUI playback can become slower when CPU-bound VMs spawn more llrawproc and
+inline int mlvappDefaultPlaybackWorkerThreadCapFor(int workerThreads)
+{
+    if (workerThreads <= 0) {
+        return 1;
+    }
+
+    return qBound(1, workerThreads, 16);
+}
+
+/* GUI playback can become slower when CPU-bound hosts spawn more llrawproc and
  * processing workers than the host can run without contention. Keep explicit
- * test/user thread overrides exact, but cap auto playback to a small default. */
+ * test/user thread overrides exact, but let auto playback scale on many-core
+ * hosts while staying below the high-contention zone. */
 inline int mlvappEffectivePlaybackWorkerThreadCount()
 {
     const int workerThreads = mlvappEffectiveWorkerThreadCount();
@@ -75,7 +85,7 @@ inline int mlvappEffectivePlaybackWorkerThreadCount()
     bool capOk = false;
     int cap = qEnvironmentVariableIntValue("MLVAPP_PLAYBACK_MAX_THREADS", &capOk);
     if (!capOk || cap <= 0) {
-        cap = 6;
+        cap = mlvappDefaultPlaybackWorkerThreadCapFor(workerThreads);
     }
 
     return qBound(1, workerThreads, cap);

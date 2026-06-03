@@ -12855,3 +12855,59 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Next optimization work should instrument inside `src/debayer/amaze_demosaic.c` / the AMaZE `demosaic(...)` worker body, or run a focused thread-count/chunk-balance sweep using the new worker max/total/count fields.
 - Because current run 1 and current run 2 differed materially, repeat profile comparisons before calling any small AMaZE demosaic change a win or regression.
 - Keep reporting four rate concepts separately: `visibleBottomLeftGuiFps`, `smokePresentedFps`, `smokeTimelineFps`, and per-stage FPS-equivalent.
+
+## 2026-06-03 - adaptive playback thread cap sweep
+
+### Verified locally
+
+- I used the new AMaZE worker timing fields to run a thread-count sweep on `tests/fixtures/clips/large_dual_iso.mlv` with `tests/fixtures/receipts/large_dual_iso_hq.marxml`, 16 measured frames, warm-frame averages skipping the first frame, and explicit receipt debayer/processing requests.
+- Scratch profile root: `.claude-state/profiling/20260603-amaze-thread-sweep/`.
+- Host CPU topology during this run: `13th Gen Intel(R) Core(TM) i9-13900KS`, `16` cores reported, `16` logical processors reported.
+- Old 6-thread cap evidence:
+  - 6 threads, 3 runs: `render_thread_work_ms=186.270` (`5.368 FPS-equivalent`)
+  - 8 threads, 4 runs: `render_thread_work_ms=171.067` (`5.845 FPS-equivalent`)
+  - 16 threads, 2 runs: `render_thread_work_ms=138.867` (`7.201 FPS-equivalent`)
+- The rebuilt release executable after the adaptive-cap change selected 16 threads when launched in auto mode:
+  - profile: `.claude-state/profiling/20260603-amaze-thread-sweep/large_dual_iso_hq_receipt_auto_adaptive16.json`
+  - metadata `worker_threads_request=auto`
+  - metadata `worker_threads_effective=16`
+  - `render_thread_work_ms=111.933` (`8.934 FPS-equivalent`)
+  - `llrawproc_ms=100.600` (`9.940 FPS-equivalent`)
+  - `dual_iso_full20_interp_amaze_ms=66.800` (`14.970 FPS-equivalent`)
+  - `dual_iso_full20_interp_amaze_demosaic_ms=29.067` (`34.404 FPS-equivalent`)
+  - `dual_iso_full20_interp_amaze_demosaic_worker_max_ms=23.400` (`42.735 FPS-equivalent`)
+- I changed `mlvappEffectivePlaybackWorkerThreadCount()` so auto playback now defaults to `min(workerThreads, 16)` instead of a flat cap of 6. Explicit `MLVAPP_PLAYBACK_MAX_THREADS`, `MLVAPP_FORCE_THREADS`, `MLVAPP_FORCE_SINGLETHREAD`, and `MLVAPP_DISABLE_PLAYBACK_THREAD_CAP` behavior remains unchanged.
+- I added `mlvappDefaultPlaybackWorkerThreadCapFor(...)` and a focused unit test covering 1, 6, 8, 16, and 32 worker-thread inputs.
+- `tools/profiling/run-release-gui-smoke.ps1` now defaults `-Threads auto` and leaves `MLVAPP_PLAYBACK_MAX_THREADS` unset unless a numeric thread count is explicitly requested. This keeps default GUI smoke aligned with a normal user launch instead of silently forcing the old 6-thread cap.
+- Focused console validation passed:
+  - `console_tests.exe --gtest_filter=WorkerThreadCount.*`
+  - `86` tests, `13` assertions, `0` failures
+- The user-facing release tree rebuilt successfully after the change:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03T05:59:29.0082666-05:00`
+  - `Length=8993792`
+  - `SHA256=7848049A7C34FE587EC7C9B3F49D5F88EE7CEC076773F4FEBEE0A50DD5C76E09`
+- Default screenshot-backed GUI smoke passed with the cap env unset:
+  - result JSON: `.claude-state/profiling/20260603-amaze-thread-sweep/m16-smoke-auto-adaptive/M16-1327.json`
+  - `validation.ok=true`
+  - `env_playback_max_threads=unset`
+  - `worker_threads=16`
+  - `visibleBottomLeftGuiFps=1.1` / `visibleBottomLeftGuiStatusText="Playback: 1.1 fps"`
+  - `smokePresentedFps=0.913`
+  - `smokeTimelineFps=21.904`
+  - `avg_render_work_ms=934.556` (`1.070 FPS-equivalent`)
+  - `avg_llrawproc_ms=35.778` (`27.950 FPS-equivalent`)
+  - presented-frame screenshot: `.claude-state/profiling/20260603-amaze-thread-sweep/m16-smoke-auto-adaptive/screenshots/M16-1327.png`, `2555x1068`, aspect `2.392322`, `SHA256=978357CA58B5AB40254C45874E2B4A925F5CBA7F3DFAC6DA640C61BA4A5CACD2`
+  - full-window screenshot: `.claude-state/profiling/20260603-amaze-thread-sweep/m16-smoke-auto-adaptive/screenshots/M16-1327-window.png`, `3158x2099`, `SHA256=49D7F7F01EEEEAEC8164D6AFA9A1AF4FFA83169050F7FC61F14E79B3561F0A76`
+- Visual inspection confirmed the full-window capture visibly shows bottom-left `Playback: 1.1 fps`, and the presented-frame capture still shows the expected de-squeezed M16 frame with no obvious channel swap, hue flip, or severe color corruption.
+
+### Cross-checked from prior analysis
+
+- Prior standard GUI smoke with the old/default 6-thread cap reported visible GUI FPS around `0.9`, smoke presented FPS `0.707`, and `avg_render_work_ms=1132.571` (`0.883 FPS-equivalent`) to `934.556` (`1.070 FPS-equivalent`) after the default auto cap selected 16 threads on this host.
+- The AMaZE worker split from the previous round showed pthread setup/create/join was not the bottleneck; this thread sweep confirms there was still safe scheduling headroom before changing demosaic math.
+
+### Needs runtime profiling
+
+- Repeat adaptive-cap profiling on lower-core and laptop-class hosts before raising the hard upper bound above 16. The new policy remains bounded at 16 to avoid unbounded oversubscription on large desktop CPUs.
+- If users report UI contention while playing back and grading simultaneously, keep `MLVAPP_PLAYBACK_MAX_THREADS` as the supported override and profile the same smoke with explicit lower values.
+- Next math-level optimization should still target the AMaZE demosaic worker body or chunk balance internals; the adaptive cap is a scheduling win, not the end of the demosaic hotspot.

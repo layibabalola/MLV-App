@@ -12,7 +12,7 @@ param(
     [double]$SystemSettleCpuPercent = -1,
     [int]$SystemSettleCpuStableMs = 2000,
     [int]$SystemSettleCpuMaxMs = 60000,
-    [string]$Threads = "6",
+    [string]$Threads = "auto",
     [string]$ScaleFactor = "",
     [int]$ExpectedScaleRequest = 1,
     [int]$ExpectedQualityMode = 1,
@@ -418,8 +418,13 @@ if ($AdditionalArgs.Count -gt 0) {
     $arguments += $AdditionalArgs
 }
 
-$launchEnv = [ordered]@{
-    MLVAPP_PLAYBACK_MAX_THREADS = $Threads
+$useAutoPlaybackThreads = [string]::IsNullOrWhiteSpace($Threads) -or
+    $Threads.Trim().Equals("auto", [System.StringComparison]::OrdinalIgnoreCase) -or
+    $Threads.Trim().Equals("0", [System.StringComparison]::OrdinalIgnoreCase)
+
+$launchEnv = [ordered]@{}
+if (-not $useAutoPlaybackThreads) {
+    $launchEnv["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
 }
 if ($FrameTelemetry) {
     $launchEnv["MLVAPP_PLAYBACK_SMOKE_TELEMETRY"] = "1"
@@ -512,7 +517,9 @@ foreach ($argument in $arguments) {
 }
 
 $envBlock = $startInfo.EnvironmentVariables
-$envBlock["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
+if (-not $useAutoPlaybackThreads) {
+    $envBlock["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
+}
 if ($FrameTelemetry) {
     $envBlock["MLVAPP_PLAYBACK_SMOKE_TELEMETRY"] = "1"
 }
@@ -758,7 +765,7 @@ $result = [pscustomobject]@{
         matchedUserShellDefaults = [pscustomobject]@{
             frameTelemetry = [bool]$FrameTelemetry
             rbfDetailTiming = [bool]$RbfDetailTiming
-            playbackMaxThreads = $Threads
+            playbackMaxThreads = if ($useAutoPlaybackThreads) { "auto/unset" } else { $Threads }
             scaleFactorUnsetUnlessRequested = [string]::IsNullOrWhiteSpace($ScaleFactor)
             preferHqMean23UnsetUnlessRequested = -not $PreferHqMean23
             experimentalEnvironmentCleared = -not $PreserveExperimentalEnvironment
