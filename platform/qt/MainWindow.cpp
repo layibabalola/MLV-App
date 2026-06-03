@@ -928,6 +928,12 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #define VERSION QString("%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 #define GITVERSION QString("QTv%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 
+static QString mlvAppUpdateReleasesUrl()
+{
+    // This fork should compare against fork releases, not upstream tags we may already supersede.
+    return QStringLiteral("https://api.github.com/repos/layibabalola/MLV-App/releases");
+}
+
 #define FACTOR_DS       22.5
 #define FACTOR_LS       11.2
 #define FACTOR_LIGHTEN  0.6
@@ -3364,6 +3370,12 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             traceFile.write( "\n" );
         }
     };
+    const bool verboseFrameTrace =
+        qEnvironmentVariableIsSet("MLVAPP_PROFILE_TRACE_VERBOSE");
+    auto traceFrameVerbose = [&](const QString & message)
+    {
+        if( verboseFrameTrace ) trace( message );
+    };
 
     trace(QStringLiteral("profile-start"));
 
@@ -3527,24 +3539,24 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         if( failureReason ) failureReason->clear();
 
         const bool previousDontDraw = m_dontDraw;
-        trace(QStringLiteral("render-prep-begin frame=%1 sample=%2 warmup=%3 slider=%4")
-              .arg( frameIndex )
-              .arg( sampleIndex )
-              .arg( warmup ? 1 : 0 )
-              .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 ) );
+        traceFrameVerbose(QStringLiteral("render-prep-begin frame=%1 sample=%2 warmup=%3 slider=%4")
+                          .arg( frameIndex )
+                          .arg( sampleIndex )
+                          .arg( warmup ? 1 : 0 )
+                          .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 ) );
         m_dontDraw = true;
         ui->horizontalSliderPosition->setValue( frameIndex );
-        trace(QStringLiteral("render-prep-slider-set frame=%1 frame_changed=%2 dont_draw=%3")
-              .arg( frameIndex )
-              .arg( m_frameChanged ? 1 : 0 )
-              .arg( m_dontDraw ? 1 : 0 ) );
+        traceFrameVerbose(QStringLiteral("render-prep-slider-set frame=%1 frame_changed=%2 dont_draw=%3")
+                          .arg( frameIndex )
+                          .arg( m_frameChanged ? 1 : 0 )
+                          .arg( m_dontDraw ? 1 : 0 ) );
         m_dontDraw = previousDontDraw;
         m_frameChanged = false;
         m_playbackFrameAdvancePending = false;
-        trace(QStringLiteral("render-prep-complete frame=%1 slider=%2 frame_changed=%3")
-              .arg( frameIndex )
-              .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 )
-              .arg( m_frameChanged ? 1 : 0 ) );
+        traceFrameVerbose(QStringLiteral("render-prep-complete frame=%1 slider=%2 frame_changed=%3")
+                          .arg( frameIndex )
+                          .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 )
+                          .arg( m_frameChanged ? 1 : 0 ) );
 
         QEventLoop loop;
         QTimer timeout;
@@ -3557,16 +3569,16 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         const int lastPresentedFrameBeforeDraw = m_lastPresentedRequestContextValid
             ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
             : -1;
-        trace(QStringLiteral("render-wait-begin frame=%1 sample=%2 warmup=%3 request_floor=%4 slider=%5 next_serial=%6 last_serial=%7 last_frame=%8 thread_idle=%9")
-              .arg( frameIndex )
-              .arg( sampleIndex )
-              .arg( warmup ? 1 : 0 )
-              .arg( static_cast<qulonglong>( requestSerialFloor ) )
-              .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 )
-              .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
-              .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
-              .arg( lastPresentedFrameBeforeDraw )
-              .arg( ( m_pRenderThread && m_pRenderThread->isIdle() ) ? 1 : 0 ) );
+        traceFrameVerbose(QStringLiteral("render-wait-begin frame=%1 sample=%2 warmup=%3 request_floor=%4 slider=%5 next_serial=%6 last_serial=%7 last_frame=%8 thread_idle=%9")
+                          .arg( frameIndex )
+                          .arg( sampleIndex )
+                          .arg( warmup ? 1 : 0 )
+                          .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                          .arg( ui->horizontalSliderPosition ? ui->horizontalSliderPosition->value() : -1 )
+                          .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                          .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                          .arg( lastPresentedFrameBeforeDraw )
+                          .arg( ( m_pRenderThread && m_pRenderThread->isIdle() ) ? 1 : 0 ) );
 
         QMetaObject::Connection engineReadyConnection = connect(
             m_pRenderThread,
@@ -3595,10 +3607,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                           .arg( lastPresentedFrame ) );
                     return;
                 }
-                trace(QStringLiteral("frame-ready-accepted frame=%1 request_floor=%2 last_serial=%3")
-                      .arg( frameIndex )
-                      .arg( static_cast<qulonglong>( requestSerialFloor ) )
-                      .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
+                traceFrameVerbose(QStringLiteral("frame-ready-accepted frame=%1 request_floor=%2 last_serial=%3")
+                                  .arg( frameIndex )
+                                  .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                                  .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
                 frameCompleted = true;
                 timeout.stop();
                 loop.quit();
@@ -3624,29 +3636,29 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
 
         timeout.start( 30000 );
         drawFrame();
-        trace(QStringLiteral("drawFrame-return frame=%1 request_floor=%2 next_serial=%3 last_serial=%4 thread_idle=%5 frame_still_drawing=%6")
-              .arg( frameIndex )
-              .arg( static_cast<qulonglong>( requestSerialFloor ) )
-              .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
-              .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
-              .arg( ( m_pRenderThread && m_pRenderThread->isIdle() ) ? 1 : 0 )
-              .arg( m_frameStillDrawing ? 1 : 0 ) );
+        traceFrameVerbose(QStringLiteral("drawFrame-return frame=%1 request_floor=%2 next_serial=%3 last_serial=%4 thread_idle=%5 frame_still_drawing=%6")
+                          .arg( frameIndex )
+                          .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                          .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                          .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                          .arg( ( m_pRenderThread && m_pRenderThread->isIdle() ) ? 1 : 0 )
+                          .arg( m_frameStillDrawing ? 1 : 0 ) );
         if( frameCompleted )
         {
-            trace(QStringLiteral("render-wait-satisfied-before-loop frame=%1 last_serial=%2")
-                  .arg( frameIndex )
-                  .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
+            traceFrameVerbose(QStringLiteral("render-wait-satisfied-before-loop frame=%1 last_serial=%2")
+                              .arg( frameIndex )
+                              .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
         }
         else
         {
-            trace(QStringLiteral("render-wait-loop-enter frame=%1 request_floor=%2")
-                  .arg( frameIndex )
-                  .arg( static_cast<qulonglong>( requestSerialFloor ) ) );
+            traceFrameVerbose(QStringLiteral("render-wait-loop-enter frame=%1 request_floor=%2")
+                              .arg( frameIndex )
+                              .arg( static_cast<qulonglong>( requestSerialFloor ) ) );
             loop.exec();
-            trace(QStringLiteral("render-wait-loop-exit frame=%1 completed=%2 last_serial=%3")
-                  .arg( frameIndex )
-                  .arg( frameCompleted ? 1 : 0 )
-                  .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
+            traceFrameVerbose(QStringLiteral("render-wait-loop-exit frame=%1 completed=%2 last_serial=%3")
+                              .arg( frameIndex )
+                              .arg( frameCompleted ? 1 : 0 )
+                              .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
         }
         timeout.stop();
 
@@ -11086,12 +11098,26 @@ void MainWindow::previewPicture( int row )
     else if (raw_w < 2000 && raw_h < 1500) downscaled_factor = 5;
     else downscaled_factor = 7;
 
+    // For get_area_average_downscale_thumnail only: other factors for dualiso hiding the horizontal lines
+    if (m_pMlvObject->llrawproc->dual_iso > 0)
+    {
+        if (downscaled_factor > 5) downscaled_factor = 8;
+        else downscaled_factor = 4;
+    }
+
+
     int width = raw_w / downscaled_factor;
     int height = raw_h / downscaled_factor;
 
-    //Get frame from library
+    //Get frame from library, temp disable linear gradient and vignette, because not compatible with shrinked resolutions
+    auto vstr = m_pMlvObject->processing->vignette_strength;
+    auto gren = m_pMlvObject->processing->gradient_enable;
+    m_pMlvObject->processing->vignette_strength = 0;
+    m_pMlvObject->processing->gradient_enable = 0;
     //create_thumbnail( m_pMlvObject, m_pRawImage, downscaled_factor, width, height, QThread::idealThreadCount() );
     get_area_average_downscale_thumnail(m_pMlvObject, 0, downscaled_factor, QThread::idealThreadCount(), m_pRawImage);
+    m_pMlvObject->processing->vignette_strength = vstr;
+    m_pMlvObject->processing->gradient_enable = gren;
 
     QImage img( m_pRawImage,
                 width,
@@ -19353,7 +19379,7 @@ void MainWindow::on_lineEditDarkFrameFile_textChanged(const QString &arg1)
 //Check if there is an update availlable
 void MainWindow::on_actionCheckForUpdates_triggered( void )
 {
-    CUpdaterDialog dialog( this, QString( "https://api.github.com/repos/ilia3101/MLV-App/releases" ), GITVERSION, false );
+    CUpdaterDialog dialog( this, mlvAppUpdateReleasesUrl(), GITVERSION, false );
     dialog.exec();
 
     QSettings set( QSettings::UserScope, "magiclantern.MLVApp", "MLVApp" );
@@ -19365,7 +19391,7 @@ void MainWindow::on_actionCheckForUpdates_triggered( void )
 //Autocheck for updates told there is an update
 void MainWindow::updateCheck(void)
 {
-    Updater *pUpdater = new Updater(this, QString( "https://api.github.com/repos/ilia3101/MLV-App/releases" ), GITVERSION);
+    Updater *pUpdater = new Updater(this, mlvAppUpdateReleasesUrl(), GITVERSION);
     if( pUpdater->isUpdateAvailable() ) on_actionCheckForUpdates_triggered();
     else checkFocusPixelUpdate();
     delete pUpdater;
