@@ -4953,6 +4953,54 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QThread::msleep( 10 );
     }
 
+    if( !options.screenshotOutputPath.isEmpty() )
+    {
+        qApp->processEvents( QEventLoop::AllEvents );
+        if( ui->graphicsView && ui->graphicsView->viewport() )
+        {
+            ui->graphicsView->viewport()->update();
+            ui->graphicsView->viewport()->repaint();
+            qApp->processEvents( QEventLoop::AllEvents );
+        }
+
+        QPixmap screenshot;
+        QString screenshotMethod = QStringLiteral("app_internal_presented_pixmap");
+        if( m_pGraphicsItem )
+        {
+            screenshot = m_pGraphicsItem->pixmap();
+        }
+        if( screenshot.isNull() && ui->graphicsView && ui->graphicsView->viewport() )
+        {
+            screenshot = ui->graphicsView->viewport()->grab();
+            screenshotMethod = QStringLiteral("app_internal_viewport_grab");
+        }
+
+        QFileInfo screenshotInfo( options.screenshotOutputPath );
+        if( !screenshotInfo.absoluteDir().exists()
+         && !QDir().mkpath( screenshotInfo.absolutePath() ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to create screenshot directory: "
+                << screenshotInfo.absolutePath() << "\n";
+            return 8;
+        }
+
+        if( screenshot.isNull()
+         || !screenshot.save( screenshotInfo.absoluteFilePath(), "PNG" ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to save screenshot: "
+                << screenshotInfo.absoluteFilePath() << "\n";
+            return 9;
+        }
+
+        logInteractionEvent(
+            QStringLiteral("gui_smoke.screenshot"),
+            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4")
+                .arg( screenshotInfo.absoluteFilePath() )
+                .arg( screenshot.width() )
+                .arg( screenshot.height() )
+                .arg( screenshotMethod ) );
+    }
+
     if( ui->actionPlay->isChecked() )
     {
         ui->actionPlay->setChecked( false );

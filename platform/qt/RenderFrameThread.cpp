@@ -2224,6 +2224,28 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.interp_mean23_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_ms"),
                                       dualIsoFull20.interp_amaze_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_scratch_ms"),
+                                      dualIsoFull20.interp_amaze_scratch_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_clear_ms"),
+                                      dualIsoFull20.interp_amaze_clear_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_squeeze_ms"),
+                                      dualIsoFull20.interp_amaze_squeeze_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_rawdata_ms"),
+                                      dualIsoFull20.interp_amaze_rawdata_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_ms"),
+                                      dualIsoFull20.interp_amaze_demosaic_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_postprocess_ms"),
+                                      dualIsoFull20.interp_amaze_postprocess_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_grayscale_ms"),
+                                      dualIsoFull20.interp_amaze_grayscale_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_init_ms"),
+                                      dualIsoFull20.interp_amaze_edge_init_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_lut_ms"),
+                                      dualIsoFull20.interp_amaze_lut_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_edge_direction_ms"),
+                                      dualIsoFull20.interp_amaze_edge_direction_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_actual_interp_ms"),
+                                      dualIsoFull20.interp_amaze_actual_interp_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_border_ms"),
                                       dualIsoFull20.interp_border_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_fullres_ms"),

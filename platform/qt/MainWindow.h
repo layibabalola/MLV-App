@@ -138,6 +138,7 @@ public:
         double settleCpuPercent = -1.0;
         int settleCpuStableMs = 1000;
         int settleCpuMaxMs = 45000;
+        QString screenshotOutputPath;
         PlaybackProfileScope scope = PlaybackProfileScope::None;
         bool forceScope = false;
         bool zebras = false;

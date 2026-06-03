@@ -149,6 +149,17 @@ typedef struct
     double interp_ms;
     double interp_mean23_ms;
     double interp_amaze_ms;
+    double interp_amaze_scratch_ms;
+    double interp_amaze_clear_ms;
+    double interp_amaze_squeeze_ms;
+    double interp_amaze_rawdata_ms;
+    double interp_amaze_demosaic_ms;
+    double interp_amaze_postprocess_ms;
+    double interp_amaze_grayscale_ms;
+    double interp_amaze_edge_init_ms;
+    double interp_amaze_lut_ms;
+    double interp_amaze_edge_direction_ms;
+    double interp_amaze_actual_interp_ms;
     double interp_border_ms;
     double fullres_ms;
     double mix_ms;

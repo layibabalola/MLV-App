@@ -147,8 +147,8 @@ static inline void amaze_store_8_bytes_avx2(uint8_t * out, __m256i v)
  *   }
  * full_search == 0 → d_best = d0 = 5; full_search == 1 → 11-direction sweep.
  *
- * For lanes where full_search == 0, we still run the sweep (cheaper than
- * branching) and blend against d0 at the end.
+ * Entire 8-lane batches where full_search == 0 can store d0 immediately;
+ * mixed batches still run the sweep and blend against d0 at the end.
  * ====================================================================== */
 __attribute__((target("avx2,fma")))
 static void amaze_edge_direction_estimator_row_avx2(
@@ -215,6 +215,11 @@ static void amaze_edge_direction_estimator_row_avx2(
             __m256i skip_mask = pack_pd_cmp_to_epi32_mask(skip_lo, skip_hi);
             /* full_search = NOT skip. */
             full_search_mask = _mm256_xor_si256(skip_mask, _mm256_set1_epi32(-1));
+        }
+
+        if (_mm256_testz_si256(full_search_mask, full_search_mask)) {
+            amaze_store_8_bytes_avx2(&edge_dir_row[x], v_d0);
+            continue;
         }
 
         /* --- Per-direction sweep. ---

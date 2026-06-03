@@ -12513,3 +12513,66 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Next targeted pass should split `amaze_interpolate(...)` internally before attempting another AMaZE rewrite. Candidate substages: scratch/clear, squeeze map, rawData load, demosaic worker join, post-clamp, grayscale, edge-direction estimation, and actual edge-directed interpolation.
 - If the goal is specifically playback FPS over authored AMaZE quality, re-check the policy path that sets `diso_playback_force_mean23` and profile a true mean23-active path separately; do not use this receipt-backed AMaZE run as evidence for mean23 speed.
+
+## 2026-06-03 - AMaZE substage split keeps an all-skip AVX2 edge-direction bypass
+
+### Verified locally
+
+- I split `amaze_interpolate(...)` timing in [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), and [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp) into JSON-exported AMaZE substages:
+  - scratch, clear, squeeze, rawData load, demosaic, postprocess, grayscale, edge init, LUT, edge direction, and actual interpolation.
+- I extended [`tests/console/test_clip_golden.cpp`](C:/!Layi%20Wkspc%20MLV-App/tests/console/test_clip_golden.cpp) so release playback-profile JSON asserts the new AMaZE substage fields exist and are non-negative.
+- The first two rebuilt-release profiles, before the bypass, used:
+  - `.claude-state/profiling/20260603-amaze-substages/large_dual_iso_hq_receipt_t4_scale4_amaze_substages16.json`
+  - `.claude-state/profiling/20260603-amaze-substages/large_dual_iso_hq_receipt_t4_scale4_amaze_substages16_repeat.json`
+  - explicit `MLVAPP_PLAYBACK_SCALE_FACTOR=4`, explicit `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`, `--playback-debayer receipt`, `--playback-processing receipt`, `--threads 4`, and 16 measured frames.
+- Those runs showed the AMaZE receipt path was dominated by edge-direction estimation:
+  - `dual_iso_full20_interp_amaze_edge_direction_ms`: `82.92 ms avg / 79.00 ms median` (`12.06 / 12.66 fps-equivalent`), then `86.92 ms avg / 90.00 ms median` (`11.50 / 11.11 fps-equivalent`)
+  - `dual_iso_full20_interp_amaze_demosaic_ms`: `44.85 ms avg / 47.00 ms median` (`22.30 / 21.28 fps-equivalent`), then `46.31 ms avg / 46.00 ms median` (`21.59 / 21.74 fps-equivalent`)
+  - `dual_iso_full20_interp_amaze_actual_interp_ms`: `20.77 ms avg / 22.00 ms median` (`48.15 / 45.45 fps-equivalent`), then `22.92 ms avg / 23.00 ms median` (`43.63 / 43.48 fps-equivalent`)
+- I then added an all-skip SIMD-batch bypass in [`src/mlv/llrawproc/dualiso_amaze_avx2.inc`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso_amaze_avx2.inc): when `_mm256_testz_si256(full_search_mask, full_search_mask)` proves all 8 lanes would be blended back to default direction `d0`, the kernel stores `d0` and skips the 11-direction sweep. Mixed batches still use the previous sweep-and-blend path.
+- Two rebuilt-release profiles after the bypass used:
+  - `.claude-state/profiling/20260603-amaze-substages/large_dual_iso_hq_receipt_t4_scale4_amaze_allskip_bypass16.json`
+  - `.claude-state/profiling/20260603-amaze-substages/large_dual_iso_hq_receipt_t4_scale4_amaze_allskip_bypass16_repeat.json`
+- Pooled warm-frame comparison across the two before/after runs, skipping the first 3 cold frames in each run:
+  - `cadence_ms`: `240.89 ms avg / 244.52 ms median` (`4.15 / 4.09 fps`) -> `222.36 ms avg / 231.75 ms median` (`4.50 / 4.31 fps`) (`-7.7% avg ms`)
+  - `render_thread_work_ms`: `237.46 ms avg / 241.00 ms median` (`4.21 / 4.15 fps-equivalent`) -> `218.46 ms avg / 228.00 ms median` (`4.58 / 4.39 fps-equivalent`) (`-8.0% avg ms`)
+  - `dual_iso_full20_total_ms`: `211.73 ms avg / 212.00 ms median` (`4.72 / 4.72 fps-equivalent`) -> `193.73 ms avg / 202.00 ms median` (`5.16 / 4.95 fps-equivalent`) (`-8.5% avg ms`)
+  - `dual_iso_full20_interp_amaze_ms`: `166.73 ms avg / 166.00 ms median` (`6.00 / 6.02 fps-equivalent`) -> `133.15 ms avg / 137.00 ms median` (`7.51 / 7.30 fps-equivalent`) (`-20.1% avg ms`)
+  - `dual_iso_full20_interp_amaze_edge_direction_ms`: `84.92 ms avg / 79.50 ms median` (`11.78 / 12.58 fps-equivalent`) -> `37.12 ms avg / 35.50 ms median` (`26.94 / 28.17 fps-equivalent`) (`-56.3% avg ms`)
+- The wider pipeline remained noisy run-to-run, but the edge-direction substage win itself was stable across both optimized profiles (`37.85 ms avg`, `26.42 fps-equivalent`, then `36.38 ms avg`, `27.49 fps-equivalent`).
+- I corrected the GUI smoke screenshot oracle so `--screenshot-output` saves the app-internal presented pixmap first and falls back to the viewport only if the pixmap is unavailable. The first implementation captured the viewport first, which could include window/letterbox geometry and was not a reliable aspect or color oracle.
+- I promoted the standard screenshot-backed M16 smoke set into [`AGENTS.md`](C:/!Layi%20Wkspc%20MLV-App/AGENTS.md): `C:\temp\MLV\M16-1327.MLV`, `C:\temp\MLV\M16-1347.MLV`, `C:\temp\MLV\M16-1446.MLV`, with `C:\temp\MLV\M16-1243.MLV` as the optional Look Assist control.
+- I reran the corrected screenshot-backed GUI smoke trio with `-FrameTelemetry`, `-RbfDetailTiming`, and app-internal presented-frame capture:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-substages/m16-presented-frame-smoke/M16-1327/screenshots/M16-1327.png): `2555x1068`, aspect `2.392322`, `SHA256=F0060A49D2B22E3BFE1BEB3AABA0BB7433D814F30DDD3C8BA4CD18B5826AA7FE`
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-substages/m16-presented-frame-smoke/M16-1347/screenshots/M16-1347.png): `2555x1068`, aspect `2.392322`, `SHA256=2B32B830BD74DF031DFC8D46C1147E031D4CF31A41C2E2E44DBEB393384047D3`
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-substages/m16-presented-frame-smoke/M16-1446/screenshots/M16-1446.png): `2555x1068`, aspect `2.392322`, `SHA256=B1919F0BB6DF227FCFCD490718C507BF4041899BB9470F9AE98D250B6E3F184A`
+- The M16 ratio is now the presented-frame ratio, not a viewport artifact. The smoke state preserved the clip's current stretch (`stretch_x=3.0`, `stretch_y=1.0`), which is consistent with `C:\temp\MLV\master.marxml` storing `stretchFactorY=0.3333`. That makes this trio a real playback/color oracle for the current app settings, not a neutral source-aspect oracle.
+- M16 smoke metrics with FPS-equivalent:
+  - `M16-1327`: `presented_fps=0.669`; `avg_render_work_ms=1248.500` (`0.80 fps-equivalent`); `avg_llrawproc_ms=49.833` (`20.07 fps-equivalent`); `avg_processed8_ms=1246.833` (`0.80 fps-equivalent`); `avg_dual_iso_full20_total_ms=48.667` (`20.55 fps-equivalent`); `avg_sh_prep_ms=423.500` (`2.36 fps-equivalent`); `avg_rbf_ms=417.833` (`2.39 fps-equivalent`)
+  - `M16-1347`: `presented_fps=0.552`; `avg_render_work_ms=1307.000` (`0.77 fps-equivalent`); `avg_llrawproc_ms=53.000` (`18.87 fps-equivalent`); `avg_processed8_ms=1305.000` (`0.77 fps-equivalent`); `avg_dual_iso_full20_total_ms=52.000` (`19.23 fps-equivalent`); `avg_sh_prep_ms=439.500` (`2.28 fps-equivalent`); `avg_rbf_ms=433.667` (`2.31 fps-equivalent`)
+  - `M16-1446`: `presented_fps=0.542`; `avg_render_work_ms=1280.167` (`0.78 fps-equivalent`); `avg_llrawproc_ms=38.500` (`25.97 fps-equivalent`); `avg_processed8_ms=1278.167` (`0.78 fps-equivalent`); `avg_dual_iso_full20_total_ms=38.500` (`25.97 fps-equivalent`); `avg_sh_prep_ms=425.167` (`2.35 fps-equivalent`); `avg_rbf_ms=418.333` (`2.39 fps-equivalent`)
+- I also reran the small `large_dual_iso` GUI smoke with the corrected capture:
+  - [`large_dual_iso.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-substages/screenshots-presented-frame/large_dual_iso.png): `1485x1865`, aspect `0.796247`, `SHA256=08EE13A76FE7DCB30DD6C03B011B737773138E23C389EB1EAFE0C1004DE36FA1`
+  - `presented_fps=3.992`; `avg_render_work_ms=187.500` (`5.33 fps-equivalent`); `avg_llrawproc_ms=89.250` (`11.20 fps-equivalent`); `avg_processed8_ms=171.500` (`5.83 fps-equivalent`); `avg_dual_iso_full20_total_ms=87.750` (`11.40 fps-equivalent`); `avg_draw_total_ms=25.250` (`39.60 fps-equivalent`)
+- The user-facing release tree was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/3/2026 2:54:06 AM`
+  - `Length=8980480`
+  - `SHA256=97171110C872ADD43EC523DB692283408772F6E53DEB6A780E2FCAE59D263F60`
+- Validation:
+  - `git diff --check` reported only the repo's usual LF-to-CRLF warnings for the touched files.
+  - Rebuilt the user-facing release tree after the screenshot fix.
+  - `tests/build-ci-pipeline/release/pipeline_tests.exe --gtest_filter=DualIsoPipeline.PhaseE1_*` passed both `DualIsoPipeline.PhaseE1_AMaZEEdgeDirectionAvx2ByteIdentity` and `DualIsoPipeline.PhaseE1_AMaZEEdgeDirectionAvx2PathActiveOnCapableHost` with `0/12301632 pixels differ, max|d|=0`.
+  - `tests/build-ci-pipeline/release/pipeline_tests.exe --gtest_filter=DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity` passed with `0/12301632 pixels differ, max|d|=0`.
+  - `tests/build-ci-console/release/console_tests.exe --gtest_filter=ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch` passed with 31 assertions against the rebuilt release executable after setting `MLVAPP_PROFILE_EXE`.
+
+### Cross-checked from prior analysis
+
+- The earlier interpolation split showed the receipt-backed HQ profile was AMaZE-bound. This substage split narrows that to the Phase E1 edge-direction estimator.
+- The AVX2 path was already active and byte-identical before this pass. The new bypass does not change chosen directions for skipped lanes; it only avoids computing a result that would have been discarded by the existing final blend.
+- The upstream v1.16 merge remains the correct updater posture for now: local version is v1.16, and the updater should remain upstream-aware so future upstream releases still act as an early merge signal.
+
+### Needs runtime profiling
+
+- Next highest AMaZE seams after this bypass are demosaic worker time and actual edge-directed interpolation; both are more correctness-sensitive than the all-skip bypass and should be split or optimized in separate micro-branches.
+- If pursuing another edge-direction improvement, first add low-overhead profiling for full-search batch density so we know whether mixed-lane batches are now the remaining cost.
+- Re-profile on the user's real M16 clips when available. The fixture evidence is strong for the hot path and byte identity, but scene-dependent full-search density will decide how much this bypass helps outside the test clip.
