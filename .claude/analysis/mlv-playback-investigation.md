@@ -13184,3 +13184,27 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Continue optimizing actual remaining Dual ISO/full20 cost: mix/final blend, overexposed handling, raw/debayer queue behavior, and shadows/highlights prep. Avoid re-enabling real Dual ISO full20 chroma smoothing for GUI method `1` until a color-correct implementation is proven by screenshots and focused tests.
 - If manual observation disagrees with the screenshot-time FPS label, capture a short repeated full-window screenshot sequence or video during playback. A single screenshot-time label can legitimately differ from the end-of-run summary sample on bursty playback.
+
+## 2026-06-03 - bottom-left GUI FPS visibility recheck
+
+### Verified locally
+
+- Re-ran a fresh current-release smoke after the user reported not seeing the cited FPS in the GUI bottom-left area:
+  - Command: `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . -Input C:\temp\MLV\M16-1327.MLV -Output .claude-state\profiling\20260603-fps-visibility-recheck\M16-1327.json -Seconds 2 -SettleMs 1000 -CaptureScreenshot -FrameTelemetry -ScreenshotOutputDir .claude-state\profiling\20260603-fps-visibility-recheck\screenshots`
+  - `validation.ok=true`
+  - `visibleBottomLeftGuiFps=7.4` / `visibleBottomLeftGuiStatusText="Playback: 7.4 fps"`
+  - `smokePresentedFps=3.857`, `smokeTimelineFps=19.028`
+  - end-of-run `guiStatusValue=0.9` / `guiStatusText="Playback: 0.9 fps"`, which is a later sample after playback is stopping and must not be reported as the same thing as the screenshot-time visible label.
+  - readable FPS proof crop: `.claude-state/profiling/20260603-fps-visibility-recheck/screenshots/M16-1327-fps-status.png` `SHA256=5C555CD5DF175FE9012783BB6B8AC30B9FAD485E62BC1A4568400DC140EC6CFC`
+  - full-window source screenshot: `.claude-state/profiling/20260603-fps-visibility-recheck/screenshots/M16-1327-window.png` `SHA256=185F4ACB1D5E8299B2B5762D0EC108CA0248C72284460190DDEEBFFBD2D28A29`
+  - presented-frame color/aspect screenshot: `.claude-state/profiling/20260603-fps-visibility-recheck/screenshots/M16-1327.png` `SHA256=9390A11B5E510524BB742A14267737405B440A0884132BDE1801896D8DB4E7FF`
+- Visual inspection of the proof crop confirmed the bottom-left status bar text is visible as `Playback: 7.4 fps`.
+
+### Cross-checked from prior analysis
+
+- The cited bottom-left GUI FPS values are not from the presented-frame screenshot. The presented-frame `*.png` deliberately omits GUI chrome and is only color/aspect/quality evidence.
+- The bottom-left GUI FPS source of truth remains `playbackFps.visibleBottomLeftGuiFps` plus the `*-fps-status.png` crop generated from the full-window `*-window.png` screenshot.
+
+### Needs runtime profiling
+
+- If future manual observation still disagrees with the screenshot-time label, capture a short sequence of full-window screenshots or video during the smoke. A single screenshot-time FPS value can differ from the later stop-summary sample on bursty playback.
