@@ -147,7 +147,14 @@ void pl_downsample_bayer_to_rgb_8x(const uint16_t * bayer_in,
  *   would still preserve RGGB; we average for anti-aliasing).
  *   in_w must be a multiple of 2. in_h must be a multiple of 8.
  *
- * Both return 0 on success, non-zero if dimensions don't satisfy the
+ * pl_downsample_bayer_to_bayer_8x_block_stride32:
+ *   Output dim: (in_w/8, in_h/8).
+ *   Y stride: keep complete 4-row blocks, block-stride 32 in source space.
+ *   X downsample: 4-tap same-Bayer-position averaging inside 8-col tiles.
+ *   in_w must be a multiple of 16 so the output width stays Bayer-even.
+ *   in_h must be a multiple of 32.
+ *
+ * All return 0 on success, non-zero if dimensions don't satisfy the
  * stride constraints (in which case the caller must fall back to the v1
  * post-llrawproc path). */
 int pl_downsample_bayer_to_bayer_4x(const uint16_t * bayer_in,
@@ -159,6 +166,14 @@ int pl_downsample_bayer_to_bayer_4x(const uint16_t * bayer_in,
                                     int threads);
 
 int pl_downsample_bayer_to_bayer_2x(const uint16_t * bayer_in,
+                                    int in_w,
+                                    int in_h,
+                                    uint16_t * bayer_out,
+                                    int * out_w,
+                                    int * out_h,
+                                    int threads);
+
+int pl_downsample_bayer_to_bayer_8x(const uint16_t * bayer_in,
                                     int in_w,
                                     int in_h,
                                     uint16_t * bayer_out,

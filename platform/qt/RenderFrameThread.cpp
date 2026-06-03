@@ -55,6 +55,7 @@ QString phase4bPathLabel( int path )
 {
     switch( path )
     {
+    case 8: return QStringLiteral("x8-full-xy-pre-recon");
     case 3: return QStringLiteral("full-xy-pre-recon");
     case 2: return QStringLiteral("x-only-pre-recon");
     default: return QStringLiteral("none-or-full-recon-fallback");
@@ -1679,7 +1680,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
      && ( outputMode == OutputProcessed8 || outputMode == OutputProcessed16 ) )
     {
         const int coreActiveScale = m_pMlvObject->playback_scale_factor_active;
-        if( coreActiveScale == 1 || coreActiveScale == 2 || coreActiveScale == 4 )
+        if( coreActiveScale == 1 || coreActiveScale == 2 || coreActiveScale == 4 || coreActiveScale == 8 )
         {
             playbackScaleFactorActive = coreActiveScale;
         }

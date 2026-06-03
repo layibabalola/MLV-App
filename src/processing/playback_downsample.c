@@ -794,6 +794,76 @@ static int pl_downsample_bayer_to_bayer_2x_scalar(const uint16_t * __restrict ba
     return 0;
 }
 
+static int pl_downsample_bayer_to_bayer_8x_scalar(const uint16_t * __restrict bayer_in,
+                                                  int in_w,
+                                                  int in_h,
+                                                  uint16_t * __restrict bayer_out,
+                                                  int * out_w_p,
+                                                  int * out_h_p,
+                                                  int threads)
+{
+    if (!bayer_in || !bayer_out) return 1;
+    if (in_w < 16 || in_h < 32) return 1;
+    if (in_w & 15) return 1;  /* output width must remain Bayer-even */
+    if (in_h & 31) return 1;  /* block stride 32 preserves 4-row ISO phase */
+
+    const int out_w = in_w >> 3;
+    const int out_h = in_h >> 3;
+    if (out_w_p) *out_w_p = out_w;
+    if (out_h_p) *out_h_p = out_h;
+
+    if (threads > 1)
+    {
+        #pragma omp parallel for num_threads(threads)
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 32 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 8;
+                const uint32_t a0 = srow[xs + 0];
+                const uint32_t a1 = srow[xs + 2];
+                const uint32_t a2 = srow[xs + 4];
+                const uint32_t a3 = srow[xs + 6];
+                const uint32_t b0 = srow[xs + 1];
+                const uint32_t b1 = srow[xs + 3];
+                const uint32_t b2 = srow[xs + 5];
+                const uint32_t b3 = srow[xs + 7];
+                drow[x_out + 0] = (uint16_t)((a0 + a1 + a2 + a3) >> 2);
+                drow[x_out + 1] = (uint16_t)((b0 + b1 + b2 + b3) >> 2);
+            }
+        }
+    }
+    else
+    {
+        for (int y_out = 0; y_out < out_h; ++y_out)
+        {
+            const int src_row_idx = (y_out >> 2) * 32 + (y_out & 3);
+            const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
+            uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
+
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
+            {
+                const int xs = x_out * 8;
+                const uint32_t a0 = srow[xs + 0];
+                const uint32_t a1 = srow[xs + 2];
+                const uint32_t a2 = srow[xs + 4];
+                const uint32_t a3 = srow[xs + 6];
+                const uint32_t b0 = srow[xs + 1];
+                const uint32_t b1 = srow[xs + 3];
+                const uint32_t b2 = srow[xs + 5];
+                const uint32_t b3 = srow[xs + 7];
+                drow[x_out + 0] = (uint16_t)((a0 + a1 + a2 + a3) >> 2);
+                drow[x_out + 1] = (uint16_t)((b0 + b1 + b2 + b3) >> 2);
+            }
+        }
+    }
+    return 0;
+}
+
 #ifdef PL_DOWNSAMPLE_AVX2_AVAILABLE
 __attribute__((target("avx2")))
 static int pl_downsample_bayer_to_bayer_4x_avx2(const uint16_t * __restrict bayer_in,
@@ -981,6 +1051,19 @@ int pl_downsample_bayer_to_bayer_2x(const uint16_t * bayer_in,
 {
     pthread_once(&g_pl_downsample_dispatch_once, pl_downsample_dispatch_init);
     return pl_downsample_bayer_to_bayer_2x_scalar(bayer_in, in_w, in_h,
+                                                  bayer_out, out_w, out_h, threads);
+}
+
+int pl_downsample_bayer_to_bayer_8x(const uint16_t * bayer_in,
+                                    int in_w,
+                                    int in_h,
+                                    uint16_t * bayer_out,
+                                    int * out_w,
+                                    int * out_h,
+                                    int threads)
+{
+    pthread_once(&g_pl_downsample_dispatch_once, pl_downsample_dispatch_init);
+    return pl_downsample_bayer_to_bayer_8x_scalar(bayer_in, in_w, in_h,
                                                   bayer_out, out_w, out_h, threads);
 }
 
