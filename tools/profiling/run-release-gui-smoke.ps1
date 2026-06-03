@@ -361,7 +361,22 @@ function Add-EnvironmentPairs {
         [string[]]$Pairs
     )
 
-    foreach ($pair in $Pairs) {
+    $expandedPairs = @()
+    foreach ($rawPair in $Pairs) {
+        if ([string]::IsNullOrWhiteSpace($rawPair)) {
+            continue
+        }
+
+        $parts = @($rawPair -split ',')
+        if ($parts.Count -gt 1 -and ($parts | Where-Object { $_.IndexOf("=") -lt 1 }).Count -eq 0) {
+            $expandedPairs += $parts
+        }
+        else {
+            $expandedPairs += $rawPair
+        }
+    }
+
+    foreach ($pair in $expandedPairs) {
         if ([string]::IsNullOrWhiteSpace($pair)) {
             continue
         }
@@ -547,13 +562,15 @@ $clearedEnvironment = @()
 if (-not $FrameTelemetry) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_SMOKE_TELEMETRY"
 }
-if (-not $RbfDetailTiming) {
+if (-not $RbfDetailTiming -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"
 }
-$clearedEnvironment += @(
-    "MLVAPP_PLAYBACK_SCALE_FACTOR",
-    "MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"
-)
+if ([string]::IsNullOrWhiteSpace($ScaleFactor) -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_SCALE_FACTOR")) {
+    $clearedEnvironment += "MLVAPP_PLAYBACK_SCALE_FACTOR"
+}
+if (-not $PreferHqMean23 -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23")) {
+    $clearedEnvironment += "MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"
+}
 if (-not $PreserveExperimentalEnvironment) {
     $clearedEnvironment += $experimentalEnvironmentToClear
 }
@@ -768,6 +785,9 @@ $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLin
 $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
 $windowScreenshotFpsStatusText = Get-ObjectPropertyValue $windowScreenshotLog "fps_status"
 $windowScreenshotFpsStatusValue = Convert-FpsStatusTextToValue $windowScreenshotFpsStatusText
+$requestedPlaybackDurationMs = [int]([Math]::Max(100, $Seconds * 1000))
+$sustainedGuiFpsSample =
+    "end-of-requested-duration window screenshot after ${Seconds}s playback"
 
 $lookAssistApplied =
     ($null -ne $lookAssistApply) -and
@@ -901,22 +921,30 @@ $result = [pscustomobject]@{
         }
     }
     playbackFps = [pscustomobject]@{
+        requestedPlaybackSeconds = $Seconds
+        requestedPlaybackDurationMs = $requestedPlaybackDurationMs
         guiStatusText = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_text"
         guiStatusValue = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_value"
         guiStatusSample = "end-of-run playback summary; this can differ from the visible screenshot-time label"
         visibleBottomLeftGuiStatusText = $windowScreenshotFpsStatusText
         visibleBottomLeftGuiFps = $windowScreenshotFpsStatusValue
-        visibleBottomLeftGuiFpsSample = "window screenshot time"
+        visibleBottomLeftGuiFpsSample = $sustainedGuiFpsSample
         visibleBottomLeftGuiFpsSource = "gui_smoke.window_screenshot fps_status from screenshot.windowCapture"
         visibleBottomLeftGuiFpsTakenAtUtc = if ($windowScreenshotCapture) { $windowScreenshotCapture.takenAtUtc } else { $null }
         visibleBottomLeftGuiProofPath = $fpsStatusCropPath
         visibleBottomLeftGuiProof = $fpsStatusCropCapture
+        sustainedBottomLeftGuiStatusText = $windowScreenshotFpsStatusText
+        sustainedBottomLeftGuiFps = $windowScreenshotFpsStatusValue
+        sustainedBottomLeftGuiFpsSample = $sustainedGuiFpsSample
+        sustainedBottomLeftGuiFpsTakenAtUtc = if ($windowScreenshotCapture) { $windowScreenshotCapture.takenAtUtc } else { $null }
+        sustainedBottomLeftGuiProofPath = $fpsStatusCropPath
+        sustainedBottomLeftGuiProof = $fpsStatusCropCapture
         screenshotGuiStatusText = $windowScreenshotFpsStatusText
         screenshotGuiStatusValue = $windowScreenshotFpsStatusValue
         smokePresentedFps = Get-ObjectPropertyValue $playbackSummary "presented_fps"
         smokeTimelineFps = Get-ObjectPropertyValue $playbackSummary "timeline_fps"
-        reportGuidance = "When citing bottom-left GUI FPS, cite visibleBottomLeftGuiFps and include the visibleBottomLeftGuiProofPath/*-fps-status.png crop. Do not use the presented-frame screenshot as FPS proof because it intentionally omits GUI chrome."
-        note = "visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible at window screenshot time in screenshot.windowCapture and enlarged in playbackFps.visibleBottomLeftGuiProof; guiStatusValue is the later end-of-run summary sample and can differ; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
+        reportGuidance = "When citing bottom-left GUI FPS, cite sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps and include the sustainedBottomLeftGuiProofPath/*-fps-status.png crop. For stable FPS, run long enough for playback to settle, for example -Seconds 30. Do not use the presented-frame screenshot as FPS proof because it intentionally omits GUI chrome."
+        note = "sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible after the requested playback duration in screenshot.windowCapture and enlarged in playbackFps.sustainedBottomLeftGuiProof; guiStatusValue is the later end-of-run summary sample and can differ; smokePresentedFps and smokeTimelineFps are smoke-run telemetry over the full requested duration, and per-stage FPS-equivalent values are 1000 / stage_ms."
     }
     process = [pscustomobject]@{
         id = $process.Id
