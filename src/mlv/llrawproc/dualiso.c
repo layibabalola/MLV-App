@@ -1680,24 +1680,41 @@ static const double fullres_thr = 0.8;
 /* trial and error - too high = aliasing, too low = noisy */
 static const int ALIAS_MAP_MAX = 15000;
 
-static inline int alias_map_fifth_smallest_37(const int values[37])
+static inline void alias_map_insert_top5(uint16_t value, uint16_t best[5])
 {
-    int best[5] = { INT_MAX, INT_MAX, INT_MAX, INT_MAX, INT_MAX };
-
-    for (int i = 0; i < 37; ++i)
+    if (value > best[4])
     {
-        const int v = values[i];
-        if (v < best[4])
+        int j = 4;
+        while (j > 0 && value > best[j - 1])
         {
-            int j = 4;
-            while (j > 0 && v < best[j - 1])
-            {
-                best[j] = best[j - 1];
-                --j;
-            }
-            best[j] = v;
+            best[j] = best[j - 1];
+            --j;
         }
+        best[j] = value;
     }
+}
+
+static inline uint16_t alias_map_fifth_largest_37_at(const uint16_t * alias_map, int w, int x, int y)
+{
+    uint16_t best[5] = { 0, 0, 0, 0, 0 };
+
+    const uint16_t * ym6 = alias_map + (size_t)(y - 6) * (size_t)w;
+    const uint16_t * ym4 = alias_map + (size_t)(y - 4) * (size_t)w;
+    const uint16_t * ym2 = alias_map + (size_t)(y - 2) * (size_t)w;
+    const uint16_t * y0  = alias_map + (size_t)y       * (size_t)w;
+    const uint16_t * yp2 = alias_map + (size_t)(y + 2) * (size_t)w;
+    const uint16_t * yp4 = alias_map + (size_t)(y + 4) * (size_t)w;
+    const uint16_t * yp6 = alias_map + (size_t)(y + 6) * (size_t)w;
+
+#define ALIAS_MAP_TOP5(row, offset) alias_map_insert_top5((row)[x + (offset)], best)
+                                                              ALIAS_MAP_TOP5(ym6, -2); ALIAS_MAP_TOP5(ym6,  0); ALIAS_MAP_TOP5(ym6,  2);
+                                  ALIAS_MAP_TOP5(ym4, -4); ALIAS_MAP_TOP5(ym4, -2); ALIAS_MAP_TOP5(ym4,  0); ALIAS_MAP_TOP5(ym4,  2); ALIAS_MAP_TOP5(ym4,  4);
+    ALIAS_MAP_TOP5(ym2, -6); ALIAS_MAP_TOP5(ym2, -4); ALIAS_MAP_TOP5(ym2, -2); ALIAS_MAP_TOP5(ym2,  0); ALIAS_MAP_TOP5(ym2,  2); ALIAS_MAP_TOP5(ym2,  4); ALIAS_MAP_TOP5(ym2,  6);
+    ALIAS_MAP_TOP5(y0,  -6); ALIAS_MAP_TOP5(y0,  -4); ALIAS_MAP_TOP5(y0,  -2); ALIAS_MAP_TOP5(y0,   0); ALIAS_MAP_TOP5(y0,   2); ALIAS_MAP_TOP5(y0,   4); ALIAS_MAP_TOP5(y0,   6);
+    ALIAS_MAP_TOP5(yp2, -6); ALIAS_MAP_TOP5(yp2, -4); ALIAS_MAP_TOP5(yp2, -2); ALIAS_MAP_TOP5(yp2,  0); ALIAS_MAP_TOP5(yp2,  2); ALIAS_MAP_TOP5(yp2,  4); ALIAS_MAP_TOP5(yp2,  6);
+                                  ALIAS_MAP_TOP5(yp4, -4); ALIAS_MAP_TOP5(yp4, -2); ALIAS_MAP_TOP5(yp4,  0); ALIAS_MAP_TOP5(yp4,  2); ALIAS_MAP_TOP5(yp4,  4);
+                                                              ALIAS_MAP_TOP5(yp6, -2); ALIAS_MAP_TOP5(yp6,  0); ALIAS_MAP_TOP5(yp6,  2);
+#undef ALIAS_MAP_TOP5
 
     return best[4];
 }
@@ -3364,17 +3381,8 @@ static inline void build_alias_map(struct raw_info raw_info,
             if (fullres_curve[bright[x + y*w]] > fullres_thr)
                 continue;
             
-            /* use 5th max (out of 37) to filter isolated pixels */
-            int neighbours[] = {
-                                                                              -alias_map[x-2 + (y-6) * w], -alias_map[x+0 + (y-6) * w], -alias_map[x+2 + (y-6) * w],
-                                                 -alias_map[x-4 + (y-4) * w], -alias_map[x-2 + (y-4) * w], -alias_map[x+0 + (y-4) * w], -alias_map[x+2 + (y-4) * w], -alias_map[x+4 + (y-4) * w],
-                    -alias_map[x-6 + (y-2) * w], -alias_map[x-4 + (y-2) * w], -alias_map[x-2 + (y-2) * w], -alias_map[x+0 + (y-2) * w], -alias_map[x+2 + (y-2) * w], -alias_map[x+4 + (y-2) * w], -alias_map[x+6 + (y-2) * w], 
-                    -alias_map[x-6 + (y+0) * w], -alias_map[x-4 + (y+0) * w], -alias_map[x-2 + (y+0) * w], -alias_map[x+0 + (y+0) * w], -alias_map[x+2 + (y+0) * w], -alias_map[x+4 + (y+0) * w], -alias_map[x+6 + (y+0) * w], 
-                    -alias_map[x-6 + (y+2) * w], -alias_map[x-4 + (y+2) * w], -alias_map[x-2 + (y+2) * w], -alias_map[x+0 + (y+2) * w], -alias_map[x+2 + (y+2) * w], -alias_map[x+4 + (y+2) * w], -alias_map[x+6 + (y+2) * w], 
-                                                 -alias_map[x-4 + (y+4) * w], -alias_map[x-2 + (y+4) * w], -alias_map[x+0 + (y+4) * w], -alias_map[x+2 + (y+4) * w], -alias_map[x+4 + (y+4) * w],
-                                                                              -alias_map[x-2 + (y+6) * w], -alias_map[x+0 + (y+6) * w], -alias_map[x+2 + (y+6) * w],
-            };
-            alias_aux[x + y * w] = -alias_map_fifth_smallest_37(neighbours);
+            /* Use the 5th max (out of 37) to filter isolated pixels. */
+            alias_aux[x + y * w] = alias_map_fifth_largest_37_at(alias_map, w, x, y);
         }
     }
 #ifndef STDOUT_SILENT

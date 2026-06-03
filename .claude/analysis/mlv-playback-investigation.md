@@ -12315,3 +12315,44 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `avg_processing_core_color_cam_agx_matrix_ms=96.000`
   - `avg_llrawproc_ms=46.286`
 - Keep this hoist as the baseline for the next playback/performance pass unless a later rerun regresses the screenshots or the timing repeatability.
+
+## 2026-06-02 - Dual ISO alias-map 37-sample top5 filter is a keeper
+
+### Verified locally
+
+- I optimized the HQ Dual ISO alias-map filter in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c) by replacing the per-pixel 37-element negated stack array plus fifth-smallest pass with a direct fifth-largest top-5 accumulator over the exact same 37 samples.
+- This is intended to be output-preserving: the old code computed `-fifth_smallest(-alias_map samples)`, which is the fifth-largest original alias-map sample. The new helper computes that directly.
+- The user-facing release tree was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/2/2026 11:23:14 PM`
+  - `Length=8960512`
+  - `SHA256=FDDD721074E19DC9B06145B1C281297B00A60BD95199FB8C224366899A06DB71`
+- Controlled release profiles used explicit HQ mean23 playback and scale 4:
+  - pre-change profile: `.claude-state/profiling/20260603-dualiso-full20-next/large_dual_iso_hq_t4_scale4_hqmean23_default16.json`
+  - post-change profile: `.claude-state/profiling/20260603-dualiso-full20-next/large_dual_iso_hq_t4_scale4_hqmean23_top5opt16.json`
+- Steady-state comparison, skipping the first 3 cold frames, kept `dual_iso_full20_use_alias_map=1` in both profiles and improved the hot path:
+  - `cadence_ms`: `89.333 avg / 84.778 median` -> `75.599 avg / 74.717 median`
+  - `latency_ms`: `88.378 avg / 83.977 median` -> `74.723 avg / 73.805 median`
+  - `render_thread_work_ms`: `86.231 avg / 82.000 median` -> `72.615 avg / 71.000 median`
+  - `dual_iso_full20_total_ms`: `62.231 avg / 59.000 median` -> `48.462 avg / 50.000 median`
+  - `dual_iso_full20_mix_ms`: `38.462 avg / 36.000 median` -> `26.846 avg / 28.000 median`
+  - `dual_iso_full20_mix_alias_map_ms`: `26.154 avg / 26.000 median` -> `18.308 avg / 19.000 median`
+- The separate alias-map-OFF policy A/B confirmed the larger policy lever still works but remains an opt-in quality choice, not this keeper's default behavior:
+  - alias-map-OFF profile: `.claude-state/profiling/20260603-dualiso-full20-next/large_dual_iso_hq_t4_scale4_hqmean23_aliasoff16.json`
+  - telemetry confirmed `dual_iso_full20_use_alias_map=0`
+  - skipping the first 3 cold frames, `cadence_ms=72.923 avg / 70.051 median`
+- Validation:
+  - `git diff --check` reported only the repo's usual LF-to-CRLF warning for `src/mlv/llrawproc/dualiso.c`.
+  - Rebuilt `tests/build-ci-pipeline/release/pipeline_tests.exe`; the relevant alias-map parity guard passed with `HQ_AliasMapAvx2ByteIdentity: 0/12301632 pixels differ, max|d|=0`.
+  - The same pipeline run still exited `1` because of pre-existing unrelated Direct8/golden/cache failures in the broader suite.
+  - App-backed `tests/build-ci-console/release/console_tests.exe --check-golden` against the rebuilt release executable passed the playback-profile checks including `ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch`.
+  - The console run still exited `1` because optional local-M16 Look Assist tests expected `look_assist_chroma_smooth=2` but observed `1`, unrelated to this alias-map filter edit.
+
+### Cross-checked from prior analysis
+
+- The prior alias-map policy notes remain valid: disabling alias_map at scale 4 is a larger performance lever, but it intentionally remains opt-in because it changes recon math. This keeper instead makes the default alias-map path faster while preserving the same alias-map stage.
+- The earlier raw uint16 prefetch suppression remains active for HQ Dual ISO scale 4; the post-change profile still reported `raw_uint16_prefetch_hit=0`.
+
+### Needs runtime profiling
+
+- Rerun the release profile on the user's real M16 clips once the local optional Look Assist chroma-smooth expectation is understood, because the fixture profile is a strong timing signal but not a full visual-color oracle.
+- If more alias-map work is needed, instrument the builder's init/filter/gaussian/grayscale substages separately before another micro-optimization; the current keeper only proves the 37-sample filter bookkeeping was worth reducing.
