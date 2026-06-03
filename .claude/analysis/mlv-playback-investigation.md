@@ -13691,3 +13691,51 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - `x8` is not currently available. Adding it is feasible, but it is a feature change: update UI/actions/preferences, accept scale `8` in the Qt and core scale contract, add or compose `8x` downsample kernels, ensure cache/output dimensions and divisibility behavior are correct, extend pipeline tests, then run the M16 screenshot smoke set.
 - Before building `x8`, measure whether `x4` is now IO/Dual ISO bound on representative clips. If `avg_dual_iso_full20_total_ms` dominates at reduced scale, `x8` may have diminishing returns unless more work can move before or inside the early downsample route.
+
+## 2026-06-03 - Early x8 reduced-Bayer playback prototype
+
+### Verified locally
+
+- Implemented a prototype x8 playback path that moves reduction before LLRawProc/Dual ISO and before debayer for compatible receipts:
+  - `src/processing/playback_downsample.[ch]`: new `pl_downsample_bayer_to_bayer_8x()` Bayer-domain preview kernel.
+  - `src/mlv/video_mlv.c`: new x8 full-XY path records telemetry as `phase4b_path=8` / `x8-full-xy-pre-recon`, then runs LLRawProc and debayer on the reduced Bayer buffer.
+  - `platform/qt/RenderFrameThread.cpp` and `platform/qt/MainWindow.cpp`: x8 telemetry labels and smoke-log fields.
+  - `tests/pipeline/test_dual_iso_pipeline.cpp`: x8 path, kill-switch, HQ mean23, and kernel coverage.
+- Focused pipeline tests passed:
+  - `pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B*`
+  - `[SUMMARY] tests=139 assertions=504 skipped=0 failed=0`
+- Rebuilt the user-facing release tree:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03 17:06:47 -05:00`, `Length=9020928`, `SHA256=1B4F0A3497703098BBBA2E22A60BA9FD2B042DFDDBBA87E9ECA092B72EF2ADA4`
+- Screenshot-backed GUI smoke on `C:/temp/MLV/M16-1327.MLV` with an x8-compatible Dual ISO HQ receipt validated the new path:
+  - Artifact: `.claude-state/profiling/20260603-playback-scale-x8-early/scale8-early-hqmean23-enabled/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - All 422 presented frame telemetry lines reported `phase4b_path=8` / `phase4b_path_label=x8-full-xy-pre-recon`.
+  - `GUI FPS=76.0`, `smoke presented FPS=13.250`, `timeline FPS=23.360`
+  - `avg_render_total_ms=68.187` (`14.666 FPS-equivalent`)
+  - `avg_llrawproc_total_ms=11.135` (`89.807 FPS-equivalent`)
+  - `avg_llrawproc_dual_iso_ms=11.126` (`89.879 FPS-equivalent`)
+  - `avg_debayered_frame_ms=1.175` (`851.064 FPS-equivalent`)
+  - `avg_processed16_ms=46.431` (`21.537 FPS-equivalent`)
+  - `avg_processed8_ms=50.941` (`19.631 FPS-equivalent`)
+  - `avg_playback_scale_ms=3.412` (`293.083 FPS-equivalent`)
+  - `avg_raw_uint16_ms=20.922` (`47.796 FPS-equivalent`)
+  - `avg_raw_decompress_ms=16.874` (`59.263 FPS-equivalent`)
+  - Presented screenshot: `.claude-state/profiling/20260603-playback-scale-x8-early/scale8-early-hqmean23-enabled/screenshots/M16-1327.png`, `SHA256=156BA11EE5EA3492D2C61AFEAEAE923072097067405808AE1F620FC6D8A2C894`
+  - FPS proof crop: `.claude-state/profiling/20260603-playback-scale-x8-early/scale8-early-hqmean23-enabled/screenshots/M16-1327-fps-status.png`, `SHA256=4A4BF5504565A7EB4F8A424C8E8FBE7C2EB6F825014298C956BD6EE0135FF0B4`
+  - Presented-frame aspect evidence: mode `neutral-presented-frame`, `width=1485`, `height=1865`, `aspect=0.796247`, `stretch_x=1.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=0`.
+
+### Cross-checked from prior analysis
+
+- This confirms the Premiere-style idea can apply here, but only once the reduction is moved early enough. The older x8 fallback still ran expensive work at full resolution and then scaled later; the new path reduces Bayer first, then runs Dual ISO and debayer on the preview-sized buffer.
+- The path intentionally permits HQ mean23 at x8 because explicit x8 preview is a user-selected quality/performance tradeoff. The x4 path keeps its earlier quality-first guard.
+
+### Needs runtime profiling
+
+- The prototype still decodes the full raw frame before reduction. It cuts LLRawProc/Dual ISO/debayer/processing cost, but not LJ92 decode or raw I/O cost.
+- x8 is visibly coarse and should be treated as deep preview, not a color/detail oracle.
+- Next opportunities, ranked:
+  - High impact / medium effort: expose x8 in UI/preferences and make the active/fallback status obvious.
+  - High impact / high effort: investigate decode-aware or tile-aware reduced preview so full raw decode is not always paid before x8.
+  - Medium impact / low effort: add route/fallback telemetry for why x8 is rejected, especially focus pixels, bad pixels, vertical stripes, pattern noise, and dimension alignment.
+  - Medium impact / medium effort: add x2/x4 policy cleanup so users get a predictable "performance preview" mode versus a "quality preview" mode.

@@ -167,15 +167,16 @@ double getMlvLastProcessed8TotalMilliseconds(void);
 int getMlvLastProcessed8DirectPathActive(void);
 int getMlvLastProcessed8PrefetchHit(void);
 
-/* Phase 4B-v2/v3 telemetry — for parity tests and diagnostics. Returns the
+/* Phase 4B-v2/v3/v4 telemetry — for parity tests and diagnostics. Returns the
  * path taken on the most recent v2 entry on the calling thread:
+ *   8 = v4 x8 full-XY pre-recon (Y-cropped if necessary)
  *   3 = v3 full-XY pre-recon (Y-cropped if necessary)
  *   2 = v2 X-only pre-recon fallback
  *   0 = v2 entry not invoked / rejected before path selection. */
 int mlv_phase4bv2_last_path_taken(void);
-/* Number of source rows cropped from the bottom edge by the v3 Y-crop
- * wrapper on the most recent v2 entry on the calling thread. 0 if v3
- * wasn't taken or if the clip was already 16-Y-aligned. */
+/* Number of source rows cropped from the bottom edge by the v3/v4 Y-crop
+ * wrapper on the most recent v2 entry on the calling thread. 0 if no
+ * Y-cropped path was taken or if the clip was already path-aligned. */
 int mlv_phase4bv3_last_y_crop_rows(void);
 
 /* Test-only hook: clear cached Phase 4B env-var values so subsequent calls

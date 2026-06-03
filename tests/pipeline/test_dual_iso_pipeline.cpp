@@ -3674,7 +3674,7 @@ TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleTwoWithSafeFallback)
     ASSERT_TRUE(psnr > 16.0);
 }
 
-TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleEightWithSafeFallback)
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightFallsBackWhenReceiptNeedsFullResCoordinates)
 {
     MlvPipelineFixture fixture;
     QString error_message;
@@ -3704,6 +3704,96 @@ TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleEightWithSafeFallback)
     ASSERT_EQ(golden.size(), got.size());
     const double psnr = phase4b::psnrRgb8(got, golden);
     ASSERT_TRUE(psnr > 16.0);
+}
+
+TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYWhenReceiptCompatible)
+{
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_PHASE4BV4_X8");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 16) != 0 || full_h < 32) {
+        return;
+    }
+
+    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
+    ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
+
+    const int expected_crop = full_h - (full_h / 32) * 32;
+    ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+}
+
+TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYInHqMean23)
+{
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_PHASE4BV4_X8");
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+    llrpSetDualIsoPlaybackForceMean23(fixture.video(), 1);
+    ASSERT_EQ(1, llrpGetDualIsoPlaybackForceMean23(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 16) != 0 || full_h < 32) {
+        return;
+    }
+
+    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
+    ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+}
+
+TEST(DualIsoPipeline, Phase4Bv4_X8KillSwitchFallsBackToPostRecon)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_DISABLE_PHASE4BV4_X8", "1");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if (full_w < 8 || full_h < 8) {
+        MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_PHASE4BV4_X8");
+        mlv_phase4bv_reset_env_cache_for_testing();
+        return;
+    }
+
+    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
+    const int active_scale = fixture.video()->playback_scale_factor_active;
+    const int path_taken = mlv_phase4bv2_last_path_taken();
+
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_PHASE4BV4_X8");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
+    ASSERT_EQ(8, active_scale);
+    ASSERT_EQ(0, path_taken);
 }
 
 /* Test (d): non-dual-ISO scale=2 stays at scale=2. */
@@ -4003,6 +4093,63 @@ TEST(DualIsoPipeline, Phase4Bv2_BayerToBayer4xRejectsMisalignedHeight)
     const int rc = pl_downsample_bayer_to_bayer_4x(bayer_in.data(), in_w, in_h,
                                                     bayer_out.data(), &out_w, &out_h, 1);
     ASSERT_TRUE(rc != 0);
+}
+
+TEST(DualIsoPipeline, Phase4Bv4_BayerToBayer8xPreserves4RowPatternAndAveragesColorPairs)
+{
+    const int in_w = 64;
+    const int in_h = 64;
+    std::vector<uint16_t> bayer_in(static_cast<std::size_t>(in_w) * in_h, 0);
+    for (int y = 0; y < in_h; ++y) {
+        for (int x = 0; x < in_w; ++x) {
+            bayer_in[static_cast<std::size_t>(y) * in_w + x] =
+                static_cast<uint16_t>(100u * y + x);
+        }
+    }
+
+    const int expected_out_w = in_w / 8;
+    const int expected_out_h = in_h / 8;
+    std::vector<uint16_t> bayer_out(static_cast<std::size_t>(expected_out_w) * expected_out_h, 0);
+    int out_w = 0, out_h = 0;
+    const int rc = pl_downsample_bayer_to_bayer_8x(bayer_in.data(), in_w, in_h,
+                                                    bayer_out.data(), &out_w, &out_h, 1);
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ(expected_out_w, out_w);
+    ASSERT_EQ(expected_out_h, out_h);
+
+    for (int yo = 0; yo < out_h; ++yo) {
+        const int src_y = (yo / 4) * 32 + (yo & 3);
+        for (int xo = 0; xo + 1 < out_w; xo += 2) {
+            const int xs = xo * 8;
+            const uint32_t even_sum =
+                bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 0]
+                + bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 2]
+                + bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 4]
+                + bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 6];
+            const uint32_t odd_sum =
+                bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 1]
+                + bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 3]
+                + bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 5]
+                + bayer_in[static_cast<std::size_t>(src_y) * in_w + xs + 7];
+
+            ASSERT_EQ(static_cast<uint16_t>(even_sum >> 2),
+                      bayer_out[static_cast<std::size_t>(yo) * out_w + xo]);
+            ASSERT_EQ(static_cast<uint16_t>(odd_sum >> 2),
+                      bayer_out[static_cast<std::size_t>(yo) * out_w + xo + 1]);
+        }
+    }
+}
+
+TEST(DualIsoPipeline, Phase4Bv4_BayerToBayer8xRejectsMisalignedDimensions)
+{
+    std::vector<uint16_t> input(static_cast<std::size_t>(64) * 64, 1000);
+    std::vector<uint16_t> output(static_cast<std::size_t>(64) * 64, 0);
+    int out_w = 0, out_h = 0;
+
+    ASSERT_TRUE(pl_downsample_bayer_to_bayer_8x(input.data(), 24, 64,
+                                                output.data(), &out_w, &out_h, 1) != 0);
+    ASSERT_TRUE(pl_downsample_bayer_to_bayer_8x(input.data(), 64, 48,
+                                                output.data(), &out_w, &out_h, 1) != 0);
 }
 
 /* Test (e): AVX2 byte-identity vs scalar at scale=4 + dual ISO HQ. */

@@ -16226,6 +16226,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processed16_to_8bit_ms" );
     const double playbackScaleMs =
         telemetryDoubleValue( timing, "render_thread_playback_scale_ms" );
+    const int phase4bPath =
+        telemetryIntValue( timing, "render_thread_phase4b_path" );
+    const QString phase4bPathLabel =
+        timing.value( QStringLiteral("render_thread_phase4b_path_label") ).toString();
     const int queuedPlaybackDrops =
         telemetryIntValue( timing, "render_thread_queued_playback_drops_before_start" );
     const double borrowedPreparedRgb8Bytes =
@@ -16599,7 +16603,7 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "processed16_to_8bit_ms=%22 playback_scale_ms=%23 "
                    "draw_image_ms=%24 draw_present_ms=%25 draw_advance_ms=%26 "
                    "draw_scopes_ms=%27 direct8=%28 processed8_prefetch=%29 "
-                   "raw_prefetch=%30" )
+                   "raw_prefetch=%30 phase4b_path=%31 phase4b_path_label=%32" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( rawUint16Ms, 0, 'f', 3 )
@@ -16629,7 +16633,9 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( drawScopesMs, 0, 'f', 3 )
                    .arg( bool01( telemetryBoolValue( timing, "processed8_direct_path_active" ) ) )
                    .arg( bool01( telemetryBoolValue( timing, "processed8_prefetch_hit" ) ) )
-                   .arg( bool01( telemetryBoolValue( timing, "raw_uint16_prefetch_hit" ) ) );
+                   .arg( bool01( telemetryBoolValue( timing, "raw_uint16_prefetch_hit" ) ) )
+                   .arg( phase4bPath )
+                   .arg( phase4bPathLabel );
         if( dualIsoFull20Valid )
         {
             qInfo().noquote()
