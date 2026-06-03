@@ -521,6 +521,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_squeeze_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_rawdata_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_setup_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_create_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_join_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_total_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_max_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_count")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_postprocess_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_grayscale_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_init_ms")));
@@ -608,6 +614,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_squeeze_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_rawdata_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_setup_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_create_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_join_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_total_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_max_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_count")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_postprocess_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_grayscale_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_init_ms")).toDouble() >= 0.0);

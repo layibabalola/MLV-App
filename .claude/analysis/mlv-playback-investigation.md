@@ -12796,3 +12796,62 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Do not retry the same actual-interpolation row-cache specialization. If actual interpolation is revisited, try a narrower arithmetic/tap helper change with a direct before/after render hash guard.
 - The next higher-impact AMaZE turn should split or instrument demosaic worker time before rewriting it, because the retained warm baseline still has `dual_iso_full20_interp_amaze_demosaic_ms=47.400` (`21.097 FPS-equivalent`).
+
+## 2026-06-03 - AMaZE demosaic worker timing split
+
+### Verified locally
+
+- I added AMaZE demosaic timing split fields to `dualiso_full20bit_timing_t` and profile telemetry:
+  - `dual_iso_full20_interp_amaze_demosaic_setup_ms`
+  - `dual_iso_full20_interp_amaze_demosaic_create_ms`
+  - `dual_iso_full20_interp_amaze_demosaic_join_ms`
+  - `dual_iso_full20_interp_amaze_demosaic_worker_total_ms`
+  - `dual_iso_full20_interp_amaze_demosaic_worker_max_ms`
+  - `dual_iso_full20_interp_amaze_demosaic_worker_count`
+- The code path is telemetry-only: `src/mlv/llrawproc/dualiso.c` now wraps each AMaZE demosaic worker in timing, records setup/create/join wall time around the existing pthread flow, and does not change AMaZE pixel math.
+- `platform/qt/RenderFrameThread.cpp` exports the new fields into per-frame stage telemetry, and `tests/console/test_clip_golden.cpp` now asserts they exist and are non-negative in headless playback profile JSON.
+- I also clarified GUI smoke output by adding `playbackFps.visibleBottomLeftGuiStatusText` and `playbackFps.visibleBottomLeftGuiFps` as aliases for the FPS label visible in the full-window `screenshot.windowCapture`. The old `screenshotGuiStatusText` / `screenshotGuiStatusValue` fields remain.
+- User-facing release build completed successfully after the source change:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03T05:36:29.6612510-05:00`
+  - `Length=8993792`
+  - `SHA256=90D7F037FADBD41E9070AEC14A6A01435CA02FB232F0ABD9FFE3AD8B6485AAF0`
+- Focused console validation passed against the rebuilt release executable:
+  - `console_tests.exe --gtest_filter=ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+  - `85` tests, `595` assertions, `0` failures
+- Refreshed large Dual ISO HQ receipt AMaZE profiles:
+  - baseline: `.claude-state/profiling/20260603-amaze-followup/large_dual_iso_hq_receipt_t4_scale4_current16.json`
+  - current run 1: `.claude-state/profiling/20260603-amaze-demosaic-worker-split/large_dual_iso_hq_receipt_t4_split16_current.json`
+  - current run 2: `.claude-state/profiling/20260603-amaze-demosaic-worker-split/large_dual_iso_hq_receipt_t4_split16_current_r2.json`
+- Warm-frame timing, skipping the first frame:
+  - Baseline `render_thread_work_ms=173.000` (`5.780 FPS-equivalent`), `llrawproc_ms=151.133` (`6.617 FPS-equivalent`), `dual_iso_full20_interp_amaze_ms=105.533` (`9.476 FPS-equivalent`), `dual_iso_full20_interp_amaze_demosaic_ms=47.400` (`21.097 FPS-equivalent`).
+  - Current run 1 was noisy/slower: `render_thread_work_ms=205.067` (`4.876 FPS-equivalent`), `llrawproc_ms=187.267` (`5.340 FPS-equivalent`), `dual_iso_full20_interp_amaze_ms=129.267` (`7.736 FPS-equivalent`), `dual_iso_full20_interp_amaze_demosaic_ms=54.867` (`18.226 FPS-equivalent`).
+  - Current run 2 was close to baseline: `render_thread_work_ms=183.667` (`5.445 FPS-equivalent`), `llrawproc_ms=166.400` (`6.010 FPS-equivalent`), `dual_iso_full20_interp_amaze_ms=112.800` (`8.865 FPS-equivalent`), `dual_iso_full20_interp_amaze_demosaic_ms=47.067` (`21.247 FPS-equivalent`).
+- The new split in current run 2 shows wrapper overhead is not the bottleneck:
+  - `dual_iso_full20_interp_amaze_demosaic_setup_ms=0.000`
+  - `dual_iso_full20_interp_amaze_demosaic_create_ms=0.200` (`4999.965 FPS-equivalent`)
+  - `dual_iso_full20_interp_amaze_demosaic_join_ms=46.867` (`21.337 FPS-equivalent`)
+  - `dual_iso_full20_interp_amaze_demosaic_worker_total_ms=167.600` (`5.967 FPS-equivalent`, parallel summed worker time, not wall FPS)
+  - `dual_iso_full20_interp_amaze_demosaic_worker_max_ms=46.533` (`21.490 FPS-equivalent`)
+  - `dual_iso_full20_interp_amaze_demosaic_worker_count=4.000`
+- Screenshot-backed GUI smoke passed on `C:\temp\MLV\M16-1327.MLV` using the rebuilt release executable:
+  - result JSON: `.claude-state/profiling/20260603-amaze-demosaic-worker-split/m16-smoke-current/M16-1327.json`
+  - `validation.ok=true`
+  - `visibleBottomLeftGuiFps=0.9` / `visibleBottomLeftGuiStatusText="Playback: 0.9 fps"`
+  - `smokePresentedFps=0.707`
+  - `smokeTimelineFps=19.400`
+  - presented-frame screenshot: `.claude-state/profiling/20260603-amaze-demosaic-worker-split/m16-smoke-current/screenshots/M16-1327.png`, `2555x1068`, aspect `2.392322`, `SHA256=A7DE468340E43AE514BADCB86DFF0D222C869091E76C6D88E4E6B183E9431BB9`
+  - full-window screenshot: `.claude-state/profiling/20260603-amaze-demosaic-worker-split/m16-smoke-current/screenshots/M16-1327-window.png`, `3158x2099`, `SHA256=E2926DF55560A1353E82A4F33C134378D00FACC376BD8F70517658B515B8CEBE`
+- Visual inspection of the current full-window screenshot confirmed the bottom-left `Playback: 0.9 fps` label is visible. Visual inspection of the presented-frame screenshot showed the expected de-squeezed wide M16 frame and no obvious hue flip, channel swap, or severe color corruption.
+
+### Cross-checked from prior analysis
+
+- Earlier "FPS-equivalent" numbers beside stage timings remain `1000 / ms` and are not the same as GUI-visible FPS. Future reports should use `visibleBottomLeftGuiFps` when referring to the bottom-left label.
+- The retained AMaZE baseline already identified `dual_iso_full20_interp_amaze_demosaic_ms` as the next major seam after the sparse mixed edge-direction win and the rejected actual-interpolation row-cache experiment.
+- The new split shows `join_ms` nearly equals `worker_max_ms`, while setup/create are near zero. That means the remaining demosaic wall time is spent inside the worker `demosaic(...)` compute itself, not in pthread orchestration.
+
+### Needs runtime profiling
+
+- Next optimization work should instrument inside `src/debayer/amaze_demosaic.c` / the AMaZE `demosaic(...)` worker body, or run a focused thread-count/chunk-balance sweep using the new worker max/total/count fields.
+- Because current run 1 and current run 2 differed materially, repeat profile comparisons before calling any small AMaZE demosaic change a win or regression.
+- Keep reporting four rate concepts separately: `visibleBottomLeftGuiFps`, `smokePresentedFps`, `smokeTimelineFps`, and per-stage FPS-equivalent.

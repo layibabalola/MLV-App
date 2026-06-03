@@ -2768,9 +2768,18 @@ static inline int edge_interp(float ** plane, int * squeezed, int * raw2ev, int 
     return pi;
 }
 
+typedef struct
+{
+    amazeinfo_t* info;
+    double* elapsed_ms;
+} amaze_demosaic_thread_arg_t;
+
 static void* demosaic_wrapper(void* arg) {
-    amazeinfo_t* info = (amazeinfo_t*)arg;
-    demosaic(info);
+    amaze_demosaic_thread_arg_t* thread_arg = (amaze_demosaic_thread_arg_t*)arg;
+    double start = mlv_stage_timing_now();
+    demosaic(thread_arg->info);
+    if (thread_arg->elapsed_ms)
+        *thread_arg->elapsed_ms = dualiso_debug_elapsed_ms(start);
     return NULL;
 }
 
@@ -2876,7 +2885,8 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         dualiso_debug_elapsed_ms(amaze_stage_start);
 
     // Multithreaded debayer
-    amaze_stage_start = mlv_stage_timing_now();
+    double demosaic_stage_start = mlv_stage_timing_now();
+    amaze_stage_start = demosaic_stage_start;
     int* startchunk_y = scratch->amaze_startchunk_y;
     int* endchunk_y = scratch->amaze_endchunk_y;
 
@@ -2897,7 +2907,16 @@ static inline void amaze_interpolate(struct raw_info raw_info,
 
     pthread_t* thread_id = (pthread_t*)scratch->amaze_thread_id;
     amazeinfo_t* amaze_arguments = (amazeinfo_t*)scratch->amaze_arguments;
+    double demosaic_worker_ms[threads];
+    amaze_demosaic_thread_arg_t demosaic_thread_args[threads];
 
+    for (int thread = 0; thread < threads; ++thread) {
+        demosaic_worker_ms[thread] = 0.0;
+    }
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_setup_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
+
+    amaze_stage_start = mlv_stage_timing_now();
     for (int thread = 0; thread < threads; ++thread) {
         amaze_arguments[thread] = (amazeinfo_t) {
             rawData,
@@ -2909,15 +2928,38 @@ static inline void amaze_interpolate(struct raw_info raw_info,
             0,
             0
         };
-        
-        pthread_create(&thread_id[thread], NULL, demosaic_wrapper, &amaze_arguments[thread]);
-    }
+        demosaic_thread_args[thread] = (amaze_demosaic_thread_arg_t) {
+            &amaze_arguments[thread],
+            &demosaic_worker_ms[thread]
+        };
 
+        pthread_create(&thread_id[thread], NULL, demosaic_wrapper, &demosaic_thread_args[thread]);
+    }
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_create_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
+
+    amaze_stage_start = mlv_stage_timing_now();
     for (int thread = 0; thread < threads; ++thread) {
         pthread_join(thread_id[thread], NULL);
     }
-    g_dualiso_full20bit_timing.interp_amaze_demosaic_ms +=
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_join_ms +=
         dualiso_debug_elapsed_ms(amaze_stage_start);
+
+    double demosaic_worker_total_ms = 0.0;
+    double demosaic_worker_max_ms = 0.0;
+    for (int thread = 0; thread < threads; ++thread) {
+        demosaic_worker_total_ms += demosaic_worker_ms[thread];
+        if (demosaic_worker_ms[thread] > demosaic_worker_max_ms)
+            demosaic_worker_max_ms = demosaic_worker_ms[thread];
+    }
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_worker_total_ms +=
+        demosaic_worker_total_ms;
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_worker_max_ms +=
+        demosaic_worker_max_ms;
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_worker_count +=
+        threads;
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_ms +=
+        dualiso_debug_elapsed_ms(demosaic_stage_start);
 
     /* undo green channel scaling and clamp the other channels */
     amaze_stage_start = mlv_stage_timing_now();

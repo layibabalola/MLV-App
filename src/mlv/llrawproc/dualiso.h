@@ -154,6 +154,12 @@ typedef struct
     double interp_amaze_squeeze_ms;
     double interp_amaze_rawdata_ms;
     double interp_amaze_demosaic_ms;
+    double interp_amaze_demosaic_setup_ms;
+    double interp_amaze_demosaic_create_ms;
+    double interp_amaze_demosaic_join_ms;
+    double interp_amaze_demosaic_worker_total_ms;
+    double interp_amaze_demosaic_worker_max_ms;
+    double interp_amaze_demosaic_worker_count;
     double interp_amaze_postprocess_ms;
     double interp_amaze_grayscale_ms;
     double interp_amaze_edge_init_ms;
