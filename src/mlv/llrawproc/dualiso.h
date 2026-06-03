@@ -206,6 +206,12 @@ typedef struct
     double mix_chroma_halfres_center_use_average_count;
     double mix_chroma_halfres_center_choose_ev_lt_eh_count;
     double mix_alias_map_ms;
+    double mix_alias_map_setup_ms;
+    double mix_alias_map_init_ms;
+    double mix_alias_map_copy_ms;
+    double mix_alias_map_filter_ms;
+    double mix_alias_map_gaussian_ms;
+    double mix_alias_map_grayscale_ms;
     double mix_overexposed_ms;
     double final_blend_setup_ms;
     double final_blend_row_kernel_ms;
