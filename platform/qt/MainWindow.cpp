@@ -930,8 +930,8 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 
 static QString mlvAppUpdateReleasesUrl()
 {
-    // This fork should compare against fork releases, not upstream tags we may already supersede.
-    return QStringLiteral("https://api.github.com/repos/layibabalola/MLV-App/releases");
+    // Watch upstream releases so the fork gets a useful signal when there is new work to merge.
+    return QStringLiteral("https://api.github.com/repos/ilia3101/MLV-App/releases");
 }
 
 #define FACTOR_DS       22.5
