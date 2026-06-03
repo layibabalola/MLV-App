@@ -719,6 +719,9 @@ $cpuSummaryLine = $recentLines |
 $processingDetailSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.processing_detail_summary*" } |
     Select-Object -Last 1
+$debayerDetailSummaryLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.debayer_detail_summary*" } |
+    Select-Object -Last 1
 $rbfDetailSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.rbf_detail_summary*" } |
     Select-Object -Last 1
@@ -753,6 +756,7 @@ $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $play
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
 $cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
 $processingDetailSummary = if ($processingDetailSummaryLine) { Convert-PlaybackLogLineToObject $processingDetailSummaryLine } else { $null }
+$debayerDetailSummary = if ($debayerDetailSummaryLine) { Convert-PlaybackLogLineToObject $debayerDetailSummaryLine } else { $null }
 $rbfDetailSummary = if ($rbfDetailSummaryLine) { Convert-PlaybackLogLineToObject $rbfDetailSummaryLine } else { $null }
 $dualIsoFull20Summary = if ($dualIsoSummaryLine) { Convert-PlaybackLogLineToObject $dualIsoSummaryLine } else { $null }
 $dualIsoMixChromaSummary = if ($dualIsoMixChromaSummaryLine) { Convert-PlaybackLogLineToObject $dualIsoMixChromaSummaryLine } else { $null }
@@ -934,6 +938,7 @@ $result = [pscustomobject]@{
         summary = $playbackSummary
         cpuSummary = $cpuSummary
         processingDetailSummary = $processingDetailSummary
+        debayerDetailSummary = $debayerDetailSummary
         rbfDetailSummary = $rbfDetailSummary
         dualIsoFull20Summary = $dualIsoFull20Summary
         dualIsoMixChromaSummary = $dualIsoMixChromaSummary
@@ -951,6 +956,7 @@ $result = [pscustomobject]@{
             summary = $summaryLine
             cpuSummary = $cpuSummaryLine
             processingDetailSummary = $processingDetailSummaryLine
+            debayerDetailSummary = $debayerDetailSummaryLine
             rbfDetailSummary = $rbfDetailSummaryLine
             dualIsoFull20Summary = $dualIsoSummaryLine
             dualIsoMixChromaSummary = $dualIsoMixChromaSummaryLine

@@ -15744,6 +15744,11 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeLlrawprocOtherSumMs = 0.0;
     m_playbackSmokeDebayeredFrameSumMs = 0.0;
     m_playbackSmokeDebayerExclusiveSumMs = 0.0;
+    m_playbackSmokeDebayerWbPrepareSumMs = 0.0;
+    m_playbackSmokeDebayerCaSumMs = 0.0;
+    m_playbackSmokeDebayerKernelSumMs = 0.0;
+    m_playbackSmokeDebayerWbUndoSumMs = 0.0;
+    m_playbackSmokeDebayerPipelineOtherSumMs = 0.0;
     m_playbackSmokeProcessingSumMs = 0.0;
     m_playbackSmokeProcessingSetupSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsPrepSumMs = 0.0;
@@ -15843,6 +15848,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDualIsoFull20LastThreads = 0;
     m_playbackSmokeDualIsoFull20LastAliasMap = false;
     m_playbackSmokeDualIsoFull20LastFullres = false;
+    m_playbackSmokeLastDebayerEngineMode = -1;
+    m_playbackSmokeDebayerBasicU16Avx2AvailableFrames = 0;
+    m_playbackSmokeDebayerBasicU16Avx2UsedFrames = 0;
     m_playbackSmokeProcessed8PrefetchHits = 0;
     m_playbackSmokeRawPrefetchHits = 0;
     m_playbackSmokeQueuedPlaybackDropSum = 0;
@@ -16106,6 +16114,25 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "debayered_frame_ms" );
     const double debayerExclusiveMs =
         telemetryDoubleValue( timing, "debayer_exclusive_ms" );
+    const bool hasDebayerEngineMode =
+        timing.contains( QStringLiteral("debayer_engine_mode") );
+    const int debayerEngineMode = hasDebayerEngineMode
+        ? telemetryIntValue( timing, "debayer_engine_mode" )
+        : -1;
+    const bool debayerBasicU16Avx2Available =
+        telemetryBoolValue( timing, "debayer_basic_u16_avx2_available" );
+    const bool debayerBasicU16Avx2Used =
+        telemetryBoolValue( timing, "debayer_basic_u16_avx2_used" );
+    const double debayerWbPrepareMs =
+        telemetryDoubleValue( timing, "debayer_wb_prepare_ms" );
+    const double debayerCaMs =
+        telemetryDoubleValue( timing, "debayer_ca_ms" );
+    const double debayerKernelMs =
+        telemetryDoubleValue( timing, "debayer_kernel_ms" );
+    const double debayerWbUndoMs =
+        telemetryDoubleValue( timing, "debayer_wb_undo_ms" );
+    const double debayerPipelineOtherMs =
+        telemetryDoubleValue( timing, "debayer_pipeline_other_ms" );
     const double processingMs =
         telemetryDoubleValue( timing, "processing_ms" );
     const double processingSetupMs =
@@ -16287,6 +16314,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeLlrawprocOtherSumMs += llrawprocOtherMs;
     m_playbackSmokeDebayeredFrameSumMs += debayeredFrameMs;
     m_playbackSmokeDebayerExclusiveSumMs += debayerExclusiveMs;
+    m_playbackSmokeDebayerWbPrepareSumMs += debayerWbPrepareMs;
+    m_playbackSmokeDebayerCaSumMs += debayerCaMs;
+    m_playbackSmokeDebayerKernelSumMs += debayerKernelMs;
+    m_playbackSmokeDebayerWbUndoSumMs += debayerWbUndoMs;
+    m_playbackSmokeDebayerPipelineOtherSumMs += debayerPipelineOtherMs;
+    if( hasDebayerEngineMode )
+        m_playbackSmokeLastDebayerEngineMode = debayerEngineMode;
+    if( debayerBasicU16Avx2Available )
+        ++m_playbackSmokeDebayerBasicU16Avx2AvailableFrames;
+    if( debayerBasicU16Avx2Used )
+        ++m_playbackSmokeDebayerBasicU16Avx2UsedFrames;
     m_playbackSmokeProcessingSumMs += processingMs;
     m_playbackSmokeProcessingSetupSumMs += processingSetupMs;
     m_playbackSmokeProcessingShadowsHighlightsPrepSumMs += processingShadowsHighlightsPrepMs;
@@ -17015,6 +17053,28 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeCurveSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeGradationSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs ), 0, 'f', 3 );
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.debayer_detail_summary session=%1 frames=%2 "
+               "avg_debayered_frame_ms=%3 avg_debayer_exclusive_ms=%4 "
+               "avg_debayer_wb_prepare_ms=%5 avg_debayer_ca_ms=%6 "
+               "avg_debayer_kernel_ms=%7 avg_debayer_wb_undo_ms=%8 "
+               "avg_debayer_pipeline_other_ms=%9 debayer_engine_mode_last=%10 "
+               "debayer_basic_u16_avx2_available_frames=%11 "
+               "debayer_basic_u16_avx2_used_frames=%12" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( m_playbackSmokePresentedFrames )
+               .arg( avgSmokeMs( m_playbackSmokeDebayeredFrameSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayerExclusiveSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayerWbPrepareSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayerCaSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayerKernelSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayerWbUndoSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeDebayerPipelineOtherSumMs ), 0, 'f', 3 )
+               .arg( m_playbackSmokeLastDebayerEngineMode )
+               .arg( m_playbackSmokeDebayerBasicU16Avx2AvailableFrames )
+               .arg( m_playbackSmokeDebayerBasicU16Avx2UsedFrames );
 
     qInfo().noquote()
         << QStringLiteral(

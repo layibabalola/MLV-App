@@ -14,6 +14,7 @@
 #include "ReconWorker.h"
 
 #include "../../src/batch/WorkerThreadCount.h"
+#include "../../src/debayer/debayer.h"
 #include "../../src/processing/raw_processing.h"
 #include "debug/FrameChecksum.h"
 #include "debug/StageTimingCsvSink.h"
@@ -2476,6 +2477,17 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       rawFloatConvertMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("debayer_exclusive_ms"),
                                       debayerExclusiveMs );
+    const int debayerEngineMode =
+        m_pMlvObject ? doesMlvAlwaysUseAmaze( m_pMlvObject ) : -1;
+    const bool debayerBasicU16Avx2Available =
+        debayerBasicU16Avx2Active() != 0;
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_engine_mode"),
+                                      debayerEngineMode );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_basic_u16_avx2_available"),
+                                      debayerBasicU16Avx2Available );
+    slot.stageTimingTelemetry.insert( QStringLiteral("debayer_basic_u16_avx2_used"),
+                                      debayerEngineMode == 0
+                                      && debayerBasicU16Avx2Available );
     slot.stageTimingTelemetry.insert( QStringLiteral("debayer_wb_prepare_ms"),
                                       debayerWbPrepareMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("debayer_ca_ms"),

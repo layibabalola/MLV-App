@@ -550,6 +550,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("debayered_frame_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("raw_float_convert_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("debayer_exclusive_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("debayer_engine_mode")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("debayer_basic_u16_avx2_available")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("debayer_basic_u16_avx2_used")));
         ASSERT_TRUE(sample.contains(QStringLiteral("debayer_wb_prepare_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("debayer_ca_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("debayer_kernel_ms")));
@@ -644,6 +647,9 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("debayered_frame_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("raw_float_convert_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("debayer_exclusive_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("debayer_engine_mode")).toInt() >= -1);
+        ASSERT_TRUE(sample.value(QStringLiteral("debayer_basic_u16_avx2_available")).isBool());
+        ASSERT_TRUE(sample.value(QStringLiteral("debayer_basic_u16_avx2_used")).isBool());
         ASSERT_TRUE(sample.value(QStringLiteral("debayer_wb_prepare_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("debayer_ca_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("debayer_kernel_ms")).toDouble() >= 0.0);
