@@ -13593,3 +13593,32 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Do not retry odd-dimension SH halfres RBF by edge-clamped ceil dimensions unless a new microbenchmark proves the downsample/RBF/upsample route beats fullres for the actual M16 frame geometry.
 - Next safer opportunity: add low-overhead route/substage telemetry for SH and processing-core time so the next source change targets the current dominant bucket instead of inferring from aggregate `avg_processing_shadows_highlights_prep_ms`.
 - Also worth profiling: current "processing core other" work after the accepted Dual ISO change, because the latest candidate regressions moved outside the narrow `final_blend` optimization surface.
+
+## 2026-06-03 - Playback scale strategy check
+
+### Verified locally
+
+- Premiere-style reduced-resolution playback already exists in the current app, with scale factors `x1`, `x2`, and `x4`.
+  - UI actions live in `platform/qt/MainWindow.ui`: `actionPlaybackScale1` (`x1`), `actionPlaybackScale2` (`x2`, half-resolution), and `actionPlaybackScale4` (`x4`, quarter-resolution).
+  - Qt handlers in `platform/qt/MainWindow.cpp` accept only scale overrides `0`, `1`, `2`, and `4`.
+  - The core playback contract in `src/mlv/video_mlv.h` and `src/mlv/video_mlv.c` normalizes playback scale to `1`, `2`, or `4`, and rejects non-divisible frame geometry.
+  - Downsample kernels in `src/processing/playback_downsample.[ch]` cover `2x` and `4x` Bayer/RGB playback paths; there is no `8x` kernel or UI action yet.
+- Screenshot-backed GUI smoke runs on `C:/temp/MLV/M16-1327.MLV` show the strategy materially improves preview speed:
+  - `x1` post-revert baseline: artifact `.claude-state/profiling/20260603-sh-odd-halfres/reverted-default/M16-1327-30s.json`; `GUI FPS=6.5`, `smoke presented FPS=6.324`, `timeline FPS=23.378`, `avg_render_work_ms=141.876` (`7.049 FPS-equivalent`), `avg_processed8_ms=140.328` (`7.126 FPS-equivalent`), `avg_processing_ms=60.124` (`16.632 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=27.771` (`36.009 FPS-equivalent`), `avg_processing_core_ms=32.328` (`30.933 FPS-equivalent`).
+  - Forced `x2`: artifact `.claude-state/profiling/20260603-playback-scale-strategy/scale2/M16-1327-30s.json`; `scale_request=2`, `scale_active=2`, `GUI FPS=8.6`, `smoke presented FPS=9.868`, `timeline FPS=23.211`, `avg_render_work_ms=78.245` (`12.780 FPS-equivalent`), `avg_processed8_ms=75.682` (`13.213 FPS-equivalent`), `avg_processing_ms=17.792` (`56.205 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=8.195` (`122.026 FPS-equivalent`), `avg_processing_core_ms=9.588` (`104.297 FPS-equivalent`), `avg_playback_scale_ms=2.362` (`423.370 FPS-equivalent`).
+  - Forced `x4`: artifact `.claude-state/profiling/20260603-playback-scale-strategy/scale4/M16-1327-30s.json`; `scale_request=4`, `scale_active=4`, `GUI FPS=8.3`, `smoke presented FPS=10.670`, `timeline FPS=23.312`, `avg_render_work_ms=75.038` (`13.326 FPS-equivalent`), `avg_processed8_ms=66.968` (`14.933 FPS-equivalent`), `avg_processing_ms=10.202` (`98.020 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=6.660` (`150.150 FPS-equivalent`), `avg_processing_core_ms=3.537` (`282.725 FPS-equivalent`), `avg_playback_scale_ms=7.953` (`125.739 FPS-equivalent`).
+  - Presented screenshot evidence:
+    - `x2`: `.claude-state/profiling/20260603-playback-scale-strategy/scale2/screenshots/M16-1327.png`, `SHA256=9330B59C1FE428E3EB16772A2DF200328A0C323A178B7342F0D7CA4C9373250B`; FPS crop `SHA256=8F1A90AC7C4FD12AF909209D7C3D7960BFAEC434A86280F71B554ACCCF1DBE7B`.
+    - `x4`: `.claude-state/profiling/20260603-playback-scale-strategy/scale4/screenshots/M16-1327.png`, `SHA256=ED9A3E08D6E256AC8D7CA99717FD7602E80E25BFD074041F4E53A27BD1FF3AE8`; FPS crop `SHA256=0AACEB3BC038E0939BD11B79AAB1EDDB89FCF24E80A09FB639D2CCADEEBA7902`.
+  - Aspect evidence for both `x2` and `x4` used presented playback stretch mode: `width=2555`, `height=1068`, `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Interpretation: reduced-resolution playback is the largest validated lever seen in this round. On M16-1327, `x4` improved smoke presented FPS from `6.324` to `10.670` and cut average render work from `141.876 ms` to `75.038 ms`; `x2` improved smoke presented FPS to `9.868` and cut average render work to `78.245 ms`.
+
+### Cross-checked from prior analysis
+
+- The previous odd-dimension SH halfres RBF candidate was a micro-optimization inside one processing bucket and regressed in live playback. The existing playback scale route is broader and already validated by the release GUI smoke harness.
+- `x4` does not remove Dual ISO cost entirely; `avg_dual_iso_full20_total_ms` stayed around the high 20s/low 30s in these runs. The biggest win comes from the smaller frame flowing through processing after the playback downsample step.
+
+### Needs runtime profiling
+
+- `x8` is not currently available. Adding it is feasible, but it is a feature change: update UI/actions/preferences, accept scale `8` in the Qt and core scale contract, add or compose `8x` downsample kernels, ensure cache/output dimensions and divisibility behavior are correct, extend pipeline tests, then run the M16 screenshot smoke set.
+- Before building `x8`, measure whether `x4` is now IO/Dual ISO bound on representative clips. If `avg_dual_iso_full20_total_ms` dominates at reduced scale, `x8` may have diminishing returns unless more work can move before or inside the early downsample route.
