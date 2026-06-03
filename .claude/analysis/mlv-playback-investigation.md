@@ -12402,3 +12402,40 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Next alias-map candidate should target `alias_map_fifth_largest_37_at(...)` / the filter loop first, preserving the exact fifth-largest-of-37 semantics and validating with `HQ_AliasMapAvx2ByteIdentity`.
 - If a filter rewrite is too risky, try smaller output-safe shapes first: fixed-cascade top5 insertion, row-local pointers, or a row-parallel loop shape before attempting a full AVX2 top-k kernel.
 - Rerun this substage profile after any filter candidate; keep the new telemetry fields until the alias-map residual stops being the dominant HQ scale-4 bucket.
+
+## 2026-06-03 - register-cascade top5 filter candidate is not kept; profiling runner became unreliable mid-pass
+
+### Verified locally
+
+- I tried the smallest suggested alias-map filter candidate in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c): replace the `uint16_t best[5]` array plus `while` insertion helper with five local `best0..best4` registers and a fixed strict-`>` compare cascade.
+- The candidate preserved the same 37 sample sites and the same strict duplicate ordering semantics on inspection, but it is **not kept** in the worktree.
+- Two early release profiles on the candidate completed and looked promising versus the prior substage baseline:
+  - `.claude-state/profiling/20260603-alias-filter-registers/large_dual_iso_hq_t4_scale4_register_top5_16.json`
+  - `.claude-state/profiling/20260603-alias-filter-registers/large_dual_iso_hq_t4_scale4_register_top5_repeat16.json`
+  - Skipping the first 3 cold frames, `dual_iso_full20_mix_alias_map_filter_ms` moved from the prior `12.000 avg / 12.000 median` to `10.154 avg / 11.000 median` and then `10.615 avg / 11.000 median`.
+  - The wider alias-map bucket also moved from `27.308 avg / 27.000 median` to `24.692 avg / 25.000 median` and then `22.385 avg / 23.000 median`.
+- After I added and then removed a test-only semantic guard experiment, app-backed profiling started timing out consistently:
+  - `.claude-state/profiling/20260603-alias-filter-registers/large_dual_iso_hq_t4_scale4_register_top5_final16.json.trace.log` stopped at `receipt-begin`.
+  - `.claude-state/profiling/20260603-alias-filter-registers/large_dual_iso_hq_t4_scale4_register_top5_final_retry16.json.trace.log` stopped at `receipt-begin`.
+  - `.claude-state/profiling/20260603-alias-filter-registers/large_dual_iso_hq_t4_scale4_register_top5_testhook_isolated16.json.trace.log` stopped at `receipt-begin`.
+  - A no-receipt large-clip smoke reached `render-begin frame=0` and then timed out.
+  - A restored-source tiny Dual ISO smoke still stopped at `receipt-begin`, so the later timeout state was not proven to be caused solely by the register-cascade helper.
+- I restored [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c) to the committed array/while helper, removed the temporary test-hook experiment, and rebuilt the user-facing release tree from clean HEAD:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/3/2026 12:27:22 AM`
+  - `Length=8964096`
+  - `SHA256=25ECA4FC0E2E09268C7B5A7E4F4202D5AE1F95D1D64EF12B115681C84F94C495`
+
+### Cross-checked from prior analysis
+
+- The earlier substage telemetry still identifies the scalar 37-sample filter as the next measured alias-map seam.
+- The register-cascade shape may still be worth revisiting only after the app-backed profile runner is healthy again, but the candidate should not be treated as accepted from the two early profiles alone.
+
+### Needs runtime profiling
+
+- First recover or isolate the app-backed `--profile-playback` timeout before attempting more source changes in this seam. A healthy smoke should complete both tiny and large receipt-backed runs before another candidate is trusted.
+- If the register-cascade candidate is retried, validate it in a fresh work block with:
+  - a focused semantic guard that does not perturb the release app,
+  - `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity`,
+  - app-backed `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`,
+  - and two stable large HQ scale-4 profiles from the final rebuilt executable.
