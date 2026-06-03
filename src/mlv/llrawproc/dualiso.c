@@ -1680,23 +1680,13 @@ static const double fullres_thr = 0.8;
 /* trial and error - too high = aliasing, too low = noisy */
 static const int ALIAS_MAP_MAX = 15000;
 
-static inline void alias_map_insert_top5(uint16_t value, uint16_t best[5])
-{
-    if (value > best[4])
-    {
-        int j = 4;
-        while (j > 0 && value > best[j - 1])
-        {
-            best[j] = best[j - 1];
-            --j;
-        }
-        best[j] = value;
-    }
-}
-
 static inline uint16_t alias_map_fifth_largest_37_at(const uint16_t * alias_map, int w, int x, int y)
 {
-    uint16_t best[5] = { 0, 0, 0, 0, 0 };
+    uint16_t best0 = 0;
+    uint16_t best1 = 0;
+    uint16_t best2 = 0;
+    uint16_t best3 = 0;
+    uint16_t best4 = 0;
 
     const uint16_t * ym6 = alias_map + (size_t)(y - 6) * (size_t)w;
     const uint16_t * ym4 = alias_map + (size_t)(y - 4) * (size_t)w;
@@ -1706,7 +1696,47 @@ static inline uint16_t alias_map_fifth_largest_37_at(const uint16_t * alias_map,
     const uint16_t * yp4 = alias_map + (size_t)(y + 4) * (size_t)w;
     const uint16_t * yp6 = alias_map + (size_t)(y + 6) * (size_t)w;
 
-#define ALIAS_MAP_TOP5(row, offset) alias_map_insert_top5((row)[x + (offset)], best)
+#define ALIAS_MAP_TOP5_VALUE(value) \
+    do { \
+        const uint16_t alias_value = (uint16_t)(value); \
+        if (alias_value > best4) \
+        { \
+            if (alias_value > best3) \
+            { \
+                best4 = best3; \
+                if (alias_value > best2) \
+                { \
+                    best3 = best2; \
+                    if (alias_value > best1) \
+                    { \
+                        best2 = best1; \
+                        if (alias_value > best0) \
+                        { \
+                            best1 = best0; \
+                            best0 = alias_value; \
+                        } \
+                        else \
+                        { \
+                            best1 = alias_value; \
+                        } \
+                    } \
+                    else \
+                    { \
+                        best2 = alias_value; \
+                    } \
+                } \
+                else \
+                { \
+                    best3 = alias_value; \
+                } \
+            } \
+            else \
+            { \
+                best4 = alias_value; \
+            } \
+        } \
+    } while (0)
+#define ALIAS_MAP_TOP5(row, offset) ALIAS_MAP_TOP5_VALUE((row)[x + (offset)])
                                                               ALIAS_MAP_TOP5(ym6, -2); ALIAS_MAP_TOP5(ym6,  0); ALIAS_MAP_TOP5(ym6,  2);
                                   ALIAS_MAP_TOP5(ym4, -4); ALIAS_MAP_TOP5(ym4, -2); ALIAS_MAP_TOP5(ym4,  0); ALIAS_MAP_TOP5(ym4,  2); ALIAS_MAP_TOP5(ym4,  4);
     ALIAS_MAP_TOP5(ym2, -6); ALIAS_MAP_TOP5(ym2, -4); ALIAS_MAP_TOP5(ym2, -2); ALIAS_MAP_TOP5(ym2,  0); ALIAS_MAP_TOP5(ym2,  2); ALIAS_MAP_TOP5(ym2,  4); ALIAS_MAP_TOP5(ym2,  6);
@@ -1715,8 +1745,9 @@ static inline uint16_t alias_map_fifth_largest_37_at(const uint16_t * alias_map,
                                   ALIAS_MAP_TOP5(yp4, -4); ALIAS_MAP_TOP5(yp4, -2); ALIAS_MAP_TOP5(yp4,  0); ALIAS_MAP_TOP5(yp4,  2); ALIAS_MAP_TOP5(yp4,  4);
                                                               ALIAS_MAP_TOP5(yp6, -2); ALIAS_MAP_TOP5(yp6,  0); ALIAS_MAP_TOP5(yp6,  2);
 #undef ALIAS_MAP_TOP5
+#undef ALIAS_MAP_TOP5_VALUE
 
-    return best[4];
+    return best4;
 }
 
 static void white_detect(struct raw_info raw_info, uint16_t * image_data, int* white_dark, int* white_bright, int * is_bright)

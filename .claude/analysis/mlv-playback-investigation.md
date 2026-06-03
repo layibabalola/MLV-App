@@ -12439,3 +12439,36 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity`,
   - app-backed `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`,
   - and two stable large HQ scale-4 profiles from the final rebuilt executable.
+
+## 2026-06-03 - Dual ISO alias-map register-cascade top5 filter is keeper-shaped after runner recovery
+
+### Verified locally
+
+- I retried the alias-map filter candidate in [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c) after the app-backed profile runner recovery. The helper still samples the same 37 alias-map positions and still uses strict `>` insertion semantics, but it now keeps the top five values in local `best0..best4` registers instead of a `uint16_t best[5]` array plus an inner `while` insertion loop.
+- I ran a standalone old/new semantic audit over 200,006 37-sample windows, including all-zero, duplicate-heavy, ascending, descending, and randomized `0..65530` values. The old array/while result and the new cascade result matched for every case.
+- I re-established the current v1.16 baseline with the large Dual ISO HQ receipt and explicit receipt-mode playback:
+  - `.claude-state/profiling/20260603-alias-filter-retry/large_dual_iso_hq_receipt_t4_scale4_baseline16.json`
+  - `dual_iso_full20_use_alias_map=true`, `render_thread_playback_scale_factor_effective=4`, `raw_uint16_prefetch_hit=false`, `threads=4`
+- Two rebuilt-release candidate profiles completed on the same fixture, receipt, frame count, scale, and thread count:
+  - `.claude-state/profiling/20260603-alias-filter-retry/large_dual_iso_hq_receipt_t4_scale4_register_top5_16.json`
+  - `.claude-state/profiling/20260603-alias-filter-retry/large_dual_iso_hq_receipt_t4_scale4_register_top5_repeat16.json`
+- Warm-frame comparison, skipping the first 3 cold frames, stayed positive despite expected host noise:
+  - `cadence_ms`: baseline `336.95 avg / 339.04 median`, candidates `312.57 / 305.77` and `318.13 / 319.58`
+  - `render_thread_work_ms`: baseline `333.38 avg / 336.00 median`, candidates `308.38 / 301.00` and `313.92 / 314.00`
+  - `dual_iso_full20_total_ms`: baseline `306.08 avg / 309.00 median`, candidates `281.69 / 274.00` and `288.62 / 290.00`
+  - `dual_iso_full20_mix_alias_map_filter_ms`: baseline `10.92 avg / 10.00 median`, candidates `9.46 / 9.00` and `10.38 / 10.00`
+- Validation:
+  - `git diff --check` reported only the repo's usual LF-to-CRLF warning for `src/mlv/llrawproc/dualiso.c`.
+  - Rebuilt the user-facing release tree successfully.
+  - Rebuilt `tests/build-ci-pipeline/release/pipeline_tests.exe`; `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity` passed with `0/12301632 pixels differ, max|d|=0`.
+  - Rebuilt `tests/build-ci-console/release/console_tests.exe`; `ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch` passed with 31 assertions against the rebuilt release executable after setting `MLVAPP_PROFILE_EXE`.
+
+### Cross-checked from prior analysis
+
+- The previous 2026-06-03 register-cascade pass had promising timing but was not kept because the profile runner became unreliable mid-pass. The runner has now completed tiny and large receipt-backed profiles again, so that prior blocker no longer applies.
+- The alias-map substage telemetry still points at the scalar top5 filter as the most direct default-quality alias-map seam. Init and gaussian remain meaningful but already have AVX2 coverage.
+
+### Needs runtime profiling
+
+- Keep the exact semantic guard and byte-identity gate around any future filter rewrite. The current cascade is small enough to keep; a full AVX2 top-k kernel would need a stronger dedicated parity test.
+- Run the same candidate on the user's real M16 clips with screenshot-backed visual smoke when available. The fixture plus byte-identity evidence is strong for output preservation on this code path, but it is not a full scene-color oracle.
