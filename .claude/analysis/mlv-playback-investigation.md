@@ -12671,3 +12671,56 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - demosaic worker-time reduction
   - actual edge-directed interpolation reduction
 - Before changing mixed-batch behavior, add or reuse byte-identity tests that compare the mixed-lane result against scalar AMaZE, because that seam is more correctness-sensitive than the all-skip bypass.
+
+## 2026-06-03 - AMaZE sparse mixed-batch edge-direction specialization
+
+### Verified locally
+
+- I corrected the visual-smoke interpretation before accepting this pass: the M16 smoke screenshots are presented playback frames, not neutral source-aspect oracles. `2555x1068` / aspect `2.392322` is correct when `visualQuality.aspectEvidence` reports `mode=presented-playback-stretch`, `stretch_x=3.0`, and `stretch_y=1.0`.
+- I specialized the AMaZE AVX2 edge-direction row kernel so mixed 8-lane batches with only one or two full-search lanes now write `d0` for skipped lanes and run the scalar 11-direction search only for those sparse full-search lanes. Denser mixed batches and all-full-search batches still use the existing vector path.
+- The valid comparison profile is:
+  - baseline: `.claude-state/profiling/20260603-amaze-density/large_dual_iso_hq_receipt_t4_scale4_amaze_density16_explicit_receipt_argsfixed.json`
+  - candidate: `.claude-state/profiling/20260603-amaze-mixed-sparse/large_dual_iso_hq_receipt_t4_scale4_sparse_mixed16.json`
+- Profile validity:
+  - `playback_debayer_request=receipt`
+  - `playback_processing_request=receipt`
+  - frame telemetry reports `dual_iso_full20_interp_method=0`
+  - density counters are unchanged between baseline and candidate, confirming the same predicate shape was measured.
+- All-frame average timing improved:
+  - `render_thread_work_ms`: `256.812` (`3.894 fps-equivalent`) -> `222.688` (`4.491 fps-equivalent`), `-13.3%`
+  - `llrawproc_ms`: `231.250` (`4.324 fps-equivalent`) -> `193.375` (`5.171 fps-equivalent`), `-16.4%`
+  - `dual_iso_full20_total_ms`: `227.875` (`4.388 fps-equivalent`) -> `190.250` (`5.256 fps-equivalent`), `-16.5%`
+  - `dual_iso_full20_interp_amaze_ms`: `154.313` (`6.480 fps-equivalent`) -> `123.438` (`8.101 fps-equivalent`), `-20.0%`
+  - `dual_iso_full20_interp_amaze_edge_direction_ms`: `42.313` (`23.634 fps-equivalent`) -> `23.062` (`43.360 fps-equivalent`), `-45.5%`
+  - `dual_iso_full20_interp_amaze_actual_interp_ms`: `27.938` (`35.794 fps-equivalent`) -> `26.313` (`38.005 fps-equivalent`), `-5.8%`
+  - `dual_iso_full20_interp_amaze_demosaic_ms`: `56.562` (`17.680 fps-equivalent`) -> `50.938` (`19.632 fps-equivalent`), `-9.9%`
+- Warm-frame average timing, skipping the first cold frame, also improved:
+  - `render_thread_work_ms`: `229.467` (`4.358 fps-equivalent`) -> `205.267` (`4.872 fps-equivalent`), `-10.5%`
+  - `llrawproc_ms`: `204.467` (`4.891 fps-equivalent`) -> `176.600` (`5.663 fps-equivalent`), `-13.6%`
+  - `dual_iso_full20_total_ms`: `203.267` (`4.920 fps-equivalent`) -> `175.267` (`5.706 fps-equivalent`), `-13.8%`
+  - `dual_iso_full20_interp_amaze_ms`: `143.933` (`6.948 fps-equivalent`) -> `117.200` (`8.532 fps-equivalent`), `-18.6%`
+  - `dual_iso_full20_interp_amaze_edge_direction_ms`: `43.067` (`23.220 fps-equivalent`) -> `23.733` (`42.135 fps-equivalent`), `-44.9%`
+  - `dual_iso_full20_interp_amaze_actual_interp_ms`: `28.333` (`35.294 fps-equivalent`) -> `26.867` (`37.221 fps-equivalent`), `-5.2%`
+  - `dual_iso_full20_interp_amaze_demosaic_ms`: `56.067` (`17.836 fps-equivalent`) -> `50.867` (`19.659 fps-equivalent`), `-9.3%`
+- I reran the standard M16 screenshot-backed visual smoke set and inspected the captured PNGs:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-mixed-sparse/m16-presented-frame-smoke/M16-1327/screenshots/M16-1327.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=3C83A85341EA68CEBBFBA7084865B97D7D8B18B65AC0CB85D3150945ED469A86`
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-mixed-sparse/m16-presented-frame-smoke/M16-1347/screenshots/M16-1347.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=0285DA09833F4379DB98DF4451E0D9B3B4551AFF8122CDF5217F8B8D62B1CFCA`
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-mixed-sparse/m16-presented-frame-smoke/M16-1446/screenshots/M16-1446.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=11CD59946D5C8A41832D1DCFA87C50FACC59D23218186534064C4BEF65D5AF21`
+- Visual inspection found the expected de-squeezed wide frame and no obvious channel swap, hue flip, severe color corruption, or harsh new artifact in the three M16 captures.
+- M16 smoke metrics with FPS-equivalent:
+  - `M16-1327`: `presented_fps=0.574`; `timeline_fps=15.695`; `avg_render_work_ms=1127.833` (`0.887 fps-equivalent`); `avg_llrawproc_ms=33.000` (`30.303 fps-equivalent`)
+  - `M16-1347`: `presented_fps=0.673`; `timeline_fps=20.404`; `avg_render_work_ms=1241.000` (`0.806 fps-equivalent`); `avg_llrawproc_ms=59.167` (`16.901 fps-equivalent`)
+  - `M16-1446`: `presented_fps=0.527`; `timeline_fps=15.721`; `avg_render_work_ms=1214.333` (`0.823 fps-equivalent`); `avg_llrawproc_ms=30.333` (`32.967 fps-equivalent`)
+- Focused validation passed on the rebuilt release tree before profiling:
+  - `pipeline_tests.exe --gtest_filter="DualIsoPipeline.PhaseE1_*:DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity"`: `127` tests, `0` failures
+  - `console_tests.exe --gtest_filter="ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson"` with `MLVAPP_PROFILE_EXE=platform/qt/build-release/release/MLVApp.exe`: `85` tests, `571` assertions, `0` failures
+
+### Cross-checked from prior analysis
+
+- The previous density run showed `74.178%` all-skip batches, `23.010%` mixed batches, and `2.813%` all-full-search batches. This pass targets only the sparse portion of the mixed-batch cost left after the all-skip bypass.
+- The M16 visual smoke set is still useful for presented playback and color-quality sanity, but its aspect judgment must always use `visualQuality.aspectEvidence` because active de-squeeze is intentional.
+
+### Needs runtime profiling
+
+- Repeat this sparse-mixed profile on additional real Dual ISO scenes if available. The fixture win is strong, but mixed-lane sparsity is scene-dependent.
+- Next likely AMaZE seams are demosaic worker time and actual edge-directed interpolation. Keep those in separate micro-branches with byte-identity tests because they are more image-math-sensitive than skipped-lane pruning.

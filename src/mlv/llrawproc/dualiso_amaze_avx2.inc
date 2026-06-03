@@ -121,6 +121,43 @@ static inline void amaze_store_8_bytes_avx2(uint8_t * out, __m256i v)
     _mm_storel_epi64((__m128i*)out, pack8);
 }
 
+__attribute__((target("avx2,fma")))
+static inline uint8_t amaze_edge_direction_scalar_fullsearch_avx2(
+    int x, int y, int w,
+    const uint32_t * gray,
+    const int32_t * raw2ev,
+    const int32_t * ack_x,
+    const int32_t * ack_y,
+    const int32_t * a_x,
+    const int32_t * a_y,
+    const int32_t * b_x,
+    const int32_t * b_y,
+    const int32_t * bck_x,
+    const int32_t * bck_y)
+{
+    enum { D0 = 5, NUM_DIR = 11, SEARCH = 5 };
+    int e_best = INT_MAX;
+    int d_best = D0;
+
+    for (int d = 0; d < NUM_DIR; d++) {
+        int e = 0;
+        for (int j = -SEARCH; j <= SEARCH; j++) {
+            int p1 = raw2ev[gray[x+ack_x[d]+j + (y+ack_y[d]) * w]];
+            int p2 = raw2ev[gray[x+a_x  [d]+j + (y+a_y  [d]) * w]];
+            int p3 = raw2ev[gray[x+b_x  [d]+j + (y+b_y  [d]) * w]];
+            int p4 = raw2ev[gray[x+bck_x[d]+j + (y+bck_y[d]) * w]];
+            int ad12 = p1 > p2 ? p1 - p2 : p2 - p1;
+            int ad23 = p2 > p3 ? p2 - p3 : p3 - p2;
+            int ad34 = p3 > p4 ? p3 - p4 : p4 - p3;
+            e += ad12 + ad23 + ad34;
+        }
+        e += kAmazeDiagPenalty[d];
+        if (e < e_best) { e_best = e; d_best = d; }
+    }
+
+    return (uint8_t)d_best;
+}
+
 /* ====================================================================== *
  * E1 — AMaZE edge-direction estimator inner row, AVX2 + FMA path.
  *
@@ -236,6 +273,25 @@ static void amaze_edge_direction_estimator_row_avx2(
             amaze_store_8_bytes_avx2(&edge_dir_row[x], v_d0);
             continue;
         }
+        if (full_search_lane_count <= 2) {
+            (*mixed_batches)++;
+            for (int lane = 0; lane < 8; lane++) {
+                edge_dir_row[x + lane] = (uint8_t)D0;
+            }
+            for (int lane = 0; lane < 8; lane++) {
+                if (full_search_lane_mask & (1u << lane)) {
+                    edge_dir_row[x + lane] =
+                        amaze_edge_direction_scalar_fullsearch_avx2(
+                            x + lane, y, w,
+                            gray, raw2ev,
+                            ack_x, ack_y,
+                            a_x, a_y,
+                            b_x, b_y,
+                            bck_x, bck_y);
+                }
+            }
+            continue;
+        }
         if (full_search_lane_count == 8) {
             (*fullsearch_batches)++;
         } else {
@@ -324,7 +380,6 @@ static void amaze_edge_direction_estimator_row_avx2(
      * tap offsets (x + ack_x + j can be < 0) don't wrap-around through
      * size_t promotion. */
     for (; x < w - 5; x++) {
-        int e_best = INT_MAX;
         int d_best = D0;
         int dmin = 0, dmax = NUM_DIR - 1;
 
@@ -346,21 +401,13 @@ static void amaze_edge_direction_estimator_row_avx2(
         if (dmin == dmax) {
             d_best = dmin;
         } else {
-            for (int d = dmin; d <= dmax; d++) {
-                int e = 0;
-                for (int j = -SEARCH; j <= SEARCH; j++) {
-                    int p1 = raw2ev[gray[x+ack_x[d]+j + (y+ack_y[d]) * w]];
-                    int p2 = raw2ev[gray[x+a_x  [d]+j + (y+a_y  [d]) * w]];
-                    int p3 = raw2ev[gray[x+b_x  [d]+j + (y+b_y  [d]) * w]];
-                    int p4 = raw2ev[gray[x+bck_x[d]+j + (y+bck_y[d]) * w]];
-                    int ad12 = p1 > p2 ? p1 - p2 : p2 - p1;
-                    int ad23 = p2 > p3 ? p2 - p3 : p3 - p2;
-                    int ad34 = p3 > p4 ? p3 - p4 : p4 - p3;
-                    e += ad12 + ad23 + ad34;
-                }
-                e += kAmazeDiagPenalty[d];
-                if (e < e_best) { e_best = e; d_best = d; }
-            }
+            d_best = amaze_edge_direction_scalar_fullsearch_avx2(
+                x, y, w,
+                gray, raw2ev,
+                ack_x, ack_y,
+                a_x, a_y,
+                b_x, b_y,
+                bck_x, bck_y);
         }
         edge_dir_row[x] = (uint8_t)d_best;
     }
