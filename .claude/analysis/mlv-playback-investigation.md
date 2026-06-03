@@ -13324,3 +13324,52 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Repeat clean 30s default/off smokes when the host CPU can settle before launch. Use those for normal FPS claims.
 - Use explicit `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=0/1` only for diagnostic SH split runs, and cite the overhead risk when comparing against default/off playback.
 - Next optimization candidates should be structural rather than bookkeeping: SH halfres RBF core changes, Dual ISO final blend/mix costs, or another measured retained bucket. Do not chase direct8, processed8 prefetch, or already-rejected AMaZE/RBF micro-variants without a new profiling reason.
+
+## 2026-06-03 - pause handoff after next-hotspot baseline
+
+### Verified locally
+
+- Started work block `wb-b59be94c593a4792` from clean `master` at `eaf5e3487b496de347be3a83501e5bb177cab283` for the next measured playback hotspot pass.
+- Ran a 30s default/off GUI smoke with a stricter prelaunch system-CPU gate at `10%`; the app smoke itself produced usable data, but wrapper validation failed because the desktop did not stay below the prelaunch threshold long enough. Treat it as host-load evidence, not a clean benchmark:
+  - Artifact: `.claude-state/profiling/20260603-next-hotspot-baseline/default/M16-1327-30s.json`
+  - `validation.ok=false`, `systemCpuSettled=false`
+  - App-level smoke values: `sustainedBottomLeftGuiFps=6.5`, `smokePresentedFps=7.782`, `smokeTimelineFps=23.471`, `avg_render_work_ms=113.545` (`8.807 FPS-equivalent`), `avg_llrawproc_ms=29.041` (`34.434 FPS-equivalent`), `avg_processed16_ms=104.793` (`9.543 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=21.833` (`45.802 FPS-equivalent`), default SH sub-buckets all `0.000`.
+- Re-ran a validation-clean 30s default/off GUI smoke with a practical prelaunch gate (`20%` for `1000 ms`) while keeping the app's internal settle gate:
+  - Artifact: `.claude-state/profiling/20260603-next-hotspot-baseline/default-validated/M16-1327-30s.json`
+  - `validation.ok=true`, `systemCpuSettled=true`, `cpuSettled=true`
+  - `sustainedBottomLeftGuiFps=6.6` / `Playback: 6.6 fps`
+  - `smokePresentedFps=6.824`, `smokeTimelineFps=23.428`
+  - `avg_render_work_ms=138.793` (`7.205 FPS-equivalent`), `avg_queue_wait_ms=128.760`
+  - `avg_processed16_ms=127.977` (`7.814 FPS-equivalent`)
+  - `avg_llrawproc_total_ms=36.857` (`27.132 FPS-equivalent`)
+  - `avg_processing_ms=60.553` (`16.514 FPS-equivalent`)
+  - `avg_processing_shadows_highlights_prep_ms=26.539` (`37.681 FPS-equivalent`)
+  - Dual ISO full20: `avg_total_ms=35.373` (`28.270 FPS-equivalent`), `avg_mix_halfres_ms=5.253`, `avg_mix_overexposed_ms=4.687`, `avg_final_blend_ms=9.023`.
+  - Default/off SH sub-buckets remained zero.
+  - FPS proof crop: `.claude-state/profiling/20260603-next-hotspot-baseline/default-validated/screenshots/M16-1327-fps-status.png` `SHA256=18D648E92347E4393DC79628B97C1E39F67205029180B2F2E6C3A6FAD71C33BD`.
+  - Presented-frame screenshot: `.claude-state/profiling/20260603-next-hotspot-baseline/default-validated/screenshots/M16-1327.png` `SHA256=1439D3A3857EA38A6DCD5404945C902428D27ECD955A4ACE567E05476BC47A49`.
+- Ran a validation-clean explicit SH-probe 30s GUI smoke to split the SH halfres bucket. This is diagnostic only, not the normal FPS source:
+  - Artifact: `.claude-state/profiling/20260603-next-hotspot-baseline/sh-probe/M16-1327-30s.json`
+  - `validation.ok=true`, `systemCpuSettled=true`, `cpuSettled=true`
+  - `sustainedBottomLeftGuiFps=8.0` / `Playback: 8.0 fps`, `smokePresentedFps=6.716`, `smokeTimelineFps=23.427`
+  - `avg_render_work_ms=133.131` (`7.511 FPS-equivalent`)
+  - `avg_processed16_ms=122.779` (`8.145 FPS-equivalent`)
+  - `avg_llrawproc_total_ms=35.967` (`27.803 FPS-equivalent`)
+  - `avg_processing_ms=57.047` (`17.529 FPS-equivalent`)
+  - SH split: downsample `2.540`, RBF `20.906`, upsample `2.441`; this confirms SH halfres RBF is still a plausible next measured bucket.
+  - Dual ISO full20: `avg_total_ms=34.606`, `avg_mix_halfres_ms=5.423`, `avg_mix_overexposed_ms=4.582`, `avg_final_blend_ms=9.028`.
+  - FPS proof crop: `.claude-state/profiling/20260603-next-hotspot-baseline/sh-probe/screenshots/M16-1327-fps-status.png` `SHA256=E9755576CDFC594E24488825A94D5DD43DD34883C339F4E472C15CE3D440785A`.
+  - Presented-frame screenshot: `.claude-state/profiling/20260603-next-hotspot-baseline/sh-probe/screenshots/M16-1327.png` `SHA256=1F07BA7326164D95C5461D9617D29E40E3A48B6511478E8F63FD8E262390F17C`.
+- Visual inspection of the validation-clean default/off FPS crop confirmed `Playback: 6.6 fps`; visual inspection of the presented-frame screenshot found the expected de-squeezed waterfall frame with no obvious channel swap, hue flip, severe color corruption, or aspect regression.
+
+### Cross-checked from prior analysis
+
+- The clean/default numbers are bursty: the validation-clean run had high `avg_queue_wait_ms=128.760`, while the stricter prelaunch run failed only the system settle gate and showed much lower app-side render work. Start the next session with one fresh default/off 30s baseline before judging a code experiment.
+- SH halfres RBF remains the strongest diagnostic SH sub-bucket, but earlier local RBF micro-shape changes were rejected. A good next pass should inspect the algorithm/dataflow before editing.
+- Dual ISO full20 final blend is also still measurable at roughly `9 ms/frame`, with mix-halfres and overexposed handling behind it. It is a viable alternate target if SH RBF does not reveal a safe structural change quickly.
+
+### Needs runtime profiling
+
+- Next session should recreate the active goal, verify repo status, and run one fresh validation-clean default/off 30s smoke before editing.
+- If pursuing SH, inspect the halfres RBF implementation and existing rejected notes first; prefer structural reductions or reuse over pointer/unroll/store shuffles.
+- If pursuing Dual ISO, inspect final blend/mix/overexposed code paths and use screenshots plus focused tests to prevent color regressions.
