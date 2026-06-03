@@ -1626,6 +1626,25 @@ TEST(DualIsoPipeline, HeadlessDualIsoFull20BitReusesOuterScratchAcrossFrames)
     ASSERT_TRUE(first_over_aux == scratch->over_aux);
 }
 
+TEST(DualIsoPipeline, DualIsoGuiChromaSmooth2x2IndexDoesNotInvokeFull20Smoother)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    fixture.receipt().setDualIso(1);
+    fixture.receipt().setDualIsoInterpolation(1);
+    fixture.receipt().setDualIsoAliasMap(0);
+    fixture.receipt().setDualIsoFrBlending(1);
+    fixture.receipt().setChromaSmooth(CS_2x2);
+
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(CS_2x2, llrpGetChromaSmoothMode(fixture.video()));
+
+    const std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+}
+
 TEST(DualIsoPipeline, Full20Mean23OutputIgnoresPoisonedOuterScratch)
 {
     MlvPipelineFixture fixture;

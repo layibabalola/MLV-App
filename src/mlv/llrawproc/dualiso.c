@@ -3683,6 +3683,11 @@ static inline void hdr_chroma_smooth(struct raw_info raw_info, uint32_t * input,
     }
 }
 
+static inline int dualiso_supported_chroma_smooth_method(int method)
+{
+    return (method == 2 || method == 3 || method == 5) ? method : 0;
+}
+
 static inline int mix_curve_key_matches(const dualiso_full20bit_scratch_t * scratch,
                                         int slot,
                                         size_t required_count,
@@ -4238,24 +4243,22 @@ static inline int mix_images(struct raw_info raw_info,
 
     if (w > 6 && h > 6)
     {
-        #pragma omp parallel for
-        for (int y = 0; y < h; ++y)
+        const size_t row_bytes = (size_t)w * sizeof(uint16_t);
+        memcpy(overexposed, over_aux, 3 * row_bytes);
+        memcpy(&overexposed[(size_t)(h - 3) * w],
+               &over_aux[(size_t)(h - 3) * w],
+               3 * row_bytes);
+
+        for (int y = 3; y < h - 3; ++y)
         {
             uint16_t * dst_row = &overexposed[(size_t)y * w];
             const uint16_t * src_row = &over_aux[(size_t)y * w];
-            if (y < 3 || y >= h - 3)
-            {
-                memcpy(dst_row, src_row, (size_t)w * sizeof(uint16_t));
-            }
-            else
-            {
-                dst_row[0] = src_row[0];
-                dst_row[1] = src_row[1];
-                dst_row[2] = src_row[2];
-                dst_row[w - 3] = src_row[w - 3];
-                dst_row[w - 2] = src_row[w - 2];
-                dst_row[w - 1] = src_row[w - 1];
-            }
+            dst_row[0] = src_row[0];
+            dst_row[1] = src_row[1];
+            dst_row[2] = src_row[2];
+            dst_row[w - 3] = src_row[w - 3];
+            dst_row[w - 2] = src_row[w - 2];
+            dst_row[w - 1] = src_row[w - 1];
         }
     }
     else
@@ -4701,6 +4704,8 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 
     int w = raw_info.width;
     int h = raw_info.height;
+    const int effective_chroma_smooth_method =
+        dualiso_supported_chroma_smooth_method(chroma_smooth_method);
     
     if (w <= 0 || h <= 0) DUALISO_FULL20_RETURN(0);
 
@@ -4833,7 +4838,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     uint32_t* halfres = scratch->halfres;
     uint32_t* halfres_smooth = halfres;
     
-    if (chroma_smooth_method)
+    if (effective_chroma_smooth_method)
     {
         if (use_fullres)
         {
@@ -4949,7 +4954,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     }
 
     stage_start = mlv_stage_timing_now();
-    int mix_ok = mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, chroma_smooth_method, scratch);
+    int mix_ok = mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, effective_chroma_smooth_method, scratch);
     g_dualiso_full20bit_timing.mix_ms += dualiso_debug_elapsed_ms(stage_start);
     if (mix_ok)
     {

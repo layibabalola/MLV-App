@@ -147,6 +147,7 @@ void chroma_smooth(int method,
     memcpy(buf, image_data, pixel_count * sizeof(uint16_t));
     
     switch (method) {
+        case 1:
         case 2:
             chroma_smooth_2x2(width, height, buf, image_data, raw2ev, ev2raw, black, white);
             break;
