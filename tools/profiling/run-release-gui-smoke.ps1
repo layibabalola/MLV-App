@@ -801,11 +801,13 @@ $result = [pscustomobject]@{
     playbackFps = [pscustomobject]@{
         guiStatusText = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_text"
         guiStatusValue = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_value"
+        visibleBottomLeftGuiStatusText = $windowScreenshotFpsStatusText
+        visibleBottomLeftGuiFps = $windowScreenshotFpsStatusValue
         screenshotGuiStatusText = $windowScreenshotFpsStatusText
         screenshotGuiStatusValue = $windowScreenshotFpsStatusValue
         smokePresentedFps = Get-ObjectPropertyValue $playbackSummary "presented_fps"
         smokeTimelineFps = Get-ObjectPropertyValue $playbackSummary "timeline_fps"
-        note = "screenshotGuiStatusValue is the bottom-left Playback FPS label visible in screenshot.windowCapture; guiStatusValue is the later end-of-run summary sample; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
+        note = "visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible in screenshot.windowCapture; guiStatusValue is the later end-of-run summary sample; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
     }
     process = [pscustomobject]@{
         id = $process.Id

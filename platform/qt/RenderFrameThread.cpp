@@ -2234,6 +2234,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.interp_amaze_rawdata_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_ms"),
                                       dualIsoFull20.interp_amaze_demosaic_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_setup_ms"),
+                                      dualIsoFull20.interp_amaze_demosaic_setup_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_create_ms"),
+                                      dualIsoFull20.interp_amaze_demosaic_create_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_join_ms"),
+                                      dualIsoFull20.interp_amaze_demosaic_join_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_total_ms"),
+                                      dualIsoFull20.interp_amaze_demosaic_worker_total_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_max_ms"),
+                                      dualIsoFull20.interp_amaze_demosaic_worker_max_ms );
+    slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_demosaic_worker_count"),
+                                      dualIsoFull20.interp_amaze_demosaic_worker_count );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_postprocess_ms"),
                                       dualIsoFull20.interp_amaze_postprocess_ms );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_interp_amaze_grayscale_ms"),
