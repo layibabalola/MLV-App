@@ -13439,3 +13439,70 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 - Do not retry the float `fullres_curve_f` mirror in `final_blend` without a new reason, such as a different compiler/codegen shape or a narrower AVX2 experiment that avoids the observed gather-path regression.
 - Next ranked implementation path: first build an exact-equivalence RBF harness that preserves the current pointer-drift behavior, then use it to evaluate a drift-preserving SH halfres RBF vertical parallelization or equivalent structural RBF change. Do not begin with another pointer/unroll/store shuffle.
 - Keep the M16 visual smoke set in play for any RBF or processing change, with `M16-1327.MLV` as the hot/warm green-cast regression clip and app-internal presented-frame screenshot evidence as the first color/aspect check.
+
+## 2026-06-03 - direct-load final_blend float fullres_curve accepted
+
+### Verified locally
+
+- Started work block `wb-266e60341aaa45f0` from clean `master` at `9fe00bf8a798657e80998a4b1325d08b6a7dde2e`.
+- Current source had no surviving float-path code from the prior rejected attempt; only the analysis note and closeout evidence were committed. `git grep` found `fullres_curve_f`, `MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE`, and `DualIsoFinalBlendFloatCurveMatchesDouble` only in the prior analysis note before this work block.
+- Live anchors after the accepted edit:
+  - `src/mlv/llrawproc/dualiso.c:2724` adds `build_fullres_curve_float`, built from the same formula/source values as the double table.
+  - `src/mlv/llrawproc/dualiso.c:2748` adds the live kill switch `MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE`; it is not cached, so tests can flip enabled/disabled modes in one process.
+  - `src/mlv/llrawproc/dualiso.c:4357` enables the float mirror only inside `final_blend`; alias-map/highest-green/fullres predicate consumers remain on the double table.
+  - `src/mlv/llrawproc/dualiso_avx2.inc:402` uses direct indexed float loads packed with `_mm256_setr_ps`, avoiding the previously rejected `vgatherdps` shape.
+  - `_no_alias` was still not touched.
+- Probe-only follow-up on the reverted/current double path used `MLVAPP_DUALISO_FULL20_FINAL_BLEND_PROBE=fullres_curve`:
+  - Artifact: `.claude-state/profiling/20260603-finalblend-followup-probe/M16-1327-fullres-curve-probe-30s.json`
+  - `validation.ok=true`
+  - Per-frame log extraction: `177` frames, `avg final_blend_fullres_curve_gather_probe_ms=12.921`, `avg final_blend_ms=13.328`. This probe adds measurement overhead, so use it only as directional evidence that the gather bucket is worth targeting, not as a normal playback FPS source.
+- Rebuilt focused pipeline tests after editing, then ran:
+  - `DualIsoPipeline.DualIsoFinalBlendFloatCurveMatchesDouble`: pass, `0/12301632 channels differ, max|d|=0`.
+  - `DualIsoPipeline.HQ_FullBlendAvx2ByteIdentity`: pass, `1572/12301632 pixels differ, max|d|=51` within its existing tolerance.
+  - `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity`: pass, `0/12301632 pixels differ, max|d|=0`.
+- Rebuilt the user-facing release tree:
+  - `platform/qt/build-release/release/MLVApp.exe`
+  - `LastWriteTime=2026-06-03 14:36:10`, `Length=9007104`, `SHA256=22DAD0E289840BA75C6159DD2ED269C4463A78DC885C7CB0267A3F3DDBCFCD52`
+- In-binary double-path baseline used the same release EXE with `MLVAPP_DISABLE_DUALISO_FLOAT_FULLRES_CURVE=1`:
+  - Artifact: `.claude-state/profiling/20260603-finalblend-directload/baseline-double-disabled/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=5.9`, `smoke presented FPS=7.204`, `timeline FPS=23.516`
+  - `avg_render_work_ms=125.031` (`7.998 FPS-equivalent`)
+  - `avg_llrawproc_ms=32.797` (`30.491 FPS-equivalent`)
+  - `avg_processed16_ms=115.379` (`8.667 FPS-equivalent`)
+  - `avg_dual_iso_full20_total_ms=31.722` (`31.524 FPS-equivalent`)
+  - `avg_mix_halfres_ms=4.943` (`202.306 FPS-equivalent`)
+  - `avg_mix_overexposed_ms=4.247` (`235.460 FPS-equivalent`)
+  - `avg_final_blend_ms=7.987` (`125.203 FPS-equivalent`)
+  - Presented screenshot: `.claude-state/profiling/20260603-finalblend-directload/baseline-double-disabled/screenshots/M16-1327.png` `SHA256=83D6E04F02939B71C15B780BCE414A805080D94BFD7A1C9AAB059392790A2074`
+  - FPS proof crop: `.claude-state/profiling/20260603-finalblend-directload/baseline-double-disabled/screenshots/M16-1327-fps-status.png` `SHA256=FF7E935B4DA1AE055A18A19720EF7B27A3407E9B6FC5E68F422E2F67E132A377`
+- Default float-direct-load post-change smoke:
+  - Artifact: `.claude-state/profiling/20260603-finalblend-directload/post-float-direct/M16-1327-30s.json`
+  - `validation.ok=true`, `requestedPlaybackSeconds=30`
+  - `GUI FPS=10.0`, `smoke presented FPS=7.790`, `timeline FPS=23.464`
+  - `avg_render_work_ms=113.763` (`8.790 FPS-equivalent`), delta `-11.268 ms`
+  - `avg_llrawproc_ms=28.612` (`34.950 FPS-equivalent`), delta `-4.185 ms`
+  - `avg_processed16_ms=104.637` (`9.557 FPS-equivalent`), delta `-10.742 ms`
+  - `avg_dual_iso_full20_total_ms=27.608` (`36.221 FPS-equivalent`), delta `-4.114 ms`
+  - `avg_mix_halfres_ms=4.457` (`224.366 FPS-equivalent`), delta `-0.486 ms`
+  - `avg_mix_overexposed_ms=3.751` (`266.596 FPS-equivalent`), delta `-0.496 ms`
+  - `avg_final_blend_ms=6.620` (`151.057 FPS-equivalent`), delta `-1.367 ms`
+  - Presented screenshot: `.claude-state/profiling/20260603-finalblend-directload/post-float-direct/screenshots/M16-1327.png` `SHA256=A9508234C500EC1D5056206675D09B3F97BDDFF3632C0A4B005C750587BB56F9`
+  - FPS proof crop: `.claude-state/profiling/20260603-finalblend-directload/post-float-direct/screenshots/M16-1327-fps-status.png` `SHA256=9BFC8277B91E703572E2982DE2FB684C4E6DA78610BABE61A508D3AC0A00D6D1`
+  - Aspect evidence: mode `presented-playback-stretch`, `width=2555`, `height=1068`, `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Visual inspection of the default float-direct presented-frame screenshot found the expected de-squeezed waterfall frame with no obvious channel swap, hue flip, severe color corruption, or aspect regression. The FPS crop visibly reads `Playback: 10 fps`.
+- Acceptance status:
+  - Accepted: direct indexed float loads for `final_blend` only. The quality gate was exact on the focused fixture and the performance gate cleared the requested `>=1.0 ms` improvement in `avg_final_blend_ms`.
+  - Rejected remains rejected: AVX2 `vgatherdps` float-table gather variant from the previous section.
+  - Deferred: RBF work and `_no_alias` remain untouched.
+
+### Cross-checked from prior analysis
+
+- This accepted variant keeps the same high-level float mirror candidate from Round 7 but changes the AVX2 load shape to avoid the measured `vgatherdps` regression.
+- The in-binary kill-switch comparison is stronger than comparing against the earlier release baseline because both the double and float paths ran from the same rebuilt EXE.
+- The 30s post-change screenshot hash matches the earlier clean baseline screenshot hash, and the focused numeric test found `max|d|=0`, so presented-frame SHA stability is consistent with the numeric gate.
+
+### Needs runtime profiling
+
+- Run the standard M16 visual smoke set (`M16-1327`, `M16-1347`, `M16-1446`, optional `M16-1243`) before broad release claims; this turn validated the hot/warm `M16-1327` gate only.
+- Next ranked implementation candidate after this accepted Dual ISO change: build the pointer-drift-preserving RBF exact-equivalence harness, then evaluate drift-preserving SH halfres RBF vertical parallelization.
