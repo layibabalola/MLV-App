@@ -178,19 +178,11 @@ static int processing_shadows_highlights_curve_index_mask_enabled(void)
 static int processing_shadows_highlights_probe_mode(void)
 {
     static int initialized = 0;
-    static int probe_mode = 0;
+    static int probe_mode = -1;
     if( !initialized )
     {
-        const char * value = getenv("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
-        if( value && *value )
-        {
-            char * end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if( end != value && *end == '\0' && parsed >= 0 && parsed <= 1 )
-            {
-                probe_mode = (int)parsed;
-            }
-        }
+        probe_mode = processing_parse_probe_mode(
+            getenv("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE"), 1);
         initialized = 1;
     }
     return probe_mode;
