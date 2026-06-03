@@ -3313,11 +3313,14 @@ static inline void build_alias_map(struct raw_info raw_info,
     int w = raw_info.width;
     int h = raw_info.height;
     
+    double alias_stage_start = mlv_stage_timing_now();
     double * fullres_curve = build_fullres_curve(black);
 #ifndef STDOUT_SILENT
     printf("Building alias map...\n");
 #endif
     uint16_t* alias_aux = ensure_alias_aux_scratch(scratch, (size_t)w * (size_t)h);
+    g_dualiso_full20bit_timing.mix_alias_map_setup_ms +=
+        dualiso_debug_elapsed_ms(alias_stage_start);
     if (!alias_aux)
     {
         return;
@@ -3326,6 +3329,7 @@ static inline void build_alias_map(struct raw_info raw_info,
     /* build the aliasing maps (where it's likely to get aliasing) */
     /* do this by comparing fullres and halfres images */
     /* if the difference is small, we'll prefer halfres for less noise, otherwise fullres for less aliasing */
+    alias_stage_start = mlv_stage_timing_now();
 #ifdef DUALISO_AVX2_AVAILABLE
     pthread_once(&g_dualiso_alias_dispatch_once, dualiso_alias_dispatch_init);
     if (g_dualiso_alias_use_avx2)
@@ -3367,11 +3371,17 @@ static inline void build_alias_map(struct raw_info raw_info,
             }
         }
     }
+    g_dualiso_full20bit_timing.mix_alias_map_init_ms +=
+        dualiso_debug_elapsed_ms(alias_stage_start);
 
+    alias_stage_start = mlv_stage_timing_now();
     memcpy(alias_aux, alias_map, w * h * sizeof(uint16_t));
+    g_dualiso_full20bit_timing.mix_alias_map_copy_ms +=
+        dualiso_debug_elapsed_ms(alias_stage_start);
 #ifndef STDOUT_SILENT
     printf("Filtering alias map...\n");
 #endif
+    alias_stage_start = mlv_stage_timing_now();
     #pragma omp parallel for collapse(2)
     for (int y = 6; y < h-6; y ++)
     {
@@ -3385,10 +3395,13 @@ static inline void build_alias_map(struct raw_info raw_info,
             alias_aux[x + y * w] = alias_map_fifth_largest_37_at(alias_map, w, x, y);
         }
     }
+    g_dualiso_full20bit_timing.mix_alias_map_filter_ms +=
+        dualiso_debug_elapsed_ms(alias_stage_start);
 #ifndef STDOUT_SILENT
     printf("Smoothing alias map...\n");
 #endif
     /* gaussian blur */
+    alias_stage_start = mlv_stage_timing_now();
 #ifdef DUALISO_AVX2_AVAILABLE
     pthread_once(&g_dualiso_alias_dispatch_once, dualiso_alias_dispatch_init);
     if (g_dualiso_alias_use_avx2)
@@ -3428,8 +3441,11 @@ static inline void build_alias_map(struct raw_info raw_info,
             }
         }
     }
+    g_dualiso_full20bit_timing.mix_alias_map_gaussian_ms +=
+        dualiso_debug_elapsed_ms(alias_stage_start);
     
     /* make it grayscale */
+    alias_stage_start = mlv_stage_timing_now();
     #pragma omp parallel for collapse(2)
     for (int y = 2; y < h-2; y += 2)
     {
@@ -3449,6 +3465,8 @@ static inline void build_alias_map(struct raw_info raw_info,
             alias_map[x+1 + (y+1) * w] = C;
         }
     }
+    g_dualiso_full20bit_timing.mix_alias_map_grayscale_ms +=
+        dualiso_debug_elapsed_ms(alias_stage_start);
     
 }
 

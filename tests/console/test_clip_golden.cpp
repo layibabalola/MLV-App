@@ -514,6 +514,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("llrawproc_chroma_smooth_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("llrawproc_other_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_total_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_setup_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_init_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_copy_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_filter_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_gaussian_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_grayscale_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("debayered_frame_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("raw_float_convert_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("debayer_exclusive_ms")));
@@ -574,6 +580,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("llrawproc_dual_iso_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("llrawproc_chroma_smooth_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("llrawproc_other_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_setup_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_init_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_copy_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_filter_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_gaussian_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_grayscale_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_preview_total_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("debayered_frame_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("raw_float_convert_ms")).toDouble() >= 0.0);

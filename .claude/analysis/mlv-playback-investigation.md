@@ -12356,3 +12356,49 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Rerun the release profile on the user's real M16 clips once the local optional Look Assist chroma-smooth expectation is understood, because the fixture profile is a strong timing signal but not a full visual-color oracle.
 - If more alias-map work is needed, instrument the builder's init/filter/gaussian/grayscale substages separately before another micro-optimization; the current keeper only proves the 37-sample filter bookkeeping was worth reducing.
+
+## 2026-06-03 - Dual ISO alias-map substage telemetry identifies the scalar top5 filter as the next seam
+
+### Verified locally
+
+- I added durable alias-map builder substage telemetry in [`src/mlv/llrawproc/dualiso.h`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.h), [`src/mlv/llrawproc/dualiso.c`](C:/!Layi%20Wkspc%20MLV-App/src/mlv/llrawproc/dualiso.c), and [`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/RenderFrameThread.cpp):
+  - `dual_iso_full20_mix_alias_map_setup_ms`
+  - `dual_iso_full20_mix_alias_map_init_ms`
+  - `dual_iso_full20_mix_alias_map_copy_ms`
+  - `dual_iso_full20_mix_alias_map_filter_ms`
+  - `dual_iso_full20_mix_alias_map_gaussian_ms`
+  - `dual_iso_full20_mix_alias_map_grayscale_ms`
+- I extended [`tests/console/test_clip_golden.cpp`](C:/!Layi%20Wkspc%20MLV-App/tests/console/test_clip_golden.cpp) so the playback-profile JSON guard asserts those fields exist and are non-negative.
+- The user-facing release tree was rebuilt successfully at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe):
+  - `LastWriteTime=6/2/2026 11:43:15 PM`
+  - `Length=8964096`
+  - `SHA256=269570FC2A795D5B416A7162344053BB07D74606831412463FDF21D185C5F426`
+- Controlled HQ Dual ISO scale-4 telemetry profile:
+  - `.claude-state/profiling/20260603-dualiso-next-hotpath/large_dual_iso_hq_t4_scale4_alias_substages16.json`
+  - `dual_iso_full20_use_alias_map=1`, `threads=4`, explicit `MLVAPP_PLAYBACK_SCALE_FACTOR=4`, explicit `MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1`
+  - Skipping the first 3 cold frames, steady-state alias-map substages were:
+    - `dual_iso_full20_mix_alias_map_ms=27.308 avg / 27.000 median`
+    - `dual_iso_full20_mix_alias_map_filter_ms=12.000 avg / 12.000 median`
+    - `dual_iso_full20_mix_alias_map_init_ms=7.308 avg / 7.000 median`
+    - `dual_iso_full20_mix_alias_map_gaussian_ms=5.000 avg / 5.000 median`
+    - `dual_iso_full20_mix_alias_map_copy_ms=2.077 avg / 2.000 median`
+    - `dual_iso_full20_mix_alias_map_grayscale_ms=0.923 avg / 1.000 median`
+    - `dual_iso_full20_mix_alias_map_setup_ms=0.000 avg / 0.000 median`
+- The same run was noisy at the top level (`cadence_ms=113.140 avg / 113.898 median`, `render_thread_work_ms=108.769 avg / 110.000 median`), so the keeper value is the substage ranking rather than a top-line FPS comparison.
+- Validation:
+  - `git diff --check` reported only the repo's usual LF-to-CRLF warnings for the four touched files.
+  - Rebuilt `tests/build-ci-console/release/console_tests.exe`; `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson` passed and exercised the new JSON fields.
+  - `ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch` still passed against the rebuilt release executable.
+  - Rebuilt `tests/build-ci-pipeline/release/pipeline_tests.exe`; `DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity` passed with `0/12301632 pixels differ, max|d|=0`.
+
+### Cross-checked from prior analysis
+
+- This telemetry-only pass implements the next-step recommendation from the 2026-06-02 top5 keeper note: split alias-map init/filter/gaussian/grayscale before attempting another micro-optimization.
+- The result confirms the previous keeper did not exhaust the alias-map work: after removing the old negated-stack/fifth-smallest overhead, the exact 37-sample fifth-largest filter remains the largest measured alias-map substage.
+- Init and gaussian are still meaningful, but they already have AVX2 coverage. The filter path is still scalar/OpenMP and now has the strongest measured case for the next byte-identical optimization.
+
+### Needs runtime profiling
+
+- Next alias-map candidate should target `alias_map_fifth_largest_37_at(...)` / the filter loop first, preserving the exact fifth-largest-of-37 semantics and validating with `HQ_AliasMapAvx2ByteIdentity`.
+- If a filter rewrite is too risky, try smaller output-safe shapes first: fixed-cascade top5 insertion, row-local pointers, or a row-parallel loop shape before attempting a full AVX2 top-k kernel.
+- Rerun this substage profile after any filter candidate; keep the new telemetry fields until the alias-map residual stops being the dominant HQ scale-4 bucket.
