@@ -13208,3 +13208,57 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - If future manual observation still disagrees with the screenshot-time label, capture a short sequence of full-window screenshots or video during the smoke. A single screenshot-time FPS value can differ from the later stop-summary sample on bursty playback.
+
+## 2026-06-03 - bottom-left GUI FPS live-observation follow-up
+
+### Verified locally
+
+- Reproduced the GUI FPS visibility check after the user still could not see the cited number during smoke runs:
+  - Command: `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . -Input C:\temp\MLV\M16-1327.MLV -Output .claude-state\profiling\20260603-fps-live-investigation\M16-1327.json -Seconds 3 -SettleMs 1000 -CaptureScreenshot -FrameTelemetry -ScreenshotOutputDir .claude-state\profiling\20260603-fps-live-investigation\screenshots`
+  - `validation.ok=true`
+  - `visibleBottomLeftGuiFps=8.1` / `visibleBottomLeftGuiStatusText="Playback: 8.1 fps"`
+  - end-of-run `guiStatusValue=1.0` / `guiStatusText="Playback: 1.0 fps"`, which confirms the screenshot-time label and later stop-summary label can legitimately differ.
+  - `smokePresentedFps=5.343`, `smokeTimelineFps=19.934`
+  - `avg_render_work_ms=111.000` (`9.009 FPS-equivalent`), `avg_processed16_ms=101.192` (`9.882 FPS-equivalent`), `avg_processing_ms=49.231` (`20.312 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=25.077` (`39.877 FPS-equivalent`)
+  - readable FPS proof crop: `.claude-state/profiling/20260603-fps-live-investigation/screenshots/M16-1327-fps-status.png` `SHA256=4BF8435F0D292C6B2E2F58E7273D3412E213144B70B03566531CCF666B6E11A1`
+  - full-window source screenshot: `.claude-state/profiling/20260603-fps-live-investigation/screenshots/M16-1327-window.png` `SHA256=75EFECCAC60E458DEA6A1469B865E957210DD94DC0B17BE51770D968BFFB0136`
+  - presented-frame color/aspect screenshot: `.claude-state/profiling/20260603-fps-live-investigation/screenshots/M16-1327.png` `SHA256=8E1F7341BADFDC4F758E03016C2931D6A35EF7D64B4FEBA24C2F4D1F47388CF3`
+- Visual inspection confirmed the proof crop visibly shows `Playback: 8.1 fps`. The label is in the Qt status bar at the bottom-left of the whole window, below the viewport/timeline area, not overlaid inside the playback image.
+- Source check:
+  - `platform/qt/MainWindow.cpp:1533` updates `m_pFpsStatus` during playback.
+  - `platform/qt/MainWindow.cpp:5864` creates `m_pFpsStatus` as a `statusBar()` widget.
+  - `platform/qt/MainWindow.cpp:5006` logs the same label text during the full-window screenshot capture.
+  - `tools/profiling/run-release-gui-smoke.ps1:908` reports that screenshot-time label as `visibleBottomLeftGuiFps`.
+
+### Cross-checked from prior analysis
+
+- The confusion is artifact/readability driven, not evidence that the label is absent: the presented-frame screenshot intentionally omits GUI chrome, while the full-window screenshot is too large for the status text to be easy to read when scaled down in chat or preview surfaces.
+- Future human-facing smoke reports should embed or prominently link the `*-fps-status.png` crop whenever claiming bottom-left GUI FPS, and separately cite the presented-frame `*.png` only for color/aspect/quality.
+
+### Needs runtime profiling
+
+- If live manual observation still disagrees with the screenshot-time crop, capture a short repeated full-window screenshot sequence or video. A single screenshot-time status sample can differ from the later stop-summary sample when playback is bursty or the smoke is closing.
+
+## 2026-06-03 - Shadows/Highlights probe timing opt-in cleanup
+
+### Verified locally
+
+- Found that `processing_shadows_highlights_probe_mode()` defaulted to probe mode `0`, unlike the other probe helpers that default to disabled (`-1`). This meant the normal playback path was still collecting a coarse Shadows/Highlights filter timing bucket unless the environment explicitly disabled it.
+- Updated the helper to use the shared `processing_parse_probe_mode(..., 1)` parser and default to `-1`; `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=0/1` remains available for explicit profiling.
+- Updated `tools/profiling/run-release-gui-smoke.ps1` to clear `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE` during default smoke runs, matching the wrapper's existing policy of clearing experimental/probe environment variables unless `-PreserveExperimentalEnvironment` is used.
+- Validation:
+  - `git diff --check` passed with only existing CRLF normalization warnings.
+  - `ProcessingFilters.*` passed: `tests=128 assertions=15 skipped=0 failed=0`.
+  - User-facing release tree rebuilt at `platform/qt/build-release/release/MLVApp.exe`, `LastWriteTime=2026-06-03T08:55:48-05:00`, `Length=9004544`, `SHA256=DCE1E707A54D36F737C4674DCEB6B867EC13FE6490D1ADC7AF033D3040316BB6`.
+- Fresh screenshot-backed smoke after the rebuilt release and probe cleanup:
+  - `M16-1327`: `validation.ok=true`, `visibleBottomLeftGuiFps=8.1` / `Playback: 8.1 fps`, `smokePresentedFps=5.343`, `smokeTimelineFps=19.934`, `avg_render_work_ms=111.000` (`9.009 FPS-equivalent`), `avg_processed16_ms=101.192` (`9.882 FPS-equivalent`), `avg_processing_ms=49.231` (`20.312 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=25.077` (`39.877 FPS-equivalent`).
+- Compared to the immediate baseline in `.claude-state/profiling/20260603-next-remaining-hotspot/baseline/M16-1327.json`, this is flat/noisy rather than a clear speed win: baseline `visibleBottomLeftGuiFps=9.1`, `smokePresentedFps=5.226`, `avg_render_work_ms=112.680`, `avg_processed16_ms=103.840`, `avg_processing_ms=45.480`.
+
+### Cross-checked from prior analysis
+
+- This cleanup is instrumentation hygiene, not a promoted optimization result. It prevents a probe default from contaminating future normal smokes and makes any future Shadows/Highlights substage timing intentionally opt-in.
+- The earlier `MLVAPP_ENABLE_SH_CURVE_INDEX_MASK=1` A/B stayed worse and remains rejected.
+
+### Needs runtime profiling
+
+- Continue looking for real remaining performance wins in Dual ISO/full20 mix/final blend and the normal Shadows/Highlights filter path. Any future substage timing for Shadows/Highlights should be explicitly opt-in and A/B'd against a clean default smoke.
