@@ -557,12 +557,13 @@ static void rgb_u16_downsample_2x_box(const uint16_t * __restrict src,
             const uint16_t * p01 = p00 + 3;
             const uint16_t * p10 = row1 + (size_t)(x * 2) * 3u;
             const uint16_t * p11 = p10 + 3;
-            for (int c = 0; c < 3; ++c)
-            {
-                const uint32_t sum = (uint32_t)p00[c] + (uint32_t)p01[c]
-                                    + (uint32_t)p10[c] + (uint32_t)p11[c];
-                drow[3 * x + c] = (uint16_t)(sum >> 2);
-            }
+            uint16_t * out = drow + (size_t)x * 3u;
+            out[0] = (uint16_t)(((uint32_t)p00[0] + (uint32_t)p01[0]
+                                + (uint32_t)p10[0] + (uint32_t)p11[0]) >> 2);
+            out[1] = (uint16_t)(((uint32_t)p00[1] + (uint32_t)p01[1]
+                                + (uint32_t)p10[1] + (uint32_t)p11[1]) >> 2);
+            out[2] = (uint16_t)(((uint32_t)p00[2] + (uint32_t)p01[2]
+                                + (uint32_t)p10[2] + (uint32_t)p11[2]) >> 2);
         }
     }
 }
@@ -574,55 +575,46 @@ static void rgb_u16_upsample_2x_bilinear(const uint16_t * __restrict src,
                                          int threads)
 {
     const int dst_w = src_w << 1;
-    const int dst_h = src_h << 1;
     const size_t src_stride = (size_t)src_w * 3u;
     const size_t dst_stride = (size_t)dst_w * 3u;
 
     #pragma omp parallel for if(threads > 1) num_threads(threads)
-    for (int y = 0; y < dst_h; ++y)
+    for (int y0 = 0; y0 < src_h; ++y0)
     {
-        const int y0 = y >> 1;
         const int y1 = (y0 + 1 < src_h) ? (y0 + 1) : y0;
-        const int wy = y & 1;
         const uint16_t * row0 = src + (size_t)y0 * src_stride;
         const uint16_t * row1 = src + (size_t)y1 * src_stride;
-        uint16_t * drow = dst + (size_t)y * dst_stride;
+        uint16_t * even_row = dst + (size_t)(y0 * 2) * dst_stride;
+        uint16_t * odd_row = even_row + dst_stride;
 
-        for (int x = 0; x < dst_w; ++x)
+        for (int x0 = 0; x0 < src_w; ++x0)
         {
-            const int x0 = x >> 1;
             const int x1 = (x0 + 1 < src_w) ? (x0 + 1) : x0;
-            const int wx = x & 1;
             const uint16_t * p00 = row0 + (size_t)x0 * 3u;
             const uint16_t * p01 = row0 + (size_t)x1 * 3u;
             const uint16_t * p10 = row1 + (size_t)x0 * 3u;
             const uint16_t * p11 = row1 + (size_t)x1 * 3u;
+            uint16_t * even = even_row + (size_t)(x0 * 2) * 3u;
+            uint16_t * odd = odd_row + (size_t)(x0 * 2) * 3u;
 
-            for (int c = 0; c < 3; ++c)
-            {
-                const uint32_t v00 = p00[c];
-                const uint32_t v01 = p01[c];
-                const uint32_t v10 = p10[c];
-                const uint32_t v11 = p11[c];
-                uint32_t sum;
-                if (!wx && !wy)
-                {
-                    sum = v00;
-                }
-                else if (wx && !wy)
-                {
-                    sum = v00 + v01;
-                }
-                else if (!wx && wy)
-                {
-                    sum = v00 + v10;
-                }
-                else
-                {
-                    sum = v00 + v01 + v10 + v11;
-                }
-                drow[3 * x + c] = (uint16_t)(sum >> (wx + wy));
-            }
+            const uint32_t r00 = p00[0], g00 = p00[1], b00 = p00[2];
+            const uint32_t r01 = p01[0], g01 = p01[1], b01 = p01[2];
+            const uint32_t r10 = p10[0], g10 = p10[1], b10 = p10[2];
+            const uint32_t r11 = p11[0], g11 = p11[1], b11 = p11[2];
+
+            even[0] = (uint16_t)r00;
+            even[1] = (uint16_t)g00;
+            even[2] = (uint16_t)b00;
+            even[3] = (uint16_t)((r00 + r01) >> 1);
+            even[4] = (uint16_t)((g00 + g01) >> 1);
+            even[5] = (uint16_t)((b00 + b01) >> 1);
+
+            odd[0] = (uint16_t)((r00 + r10) >> 1);
+            odd[1] = (uint16_t)((g00 + g10) >> 1);
+            odd[2] = (uint16_t)((b00 + b10) >> 1);
+            odd[3] = (uint16_t)((r00 + r01 + r10 + r11) >> 2);
+            odd[4] = (uint16_t)((g00 + g01 + g10 + g11) >> 2);
+            odd[5] = (uint16_t)((b00 + b01 + b10 + b11) >> 2);
         }
     }
 }
