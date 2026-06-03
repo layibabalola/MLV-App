@@ -526,6 +526,13 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_init_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_lut_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_direction_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_simd_batches")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_allskip_batches")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_mixed_batches")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_fullsearch_batches")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_fullsearch_pixels")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_skip_pixels")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_edge_scalar_pixels")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_amaze_actual_interp_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_interp_border_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_full20_mix_alias_map_setup_ms")));
@@ -606,6 +613,13 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_init_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_lut_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_direction_ms")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_simd_batches")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_allskip_batches")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_mixed_batches")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_fullsearch_batches")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_fullsearch_pixels")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_skip_pixels")).toDouble() >= 0.0);
+        ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_edge_scalar_pixels")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_amaze_actual_interp_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_interp_border_ms")).toDouble() >= 0.0);
         ASSERT_TRUE(sample.value(QStringLiteral("dual_iso_full20_mix_alias_map_setup_ms")).toDouble() >= 0.0);

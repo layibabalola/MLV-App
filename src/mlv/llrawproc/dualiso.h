@@ -159,6 +159,13 @@ typedef struct
     double interp_amaze_edge_init_ms;
     double interp_amaze_lut_ms;
     double interp_amaze_edge_direction_ms;
+    double interp_amaze_edge_simd_batches;
+    double interp_amaze_edge_allskip_batches;
+    double interp_amaze_edge_mixed_batches;
+    double interp_amaze_edge_fullsearch_batches;
+    double interp_amaze_edge_fullsearch_pixels;
+    double interp_amaze_edge_skip_pixels;
+    double interp_amaze_edge_scalar_pixels;
     double interp_amaze_actual_interp_ms;
     double interp_border_ms;
     double fullres_ms;

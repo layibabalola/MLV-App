@@ -12605,3 +12605,69 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 ### Needs runtime profiling
 
 - Continue the playback optimization loop at the next AMaZE seam: demosaic worker time, actual edge-directed interpolation, or full-search batch density instrumentation.
+
+## 2026-06-03 - AMaZE edge-search density telemetry
+
+### Verified locally
+
+- I added low-overhead AMaZE edge-direction density counters to the Dual ISO full20 timing struct, AVX2 row kernel, release profile JSON export, and golden profile contract:
+  - `dual_iso_full20_interp_amaze_edge_simd_batches`
+  - `dual_iso_full20_interp_amaze_edge_allskip_batches`
+  - `dual_iso_full20_interp_amaze_edge_mixed_batches`
+  - `dual_iso_full20_interp_amaze_edge_fullsearch_batches`
+  - `dual_iso_full20_interp_amaze_edge_fullsearch_pixels`
+  - `dual_iso_full20_interp_amaze_edge_skip_pixels`
+  - `dual_iso_full20_interp_amaze_edge_scalar_pixels`
+- The counters measure the existing predicate shape only. They do not change which lanes use the full 11-direction AMaZE search, which lanes keep default direction `d0`, or which pixels are written.
+- Rebuilt the user-facing release tree at [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc%20MLV-App/platform/qt/build-release/release/MLVApp.exe).
+- Rebuilt focused test binaries:
+  - `tests/build-ci-console/release/console_tests.exe`
+  - `tests/build-ci-pipeline/release/pipeline_tests.exe`
+- Focused validation passed:
+  - `console_tests.exe --gtest_filter=ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+  - `pipeline_tests.exe --gtest_filter=DualIsoPipeline.PhaseE1_*:DualIsoPipeline.HQ_AliasMapAvx2ByteIdentity`
+- Correct AMaZE profile command shape:
+  - Use `--playback-debayer receipt` and `--playback-processing receipt`.
+  - When calling `tools/profiling/run-release-playback-profile.ps1` through `pwsh -Command`, pass `-AdditionalArgs` as a real array. Passing comma-separated values through `pwsh -File` can be swallowed before the app sees them.
+- The valid 16-frame profile is:
+  - `.claude-state/profiling/20260603-amaze-density/large_dual_iso_hq_receipt_t4_scale4_amaze_density16_explicit_receipt_argsfixed.json`
+  - Metadata confirmed `playback_debayer_request=receipt`, `playback_processing_request=receipt`, and `dual_iso_full20_interp_method=0`.
+- AMaZE timing from that run:
+  - `render_thread_work_ms=256.812` (`3.894 fps-equivalent`)
+  - `llrawproc_ms=231.250` (`4.324 fps-equivalent`)
+  - `dual_iso_full20_total_ms=227.875` (`4.388 fps-equivalent`)
+  - `dual_iso_full20_interp_amaze_ms=154.313` (`6.480 fps-equivalent`)
+  - `dual_iso_full20_interp_amaze_edge_direction_ms=42.313` (`23.634 fps-equivalent`)
+  - `dual_iso_full20_interp_amaze_actual_interp_ms=27.938` (`35.794 fps-equivalent`)
+  - `dual_iso_full20_interp_amaze_demosaic_ms=56.562` (`17.680 fps-equivalent`)
+- Edge-search density from that run:
+  - `avg_simd_batches=505792.000`
+  - `avg_allskip_batches=375184.000` (`74.178%`)
+  - `avg_mixed_batches=116381.375` (`23.010%`)
+  - `avg_fullsearch_batches=14226.625` (`2.813%`)
+  - `avg_fullsearch_pixels=427700.438` (`10.535%`)
+  - `avg_skip_pixels=3632183.562` (`89.465%`)
+  - `avg_scalar_pixels=13548.000`
+- This confirms the previous all-skip bypass is doing useful work: most SIMD batches are all-skip. The remaining edge-direction cost is now mostly the mixed-batch tail plus the true full-search lanes, not the all-skip majority.
+- I reran the standard M16 screenshot-backed visual smoke set with app-internal presented-frame capture:
+  - [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-density/m16-presented-frame-smoke/M16-1327/screenshots/M16-1327.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=940CA57D80DE6D75A1ADD6FC9DA59494F31CCC2001A5888AA3326F707F073705`
+  - [`M16-1347.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-density/m16-presented-frame-smoke/M16-1347/screenshots/M16-1347.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=A397DCA2C5B4A17EEE1CD0F92156E0ED66E762EC9E60B8759C91F4169056B5A7`
+  - [`M16-1446.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-amaze-density/m16-presented-frame-smoke/M16-1446/screenshots/M16-1446.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=1E65250E5CB239A9A5C042542499B3DA2914DD74F054335A5BE131AC7A6D8E54`
+- Visual inspection: the screenshots remain in the expected presented-frame family. `M16-1327` is still dark/warm, `M16-1347` remains the bright neutral-ish indoor control, and `M16-1446` remains the flatter outdoor/noise-floor control. I did not see a new obvious color corruption from this telemetry-only change.
+- M16 smoke metrics with FPS-equivalent:
+  - `M16-1327`: `presented_fps=0.673`; `avg_render_work_ms=1186.833` (`0.843 fps-equivalent`); `avg_llrawproc_ms=44.167` (`22.641 fps-equivalent`); `avg_processed8_ms=1185.333` (`0.844 fps-equivalent`); `avg_dual_iso_full20_total_ms=42.500` (`23.529 fps-equivalent`); `avg_sh_prep_ms=409.000` (`2.445 fps-equivalent`); `avg_rbf_ms=403.500` (`2.478 fps-equivalent`)
+  - `M16-1347`: `presented_fps=0.674`; `avg_render_work_ms=1189.500` (`0.841 fps-equivalent`); `avg_llrawproc_ms=47.333` (`21.127 fps-equivalent`); `avg_processed8_ms=1188.000` (`0.842 fps-equivalent`); `avg_dual_iso_full20_total_ms=46.500` (`21.505 fps-equivalent`); `avg_sh_prep_ms=401.000` (`2.494 fps-equivalent`); `avg_rbf_ms=395.167` (`2.530 fps-equivalent`)
+  - `M16-1446`: `presented_fps=0.678`; `avg_render_work_ms=1198.833` (`0.834 fps-equivalent`); `avg_llrawproc_ms=40.000` (`25.000 fps-equivalent`); `avg_processed8_ms=1197.167` (`0.835 fps-equivalent`); `avg_dual_iso_full20_total_ms=40.000` (`25.000 fps-equivalent`); `avg_sh_prep_ms=407.667` (`2.453 fps-equivalent`); `avg_rbf_ms=402.667` (`2.483 fps-equivalent`)
+
+### Cross-checked from prior analysis
+
+- The prior all-skip bypass reduced edge-direction work from roughly `84.92 ms` (`11.78 fps-equivalent`) to roughly `37.12 ms` (`26.94 fps-equivalent`) on the same fixture family. The new density counters explain why that win was available: about three quarters of SIMD batches in this run are all-skip.
+- The M16 aspect remains a presented playback/de-squeeze check, not a neutral source-aspect check. `2555x1068` is correct for the active smoke state because the wrapper reports `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, and `v_stretch_index=3`.
+
+### Needs runtime profiling
+
+- The next AMaZE optimization should not chase all-skip lanes again. Higher-impact candidates are:
+  - mixed-batch specialization that avoids full 11-direction work for skip lanes inside mixed SIMD batches
+  - demosaic worker-time reduction
+  - actual edge-directed interpolation reduction
+- Before changing mixed-batch behavior, add or reuse byte-identity tests that compare the mixed-lane result against scalar AMaZE, because that seam is more correctness-sensitive than the all-skip bypass.
