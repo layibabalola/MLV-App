@@ -12724,3 +12724,26 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
 
 - Repeat this sparse-mixed profile on additional real Dual ISO scenes if available. The fixture win is strong, but mixed-lane sparsity is scene-dependent.
 - Next likely AMaZE seams are demosaic worker time and actual edge-directed interpolation. Keep those in separate micro-branches with byte-identity tests because they are more image-math-sensitive than skipped-lane pruning.
+
+## 2026-06-03 - GUI FPS status vs smoke FPS metrics
+
+### Verified locally
+
+- The bottom-left GUI status label was not the same metric as the FPS-equivalent stage numbers I had been reporting. In `MainWindow::timerFrameEvent`, the live label used `1000 / measuredFrameMs` for the last displayed playback frame and cast it to `int`, so sub-1 FPS playback displayed as `Playback: 0 fps`.
+- The GUI smoke screenshot is an app-internal presented-frame capture, not a full-window/status-bar capture. That is correct for color/aspect verification, but it cannot visually prove the bottom-left status text by itself.
+- I changed the live label formatter so playback below 10 FPS keeps one decimal place, e.g. `Playback: 0.6 fps`, while higher FPS still uses whole numbers.
+- I added `gui_fps_status_text` and `gui_fps_status_value` to the playback smoke summary, and surfaced those as `playbackFps.guiStatusText` and `playbackFps.guiStatusValue` in `tools/profiling/run-release-gui-smoke.ps1`.
+- Before the decimal-label fix, the M16-1327 smoke run reported `playbackFps.guiStatusText="Playback: 0 fps"` while smoke telemetry reported `smokePresentedFps=0.558` and `smokeTimelineFps=17.392`.
+- After the fix, the M16-1327 smoke run reported `playbackFps.guiStatusText="Playback: 0.6 fps"`, `playbackFps.guiStatusValue=0.6`, `smokePresentedFps=0.420`, and `smokeTimelineFps=15.760`.
+- The same post-fix run captured the presented frame at [`M16-1327.png`](C:/!Layi%20Wkspc%20MLV-App/.claude-state/profiling/20260603-gui-fps-status/M16-1327-decimal/screenshots/M16-1327.png): `2555x1068`, aspect `2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `SHA256=C80BB108B3A67E3BDA68DF82EFD3DF421F9BD7C8928F8719EB4AD50FCBF7746D`.
+- Visual inspection of that post-fix screenshot showed the expected de-squeezed wide M16 frame and no obvious new color corruption from this telemetry/UI formatting change.
+
+### Cross-checked from prior analysis
+
+- Earlier `fps≈...` values beside `llrawproc_ms`, `mix_chroma_ms`, `render_thread_work_ms`, and similar stage timings should be read as per-stage FPS-equivalent (`1000 / ms`), not as the GUI bottom-left playback FPS.
+- The smoke-run `presented_fps` is a run-level presented-frame rate over the smoke window, and `timeline_fps` is timeline advance rate; neither should be described as the bottom-left GUI FPS unless the smoke artifact's `playbackFps.guiStatusValue` says so.
+
+### Needs runtime profiling
+
+- Future smoke reports must label all four playback-rate concepts separately when they appear: `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and `FPS-equivalent`.
+- If visual proof of the status-bar text becomes important, add an optional full-window screenshot mode in addition to the current presented-frame screenshot; keep the presented-frame capture as the color/aspect oracle.

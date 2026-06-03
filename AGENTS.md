@@ -46,6 +46,7 @@
 - When aspect ratio is under review, report `stretch_x`, `stretch_y`, `h_stretch_index`, `v_stretch_index`, and whether the screenshot is a presented-playback geometry check or a neutral source-aspect check. The M16 smoke set may intentionally preserve receipt/app stretch, so do not call a screenshot correct or wrong without the active stretch state.
 - `tools\profiling\run-release-gui-smoke.ps1` records screenshot `width`, `height`, `aspect`, `sha256`, and `visualQuality.aspectEvidence`; use that object as the first-line aspect evidence before making a visual judgment.
 - When reporting playback smoke metrics, include both milliseconds and FPS or FPS-equivalent (`1000 / ms`) for every timing number that is used to compare performance.
+- Keep playback FPS labels explicit: `GUI FPS` is the bottom-left `Playback: ... fps` status value, `smoke presented FPS` is `presented_fps`, `timeline FPS` is `timeline_fps`, and per-stage timing conversions are only `FPS-equivalent` (`1000 / ms`).
 - Do **not** force `QT_QPA_PLATFORM=offscreen` when profiling or smoking `platform\qt\build-release\release\MLVApp.exe`. That release tree deploys `platforms\qwindows.dll`; forcing `offscreen` can trigger the Qt platform-plugin popup even though the normal GUI launch path is healthy. `offscreen` remains appropriate only for `gui_tests` or for an explicitly deployed offscreen platform-plugin tree.
 
 ## Brokered Auto-Closeout

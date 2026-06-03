@@ -68,6 +68,14 @@ static bool playbackSmokeFrameTelemetryEnabled()
     return enabled;
 }
 
+static QString playbackFpsStatusText( double fps )
+{
+    if( fps < 0.0 ) fps = 0.0;
+    return fps < 10.0
+        ? QStringLiteral( "Playback: %1 fps" ).arg( fps, 0, 'f', 1 )
+        : QStringLiteral( "Playback: %1 fps" ).arg( static_cast<int>( fps ) );
+}
+
 static int playbackScopeUpdateIntervalMs()
 {
     bool ok = false;
@@ -1517,7 +1525,13 @@ void MainWindow::timerFrameEvent( void )
 
         //fps measurement
         const int measuredFrameMs = lastTime.msecsTo( nowTime );
-        if( timeDiff != 0 ) m_pFpsStatus->setText( tr( "Playback: %1 fps" ).arg( (int)( 1000 / measuredFrameMs ) ) );
+        if( timeDiff != 0 )
+        {
+            const double measuredFps = measuredFrameMs > 0
+                ? 1000.0 / static_cast<double>( measuredFrameMs )
+                : 0.0;
+            m_pFpsStatus->setText( playbackFpsStatusText( measuredFps ) );
+        }
         lastTime = nowTime;
 
         //Phase 4E: feed the auto sampler with the per-frame cadence; only
@@ -1580,7 +1594,7 @@ void MainWindow::timerFrameEvent( void )
                     .arg( ui->horizontalSliderPosition->value() ),
                 true );
         }
-        m_pFpsStatus->setText( tr( "Playback: 0 fps" ) );
+        m_pFpsStatus->setText( playbackFpsStatusText( 0.0 ) );
         lastTime = QTime::currentTime(); //do that for calculation of timeDiff for DropFrameMode;
 
     }
@@ -5811,7 +5825,7 @@ void MainWindow::initGui( void )
     m_pFpsStatus = new QLabel( statusBar() );
     m_pFpsStatus->setMaximumWidth( 110 );
     m_pFpsStatus->setMinimumWidth( 110 );
-    m_pFpsStatus->setText( tr( "Playback: 0 fps" ) );
+    m_pFpsStatus->setText( playbackFpsStatusText( 0.0 ) );
     //m_pFpsStatus->setFrameStyle(QFrame::Panel | QFrame::Sunken);
     statusBar()->addWidget( m_pFpsStatus );
 
@@ -16695,6 +16709,21 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             ? sum / static_cast<double>( m_playbackSmokePresentedFrames )
             : 0.0;
     };
+    const QString guiFpsStatusText =
+        m_pFpsStatus ? m_pFpsStatus->text() : QString();
+    double guiFpsStatusValue = -1.0;
+    const QStringList guiFpsStatusTokens =
+        guiFpsStatusText.split( QLatin1Char(' '), Qt::SkipEmptyParts );
+    for( const QString &token : guiFpsStatusTokens )
+    {
+        bool ok = false;
+        const double value = token.toDouble( &ok );
+        if( ok )
+        {
+            guiFpsStatusValue = value;
+            break;
+        }
+    }
 
     m_playbackSmokeActive = false;
 
@@ -16716,7 +16745,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "prep_generation_drops=%36 prep_replaced_before=%37 "
                "prep_replaced_after=%38 still_drawing=%39 pending_advance=%40 "
                "preroll_requested=%41 play_to_first_valid=%42 play_to_first_ms=%43 "
-               "frame_telemetry=%44" )
+               "frame_telemetry=%44 gui_fps_status_text=\"%45\" "
+               "gui_fps_status_value=%46" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -16764,7 +16794,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( bool01( m_lastPlayStartPrerollRequested ) )
                .arg( bool01( m_lastPlayToFirstFrameValid ) )
                .arg( m_lastPlayToFirstFrameMs, 0, 'f', 3 )
-               .arg( bool01( m_playbackSmokeFrameTelemetry ) );
+               .arg( bool01( m_playbackSmokeFrameTelemetry ) )
+               .arg( guiFpsStatusText )
+               .arg( guiFpsStatusValue, 0, 'f', 3 );
 
     qInfo().noquote()
         << QStringLiteral(

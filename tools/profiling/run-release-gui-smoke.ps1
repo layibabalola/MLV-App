@@ -751,6 +751,13 @@ $result = [pscustomobject]@{
             finalTint = Get-ObjectPropertyValue $lookAssistApply "final_tint"
         }
     }
+    playbackFps = [pscustomobject]@{
+        guiStatusText = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_text"
+        guiStatusValue = Get-ObjectPropertyValue $playbackSummary "gui_fps_status_value"
+        smokePresentedFps = Get-ObjectPropertyValue $playbackSummary "presented_fps"
+        smokeTimelineFps = Get-ObjectPropertyValue $playbackSummary "timeline_fps"
+        note = "guiStatusValue is the bottom-left Playback FPS label; smokePresentedFps and smokeTimelineFps are smoke-run telemetry, and per-stage FPS-equivalent values are 1000 / stage_ms."
+    }
     process = [pscustomobject]@{
         id = $process.Id
         exitCode = $process.ExitCode
