@@ -278,6 +278,9 @@ if (-not [string]::IsNullOrWhiteSpace($Receipt)) {
 if (-not [string]::IsNullOrWhiteSpace($Scope)) {
     $arguments += @("--scope", $Scope)
 }
+if ($CaptureScreenshot) {
+    $arguments += @("--screenshot-output", $screenshotPath)
+}
 if ($Zebras -eq "on") {
     $arguments += "--zebras"
 }
@@ -422,24 +425,28 @@ $preLaunchSystemCpuSettle = Wait-SystemCpuSettle `
 $startUtc = [datetime]::UtcNow
 $process = [System.Diagnostics.Process]::Start($startInfo)
 $screenshotCapture = $null
-if ($CaptureScreenshot) {
-    $playbackStartLog = Wait-ForLogLineMatch -LogRoot $logRoot -Pattern "playback_smoke.start" -NotBeforeUtc $startUtc -TimeoutMs ([Math]::Max(20000, $ScreenshotWindowWaitMs))
-    if ($null -eq $playbackStartLog) {
-        throw "Timed out waiting for playback start telemetry before taking a screenshot."
-    }
-    Start-Sleep -Milliseconds $ScreenshotDelayMs
-    $screenshotCapture = & (Join-Path $PSScriptRoot "capture-window-screenshot.ps1") `
-        -Process $process `
-        -OutputPath $screenshotPath `
-        -WindowWaitMs $ScreenshotWindowWaitMs `
-        -CaptureTimeoutMs $ScreenshotCaptureTimeoutMs
-}
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
 $process.WaitForExit()
 $stdout = $stdoutTask.GetAwaiter().GetResult()
 $stderr = $stderrTask.GetAwaiter().GetResult()
 $endUtc = [datetime]::UtcNow
+
+if ($CaptureScreenshot) {
+    if (-not (Test-Path -LiteralPath $screenshotPath)) {
+        throw "GUI smoke completed but did not write screenshot: $screenshotPath"
+    }
+    $screenshotItem = Get-Item -LiteralPath $screenshotPath
+    $screenshotCapture = [pscustomobject]@{
+        outputPath = $screenshotItem.FullName
+        takenAtUtc = $screenshotItem.LastWriteTimeUtc.ToString("o")
+        method = "app-internal-presented-frame-preferred"
+        length = $screenshotItem.Length
+        requestedDelayMs = $ScreenshotDelayMs
+        windowWaitMs = $ScreenshotWindowWaitMs
+        captureTimeoutMs = $ScreenshotCaptureTimeoutMs
+    }
+}
 
 $logFile = Get-ChildItem -LiteralPath $logRoot -Filter "mlvapp-*.log" |
     Sort-Object LastWriteTimeUtc -Descending |

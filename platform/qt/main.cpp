@@ -774,6 +774,12 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("45000"));
     parser.addOption(settleCpuMaxOpt);
 
+    const QCommandLineOption screenshotOutputOpt(
+        QStringLiteral("screenshot-output"),
+        QStringLiteral("Optional PNG path for an app-internal presented playback frame screenshot."),
+        QStringLiteral("path"));
+    parser.addOption(screenshotOutputOpt);
+
     const QCommandLineOption scopeOpt(
         QStringLiteral("scope"),
         QStringLiteral("Force a live scope during the smoke: none, histogram, waveform, parade, vectorscope. If omitted, the user's persisted GUI state is used."),
@@ -872,6 +878,9 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.settleCpuPercent = settleCpuPercent;
     options.settleCpuStableMs = settleCpuStableMs;
     options.settleCpuMaxMs = settleCpuMaxMs;
+    options.screenshotOutputPath = parser.value(screenshotOutputOpt).isEmpty()
+        ? QString()
+        : QFileInfo(parser.value(screenshotOutputOpt)).absoluteFilePath();
     options.scope = scope;
     options.forceScope = parser.isSet(scopeOpt);
     options.zebras = parser.isSet(zebrasOpt);

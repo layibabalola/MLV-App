@@ -2789,21 +2789,30 @@ static inline void amaze_interpolate(struct raw_info raw_info,
     int h = raw_info.height;
     int wx = w + 16;
 
+    double amaze_stage_start = mlv_stage_timing_now();
     if (!ensure_amaze_interpolation_scratch(scratch, (size_t)h, (size_t)wx, (size_t)w * (size_t)h, (size_t)threads))
     {
+        g_dualiso_full20bit_timing.interp_amaze_scratch_ms +=
+            dualiso_debug_elapsed_ms(amaze_stage_start);
         return;
     }
+    g_dualiso_full20bit_timing.interp_amaze_scratch_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
 
     int* squeezed = scratch->amaze_squeezed;
     float** rawData = scratch->amaze_rawData_rows;
     float** red = scratch->amaze_red_rows;
     float** green = scratch->amaze_green_rows;
     float** blue = scratch->amaze_blue_rows;
+    amaze_stage_start = mlv_stage_timing_now();
     for (int y = 0; y < h; y++)
         squeezed[y] = -1;
     memset(scratch->amaze_rawData_storage, 0, (size_t)h * (size_t)wx * sizeof(float));
+    g_dualiso_full20bit_timing.interp_amaze_clear_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
     
     /* squeeze the dark image by deleting fields from the bright exposure */
+    amaze_stage_start = mlv_stage_timing_now();
     int yh = -1;
     for (int y = 0; y < h; y ++)
     {
@@ -2831,7 +2840,10 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         yh++;
         if (yh >= h) break; /* just in case */
     }
+    g_dualiso_full20bit_timing.interp_amaze_squeeze_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
 
+    amaze_stage_start = mlv_stage_timing_now();
     #pragma omp parallel for
     for (int y = 0; y < h; y ++)
     {
@@ -2850,15 +2862,21 @@ static inline void amaze_interpolate(struct raw_info raw_info,
             raw_row[x] = p;
         }
     }
+    g_dualiso_full20bit_timing.interp_amaze_rawdata_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
 
+    amaze_stage_start = mlv_stage_timing_now();
     #pragma omp parallel for
     for (int y = 0; y < h; y ++)
     {
         if (squeezed[y] < 0)
             squeezed[y] = 0;
     }
+    g_dualiso_full20bit_timing.interp_amaze_squeeze_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
 
     // Multithreaded debayer
+    amaze_stage_start = mlv_stage_timing_now();
     int* startchunk_y = scratch->amaze_startchunk_y;
     int* endchunk_y = scratch->amaze_endchunk_y;
 
@@ -2898,8 +2916,11 @@ static inline void amaze_interpolate(struct raw_info raw_info,
     for (int thread = 0; thread < threads; ++thread) {
         pthread_join(thread_id[thread], NULL);
     }
+    g_dualiso_full20bit_timing.interp_amaze_demosaic_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
 
     /* undo green channel scaling and clamp the other channels */
+    amaze_stage_start = mlv_stage_timing_now();
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
     {
@@ -2910,6 +2931,8 @@ static inline void amaze_interpolate(struct raw_info raw_info,
             blue[y][x] = COERCE(blue[y][x], 0, 0xFFFFF);
         }
     }
+    g_dualiso_full20bit_timing.interp_amaze_postprocess_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
 #ifndef STDOUT_SILENT
     printf("Edge-directed interpolation...\n");
 #endif
@@ -2917,21 +2940,27 @@ static inline void amaze_interpolate(struct raw_info raw_info,
     /* convert to grayscale and de-squeeze for easier processing */
     uint32_t * gray = scratch->amaze_gray;
 
+    amaze_stage_start = mlv_stage_timing_now();
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
         for (int x = 0; x < w; x ++)
             gray[x + y*w] = green[squeezed[y]][x]/2 + red[squeezed[y]][x]/4 + blue[squeezed[y]][x]/4;
+    g_dualiso_full20bit_timing.interp_amaze_grayscale_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
     
     
     uint8_t* edge_direction = scratch->amaze_edge_direction;
     int d0 = COUNT(edge_directions)/2;
 
+    amaze_stage_start = mlv_stage_timing_now();
     #pragma omp parallel for collapse(2)
     for (int y = 0; y < h; y ++)
         for (int x = 0; x < w; x ++)
             edge_direction[x + y*w] = d0;
     
     double * fullres_curve = build_fullres_curve(black);
+    g_dualiso_full20bit_timing.interp_amaze_edge_init_ms +=
+        dualiso_debug_elapsed_ms(amaze_stage_start);
     
     //~ printf("Cross-correlation...\n");
     
@@ -2950,13 +2979,17 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         int deep_shadow = 0;
         int not_shadow = 0;
 
+        amaze_stage_start = mlv_stage_timing_now();
         if(black != previous_black)
         {
             build_ev2raw_lut(raw2ev, ev2raw_0, black, white);
             previous_black = black;
         }
+        g_dualiso_full20bit_timing.interp_amaze_lut_ms +=
+            dualiso_debug_elapsed_ms(amaze_stage_start);
 #ifdef DUALISO_AVX2_AVAILABLE
         pthread_once(&g_dualiso_amaze_dispatch_once, dualiso_amaze_dispatch_init);
+        amaze_stage_start = mlv_stage_timing_now();
         if (g_dualiso_amaze_use_avx2)
         {
             /* Phase E1 — AVX2 fast path. Skips the diagnostic stat counters
@@ -2981,6 +3014,9 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         else
 #endif
         {
+#ifndef DUALISO_AVX2_AVAILABLE
+        amaze_stage_start = mlv_stage_timing_now();
+#endif
         #pragma omp parallel for
         for (int y = 5; y < h-5; y ++)
         {
@@ -3069,12 +3105,15 @@ static inline void amaze_interpolate(struct raw_info raw_info,
             }
         }
         }
+        g_dualiso_full20bit_timing.interp_amaze_edge_direction_ms +=
+            dualiso_debug_elapsed_ms(amaze_stage_start);
 #ifndef STDOUT_SILENT
         printf("Semi-overexposed: %.02f%%\n", semi_overexposed * 100.0 / (semi_overexposed + not_overexposed));
         printf("Deep shadows    : %.02f%%\n", deep_shadow * 100.0 / (deep_shadow + not_shadow));
 #endif
         //~ printf("Actual interpolation...\n");
         
+        amaze_stage_start = mlv_stage_timing_now();
         #pragma omp parallel for
         for (int y = 2; y < h-2; y ++)
         {
@@ -3105,6 +3144,8 @@ static inline void amaze_interpolate(struct raw_info raw_info,
                 x -= 2;
             }
         }
+        g_dualiso_full20bit_timing.interp_amaze_actual_interp_ms +=
+            dualiso_debug_elapsed_ms(amaze_stage_start);
     }
     UNLOCK(ev2raw_mutex)
     
