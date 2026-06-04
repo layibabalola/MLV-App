@@ -178,6 +178,84 @@ static int mlv_env_value_is_truthy(const char * value)
     return 0;
 }
 
+static int g_mlv_playback_aggressive_preview_mode = 0;
+
+void mlvSetPlaybackAggressivePreviewMode(int enabled)
+{
+#if defined(__GNUC__)
+    __atomic_store_n(&g_mlv_playback_aggressive_preview_mode,
+                     enabled ? 1 : 0,
+                     __ATOMIC_RELEASE);
+#else
+    g_mlv_playback_aggressive_preview_mode = enabled ? 1 : 0;
+#endif
+}
+
+static int mlv_playback_aggressive_preview_env_override(void)
+{
+    const char * value = getenv("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
+    if (value && value[0] != '\0')
+    {
+        if (strcmp(value, "0") == 0
+         || strcasecmp(value, "false") == 0
+         || strcasecmp(value, "off") == 0
+         || strcasecmp(value, "sharp") == 0
+         || strcasecmp(value, "sharp_smooth") == 0
+         || strcasecmp(value, "smooth") == 0
+         || strcasecmp(value, "quality") == 0)
+        {
+            return 0;
+        }
+        if (mlv_env_value_is_truthy(value)
+         || strcasecmp(value, "aggressive") == 0
+         || strcasecmp(value, "aggressive_performance") == 0
+         || strcasecmp(value, "performance") == 0
+         || strcasecmp(value, "fast") == 0)
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+    value = getenv("MLVAPP_PLAYBACK_PREVIEW_MODE");
+    if (!value || value[0] == '\0')
+    {
+        return -1;
+    }
+    if (strcmp(value, "0") == 0
+     || strcasecmp(value, "sharp") == 0
+     || strcasecmp(value, "sharp_smooth") == 0
+     || strcasecmp(value, "smooth") == 0
+     || strcasecmp(value, "quality") == 0)
+    {
+        return 0;
+    }
+    if (mlv_env_value_is_truthy(value)
+     || strcasecmp(value, "aggressive") == 0
+     || strcasecmp(value, "aggressive_performance") == 0
+     || strcasecmp(value, "performance") == 0
+     || strcasecmp(value, "fast") == 0)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+int mlvPlaybackAggressivePreviewMode(void)
+{
+    const int envOverride = mlv_playback_aggressive_preview_env_override();
+    if (envOverride >= 0)
+    {
+        return envOverride;
+    }
+#if defined(__GNUC__)
+    return __atomic_load_n(&g_mlv_playback_aggressive_preview_mode,
+                           __ATOMIC_ACQUIRE) != 0;
+#else
+    return g_mlv_playback_aggressive_preview_mode != 0;
+#endif
+}
+
 /* Matches lj92.c's lj92_pred6_split_enabled-style truthy check: any non-empty
  * value other than literal "0" enables the feature. Broader than
  * mlv_env_value_is_truthy so the prefetch disable here tracks whatever lj92
@@ -239,10 +317,17 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
     }
 
     /* On HQ Dual ISO scale-4 playback, the prefetch worker competes with the
-     * full20 reconstruction threads; foreground decode is cheaper here. */
+     * full20 reconstruction threads; foreground decode is cheaper here. In
+     * aggressive x8 preview, recon now runs on 1/64 of the pixels, so decode
+     * overlap is allowed to attack the measured full-raw decode floor. */
     if (video->llrawproc->dual_iso == 1
         && video->playback_scale_factor_active >= 4)
     {
+        if (video->playback_scale_factor_active == 8
+         && mlvPlaybackAggressivePreviewMode())
+        {
+            return 1;
+        }
         return 0;
     }
 
@@ -520,6 +605,8 @@ static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * vid
      * distinguishes them. */
     const int normalizedScale = mlv_normalize_playback_scale_factor(scaleFactor);
     hash = mlv_hash_bytes(hash, &normalizedScale, sizeof(normalizedScale));
+    const int aggressivePreview = mlvPlaybackAggressivePreviewMode();
+    hash = mlv_hash_bytes(hash, &aggressivePreview, sizeof(aggressivePreview));
 
     if (!video)
     {
@@ -2776,6 +2863,10 @@ static int g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
 
 static int mlv_phase4bv2_allow_fast_hq_via_env(void)
 {
+    if (mlvPlaybackAggressivePreviewMode())
+    {
+        return 1;
+    }
     if (g_mlv_phase4bv2_allow_fast_hq_env_cache < 0)
     {
         const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");

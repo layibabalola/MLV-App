@@ -141,8 +141,23 @@ the scale happened after LLRawProc. The profile JSON exposes this through
 `render_thread_phase4b_path`, `render_thread_phase4b_fallback_reason`, and
 the `render_thread_stage_*_{width,height,pixels}` fields.
 
+Playback preview mode controls how aggressively the app applies this contract:
+
+- `Sharp / Smooth Preview` is the default quality-first policy. It keeps the
+  conservative x4 HQ mean23 full-recon fallback when that is the safer visual
+  choice.
+- `Aggressive Performance Preview` opts into faster preview work, including
+  x4 HQ mean23 early reconstruction where the Phase 4B gates pass and raw
+  uint16 decode-ahead overlap for Dual ISO x8.
+- x2 is still a late-scale mode today: it pays full raw decode and full
+  LLRawProc/Dual ISO before reducing RGB work. Treat x2 as less hardened for
+  fastest playback until a real early x2 Bayer reduction path exists.
+
 ## Notes
 
 - Prefetch telemetry: `raw_uint16_prefetch_hit`, `raw_uint16_prefetch_decode_failures`. Disable with `MLVAPP_DISABLE_RAW_UINT16_PREFETCH=1` to restore thread-local decode telemetry.
+- Preview-mode telemetry: `render_thread_preview_mode`,
+  `render_thread_aggressive_preview`, `playback_preview_mode`, and
+  `playback_aggressive_preview`.
 - Stage 9 (direct 8-bit fast path) is gated by `MLVAPP_ENABLE_AVX2=1` at `qmake` time plus runtime dispatch via `processingFastPathAvx2Active`.
 - Dual ISO fixtures exercise LJ92 predictor 1, not pred6 — optimise the generic path.

@@ -229,6 +229,13 @@
       <addaction name="actionPlaybackScale4"/>
       <addaction name="actionPlaybackScale8"/>
      </widget>
+     <widget class="QMenu" name="menuPlaybackPreviewMode">
+      <property name="title">
+       <string>Preview Mode</string>
+      </property>
+      <addaction name="actionPlaybackPreviewSharpSmooth"/>
+      <addaction name="actionPlaybackPreviewAggressive"/>
+     </widget>
      <addaction name="actionPlaybackQualityFast"/>
      <addaction name="actionPlaybackQualityHQ"/>
      <addaction name="actionPlaybackQualityAuto"/>
@@ -236,6 +243,7 @@
      <addaction name="actionPlaybackQualityPhase3HQ"/>
      <addaction name="separator"/>
      <addaction name="actionPlaybackShowQualityIndicator"/>
+     <addaction name="menuPlaybackPreviewMode"/>
      <addaction name="menuPlaybackScaleFactor"/>
      <addaction name="menuPlaybackAutoTargetFps"/>
     </widget>
@@ -11115,6 +11123,34 @@ QGroupBox::indicator:checked:disabled {
    </property>
    <property name="statusTip">
     <string>Playback Quality: Experimental Phase 3 High Quality path.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackPreviewSharpSmooth">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Sharp / Smooth Preview</string>
+   </property>
+   <property name="toolTip">
+    <string>Favor non-blocky preview quality. x4 HQ keeps the conservative full-reconstruction path; x8 remains an explicit deep preview.</string>
+   </property>
+   <property name="statusTip">
+    <string>Preview Mode: sharper, smoother playback preview with conservative scaling shortcuts.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackPreviewAggressive">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Aggressive Performance Preview</string>
+   </property>
+   <property name="toolTip">
+    <string>Prefer earliest reduced-resolution work for throughput. Enables early x4 HQ reduction and x8 Dual ISO decode overlap.</string>
+   </property>
+   <property name="statusTip">
+    <string>Preview Mode: fastest reduced-resolution playback, accepting coarser preview tradeoffs.</string>
    </property>
   </action>
   <action name="actionPlaybackScaleAuto">

@@ -332,6 +332,8 @@ private slots:
     void on_actionPlaybackQualityAuto_triggered();
     void on_actionPlaybackQualityPhase3Fast_triggered();
     void on_actionPlaybackQualityPhase3HQ_triggered();
+    void on_actionPlaybackPreviewSharpSmooth_triggered();
+    void on_actionPlaybackPreviewAggressive_triggered();
     void on_actionPlaybackShowQualityIndicator_triggered();
     void on_actionPlaybackAutoTarget24_triggered();
     void on_actionPlaybackAutoTarget30_triggered();
@@ -704,6 +706,7 @@ private:
     QActionGroup *m_playbackElementGroup;
     QActionGroup *m_scopeGroup;
     QActionGroup *m_playbackQualityGroup = nullptr;       // Phase 4E
+    QActionGroup *m_playbackPreviewModeGroup = nullptr;   // Phase 4E
     QActionGroup *m_playbackAutoTargetFpsGroup = nullptr; // Phase 4E
     QActionGroup *m_playbackScaleFactorGroup = nullptr;   // Phase 4E
     DoubleClickLabel *m_pTcLabel;
@@ -748,6 +751,7 @@ private:
      * frame (equal to the user choice for Fast/HighQuality, dynamically
      * decided by the auto sampler for Auto). */
     int m_playbackQualityMode = 0;
+    int m_playbackPreviewMode = 0;
     int m_playbackAutoTargetFps = 30;
     int m_playbackQualityActiveScale = 1;
     bool m_playbackQualityActiveHq = false;
@@ -1187,8 +1191,10 @@ private:
     void applyEffectiveDualIsoPlaybackSettings( void );
     /* Phase 4E: Playback Quality dial helpers. */
     void initPlaybackQualityFromSettings( void );
+    void initPlaybackPreviewModeFromSettings( void );
     void initPlaybackScaleFactorFromSettings( void );
     void applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh );
+    void applyPlaybackPreviewMode( int mode, bool persist, bool forceRefresh );
     void applyPlaybackScaleFactorOverride( int scaleFactor, bool persist );
     void applyPlaybackAutoTargetFps( int targetFps, bool persist );
     void setPlaybackQualityIndicatorVisible( bool visible, bool persist );

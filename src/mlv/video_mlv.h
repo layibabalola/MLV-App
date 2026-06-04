@@ -180,6 +180,11 @@ const char * mlv_phase4bv2_last_fallback_reason(void);
  * Y-cropped path was taken or if the clip was already path-aligned. */
 int mlv_phase4bv3_last_y_crop_rows(void);
 
+/* Playback preview contract selected by the GUI/profile environment.
+ * Sharp/Smooth is 0; Aggressive Performance is non-zero. */
+void mlvSetPlaybackAggressivePreviewMode(int enabled);
+int mlvPlaybackAggressivePreviewMode(void);
+
 /* Test-only hook: clear cached Phase 4B env-var values so subsequent calls
  * re-read getenv(). Used by parity tests that flip the kill switches or HQ
  * fast-path override mid-process. */
