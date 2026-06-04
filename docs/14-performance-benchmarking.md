@@ -290,8 +290,8 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 - Playback preview mode is a separate quality/performance policy from scale:
   - `Sharp / Smooth Preview` is the default quality-first policy.
   - `Aggressive Performance Preview` opts into faster preview contracts, such
-    as x4 HQ mean23 early reconstruction where gates allow and x8 Dual ISO raw
-    decode-ahead overlap.
+    as x4 HQ mean23 early reconstruction where gates allow and Dual ISO raw
+    decode-ahead overlap for compatible reduced x4/x8 previews.
   - For scripted profiles, use `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=1` or
     `MLVAPP_PLAYBACK_PREVIEW_MODE=aggressive_performance`. Use `0` or
     `sharp_smooth` for the default behavior.

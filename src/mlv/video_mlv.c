@@ -304,6 +304,53 @@ static int mlv_raw_uint16_prefetch_enabled(void)
     return enabled;
 }
 
+static int mlv_phase4bv2_disabled_via_env(void);
+static int mlv_phase4bv3_disabled_via_env(void);
+static int mlv_phase4bv4_x8_disabled_via_env(void);
+
+static int mlv_aggressive_reduced_dual_iso_prefetch_expected(const mlvObject_t * video)
+{
+    if (!mlvPlaybackAggressivePreviewMode() || !video || !video->llrawproc)
+    {
+        return 0;
+    }
+    if (mlv_phase4bv2_disabled_via_env())
+    {
+        return 0;
+    }
+
+    const llrawprocObject_t * shared = video->llrawproc;
+    if (shared->dual_iso != 1 || !shared->diso_validity || !shared->fix_raw)
+    {
+        return 0;
+    }
+    if (shared->focus_pixels
+     || shared->bad_pixels
+     || shared->vertical_stripes
+     || shared->pattern_noise)
+    {
+        return 0;
+    }
+
+    if (video->playback_scale_factor_active == 8)
+    {
+        return !mlv_phase4bv4_x8_disabled_via_env();
+    }
+    if (video->playback_scale_factor_active == 4)
+    {
+        if (mlv_phase4bv3_disabled_via_env())
+        {
+            return 0;
+        }
+        const int full_w = (int)getMlvWidth(video);
+        const int full_h = (int)getMlvHeight(video);
+        const int eff_h = (full_h / 16) * 16;
+        return full_w > 0 && full_h > 0 && (full_w % 4) == 0 && eff_h >= 16;
+    }
+
+    return 0;
+}
+
 static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video)
 {
     if (!mlv_raw_uint16_prefetch_enabled())
@@ -316,15 +363,15 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
         return 1;
     }
 
-    /* On HQ Dual ISO scale-4 playback, the prefetch worker competes with the
-     * full20 reconstruction threads; foreground decode is cheaper here. In
-     * aggressive x8 preview, recon now runs on 1/64 of the pixels, so decode
-     * overlap is allowed to attack the measured full-raw decode floor. */
+    /* On full-recon HQ Dual ISO scale-4+ playback, the prefetch worker
+     * competes with full20 reconstruction; foreground decode is cheaper there.
+     * In aggressive reduced previews, Phase 4B has already moved recon/debayer
+     * to preview-sized buffers, so decode overlap attacks the measured full-raw
+     * decode floor without changing sharp/smooth fallback behavior. */
     if (video->llrawproc->dual_iso == 1
         && video->playback_scale_factor_active >= 4)
     {
-        if (video->playback_scale_factor_active == 8
-         && mlvPlaybackAggressivePreviewMode())
+        if (mlv_aggressive_reduced_dual_iso_prefetch_expected(video))
         {
             return 1;
         }

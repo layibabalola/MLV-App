@@ -148,7 +148,7 @@ Playback preview mode controls how aggressively the app applies this contract:
   choice.
 - `Aggressive Performance Preview` opts into faster preview work, including
   x4 HQ mean23 early reconstruction where the Phase 4B gates pass and raw
-  uint16 decode-ahead overlap for Dual ISO x8.
+  uint16 decode-ahead overlap for compatible reduced Dual ISO x4/x8 previews.
 - x2 is still a late-scale mode today: it pays full raw decode and full
   LLRawProc/Dual ISO before reducing RGB work. Treat x2 as less hardened for
   fastest playback until a real early x2 Bayer reduction path exists.

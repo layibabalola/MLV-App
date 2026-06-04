@@ -2102,7 +2102,7 @@ TEST(ClipGolden, LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch)
     ASSERT_TRUE(saw_full20_frame);
 }
 
-TEST(ClipGolden, LargeDualIsoAggressiveX8AllowsRawUint16Prefetch)
+TEST(ClipGolden, LargeDualIsoAggressiveX8SuppressesRawUint16PrefetchWhenReceiptNeedsFullResCoordinates)
 {
     const QString fixture_path = large_dual_iso_fixture_path();
     if (!QFileInfo::exists(fixture_path)) {
@@ -2124,7 +2124,7 @@ TEST(ClipGolden, LargeDualIsoAggressiveX8AllowsRawUint16Prefetch)
 
     QTemporaryDir temp_dir;
     ASSERT_TRUE(temp_dir.isValid());
-    const QString output_json = temp_dir.filePath(QStringLiteral("large-dual-iso-aggressive-x8-prefetch.json"));
+    const QString output_json = temp_dir.filePath(QStringLiteral("large-dual-iso-aggressive-x8-incompatible-prefetch.json"));
 
     QProcess process;
     configure_playback_profile_process(
@@ -2160,14 +2160,16 @@ TEST(ClipGolden, LargeDualIsoAggressiveX8AllowsRawUint16Prefetch)
 
     const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
     ASSERT_TRUE(frames.size() >= 4);
-    ASSERT_TRUE(count_raw_uint16_prefetch_hits(frames) > 0);
+    ASSERT_EQ(0, count_raw_uint16_prefetch_hits(frames));
 
     for (const QJsonValue & value : frames) {
         ASSERT_TRUE(value.isObject());
         const QJsonObject sample = value.toObject();
         ASSERT_EQ(8, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
         ASSERT_EQ(8, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
-        ASSERT_EQ(8, sample.value(QStringLiteral("render_thread_phase4b_path")).toInt());
+        ASSERT_EQ(0, sample.value(QStringLiteral("render_thread_phase4b_path")).toInt());
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_phase4b_fallback_reason")).toString()
+                    == QStringLiteral("focus_pixels enabled"));
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_aggressive_preview")).toBool());
         ASSERT_TRUE(sample.value(QStringLiteral("render_thread_preview_mode")).toString()
                     == QStringLiteral("aggressive_performance"));
@@ -2177,7 +2179,89 @@ TEST(ClipGolden, LargeDualIsoAggressiveX8AllowsRawUint16Prefetch)
             sample.value(QStringLiteral("render_thread_stage_llrawproc_pixels")).toDouble();
         ASSERT_TRUE(raw_decode_pixels > 0.0);
         ASSERT_TRUE(llrawproc_pixels > 0.0);
-        ASSERT_TRUE(llrawproc_pixels < raw_decode_pixels);
+        ASSERT_EQ(raw_decode_pixels, llrawproc_pixels);
+    }
+}
+
+TEST(ClipGolden, LargeDualIsoAggressiveX4SuppressesRawUint16PrefetchWhenReceiptNeedsFullResCoordinates)
+{
+    const QString fixture_path = large_dual_iso_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/large_dual_iso.mlv");
+    }
+
+    const QString receipt_path = large_dual_iso_hq_receipt_path();
+    if (!QFileInfo::exists(receipt_path)) {
+        SKIP_TEST("Missing fixture receipt tests/fixtures/receipts/large_dual_iso_hq.marxml");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("large-dual-iso-aggressive-x4-incompatible-prefetch.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--receipt") << receipt_path
+            << QStringLiteral("--frames") << QStringLiteral("10")
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--threads") << QStringLiteral("4")
+            << QStringLiteral("--playback-debayer") << QStringLiteral("receipt")
+            << QStringLiteral("--playback-processing") << QStringLiteral("receipt"),
+        {{QStringLiteral("MLVAPP_RAW_UINT16_PREFETCH"), QStringLiteral("1")},
+         {QStringLiteral("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW"), QStringLiteral("1")},
+         {QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1")},
+         {QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QStringLiteral("4")}});
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(0, process.exitCode());
+
+    QFile json_file(output_json);
+    ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+    ASSERT_TRUE(document.isObject());
+
+    const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_aggressive_preview")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("playback_preview_mode")).toString()
+                == QStringLiteral("aggressive_performance"));
+
+    const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 4);
+    ASSERT_EQ(0, count_raw_uint16_prefetch_hits(frames));
+
+    for (const QJsonValue & value : frames) {
+        ASSERT_TRUE(value.isObject());
+        const QJsonObject sample = value.toObject();
+        ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+        ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+        ASSERT_EQ(0, sample.value(QStringLiteral("render_thread_phase4b_path")).toInt());
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_phase4b_fallback_reason")).toString()
+                    == QStringLiteral("focus_pixels enabled"));
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_aggressive_preview")).toBool());
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_preview_mode")).toString()
+                    == QStringLiteral("aggressive_performance"));
+        const double raw_decode_pixels =
+            sample.value(QStringLiteral("render_thread_stage_raw_decode_pixels")).toDouble();
+        const double llrawproc_pixels =
+            sample.value(QStringLiteral("render_thread_stage_llrawproc_pixels")).toDouble();
+        ASSERT_TRUE(raw_decode_pixels > 0.0);
+        ASSERT_TRUE(llrawproc_pixels > 0.0);
+        ASSERT_EQ(raw_decode_pixels, llrawproc_pixels);
     }
 }
 
