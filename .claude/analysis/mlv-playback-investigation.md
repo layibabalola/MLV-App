@@ -14409,3 +14409,30 @@ Post-change stage timings:
 
 - Do not reopen combined Dual ISO noise scanning unless a future profile shows `dual_iso_full20_noise_ms` as a stable top bucket across the standard clips and the candidate wins same-binary A/B on both stage time and `render_thread_total_ms`.
 - Continue ranking from retained x8 processed16/processing, residual presentation scheduling, and the decode-aware/tile-aware frontier when raw decode remains a wall-clock limiter after prefetch.
+
+## 2026-06-04 - Aggressive x8 Shadows/Highlights eighth-res probe rejected
+
+### Verified locally
+
+- I tested one more aggressive-x8 Shadows/Highlights reduction stage after the accepted quarter-res path. The probe moved the RBF to one-eighth preview resolution and then upsampled back through quarter/half/full scratch buffers. It was removed; no source/test probe remains in the tree.
+- Focused `ProcessingFilters.*` passed while the probe was present, including sharp/smooth full-res, aggressive x4 half-res, aggressive x8 eighth-res, and eighth-res kill-switch fallback. The rejection is runtime/quality-risk driven, not a unit-level crash or branch-selection failure.
+- First profile pass with doubled eighth-res spatial sigma failed the no-regression bar:
+  - `M16-1446`: baseline quarter-res `render_thread_total_ms=26.37 ms` (`37.92 FPS-equivalent`) vs eighth-res `31.23 ms` (`32.02 FPS-equivalent`); Shadows/Highlights filter `3.32 -> 5.87 ms` (`301.59 -> 170.25 FPS-equivalent`).
+- Second profile pass with the quarter-res sigma improved the noisy clip but still failed as a default:
+  - `M16-1327`: baseline quarter-res `render_thread_total_ms=23.92 ms` (`41.81 FPS-equivalent`) vs eighth-res `25.09 ms` (`39.85 FPS-equivalent`); Shadows/Highlights filter `2.53 -> 2.85 ms` (`395.83 -> 350.55 FPS-equivalent`).
+  - `M16-1347`: baseline quarter-res `render_thread_total_ms=29.97 ms` (`33.37 FPS-equivalent`) vs eighth-res `29.42 ms` (`33.99 FPS-equivalent`); Shadows/Highlights filter `3.60 -> 3.26 ms` (`277.78 -> 306.45 FPS-equivalent`).
+  - `M16-1446`: baseline quarter-res `render_thread_total_ms=26.37 ms` (`37.92 FPS-equivalent`) vs eighth-res `21.67 ms` (`46.14 FPS-equivalent`); Shadows/Highlights filter `3.32 -> 2.57 ms` (`301.59 -> 389.35 FPS-equivalent`).
+- Same-binary A/B against current quarter-res fallback confirmed the result is clip-dependent, not a clean retained-bucket win:
+  - `M16-1327`: quarter-res `render_thread_total_ms=19.91 ms` (`50.24 FPS-equivalent`) vs eighth-res `25.09 ms` (`39.85 FPS-equivalent`); filter `2.50 -> 2.85 ms` (`400.84 -> 350.55 FPS-equivalent`).
+  - `M16-1347`: quarter-res `render_thread_total_ms=23.11 ms` (`43.28 FPS-equivalent`) vs eighth-res `29.42 ms` (`33.99 FPS-equivalent`); filter `2.54 -> 3.26 ms` (`394.19 -> 306.45 FPS-equivalent`).
+  - `M16-1446`: quarter-res `render_thread_total_ms=33.99 ms` (`29.42 FPS-equivalent`) vs eighth-res `21.67 ms` (`46.14 FPS-equivalent`); filter `5.32 -> 2.57 ms` (`188.12 -> 389.35 FPS-equivalent`).
+
+### Cross-checked from prior analysis
+
+- Raw x8 prefetch is already active on this base; this rejected probe did not change the decode-overlap decision.
+- The accepted quarter-res path remains the stronger default for Aggressive Performance Preview because it is already coarse/deep, measured faster than the old full preview path, and is less clip-dependent than eighth-res.
+
+### Needs runtime profiling
+
+- Do not promote eighth-res Shadows/Highlights as the default. It may be worth revisiting only as a separate explicit "extra coarse" preview option after visual acceptance criteria exist.
+- Continue the active playback-speed goal from retained x8 `processed16`/processing, presentation scheduling, and decode-aware/tile-aware work only when fresh profiles show those buckets dominate after raw prefetch hits.
