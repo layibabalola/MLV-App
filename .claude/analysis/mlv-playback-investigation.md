@@ -1,3 +1,31 @@
+# 2026-06-03 - clip-open presentation reset suppresses transient pink top-block startup artifact
+
+### Verified locally
+
+- Investigated the user-reported brief pink/magenta block at the top of the viewer during clip open/startup. This artifact is distinct from the older broad direct8 preview pink wash: the settled frame is correct, while the bad visual appears transiently before the current frame settles.
+- The clip-open path could leave old or partial presentation state visible while `openMlv()` / `openMlvForPreview()` waited for render work to finish and swapped `m_pMlvObject`. The async presenter already rejects stale frames by `presentationGeneration`, but clip open was not invalidating that generation or clearing the viewport before the wait/free/swap window.
+- Added `MainWindow::clearPresentationForClipOpen()` in [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp) and calls from `openMlv()` and `openMlvForPreview()`. The helper invalidates display preview cache, bumps playback-prep presentation generation, clears pending presentation requests, resets last-presented context, clears GPU/pixmap presentation to the transparent dummy, blanks scopes, and repaints the viewport before the clip object swap.
+- Rebuilt the user-facing release executable:
+  - [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/3/2026 9:35:52 PM`
+  - `Length=9020416`
+  - `SHA256=FA5FECD96D8A81BEC32BE1DBE7C9277CBB62E9F8A928A0D146556793633A65E8`
+- Screenshot-backed GUI smoke passed on [`C:\temp\MLV\M16-1327.MLV`](C:/temp/MLV/M16-1327.MLV) for HQ x1, x4, and x8 requested scale:
+  - HQ x1: `validation.ok=true`, `scaleActiveLast=1`, GUI FPS label `7.1`, smoke presented FPS `3.299`, first-present `347 ms`.
+  - x4: `validation.ok=true`, `scaleActiveLast=4`, GUI FPS label `10`, smoke presented FPS `6.467`, first-present `148 ms`.
+  - x8: `validation.ok=true`, `scaleActiveLast=8`, GUI FPS label `66`, smoke presented FPS `10.334`, first-present `158 ms`.
+- App-internal presented-frame screenshots for all three modes showed no top pink/magenta block. A simple sampled top-band RGB check gave negative magenta-axis values (`-10.38`, `-10.68`, `-10.96`), consistent with the visual read.
+
+### Cross-checked from prior analysis
+
+- The older broad pink wash remains a preview-color/direct8 boundary issue and should not be confused with this startup presentation artifact. This patch does not change Dual ISO reconstruction, debayer math, direct8 color math, or export behavior.
+- The likely transient mechanisms are still either stale/temporary presentation state during async open or a brief preview-path frame. Holding/blanking the viewport until the first current-generation frame is ready is the lowest-risk fix because it prevents bad interim visuals without changing the settled image.
+
+### Needs runtime profiling
+
+- The current GUI smoke captures settled presented frames after a short playback run, not a high-speed video of the first 1-2 seconds of window painting. If the user still sees a pink top block by eye, add an early-open screenshot harness that samples the viewport repeatedly at 50-100 ms intervals from process launch through first current-frame presentation.
+- Re-run the same first-open capture on a known non-Dual-ISO clip and on `M16-1347`/`M16-1446` to separate Dual ISO preview behavior from generic async presentation hygiene.
+
 # 2026-06-03 - explicit x8 reduced-resolution playback preview is available but not yet a full early-pipeline shortcut
 
 ### Verified locally
