@@ -13,8 +13,10 @@ param(
     [int]$SystemSettleCpuStableMs = 2000,
     [int]$SystemSettleCpuMaxMs = 60000,
     [string]$Threads = "auto",
+    [string]$QualityMode = "",
     [string]$ScaleFactor = "",
     [int]$ExpectedScaleRequest = 1,
+    [int]$ExpectedVisualScaleRequest = -2,
     [int]$ExpectedQualityMode = 1,
     [switch]$PreferHqMean23,
     [switch]$FrameTelemetry,
@@ -522,6 +524,9 @@ if (-not $useAutoPlaybackThreads) {
 if ($FrameTelemetry) {
     $launchEnv["MLVAPP_PLAYBACK_SMOKE_TELEMETRY"] = "1"
 }
+if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
+    $launchEnv["MLVAPP_PLAYBACK_QUALITY_MODE"] = $QualityMode
+}
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $launchEnv["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
 }
@@ -562,6 +567,9 @@ $clearedEnvironment = @()
 if (-not $FrameTelemetry) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_SMOKE_TELEMETRY"
 }
+if ([string]::IsNullOrWhiteSpace($QualityMode) -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_QUALITY_MODE")) {
+    $clearedEnvironment += "MLVAPP_PLAYBACK_QUALITY_MODE"
+}
 if (-not $RbfDetailTiming -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"
 }
@@ -575,6 +583,11 @@ if (-not $PreserveExperimentalEnvironment) {
     $clearedEnvironment += $experimentalEnvironmentToClear
 }
 $clearedEnvironment = @($clearedEnvironment | Select-Object -Unique)
+$effectiveExpectedVisualScaleRequest = if ($ExpectedVisualScaleRequest -eq -2) {
+    $ExpectedScaleRequest
+} else {
+    $ExpectedVisualScaleRequest
+}
 
 if ($DryRun) {
     [pscustomobject]@{
@@ -594,7 +607,9 @@ if ($DryRun) {
             requireLookAssist = $RequireLookAssist
             requireCpuSettled = $RequireCpuSettled
             expectedScaleRequest = $ExpectedScaleRequest
+            expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
+            qualityModeOverride = $QualityMode
         }
         output = $outputPath
     } | ConvertTo-Json -Depth 5
@@ -627,6 +642,12 @@ if ($FrameTelemetry) {
 }
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_SMOKE_TELEMETRY")
+}
+if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
+    $envBlock["MLVAPP_PLAYBACK_QUALITY_MODE"] = $QualityMode
+}
+else {
+    [void]$envBlock.Remove("MLVAPP_PLAYBACK_QUALITY_MODE")
 }
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $envBlock["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
@@ -837,10 +858,10 @@ if ($ExpectedScaleRequest -ge 0 -and
     ($null -eq $validatedScaleRequest -or [int]$validatedScaleRequest -ne $ExpectedScaleRequest)) {
     $validationFailures += "Playback scale request was $validatedScaleRequest; expected $ExpectedScaleRequest."
 }
-if ($ExpectedScaleRequest -ge 0 -and
+if ($effectiveExpectedVisualScaleRequest -ge 0 -and
     $null -ne $visualState -and
-    [int](Get-ObjectPropertyValue $visualState "scale_request") -ne $ExpectedScaleRequest) {
-    $validationFailures += "GUI visual state scale request was $(Get-ObjectPropertyValue $visualState "scale_request"); expected $ExpectedScaleRequest."
+    [int](Get-ObjectPropertyValue $visualState "scale_request") -ne $effectiveExpectedVisualScaleRequest) {
+    $validationFailures += "GUI visual state scale request was $(Get-ObjectPropertyValue $visualState "scale_request"); expected $effectiveExpectedVisualScaleRequest."
 }
 if ($ExpectedQualityMode -ge 0 -and
     ($null -eq $validatedQualityMode -or [int]$validatedQualityMode -ne $ExpectedQualityMode)) {
@@ -875,6 +896,7 @@ $result = [pscustomobject]@{
             requireLookAssist = $RequireLookAssist
             requireCpuSettled = $RequireCpuSettled
             expectedScaleRequest = $ExpectedScaleRequest
+            expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
         }
         matchedUserShellDefaults = [pscustomobject]@{

@@ -25,6 +25,38 @@ void feed_n( PlaybackQualityAutoSampler & s, double ms, size_t n )
 
 } // namespace
 
+TEST(PlaybackQualityModeOverride, ParsesNumbersAndNames)
+{
+    int mode = -1;
+    ASSERT_TRUE( playbackQualityModeParseOverride( "0", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Fast ), mode );
+
+    ASSERT_TRUE( playbackQualityModeParseOverride( "HQ", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::HighQuality ), mode );
+
+    ASSERT_TRUE( playbackQualityModeParseOverride( "auto", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Auto ), mode );
+
+    ASSERT_TRUE( playbackQualityModeParseOverride( "phase3-fast", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Phase3Fast ), mode );
+
+    ASSERT_TRUE( playbackQualityModeParseOverride( "phase3_hq", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Phase3HQ ), mode );
+}
+
+TEST(PlaybackQualityModeOverride, RejectsInvalidValues)
+{
+    int mode = 123;
+    ASSERT_FALSE( playbackQualityModeParseOverride( "", &mode ) );
+    ASSERT_EQ( 123, mode );
+
+    ASSERT_FALSE( playbackQualityModeParseOverride( "turbo", &mode ) );
+    ASSERT_EQ( 123, mode );
+
+    ASSERT_FALSE( playbackQualityModeParseOverride( "8", &mode ) );
+    ASSERT_EQ( 123, mode );
+}
+
 TEST(PlaybackQualityAutoSampler, OptimisticUntilWindowFull)
 {
     PlaybackQualityAutoSampler s;

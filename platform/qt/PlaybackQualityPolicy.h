@@ -8,9 +8,9 @@
  * Auto adapts based on measured cadence. The mode is persisted to the existing QSettings store
  * (HKCU\Software\magiclantern.MLVApp\MLVApp\Playback\... on Windows).
  *
- * The MLVAPP_PLAYBACK_PREFER_HQ_MEAN23 and MLVAPP_PLAYBACK_SCALE_FACTOR env
- * vars retain priority for dev/CI overrides; this layer only kicks in when
- * those env vars are unset.
+ * The MLVAPP_PLAYBACK_QUALITY_MODE, MLVAPP_PLAYBACK_PREFER_HQ_MEAN23, and
+ * MLVAPP_PLAYBACK_SCALE_FACTOR env vars retain priority for dev/CI overrides;
+ * this layer only kicks in when those env vars are unset.
  *
  * Decisions:
  * - Fast: preview rowscale, scale=4, cast present, fastest cadence.
@@ -103,6 +103,74 @@ inline bool playbackQualityEnvVarTruthy(const char * raw)
         && std::strcmp(raw, "false") != 0
         && std::strcmp(raw, "FALSE") != 0
         && std::strcmp(raw, "False") != 0;
+}
+
+inline bool playbackQualityAsciiEqualsIgnoreCase( const char * a, const char * b )
+{
+    if ( !a || !b ) return false;
+    while ( *a && *b )
+    {
+        char ca = *a++;
+        char cb = *b++;
+        if ( ca >= 'A' && ca <= 'Z' ) ca = static_cast<char>( ca - 'A' + 'a' );
+        if ( cb >= 'A' && cb <= 'Z' ) cb = static_cast<char>( cb - 'A' + 'a' );
+        if ( ca != cb ) return false;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+inline bool playbackQualityModeParseOverride( const char * raw, int * outMode )
+{
+    if ( !raw || !*raw || !outMode ) return false;
+
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "0" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" ) )
+    {
+        *outMode = static_cast<int>( PlaybackQualityMode::Fast );
+        return true;
+    }
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "1" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "hq" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "high" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "high_quality" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "high-quality" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" ) )
+    {
+        *outMode = static_cast<int>( PlaybackQualityMode::HighQuality );
+        return true;
+    }
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "2" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "auto" ) )
+    {
+        *outMode = static_cast<int>( PlaybackQualityMode::Auto );
+        return true;
+    }
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "3" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "phase3fast" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "phase3_fast" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "phase3-fast" ) )
+    {
+        *outMode = static_cast<int>( PlaybackQualityMode::Phase3Fast );
+        return true;
+    }
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "4" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "phase3hq" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "phase3_hq" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "phase3-hq" ) )
+    {
+        *outMode = static_cast<int>( PlaybackQualityMode::Phase3HQ );
+        return true;
+    }
+    return false;
+}
+
+/* Returns -1 when unset, -2 when set to an invalid value, else 0..4. */
+inline int playbackQualityModeEnvOverride()
+{
+    const char * raw = std::getenv( "MLVAPP_PLAYBACK_QUALITY_MODE" );
+    if ( !raw || !*raw ) return -1;
+    int mode = -1;
+    return playbackQualityModeParseOverride( raw, &mode ) ? mode : -2;
 }
 
 inline int playbackPreviewAggressiveEnvOverride()
