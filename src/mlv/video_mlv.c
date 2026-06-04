@@ -80,7 +80,9 @@ static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processing_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_total_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_for_8bit_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_to_8bit_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed16_cache_store_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed8_total_ms = 0.0;
+static MLV_STAGE_THREAD_LOCAL double g_mlv_last_processed8_cache_store_ms = 0.0;
 static MLV_STAGE_THREAD_LOCAL int g_mlv_last_processed8_direct_path_active = 0;
 static MLV_STAGE_THREAD_LOCAL int g_mlv_last_processed8_prefetch_hit = 0;
 
@@ -1315,9 +1317,11 @@ static void mlv_store_processed_frame_16bit_cache_with_scale(mlvObject_t * video
                                                              uint64_t rgb_frame_words,
                                                              int scaleFactor)
 {
+    const double store_start = mlv_stage_timing_now();
     uint16_t * cache = mlv_prepare_processed_frame_16bit_cache(video, rgb_frame_words);
     if (!cache)
     {
+        g_mlv_last_processed16_cache_store_ms += (mlv_stage_timing_now() - store_start) * 1000.0;
         return;
     }
 
@@ -1337,6 +1341,7 @@ static void mlv_store_processed_frame_16bit_cache_with_scale(mlvObject_t * video
     if (!slot_buffer)
     {
         mlv_reset_processed_frame_16bit_cache(video);
+        g_mlv_last_processed16_cache_store_ms += (mlv_stage_timing_now() - store_start) * 1000.0;
         return;
     }
 
@@ -1346,6 +1351,10 @@ static void mlv_store_processed_frame_16bit_cache_with_scale(mlvObject_t * video
     video->processed_16bit_cache_threads[slot] = threads;
     video->processed_16bit_cache_signature[slot] = signature;
     video->processed_16bit_cache_scale[slot] = normalizedScale;
+    g_mlv_last_processed16_cache_store_ms += (mlv_stage_timing_now() - store_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("processed16_cache_store",
+                                  frameIndex,
+                                  g_mlv_last_processed16_cache_store_ms);
 }
 
 static void mlv_store_processed_frame_16bit_cache(mlvObject_t * video,
@@ -1699,6 +1708,7 @@ static void mlv_store_processed_frame_8bit_cache_with_scale(mlvObject_t * video,
                                                             int prefetched,
                                                             int scaleFactor)
 {
+    const double store_start = mlv_stage_timing_now();
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
     mlv_store_processed_frame_8bit_cache_locked_with_scale(video,
                                                            frameIndex,
@@ -1710,6 +1720,10 @@ static void mlv_store_processed_frame_8bit_cache_with_scale(mlvObject_t * video,
                                                            prefetched,
                                                            scaleFactor);
     pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+    g_mlv_last_processed8_cache_store_ms += (mlv_stage_timing_now() - store_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("processed8_cache_store",
+                                  frameIndex,
+                                  g_mlv_last_processed8_cache_store_ms);
 }
 
 static void mlv_copy_processed8_prefetch_processing_state(processingObject_t * dst,
@@ -4208,6 +4222,7 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
     g_mlv_last_debayered_frame_ms = 0.0;
     g_mlv_last_processing_ms = 0.0;
     g_mlv_last_processed16_total_ms = 0.0;
+    g_mlv_last_processed16_cache_store_ms = 0.0;
     g_mlv_last_processed8_direct_path_active = 0;
 
     /* Phase 4B: resolve effective scale (rejects scales that don't divide
@@ -4411,7 +4426,9 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed16_total_ms = 0.0;
     g_mlv_last_processed16_for_8bit_ms = 0.0;
     g_mlv_last_processed16_to_8bit_ms = 0.0;
+    g_mlv_last_processed16_cache_store_ms = 0.0;
     g_mlv_last_processed8_total_ms = 0.0;
+    g_mlv_last_processed8_cache_store_ms = 0.0;
     g_mlv_last_processed8_direct_path_active = 0;
     g_mlv_last_processed8_prefetch_hit = 0;
     /* Keep the playback-preview policy visible on the main render thread so
@@ -4678,7 +4695,9 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
     g_mlv_last_processed16_total_ms = 0.0;
     g_mlv_last_processed16_for_8bit_ms = 0.0;
     g_mlv_last_processed16_to_8bit_ms = 0.0;
+    g_mlv_last_processed16_cache_store_ms = 0.0;
     g_mlv_last_processed8_total_ms = 0.0;
+    g_mlv_last_processed8_cache_store_ms = 0.0;
     g_mlv_last_processed8_direct_path_active = 0;
     g_mlv_last_processed8_prefetch_hit = 0;
 
@@ -4765,7 +4784,9 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
     g_mlv_last_processed16_total_ms = 0.0;
     g_mlv_last_processed16_for_8bit_ms = 0.0;
     g_mlv_last_processed16_to_8bit_ms = 0.0;
+    g_mlv_last_processed16_cache_store_ms = 0.0;
     g_mlv_last_processed8_total_ms = 0.0;
+    g_mlv_last_processed8_cache_store_ms = 0.0;
     g_mlv_last_processed8_direct_path_active = 0;
     g_mlv_last_processed8_prefetch_hit = 0;
 
@@ -5062,9 +5083,19 @@ double getMlvLastProcessed16To8BitMilliseconds(void)
     return g_mlv_last_processed16_to_8bit_ms;
 }
 
+double getMlvLastProcessed16CacheStoreMilliseconds(void)
+{
+    return g_mlv_last_processed16_cache_store_ms;
+}
+
 double getMlvLastProcessed8TotalMilliseconds(void)
 {
     return g_mlv_last_processed8_total_ms;
+}
+
+double getMlvLastProcessed8CacheStoreMilliseconds(void)
+{
+    return g_mlv_last_processed8_cache_store_ms;
 }
 
 int getMlvLastProcessed8DirectPathActive(void)

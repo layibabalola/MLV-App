@@ -163,7 +163,9 @@ double getMlvLastProcessingMilliseconds(void);
 double getMlvLastProcessed16TotalMilliseconds(void);
 double getMlvLastProcessed16For8BitMilliseconds(void);
 double getMlvLastProcessed16To8BitMilliseconds(void);
+double getMlvLastProcessed16CacheStoreMilliseconds(void);
 double getMlvLastProcessed8TotalMilliseconds(void);
+double getMlvLastProcessed8CacheStoreMilliseconds(void);
 int getMlvLastProcessed8DirectPathActive(void);
 int getMlvLastProcessed8PrefetchHit(void);
 

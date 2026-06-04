@@ -367,6 +367,9 @@ Per-stage resolution telemetry uses the prefix
 - `processing_ms`
 - `processed16_total_ms`
 - `processed16_to_8bit_ms`
+- `processed16_cache_store_ms`
+- `processed8_total_ms`
+- `processed8_cache_store_ms`
 
 ### Dual ISO preview internals
 

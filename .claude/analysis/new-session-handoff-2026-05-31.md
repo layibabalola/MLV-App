@@ -317,3 +317,28 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
 - Next session:
   - Keep the user-facing split clear: Sharp/Smooth Preview is sharper and anti-aliased; Aggressive Performance Preview is coarse/deep and now uses the strongest early-resolution path after warmup.
   - Rank the next iteration from post-policy telemetry. The high-impact frontier is still decode-aware/tile-aware x8 because raw decode remains full source resolution, but first compare it against the current retained buckets: `avg_processed16_ms` around `9.976-12.861 ms` (`77.75-100.24 FPS-equivalent`) and residual render/presentation scheduling.
+
+## 2026-06-04 Addendum - Cache-Store Telemetry Says Do Not Prune The Cache Next
+
+- A scaled-playback cache-skip behavior change was tested and rejected. It improved some reruns but regressed `M16-1446`, so no cache-pruning behavior was kept.
+- The kept change is telemetry-only:
+  - Per-frame/profile keys: `processed16_cache_store_ms`, `processed8_cache_store_ms`.
+  - GUI smoke summary averages: `avg_processed16_cache_store_ms`, `avg_processed8_cache_store_ms`.
+- Corrected explicit x8 aggressive headless profile:
+  - Artifact: `.claude-state\profiling\20260604-next-x8-bottleneck\M16-1327-x8-aggressive-cache-telemetry-profile-final.json`.
+  - `request=8`, `effective=8`, `phase4b_path=8`, `fallback=none`, `direct8=false`.
+  - Resolution proof: raw decode `1808x2268` (`4,100,544` pixels), LLRawProc `226x280` (`63,280` pixels), processing/presentation `226x283` (`63,958` pixels).
+  - Stage timing: `render_thread_total_ms=14.162` (`70.61 FPS-equivalent`), `raw_uint16_ms=1.649` (`606.56 FPS-equivalent`), `llrawproc_total_ms=2.703` (`370.00 FPS-equivalent`), `processing_ms=2.865` (`349.06 FPS-equivalent`), `processed16_total_ms=10.676` (`93.67 FPS-equivalent`), `processed8_total_ms=13.892` (`71.98 FPS-equivalent`).
+  - Cache-store timing: `processed16_cache_store_ms=0.027` (`36993.86 FPS-equivalent`), `processed8_cache_store_ms=0.000` (effectively zero; FPS-equivalent not meaningful).
+- Screenshot-backed x8 aggressive GUI smoke passed:
+  - Artifact: `.claude-state\profiling\20260604-next-x8-bottleneck\M16-1327-auto-aggressive-cache-telemetry-smoke-final.json`, `validation.ok=true`.
+  - Bottom-left screenshot-time `GUI FPS=90.0`, end-summary `GUI FPS=100.0`, `smoke presented FPS=33.381`, `timeline FPS=23.935`.
+  - `avg_render_total_ms=27.242` (`36.71 FPS-equivalent`), `avg_processed8_ms=18.067` (`55.35 FPS-equivalent`), `avg_draw_total_ms=9.727` (`102.81 FPS-equivalent`), `avg_processed16_ms=14.319` (`69.84 FPS-equivalent`).
+  - Cache-store summary: `avg_processed16_cache_store_ms=0.086` (`11627.91 FPS-equivalent`), `avg_processed8_cache_store_ms=0.022` (`45454.55 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-next-x8-bottleneck\screenshots-M16-1327-cache-telemetry-final\M16-1327.png`; FPS crop: `.claude-state\profiling\20260604-next-x8-bottleneck\screenshots-M16-1327-cache-telemetry-final\M16-1327-fps-status.png`.
+  - Aspect evidence remains presented-playback stretch: `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 06:32:07 -05:00`, `Length=9057792`, SHA256 `3CD86B59561ADF3A4E90FDD104ED2AC9F8FC8B86D7D24F01CC9B9876CFFC3A32`.
+- Next session:
+  - Do not start with cache pruning; the measured cache-store cost is near zero.
+  - Rank `processed16_total_ms` / processed8 conversion first for a possible aggressive direct8/local-tone-compatible path (`10.676-14.319 ms`, `69.84-93.67 FPS-equivalent`).
+  - Keep decode-aware/tile-aware x8 on the roadmap because raw decode still touches full source pixels, but only start that heavier work when longer profiles show raw decode is a wall-clock limiter after prefetch.
