@@ -16076,6 +16076,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokePrepWorkerTotalSumMs = 0.0;
     m_playbackSmokePrepResultQueueSumMs = 0.0;
     m_playbackSmokePrepTotalBeforeFinishSumMs = 0.0;
+    m_playbackSmokePrepInlinePresentFrames = 0;
     m_playbackSmokeProcessed8DirectPathFrames = 0;
     m_playbackSmokeBorrowedPreparedRgb8Frames = 0;
     m_playbackSmokeOwnedPreparedRgb8Frames = 0;
@@ -16761,6 +16762,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokePrepWorkerTotalSumMs += prepWorkerTotalMs;
     m_playbackSmokePrepResultQueueSumMs += prepResultQueueMs;
     m_playbackSmokePrepTotalBeforeFinishSumMs += prepTotalBeforeFinishMs;
+    if( telemetryBoolValue( timing, "playback_prep_inline_present" ) )
+        ++m_playbackSmokePrepInlinePresentFrames;
     if( telemetryBoolValue( timing, "processed8_direct_path_active" ) )
         ++m_playbackSmokeProcessed8DirectPathFrames;
     if( borrowedPreparedRgb8Bytes > 0.0 )
@@ -17116,7 +17119,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_playback_prep_worker_build_ms=%49 "
                "avg_playback_prep_worker_total_ms=%50 "
                "avg_playback_prep_result_queue_ms=%51 "
-               "avg_playback_prep_total_before_finish_ms=%52" )
+               "avg_playback_prep_total_before_finish_ms=%52 "
+               "playback_prep_inline_present_frames=%53" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -17172,7 +17176,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokePrepWorkerBuildSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokePrepWorkerTotalSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokePrepResultQueueSumMs ), 0, 'f', 3 )
-               .arg( avgSmokeMs( m_playbackSmokePrepTotalBeforeFinishSumMs ), 0, 'f', 3 );
+               .arg( avgSmokeMs( m_playbackSmokePrepTotalBeforeFinishSumMs ), 0, 'f', 3 )
+               .arg( m_playbackSmokePrepInlinePresentFrames );
 
     qInfo().noquote()
         << QStringLiteral(
@@ -19282,6 +19287,32 @@ void MainWindow::drawFrameReady()
         QStringLiteral("playback_prep_pre_enqueue_ms"),
         task.preEnqueueMs );
     task.rebindOwnedImagePointers();
+
+    const bool inlineFastPlaybackPrep =
+        ui->actionPlay->isChecked()
+        && task.playbackFastScaleActive
+        && task.zoomFitEnabled
+        && task.transformationMode == 0
+        && !task.zebrasEnabled
+        && !task.useGpuImagePresentation
+        && !task.displayPreviewCachingAllowed
+        && task.readyFrame.playbackScaledImage8
+        && task.readyFrame.playbackScaledWidth > 0
+        && task.readyFrame.playbackScaledHeight > 0;
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_inline_present"),
+        inlineFastPlaybackPrep );
+
+    if( inlineFastPlaybackPrep )
+    {
+        m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
+        PlaybackPrepResult result = buildPlaybackPrepResult( task );
+        result.workerQueueMs = 0.0;
+        result.workerTotalMs = result.imageBuildMs;
+        result.resultReadyTime = mlv_stage_timing_now();
+        presentPlaybackPreparedFrame( result );
+        return;
+    }
 
     enqueuePlaybackPrepTask( task );
     return;

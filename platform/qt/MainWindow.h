@@ -1046,6 +1046,7 @@ private:
     double m_playbackSmokePrepWorkerTotalSumMs = 0.0;
     double m_playbackSmokePrepResultQueueSumMs = 0.0;
     double m_playbackSmokePrepTotalBeforeFinishSumMs = 0.0;
+    int m_playbackSmokePrepInlinePresentFrames = 0;
     int m_playbackSmokeProcessed8DirectPathFrames = 0;
     int m_playbackSmokeBorrowedPreparedRgb8Frames = 0;
     int m_playbackSmokeOwnedPreparedRgb8Frames = 0;

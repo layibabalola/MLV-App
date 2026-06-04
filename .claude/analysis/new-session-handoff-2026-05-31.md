@@ -229,3 +229,29 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
 - Ranked next target:
   - First investigate and reduce result-queue/presentation cadence: `playback_prep_result_queue_ms`, `prep_replaced_after`, UI-thread queued signal latency, and render-slot release timing.
   - Keep decode-aware/tile-aware x8 as the larger frontier, but do not start the decoder rewrite until the prep/presentation queue is explained.
+
+## 2026-06-04 Addendum - Inline Prep Presentation Removes Queue Delay
+
+- Implemented the next telemetry-proven scheduler/presentation fix:
+  - Pre-scaled fast playback frames (`playbackScaledImage8`) now build and present their lightweight `PlaybackPrepResult` inline in `MainWindow::drawFrameReady()`.
+  - The gate is narrow: playback active, fast-scale active, zoom-fit, no transform, no zebras, no GPU presentation, no display-preview cache, and valid playback-scaled dimensions.
+  - Added `playback_prep_inline_present` per frame and `playback_prep_inline_present_frames` in smoke summaries.
+- Why this was the right first edit after the model:
+  - Prior telemetry showed prep worker build at only `0.021 ms` (`47619.05 FPS-equivalent`) but prep result queue at `22.000 ms` (`45.45 FPS-equivalent`) and prep total at `30.676 ms` (`32.60 FPS-equivalent`).
+  - This removes measured scheduling latency after the render thread already produced a scaled frame; it does not change raw decode, LLRawProc/Dual ISO, debayer, or Bayer-domain reduction.
+- Screenshot-backed validation on the rebuilt release exe:
+  - `M16-1327` Auto aggressive: `.claude-state\profiling\20260604-inline-prep-presentation\M16-1327-auto-aggressive-inline-prep-expected4.json`, validation `ok=true`.
+    - Auto now stayed sharper at x4 (`scaleRequestStart=4`, `scaleRequestLast=4`, `scaleActiveLast=4`) instead of dropping to active x8 under prep queue pressure.
+    - Bottom-left `GUI FPS=15.0` in summary and `100.0` in screenshot-time crop, `smoke presented FPS=26.352`, `timeline FPS=22.663`.
+    - `avg_present_interval_ms=35.526` (`28.15 FPS-equivalent`), `avg_render_total_ms=35.476` (`28.19 FPS-equivalent`), `avg_draw_total_ms=10.688` (`93.56 FPS-equivalent`).
+    - Prep result queue is `0.000 ms` (removed; FPS-equivalent not meaningful), prep total `9.320 ms` (`107.30 FPS-equivalent`), inline frames `250`, stale/replaced prep drops `0/0`.
+  - `M16-1327` explicit x8 aggressive: `.claude-state\profiling\20260604-inline-prep-presentation\M16-1327-scale8-aggressive-inline-prep.json`, validation `ok=true`.
+    - Bottom-left `GUI FPS=35.0` in summary and `27.0` in screenshot-time crop, `smoke presented FPS=25.112`, `timeline FPS=22.919`.
+    - `avg_present_interval_ms=37.811` (`26.45 FPS-equivalent`), `avg_render_total_ms=35.795` (`27.94 FPS-equivalent`), `avg_draw_total_ms=10.900` (`91.74 FPS-equivalent`), prep total `9.258 ms` (`108.01 FPS-equivalent`), inline frames `229`.
+  - `M16-1347` Auto aggressive: `.claude-state\profiling\20260604-inline-prep-presentation\M16-1347-auto-aggressive-inline-prep.json`, validation `ok=true`.
+    - Bottom-left `GUI FPS=30.0` in summary and `14.0` in screenshot-time crop, `smoke presented FPS=22.832`, `timeline FPS=22.215`.
+    - `avg_present_interval_ms=40.186` (`24.88 FPS-equivalent`), `avg_render_total_ms=40.495` (`24.69 FPS-equivalent`), `avg_draw_total_ms=10.716` (`93.32 FPS-equivalent`), prep total `9.059 ms` (`110.39 FPS-equivalent`), inline frames `222`.
+- Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 04:26:19 -05:00`, `Length=9053696`, SHA256 `A826C66A608788A259264558BE72CA0530E3447103566B923777851D8F8AB752`.
+- Next session:
+  - Run the same Auto aggressive smoke on `M16-1446`, then aggregate the new post-queue multi-clip Auto aggressive average against the previous `15.670` smoke-presented FPS baseline.
+  - Choose the next change from the new post-queue profile. Likely candidates are remaining render work around `35-40 ms` (`24.69-28.19 FPS-equivalent`), processing/shadows-highlights prep, and the still-full raw decode floor for explicit x8.
