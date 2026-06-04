@@ -13,7 +13,9 @@
  * this layer only kicks in when those env vars are unset.
  *
  * Decisions:
- * - Fast: preview rowscale, scale=4, cast present, fastest cadence.
+ * - Fast: non-Dual ISO uses scale=4. Dual ISO uses the color-correct
+ *   HQ+mean23 path and may start at scale=8 so it does not fall into the
+ *   legacy preview-rowscale magenta-cast path.
  * - HighQuality: HQ + mean23 + scale=4, cast closed, slower cadence.
  * - Auto: Sharp/Smooth starts at HQ scale=4; if measured cadence misses
  *   target, fall back to Fast for the next slot in Sharp/Smooth. Aggressive
@@ -595,7 +597,10 @@ inline int playbackQualityNextModeForCycle( int currentMode )
 #endif // QT_CORE_LIB
 
 /* Effective HQ-mean23 desire considering env override + GUI fallback.
- * Env var takes priority; otherwise HighQuality and Auto modes ask for HQ. */
+ * Env var takes priority. GUI modes ask for HQ on Dual ISO playback so they
+ * avoid the legacy preview-rowscale path's deterministic magenta cast; the
+ * active scale policy keeps Fast/Auto playable by reducing earlier in the
+ * pipeline. */
 inline bool playbackQualityWantsHqMean23( PlaybackQualityMode mode )
 {
     /* Env var takes precedence: matches existing
@@ -605,7 +610,8 @@ inline bool playbackQualityWantsHqMean23( PlaybackQualityMode mode )
     {
         return playbackQualityEnvVarTruthy( env );
     }
-    return mode == PlaybackQualityMode::HighQuality
+    return mode == PlaybackQualityMode::Fast
+        || mode == PlaybackQualityMode::HighQuality
         || mode == PlaybackQualityMode::Auto
         || mode == PlaybackQualityMode::Phase3HQ;
 }
@@ -636,17 +642,15 @@ inline int playbackQualityScaleFactorForMode( PlaybackQualityMode mode,
              * bypassed entirely. Net result on the user's 5K M16-1210
              * clip: Fast = 13 fps GUI, HQ = 15 fps GUI — confusing UX.
              *
-             * Returning 4 here makes Fast actually fastest: Fast
-             * (preview rowscale at scale=4) ~24 fps GUI vs HQ
-             * (matched-pair at scale=4) ~13-15 fps GUI on the same clip.
-             * Cast still present in Fast mode (only HQ's matched-pair
-             * recon closes it); image is downsampled (1/4 each axis)
-             * during playback only — pause/scrub/export still produce
-             * full-resolution output.
+             * Returning 4 kept Fast fast, but the preview rowscale path
+             * carried a deterministic magenta cast on Dual ISO clips. For
+             * Dual ISO, prefer scale=8 with HQ+mean23 instead: the early
+             * Bayer-domain reduction keeps cadence high while avoiding the
+             * rowscale color artifact. Non-Dual ISO Fast stays at scale=4.
              *
              * Users who want full-resolution playback unconditionally
              * can set MLVAPP_PLAYBACK_SCALE_FACTOR=1 (handled above). */
-            return 4;
+            return dualIsoActive ? 8 : 4;
         case PlaybackQualityMode::HighQuality:
             return 4;
         case PlaybackQualityMode::Auto:

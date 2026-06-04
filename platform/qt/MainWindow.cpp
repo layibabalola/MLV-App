@@ -2551,6 +2551,22 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         }
     }
 
+    int suppressedTopMagentaBandRows = 0;
+    if( playbackPolicyActive
+     && !displayImage.isNull()
+     && displayImage.format() == QImage::Format_RGB888 )
+    {
+        suppressedTopMagentaBandRows =
+            playbackSuppressUniformTopMagentaBandRgb8(
+                displayImage.bits(),
+                displayImage.width(),
+                displayImage.height(),
+                displayImage.bytesPerLine() );
+    }
+    result.task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("draw_frame_ready_top_magenta_band_rows"),
+        suppressedTopMagentaBandRows );
+
     if( useGpuImagePresentation && useGpuShaderZebras )
     {
         underOver = scanZebrasRgb8( rgb8DisplaySource, sourceWidth, sourceHeight );
@@ -2954,6 +2970,23 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
         return;
     }
+
+    int suppressedPresentedTopMagentaBandRows = 0;
+    if( !framePresentedByViewport
+     && playbackPolicyActive()
+     && !displayImage.isNull()
+     && displayImage.format() == QImage::Format_RGB888 )
+    {
+        suppressedPresentedTopMagentaBandRows =
+            playbackSuppressUniformTopMagentaBandRgb8(
+                displayImage.bits(),
+                displayImage.width(),
+                displayImage.height(),
+                displayImage.bytesPerLine() );
+    }
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("draw_frame_ready_present_top_magenta_band_rows"),
+        suppressedPresentedTopMagentaBandRows );
 
     if( !framePresentedByViewport
      && !GpuDisplayViewport::presentImage( ui->graphicsView,
@@ -13877,7 +13910,10 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
         playbackQualityTierWriteToSettings(
             pqMode, PlaybackQualityTier::Dev, QDateTime::currentMSecsSinceEpoch() );
     }
-    const bool dualIsoActive = false; /* sampler keys off DI dynamically */
+    const bool dualIsoActive =
+        m_fileLoaded
+        && m_pMlvObject
+        && llrpGetDualIsoMode( m_pMlvObject ) != 0;
     m_playbackQualityActiveScale = playbackQualityScaleFactorForMode( pqMode, dualIsoActive );
     m_playbackQualityActiveHq    = playbackQualityWantsHqMean23( pqMode );
     g_playbackQualityActiveHqMirror.store( m_playbackQualityActiveHq ? 1 : 0,
@@ -14206,8 +14242,9 @@ int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
     }
     const bool scalePolicyAuto = ( envScale == -1 || m_playbackScaleFactorOverride == 0 );
     if( scalePolicyAuto
-     && m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto )
-     && mlvPlaybackAggressivePreviewMode() != 0
+     && ( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Fast )
+       || ( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto )
+         && mlvPlaybackAggressivePreviewMode() != 0 ) )
      && m_fileLoaded
      && m_pMlvObject
      && llrpGetDualIsoMode( m_pMlvObject ) )
