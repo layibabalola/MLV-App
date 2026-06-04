@@ -14036,3 +14036,41 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 - Screenshot-backed Auto-mode GUI smoke still needs a first-class smoke harness override for quality mode. The current harness can force scale via `MLVAPP_PLAYBACK_SCALE_FACTOR` and can validate `ExpectedQualityMode`, but it cannot directly set Auto quality mode without touching user QSettings.
 - A failed settings-based Auto smoke attempt produced a pre-playback crash dump (`0xC0000005`) after loading `Aggressive Performance Preview`; user playback settings were restored and a subsequent HQ/x2 direct smoke ran normally. Treat this as a harness/runtime validation blocker, not as proof that the sampler policy regressed playback.
 - Add a dedicated release smoke override for playback quality mode before claiming screenshot-backed Auto switching coverage. Then run Auto aggressive on the standard M16 set and report `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and every compared stage as `ms` plus `FPS-equivalent`.
+
+## 2026-06-04 - Auto smoke override and presented-cadence sampler
+
+### Verified locally
+
+- Closed the Auto validation gap by adding smoke/dev-only environment overrides:
+  - `MLVAPP_PLAYBACK_QUALITY_MODE` selects `fast`, `hq`, `auto`, `phase3_fast`, or `phase3_hq` without mutating user `QSettings`.
+  - `MLVAPP_PLAYBACK_SCALE_FACTOR=auto` bypasses a persisted GUI scale override and lets the active playback quality policy choose scale.
+  - `tools\profiling\run-release-gui-smoke.ps1` now exposes `-QualityMode` and `-ExpectedVisualScaleRequest`, so Auto runs can validate a pre-playback visual state at x4 while expecting a later policy switch to x8.
+- Fixed the Auto sampler clock: `MainWindow::timerFrameEvent()` no longer feeds the Auto sampler from timer-loop cadence, which can report optimistic GUI-loop values like `500-1000 fps`. The sampler now records actual presented-frame intervals in `finishPresentedFrame()`, after `drawFrameReady.total` is measured. The sampler state and last-presented timestamp reset on quality-mode changes and play start/stop.
+- Screenshot-backed Auto aggressive smoke passed:
+  - Artifact: `.claude-state\profiling\20260604-auto-quality-mode-override\M16-1327-auto-aggressive-presented-cadence.json`.
+  - Visual-state warmup: `scaleRequestStart=4`, `qualityModeStart=2`; final Auto state: `scaleRequestLast=8`, `scaleActiveLast=8`, `qualityModeLast=2`.
+  - Bottom-left `GUI FPS=11.0`, `smoke presented FPS=17.176`, `timeline FPS=23.050`.
+  - Timing: `avg_present_interval_ms=55.461` (`18.03 FPS-equivalent`), `avg_render_total_ms=26.955` (`37.10 FPS-equivalent`), `avg_draw_total_ms=31.858` (`31.39 FPS-equivalent`).
+  - Stage timing: `avg_raw_uint16_ms=4.574` (`218.63 FPS-equivalent`), `avg_llrawproc_total_ms=4.071` (`245.64 FPS-equivalent`), `avg_debayered_frame_ms=0.761` (`1314.06 FPS-equivalent`), `avg_processing_ms=4.968` (`201.29 FPS-equivalent`), `avg_playback_scale_ms=4.155` (`240.67 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-auto-quality-mode-override\screenshots\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `9EB3C491568F8032E3EE66657005CF15B0CFC2D2BB7691702501199D22500A32`.
+  - FPS crop SHA256 `BBE62961D32DDBDA018B96B19EF68DDA3D947E03E7E4A4576892DD81AC69E55F`; aspect evidence is presented-playback stretch with `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Screenshot-backed Auto sharp/smooth smoke passed:
+  - Artifact: `.claude-state\profiling\20260604-auto-quality-mode-override\M16-1327-auto-sharp-presented-cadence.json`.
+  - Visual/final Auto state stayed sharp/smooth x4: `scaleRequestStart=4`, `scaleRequestLast=4`, `scaleActiveLast=4`, `qualityModeLast=2`.
+  - Bottom-left `GUI FPS=12.0`, `smoke presented FPS=9.030`, `timeline FPS=22.119`.
+  - Timing: `avg_present_interval_ms=101.523` (`9.85 FPS-equivalent`), `avg_render_total_ms=143.079` (`6.99 FPS-equivalent`), `avg_draw_total_ms=27.562` (`36.28 FPS-equivalent`).
+  - Stage timing: `avg_raw_uint16_ms=13.438` (`74.42 FPS-equivalent`), `avg_llrawproc_total_ms=37.595` (`26.60 FPS-equivalent`), `avg_debayered_frame_ms=51.854` (`19.29 FPS-equivalent`), `avg_processing_ms=10.933` (`91.47 FPS-equivalent`), `avg_playback_scale_ms=16.787` (`59.57 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-auto-quality-mode-override\screenshots-sharp\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `8F74741F9CC6A034471638B4AC64FFFF224753978B62A9C37FCDB3E65A99ABFF`.
+  - FPS crop SHA256 `D16D4461A3CF10E5A9185FC2C10C46EB83594047B890D7AD54A181AC37CAEDF1`; aspect evidence is presented-playback stretch with `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Focused console validation passed after the parser additions: `console_tests.exe --check-golden`, `tests=92`, `assertions=336`, `skipped=29`, `failed=0`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 03:53:28 -05:00`, `Length=9047040`, SHA256 `8D282B595AF7733FFA9B07E950F4EE6A2741C6EAED8836BDD9BD89270253D549`.
+
+### Cross-checked from prior analysis
+
+- This closes the earlier validation gap without touching the registry: Auto mode can now be smoked repeatably from the harness.
+- The policy split is now proven by runtime cadence, not timer-loop cadence: sharp/smooth Auto remains the higher-quality x4 path on cadence miss, while aggressive Auto chooses the early x8 path on the same clip.
+
+### Needs runtime profiling
+
+- Repeat the Auto sharp/aggressive comparison across `M16-1347` and `M16-1446` before making aggressive behavior automatic.
+- The next performance target should still be selected from the stage model after these Auto smokes. On `M16-1327`, aggressive x8 reduced `avg_render_total_ms` from `143.079 ms` (`6.99 FPS-equivalent`) to `26.955 ms` (`37.10 FPS-equivalent`) versus sharp x4, but the remaining gap between render work and `smoke presented FPS` suggests presentation cadence / queued presentation replacement still needs profiling before a decoder rewrite.

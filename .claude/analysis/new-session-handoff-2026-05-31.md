@@ -182,3 +182,26 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
 - Focused console validation passed: `console_tests.exe --check-golden`, `tests=90`, `assertions=320`, `skipped=29`, `failed=0`; new coverage includes `PlaybackQualityAutoSampler.AggressiveCadenceMissUsesHqx8`.
 - Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 03:14:36 -05:00`, `Length=9043456`, SHA256 `23C4F48E0718C5E4AEF13380EE105C83BBA20D1A724957F4E5732345D4007C6E`.
 - Remaining validation gap: the release GUI smoke harness can force scale but not playback quality mode. A settings-based Auto/aggressive smoke attempt hit a pre-playback `0xC0000005` crash; user settings were restored and HQ/x2 smoke ran normally afterward. Add a first-class quality-mode smoke override before claiming screenshot-backed Auto switching coverage.
+
+## 2026-06-04 Addendum - Auto Validation Gap Closed
+
+- Added harness/dev overrides that do not mutate user settings:
+  - `MLVAPP_PLAYBACK_QUALITY_MODE=auto` (or `fast`, `hq`, `phase3_fast`, `phase3_hq`) selects playback quality mode.
+  - `MLVAPP_PLAYBACK_SCALE_FACTOR=auto` bypasses a persisted GUI scale override and lets the active quality policy drive the request scale.
+  - `tools\profiling\run-release-gui-smoke.ps1` now has `-QualityMode` and `-ExpectedVisualScaleRequest`, so Auto can validate pre-playback visual state at x4 while expecting final scale x8.
+- Moved Auto cadence sampling from `timerFrameEvent()` to actual presented-frame intervals in `finishPresentedFrame()`. This matters because the timer loop can report optimistic GUI-loop values like `500-1000 fps`; the policy now reacts to the same presented cadence used by smoke/profile telemetry.
+- Screenshot-backed Auto aggressive smoke passed:
+  - Artifact: `.claude-state\profiling\20260604-auto-quality-mode-override\M16-1327-auto-aggressive-presented-cadence.json`.
+  - Starts x4, ends x8: `scaleRequestStart=4`, `scaleRequestLast=8`, `scaleActiveLast=8`.
+  - Bottom-left `GUI FPS=11.0`, `smoke presented FPS=17.176`, `timeline FPS=23.050`.
+  - Timing: `avg_render_total_ms=26.955` (`37.10 FPS-equivalent`), `avg_draw_total_ms=31.858` (`31.39 FPS-equivalent`), `avg_raw_uint16_ms=4.574` (`218.63 FPS-equivalent`), `avg_llrawproc_total_ms=4.071` (`245.64 FPS-equivalent`), `avg_debayered_frame_ms=0.761` (`1314.06 FPS-equivalent`), `avg_processing_ms=4.968` (`201.29 FPS-equivalent`), `avg_playback_scale_ms=4.155` (`240.67 FPS-equivalent`).
+  - Presented screenshot SHA256 `9EB3C491568F8032E3EE66657005CF15B0CFC2D2BB7691702501199D22500A32`; FPS crop SHA256 `BBE62961D32DDBDA018B96B19EF68DDA3D947E03E7E4A4576892DD81AC69E55F`.
+- Screenshot-backed Auto sharp/smooth smoke passed:
+  - Artifact: `.claude-state\profiling\20260604-auto-quality-mode-override\M16-1327-auto-sharp-presented-cadence.json`.
+  - Stays x4: `scaleRequestStart=4`, `scaleRequestLast=4`, `scaleActiveLast=4`.
+  - Bottom-left `GUI FPS=12.0`, `smoke presented FPS=9.030`, `timeline FPS=22.119`.
+  - Timing: `avg_render_total_ms=143.079` (`6.99 FPS-equivalent`), `avg_draw_total_ms=27.562` (`36.28 FPS-equivalent`), `avg_raw_uint16_ms=13.438` (`74.42 FPS-equivalent`), `avg_llrawproc_total_ms=37.595` (`26.60 FPS-equivalent`), `avg_debayered_frame_ms=51.854` (`19.29 FPS-equivalent`), `avg_processing_ms=10.933` (`91.47 FPS-equivalent`), `avg_playback_scale_ms=16.787` (`59.57 FPS-equivalent`).
+  - Presented screenshot SHA256 `8F74741F9CC6A034471638B4AC64FFFF224753978B62A9C37FCDB3E65A99ABFF`; FPS crop SHA256 `D16D4461A3CF10E5A9185FC2C10C46EB83594047B890D7AD54A181AC37CAEDF1`.
+- Focused console validation passed after the parser additions: `console_tests.exe --check-golden`, `tests=92`, `assertions=336`, `skipped=29`, `failed=0`.
+- Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 03:53:28 -05:00`, `Length=9047040`, SHA256 `8D282B595AF7733FFA9B07E950F4EE6A2741C6EAED8836BDD9BD89270253D549`.
+- Next session should extend this Auto sharp/aggressive comparison to `M16-1347` and `M16-1446`, then choose the next source change from the stage model. On `M16-1327`, aggressive x8 cut render work from `143.079 ms` (`6.99 FPS-equivalent`) to `26.955 ms` (`37.10 FPS-equivalent`), but the remaining gap to user-visible presented FPS means presentation cadence / queued presentation replacement should be measured before starting a heavier decode-aware raw decoder rewrite.

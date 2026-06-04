@@ -757,6 +757,7 @@ private:
     bool m_playbackQualityActiveHq = false;
     bool m_playbackQualityIndicatorVisible = true;
     uint64_t m_playbackQualityFrameCounter = 0;
+    double m_playbackQualityLastPresentedTime = 0.0;
     PlaybackQualityAutoSampler m_playbackQualitySampler;
     bool m_lastLookAssistDiagnosticsValid = false;
     QString m_lastLookAssistScene;

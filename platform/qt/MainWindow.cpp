@@ -1137,10 +1137,12 @@ static bool playback_start_preroll_disabled_by_environment()
 }
 
 /* Read MLVAPP_PLAYBACK_SCALE_FACTOR once and cache the request.
- * Accepts "1", "2", "4", or "8"; returns 0 when unset so the caller can fall
- * back to the GUI dial. The render thread logs both this requested value
- * and the effective core value because clips with incompatible dimensions
- * can reject unsafe requests. */
+ * Accepts "1", "2", "4", "8", or "auto". Returns 0 when unset so the
+ * caller can fall back to the GUI dial; returns -1 for "auto" so smoke/dev
+ * runs can ignore a persisted GUI scale override and let the quality policy
+ * drive scale. The render thread logs both this requested value and the
+ * effective core value because clips with incompatible dimensions can reject
+ * unsafe requests. */
 static int playback_scale_factor_env_override()
 {
     static int cached_scale = -2; /* -2 == not yet probed, 0 == unset */
@@ -1160,15 +1162,26 @@ static int playback_scale_factor_env_override()
         {
             requested = parsed;
         }
+        else if (raw.compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0
+              || raw.compare(QStringLiteral("policy"), Qt::CaseInsensitive) == 0
+              || raw.compare(QStringLiteral("quality"), Qt::CaseInsensitive) == 0)
+        {
+            requested = -1;
+        }
         else
         {
             qWarning().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR ignored:"
                                  << raw
-                                 << "(must be 1, 2, 4, or 8); falling back to GUI dial.";
+                                 << "(must be 1, 2, 4, 8, or auto); falling back to GUI dial.";
         }
     }
     cached_scale = requested;
-    if (requested != 0)
+    if (requested == -1)
+    {
+        qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR = auto"
+                          << "(env override; the GUI scale override is bypassed).";
+    }
+    else if (requested != 0)
     {
         qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR =" << requested
                           << "(env override; the GUI dial is bypassed).";
@@ -1519,51 +1532,6 @@ void MainWindow::timerFrameEvent( void )
             m_pFpsStatus->setText( playbackFpsStatusText( measuredFps ) );
         }
         lastTime = nowTime;
-
-        //Phase 4E: feed the auto sampler with the per-frame cadence; only
-        //relevant during active playback in Auto mode, but we always
-        //record (stale samples are pruned by the sliding window).
-        if( ui->actionPlay->isChecked() && measuredFrameMs > 0 )
-        {
-            m_playbackQualitySampler.recordFrameMs( static_cast<double>( measuredFrameMs ) );
-            ++m_playbackQualityFrameCounter;
-            if ( m_playbackQualityMode == 2
-                 && (m_playbackQualityFrameCounter % PlaybackQualityAutoSampler::kSlidingWindow) == 0 )
-            {
-                /* Re-evaluate every full sliding window. Dual-ISO state
-                 * influences the sampler's headroom heuristic; we read the
-                 * current llrawproc validity directly. */
-                const bool dualIsoActive =
-                    ( m_pMlvObject != nullptr )
-                    && ( llrpGetDualIsoValidity( m_pMlvObject ) != 0 )
-                    && ui->checkBoxRawFixEnable->isChecked();
-                const PlaybackQualityAutoSampler::Decision decision =
-                    m_playbackQualitySampler.decideNextSlot(
-                        m_playbackAutoTargetFps,
-                        dualIsoActive,
-                        mlvPlaybackAggressivePreviewMode() != 0 );
-                if ( decision.scaleFactor != m_playbackQualityActiveScale
-                     || decision.useHqMean23 != m_playbackQualityActiveHq )
-                {
-                    m_playbackQualityActiveScale = decision.scaleFactor;
-                    m_playbackQualityActiveHq    = decision.useHqMean23;
-                    g_playbackQualityActiveHqMirror.store(
-                        m_playbackQualityActiveHq ? 1 : 0,
-                        std::memory_order_release );
-                    /* Buffer-size or HQ-flag changed: invalidate caches so
-                     * the next request re-renders. */
-                    invalidateDisplayPreviewCache();
-                    m_frameChanged = true;
-                    updatePlaybackQualityIndicator();
-                    /* Phase E5: the scale-aware alias_map / FR-blending
-                     * downgrade is keyed on m_playbackQualityActiveScale.
-                     * When the auto sampler bumps from <4 to 4 (or back),
-                     * the override needs to fire/clear so the next render
-                     * sees the right alias_map / FR flags. */
-                    applyEffectiveDualIsoPlaybackSettings();
-                }
-            }
-        }
 
         //When playback is off, the timeDiff is set to 0 for DropFrameMode
         if( !ui->actionPlay->isChecked() ) timeDiff = 1000 / getFramerate();
@@ -13602,6 +13570,19 @@ void MainWindow::initPlaybackQualityFromSettings( void )
     int rawMode = set.value( PlaybackQualitySettings::kKeyQualityMode(),
                              PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
     if ( rawMode < 0 || rawMode > 4 ) rawMode = 0;
+    const int envQualityMode = playbackQualityModeEnvOverride();
+    if ( envQualityMode == -2 )
+    {
+        qWarning().noquote()
+            << "MLVAPP_PLAYBACK_QUALITY_MODE ignored:"
+            << envValueForLog( "MLVAPP_PLAYBACK_QUALITY_MODE" )
+            << "(must be 0/fast, 1/hq, 2/auto, 3/phase3_fast, or 4/phase3_hq);"
+            << "falling back to Playback/QualityMode setting.";
+    }
+    else if ( envQualityMode >= 0 )
+    {
+        rawMode = envQualityMode;
+    }
     if ( playbackQualityModeIntIsPhase3( rawMode )
       && ( !playbackQualityPhase3ModeSelectable( playbackQualityModeFromInt( rawMode ) )
         || !playbackQualityPhase3AcknowledgedFromSettings() ) )
@@ -13639,6 +13620,14 @@ void MainWindow::initPlaybackQualityFromSettings( void )
     if ( ui->actionPlaybackShowQualityIndicator )
         ui->actionPlaybackShowQualityIndicator->setChecked( indicatorVisible );
     updatePhase3PlaybackQualityUi();
+
+    if ( envQualityMode >= 0 )
+    {
+        qInfo().noquote()
+            << "MLVAPP_PLAYBACK_QUALITY_MODE ="
+            << rawMode
+            << "(env override; Playback/QualityMode setting is bypassed).";
+    }
 
     /* Seed active state without persisting (already loaded). */
     applyPlaybackQualityMode( rawMode, /*persist*/false, /*forceRefresh*/true );
@@ -13767,7 +13756,9 @@ void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist
     else
     {
         const int envScale = playback_scale_factor_env_override();
-        const bool envScaleActive = envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8;
+        const bool envScaleActive =
+            envScale == -1 || envScale == 1 || envScale == 2
+         || envScale == 4 || envScale == 8;
         qInfo().noquote() << "Playback scale override =" << scaleFactor
                           << ( envScaleActive
                                ? "(ui setting loaded; MLVAPP_PLAYBACK_SCALE_FACTOR currently has precedence)."
@@ -13829,6 +13820,7 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
     g_playbackQualityActiveHqMirror.store( m_playbackQualityActiveHq ? 1 : 0,
                                             std::memory_order_release );
     m_playbackQualityFrameCounter = 0;
+    m_playbackQualityLastPresentedTime = 0.0;
     m_playbackQualitySampler.reset();
 
     if ( persist )
@@ -13947,8 +13939,11 @@ void MainWindow::updatePlaybackQualityIndicator( void )
        || m_playbackScaleFactorOverride == 4 || m_playbackScaleFactorOverride == 8 );
     const int envScale = playback_scale_factor_env_override();
     const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
+    const bool envScaleFixed =
+        envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8;
+    const bool envScaleAuto = envScale == -1;
     const bool envOverrideActive =
-        ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 ) || envHq;
+        envScaleFixed || envScaleAuto || envHq;
     const int envPreviewOverride = playbackPreviewAggressiveEnvOverride();
     const bool aggressivePreviewActive = ( mlvPlaybackAggressivePreviewMode() != 0 );
     const bool guiScaleOverrideActive = !envOverrideActive && guiScaleSettingActive;
@@ -14005,11 +14000,9 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     }
     else if ( envOverrideActive )
     {
-        const int effScale = ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 )
+        const int effScale = envScaleFixed
                                  ? envScale
-                                 : ( guiScaleSettingActive
-                                         ? m_playbackScaleFactorOverride
-                                         : m_playbackQualityActiveScale );
+                                 : m_playbackQualityActiveScale;
         const QString scaleLabel = playbackScaleLabel( effScale );
         if ( envHq )
         {
@@ -14147,6 +14140,13 @@ int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
     if ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 )
     {
         return envScale;
+    }
+    if ( envScale == -1 )
+    {
+        const int active = m_playbackQualityActiveScale;
+        if ( active == 1 || active == 2 || active == 4 || active == 8 )
+            return active;
+        return 1;
     }
     if ( m_playbackScaleFactorOverride == 1
       || m_playbackScaleFactorOverride == 2
@@ -16072,7 +16072,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                "env_playback_scope_interval_ms=%22 env_omp_num_threads=%23 "
                "env_disable_raw_uint16_prefetch=%24 "
                "env_disable_play_start_preroll=%25 "
-               "preview_mode=%26 env_aggressive_preview=%27 env_preview_mode=%28" )
+               "preview_mode=%26 env_aggressive_preview=%27 env_preview_mode=%28 "
+               "env_quality_mode=%29" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( m_playbackSmokeStartPosition )
                .arg( m_playbackSmokeStartCutIn )
@@ -16102,7 +16103,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                      ? QStringLiteral("aggressive_performance")
                      : QStringLiteral("sharp_smooth") )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW" ) )
-               .arg( envValueForLog( "MLVAPP_PLAYBACK_PREVIEW_MODE" ) );
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_PREVIEW_MODE" ) )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_QUALITY_MODE" ) );
 }
 
 void MainWindow::notePlaybackSmokePresentedFrame(
@@ -17526,11 +17528,17 @@ void MainWindow::on_actionPlay_toggled(bool checked)
         m_playbackScopeLastUpdateTime = 0.0;
         m_lastPlaybackAudioSyncFrame = -1;
         m_lastPlaybackAudioSyncTime = 0.0;
+        m_playbackQualityLastPresentedTime = 0.0;
+        m_playbackQualityFrameCounter = 0;
+        m_playbackQualitySampler.reset();
     }
     selectDebayerAlgorithm();
     applyEffectiveDualIsoPlaybackSettings();
     if( checked )
     {
+        m_playbackQualityLastPresentedTime = 0.0;
+        m_playbackQualityFrameCounter = 0;
+        m_playbackQualitySampler.reset();
         beginPlaybackSmokeTelemetry();
         beginPlayToFirstFrameMeasurement();
         m_playbackScopeLastUpdateTime = 0.0;
@@ -18816,6 +18824,51 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     else
     {
         m_phase3LastPresentedStageTime = 0.0;
+    }
+    if( ui->actionPlay->isChecked() && m_playbackQualityMode == 2 )
+    {
+        if( m_playbackQualityLastPresentedTime > 0.0
+         && displayStart >= m_playbackQualityLastPresentedTime )
+        {
+            const double presentedIntervalMs =
+                ( displayStart - m_playbackQualityLastPresentedTime ) * 1000.0;
+            if( presentedIntervalMs > 0.0 )
+            {
+                m_playbackQualitySampler.recordFrameMs( presentedIntervalMs );
+                ++m_playbackQualityFrameCounter;
+                if( (m_playbackQualityFrameCounter
+                     % PlaybackQualityAutoSampler::kSlidingWindow) == 0 )
+                {
+                    const bool dualIsoActive =
+                        ( m_pMlvObject != nullptr )
+                        && ( llrpGetDualIsoValidity( m_pMlvObject ) != 0 )
+                        && ui->checkBoxRawFixEnable->isChecked();
+                    const PlaybackQualityAutoSampler::Decision decision =
+                        m_playbackQualitySampler.decideNextSlot(
+                            m_playbackAutoTargetFps,
+                            dualIsoActive,
+                            mlvPlaybackAggressivePreviewMode() != 0 );
+                    if( decision.scaleFactor != m_playbackQualityActiveScale
+                     || decision.useHqMean23 != m_playbackQualityActiveHq )
+                    {
+                        m_playbackQualityActiveScale = decision.scaleFactor;
+                        m_playbackQualityActiveHq = decision.useHqMean23;
+                        g_playbackQualityActiveHqMirror.store(
+                            m_playbackQualityActiveHq ? 1 : 0,
+                            std::memory_order_release );
+                        invalidateDisplayPreviewCache();
+                        m_frameChanged = true;
+                        updatePlaybackQualityIndicator();
+                        applyEffectiveDualIsoPlaybackSettings();
+                    }
+                }
+            }
+        }
+        m_playbackQualityLastPresentedTime = displayStart;
+    }
+    else
+    {
+        m_playbackQualityLastPresentedTime = 0.0;
     }
     notePlayToFirstFramePresentation( displayFrame );
     if( m_pRenderThread )
