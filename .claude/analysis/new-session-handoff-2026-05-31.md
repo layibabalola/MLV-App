@@ -301,3 +301,19 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
 - Next session:
   - Run longer Auto aggressive smokes to check scale stability after the presentation-scaler reduction.
   - Rank the next change from fresh telemetry: remaining render work outside `avg_playback_scale_ms`, x4 LLRawProc/processing, or the larger decode-aware/tile-aware x8 raw-decode floor.
+
+## 2026-06-04 Addendum - Aggressive Auto Chooses x8 After Warmup
+
+- Fresh post-resampler Auto aggressive smokes showed explicit x8 was now the best proven Dual ISO aggressive preview path, so the sampler policy was tightened:
+  - Aggressive Performance Preview + Dual ISO now chooses HQ x8 after the Auto warmup window, even if cadence is merely near target.
+  - Sharp/Smooth Auto and non-Dual-ISO aggressive Auto keep the earlier cadence-miss policy.
+- Implemented in `platform\qt\PlaybackQualityPolicy.h`; focused coverage added in `tests\console\test_playback_quality_auto_mode.cpp` as `PlaybackQualityAutoSampler.AggressiveDualIsoUsesHqx8AfterWarmup`.
+- Focused validation passed after rebuilding `tests\build-ci-console`: `console_tests.exe --gtest_filter=PlaybackQualityAutoSampler.*`, `tests=93`, `assertions=36`, `skipped=0`, `failed=0`.
+- Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 05:42:36 -05:00`, `Length=9054720`, SHA256 `D77312A8A303428F3783333538280BD033AA888191192A1179DB2EB38C92E5A0`.
+- Screenshot-backed 20s Auto aggressive GUI smokes passed with `validation.ok=true`, `scaleRequestStart=4`, `scaleRequestLast=8`, and `scaleActiveLast=8`:
+  - `M16-1327`: before `smoke presented FPS=27.706`, `avg_render_total_ms=38.488` (`25.98 FPS-equivalent`); after `smoke presented FPS=36.338`, `avg_render_total_ms=24.261` (`41.22 FPS-equivalent`). Bottom-left `GUI FPS=38.0` summary / `76.0` crop, `timeline FPS=23.915`. Presented screenshot SHA256 `43DDEB320E8FEDEDB83CA537468167EB62980F405C3D432CEC797AF932FFA188`; FPS crop SHA256 `5847FB9CF332A38E0C91768388D6FD1F2ED75E9B75177E903E589DD29686DA81`.
+  - `M16-1347`: before `smoke presented FPS=23.131`, `avg_render_total_ms=51.655` (`19.36 FPS-equivalent`); after `smoke presented FPS=40.286`, `avg_render_total_ms=20.093` (`49.77 FPS-equivalent`). Bottom-left `GUI FPS=20.0` summary / `62.0` crop, `timeline FPS=23.956`. Presented screenshot SHA256 `5498BE29F4493EB65CB07C3D1491ECDA84D6B0D37AC890CC69B02A6BCBCA7B4D`; FPS crop SHA256 `DE216489D509479752A9C0F163E8F31D96AD7617DC14E2935E8F332F4A39684E`.
+  - `M16-1446`: before `smoke presented FPS=25.476`, `avg_render_total_ms=44.067` (`22.69 FPS-equivalent`); after `smoke presented FPS=37.379`, `avg_render_total_ms=21.277` (`47.00 FPS-equivalent`). Bottom-left `GUI FPS=16.0` summary / `76.0` crop, `timeline FPS=23.911`. Presented screenshot SHA256 `19AB2A415BE87AB3C4FC3C0D1D40281D2F0B68D8499BA1373C7C0D94892FD571`; FPS crop SHA256 `60916B1EA7D8940B25B02D666EA25BC7191E380F59166C9313375699DA7B7DF6`.
+- Next session:
+  - Keep the user-facing split clear: Sharp/Smooth Preview is sharper and anti-aliased; Aggressive Performance Preview is coarse/deep and now uses the strongest early-resolution path after warmup.
+  - Rank the next iteration from post-policy telemetry. The high-impact frontier is still decode-aware/tile-aware x8 because raw decode remains full source resolution, but first compare it against the current retained buckets: `avg_processed16_ms` around `9.976-12.861 ms` (`77.75-100.24 FPS-equivalent`) and residual render/presentation scheduling.
