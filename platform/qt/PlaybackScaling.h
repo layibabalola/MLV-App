@@ -59,6 +59,44 @@ struct CubicPlaybackScaleCache
     std::vector<std::array<float, 4>> yWeights;
 };
 
+enum class PlaybackPresentationScaleResampler
+{
+    Nearest,
+    Bilinear,
+    Cubic
+};
+
+inline PlaybackPresentationScaleResampler playbackChoosePresentationScaleResampler(
+    int playbackScaleFactorActive,
+    int phase4bPath,
+    bool upscaling,
+    bool presentationResize,
+    bool aggressivePreviewActive)
+{
+    if( playbackScaleFactorActive <= 1 || !presentationResize )
+    {
+        return PlaybackPresentationScaleResampler::Nearest;
+    }
+
+    /* Aggressive preview is the user-facing coarse/fast mode. Keep
+     * Sharp/Smooth on the anti-aliased paths, but let Aggressive avoid the
+     * full-viewport bilinear pass after the pipeline already reduced the
+     * frame upstream. */
+    if( aggressivePreviewActive )
+    {
+        return PlaybackPresentationScaleResampler::Nearest;
+    }
+
+    if( playbackScaleFactorActive >= 4
+     && phase4bPath == 0
+     && upscaling )
+    {
+        return PlaybackPresentationScaleResampler::Cubic;
+    }
+
+    return PlaybackPresentationScaleResampler::Bilinear;
+}
+
 inline float playbackCubicWeight(float x)
 {
     const float a = -0.5f;

@@ -534,6 +534,38 @@ TEST(PlaybackScaling, BilinearVsNearestOnDiagonalLine)
     ASSERT_TRUE(bilinearSmoothed > nearestSmoothed * 10);
 }
 
+TEST(PlaybackScaling, PresentationResamplerPolicySplitsSharpAndAggressive)
+{
+    ASSERT_EQ(static_cast<int>(PlaybackPresentationScaleResampler::Bilinear),
+              static_cast<int>(playbackChoosePresentationScaleResampler(
+                  4,
+                  3,
+                  true,
+                  true,
+                  false)));
+    ASSERT_EQ(static_cast<int>(PlaybackPresentationScaleResampler::Nearest),
+              static_cast<int>(playbackChoosePresentationScaleResampler(
+                  4,
+                  3,
+                  true,
+                  true,
+                  true)));
+    ASSERT_EQ(static_cast<int>(PlaybackPresentationScaleResampler::Cubic),
+              static_cast<int>(playbackChoosePresentationScaleResampler(
+                  4,
+                  0,
+                  true,
+                  true,
+                  false)));
+    ASSERT_EQ(static_cast<int>(PlaybackPresentationScaleResampler::Nearest),
+              static_cast<int>(playbackChoosePresentationScaleResampler(
+                  1,
+                  0,
+                  false,
+                  false,
+                  false)));
+}
+
 TEST(PlaybackScaling, FastScalerCanWritePaddedRows)
 {
     const int sourceWidth = 7;

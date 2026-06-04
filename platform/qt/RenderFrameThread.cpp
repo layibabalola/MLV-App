@@ -1939,13 +1939,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
         const bool presentationResize =
             sourceWidthForScaler != m_activePresentationPreparationOptions.targetWidth
          || sourceHeightForScaler != m_activePresentationPreparationOptions.targetHeight;
-        const bool useBilinearPresentationScale =
-            playbackScaleFactorActive > 1 && presentationResize;
-        const bool useCubicPresentationScale =
-            playbackScaleFactorActive >= 4
-            && phase4bPath == 0
-            && upscaling
-            && presentationResize;
+        const PlaybackPresentationScaleResampler presentationScaleResampler =
+            playbackChoosePresentationScaleResampler( playbackScaleFactorActive,
+                                                      phase4bPath,
+                                                      upscaling,
+                                                      presentationResize,
+                                                      aggressivePreview );
         const double stretchX =
             (sourceWidthForScaler > 0)
                 ? static_cast<double>( m_activePresentationPreparationOptions.targetWidth )
@@ -1976,7 +1975,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
         const int targetBytesPerLine =
             ((m_activePresentationPreparationOptions.targetWidth * 3) + 3) & ~3;
 
-        if( useCubicPresentationScale )
+        if( presentationScaleResampler == PlaybackPresentationScaleResampler::Cubic )
         {
             slot.playbackFastScaleActive =
                 playbackBuildCubicScaledRgb8( slot.rawImage8.data(),
@@ -1989,7 +1988,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                               targetBytesPerLine );
             cubicUsed = slot.playbackFastScaleActive;
         }
-        if( !slot.playbackFastScaleActive && useBilinearPresentationScale )
+        if( !slot.playbackFastScaleActive
+         && presentationScaleResampler == PlaybackPresentationScaleResampler::Bilinear )
         {
             slot.playbackFastScaleActive =
                 playbackBuildBilinearScaledRgb8( slot.rawImage8.data(),

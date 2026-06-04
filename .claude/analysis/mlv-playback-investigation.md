@@ -14198,3 +14198,45 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 - Treat the x8 result as the clean win from this change: it removes a measured full-res RGB blur from the aggressive x8 preview path without changing the upstream Bayer-domain reduction contract.
 - Treat the x4 smoke as branch proof, not a broad performance win. x4 remains dominated by render work, LLRawProc/processing, and queue timing; the next x4 iteration should target the current dominant stage from fresh telemetry rather than assume the shadows/highlights branch is the limiter.
 - Auto aggressive exploratory runs on `M16-1446` bounced between final x4 and x8 in short smokes, so Auto policy impact needs a longer or more controlled run before drawing a user-facing conclusion.
+
+## 2026-06-04 - Aggressive presentation resampler for reduced preview frames
+
+### Verified locally
+
+- The next fresh post-queue telemetry pass showed a common retained bucket after upstream preview reduction: the render-thread processed-RGB presentation scaler was still around `4-5 ms/frame` (`~208-244 FPS-equivalent`) for aggressive x4/x8, even though Bayer-domain reduction, LLRawProc/Dual ISO, debayer, and processing were already running at preview scale where the early path applied.
+- Implemented a narrow preview-mode resampler policy in `platform/qt/PlaybackScaling.h` and `platform/qt/RenderFrameThread.cpp`:
+  - Sharp/Smooth preview keeps the anti-aliased presentation paths: bilinear for normal early reduced previews, and the existing cubic path for full-recon fallback upscales.
+  - Aggressive Performance Preview uses the existing nearest-neighbor fast scaler for the final processed-RGB presentation scale after the pipeline has already reduced the frame upstream.
+  - Existing frame telemetry still records `render_thread_playback_scale_resampler` as `nearest`, `bilinear`, `cubic`, or `none` in full profile output.
+- Added focused policy coverage in `tests/pipeline/test_playback_scaling.cpp`: `PlaybackScaling.PresentationResamplerPolicySplitsSharpAndAggressive`.
+
+### Validation completed
+
+- Focused pipeline validation passed after rebuilding `tests\build-ci-pipeline`: `pipeline_tests.exe --gtest_filter=PlaybackScaling.*`, `tests=143`, `assertions=67719`, `skipped=1`, `failed=0`. The skipped test was the pre-existing OpenMP-thread-count-sensitive `PlaybackScaling.BilinearPerformance`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 05:17:26 -05:00`, `Length=9054720`, SHA256 `F81D5BD82E5C36A8881DBE9D28647B0B85024C51D3B786C5B11CEEF2A92A7BB9`.
+- Screenshot-backed explicit x4 aggressive smoke passed on `M16-1327`:
+  - Before patch: `.claude-state\profiling\20260604-next-measured-preview\M16-1327-scale4-aggressive-current.json`, validation `ok=true`.
+    - `GUI FPS=111.0` in the summary and `71.0` in the screenshot-time crop, `smoke presented FPS=26.975`, `timeline FPS=22.659`.
+    - `avg_present_interval_ms=34.627` (`28.88 FPS-equivalent`), `avg_render_total_ms=33.240` (`30.08 FPS-equivalent`), `avg_render_work_ms=25.728` (`38.87 FPS-equivalent`), `avg_draw_total_ms=10.572` (`94.59 FPS-equivalent`), `avg_playback_scale_ms=4.108` (`243.43 FPS-equivalent`).
+  - After patch: `.claude-state\profiling\20260604-next-measured-preview\M16-1327-scale4-aggressive-nearest.json`, validation `ok=true`.
+    - `GUI FPS=34.0` in the summary and `15.0` in the screenshot-time crop; these short-run GUI labels were noisy, while stable smoke metrics improved to `smoke presented FPS=38.059`, `timeline FPS=23.510`.
+    - `avg_present_interval_ms=25.558` (`39.13 FPS-equivalent`), `avg_render_total_ms=22.168` (`45.11 FPS-equivalent`), `avg_render_work_ms=16.587` (`60.29 FPS-equivalent`), `avg_draw_total_ms=8.609` (`116.16 FPS-equivalent`), `avg_playback_scale_ms=1.147` (`871.84 FPS-equivalent`).
+    - Presented screenshot: `.claude-state\profiling\20260604-next-measured-preview\screenshots-M16-1327-scale4-nearest\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `F8C0A8F146E75F502291C8C0DC5942CC297E19973D089130CA30E42F7714F5FF`; FPS crop SHA256 `BD6520A579D5A80805B6BD76900081A450161C076E6D2B23F4CBC32868151495`.
+- Screenshot-backed explicit x8 aggressive smoke passed on `M16-1446`:
+  - Before patch: `.claude-state\profiling\20260604-next-measured-preview\M16-1446-scale8-aggressive-current.json`, validation `ok=true`.
+    - `GUI FPS=125.0` in the summary and `76.0` in the screenshot-time crop, `smoke presented FPS=28.968`, `timeline FPS=22.847`.
+    - `avg_present_interval_ms=32.458` (`30.81 FPS-equivalent`), `avg_render_total_ms=27.449` (`36.43 FPS-equivalent`), `avg_render_work_ms=21.411` (`46.70 FPS-equivalent`), `avg_draw_total_ms=10.162` (`98.41 FPS-equivalent`), `avg_playback_scale_ms=4.532` (`220.65 FPS-equivalent`).
+  - After patch: `.claude-state\profiling\20260604-next-measured-preview\M16-1446-scale8-aggressive-nearest.json`, validation `ok=true`.
+    - `GUI FPS=27.0` in the summary and `142.0` in the screenshot-time crop; again, use the smoke/timeline metrics for comparison. `smoke presented FPS=40.436`, `timeline FPS=23.835`.
+    - `avg_present_interval_ms=24.318` (`41.12 FPS-equivalent`), `avg_render_total_ms=20.217` (`49.46 FPS-equivalent`), `avg_render_work_ms=14.217` (`70.34 FPS-equivalent`), `avg_draw_total_ms=9.205` (`108.64 FPS-equivalent`), `avg_playback_scale_ms=1.229` (`813.67 FPS-equivalent`).
+    - Presented screenshot: `.claude-state\profiling\20260604-next-measured-preview\screenshots-M16-1446-scale8-nearest\M16-1446.png`, `2555x1068`, aspect `2.392322`, SHA256 `59AF0CEB9FFE55E56290FA97EDF2054F3528408960D96B5A96B8FFF97F0F60EA`; FPS crop SHA256 `9F1098A0219CE2751B44D93B4558EC0D969E57E8356B8EE245A84F0E15223526`.
+
+### Cross-checked from prior analysis
+
+- This is not a standalone hotspot tweak. It was selected after the pipeline-resolution model and fresh telemetry showed the upstream early-resolution contract was already doing its job for these aggressive x4/x8 runs, while the common remaining processed-RGB presentation scaler cost was still visible.
+- The tradeoff stays user-facing: Sharp/Smooth preview remains non-blocky and anti-aliased; Aggressive Performance Preview accepts coarser final presentation scaling for higher playback cadence.
+
+### Needs runtime profiling
+
+- Re-run longer Auto aggressive smokes after this patch to see whether Auto remains stable at x4/x8 instead of bouncing on short samples.
+- The next ranked candidates should come from fresh post-patch telemetry: remaining render work outside `avg_playback_scale_ms`, x4 LLRawProc/processing buckets, and the larger decode-aware/tile-aware x8 raw-decode floor.
