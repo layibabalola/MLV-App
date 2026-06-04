@@ -15920,6 +15920,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeQueueWaitSumMs = 0.0;
     m_playbackSmokeLlrawprocSumMs = 0.0;
     m_playbackSmokeProcessed8SumMs = 0.0;
+    m_playbackSmokeProcessed8CacheStoreSumMs = 0.0;
     m_playbackSmokeRawUint16SumMs = 0.0;
     m_playbackSmokeRawUint16DecompressSumMs = 0.0;
     m_playbackSmokeRawUint16UnpackSumMs = 0.0;
@@ -16063,6 +16064,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessed16SumMs = 0.0;
     m_playbackSmokeProcessed16For8BitSumMs = 0.0;
     m_playbackSmokeProcessed16To8BitSumMs = 0.0;
+    m_playbackSmokeProcessed16CacheStoreSumMs = 0.0;
     m_playbackSmokePlaybackScaleSumMs = 0.0;
     m_playbackSmokeDrawImageSumMs = 0.0;
     m_playbackSmokeDrawPresentSumMs = 0.0;
@@ -16462,6 +16464,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processed16_for_8bit_ms" );
     const double processed16To8BitMs =
         telemetryDoubleValue( timing, "processed16_to_8bit_ms" );
+    const double processed16CacheStoreMs =
+        telemetryDoubleValue( timing, "processed16_cache_store_ms" );
+    const double processed8CacheStoreMs =
+        telemetryDoubleValue( timing, "processed8_cache_store_ms" );
     const double playbackScaleMs =
         telemetryDoubleValue( timing, "render_thread_playback_scale_ms" );
     const int phase4bPath =
@@ -16501,6 +16507,7 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeRenderTotalSumMs += renderTotalMs;
     m_playbackSmokeLlrawprocSumMs += llrawprocMs;
     m_playbackSmokeProcessed8SumMs += processed8Ms;
+    m_playbackSmokeProcessed8CacheStoreSumMs += processed8CacheStoreMs;
     m_playbackSmokeRawUint16SumMs += rawUint16Ms;
     m_playbackSmokeRawUint16DecompressSumMs += rawUint16DecompressMs;
     m_playbackSmokeRawUint16UnpackSumMs += rawUint16UnpackMs;
@@ -16750,6 +16757,7 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeProcessed16SumMs += processed16Ms;
     m_playbackSmokeProcessed16For8BitSumMs += processed16For8BitMs;
     m_playbackSmokeProcessed16To8BitSumMs += processed16To8BitMs;
+    m_playbackSmokeProcessed16CacheStoreSumMs += processed16CacheStoreMs;
     m_playbackSmokePlaybackScaleSumMs += playbackScaleMs;
     m_playbackSmokeDrawImageSumMs += drawImageMs;
     m_playbackSmokeDrawPresentSumMs += drawPresentMs;
@@ -17254,7 +17262,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processing_core_creative_toning_ms=%94 "
                "avg_processing_core_creative_curve_ms=%95 "
                "avg_processing_core_creative_gradation_ms=%96 "
-               "avg_processing_core_creative_agx_inverse_ms=%97" )
+               "avg_processing_core_creative_agx_inverse_ms=%97 "
+               "avg_processed16_cache_store_ms=%98 "
+               "avg_processed8_cache_store_ms=%99" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -17356,7 +17366,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeToningSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeCurveSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeGradationSumMs ), 0, 'f', 3 )
-               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs ), 0, 'f', 3 );
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16CacheStoreSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8CacheStoreSumMs ), 0, 'f', 3 );
 
     qInfo().noquote()
         << QStringLiteral(

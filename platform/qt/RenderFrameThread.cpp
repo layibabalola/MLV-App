@@ -2847,8 +2847,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       getMlvLastProcessed16For8BitMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed16_to_8bit_ms"),
                                       getMlvLastProcessed16To8BitMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed16_cache_store_ms"),
+                                      getMlvLastProcessed16CacheStoreMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_total_ms"),
                                       getMlvLastProcessed8TotalMilliseconds() );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_store_ms"),
+                                      getMlvLastProcessed8CacheStoreMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_active"),
                                       getMlvLastProcessed8DirectPathActive() != 0 );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_prefetch_hit"),

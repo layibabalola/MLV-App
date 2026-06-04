@@ -881,6 +881,7 @@ private:
     double m_playbackSmokeQueueWaitSumMs = 0.0;
     double m_playbackSmokeLlrawprocSumMs = 0.0;
     double m_playbackSmokeProcessed8SumMs = 0.0;
+    double m_playbackSmokeProcessed8CacheStoreSumMs = 0.0;
     double m_playbackSmokeRawUint16SumMs = 0.0;
     double m_playbackSmokeRawUint16DecompressSumMs = 0.0;
     double m_playbackSmokeRawUint16UnpackSumMs = 0.0;
@@ -1033,6 +1034,7 @@ private:
     double m_playbackSmokeProcessed16SumMs = 0.0;
     double m_playbackSmokeProcessed16For8BitSumMs = 0.0;
     double m_playbackSmokeProcessed16To8BitSumMs = 0.0;
+    double m_playbackSmokeProcessed16CacheStoreSumMs = 0.0;
     double m_playbackSmokePlaybackScaleSumMs = 0.0;
     double m_playbackSmokeDrawImageSumMs = 0.0;
     double m_playbackSmokeDrawPresentSumMs = 0.0;

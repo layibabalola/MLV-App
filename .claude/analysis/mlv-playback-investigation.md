@@ -14276,3 +14276,39 @@ Post-change stage timings:
 - Keep decode-aware/tile-aware x8 reduced preview as the high-impact frontier because x8 still full-decodes raw source pixels before Bayer-domain reduction.
 - Before rewriting decode, run the next post-policy profile with per-stage resolution telemetry on explicit x8 and Auto aggressive to rank the remaining wall-clock buckets: full raw decode, `avg_processed16_ms` around `9.976-12.861 ms` (`77.75-100.24 FPS-equivalent`), and residual render/presentation scheduling.
 - For future UI language, keep the modes explicit: Sharp/Smooth Preview means sharper, anti-aliased playback; Aggressive Performance Preview means coarse/deep preview for the fastest measured cadence.
+
+## 2026-06-04 - x8 cache-store telemetry rejects cache pruning as the next lever
+
+### Verified locally
+
+- I tested but did not keep a cache-skip source change for scaled 8-bit playback. It improved some reruns but repeatedly regressed `M16-1446`, so the behavior change was reverted and only telemetry was kept.
+- Added per-frame/profile telemetry for processed-frame cache store cost:
+  - `processed16_cache_store_ms`
+  - `processed8_cache_store_ms`
+  - GUI smoke summary averages `avg_processed16_cache_store_ms` and `avg_processed8_cache_store_ms`
+- Corrected explicit x8 aggressive headless profile on `M16-1327` after rebuilding the release exe:
+  - Artifact: `.claude-state\profiling\20260604-next-x8-bottleneck\M16-1327-x8-aggressive-cache-telemetry-profile-final.json`
+  - `frames_used=37`, `request=8`, `effective=8`, `phase4b_path=8`, `fallback=none`, `direct8=false`.
+  - Resolution proof: raw decode still runs at `1808x2268` (`4,100,544` pixels), while LLRawProc runs at `226x280` (`63,280` pixels) and processing/presentation at `226x283` (`63,958` pixels).
+  - Stage averages: `render_thread_total_ms=14.162` (`70.61 FPS-equivalent`), `raw_uint16_ms=1.649` (`606.56 FPS-equivalent`), `llrawproc_total_ms=2.703` (`370.00 FPS-equivalent`), `debayered_frame_ms=0.405` (`2466.69 FPS-equivalent`), `processing_ms=2.865` (`349.06 FPS-equivalent`), `processed16_total_ms=10.676` (`93.67 FPS-equivalent`), `processed8_total_ms=13.892` (`71.98 FPS-equivalent`).
+  - Cache-store averages: `processed16_cache_store_ms=0.027` (`36993.86 FPS-equivalent`), `processed8_cache_store_ms=0.000` (effectively zero; FPS-equivalent not meaningful).
+- Screenshot-backed x8 aggressive GUI smoke on `M16-1327` passed with the rebuilt exe:
+  - Artifact: `.claude-state\profiling\20260604-next-x8-bottleneck\M16-1327-auto-aggressive-cache-telemetry-smoke-final.json`, `validation.ok=true`.
+  - `GUI FPS=90.0` in the screenshot-time bottom-left crop, `GUI FPS=100.0` in the end summary, `smoke presented FPS=33.381`, `timeline FPS=23.935`.
+  - `avg_render_total_ms=27.242` (`36.71 FPS-equivalent`), `avg_processed8_ms=18.067` (`55.35 FPS-equivalent`), `avg_draw_total_ms=9.727` (`102.81 FPS-equivalent`), `avg_processed16_ms=14.319` (`69.84 FPS-equivalent`).
+  - Cache-store summary: `avg_processed16_cache_store_ms=0.086` (`11627.91 FPS-equivalent`), `avg_processed8_cache_store_ms=0.022` (`45454.55 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-next-x8-bottleneck\screenshots-M16-1327-cache-telemetry-final\M16-1327.png`; FPS crop: `.claude-state\profiling\20260604-next-x8-bottleneck\screenshots-M16-1327-cache-telemetry-final\M16-1327-fps-status.png`.
+  - Aspect evidence is presented-playback stretch: `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 06:32:07 -05:00`, `Length=9057792`, SHA256 `3CD86B59561ADF3A4E90FDD104ED2AC9F8FC8B86D7D24F01CC9B9876CFFC3A32`.
+
+### Cross-checked from prior analysis
+
+- The early-resolution x8 contract is still doing the important work: Bayer reduction happens before LLRawProc/Dual ISO and debayer. The remaining raw-decode stage still touches full source pixels, but current post-policy timing shows cache store is far smaller than processed16/render work.
+- The telemetry-first edit de-risks the next iteration. It proves cache pruning is not worth keeping right now, because measured store cost is around `0.000-0.086 ms/frame` (effectively zero to `11627.91 FPS-equivalent`) while processed16/render work remains in the `10-27 ms/frame` range (`36.71-93.67 FPS-equivalent`).
+
+### Needs runtime profiling
+
+- Rank the next change from the post-policy x8 profile, not from the rejected cache-skip attempt:
+  1. Highest confidence: investigate `processed16_total_ms` / processed8 conversion and whether a safe aggressive direct8/local-tone-compatible path can avoid part of the current `10.676-14.319 ms` processed16 cost (`69.84-93.67 FPS-equivalent`).
+  2. Keep decode-aware/tile-aware x8 as the larger structural frontier because raw decode still uses `4,100,544` source pixels, but gate it on longer profiles that show raw decode is a real wall-clock limiter after prefetch.
+  3. Keep presentation/scheduling telemetry in the loop: short-run bottom-left `GUI FPS` remains useful as screenshot proof, but `smoke presented FPS`, `timeline FPS`, and per-stage FPS-equivalent should drive ranking.
