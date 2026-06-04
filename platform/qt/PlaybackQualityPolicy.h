@@ -623,7 +623,8 @@ struct PlaybackQualityAutoSampler
      *   - if window not full yet -> stay at HQ scale=4 (gather more data)
      *   - else compute avg cadence
      *   - if avg cadence > 1.10 * frame budget (under-meeting target by >10%)
-     *       -> downgrade to Fast (scale=1, no HQ)
+     *       -> downgrade to Fast (scale=4, no HQ) in Sharp/Smooth preview
+     *       -> use deep HQ x8 preview in Aggressive preview
      *   - else if avg cadence < 0.65 * frame budget (lots of headroom)
      *       and !dualIsoActive
      *       -> upgrade HQ to scale=2 (try sharper)
@@ -634,7 +635,9 @@ struct PlaybackQualityAutoSampler
         bool useHqMean23;      /* true => HQ + mean23, false => Fast preview */
     };
 
-    Decision decideNextSlot( int targetFps, bool dualIsoActive ) const
+    Decision decideNextSlot( int targetFps,
+                             bool dualIsoActive,
+                             bool aggressivePreviewActive = false ) const
     {
         std::lock_guard<std::mutex> lock( m_mutex );
         if ( targetFps <= 0 ) targetFps = 30;
@@ -652,8 +655,15 @@ struct PlaybackQualityAutoSampler
 
         if ( avgMs > frameBudgetMs * 1.10 )
         {
-            /* Missing target by >10%: drop to Fast. */
-            return Decision{ 1, false };
+            if ( aggressivePreviewActive )
+            {
+                /* Missing target in Aggressive preview: keep HQ Dual ISO so
+                 * the x8 pre-recon path can reduce in the Bayer domain. */
+                return Decision{ 8, true };
+            }
+            /* Missing target in Sharp/Smooth preview: drop to the same x4
+             * Fast contract as the fixed Fast mode. */
+            return Decision{ 4, false };
         }
         if ( !dualIsoActive && avgMs < frameBudgetMs * 0.65 )
         {

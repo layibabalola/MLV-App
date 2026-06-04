@@ -1539,7 +1539,9 @@ void MainWindow::timerFrameEvent( void )
                     && ui->checkBoxRawFixEnable->isChecked();
                 const PlaybackQualityAutoSampler::Decision decision =
                     m_playbackQualitySampler.decideNextSlot(
-                        m_playbackAutoTargetFps, dualIsoActive );
+                        m_playbackAutoTargetFps,
+                        dualIsoActive,
+                        mlvPlaybackAggressivePreviewMode() != 0 );
                 if ( decision.scaleFactor != m_playbackQualityActiveScale
                      || decision.useHqMean23 != m_playbackQualityActiveHq )
                 {

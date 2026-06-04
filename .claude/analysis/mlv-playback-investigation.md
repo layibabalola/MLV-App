@@ -14009,3 +14009,30 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 
 - Run a longer standard M16 set (`M16-1327`, `M16-1347`, `M16-1446`) comparing x4 sharp, x4 aggressive, and x8 aggressive before making aggressive mode automatic or changing Auto's scale policy.
 - The next model-ranked candidate is no longer x4 foreground raw decode on compatible receipts; it is whichever stage dominates those multi-clip aggressive runs, likely presentation/draw cadence, processing at x4, or full raw decode in clips where prefetch misses.
+
+## 2026-06-04 - Auto policy uses the proven aggressive x8 path on cadence miss
+
+### Verified locally
+
+- Multi-clip aggressive profiling across `M16-1327`, `M16-1347`, and `M16-1446` showed x8 aggressive is the faster measured fallback than x4 aggressive after x4 decode overlap landed.
+  - x4 aggressive averages: `GUI FPS=19.000`, `smoke presented FPS=13.067`, `timeline FPS=21.686`, `avg_raw_uint16_ms=6.502` (`153.80 FPS-equivalent`), `avg_llrawproc_total_ms=5.960` (`167.79 FPS-equivalent`), `avg_processing_ms=10.320` (`96.90 FPS-equivalent`), `avg_playback_scale_ms=4.063` (`246.12 FPS-equivalent`), `avg_render_total_ms=37.892` (`26.39 FPS-equivalent`), `avg_draw_total_ms=38.816` (`25.76 FPS-equivalent`).
+  - x8 aggressive averages: `GUI FPS=24.333`, `smoke presented FPS=15.615`, `timeline FPS=22.091`, `avg_raw_uint16_ms=5.095` (`196.27 FPS-equivalent`), `avg_llrawproc_total_ms=3.987` (`250.82 FPS-equivalent`), `avg_processing_ms=3.967` (`252.08 FPS-equivalent`), `avg_playback_scale_ms=4.094` (`244.26 FPS-equivalent`), `avg_render_total_ms=25.893` (`38.62 FPS-equivalent`), `avg_draw_total_ms=35.166` (`28.44 FPS-equivalent`).
+- Implemented the next model-ranked policy change in `PlaybackQualityAutoSampler`:
+  - Sharp/Smooth Auto cadence misses now fall back to fixed Fast's x4/no-HQ contract instead of old x1/no-HQ.
+  - Aggressive Auto cadence misses now choose HQ x8 so the existing early x8 Bayer-domain reduction remains active before LLRawProc/Dual ISO and debayer.
+- `MainWindow::timerFrameEvent()` now passes the active preview-mode policy into the Auto sampler, so the user-facing `Sharp / Smooth Preview` versus `Aggressive Performance Preview` split controls Auto's miss response.
+- Focused console validation passed after rebuilding `tests\build-ci-console`: `console_tests.exe --check-golden`, `tests=90`, `assertions=320`, `skipped=29`, `failed=0`.
+  - New coverage includes `PlaybackQualityAutoSampler.AggressiveCadenceMissUsesHqx8`.
+  - Updated coverage keeps Sharp/Smooth Auto cadence misses at x4/no-HQ.
+- Rebuilt release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 03:14:36 -05:00`, `Length=9043456`, SHA256 `23C4F48E0718C5E4AEF13380EE105C83BBA20D1A724957F4E5732345D4007C6E`.
+
+### Cross-checked from prior analysis
+
+- This is not a new isolated hotspot tweak. It is a policy use of the existing stage model: when Auto must miss downward and the user has chosen aggressive preview, the best available proven path is the one that makes x8 preview resolution upstream of LLRawProc/Dual ISO and debayer.
+- The heavier decode-aware/tile-aware x8 work remains the larger frontier, but the multi-clip telemetry says the current safe move is to let Auto select the already-hardened x8 path before rewriting raw decode.
+
+### Needs runtime profiling
+
+- Screenshot-backed Auto-mode GUI smoke still needs a first-class smoke harness override for quality mode. The current harness can force scale via `MLVAPP_PLAYBACK_SCALE_FACTOR` and can validate `ExpectedQualityMode`, but it cannot directly set Auto quality mode without touching user QSettings.
+- A failed settings-based Auto smoke attempt produced a pre-playback crash dump (`0xC0000005`) after loading `Aggressive Performance Preview`; user playback settings were restored and a subsequent HQ/x2 direct smoke ran normally. Treat this as a harness/runtime validation blocker, not as proof that the sampler policy regressed playback.
+- Add a dedicated release smoke override for playback quality mode before claiming screenshot-backed Auto switching coverage. Then run Auto aggressive on the standard M16 set and report `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and every compared stage as `ms` plus `FPS-equivalent`.
