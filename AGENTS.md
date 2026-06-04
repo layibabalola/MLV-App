@@ -29,10 +29,18 @@
 - Seed automated coverage now lives under `tests/`.
 - CI entrypoint for that scaffold is `.github/workflows/tests.yml`.
 - Keep the docs above synchronized with what is implemented now versus still planned next.
+- On Windows, never launch `pipeline_tests.exe`, `console_tests.exe`, or other Qt-linked test executables from a bare shell, Explorer, or a direct `& .\...\*_tests.exe` command. They need the Qt and MinGW runtime DLLs on `PATH`; otherwise Windows shows modal missing-DLL popups such as `Qt6Core.dll`, `Qt6OpenGL.dll`, `Qt6Gui.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, or `libwinpthread-1.dll` before the test can print a useful error.
+- Use the repo wrapper for all local Windows Qt-linked tests. It prepares PATH, deploys missing runtime DLLs beside the selected test exe, and sets the process error mode to suppress Windows loader popups:
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\testing\run-windows-test.ps1 -Suite console -TestArgs '--gtest_filter=PlaybackQualityAutoSampler.*'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\testing\run-windows-test.ps1 -Suite pipeline -TestArgs '--gtest_filter=DualIsoPipeline.Phase4Bv3_AggressivePreviewAllowsHqMean23PreReconX4'`
+- The Windows `console_tests` and `pipeline_tests` builds deploy Qt runtime/plugins with `windeployqt`, then copy MinGW/OpenMP runtime DLLs beside the exe through `tools\testing\deploy-windows-test-runtime.ps1`. If a modal missing-DLL popup appears, treat it as a workflow regression: stop using the bare command, rerun through `tools\testing\run-windows-test.ps1`, and update this note if the wrapper itself fails.
+- When running a nested `pwsh.exe -Command` from an already-running PowerShell shell, do not put `$env:PATH=...` inside outer double quotes; the outer shell expands `$env:PATH` too early and can corrupt the child PATH. Prefer the current-shell form above, or single-quote the child command string.
 
 ## GUI Release Build Verification
 - After any source, UI, receipt, playback, color, scaling, or processing change that is meant to affect the Windows GUI, rebuild the user-facing release tree before final response:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$env:PATH='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;' + $env:PATH; & 'C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe' -C platform\qt\build-release -B release -j4"`
+- In Codex Desktop's PowerShell shell, the safer equivalent is:
+  - `$env:PATH='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;' + $env:PATH; & 'C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe' -C platform\qt\build-release -B release -j4`
 - Do **not** treat `.claude-state\build\mlvapp\release\MLVApp.exe` as the user-facing GUI build. That scratch build is useful for validation, but the executable the user normally launches is `platform\qt\build-release\release\MLVApp.exe`.
 - After rebuilding, verify and report the actual release executable path, `LastWriteTime`, length, and SHA256:
   - `Get-Item platform\qt\build-release\release\MLVApp.exe | Select-Object FullName, LastWriteTime, Length`

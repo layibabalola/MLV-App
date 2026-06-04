@@ -1,5 +1,29 @@
 ## Testing Scaffold Notes
 
+### Windows Qt Test Runtime Wrapper (2026-06-04)
+
+#### Verified locally
+
+- Directly launching `tests\build-ci-pipeline\release\pipeline_tests.exe`, `tests\build-ci-console\release\console_tests.exe`, or other Qt-linked test executables from a bare Windows shell can produce modal system error popups instead of useful test output when Qt/MinGW runtime DLLs are not on `PATH`.
+  - Observed missing DLLs: `Qt6Core.dll`, `Qt6OpenGL.dll`, `Qt6Gui.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, and `libwinpthread-1.dll`.
+  - This is a harness invocation problem, not a pipeline-test failure.
+- Durable prevention is now in `AGENTS.md`: never run Qt-linked `*_tests.exe` directly on Windows. Use the repo wrapper:
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\testing\run-windows-test.ps1 -Suite console -TestArgs '--gtest_filter=PlaybackQualityAutoSampler.*'`
+  - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\testing\run-windows-test.ps1 -Suite pipeline -TestArgs '--gtest_filter=DualIsoPipeline.Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYWhenReceiptCompatible'`
+- Stronger prevention is now build-time too:
+  - `tools\testing\deploy-windows-test-runtime.ps1` accepts `-ExeName`, runs `windeployqt` for the selected test executable, and copies MinGW/OpenMP runtime DLLs (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`, `libgomp-1.dll`) beside the exe.
+  - `tests/pipeline/pipeline_tests.pro` and `tests/console/console_tests.pro` deploy the runtime after linking on Windows.
+  - `tools\testing\run-windows-test.ps1` sets the Windows process error mode before launching the test, so missing-DLL failures should return as command failures instead of modal loader popups.
+- Also avoid nested double-quoted `pwsh.exe -Command "$env:PATH=..."` from an outer PowerShell shell; the outer shell expands `$env:PATH` before the child `pwsh` sees it and can corrupt the child build/test PATH.
+
+#### Cross-checked from prior analysis
+
+- Existing validation lines that say `console_tests` or `pipeline_tests` assume the wrapper/PATH-prepared runtime environment on Windows.
+
+#### Needs runtime profiling
+
+- None. This is an invocation guard to prevent misleading Windows modal dialogs during future focused test runs.
+
 ### Safe Overlap Keep-Set + Expanded Playback Telemetry Assertions (2026-04-23)
 
 #### Verified locally

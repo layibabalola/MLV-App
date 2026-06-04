@@ -61,6 +61,10 @@ CLAUDE_CODE_PROMPTS.md
 # .claude/settings.json (if it exists) is tracked; this one stays local.
 .claude/settings.local.json
 
+# Claude Desktop scheduled-task runtime lock. This can be live while the
+# independent review loop is running and must not block repo closeout.
+.claude/scheduled_tasks.lock
+
 # Local bridge monitor/runtime breadcrumbs should live under bridge state or
 # scratch; ignore accidental root-level drops.
 monitor-*.runtime.json

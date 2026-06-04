@@ -5,6 +5,7 @@ param(
     [string]$ClipPath = "",
     [string]$Output = "",
     [int]$Seconds = 8,
+    [int]$StartFrame = 0,
     [int]$SettleMs = 2500,
     [double]$SettleCpuPercent = 10,
     [int]$SettleCpuStableMs = 1000,
@@ -449,7 +450,6 @@ if ([string]::IsNullOrWhiteSpace($ClipPath)) {
     throw "Missing -Input <clip.mlv>."
 }
 $inputPath = (Resolve-Path -LiteralPath $ClipPath).Path
-$logRoot = Join-Path $env:APPDATA "magiclantern\MLVApp\logs"
 
 if ([string]::IsNullOrWhiteSpace($Output)) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -461,6 +461,8 @@ $outputDir = Split-Path -Parent $outputPath
 if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 }
+$logRoot = Join-Path $outputDir "logs"
+New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 $screenshotPath = $null
 $windowScreenshotPath = $null
@@ -483,6 +485,7 @@ $arguments = @(
     "--gui-smoke-playback",
     "--input", $inputPath,
     "--seconds", [string]$Seconds,
+    "--start-frame", [string]$StartFrame,
     "--settle-ms", [string]$SettleMs,
     "--settle-cpu-percent", ([string]::Format(
         [System.Globalization.CultureInfo]::InvariantCulture,
@@ -524,6 +527,7 @@ if (-not $useAutoPlaybackThreads) {
 if ($FrameTelemetry) {
     $launchEnv["MLVAPP_PLAYBACK_SMOKE_TELEMETRY"] = "1"
 }
+$launchEnv["MLVAPP_CRASH_FORENSICS_LOG_DIR"] = $logRoot
 if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
     $launchEnv["MLVAPP_PLAYBACK_QUALITY_MODE"] = $QualityMode
 }
@@ -643,6 +647,7 @@ if ($FrameTelemetry) {
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_SMOKE_TELEMETRY")
 }
+$envBlock["MLVAPP_CRASH_FORENSICS_LOG_DIR"] = $logRoot
 if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
     $envBlock["MLVAPP_PLAYBACK_QUALITY_MODE"] = $QualityMode
 }

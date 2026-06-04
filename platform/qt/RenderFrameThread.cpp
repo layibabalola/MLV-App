@@ -56,6 +56,7 @@ QString phase4bPathLabel( int path )
     switch( path )
     {
     case 8: return QStringLiteral("x8-full-xy-pre-recon");
+    case 4: return QStringLiteral("x2-full-xy-pre-recon");
     case 3: return QStringLiteral("full-xy-pre-recon");
     case 2: return QStringLiteral("x-only-pre-recon");
     default: return QStringLiteral("none-or-full-recon-fallback");
@@ -1730,6 +1731,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_playback_scale_factor_clamped"),
         playbackScaleFactorActive != playbackScaleFactor );
+    const bool processed8CacheHit = getMlvLastProcessed8CacheHit() != 0;
+    const bool processed8PrefetchHit = getMlvLastProcessed8PrefetchHit() != 0;
+    const int processed8CacheHitScale = getMlvLastProcessed8CacheHitScaleFactor();
     const int phase4bPath = playbackScaleFactorActive > 1
                            ? mlv_phase4bv2_last_path_taken()
                            : 0;
@@ -1743,6 +1747,27 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const qint64 sourcePixels = stagePixelCount( sourceWidth, sourceHeight );
     const qint64 renderedPixels = stagePixelCount( renderedWidth, renderedHeight );
     QString phase4bFallbackReason = QStringLiteral("none");
+    const bool aggressivePreview = ( mlvPlaybackAggressivePreviewMode() != 0 );
+    const bool phase4bReducedPath =
+        phase4bPath == 8 || phase4bPath == 4 || phase4bPath == 3 || phase4bPath == 2;
+    bool skipFocusPixels = false;
+    bool skipBadPixels = false;
+    bool skipVerticalStripes = false;
+    bool skipPatternNoise = false;
+    if( m_pMlvObject && m_pMlvObject->llrawproc )
+    {
+        skipFocusPixels = m_pMlvObject->llrawproc->focus_pixels != 0;
+        skipBadPixels = m_pMlvObject->llrawproc->bad_pixels != 0;
+        skipVerticalStripes = m_pMlvObject->llrawproc->vertical_stripes != 0;
+        skipPatternNoise = m_pMlvObject->llrawproc->pattern_noise != 0;
+    }
+    const bool skippedScaledRawCoordinateFixes =
+        aggressivePreview
+        && phase4bReducedPath
+        && ( skipFocusPixels
+          || skipBadPixels
+          || skipVerticalStripes
+          || skipPatternNoise );
     if( playbackScaleFactorActive > 1 && phase4bPath == 0 )
     {
         const char *reason = mlv_phase4bv2_last_fallback_reason();
@@ -1758,12 +1783,31 @@ void RenderFrameThread::drawFrame( int slotIndex,
         QStringLiteral("render_thread_phase4b_path_label"),
         phase4bPathLabel( phase4bPath ) );
     slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_phase4b_path_source"),
+        processed8CacheHit
+            ? QStringLiteral("processed8_cache")
+            : QStringLiteral("render_thread") );
+    slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_phase4b_y_crop_rows"),
         phase4bCropRows );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_phase4b_fallback_reason"),
         phase4bFallbackReason );
-    const bool aggressivePreview = ( mlvPlaybackAggressivePreviewMode() != 0 );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_scaled_raw_coordinate_fixes_skipped"),
+        skippedScaledRawCoordinateFixes );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_scaled_skip_focus_pixels"),
+        skippedScaledRawCoordinateFixes && skipFocusPixels );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_scaled_skip_bad_pixels"),
+        skippedScaledRawCoordinateFixes && skipBadPixels );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_scaled_skip_vertical_stripes"),
+        skippedScaledRawCoordinateFixes && skipVerticalStripes );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_scaled_skip_pattern_noise"),
+        skippedScaledRawCoordinateFixes && skipPatternNoise );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_preview_mode"),
         aggressivePreview
@@ -1809,6 +1853,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
             bayerReductionOutputWidth = sourceWidth / 8;
             bayerReductionOutputHeight = effectiveHeight / 8;
         }
+        else if( phase4bPath == 4 )
+        {
+            const int effectiveHeight = qMax( 0, sourceHeight - phase4bCropRows );
+            bayerReductionInputWidth = sourceWidth;
+            bayerReductionInputHeight = effectiveHeight;
+            bayerReductionOutputWidth = sourceWidth / 2;
+            bayerReductionOutputHeight = effectiveHeight / 2;
+        }
         else if( phase4bPath == 3 )
         {
             const int effectiveHeight = qMax( 0, sourceHeight - phase4bCropRows );
@@ -1825,7 +1877,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
             bayerReductionOutputHeight = sourceHeight;
         }
 
-        if( phase4bPath == 8 || phase4bPath == 3 || phase4bPath == 2 )
+        if( phase4bPath == 8 || phase4bPath == 4 || phase4bPath == 3 || phase4bPath == 2 )
         {
             llrawprocWidth = bayerReductionOutputWidth;
             llrawprocHeight = bayerReductionOutputHeight;
@@ -2871,8 +2923,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       getMlvLastProcessed8CacheStoreMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_active"),
                                       getMlvLastProcessed8DirectPathActive() != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit"),
+                                      processed8CacheHit );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit_scale_factor"),
+                                      processed8CacheHitScale );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_prefetch_hit"),
-                                      getMlvLastProcessed8PrefetchHit() != 0 );
+                                      processed8PrefetchHit );
 
     slot.processedFrame8Active =
         m_pMlvObject && m_pMlvObject->current_processed_frame_8bit_active;

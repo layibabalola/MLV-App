@@ -734,8 +734,8 @@ static int pl_downsample_bayer_to_bayer_2x_scalar(const uint16_t * __restrict ba
                                                   int threads)
 {
     if (!bayer_in || !bayer_out) return 1;
-    if (in_w < 2 || in_h < 8) return 1;
-    if (in_w & 1) return 1;
+    if (in_w < 4 || in_h < 8) return 1;
+    if (in_w & 3) return 1;
     if (in_h & 7) return 1; /* multiple of 8 (block stride) */
 
     const int out_w = in_w >> 1;
@@ -743,16 +743,10 @@ static int pl_downsample_bayer_to_bayer_2x_scalar(const uint16_t * __restrict ba
     if (out_w_p) *out_w_p = out_w;
     if (out_h_p) *out_h_p = out_h;
 
-    /* X downsample by 2: each output Bayer cell takes 1 source cell at the
-     * same color position. We use src col x_out*2 + (x_out%2) — wait, that
-     * collapses to identity. We want to take TWO same-color taps per output
-     * cell to reduce aliasing. So src cols at x_out*2 + 0 and... wait, with
-     * in_w/2 outputs there's only 1 source col pair per output cell.
-     * x_out=0 (R) → src col 0 (R). x_out=1 (G) → src col 1 (G).
-     * x_out=2 (R) → src col 2 (R). x_out=3 (G) → src col 3 (G).
-     * That IS identity — there's no X downsample at scale=2 for bayer-to-
-     * bayer because the Bayer cell pitch already matches. So scale=2 mode
-     * is pure Y block-stride downsample (in_h/2). */
+    /* X downsample by 2 while preserving the RGGB pattern:
+     * output cells are processed in Bayer pairs. For each 4-column source
+     * tile, the even output cell averages source cols 0 and 2 (same Bayer
+     * color), while the odd output cell averages cols 1 and 3. */
     if (threads > 1)
     {
         #pragma omp parallel for num_threads(threads)
@@ -761,20 +755,15 @@ static int pl_downsample_bayer_to_bayer_2x_scalar(const uint16_t * __restrict ba
             const int src_row_idx = (y_out >> 2) * 8 + (y_out & 3);
             const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
             uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
-            /* Take alternate source cells: src_col = x_out * 2 + (x_out % 2).
-             * Wait that's not right either. Per the X analysis above, scale=2
-             * keeps Y/2 (block-stride 8) but X identity at the Bayer-cell
-             * pitch. We sample TWO consecutive source cells (one R-G pair
-             * or one G-B pair) per output Bayer cell pair, taking src
-             * col = x_out (no X reduction). To actually reduce X by 2 we'd
-             * need pl_downsample_bayer_to_bayer_2x_x to average across the
-             * 4-col tile, but that contracts X by 2 (output cells at
-             * x*2 + 0 and x*2 + 1 take src cols 0,2 and 1,3 — not what we
-             * want for a "2x"). For now scale=2 is Y/2 only — equivalent
-             * pixel reduction is 2x. */
-            for (int x_out = 0; x_out < out_w; ++x_out)
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
             {
-                drow[x_out] = srow[x_out];
+                const int xs = x_out * 2;
+                const uint32_t even0 = srow[xs + 0];
+                const uint32_t even1 = srow[xs + 2];
+                const uint32_t odd0 = srow[xs + 1];
+                const uint32_t odd1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((even0 + even1) >> 1);
+                drow[x_out + 1] = (uint16_t)((odd0 + odd1) >> 1);
             }
         }
     }
@@ -785,9 +774,15 @@ static int pl_downsample_bayer_to_bayer_2x_scalar(const uint16_t * __restrict ba
             const int src_row_idx = (y_out >> 2) * 8 + (y_out & 3);
             const uint16_t * __restrict srow = bayer_in + (size_t)src_row_idx * (size_t)in_w;
             uint16_t * __restrict drow = bayer_out + (size_t)y_out * (size_t)out_w;
-            for (int x_out = 0; x_out < out_w; ++x_out)
+            for (int x_out = 0; x_out + 1 < out_w; x_out += 2)
             {
-                drow[x_out] = srow[x_out];
+                const int xs = x_out * 2;
+                const uint32_t even0 = srow[xs + 0];
+                const uint32_t even1 = srow[xs + 2];
+                const uint32_t odd0 = srow[xs + 1];
+                const uint32_t odd1 = srow[xs + 3];
+                drow[x_out + 0] = (uint16_t)((even0 + even1) >> 1);
+                drow[x_out + 1] = (uint16_t)((odd0 + odd1) >> 1);
             }
         }
     }

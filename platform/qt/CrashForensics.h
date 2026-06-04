@@ -6,7 +6,9 @@
  *
  * The always-on rotating log is written to
  *   <AppDataLocation>/logs/mlvapp-YYYYMMDD.log
- * with the 5 most recent date-stamped files kept on startup.
+ * with the 5 most recent date-stamped files kept on startup. Test and
+ * profiling harnesses may redirect this directory with
+ * MLVAPP_CRASH_FORENSICS_LOG_DIR.
  *
  * On Windows, the unhandled-exception filter writes
  *   <AppDataLocation>/logs/mlvapp-YYYYMMDD-HHMMSS.dmp

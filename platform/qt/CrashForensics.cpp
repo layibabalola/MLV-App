@@ -271,13 +271,23 @@ QString install(int argc, char * argv[])
         g_commandLine.append(QString::fromLocal8Bit(argv[i]));
     }
 
-    const QString base =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (base.isEmpty()) {
-        g_installed.store(false);
-        return QString();
+    const QString overrideLogDir =
+        qEnvironmentVariable("MLVAPP_CRASH_FORENSICS_LOG_DIR").trimmed();
+    if (!overrideLogDir.isEmpty()) {
+        const QFileInfo overrideInfo(overrideLogDir);
+        g_logsDir = overrideInfo.isAbsolute()
+            ? QDir::cleanPath(overrideInfo.absoluteFilePath())
+            : QDir::cleanPath(QDir::current().absoluteFilePath(overrideLogDir));
     }
-    g_logsDir = QDir(base).absoluteFilePath(QStringLiteral("logs"));
+    else {
+        const QString base =
+            QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) {
+            g_installed.store(false);
+            return QString();
+        }
+        g_logsDir = QDir(base).absoluteFilePath(QStringLiteral("logs"));
+    }
     QDir().mkpath(g_logsDir);
     pruneOldLogs(g_logsDir, 5);
 

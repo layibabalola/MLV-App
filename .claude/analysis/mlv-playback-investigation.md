@@ -14436,3 +14436,300 @@ Post-change stage timings:
 
 - Do not promote eighth-res Shadows/Highlights as the default. It may be worth revisiting only as a separate explicit "extra coarse" preview option after visual acceptance criteria exist.
 - Continue the active playback-speed goal from retained x8 `processed16`/processing, presentation scheduling, and decode-aware/tile-aware work only when fresh profiles show those buckets dominate after raw prefetch hits.
+
+## 2026-06-04 - Aggressive x8 coordinate raw-fix skip unlocks GUI early path
+
+### Verified locally
+
+- Claude Round 06 and Codex converged that the GUI Auto/aggressive x8 failure was a path-selection mismatch, not a draw/presentation issue. A run-local phase4b probe supplied the decisive reason: `[PHASE4BV2] reject: vertical_stripes enabled`.
+- Implemented the mode split explicitly:
+  - Sharp/Smooth Preview stays conservative and continues to fall back when focus-pixels, bad-pixels, vertical-stripes, or pattern-noise state requires full-resolution coordinates.
+  - Aggressive Performance Preview may keep reduced-Bayer phase4b paths eligible and intentionally skip those coordinate-sensitive raw fixes after reduction. This is the coarse/deep preview contract.
+- Added proof telemetry in `RenderFrameThread` and GUI smoke logs:
+  - `render_thread_scaled_raw_coordinate_fixes_skipped`
+  - `render_thread_scaled_skip_focus_pixels`
+  - `render_thread_scaled_skip_bad_pixels`
+  - `render_thread_scaled_skip_vertical_stripes`
+  - `render_thread_scaled_skip_pattern_noise`
+- Focused pipeline validation passed after the final source state:
+  - `tests\build-ci-pipeline\release\pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B_DualIsoScaleEight*`
+  - Passed conservative fallback and aggressive skip tests: `tests=145`, `assertions=25`, `skipped=0`, `failed=0`.
+- CrashForensics log placement was hardened so GUI smoke reads run-local evidence instead of stale user-profile logs:
+  - `MLVAPP_CRASH_FORENSICS_LOG_DIR` overrides the log directory.
+  - Focused validation passed: `pipeline_tests.exe --gtest_filter=CrashForensics.*`, `tests=144`, `assertions=24`, `skipped=1`, `failed=0`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 11:38:56 -05:00`, `Length=9069568`, SHA256 `CAAD8E14800464CCF072B81E314D793595EF28576CCC67791453074B935C255D`.
+
+### GUI Smoke
+
+- Screenshot-backed x8 aggressive Auto GUI smoke artifacts:
+  - Before: `.claude-state\profiling\20260604-next-telemetry-ranked-bucket\gui-smoke-x8-aggressive-auto\`.
+  - After: `.claude-state\profiling\20260604-next-telemetry-ranked-bucket\gui-smoke-x8-aggressive-auto-skipfix\`.
+  - All post-fix runs had `validation.ok=true`, `scaleRequestLast=8`, `scaleActiveLast=8`, `qualityModeLast=2`, and presented-playback stretch evidence with active `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Path proof from post-fix `playback_smoke.cpu_frame` lines:
+  - `M16-1327`: `phase4b_path=8` on `836/836`, fallback `none` on `836/836`, `skipped_scaled_raw_fixes=1` on `836/836`.
+  - `M16-1347`: `phase4b_path=8` on `822/822`, fallback `none` on `822/822`, `skipped_scaled_raw_fixes=1` on `822/822`.
+  - `M16-1446`: `phase4b_path=8` on `813/813`, fallback `none` on `813/813`, `skipped_scaled_raw_fixes=1` on `813/813`.
+- Before/after timing:
+  - `M16-1327`: `smoke presented FPS=6.079 -> 34.501` (`5.68x`), average present interval `162.381 -> 28.825 ms`; LLRawProc `94.311 -> 7.165 ms` (`10.60 -> 139.57 FPS-equivalent`), debayer `122.209 -> 1.016 ms` (`8.18 -> 984.25 FPS-equivalent`), processed16 `155.791 -> 18.763 ms` (`6.42 -> 53.30 FPS-equivalent`), raw prefetch hits `0 -> 410`.
+  - `M16-1347`: `smoke presented FPS=5.123 -> 33.791` (`6.60x`), average present interval `191.653 -> 29.424 ms`; LLRawProc `106.016 -> 8.262 ms` (`9.43 -> 121.04 FPS-equivalent`), debayer `140.752 -> 0.807 ms` (`7.10 -> 1239.16 FPS-equivalent`), processed16 `183.856 -> 19.300 ms` (`5.44 -> 51.81 FPS-equivalent`), raw prefetch hits `0 -> 380`.
+  - `M16-1446`: `smoke presented FPS=2.173 -> 33.209` (`15.28x`), average present interval `449.981 -> 29.676 ms`; LLRawProc `226.741 -> 6.663 ms` (`4.41 -> 150.08 FPS-equivalent`), debayer `285.889 -> 0.779 ms` (`3.50 -> 1283.70 FPS-equivalent`), processed16 `400.926 -> 18.791 ms` (`2.49 -> 53.22 FPS-equivalent`), raw prefetch hits `0 -> 366`.
+- Post-fix GUI labels remain noisy and must be labeled separately from smoke metrics:
+  - `M16-1327`: visible bottom-left `GUI FPS=166`, summary `GUI FPS=58`, `smoke presented FPS=34.501`, `timeline FPS=23.936`.
+  - `M16-1347`: visible bottom-left `GUI FPS=15`, summary `GUI FPS=66`, `smoke presented FPS=33.791`, `timeline FPS=23.966`.
+  - `M16-1446`: visible bottom-left `GUI FPS=125`, summary `GUI FPS=23`, `smoke presented FPS=33.209`, `timeline FPS=23.814`.
+- Presented screenshots:
+  - `M16-1327`: `.claude-state\profiling\20260604-next-telemetry-ranked-bucket\gui-smoke-x8-aggressive-auto-skipfix\screenshots\M16-1327.png`, SHA256 `C14FF54436D3B4E08443DBFB1547297A832EF0A84B7FDFEF8FCD544F6110DAD8`.
+  - `M16-1347`: `.claude-state\profiling\20260604-next-telemetry-ranked-bucket\gui-smoke-x8-aggressive-auto-skipfix\screenshots\M16-1347.png`, SHA256 `8AE270C31FA6FC3C1B5EC485231C76171D9277B246165FED25BE2469488119C3`.
+  - `M16-1446`: `.claude-state\profiling\20260604-next-telemetry-ranked-bucket\gui-smoke-x8-aggressive-auto-skipfix\screenshots\M16-1446.png`, SHA256 `A1FD04AFD028DD3F1FD1A0071E2AA1632E9D995AA7B9EBC28B4ADF773F202546`.
+
+### Cross-checked from prior analysis
+
+- This is the recent breakthrough applied to the GUI path: aggressive x8 now moves Bayer-domain reduction before LLRawProc/Dual ISO and before debayer even when the receipt has vertical-stripe state. The measured speedup came from removing unnecessary full-resolution reconstruction/debayer work, not from a late RGB scaler tweak.
+- The user-facing split is now concrete: Sharp/Smooth Preview protects quality by honoring coordinate-sensitive raw fixes at full resolution; Aggressive Performance Preview prioritizes the strongest early-resolution path and accepts skipped full-res raw fixes as a preview approximation.
+
+### Needs runtime profiling
+
+- Next ranking should start from the new post-fix retained buckets. GUI x8 aggressive is now around `33-35 smoke presented FPS`, so the next candidate is no longer phase4b path selection.
+- `processed16` remains a consistent retained bucket at about `18.763-19.300 ms` (`51.81-53.30 FPS-equivalent`) across the smoke set, with `avg_processing_ms=6.344-6.910 ms` (`144.72-157.63 FPS-equivalent`), `avg_llrawproc_total_ms=6.663-8.262 ms` (`121.04-150.08 FPS-equivalent`), and draw total `4.353-4.638 ms` (`215.61-229.73 FPS-equivalent`).
+- Decode-aware/tile-aware x8 remains the structural frontier because raw decode still starts from source pixels, but raw prefetch now hits in GUI, so it should be gated on longer profiles that show decode/queueing as a wall-clock limiter after the path-8 unlock.
+
+## 2026-06-04 - Broad quarter-res processed16 rejected; x8 aggressive is near CPU-render floor
+
+### Verified locally
+
+- A brief Codex probe tried to push the broad scaled `processed16`/processing path through the aggressive preview-mode contract. Claude Round 13 independently rejected the approach across the standard M16 set, so the source hook and its focused test were removed before closeout.
+- The retained source state keeps the accepted aggressive x8 coordinate raw-fix skip and removes the broad `getMlvProcessedFrame16_with_scale()` preview-mode hook. This keeps the win anchored at the strongest position: reduced Bayer before LLRawProc/Dual ISO and debayer, not a late processed-RGB downsample.
+- Rebuilt the user-facing release executable after removing the rejected hook:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-04 12:40:18 -05:00`
+  - `Length=9071616`
+  - SHA256 `96C426B2383A520B5BF60552BAE001D9D8ED0B11FE152918B5210D8DBB63999C`
+- Focused validation after cleanup:
+  - `pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B_DualIsoScaleEight*`: conservative fallback plus aggressive coordinate-skip early path passed, `tests=145`, `assertions=25`, `skipped=0`, `failed=0`.
+  - `pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4Bv4_DualIsoScaleEightUsesEarlyFullXY*`: both x8 early full-XY tests passed, `tests=145`, `assertions=19`, `skipped=0`, `failed=0`.
+  - `pipeline_tests.exe --gtest_filter=ProcessingFilters.*`: `tests=145`, `assertions=42`, `skipped=0`, `failed=0`.
+- Screenshot-backed current-binary GUI smoke passed:
+  - Artifact: `.claude-state\profiling\20260604-final-retained-x8-skipfix\M16-1327-x8-aggressive-current-retained-smoke.json`, `validation.ok=true`.
+  - Requested/active scale: `scaleRequestLast=8`, `scaleActiveLast=8`, `qualityModeLast=2`.
+  - FPS labels: visible bottom-left `GUI FPS=200`, summary `GUI FPS=125`, `smoke presented FPS=23.301`, `timeline FPS=23.869`.
+  - Timing: average present interval `42.224 ms` (`23.68 FPS-equivalent`), render total `64.105 ms` (`15.60 FPS-equivalent`), render work `38.369 ms` (`26.06 FPS-equivalent`), queue wait `25.725 ms` (`38.87 FPS-equivalent`), raw uint16 `6.969 ms` (`143.49 FPS-equivalent`), LLRawProc total `11.258 ms` (`88.83 FPS-equivalent`), debayered frame `1.958 ms` (`510.73 FPS-equivalent`), processing `12.962 ms` (`77.15 FPS-equivalent`), processed16 `32.652 ms` (`30.63 FPS-equivalent`), processed8 `37.199 ms` (`26.88 FPS-equivalent`), draw total `4.979 ms` (`200.84 FPS-equivalent`).
+  - Local-tone detail: Shadows/Highlights prep `12.774 ms` (`78.28 FPS-equivalent`), RBF total `10.707 ms` (`93.40 FPS-equivalent`). The normal smoke had `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE` cleared, so the quarter-res split counters read zero and must not be interpreted as path failure.
+  - Raw prefetch hits: `147`; processed8 direct path frames: `0`.
+  - Presented screenshot: `.claude-state\profiling\20260604-final-retained-x8-skipfix\screenshots\M16-1327.png`, SHA256 `DCC4F41ACCBB617C4D10C1EF8616ED86266D5CE69C117DA48303F1ECD9344BA2`.
+
+### Cross-checked from prior analysis
+
+- Claude Round 13 compared the broad quarter-res processed16 probe to the accepted skipfix path-8 baseline and found all three clips regressed:
+  - `M16-1327`: smoke presented FPS `34.501 -> 28.969`, processed16 `18.76 -> 23.84 ms` (`53.30 -> 41.95 FPS-equivalent`).
+  - `M16-1347`: smoke presented FPS `33.791 -> 23.294`, processed16 `19.30 -> 30.90 ms` (`51.81 -> 32.36 FPS-equivalent`).
+  - `M16-1446`: smoke presented FPS `33.209 -> 28.475`, processed16 `18.79 -> 25.21 ms` (`53.22 -> 39.67 FPS-equivalent`).
+- Mechanism: x8 path 8 already runs broad processing at preview resolution (`~63,958` processed RGB pixels on M16-1327). Further broad downsample/resample/upsample overhead exceeds the saved pointwise work. This is different from the accepted Shadows/Highlights quarter-res path, where the spatial RBF filter was the measured local-tone bucket.
+
+### Needs runtime profiling
+
+- Treat warm aggressive x8 as the current practical CPU-render floor for the accepted preview mode. It is already realtime on the accepted warm baseline (`~33-34 smoke presented FPS`) when path 8 holds.
+- Do not invest further in CPU-side broad processed16/downsample variants unless fresh telemetry shows a new retained bucket and same-binary A/B beats the accepted path on all three standard clips.
+- If more headroom is needed, pivot to GPU/presentation/queue-cadence measurement first. Decode-aware/tile-aware x8 remains the structural CPU frontier only when fresh profiles show raw decode remains wall-clock limiting despite raw prefetch hits.
+
+## 2026-06-04 - Prevented bare pipeline_tests.exe missing-DLL popups
+
+### Verified locally
+
+- Added `tools\testing\deploy-windows-test-runtime.ps1` and wired `tests\pipeline\pipeline_tests.pro` to run it after linking on Windows.
+- The deploy step runs `windeployqt` for `pipeline_tests.exe`, then copies MinGW/OpenMP runtime DLLs beside the exe. The current build directory now has direct and transitive runtime dependencies, including `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6OpenGL.dll`, `Qt6Network.dll`, `Qt6Svg.dll`, `D3Dcompiler_47.dll`, `opengl32sw.dll`, `platforms\qwindows.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`, and `libgomp-1.dll`.
+- Verified under a deliberately bare runtime `PATH` via `cmd.exe`:
+  - `cmd.exe /d /c "set PATH=%SystemRoot%\System32;%SystemRoot%&& tests\build-ci-pipeline\release\pipeline_tests.exe --gtest_filter=ProcessingFilters.*"`
+  - Passed with `tests=145`, `assertions=42`, `skipped=0`, `failed=0`.
+
+### Cross-checked from prior analysis
+
+- The original warning remains in `AGENTS.md` and `.claude/analysis/testing-scaffold-implementation.md`, but this is now hardened at build output level too. A stale build dir may still need rebuilding once so the deploy hook can copy the runtime payload.
+
+### Needs runtime profiling
+
+- None for playback. This is a workflow hardening change to avoid modal loader popups during future test runs.
+
+## 2026-06-04 - Aggressive x2 early Bayer path accepted after visual control
+
+### Verified locally
+
+- Implemented the next pipeline-resolution improvement for Aggressive Performance Preview at x2:
+  - `pl_downsample_bayer_to_bayer_2x_scalar()` now performs a true same-color horizontal Bayer reduction and halves the active Bayer dimensions while preserving the row/column phase required by the reduced reconstruction path.
+  - `video_mlv.c` now exposes `phase4b_path=4` (`x2-full-xy-pre-recon`) for aggressive x2. The path reduces Bayer before `applyLLRawProcObject_with_dims()` and before `debayerBasicU16()`, then fills any crop tail rows from the last valid row.
+  - Sharp/Smooth Preview remains conservative: x2 still uses the full-recon post-downsample fallback there.
+  - `RenderFrameThread` stage telemetry recognizes path 4 and reports reduced Bayer/LLRawProc/RGB dimensions.
+- Focused validation passed with the deployed Windows test runtime:
+  - `DualIsoPipeline.Phase4B_DualIsoHonorsScaleTwoWithSafeFallback`: `assertions=12`, `failed=0`.
+  - `DualIsoPipeline.Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY`: `assertions=10`, `failed=0`.
+  - `DualIsoPipeline.Phase4Bv2_BayerToBayer2xPreservesPatternAndAveragesColorPairs`: `assertions=19`, `failed=0`.
+  - `DualIsoPipeline.Phase4Bv2_BayerToBayer2xRejectsMisalignedDimensions`: `assertions=2`, `failed=0`.
+- Rebuilt the user-facing release executable:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-04 13:56:52 -05:00`
+  - `Length=9073664`
+  - SHA256 `2068EBE6519016AC89BB0D8A6BE077A51F86BE1D9F9A0591459BC71CAB274830`.
+
+### Performance Evidence
+
+- Headless x2 aggressive A/B on `M16-1327` used the release profile path and skipped the first 5 frames:
+  - Before: `.claude-state\profiling\20260604-x2-aggressive-early-path\M16-1327-x2-aggressive-before-headless-60f.json`, `phase4b_path=0`, fallback `scale=2 uses full-recon post-downsample fallback`, raw decode pixels `4,100,544`, LLRawProc pixels `4,100,544`, processing pixels `1,025,136`.
+  - After: `.claude-state\profiling\20260604-x2-aggressive-early-path\M16-1327-x2-aggressive-after-sha2068ebe6-headless-60f.json`, `phase4b_path=4`, fallback `none`, raw decode pixels `4,100,544`, Bayer reduction output/LLRawProc pixels `1,023,328`, RGB/processing pixels `1,025,136`, crop rows `4`.
+- Headless timing improved:
+  - Cadence `107.354 -> 42.835 ms` (`9.31 -> 23.35 FPS-equivalent`).
+  - Render total `95.500 -> 35.000 ms` (`10.47 -> 28.57 FPS-equivalent`).
+  - LLRawProc `72.083 -> 16.250 ms` (`13.87 -> 61.54 FPS-equivalent`).
+  - Debayered frame `78.583 -> 22.200 ms` (`12.73 -> 45.05 FPS-equivalent`).
+  - Processing `10.217 -> 6.733 ms` (`97.88 -> 148.51 FPS-equivalent`).
+- Screenshot-backed 12-second GUI smoke on `M16-1446` confirmed the real app path and kept FPS labels separate:
+  - Sharp/full-recon artifact: `.claude-state\profiling\20260604-x2-aggressive-early-path\visual-ab\M16-1446-x2-sharp-fullrecon-sha2068ebe6-gui-smoke.json`, visible bottom-left `GUI FPS=6.0`, smoke presented FPS `2.637`, timeline FPS `22.832`, render total `337.057 ms` (`2.97 FPS-equivalent`), LLRawProc `157.343 ms` (`6.36 FPS-equivalent`).
+  - Aggressive/x2-early artifact: `.claude-state\profiling\20260604-x2-aggressive-early-path\visual-ab\M16-1446-x2-aggressive-early-sha2068ebe6-gui-smoke.json`, visible bottom-left `GUI FPS=10.0`, smoke presented FPS `9.627`, timeline FPS `23.290`, render total `182.008 ms` (`5.49 FPS-equivalent`), render work `97.427 ms` (`10.26 FPS-equivalent`), LLRawProc `23.863 ms` (`41.91 FPS-equivalent`).
+
+### Visual Acceptance
+
+- Claude Round 22 initially blocked acceptance pending visual A/B because x2 skips coordinate-sensitive raw fixes at a larger preview size than x8. Codex produced the requested night-clip A/B and Claude Round 23 lifted the hard block after viewing the screenshots.
+- Codex also ran an isolated aggressive-mode visual control at `StartFrame=270`, scopes off:
+  - Aggressive forced full-recon via `MLVAPP_DISABLE_PHASE4BV2=1`: `.claude-state\profiling\20260604-x2-aggressive-early-path\visual-ab\native-start270\M16-1446-x2-aggressive-forced-fullrecon-start270-sha2068ebe6-gui-smoke.json`, screenshot SHA256 `DA32B1CB2389467E85F9DBA69719E9E0E55BF52F848A107C418FFB3988FDD80A`, render total `149.500 ms` (`6.69 FPS-equivalent`), LLRawProc `78.833 ms` (`12.68 FPS-equivalent`).
+  - Aggressive x2 early: `.claude-state\profiling\20260604-x2-aggressive-early-path\visual-ab\native-start270\M16-1446-x2-aggressive-early-start270-sha2068ebe6-gui-smoke.json`, screenshot SHA256 `DBF9836B5680E2246B91903990B51CF634AAA9A7A1C1CA33F8ABD04FE8CFCC0D`, render total `91.000 ms` (`10.99 FPS-equivalent`), LLRawProc `16.667 ms` (`60.00 FPS-equivalent`).
+- Visual verdict: the x2 early path is warmer/darker than full-recon on this night clip, but it does not show an obvious objectionable vertical-column regression. The forced full-recon control actually shows stronger green/magenta horizontal line structure in the presented stretched frame. No x2 coordinate-fix gate was added in this pass; keep the conservative receipt-based gate as a fallback only if native human review later finds objectionable x2 artifacts.
+
+### Cross-checked from prior analysis
+
+- This matches the core heuristic from the x8 breakthrough: the scale must happen before LLRawProc/Dual ISO and before debayer. The headless telemetry proves x2 aggressive no longer pays full-resolution reconstruction/debayer, while raw decode remains full source resolution.
+- The user-facing split remains intact:
+  - Sharp/Smooth Preview: quality-first, x2 full-recon fallback.
+  - Aggressive Performance Preview: early Bayer reduction at x2/x4/x8 where the explicit approximation contract allows it.
+
+### Needs runtime profiling
+
+- Treat the accepted x2 path as a strong preview-mode win, but continue to label visual review caveats. A future native-res human check on `M16-1446` dark pavement should decide whether any optional x2-specific artifact guard is warranted.
+- Next ranked candidates should return to fresh telemetry rather than reopening x2 by default: x4 default/Auto policy, processed/presentation scheduling, and decode-aware/tile-aware raw decode only when raw decode remains wall-clock limiting despite prefetch.
+
+## 2026-06-04 - Processed8-prefetch rejected in the real x8 path-8 state; telemetry hardened
+
+### Verified locally
+
+- Implemented the telemetry/cache-metadata hardening requested after Claude Round 19:
+  - Processed8 cache entries now retain the phase4b path and Y-crop rows that produced the cached frame.
+  - Processed8 cache-hit frames restore that metadata before telemetry is emitted, so cache-served frames no longer collapse to `phase4b_path=0`.
+  - New per-frame/profile fields: `render_thread_phase4b_path_source`, `processed8_cache_hit`, `processed8_cache_hit_scale_factor`, and corrected `processed8_prefetch_hit`.
+  - GUI smoke now logs `processed8_cache_hits` separately from processed8-prefetch hits.
+- Focused validation passed with the deployed Windows test runtime:
+  - `DualIsoPipeline.Phase4Bv4_Processed8CacheHitPreservesPhasePathTelemetry`: `assertions=16`, `failed=0`.
+  - `DualIsoPipeline.Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYWhenReceiptCompatible`: `assertions=10`, `failed=0`.
+  - `DualIsoPipeline.Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY`: `assertions=10`, `failed=0`.
+  - `DualIsoPipeline.Phase4B_DualIsoScaleEightAggressiveSkipsCoordinateRawFixesForEarlyPath`: `assertions=13`, `failed=0`.
+- Rebuilt the user-facing release executable:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-04 14:51:50 -05:00`
+  - `Length=9079296`
+  - SHA256 `945F05CDEA7F8B750769B00440E55ACE16572948DE8C50D1D587564442EB79D1`
+
+### Performance Evidence
+
+- Release profile A/B used `MLVApp.exe --profile-playback` through the normal Windows Qt platform plugin, not forced `QT_QPA_PLATFORM=offscreen`. This is non-interactive/headless-style stage benchmarking; GUI validation is listed separately below.
+- Correct HQ x8 aggressive A/B artifacts:
+  - Baseline: `.claude-state\profiling\20260604-processed8-prefetch-telemetry-fix\M16-1327-x8-aggressive-hq-baseline-sha945f05cd-headless-80f.json`
+  - Processed8-prefetch: `.claude-state\profiling\20260604-processed8-prefetch-telemetry-fix\M16-1327-x8-aggressive-hq-processed8-prefetch-sha945f05cd-headless-80f.json`
+- The telemetry fix is proven:
+  - Baseline: `scale=8` on 80/80 frames, `phase4b_path=8` on 80/80, `fallback=none` on 80/80, `path_source=render_thread` on 80/80, `processed8_cache_hits=0`.
+  - Processed8-prefetch: `scale=8` on 80/80 frames, `phase4b_path=8` on 80/80, `fallback=none` on 80/80, `path_source=processed8_cache` on 17/80 and `render_thread` on 63/80, `processed8_cache_hits=17`, `processed8_prefetch_hits=17`.
+- The performance verdict is reject for the production x8 path-8 state:
+  - Cadence regressed `34.470 -> 44.124 ms` (`29.01 -> 22.66 FPS-equivalent`).
+  - Render total regressed `30.825 -> 37.775 ms` (`32.44 -> 26.47 FPS-equivalent`).
+  - Median render total regressed `25.000 -> 32.000 ms` (`40.00 -> 31.25 FPS-equivalent`).
+  - Processed8 total regressed `30.075 -> 35.875 ms` (`33.25 -> 27.87 FPS-equivalent`).
+  - `llrawproc_ms` regressed `19.962 -> 26.338 ms` (`50.09 -> 37.97 FPS-equivalent`).
+  - Debayered frame regressed `24.763 -> 30.675 ms` (`40.38 -> 32.60 FPS-equivalent`).
+  - Raw uint16 slightly improved `2.863 -> 2.712 ms` (`349.34 -> 368.66 FPS-equivalent`), so the overall regression is not a raw-decode win being hidden by labels.
+- Screenshot-backed release GUI smoke passed separately:
+  - Artifact: `.claude-state\profiling\20260604-processed8-prefetch-telemetry-fix\M16-1327-x8-aggressive-hq-smoke-sha945f05cd-no-lookassist-required.json`, `validation.ok=true`.
+  - This smoke disabled the Look Assist settle requirement because the change is playback telemetry/cache metadata; the first strict run failed only on Look Assist diagnostics, while scale and quality validation already matched.
+  - Requested/active scale: `scaleRequestLast=8`, `scaleActiveLast=8`, `qualityModeLast=1`.
+  - FPS labels: visible bottom-left `GUI FPS=25`, smoke presented FPS `20.355`, timeline FPS `23.972`.
+  - Timing: render total `51.102 ms` (`19.57 FPS-equivalent`), render work `38.416 ms` (`26.03 FPS-equivalent`), queue wait `12.685 ms` (`78.83 FPS-equivalent`), LLRawProc `17.223 ms` (`58.06 FPS-equivalent`), processed8 `37.015 ms` (`27.02 FPS-equivalent`), draw total `4.680 ms` (`213.68 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-processed8-prefetch-telemetry-fix\screenshots-no-lookassist-required\M16-1327.png`, SHA256 `978E22069783F53F2FB8983348E4C6E404B289371C5C07F84838AC524A88619B`, width `1197`, height `500`, aspect `2.394`.
+  - FPS crop SHA256 `646B09EA3192359D42C163A437C4F715D4B5999F4B2FEBC9619B9CC85DE423B1`.
+
+### Cross-checked from prior analysis
+
+- Claude Round 26 independently rejected processed8-prefetch in the correct production state. The earlier apparent win was a wrong-state artifact: it measured a path-0/full-recon state, while production aggressive x8 is path 8 with preview-res LLRawProc.
+- The durable lesson is to validate optimization candidates in the state production actually uses and prove that state with `llrawproc_pixels`/stage pixels, not just with requested scale or path labels.
+
+### Needs runtime profiling
+
+- Keep processed8-prefetch experimental/off for production. Do not promote it unless a future design raises the hit rate substantially and wins same-binary path-8 A/B across the standard clips.
+- Next ranked work should avoid isolated processed8/prefetch tweaks and return to model-proven buckets: x4 default/Auto policy, presentation/queue cadence, and decode-aware/tile-aware raw decode only when raw decode remains a wall-clock limiter despite prefetch.
+
+## 2026-06-04 - Aggressive Auto Dual ISO first-window x8 and GUI startup guard
+
+### Verified locally
+
+- Implemented the current highest-confidence policy fix from the pipeline-resolution model:
+  - Aggressive Performance Preview + Auto + Dual ISO now requests x8 immediately rather than warming at x4 first.
+  - `PlaybackQualityAutoSampler` returns HQ x8 for aggressive Dual ISO before the warmup-window check.
+  - `MainWindow::effectivePlaybackScaleFactorForRequest()` also returns x8 for the first GUI/profile request when scale policy is Auto, quality mode is Auto, aggressive preview is active, and the loaded clip is Dual ISO.
+- GUI smoke exposed a real startup crash in the first implementation:
+  - `MLVAPP_PLAYBACK_QUALITY_MODE=2` can apply before a clip is loaded.
+  - The first implementation read clip-specific Dual ISO state while `m_pMlvObject` was still uninitialized/invalid during constructor-time settings refresh.
+  - Fixed by initializing `m_pMlvObject=nullptr`, `m_fileLoaded=false`, and requiring `m_fileLoaded && m_pMlvObject` before the x8 Dual ISO shortcut touches `llrpGetDualIsoMode()`.
+- Rebuilt the user-facing release executable after the crash guard:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-04 15:49:19 -05:00`
+  - `Length=9079808`
+  - SHA256 `0F0F22CCF20ACFC3F5351FB9D9FE52E23D5054911EE3190238D33AA5948D8B1D`
+- Focused policy test passed before the handoff:
+  - `PlaybackQualityAutoSampler.*`: `tests=94`, `assertions=40`, `skipped=0`, `failed=0`.
+  - Includes the new `PlaybackQualityAutoSampler.AggressiveDualIsoStartsAtHqx8`.
+
+### Performance Evidence
+
+- Controlled release profile artifact:
+  - `.claude-state\profiling\20260604-aggressive-auto-x8-warmup\M16-1327-auto-aggressive-hq-sha0f0f22cc-release-profile-80f.json`
+  - This is `MLVApp.exe --profile-playback` through the normal Windows Qt platform plugin (`qt_qpa=windows`), not forced `QT_QPA_PLATFORM=offscreen`, but `window_visible=false`; treat it as stage-cost benchmarking, not a visible GUI playback measurement.
+- The controlled profile proves the first-window x8 contract:
+  - `render_thread_playback_scale_factor_request=8` on 80/80 frames.
+  - `render_thread_playback_scale_factor_effective=8` on 80/80 frames.
+  - `render_thread_phase4b_path=8` on 80/80 frames.
+  - `render_thread_phase4b_fallback_reason=none` on 80/80 frames.
+  - Raw decode pixels `4,100,544`; LLRawProc pixels `63,280`; processing/presentation pixels `63,958`.
+- Controlled profile timing:
+  - Average cadence `32.962 ms` (`30.34 FPS-equivalent`); median cadence `26.870 ms` (`37.22 FPS-equivalent`).
+  - Render total `28.570 ms` (`35.00 FPS-equivalent`); median render total `24.000 ms` (`41.67 FPS-equivalent`).
+  - Raw uint16 `3.040 ms` (`329.22 FPS-equivalent`).
+  - LLRawProc `18.200 ms` (`54.94 FPS-equivalent`).
+  - Debayered frame `22.520 ms` (`44.40 FPS-equivalent`).
+  - Processed8 `27.690 ms` (`36.12 FPS-equivalent`).
+- Screenshot-backed release GUI smoke artifact:
+  - `.claude-state\profiling\20260604-aggressive-auto-x8-warmup\M16-1327-auto-aggressive-hq-sha0f0f22cc-gui-smoke.json`
+  - This is the visible GUI smoke path with app-internal screenshots and frame telemetry; validation passed with `validation.ok=true`.
+  - Start/last requested scale `8`, active scale `8`, quality mode `2`, preview mode `aggressive_performance`.
+- GUI smoke FPS labels:
+  - Visible bottom-left `GUI FPS=111` from the window screenshot crop.
+  - End-of-run GUI status sample `GUI FPS=76`.
+  - Smoke presented FPS `31.641`.
+  - Timeline FPS `23.873`.
+- GUI smoke timing:
+  - Average render total `37.880 ms` (`26.40 FPS-equivalent`).
+  - Average render work `24.880 ms` (`40.19 FPS-equivalent`).
+  - Average queue wait `13.000 ms` (`76.92 FPS-equivalent`).
+  - Summary LLRawProc `13.952 ms` (`71.67 FPS-equivalent`); CPU summary LLRawProc total `22.413 ms` (`44.62 FPS-equivalent`).
+  - Average processed8 `23.563 ms` (`42.44 FPS-equivalent`).
+  - Average draw total `5.168 ms` (`193.50 FPS-equivalent`).
+  - Raw uint16 `3.994 ms` (`250.38 FPS-equivalent`).
+- Screenshot evidence:
+  - Presented frame: `.claude-state\profiling\20260604-aggressive-auto-x8-warmup\screenshots-sha0f0f22cc\M16-1327.png`, SHA256 `50F7A21D329806A1513B6FC8A59D9746CB7721459E506261943E3BA69C968946`, width `1197`, height `500`, aspect `2.394`.
+  - Window screenshot: `.claude-state\profiling\20260604-aggressive-auto-x8-warmup\screenshots-sha0f0f22cc\M16-1327-window.png`, SHA256 `BFD256F18C868C7A406579A9EFC2FD4A877BE1B40B2517DB4B5A95EA90770B3F`.
+  - FPS crop: `.claude-state\profiling\20260604-aggressive-auto-x8-warmup\screenshots-sha0f0f22cc\M16-1327-fps-status.png`, SHA256 `FE8AFA3D4DD151B4A06548401253170314615E48C68475801FA2A62F1AD72B11`.
+
+### Cross-checked from prior analysis
+
+- Claude Round 29 was written against the intermediate `sha6ac76885` state where aggressive Auto still settled at x4. That is now stale: the later `sha0f0f22cc` build requests x8 from the first measured frame and GUI smoke confirms `scale_request=8`, `scale_active=8`.
+- The policy tradeoff is now explicit:
+  - Aggressive Performance Preview prioritizes smooth/deep preview and uses immediate x8 for Auto + Dual ISO.
+  - Sharp/Smooth Preview and explicit scale choices remain the path for sharper preview when the user accepts lower playback headroom.
+
+### Needs runtime profiling
+
+- Before committing this turn's latest changes, rerun focused pipeline tests through `tools\testing\run-windows-test.ps1` rather than directly launching test exes.
+- If the product direction changes to "sharpest playable Auto" instead of "aggressive smooth Auto", implement an adaptive x4-to-x8 policy rather than a fixed x4 default. Validate that on `M16-1347` and `M16-1446` with both controlled profiles and GUI smoke.
+- Keep the next ranked work telemetry-led: presentation/queue cadence, then decode-aware/tile-aware raw decode only when raw prefetch is already hitting and raw decode remains a wall-clock limiter.

@@ -167,11 +167,14 @@ double getMlvLastProcessed16CacheStoreMilliseconds(void);
 double getMlvLastProcessed8TotalMilliseconds(void);
 double getMlvLastProcessed8CacheStoreMilliseconds(void);
 int getMlvLastProcessed8DirectPathActive(void);
+int getMlvLastProcessed8CacheHit(void);
+int getMlvLastProcessed8CacheHitScaleFactor(void);
 int getMlvLastProcessed8PrefetchHit(void);
 
 /* Phase 4B-v2/v3/v4 telemetry — for parity tests and diagnostics. Returns the
  * path taken on the most recent v2 entry on the calling thread:
  *   8 = v4 x8 full-XY pre-recon (Y-cropped if necessary)
+ *   4 = x2 full-XY pre-recon (Y-cropped if necessary)
  *   3 = v3 full-XY pre-recon (Y-cropped if necessary)
  *   2 = v2 X-only pre-recon fallback
  *   0 = v2 entry not invoked / rejected before path selection. */
