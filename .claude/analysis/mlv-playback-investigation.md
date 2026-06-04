@@ -14384,3 +14384,28 @@ Post-change stage timings:
 
 - Next ranking should start from the remaining `M16-1347` and `M16-1446` buckets: `processed16_total_ms=45.373 ms` (`22.04 FPS-equivalent`) on `M16-1347`, `processed16_total_ms=34.267 ms` (`29.18 FPS-equivalent`) on `M16-1446`, and LLRawProc totals of `19.453 ms` (`51.41 FPS-equivalent`) / `12.587 ms` (`79.45 FPS-equivalent`).
 - Decode-aware/tile-aware x8 remains the structural frontier because raw decode is still full source resolution, but it should start only if longer profiles show raw decode or queueing dominates despite raw prefetch hits.
+
+## 2026-06-04 - Dual ISO combined noise scan rejected
+
+### Verified locally
+
+- A Dual ISO `compute_noise()` experiment combined the four phase mean/stddev scans, first with a branchy phase loop and then with row-group phase loops. Both versions passed a focused combined-vs-legacy parity fixture before removal, so rejection was performance-driven rather than correctness-driven.
+- The source and test probe were reverted; no Dual ISO noise-scan behavior change remains in the tree.
+- Same-binary x8 aggressive A/B profiles were written under `.claude-state\profiling\20260604-dualiso-combined-noise\`.
+- The branchy combined scan failed the smoke-set bar:
+  - `M16-1347`: legacy `render_thread_total_ms=34.040 ms` (`29.38 FPS-equivalent`) vs combined `35.587 ms` (`28.10 FPS-equivalent`); `dual_iso_full20_noise_ms=2.480 -> 3.480 ms` (`403.23 -> 287.36 FPS-equivalent`).
+  - `M16-1446`: legacy `render_thread_total_ms=43.333 ms` (`23.08 FPS-equivalent`) vs combined `56.360 ms` (`17.74 FPS-equivalent`); `dual_iso_full20_noise_ms=5.560 -> 10.480 ms` (`179.86 -> 95.42 FPS-equivalent`).
+- The row-group version still failed the no-regression bar:
+  - `M16-1327`: legacy `render_thread_total_ms=24.560 ms` (`40.72 FPS-equivalent`) vs row-group `22.267 ms` (`44.91 FPS-equivalent`), but `dual_iso_full20_noise_ms=0.987 -> 1.427 ms` (`1013.52 -> 700.94 FPS-equivalent`).
+  - `M16-1347`: legacy `render_thread_total_ms=19.507 ms` (`51.26 FPS-equivalent`) vs row-group `27.933 ms` (`35.80 FPS-equivalent`); `dual_iso_full20_noise_ms=0.827 -> 1.987 ms` (`1209.67 -> 503.35 FPS-equivalent`).
+  - `M16-1446`: legacy `render_thread_total_ms=32.547 ms` (`30.73 FPS-equivalent`) vs row-group `23.107 ms` (`43.28 FPS-equivalent`); `dual_iso_full20_noise_ms=3.467 -> 1.213 ms` (`288.46 -> 824.17 FPS-equivalent`).
+
+### Cross-checked from prior analysis
+
+- The result does not change the pipeline-resolution model: x8 aggressive still gets its major win from Bayer-domain reduction before LLRawProc/Dual ISO and debayer.
+- `compute_noise()` is not a stable next target at the current x8 preview size. It is frequently around `1 ms/frame` (`~1000 FPS-equivalent`) and the larger end-to-end movement is dominated by other retained buckets and scheduling noise.
+
+### Needs runtime profiling
+
+- Do not reopen combined Dual ISO noise scanning unless a future profile shows `dual_iso_full20_noise_ms` as a stable top bucket across the standard clips and the candidate wins same-binary A/B on both stage time and `render_thread_total_ms`.
+- Continue ranking from retained x8 processed16/processing, residual presentation scheduling, and the decode-aware/tile-aware frontier when raw decode remains a wall-clock limiter after prefetch.

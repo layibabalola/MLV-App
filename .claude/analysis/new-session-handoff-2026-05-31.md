@@ -380,3 +380,15 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
   - Keep the active goal: iterate playback speed from telemetry-ranked remaining buckets with explicit ms and FPS/FPS-equivalent labels.
   - Next likely target is not cache pruning or local-tone direct8. Start from `M16-1347`/`M16-1446` retained x8: processed16 totals `45.373 ms` (`22.04 FPS-equivalent`) and `34.267 ms` (`29.18 FPS-equivalent`), plus LLRawProc totals `19.453 ms` (`51.41 FPS-equivalent`) and `12.587 ms` (`79.45 FPS-equivalent`).
   - Keep decode-aware/tile-aware x8 as the structural frontier, but only begin it when longer profiles show raw decode or queueing dominates despite raw prefetch hits.
+
+## 2026-06-04 Addendum - Dual ISO Combined Noise Scan Rejected
+
+- A same-turn probe combined Dual ISO `compute_noise()` phase scans, then tightened the loop to row-grouped phase scans. Both variants were reverted; no source/test probe remains.
+- Reason: same-binary x8 aggressive A/B did not produce a reliable stage or end-to-end win across the standard clips, even though the focused parity fixture passed before revert.
+- Key evidence in `.claude-state\profiling\20260604-dualiso-combined-noise\`:
+  - Branchy combined scan: `M16-1446` regressed from `43.333 ms` (`23.08 FPS-equivalent`) legacy render to `56.360 ms` (`17.74 FPS-equivalent`) combined render; noise scan regressed from `5.560 ms` (`179.86 FPS-equivalent`) to `10.480 ms` (`95.42 FPS-equivalent`).
+  - Row-group scan: `M16-1347` regressed from `19.507 ms` (`51.26 FPS-equivalent`) legacy render to `27.933 ms` (`35.80 FPS-equivalent`) row-group render; noise scan regressed from `0.827 ms` (`1209.67 FPS-equivalent`) to `1.987 ms` (`503.35 FPS-equivalent`).
+  - Row-group did improve `M16-1446` (`32.547 -> 23.107 ms`, `30.73 -> 43.28 FPS-equivalent`), but the `M16-1347` regression fails the no-regression bar.
+- Next session:
+  - Do not reopen combined Dual ISO noise scanning unless future telemetry makes `dual_iso_full20_noise_ms` a stable top bucket and same-binary A/B wins across the smoke set.
+  - Continue from retained x8 processed16/processing, presentation scheduling, or decode-aware/tile-aware raw reduction when raw decode remains a wall-clock limiter after prefetch.
