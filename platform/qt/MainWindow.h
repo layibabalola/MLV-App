@@ -1208,6 +1208,7 @@ private:
     void notePlayToFirstFramePresentation( int presentedFrame );
     bool primePlaybackCacheOnPlayStart( void );
     void invalidateDisplayPreviewCache( void );
+    void clearPresentationForClipOpen( const char *reason );
     void requestFrameRefresh( bool resetCurrentFrameCache, const char *reason = nullptr );
     void readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings *receipt , int version);
     void writeXmlElementsToFile( QXmlStreamWriter *xmlWriter, ReceiptSettings *receipt );

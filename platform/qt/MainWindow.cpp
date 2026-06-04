@@ -5172,6 +5172,7 @@ int MainWindow::openMlvForPreview(QString fileName)
     //disable drawing and kill old timer and old WaveFormMonitor
     m_fileLoaded = false;
     m_dontDraw = true;
+    clearPresentationForClipOpen( "clip-open-preview" );
 
     //Waiting for thread being idle for not freeing used memory
     while( !m_pRenderThread->isIdle() ) {}
@@ -5345,6 +5346,7 @@ int MainWindow::openMlv( QString fileName )
     //Disable drawing and kill old timer and old WaveFormMonitor
     killTimer( m_timerId );
     m_dontDraw = true;
+    clearPresentationForClipOpen( "clip-open" );
 
     //Waiting for thread being idle for not freeing used memory
     while( !m_pRenderThread->isIdle() ) {}
@@ -11439,6 +11441,39 @@ void MainWindow::invalidateDisplayPreviewCache( void )
     for( DisplayPreviewCacheEntry & entry : m_displayPreviewCache )
     {
         entry = DisplayPreviewCacheEntry();
+    }
+}
+
+void MainWindow::clearPresentationForClipOpen( const char *reason )
+{
+    invalidateDisplayPreviewCache();
+    invalidatePlaybackPrepForDisplayChange( reason );
+    m_pendingPresentationRequests.clear();
+    m_lastPresentedRequestContext = PresentationRequestContext();
+    m_lastPresentedRequestContextValid = false;
+    m_lastPresentedRequestSerial = 0;
+    m_frameChanged = false;
+
+    if( ui && ui->labelScope )
+    {
+        ui->labelScope->setScope( NULL, 0, 0, false, false, ScopesLabel::None );
+    }
+
+    if( ui && ui->graphicsView )
+    {
+        GpuDisplayViewport::clearPresentedImage( ui->graphicsView, m_pGraphicsItem );
+        if( m_pGraphicsItem )
+        {
+            m_pGraphicsItem->setPixmap( QPixmap( ":/IMG/IMG/TransDummy.png" ) );
+            m_pGraphicsItem->setVisible( true );
+        }
+        if( m_pScene )
+        {
+            m_pScene->setSceneRect( 0, 0, 10, 10 );
+        }
+        ui->graphicsView->viewport()->update();
+        qApp->processEvents( QEventLoop::ExcludeUserInputEvents
+                           | QEventLoop::ExcludeSocketNotifiers );
     }
 }
 
