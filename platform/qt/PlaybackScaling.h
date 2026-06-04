@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 struct FastPlaybackScaleCache
@@ -95,6 +96,338 @@ inline PlaybackPresentationScaleResampler playbackChoosePresentationScaleResampl
     }
 
     return PlaybackPresentationScaleResampler::Bilinear;
+}
+
+inline bool playbackRgb8RowLooksLikeUniformTopMagentaBand(const uint8_t *row,
+                                                          int width)
+{
+    if( !row || width <= 0 )
+    {
+        return false;
+    }
+
+    const int sampleStep = std::max( 1, width / 512 );
+    int samples = 0;
+    int magentaSamples = 0;
+    int minR = 255, minG = 255, minB = 255;
+    int maxR = 0, maxG = 0, maxB = 0;
+    uint64_t sumR = 0, sumG = 0, sumB = 0;
+
+    for( int x = 0; x < width; x += sampleStep )
+    {
+        const uint8_t *pixel = row + static_cast<size_t>( x ) * 3u;
+        const int r = pixel[0];
+        const int g = pixel[1];
+        const int b = pixel[2];
+        ++samples;
+        sumR += static_cast<uint64_t>( r );
+        sumG += static_cast<uint64_t>( g );
+        sumB += static_cast<uint64_t>( b );
+        minR = std::min( minR, r );
+        minG = std::min( minG, g );
+        minB = std::min( minB, b );
+        maxR = std::max( maxR, r );
+        maxG = std::max( maxG, g );
+        maxB = std::max( maxB, b );
+        if( r > 170
+         && b > 140
+         && g < 150
+         && (((r + b) / 2) - g) > 35 )
+        {
+            ++magentaSamples;
+        }
+    }
+
+    if( samples <= 0 )
+    {
+        return false;
+    }
+
+    const double invSamples = 1.0 / static_cast<double>( samples );
+    const double avgR = static_cast<double>( sumR ) * invSamples;
+    const double avgG = static_cast<double>( sumG ) * invSamples;
+    const double avgB = static_cast<double>( sumB ) * invSamples;
+    const bool magentaAverage =
+        avgR >= 170.0
+        && avgB >= 140.0
+        && avgG <= 150.0
+        && (avgR - avgG) >= 45.0
+        && (avgB - avgG) >= 35.0;
+    const bool mostlyMagenta =
+        magentaSamples * 100 >= samples * 90;
+    const bool lowVariance =
+        (maxR - minR) <= 24
+        && (maxG - minG) <= 80
+        && (maxB - minB) <= 24;
+
+    return magentaAverage && mostlyMagenta && lowVariance;
+}
+
+inline bool playbackRgb8RowLooksNearBlack(const uint8_t *row,
+                                          int width)
+{
+    if( !row || width <= 0 )
+    {
+        return false;
+    }
+
+    const int sampleStep = std::max( 1, width / 512 );
+    int samples = 0;
+    int brightSamples = 0;
+    uint64_t sumR = 0, sumG = 0, sumB = 0;
+
+    for( int x = 0; x < width; x += sampleStep )
+    {
+        const uint8_t *pixel = row + static_cast<size_t>( x ) * 3u;
+        const int r = pixel[0];
+        const int g = pixel[1];
+        const int b = pixel[2];
+        ++samples;
+        sumR += static_cast<uint64_t>( r );
+        sumG += static_cast<uint64_t>( g );
+        sumB += static_cast<uint64_t>( b );
+        if( r > 8 || g > 8 || b > 8 )
+        {
+            ++brightSamples;
+        }
+    }
+
+    if( samples <= 0 )
+    {
+        return false;
+    }
+
+    const double invSamples = 1.0 / static_cast<double>( samples );
+    const double avg =
+        (static_cast<double>( sumR + sumG + sumB ) * invSamples) / 3.0;
+    return avg <= 4.0 && brightSamples * 100 <= samples * 2;
+}
+
+inline bool playbackRgb8RowLooksLikeUniformTopMagentaTransition(const uint8_t *row,
+                                                                int width)
+{
+    if( !row || width <= 0 )
+    {
+        return false;
+    }
+
+    const int sampleStep = std::max( 1, width / 512 );
+    int samples = 0;
+    int magentaSamples = 0;
+    int minR = 255, minG = 255, minB = 255;
+    int maxR = 0, maxG = 0, maxB = 0;
+    uint64_t sumR = 0, sumG = 0, sumB = 0;
+
+    for( int x = 0; x < width; x += sampleStep )
+    {
+        const uint8_t *pixel = row + static_cast<size_t>( x ) * 3u;
+        const int r = pixel[0];
+        const int g = pixel[1];
+        const int b = pixel[2];
+        ++samples;
+        sumR += static_cast<uint64_t>( r );
+        sumG += static_cast<uint64_t>( g );
+        sumB += static_cast<uint64_t>( b );
+        minR = std::min( minR, r );
+        minG = std::min( minG, g );
+        minB = std::min( minB, b );
+        maxR = std::max( maxR, r );
+        maxG = std::max( maxG, g );
+        maxB = std::max( maxB, b );
+        if( r >= 70
+         && b >= 55
+         && g <= 110
+         && (r - g) >= 18
+         && (b - g) >= 10 )
+        {
+            ++magentaSamples;
+        }
+    }
+
+    if( samples <= 0 )
+    {
+        return false;
+    }
+
+    const double invSamples = 1.0 / static_cast<double>( samples );
+    const double avgR = static_cast<double>( sumR ) * invSamples;
+    const double avgG = static_cast<double>( sumG ) * invSamples;
+    const double avgB = static_cast<double>( sumB ) * invSamples;
+    const bool magentaAverage =
+        avgR >= 70.0
+        && avgB >= 55.0
+        && avgG <= 110.0
+        && (avgR - avgG) >= 18.0
+        && (avgB - avgG) >= 10.0;
+    const bool mostlyMagenta =
+        magentaSamples * 100 >= samples * 90;
+    const bool lowVariance =
+        (maxR - minR) <= 32
+        && (maxG - minG) <= 32
+        && (maxB - minB) <= 32;
+
+    return magentaAverage && mostlyMagenta && lowVariance;
+}
+
+inline bool playbackRgb8RowLooksLikeTopMagentaEdgeAfterLetterbox(const uint8_t *row,
+                                                                 int width)
+{
+    if( !row || width <= 0 )
+    {
+        return false;
+    }
+
+    const int sampleStep = std::max( 1, width / 512 );
+    int samples = 0;
+    int edgeSamples = 0;
+    int brightSamples = 0;
+    uint64_t sumR = 0, sumG = 0, sumB = 0;
+
+    for( int x = 0; x < width; x += sampleStep )
+    {
+        const uint8_t *pixel = row + static_cast<size_t>( x ) * 3u;
+        const int r = pixel[0];
+        const int g = pixel[1];
+        const int b = pixel[2];
+        ++samples;
+        sumR += static_cast<uint64_t>( r );
+        sumG += static_cast<uint64_t>( g );
+        sumB += static_cast<uint64_t>( b );
+        if( r > 8 || g > 8 || b > 8 )
+        {
+            ++brightSamples;
+        }
+        if( r >= 65
+         && b >= 50
+         && g <= 115
+         && (r - g) >= 18
+         && (b - g) >= 8 )
+        {
+            ++edgeSamples;
+        }
+    }
+
+    if( samples <= 0 )
+    {
+        return false;
+    }
+
+    const double invSamples = 1.0 / static_cast<double>( samples );
+    const double avgR = static_cast<double>( sumR ) * invSamples;
+    const double avgG = static_cast<double>( sumG ) * invSamples;
+    const double avgB = static_cast<double>( sumB ) * invSamples;
+    const bool magentaAverage =
+        avgR >= 70.0
+        && avgB >= 55.0
+        && avgG <= 115.0
+        && (avgR - avgG) >= 18.0
+        && (avgB - avgG) >= 8.0;
+    const bool enoughContent =
+        brightSamples * 100 >= samples * 40;
+    const bool enoughMagentaEdge =
+        edgeSamples * 100 >= samples * 55;
+
+    return magentaAverage && enoughContent && enoughMagentaEdge;
+}
+
+inline int playbackSuppressUniformTopMagentaBandRgb8(uint8_t *data,
+                                                     int width,
+                                                     int height,
+                                                     int bytesPerLine = 0)
+{
+    if( !data || width <= 0 || height <= 0 )
+    {
+        return 0;
+    }
+
+    const int rowBytes = width * 3;
+    const int stride = (bytesPerLine > 0) ? bytesPerLine : rowBytes;
+    if( stride < rowBytes )
+    {
+        return 0;
+    }
+
+    const int maxProbeRows =
+        std::min( height, std::max( 4, height / 8 ) );
+    int probeStartRow = 0;
+    for( ; probeStartRow < maxProbeRows; ++probeStartRow )
+    {
+        const uint8_t *row =
+            data + static_cast<size_t>( probeStartRow ) * static_cast<size_t>( stride );
+        if( !playbackRgb8RowLooksNearBlack( row, width ) )
+        {
+            break;
+        }
+    }
+    if( probeStartRow >= maxProbeRows )
+    {
+        return 0;
+    }
+
+    int bandRows = 0;
+    for( int y = probeStartRow; y < maxProbeRows; ++y )
+    {
+        const uint8_t *row =
+            data + static_cast<size_t>( y ) * static_cast<size_t>( stride );
+        if( !playbackRgb8RowLooksLikeUniformTopMagentaBand( row, width ) )
+        {
+            break;
+        }
+        ++bandRows;
+    }
+
+    if( bandRows < 4 )
+    {
+        if( probeStartRow >= 4 && bandRows == 0 )
+        {
+            int edgeRows = 0;
+            for( int y = probeStartRow;
+                 y < maxProbeRows && y < probeStartRow + 2;
+                 ++y )
+            {
+                const uint8_t *row =
+                    data + static_cast<size_t>( y ) * static_cast<size_t>( stride );
+                if( !playbackRgb8RowLooksLikeTopMagentaEdgeAfterLetterbox( row, width ) )
+                {
+                    break;
+                }
+                ++edgeRows;
+            }
+
+            for( int y = probeStartRow; y < probeStartRow + edgeRows; ++y )
+            {
+                uint8_t *row =
+                    data + static_cast<size_t>( y ) * static_cast<size_t>( stride );
+                std::memset( row, 0, static_cast<size_t>( stride ) );
+            }
+
+            return edgeRows;
+        }
+        return 0;
+    }
+
+    int suppressRows = bandRows;
+    for( int y = probeStartRow + bandRows;
+         y < maxProbeRows && y < probeStartRow + bandRows + 2;
+         ++y )
+    {
+        const uint8_t *row =
+            data + static_cast<size_t>( y ) * static_cast<size_t>( stride );
+        if( !playbackRgb8RowLooksLikeUniformTopMagentaTransition( row, width ) )
+        {
+            break;
+        }
+        ++suppressRows;
+    }
+
+    for( int y = probeStartRow; y < probeStartRow + suppressRows; ++y )
+    {
+        uint8_t *row =
+            data + static_cast<size_t>( y ) * static_cast<size_t>( stride );
+        std::memset( row, 0, static_cast<size_t>( stride ) );
+    }
+
+    return suppressRows;
 }
 
 inline float playbackCubicWeight(float x)

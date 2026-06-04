@@ -165,20 +165,19 @@ inline bool dualIsoPlaybackDowngradeFrBlendingAtScaleViaEnv()
  * over the preview-rowscale-forced override. Closes the structural magenta
  * cast that preview rowscale introduces (preview's global linear gain is
  * fundamentally different from HQ matched-pair recon and produces a
- * deterministic chroma bias on bright lanes). Set
+ * deterministic chroma bias on bright lanes). The GUI Playback Quality modes
+ * now use this path for Dual ISO playback by default; the env var remains
+ * the explicit override for tests and external harnesses. Set
  *   MLVAPP_PLAYBACK_PREFER_HQ_MEAN23=1
  * to enable.
  *
  * Tradeoff: HQ recon is much slower than preview rowscale at full sensor
- * resolution. On 5K dual-ISO clips, expect cadence to drop from ~50 fps
- * (preview rowscale) to ~2-3 fps (HQ + mean23 even with all the AVX2
- * acceleration shipped this session). On smaller clips (~1808x2268) HQ +
- * mean23 sustains ~50 fps and there is no cadence cost.
+ * resolution. The GUI compensates by using the pipeline-resolution model
+ * (for example x8 Dual ISO Fast/Auto paths) so HQ + mean23 runs after early
+ * Bayer-domain reduction instead of at full sensor size.
  *
- * Without this env var, playback continues to use preview rowscale (cast
- * present, fast). With it, playback uses HQ + mean23 (cast closed, slow on
- * big sensors). Phase 4 adaptive resolution is the long-term path that
- * delivers both. */
+ * Without either this env var or a GUI fallback, playback continues to use
+ * preview rowscale. With it, playback uses HQ + mean23. */
 inline bool dualIsoPlaybackPreferHqMean23ViaEnv()
 {
     static int cached = -1;

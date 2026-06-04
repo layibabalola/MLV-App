@@ -566,6 +566,263 @@ TEST(PlaybackScaling, PresentationResamplerPolicySplitsSharpAndAggressive)
                   false)));
 }
 
+TEST(PlaybackScaling, SuppressesUniformTopMagentaBandOnly)
+{
+    const int width = 64;
+    const int height = 80;
+    const int rowBytes = width * 3;
+    const int bytesPerLine = rowBytes + 4;
+    std::vector<uint8_t> image(static_cast<size_t>(bytesPerLine) *
+                               static_cast<size_t>(height),
+                               0xCDu);
+
+    for( int y = 0; y < height; ++y )
+    {
+        uint8_t *row =
+            image.data() + static_cast<size_t>(y) * static_cast<size_t>(bytesPerLine);
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index = static_cast<size_t>(x) * 3u;
+            if( y < 5 )
+            {
+                row[index + 0] = 203u;
+                row[index + 1] = static_cast<uint8_t>(82 + (x % 68));
+                row[index + 2] = 180u;
+            }
+            else if( y < 7 )
+            {
+                row[index + 0] = 142u;
+                row[index + 1] = 87u;
+                row[index + 2] = 122u;
+            }
+            else
+            {
+                row[index + 0] = static_cast<uint8_t>(40 + x);
+                row[index + 1] = static_cast<uint8_t>(20 + y);
+                row[index + 2] = static_cast<uint8_t>(30 + (x / 2));
+            }
+        }
+    }
+
+    const std::vector<uint8_t> before = image;
+    const int suppressed =
+        playbackSuppressUniformTopMagentaBandRgb8(image.data(),
+                                                  width,
+                                                  height,
+                                                  bytesPerLine);
+    ASSERT_EQ(7, suppressed);
+
+    for( int y = 0; y < 7; ++y )
+    {
+        const uint8_t *row =
+            image.data() + static_cast<size_t>(y) * static_cast<size_t>(bytesPerLine);
+        for( int x = 0; x < bytesPerLine; ++x )
+        {
+            ASSERT_EQ(0, static_cast<int>(row[x]));
+        }
+    }
+
+    for( int y = 7; y < height; ++y )
+    {
+        const size_t rowOffset =
+            static_cast<size_t>(y) * static_cast<size_t>(bytesPerLine);
+        for( int x = 0; x < bytesPerLine; ++x )
+        {
+            ASSERT_EQ(static_cast<int>(before[rowOffset + static_cast<size_t>(x)]),
+                      static_cast<int>(image[rowOffset + static_cast<size_t>(x)]));
+        }
+    }
+}
+
+TEST(PlaybackScaling, LeavesVariedMagentaContentUntouched)
+{
+    const int width = 64;
+    const int height = 24;
+    std::vector<uint8_t> image = make_flat_rgb8(width, height, 30, 20, 25);
+
+    for( int y = 0; y < 5; ++y )
+    {
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index =
+                (static_cast<size_t>(y) * static_cast<size_t>(width)
+                 + static_cast<size_t>(x)) * 3u;
+            image[index + 0] = static_cast<uint8_t>(180 + (x % 40));
+            image[index + 1] = static_cast<uint8_t>(80 + (x % 35));
+            image[index + 2] = static_cast<uint8_t>(150 + (x % 45));
+        }
+    }
+
+    const std::vector<uint8_t> before = image;
+    const int suppressed =
+        playbackSuppressUniformTopMagentaBandRgb8(image.data(),
+                                                  width,
+                                                  height);
+    ASSERT_EQ(0, suppressed);
+    ASSERT_TRUE(before == image);
+}
+
+TEST(PlaybackScaling, SuppressesTopMagentaBandAfterBlackLetterbox)
+{
+    const int width = 64;
+    const int height = 120;
+    std::vector<uint8_t> image = make_flat_rgb8(width, height, 0, 0, 0);
+
+    for( int y = 6; y < 11; ++y )
+    {
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index =
+                (static_cast<size_t>(y) * static_cast<size_t>(width)
+                 + static_cast<size_t>(x)) * 3u;
+            image[index + 0] = 203u;
+            image[index + 1] = static_cast<uint8_t>(122 + (x % 17));
+            image[index + 2] = 179u;
+        }
+    }
+
+    for( int y = 11; y < 13; ++y )
+    {
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index =
+                (static_cast<size_t>(y) * static_cast<size_t>(width)
+                 + static_cast<size_t>(x)) * 3u;
+            image[index + 0] = 142u;
+            image[index + 1] = 96u;
+            image[index + 2] = 122u;
+        }
+    }
+
+    for( int y = 13; y < height; ++y )
+    {
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index =
+                (static_cast<size_t>(y) * static_cast<size_t>(width)
+                 + static_cast<size_t>(x)) * 3u;
+            image[index + 0] = 18u;
+            image[index + 1] = 16u;
+            image[index + 2] = 8u;
+        }
+    }
+
+    const int suppressed =
+        playbackSuppressUniformTopMagentaBandRgb8(image.data(), width, height);
+    ASSERT_EQ(7, suppressed);
+
+    for( int y = 0; y < 6; ++y )
+    {
+        const size_t rowOffset =
+            static_cast<size_t>(y) * static_cast<size_t>(width) * 3u;
+        ASSERT_EQ(0, static_cast<int>(image[rowOffset + 0]));
+        ASSERT_EQ(0, static_cast<int>(image[rowOffset + 1]));
+        ASSERT_EQ(0, static_cast<int>(image[rowOffset + 2]));
+    }
+
+    for( int y = 6; y < 13; ++y )
+    {
+        const size_t rowOffset =
+            static_cast<size_t>(y) * static_cast<size_t>(width) * 3u;
+        for( int x = 0; x < width * 3; ++x )
+        {
+            ASSERT_EQ(0, static_cast<int>(image[rowOffset + static_cast<size_t>(x)]));
+        }
+    }
+
+    const size_t contentOffset =
+        static_cast<size_t>(13) * static_cast<size_t>(width) * 3u;
+    ASSERT_EQ(18, static_cast<int>(image[contentOffset + 0]));
+    ASSERT_EQ(16, static_cast<int>(image[contentOffset + 1]));
+    ASSERT_EQ(8, static_cast<int>(image[contentOffset + 2]));
+}
+
+TEST(PlaybackScaling, SuppressesSingleTopMagentaEdgeAfterBlackLetterbox)
+{
+    const int width = 96;
+    const int height = 96;
+    std::vector<uint8_t> image = make_flat_rgb8(width, height, 0, 0, 0);
+
+    for( int x = 0; x < width; ++x )
+    {
+        const size_t index =
+            (static_cast<size_t>(8) * static_cast<size_t>(width)
+             + static_cast<size_t>(x)) * 3u;
+        if( x < 34 )
+        {
+            image[index + 0] = 0u;
+            image[index + 1] = 0u;
+            image[index + 2] = 0u;
+        }
+        else
+        {
+            image[index + 0] = static_cast<uint8_t>(104 + (x % 37));
+            image[index + 1] = static_cast<uint8_t>(52 + (x % 36));
+            image[index + 2] = static_cast<uint8_t>(92 + (x % 14));
+        }
+    }
+
+    for( int y = 9; y < height; ++y )
+    {
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index =
+                (static_cast<size_t>(y) * static_cast<size_t>(width)
+                 + static_cast<size_t>(x)) * 3u;
+            image[index + 0] = 22u;
+            image[index + 1] = 18u;
+            image[index + 2] = 10u;
+        }
+    }
+
+    const int suppressed =
+        playbackSuppressUniformTopMagentaBandRgb8(image.data(), width, height);
+    ASSERT_EQ(1, suppressed);
+
+    const size_t edgeOffset =
+        static_cast<size_t>(8) * static_cast<size_t>(width) * 3u;
+    for( int x = 0; x < width * 3; ++x )
+    {
+        ASSERT_EQ(0, static_cast<int>(image[edgeOffset + static_cast<size_t>(x)]));
+    }
+
+    const size_t contentOffset =
+        static_cast<size_t>(9) * static_cast<size_t>(width) * 3u;
+    ASSERT_EQ(22, static_cast<int>(image[contentOffset + 0]));
+    ASSERT_EQ(18, static_cast<int>(image[contentOffset + 1]));
+    ASSERT_EQ(10, static_cast<int>(image[contentOffset + 2]));
+}
+
+TEST(PlaybackScaling, LeavesSingleTopMagentaEdgeWithoutLetterboxUntouched)
+{
+    const int width = 96;
+    const int height = 64;
+    std::vector<uint8_t> image = make_flat_rgb8(width, height, 22, 18, 10);
+
+    for( int x = 0; x < width; ++x )
+    {
+        const size_t index = static_cast<size_t>(x) * 3u;
+        if( x < 34 )
+        {
+            image[index + 0] = 0u;
+            image[index + 1] = 0u;
+            image[index + 2] = 0u;
+        }
+        else
+        {
+            image[index + 0] = static_cast<uint8_t>(104 + (x % 37));
+            image[index + 1] = static_cast<uint8_t>(52 + (x % 36));
+            image[index + 2] = static_cast<uint8_t>(92 + (x % 14));
+        }
+    }
+
+    const std::vector<uint8_t> before = image;
+    const int suppressed =
+        playbackSuppressUniformTopMagentaBandRgb8(image.data(), width, height);
+    ASSERT_EQ(0, suppressed);
+    ASSERT_TRUE(before == image);
+}
+
 TEST(PlaybackScaling, FastScalerCanWritePaddedRows)
 {
     const int sourceWidth = 7;

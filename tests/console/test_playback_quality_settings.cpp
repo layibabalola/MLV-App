@@ -8,8 +8,9 @@
  *      QSettings dial.
  *   4. dualIsoPlaybackPreferHqMean23() consults the QSettings fallback when
  *      the env var is unset.
- *   5. playbackQualityScaleFactorForMode() returns 4 for all persisted modes
- *      unless the explicit scale-factor env var overrides it.
+ *   5. playbackQualityScaleFactorForMode() returns 4 for non-Dual ISO
+ *      persisted modes, while Fast/Dual ISO may start at x8 unless the
+ *      explicit scale-factor env var overrides it.
  *
  * Skips when QCoreApplication is unavailable (the harness installs one in
  * test_main.cpp; defensive check in case the test is reused). */
@@ -147,6 +148,7 @@ TEST(PlaybackQualitySettings, ScaleFactorForMode)
     unsetEnv();
 
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Fast,        false ) );
+    ASSERT_EQ( 8, playbackQualityScaleFactorForMode( PlaybackQualityMode::Fast,        true ) );
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::HighQuality, false ) );
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Auto,        false ) );
     ASSERT_EQ( 4, playbackQualityScaleFactorForMode( PlaybackQualityMode::Phase3Fast,  false ) );
@@ -176,11 +178,12 @@ TEST(PlaybackQualitySettings, EnvVarOverridesGuiHqMean23)
     clearAllPlaybackQualityKeys();
     unsetEnv();
 
-    /* GUI mode set to Fast — would normally be HQ-mean23-OFF. */
+    /* GUI mode set to Fast — now asks for HQ-mean23 so Dual ISO playback
+     * avoids the legacy preview-rowscale magenta cast. */
     playbackQualityModeWriteToSettings( PlaybackQualityMode::Fast );
-    ASSERT_FALSE( playbackQualityWantsHqMean23( PlaybackQualityMode::Fast ) );
+    ASSERT_TRUE( playbackQualityWantsHqMean23( PlaybackQualityMode::Fast ) );
 
-    /* Env var ON forces HQ-mean23 ON regardless of GUI mode. */
+    /* Env var ON still forces HQ-mean23 ON regardless of GUI mode. */
     setEnvOn();
     ASSERT_TRUE( playbackQualityWantsHqMean23( PlaybackQualityMode::Fast ) );
 
@@ -227,5 +230,35 @@ TEST(PlaybackQualitySettings, DualIsoFallbackHookIsConsulted)
     ASSERT_EQ( 0, g_fallback_call_count );          // fallback not called
 
     unsetEnv();
+    setDualIsoPlaybackPreferHqMean23Fallback( prior );
+}
+
+TEST(PlaybackQualitySettings, GuiFallbackSuppressesDualIsoPreviewRowscale)
+{
+    if ( !QCoreApplication::instance() ) SKIP_TEST( "Requires QCoreApplication" );
+
+    unsetEnv();
+
+    DualIsoPlaybackPreferHqMean23Fallback prior =
+        dualIsoPlaybackPreferHqMean23FallbackRef();
+    setDualIsoPlaybackPreferHqMean23Fallback( &fallback_returns_true );
+
+    const DualIsoPlaybackRuntimeSettings settings =
+        effectiveDualIsoPlaybackRuntimeSettings(
+            /*playbackActive=*/true,
+            /*rawFixEnabled=*/true,
+            /*dualIsoValidity=*/1,
+            /*selectedMode=*/1,
+            /*selectedInterpolation=*/0,
+            /*selectedAliasMap=*/1,
+            /*selectedFullResBlending=*/1);
+
+    ASSERT_FALSE( settings.previewOverrideActive );
+    ASSERT_EQ( 1, settings.mode );
+    ASSERT_EQ( 0, settings.interpolation );
+    ASSERT_EQ( 1, settings.aliasMap );
+    ASSERT_EQ( 1, settings.fullResBlending );
+    ASSERT_TRUE( settings.playbackForceMean23 );
+
     setDualIsoPlaybackPreferHqMean23Fallback( prior );
 }
