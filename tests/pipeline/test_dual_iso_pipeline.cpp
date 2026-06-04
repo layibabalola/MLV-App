@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <QFile>
 #include <QString>
@@ -3667,6 +3668,9 @@ TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleTwoWithSafeFallback)
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 2) * (full_h / 2) * 3u, got.size());
     ASSERT_EQ(2, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("scale=2 uses full-recon post-downsample fallback"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
 
     const std::vector<uint8_t> golden = phase4b::buildBlockAveragedGoldenRgb8(full, full_w, full_h, 2);
     ASSERT_EQ(golden.size(), got.size());
@@ -3699,6 +3703,8 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightFallsBackWhenReceiptNeedsFullResC
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
     ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
     ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("focus_pixels enabled"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
 
     const std::vector<uint8_t> golden = phase4b::buildBlockAveragedGoldenRgb8(full, full_w, full_h, 8);
     ASSERT_EQ(golden.size(), got.size());
@@ -3729,6 +3735,8 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYWhenReceiptCompa
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
     ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
     ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("none"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
 
     const int expected_crop = full_h - (full_h / 32) * 32;
     ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
@@ -3863,7 +3871,10 @@ TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleEightWorks)
     ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
     ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
     fixture.receipt().setDualIso(0);
+    fixture.receipt().setFocusPixels(0);
     ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    llrpSetDualIsoMode(fixture.video(), 0);
+    ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
 
     const int full_w = fixture.width();
     const int full_h = fixture.height();
@@ -3877,6 +3888,8 @@ TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleEightWorks)
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, scaled8.size());
     ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
     ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("not HQ Dual ISO; full-recon post-downsample fallback"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
 
     const std::vector<uint8_t> golden = phase4b::buildBlockAveragedGoldenRgb8(full, full_w, full_h, 8);
     ASSERT_EQ(golden.size(), scaled8.size());

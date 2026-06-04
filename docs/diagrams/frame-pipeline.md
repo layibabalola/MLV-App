@@ -120,6 +120,27 @@ sequenceDiagram
     GUI->>GUI: update scopes, upload to viewport, repaint
 ```
 
+## Playback Resolution Overlay
+
+Playback scale is a pipeline contract, not just a presentation resize. Let
+`W x H` be the source frame and `N = W * H`.
+
+| Stage | Domain | x1 | x2 | x4 | x8 |
+| --- | --- | --- | --- | --- | --- |
+| Raw read/decode/unpack | raw Bayer | `W x H`, `N` | `W x H`, `N` | `W x H`, `N` | `W x H`, `N` |
+| Bayer-domain reduction | raw Bayer | none | none today | path 3: `W/4 x floor(H/16)*4`, about `N/16`; path 2: `W/4 x H`, `N/4`; fallback none | path 8: `W/8 x floor(H/32)*4`, about `N/64`; fallback none |
+| LLRawProc / Dual ISO | reconstructed Bayer | `W x H`, `N` | `W x H`, `N` | default HQ/Auto mean23 fallback: `W x H`, `N`; path 3: about `N/16`; path 2: `N/4` | path 8: about `N/64`; fallback `N` |
+| RGB producer | RGB | debayer `W x H`, `N` | post-recon Bayer-to-RGB block average to `W/2 x H/2`, `N/4` | final `W/4 x H/4`, `N/16` | final `floor(W/8) x floor(H/8)`, about `N/64` |
+| Processing / 16-to-8 | processed RGB | `N` | `N/4` | `N/16` | about `N/64` |
+| Presentation | display RGB | viewport | viewport | viewport | viewport |
+
+The current x8 breakthrough is path 8: full raw decode, then Bayer-domain
+reduction before LLRawProc/Dual ISO and before debayer. If `phase4b_path=0`
+at a reduced playback scale, the frame used the late full-recon fallback and
+the scale happened after LLRawProc. The profile JSON exposes this through
+`render_thread_phase4b_path`, `render_thread_phase4b_fallback_reason`, and
+the `render_thread_stage_*_{width,height,pixels}` fields.
+
 ## Notes
 
 - Prefetch telemetry: `raw_uint16_prefetch_hit`, `raw_uint16_prefetch_decode_failures`. Disable with `MLVAPP_DISABLE_RAW_UINT16_PREFETCH=1` to restore thread-local decode telemetry.

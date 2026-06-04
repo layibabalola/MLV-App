@@ -174,6 +174,7 @@ int getMlvLastProcessed8PrefetchHit(void);
  *   2 = v2 X-only pre-recon fallback
  *   0 = v2 entry not invoked / rejected before path selection. */
 int mlv_phase4bv2_last_path_taken(void);
+const char * mlv_phase4bv2_last_fallback_reason(void);
 /* Number of source rows cropped from the bottom edge by the v3/v4 Y-crop
  * wrapper on the most recent v2 entry on the calling thread. 0 if no
  * Y-cropped path was taken or if the clip was already path-aligned. */
