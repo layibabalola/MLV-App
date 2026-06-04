@@ -13739,3 +13739,68 @@ A tiny `underOver` memo keyed by `frameIndex` plus `signature` is safe when shad
   - High impact / high effort: investigate decode-aware or tile-aware reduced preview so full raw decode is not always paid before x8.
   - Medium impact / low effort: add route/fallback telemetry for why x8 is rejected, especially focus pixels, bad pixels, vertical stripes, pattern noise, and dimension alignment.
   - Medium impact / medium effort: add x2/x4 policy cleanup so users get a predictable "performance preview" mode versus a "quality preview" mode.
+
+## 2026-06-03 - External review handoff prompt
+
+### Verified locally
+
+- Claude Desktop can be useful as a second reviewer if it is given the code paths, the measured GUI artifacts, and the exact question: whether the early reduced-resolution strategy is correct, where it is still paying full-resolution cost, and what should be prioritized next.
+- The most useful review mode is not a general "make it faster" prompt. Ask for a skeptical code and pipeline review with ranked recommendations, explicit correctness risks, and concrete profiling/tests required before any further implementation.
+
+### Cross-checked from prior analysis
+
+- The key current fact is that debayer for the x8 prototype now happens after Bayer-domain reduction, but raw decode still happens at full resolution before reduction.
+- Any reviewer should distinguish:
+  - full-resolution fallback path: full raw decode, full LLRawProc/Dual ISO/reconstruction, debayer or post-recon scale later.
+  - early x8 preview path: full raw decode, x8 Bayer-domain reduction, LLRawProc/Dual ISO on reduced Bayer, reduced-frame debayer, then processing/output.
+- Any reviewer should treat x8 as deep preview, not as a detail/color oracle, and should keep the release GUI smoke evidence separate from theoretical FPS-equivalent stage timings.
+
+### Claude Desktop prompt
+
+```text
+You are reviewing MLV-App playback performance work in a local Windows repo.
+
+Goal: review the new early x8 reduced-Bayer playback prototype and recommend the next safest performance improvements without regressing Dual ISO correctness, color, aspect/scaling, or GUI behavior.
+
+Repo context:
+- Branch/commit to review: master at 303ebad0, commit subject "playback: prototype early x8 reduced preview path".
+- Main files:
+  - src/mlv/video_mlv.c
+  - src/mlv/video_mlv.h
+  - src/processing/playback_downsample.c
+  - src/processing/playback_downsample.h
+  - platform/qt/RenderFrameThread.cpp
+  - platform/qt/MainWindow.cpp
+  - tests/pipeline/test_dual_iso_pipeline.cpp
+  - .claude/analysis/mlv-playback-investigation.md
+
+Important pipeline facts to verify:
+- Old fallback/deep preview behavior can still pay full-resolution LLRawProc/Dual ISO and scale late.
+- New compatible x8 path should do: full raw decode -> x8 Bayer-domain reduction -> LLRawProc/Dual ISO on reduced Bayer -> debayer reduced frame -> processing/output.
+- The x8 path still decodes full raw frames first, so decode-aware/tile-aware reduced preview may be the next larger frontier.
+- The x8 output is intentionally coarse and should be treated as preview only.
+
+Local evidence already collected:
+- Focused tests passed: pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B*, summary tests=139 assertions=504 skipped=0 failed=0.
+- Release GUI build: platform/qt/build-release/release/MLVApp.exe, LastWriteTime=2026-06-03 17:06:47 -05:00, Length=9020928, SHA256=1B4F0A3497703098BBBA2E22A60BA9FD2B042DFDDBBA87E9ECA092B72EF2ADA4.
+- GUI smoke artifact: .claude-state/profiling/20260603-playback-scale-x8-early/scale8-early-hqmean23-enabled/M16-1327-30s.json.
+- Screenshots:
+  - .claude-state/profiling/20260603-playback-scale-x8-early/scale8-early-hqmean23-enabled/screenshots/M16-1327.png
+  - .claude-state/profiling/20260603-playback-scale-x8-early/scale8-early-hqmean23-enabled/screenshots/M16-1327-fps-status.png
+- Smoke results: all 422 presented frame logs reported phase4b_path=8 / phase4b_path_label=x8-full-xy-pre-recon.
+- Metrics: GUI FPS=76.0, smoke presented FPS=13.250, timeline FPS=23.360, avg_render_total_ms=68.187, avg_llrawproc_total_ms=11.135, avg_llrawproc_dual_iso_ms=11.126, avg_debayered_frame_ms=1.175, avg_processed16_ms=46.431, avg_processed8_ms=50.941, avg_raw_uint16_ms=20.922, avg_raw_decompress_ms=16.874.
+
+Please produce:
+1. A concise explanation of when debayer happens in each path and whether the early x8 design is sound.
+2. Any correctness risks in the Bayer x8 kernel, Dual ISO phase preservation, crop/fill behavior, receipt compatibility gates, HQ mean23 policy, telemetry, or fallback behavior.
+3. Ranked next opportunities by impact/effort, especially whether decode-aware/tile-aware reduced preview is feasible.
+4. Specific tests/profiling/GUI smokes you would require before shipping x8 as a visible UI feature.
+5. Clear "do not pursue yet" items where the evidence does not support further optimization.
+
+Please cite file paths and line numbers from the repo, separate verified facts from hypotheses, and do not recommend changes that require full-quality x8 output; this is preview-only.
+```
+
+### Needs runtime profiling
+
+- Ask Claude Desktop to review screenshots and JSON artifacts if it has filesystem access. If it only has pasted text, provide the prompt plus the key metrics above, then ask it to call out assumptions it could not verify locally.
+- A useful second-review output should be actionable and ranked; broad ideas without file references, risk notes, or validation commands should not be treated as implementation guidance.
