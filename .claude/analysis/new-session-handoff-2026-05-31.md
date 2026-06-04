@@ -392,3 +392,18 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
 - Next session:
   - Do not reopen combined Dual ISO noise scanning unless future telemetry makes `dual_iso_full20_noise_ms` a stable top bucket and same-binary A/B wins across the smoke set.
   - Continue from retained x8 processed16/processing, presentation scheduling, or decode-aware/tile-aware raw reduction when raw decode remains a wall-clock limiter after prefetch.
+
+## 2026-06-04 Addendum - Aggressive x8 Shadows/Highlights Eighth-Res Probe Rejected
+
+- A same-turn probe added one more aggressive-x8 Shadows/Highlights reduction stage after the accepted quarter-res path, then removed it. No source/test probe remains.
+- Focused `ProcessingFilters.*` passed while the probe was present, so rejection was runtime risk and default-policy quality risk, not branch-selection failure.
+- First doubled-sigma eighth-res run regressed the noisy clip:
+  - `M16-1446`: quarter-res baseline `render_thread_total_ms=26.37 ms` (`37.92 FPS-equivalent`) vs eighth-res `31.23 ms` (`32.02 FPS-equivalent`); Shadows/Highlights filter `3.32 -> 5.87 ms` (`301.59 -> 170.25 FPS-equivalent`).
+- Same-binary A/B with quarter-res fallback showed the probe is clip-dependent:
+  - `M16-1327`: quarter-res `19.91 ms` (`50.24 FPS-equivalent`) vs eighth-res `25.09 ms` (`39.85 FPS-equivalent`); filter `2.50 -> 2.85 ms` (`400.84 -> 350.55 FPS-equivalent`).
+  - `M16-1347`: quarter-res `23.11 ms` (`43.28 FPS-equivalent`) vs eighth-res `29.42 ms` (`33.99 FPS-equivalent`); filter `2.54 -> 3.26 ms` (`394.19 -> 306.45 FPS-equivalent`).
+  - `M16-1446`: quarter-res `33.99 ms` (`29.42 FPS-equivalent`) vs eighth-res `21.67 ms` (`46.14 FPS-equivalent`); filter `5.32 -> 2.57 ms` (`188.12 -> 389.35 FPS-equivalent`).
+- Next session:
+  - Keep accepted quarter-res Shadows/Highlights as the aggressive x8 default.
+  - Do not promote eighth-res as default; revisit only as a separate explicit extra-coarse preview option with visual acceptance criteria.
+  - Continue ranking from retained x8 `processed16`/processing, presentation scheduling, and decode-aware/tile-aware work only when fresh profiles show raw decode still dominates after prefetch hits.
