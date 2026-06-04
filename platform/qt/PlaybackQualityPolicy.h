@@ -51,6 +51,12 @@ enum class PlaybackQualityMode : int
     Phase3HQ = 4
 };
 
+enum class PlaybackPreviewMode : int
+{
+    SharpSmooth = 0,
+    AggressivePerformance = 1
+};
+
 enum class PlaybackQualityTier : int
 {
     Dev = 0,
@@ -63,6 +69,7 @@ namespace PlaybackQualitySettings
     inline constexpr const char * kOrganization() { return "magiclantern.MLVApp"; }
     inline constexpr const char * kApplication() { return "MLVApp"; }
     inline constexpr const char * kKeyQualityMode() { return "Playback/QualityMode"; }
+    inline constexpr const char * kKeyPreviewMode() { return "Playback/PreviewMode"; }
     inline constexpr const char * kKeyScaleFactorOverride() { return "Playback/ScaleFactorOverride"; }
     inline constexpr const char * kKeyAutoTargetFps() { return "Playback/AutoTargetFps"; }
     inline constexpr const char * kKeyShowQualityIndicator() { return "Playback/ShowQualityIndicator"; }
@@ -79,6 +86,7 @@ namespace PlaybackQualitySettings
     inline constexpr const char * kKeyClipPlaytimePrefix() { return "Playback/ClipPlaytime/"; }
 
     inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Fast ); }
+    inline constexpr int kDefaultPreviewMode() { return static_cast<int>( PlaybackPreviewMode::SharpSmooth ); }
     inline constexpr int kDefaultScaleFactorOverride() { return 0; }
     inline constexpr int kDefaultAutoTargetFps() { return 30; }
     inline constexpr int kDefaultShowQualityIndicator() { return 1; }
@@ -95,6 +103,69 @@ inline bool playbackQualityEnvVarTruthy(const char * raw)
         && std::strcmp(raw, "false") != 0
         && std::strcmp(raw, "FALSE") != 0
         && std::strcmp(raw, "False") != 0;
+}
+
+inline int playbackPreviewAggressiveEnvOverride()
+{
+    const char * raw = std::getenv("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
+    if ( raw && *raw )
+    {
+        if ( std::strcmp(raw, "0") == 0
+          || std::strcmp(raw, "false") == 0
+          || std::strcmp(raw, "FALSE") == 0
+          || std::strcmp(raw, "False") == 0
+          || std::strcmp(raw, "off") == 0
+          || std::strcmp(raw, "OFF") == 0
+          || std::strcmp(raw, "sharp") == 0
+          || std::strcmp(raw, "sharp_smooth") == 0
+          || std::strcmp(raw, "smooth") == 0
+          || std::strcmp(raw, "quality") == 0 )
+        {
+            return 0;
+        }
+        if ( std::strcmp(raw, "1") == 0
+          || std::strcmp(raw, "true") == 0
+          || std::strcmp(raw, "TRUE") == 0
+          || std::strcmp(raw, "True") == 0
+          || std::strcmp(raw, "yes") == 0
+          || std::strcmp(raw, "on") == 0
+          || std::strcmp(raw, "aggressive") == 0
+          || std::strcmp(raw, "aggressive_performance") == 0
+          || std::strcmp(raw, "performance") == 0
+          || std::strcmp(raw, "fast") == 0 )
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+    raw = std::getenv("MLVAPP_PLAYBACK_PREVIEW_MODE");
+    if ( !raw || !*raw ) return -1;
+    if ( std::strcmp(raw, "1") == 0
+      || std::strcmp(raw, "aggressive") == 0
+      || std::strcmp(raw, "aggressive_performance") == 0
+      || std::strcmp(raw, "performance") == 0
+      || std::strcmp(raw, "fast") == 0 )
+    {
+        return 1;
+    }
+    if ( std::strcmp(raw, "0") == 0
+      || std::strcmp(raw, "sharp") == 0
+      || std::strcmp(raw, "sharp_smooth") == 0
+      || std::strcmp(raw, "smooth") == 0
+      || std::strcmp(raw, "quality") == 0 )
+    {
+        return 0;
+    }
+    if ( std::strcmp(raw, "true") == 0
+      || std::strcmp(raw, "TRUE") == 0
+      || std::strcmp(raw, "True") == 0
+      || std::strcmp(raw, "yes") == 0
+      || std::strcmp(raw, "on") == 0 )
+    {
+        return 1;
+    }
+    return 0;
 }
 
 inline bool playbackQualityModeIsPhase3( PlaybackQualityMode mode )
@@ -131,6 +202,16 @@ inline const char * playbackQualityTierName( PlaybackQualityTier tier )
     return "Dev";
 }
 
+inline const char * playbackPreviewModeName( PlaybackPreviewMode mode )
+{
+    switch ( mode )
+    {
+        case PlaybackPreviewMode::SharpSmooth: return "sharp_smooth";
+        case PlaybackPreviewMode::AggressivePerformance: return "aggressive_performance";
+    }
+    return "sharp_smooth";
+}
+
 /* Returns the user's persisted QualityMode (Fast=0, HighQuality=1, Auto=2). */
 #ifdef QT_CORE_LIB
 inline PlaybackQualityMode playbackQualityModeFromSettings()
@@ -142,6 +223,18 @@ inline PlaybackQualityMode playbackQualityModeFromSettings()
                                PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
     if ( raw < 0 || raw > 4 ) return PlaybackQualityMode::Fast;
     return static_cast<PlaybackQualityMode>( raw );
+}
+
+inline PlaybackPreviewMode playbackPreviewModeFromSettings()
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    const int raw = set.value( PlaybackQualitySettings::kKeyPreviewMode(),
+                               PlaybackQualitySettings::kDefaultPreviewMode() ).toInt();
+    return raw == static_cast<int>( PlaybackPreviewMode::AggressivePerformance )
+        ? PlaybackPreviewMode::AggressivePerformance
+        : PlaybackPreviewMode::SharpSmooth;
 }
 
 inline int playbackQualityAutoTargetFpsFromSettings()
@@ -188,6 +281,15 @@ inline void playbackQualityModeWriteToSettings( PlaybackQualityMode mode )
                    PlaybackQualitySettings::kOrganization(),
                    PlaybackQualitySettings::kApplication() );
     set.setValue( PlaybackQualitySettings::kKeyQualityMode(),
+                  static_cast<int>( mode ) );
+}
+
+inline void playbackPreviewModeWriteToSettings( PlaybackPreviewMode mode )
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyPreviewMode(),
                   static_cast<int>( mode ) );
 }
 

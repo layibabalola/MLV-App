@@ -4265,6 +4265,9 @@ TEST(DualIsoPipeline, Phase4Bv3_NonAlignedYClipsToFullXYPath)
 TEST(DualIsoPipeline, Phase4Bv3_HqMean23PlaybackUsesFullReconFallbackByDefault)
 {
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_PREVIEW_MODE");
+    mlvSetPlaybackAggressivePreviewMode(0);
     mlv_phase4bv_reset_env_cache_for_testing();
 
     {
@@ -4309,7 +4312,41 @@ TEST(DualIsoPipeline, Phase4Bv3_HqMean23PlaybackUsesFullReconFallbackByDefault)
         ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
     }
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+    mlvSetPlaybackAggressivePreviewMode(0);
     mlv_phase4bv_reset_env_cache_for_testing();
+}
+
+TEST(DualIsoPipeline, Phase4Bv3_AggressivePreviewAllowsHqMean23PreReconX4)
+{
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_PREVIEW_MODE");
+    mlvSetPlaybackAggressivePreviewMode(1);
+    mlv_phase4bv_reset_env_cache_for_testing();
+    struct AggressivePreviewResetGuard {
+        ~AggressivePreviewResetGuard() {
+            mlvSetPlaybackAggressivePreviewMode(0);
+            MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
+            MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_PREVIEW_MODE");
+        }
+    } aggressive_preview_reset_guard;
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    llrpSetDualIsoPlaybackForceMean23(fixture.video(), 1);
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+        return;
+    }
+
+    const std::vector<uint8_t> scaled = fixture.renderFrame8Scaled(0, 1, 4);
+    ASSERT_FALSE(scaled.empty());
+    ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
 }
 
 /* Phase4Bv3 (b): kill-switch routes back to the v2 X-only path; both paths

@@ -133,3 +133,25 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
   - Release x8 profile for `C:\temp\MLV\M16-1327.MLV` showed `raw_decode_pixels=4100544`, `llrawproc_pixels=63280`, `processing_pixels=63958`, proving x8 still pays full raw decode while later stages run near preview resolution.
   - Screenshot-backed x8 GUI smoke passed: `GUI FPS=11.0`, `smoke presented FPS=13.393`, `timeline FPS=22.487`, screenshot SHA256 `8BB082054A3604DFBBC4C6304B18618B57362715B3A58B94CF3698D70072C5A8`.
   - Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 01:17:02`, `Length=9031680`, SHA256 `C2262AB2C49AC7A09C36BD6ADCA2702449B48DA385D9D4C7633EF3EA20192978`.
+
+## 2026-06-04 Addendum - Preview Modes Ship The First Model-Driven Improvement
+
+- The next implementation introduced two explicit user-facing playback preview policies:
+  - `Sharp / Smooth Preview` is the default. It keeps the conservative x4 HQ mean23 full-recon fallback for smoother, less blocky playback quality.
+  - `Aggressive Performance Preview` is opt-in. It lets x4 HQ mean23 use the existing early Phase 4B path where gates allow, and re-enables raw uint16 decode-ahead for Dual ISO x8 because x8 now reconstructs/debayers at preview resolution.
+- New controls and proof fields:
+  - UI menu: Playback Quality -> Preview Mode.
+  - Settings key: `Playback/PreviewMode`.
+  - Env overrides: `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW`, `MLVAPP_PLAYBACK_PREVIEW_MODE`.
+  - Profile fields: `playback_preview_mode`, `playback_aggressive_preview`, `render_thread_preview_mode`, `render_thread_aggressive_preview`.
+- Validation artifacts:
+  - x4 sharp profile: `.claude-state\profiling\20260604-preview-modes\m16-1327-x4-sharp.json` shows `phase4b_path=0`, fallback `HQ mean23 playback uses full-recon x4 fallback`, and `llrawproc_pixels=4100544`.
+  - x8 aggressive profile: `.claude-state\profiling\20260604-preview-modes\m16-1327-x8-aggressive.json` shows `phase4b_path=8`, `fallback_reason=none`, `llrawproc_pixels=63280`, `processing_pixels=63958`, and raw prefetch hits on 9 of 10 frames.
+  - x8 aggressive GUI smoke: `.claude-state\profiling\20260604-preview-modes\m16-1327-x8-aggressive-smoke.json`, `validation.ok=true`, bottom-left `GUI FPS=17.0`, `smoke presented FPS=16.039`, `timeline FPS=22.624`.
+  - Stage timings from the smoke: `avg_raw_uint16_ms=4.632` (`215.89 FPS-equivalent`), `avg_llrawproc_total_ms=3.484` (`287.03 FPS-equivalent`), `avg_debayered_frame_ms=0.726` (`1377.41 FPS-equivalent`), `avg_processing_ms=3.747` (`266.88 FPS-equivalent`), `avg_playback_scale_ms=4.295` (`232.83 FPS-equivalent`), `avg_render_total_ms=26.263` (`38.08 FPS-equivalent`), `avg_draw_total_ms=37.768` (`26.48 FPS-equivalent`).
+  - Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 02:26:40 -05:00`, `Length=9042944`, SHA256 `8A2F64C4814275B025E95BB808086D245344AF63C22879632CD7C5248005D11B`.
+- Current hardness summary:
+  - x8 is the most complete early-resolution mode: full raw decode still happens, but reduction now precedes LLRawProc/Dual ISO and debayer.
+  - x4 is policy-split: sharp/smooth intentionally keeps full-recon fallback for default HQ mean23; aggressive exposes the faster early path behind an explicit user choice.
+  - x2 is still late/full-recon and should be treated as less hardened for fastest playback until a real x2 Bayer-to-Bayer early path exists.
+- Next session should compare x4 sharp/aggressive and x8 sharp/aggressive across the standard M16 clips before making aggressive behavior automatic or starting the heavier decode-aware/tile-aware x8 work.

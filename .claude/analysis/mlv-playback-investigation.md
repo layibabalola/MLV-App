@@ -13920,3 +13920,49 @@ Please cite file paths and line numbers from the repo, separate verified facts f
   - `requested=x4 active=x4 phase4b_path=0` means `render_thread_stage_llrawproc_pixels == render_thread_stage_raw_decode_pixels`.
   - `requested=x8 active=x8 phase4b_path=8` means LLRawProc and RGB stages are about `N/64`, while raw decode remains `N`.
 - Keep decode-aware/tile-aware reduced preview as the high-impact research frontier, but do not start a decoder rewrite until the new telemetry proves the decode floor across representative clips.
+
+## 2026-06-04 - Preview-mode split and aggressive x8 decode overlap
+
+### Verified locally
+
+- Added a user-facing Playback Preview Mode split:
+  - `Sharp / Smooth Preview` is the default quality-first mode. It preserves the current HQ/Auto mean23 x4 full-recon fallback when that is the safest non-blocky preview.
+  - `Aggressive Performance Preview` is an explicit opt-in. It extends the early-resolution contract to default HQ mean23 x4 where the existing Phase 4B v3 gate allows it, and re-enables raw uint16 decode-ahead for Dual ISO x8 because x8 reconstruction/debayer now run at roughly `N/64`.
+- Added settings/env/profile plumbing:
+  - QSettings key: `Playback/PreviewMode`.
+  - Environment overrides: `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW` and `MLVAPP_PLAYBACK_PREVIEW_MODE`.
+  - Per-frame/profile telemetry: `render_thread_preview_mode` and `render_thread_aggressive_preview`.
+  - Headless metadata: `playback_preview_mode` and `playback_aggressive_preview`.
+- The model chose the first source change: avoid keeping x8 raw decode fully foreground/serial once the expensive reconstruction stages are already preview-sized. This is lower risk than a decode-aware/tile decoder rewrite because it changes scheduling policy, not raw decode semantics.
+
+### Validation completed
+
+- Focused pipeline test: `tests\build-ci-pipeline\release\pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B*` passed, `tests=140`, `assertions=515`, `failed=0`.
+- Console test binary rebuilt successfully after adding aggressive-preview profile coverage. The app-backed direct profile scripts below validated the same runtime behavior in the release tree.
+- Release x4 sharp profile: `.claude-state\profiling\20260604-preview-modes\m16-1327-x4-sharp.json`.
+  - `playback_preview_mode=sharp_smooth`, `playback_aggressive_preview=false`.
+  - `requested=4`, `effective=4`, `phase4b_path=0`, fallback reason `HQ mean23 playback uses full-recon x4 fallback`.
+  - `raw_decode_pixels=4100544`, `llrawproc_pixels=4100544`, `processing_pixels=256284`, proving the quality-first x4 mode still pays full reconstruction when mean23 requests the full-recon fallback.
+- Release x8 aggressive profile: `.claude-state\profiling\20260604-preview-modes\m16-1327-x8-aggressive.json`.
+  - `playback_preview_mode=aggressive_performance`, `playback_aggressive_preview=true`.
+  - `requested=8`, `effective=8`, `phase4b_path=8`, `fallback_reason=none`.
+  - `raw_decode_pixels=4100544`, `llrawproc_pixels=63280`, `processing_pixels=63958`, `raw_uint16_prefetch_hit` on 9 of 10 profiled frames.
+- Screenshot-backed x8 aggressive GUI smoke passed: `.claude-state\profiling\20260604-preview-modes\m16-1327-x8-aggressive-smoke.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=17.0` from the window screenshot crop.
+  - `smoke presented FPS=16.039`, `timeline FPS=22.624`.
+  - CPU summary: `avg_raw_uint16_ms=4.632` (`215.89 FPS-equivalent`), `avg_llrawproc_total_ms=3.484` (`287.03 FPS-equivalent`), `avg_debayered_frame_ms=0.726` (`1377.41 FPS-equivalent`), `avg_processing_ms=3.747` (`266.88 FPS-equivalent`), `avg_playback_scale_ms=4.295` (`232.83 FPS-equivalent`), `avg_render_total_ms=26.263` (`38.08 FPS-equivalent`), `avg_draw_total_ms=37.768` (`26.48 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-preview-modes\screenshots\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `8BB082054A3604DFBBC4C6304B18618B57362715B3A58B94CF3698D70072C5A8`.
+  - Aspect evidence is presented-playback stretch with `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Rebuilt release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 02:26:40 -05:00`, `Length=9042944`, SHA256 `8A2F64C4814275B025E95BB808086D245344AF63C22879632CD7C5248005D11B`.
+
+### Cross-checked from prior analysis
+
+- x2 is still not hardened as an early-resolution path. It remains a late full-recon mode until a real x2 Bayer-to-Bayer kernel and visual gate exist.
+- x4 now has a deliberate policy split: sharp/smooth keeps the conservative HQ mean23 fallback, aggressive lets the existing early x4 path participate when its gates pass.
+- x8 remains the strongest early-resolution path among the exposed scales because it reduces Bayer before LLRawProc/Dual ISO and debayer. Aggressive mode now also overlaps most raw decode through the existing prefetch worker, but x8 still pays full raw decode somewhere in the system.
+
+### Needs runtime profiling
+
+- Run longer A/B smokes across `M16-1327`, `M16-1347`, and `M16-1446` for x4 sharp versus x4 aggressive and x8 sharp versus x8 aggressive before making aggressive mode automatic.
+- The next ranked source frontier remains decode-aware/tile-aware reduced preview for x8, but only after multi-clip telemetry proves that the remaining wall-clock floor is still full raw decode rather than presentation/upload cadence.
+- A separate early x2 Bayer reduction path is still open work; do not market x2 as equally early or equally hardened until it has kernel coverage and screenshot-backed profile evidence.

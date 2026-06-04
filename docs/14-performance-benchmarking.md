@@ -287,6 +287,14 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   - `subset` is an explicit opt-in.
   - This is intentional because the subset path currently loses to the
     receipt path on the tested Dual ISO CPU-only VM workload.
+- Playback preview mode is a separate quality/performance policy from scale:
+  - `Sharp / Smooth Preview` is the default quality-first policy.
+  - `Aggressive Performance Preview` opts into faster preview contracts, such
+    as x4 HQ mean23 early reconstruction where gates allow and x8 Dual ISO raw
+    decode-ahead overlap.
+  - For scripted profiles, use `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=1` or
+    `MLVAPP_PLAYBACK_PREVIEW_MODE=aggressive_performance`. Use `0` or
+    `sharp_smooth` for the default behavior.
 
 ## Telemetry key list (playback-profile JSON)
 
@@ -302,6 +310,8 @@ the following families of keys.
 - `render_thread_phase4b_path_label`
 - `render_thread_phase4b_y_crop_rows`
 - `render_thread_phase4b_fallback_reason`
+- `render_thread_preview_mode`
+- `render_thread_aggressive_preview`
 - `render_thread_playback_scale_sensor_pixels`
 - `render_thread_playback_scale_output_pixels`
 - `render_thread_playback_scale_pixel_retention_ratio`
@@ -332,6 +342,8 @@ Per-stage resolution telemetry uses the prefix
 - `dual_iso_mode_selected`
 - `dual_iso_mode_effective`
 - `dual_iso_preview_runtime_active`
+- `playback_preview_mode`
+- `playback_aggressive_preview`
 
 ### One-time GPU bilinear debayer probe
 

@@ -983,6 +983,13 @@ static PlaybackQualityMode playbackQualityModeFromInt( int mode )
     return static_cast<PlaybackQualityMode>( mode );
 }
 
+static PlaybackPreviewMode playbackPreviewModeFromInt( int mode )
+{
+    return mode == static_cast<int>( PlaybackPreviewMode::AggressivePerformance )
+        ? PlaybackPreviewMode::AggressivePerformance
+        : PlaybackPreviewMode::SharpSmooth;
+}
+
 static QString phase3ClipFingerprintForPath( const QString & path )
 {
     if( path.isEmpty() ) return QString();
@@ -3958,6 +3965,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             << QStringLiteral("render_thread_phase4b_path_label")
             << QStringLiteral("render_thread_phase4b_y_crop_rows")
             << QStringLiteral("render_thread_phase4b_fallback_reason")
+            << QStringLiteral("render_thread_preview_mode")
+            << QStringLiteral("render_thread_aggressive_preview")
             << QStringLiteral("render_thread_stage_raw_decode_pixels")
             << QStringLiteral("render_thread_stage_llrawproc_pixels")
             << QStringLiteral("render_thread_stage_rgb_output_pixels")
@@ -4488,6 +4497,13 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("scope"), QString::fromLatin1( playback_profile_scope_name( options.scope ) ) );
     metadata.insert( QStringLiteral("playback_policy_active"),
                      m_headlessPlaybackProfileUsePlaybackPolicy );
+    metadata.insert( QStringLiteral("playback_preview_mode"),
+                     QString::fromLatin1(
+                         mlvPlaybackAggressivePreviewMode() != 0
+                             ? playbackPreviewModeName( PlaybackPreviewMode::AggressivePerformance )
+                             : playbackPreviewModeName( PlaybackPreviewMode::SharpSmooth ) ) );
+    metadata.insert( QStringLiteral("playback_aggressive_preview"),
+                     mlvPlaybackAggressivePreviewMode() != 0 );
     const QString playbackDebayerEffective = playbackDebayerLabel();
     const bool playbackDebayerUsesCaching =
         playbackDebayerEffective == QStringLiteral("amaze-cached")
@@ -5732,6 +5748,11 @@ void MainWindow::initGui( void )
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityPhase3Fast );
     m_playbackQualityGroup->addAction( ui->actionPlaybackQualityPhase3HQ );
 
+    m_playbackPreviewModeGroup = new QActionGroup( this );
+    m_playbackPreviewModeGroup->setExclusive( true );
+    m_playbackPreviewModeGroup->addAction( ui->actionPlaybackPreviewSharpSmooth );
+    m_playbackPreviewModeGroup->addAction( ui->actionPlaybackPreviewAggressive );
+
     m_playbackScaleFactorGroup = new QActionGroup( this );
     m_playbackScaleFactorGroup->setExclusive( true );
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScaleAuto );
@@ -5913,7 +5934,7 @@ void MainWindow::initGui( void )
     //Phase 4E: Set up playback-quality status indicator. Tooltip-described
     //and toggleable via the Playback menu.
     m_pPlaybackQualityIndicator = new QLabel( statusBar() );
-    m_pPlaybackQualityIndicator->setMaximumWidth( 200 );
+    m_pPlaybackQualityIndicator->setMaximumWidth( 280 );
     m_pPlaybackQualityIndicator->setMinimumWidth( 140 );
     m_pPlaybackQualityIndicator->setText( tr( "Quality: Fast" ) );
     m_pPlaybackQualityIndicator->setToolTip(
@@ -5934,6 +5955,11 @@ void MainWindow::initGui( void )
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityPhase3Fast );
         m_pPlaybackQualityToolButtonMenu->addAction( ui->actionPlaybackQualityPhase3HQ );
         m_pPlaybackQualityToolButtonMenu->addSeparator();
+        QMenu *pPreviewModeSub = new QMenu( tr( "Preview Mode" ),
+                                            m_pPlaybackQualityToolButtonMenu );
+        pPreviewModeSub->addAction( ui->actionPlaybackPreviewSharpSmooth );
+        pPreviewModeSub->addAction( ui->actionPlaybackPreviewAggressive );
+        m_pPlaybackQualityToolButtonMenu->addMenu( pPreviewModeSub );
         QMenu *pScaleFactorSub = new QMenu( tr( "Scale Factor" ),
                                             m_pPlaybackQualityToolButtonMenu );
         pScaleFactorSub->addAction( ui->actionPlaybackScaleAuto );
@@ -5966,7 +5992,7 @@ void MainWindow::initGui( void )
         m_pPlaybackQualityToolButton->setToolTip(
             tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
                 "(HQ matched-pair, cast-closed), Auto (adapts to target fps), "
-                "and x1/x2/x4/x8 playback scale.\n"
+                "sharp/aggressive preview mode, and x1/x2/x4/x8 playback scale.\n"
                 "Keyboard shortcut: Q" ) );
         m_pPlaybackQualityToolButton->setCursor( Qt::PointingHandCursor );
         m_pPlaybackQualityToolButton->setContextMenuPolicy( Qt::CustomContextMenu );
@@ -5986,6 +6012,7 @@ void MainWindow::initGui( void )
     //Phase 4E: read Playback Quality state and reflect into menu/sampler.
     //Must run AFTER initGui() (action groups exist) and AFTER readSettings()
     //(though Playback Quality keys are independent of legacy keys).
+    initPlaybackPreviewModeFromSettings();
     initPlaybackQualityFromSettings();
     initPlaybackScaleFactorFromSettings();
 
@@ -13514,6 +13541,12 @@ bool MainWindow::dualIsoPlaybackPreferHqMean23GuiFallback( void )
     return playbackQualityWantsHqMean23( playbackQualityModeFromSettings() );
 }
 
+void MainWindow::initPlaybackPreviewModeFromSettings( void )
+{
+    const int rawMode = static_cast<int>( playbackPreviewModeFromSettings() );
+    applyPlaybackPreviewMode( rawMode, /*persist*/false, /*forceRefresh*/false );
+}
+
 void MainWindow::updatePhase3PlaybackQualityUi( void )
 {
     const bool showPhase3Fast =
@@ -13608,6 +13641,72 @@ void MainWindow::initPlaybackQualityFromSettings( void )
     /* Seed active state without persisting (already loaded). */
     applyPlaybackQualityMode( rawMode, /*persist*/false, /*forceRefresh*/true );
     setPlaybackQualityIndicatorVisible( indicatorVisible, /*persist*/false );
+}
+
+void MainWindow::applyPlaybackPreviewMode( int mode, bool persist, bool forceRefresh )
+{
+    if( mode != static_cast<int>( PlaybackPreviewMode::AggressivePerformance ) )
+    {
+        mode = static_cast<int>( PlaybackPreviewMode::SharpSmooth );
+    }
+
+    const int previousMode = m_playbackPreviewMode;
+    const bool changed = ( mode != previousMode ) || forceRefresh;
+    m_playbackPreviewMode = mode;
+
+    const PlaybackPreviewMode previewMode = playbackPreviewModeFromInt( mode );
+    mlvSetPlaybackAggressivePreviewMode(
+        previewMode == PlaybackPreviewMode::AggressivePerformance ? 1 : 0 );
+
+    if( ui->actionPlaybackPreviewSharpSmooth )
+        ui->actionPlaybackPreviewSharpSmooth->setChecked(
+            previewMode == PlaybackPreviewMode::SharpSmooth );
+    if( ui->actionPlaybackPreviewAggressive )
+        ui->actionPlaybackPreviewAggressive->setChecked(
+            previewMode == PlaybackPreviewMode::AggressivePerformance );
+
+    if( persist )
+    {
+        playbackPreviewModeWriteToSettings( previewMode );
+    }
+
+    const int envPreviewOverride = playbackPreviewAggressiveEnvOverride();
+    qInfo().noquote()
+        << "Playback preview mode ="
+        << QString::fromLatin1( playbackPreviewModeName( previewMode ) )
+        << ( envPreviewOverride >= 0
+             ? QStringLiteral( "(ui setting loaded; MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW/MLVAPP_PLAYBACK_PREVIEW_MODE currently has precedence)." )
+             : QStringLiteral( "(ui setting)." ) );
+
+    if( changed )
+    {
+        logInteractionEvent(
+            QStringLiteral("playback_preview_mode.change"),
+            QStringLiteral("mode=%1->%2 effective_aggressive=%3 file_loaded=%4 still_drawing=%5 latest_serial=%6 next_serial=%7 generation_before=%8")
+                .arg( previousMode )
+                .arg( mode )
+                .arg( bool01( mlvPlaybackAggressivePreviewMode() != 0 ) )
+                .arg( bool01( m_fileLoaded ) )
+                .arg( bool01( m_frameStillDrawing ) )
+                .arg( static_cast<qulonglong>( m_latestRequestedSerial.load( std::memory_order_acquire ) ) )
+                .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                .arg( static_cast<qulonglong>( m_playbackPresentationGeneration.load( std::memory_order_acquire ) ) ),
+            true );
+        if( m_fileLoaded || m_pMlvObject )
+        {
+            invalidateDisplayPreviewCache();
+            invalidatePlaybackPrepForDisplayChange( "playback-preview-mode-change" );
+            if( m_pMlvObject )
+            {
+                waitForRenderThreadIdleBeforeCoreMutation( "playback-preview-mode-change" );
+                resetMlvCache( m_pMlvObject );
+                resetMlvCachedFrame( m_pMlvObject );
+            }
+            m_frameChanged = true;
+            requestFrameRefresh( false, "playback-preview-mode-change" );
+        }
+    }
+    updatePlaybackQualityIndicator();
 }
 
 void MainWindow::initPlaybackScaleFactorFromSettings( void )
@@ -13848,6 +13947,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
     const bool envOverrideActive =
         ( envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8 ) || envHq;
+    const int envPreviewOverride = playbackPreviewAggressiveEnvOverride();
+    const bool aggressivePreviewActive = ( mlvPlaybackAggressivePreviewMode() != 0 );
     const bool guiScaleOverrideActive = !envOverrideActive && guiScaleSettingActive;
     auto playbackScaleLabel = [this]( int requestedScale ) -> QString
     {
@@ -13972,6 +14073,14 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             text += tr( " (%1)" ).arg( QString::fromLatin1( playbackQualityTierName( tier ) ) );
         }
     }
+    if( aggressivePreviewActive )
+    {
+        text += tr( " Aggressive" );
+        if( envPreviewOverride >= 0 && !text.contains( QStringLiteral("[env]") ) )
+        {
+            text += tr( " [env]" );
+        }
+    }
     if ( m_pPlaybackQualityIndicator && m_playbackQualityIndicatorVisible )
     {
         if( m_pPlaybackQualityIndicator->text() != text )
@@ -14072,6 +14181,22 @@ void MainWindow::on_actionPlaybackQualityPhase3Fast_triggered()
 void MainWindow::on_actionPlaybackQualityPhase3HQ_triggered()
 {
     applyPlaybackQualityMode( 4, /*persist*/true, /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackPreviewSharpSmooth_triggered()
+{
+    applyPlaybackPreviewMode(
+        static_cast<int>( PlaybackPreviewMode::SharpSmooth ),
+        /*persist*/true,
+        /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackPreviewAggressive_triggered()
+{
+    applyPlaybackPreviewMode(
+        static_cast<int>( PlaybackPreviewMode::AggressivePerformance ),
+        /*persist*/true,
+        /*forceRefresh*/false );
 }
 
 void MainWindow::on_actionPlaybackScaleAuto_triggered()
@@ -15944,7 +16069,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                "env_playback_smoke_telemetry=%21 "
                "env_playback_scope_interval_ms=%22 env_omp_num_threads=%23 "
                "env_disable_raw_uint16_prefetch=%24 "
-               "env_disable_play_start_preroll=%25" )
+               "env_disable_play_start_preroll=%25 "
+               "preview_mode=%26 env_aggressive_preview=%27 env_preview_mode=%28" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( m_playbackSmokeStartPosition )
                .arg( m_playbackSmokeStartCutIn )
@@ -15969,7 +16095,12 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_SCOPE_INTERVAL_MS" ) )
                .arg( envValueForLog( "OMP_NUM_THREADS" ) )
                .arg( envValueForLog( "MLVAPP_DISABLE_RAW_UINT16_PREFETCH" ) )
-               .arg( envValueForLog( "MLVAPP_DISABLE_PLAY_START_PREROLL" ) );
+               .arg( envValueForLog( "MLVAPP_DISABLE_PLAY_START_PREROLL" ) )
+               .arg( mlvPlaybackAggressivePreviewMode() != 0
+                     ? QStringLiteral("aggressive_performance")
+                     : QStringLiteral("sharp_smooth") )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW" ) )
+               .arg( envValueForLog( "MLVAPP_PLAYBACK_PREVIEW_MODE" ) );
 }
 
 void MainWindow::notePlaybackSmokePresentedFrame(

@@ -1751,6 +1751,15 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_phase4b_fallback_reason"),
         phase4bFallbackReason );
+    const bool aggressivePreview = ( mlvPlaybackAggressivePreviewMode() != 0 );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_preview_mode"),
+        aggressivePreview
+            ? QStringLiteral("aggressive_performance")
+            : QStringLiteral("sharp_smooth") );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_aggressive_preview"),
+        aggressivePreview );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_playback_scale_sensor_pixels"),
         sourcePixels );
