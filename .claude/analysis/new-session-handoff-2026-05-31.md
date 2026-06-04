@@ -205,3 +205,27 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
 - Focused console validation passed after the parser additions: `console_tests.exe --check-golden`, `tests=92`, `assertions=336`, `skipped=29`, `failed=0`.
 - Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 03:53:28 -05:00`, `Length=9047040`, SHA256 `8D282B595AF7733FFA9B07E950F4EE6A2741C6EAED8836BDD9BD89270253D549`.
 - Next session should extend this Auto sharp/aggressive comparison to `M16-1347` and `M16-1446`, then choose the next source change from the stage model. On `M16-1327`, aggressive x8 cut render work from `143.079 ms` (`6.99 FPS-equivalent`) to `26.955 ms` (`37.10 FPS-equivalent`), but the remaining gap to user-visible presented FPS means presentation cadence / queued presentation replacement should be measured before starting a heavier decode-aware raw decoder rewrite.
+
+## 2026-06-04 Addendum - Multi-Clip Auto Aggregate Points To Prep/Presentation Cadence
+
+- Auto sharp/aggressive comparison is now extended across `M16-1327`, `M16-1347`, and `M16-1446`.
+- Multi-clip Auto aggressive average:
+  - `smoke presented FPS=15.670`, `timeline FPS=22.686`.
+  - `avg_present_interval_ms=60.481` (`16.53 FPS-equivalent`), `avg_render_total_ms=29.875` (`33.47 FPS-equivalent`), `avg_draw_total_ms=33.380` (`29.96 FPS-equivalent`).
+  - Stage averages: `avg_raw_uint16_ms=6.247` (`160.09 FPS-equivalent`), `avg_llrawproc_total_ms=4.557` (`219.43 FPS-equivalent`), `avg_debayered_frame_ms=0.863` (`1158.30 FPS-equivalent`), `avg_processing_ms=5.270` (`189.74 FPS-equivalent`), `avg_processed16_ms=19.858` (`50.36 FPS-equivalent`), `avg_processed8_ms=23.648` (`42.29 FPS-equivalent`), `avg_playback_scale_ms=4.189` (`238.72 FPS-equivalent`).
+- Multi-clip Auto sharp/smooth average:
+  - `smoke presented FPS=9.108`, `timeline FPS=22.085`.
+  - `avg_present_interval_ms=100.892` (`9.91 FPS-equivalent`), `avg_render_total_ms=124.196` (`8.05 FPS-equivalent`), `avg_draw_total_ms=33.294` (`30.04 FPS-equivalent`).
+  - Stage averages: `avg_raw_uint16_ms=12.919` (`77.41 FPS-equivalent`), `avg_llrawproc_total_ms=31.537` (`31.71 FPS-equivalent`), `avg_debayered_frame_ms=45.801` (`21.83 FPS-equivalent`), `avg_processing_ms=11.909` (`83.97 FPS-equivalent`), `avg_processed16_ms=61.614` (`16.23 FPS-equivalent`), `avg_processed8_ms=65.865` (`15.18 FPS-equivalent`), `avg_playback_scale_ms=17.198` (`58.15 FPS-equivalent`).
+- Implemented the next telemetry split in `MainWindow`:
+  - Per-frame/profile fields: `playback_prep_pre_enqueue_ms`, `playback_prep_worker_queue_ms`, `playback_prep_worker_build_ms`, `playback_prep_worker_total_ms`, `playback_prep_result_queue_ms`, `playback_prep_elapsed_before_present_ms`, `playback_prep_total_before_finish_ms`.
+  - Smoke-summary averages: `avg_playback_prep_*`.
+- Validation on rebuilt release exe:
+  - `.claude-state\profiling\20260604-playback-prep-telemetry\M16-1327-auto-aggressive-prep-telemetry-rerun.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=58.0` was noisy; stable run metrics were `smoke presented FPS=16.113`, `timeline FPS=23.003`.
+  - `avg_render_total_ms=34.317` (`29.14 FPS-equivalent`), `avg_draw_total_ms=32.290` (`30.97 FPS-equivalent`).
+  - Prep split: `avg_playback_prep_worker_build_ms=0.021` (`47619.05 FPS-equivalent`), `avg_playback_prep_result_queue_ms=22.000` (`45.45 FPS-equivalent`), `avg_playback_prep_total_before_finish_ms=30.676` (`32.60 FPS-equivalent`).
+  - Presented screenshot SHA256 `9EB3C491568F8032E3EE66657005CF15B0CFC2D2BB7691702501199D22500A32`; FPS crop SHA256 `EAB33F97E7E0F9DD7F9A0B37F1960F0777B95A6D55DA75F3588661F9FB826A65`.
+- Ranked next target:
+  - First investigate and reduce result-queue/presentation cadence: `playback_prep_result_queue_ms`, `prep_replaced_after`, UI-thread queued signal latency, and render-slot release timing.
+  - Keep decode-aware/tile-aware x8 as the larger frontier, but do not start the decoder rewrite until the prep/presentation queue is explained.
