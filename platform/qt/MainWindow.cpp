@@ -1337,37 +1337,16 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     //"Open with" for Windows or scripts
     if( argc > 1 )
     {
-        QString fileName = QString( "%1" ).arg( argv[1] );
+        QStringList startupFiles;
+        for( int i = 1; i < argc; ++i )
+        {
+            QString fileName = QString( "%1" ).arg( argv[i] );
+            if( fileName.startsWith( "-" ) ) continue;
+            if( !QFile(fileName).exists() ) continue;
+            startupFiles.append( fileName );
+        }
 
-        //Exit if not an MLV file or aborted
-        if( QFile(fileName).exists() && fileName.endsWith( ".mlv", Qt::CaseInsensitive ) )
-        {
-            importNewMlv( fileName );
-            //Show last imported file
-            if( SESSION_CLIP_COUNT ) showFileInEditor( SESSION_CLIP_COUNT - 1 );
-        }
-        else if( QFile(fileName).exists() && fileName.endsWith( ".masxml", Qt::CaseInsensitive ) )
-        {
-            if( SESSION_CLIP_COUNT && askToSaveCurrentSession() ) return;
-
-            m_inOpeningProcess = true;
-            openSession( fileName );
-            //Show last imported file
-            if( SESSION_CLIP_COUNT ) showFileInEditor( SESSION_CLIP_COUNT - 1 );
-            m_inOpeningProcess = false;
-            m_sessionFileName = fileName;
-            selectDebayerAlgorithm();
-        }
-        else if( QFile(fileName).exists() && fileName.endsWith( ".command", Qt::CaseInsensitive ) )
-        {
-            if( m_pScripting->installScript( fileName ) )
-                QMessageBox::information( this, APPNAME, tr( "Installation of script %1 successful." ).arg( QFileInfo( fileName ).fileName() ) );
-        }
-        else if( QFile(fileName).exists() && fileName.endsWith( ".fpm", Qt::CaseInsensitive ) )
-        {
-            if( FpmInstaller::installFpm( fileName ) )
-                QMessageBox::information( this, APPNAME, tr( "Installation of focus pixel map %1 successful." ).arg( QFileInfo( fileName ).fileName() ) );
-        }
+        if( !startupFiles.empty() ) openMlvSet( startupFiles );
     }
 
     //Update check, if autocheck enabled, once a day
@@ -1786,6 +1765,8 @@ void MainWindow::dropEvent(QDropEvent *event)
 void MainWindow::openMlvSet( QStringList list )
 {
     m_inOpeningProcess = true;
+    QStringList normalisedList;
+    QString sessionFileName;
     for( int i = 0; i < list.size(); i++ )
     {
         QString fileName = list.at(i);
@@ -1800,6 +1781,22 @@ void MainWindow::openMlvSet( QStringList list )
         if( fileName.startsWith( "/" ) && !fileName.startsWith( "//" ) )
             fileName.remove( 0, 1 );
 #endif
+
+        if( fileName.isEmpty() || !QFile(fileName).exists() ) continue;
+        if( fileName.endsWith( ".m00", Qt::CaseInsensitive ) ) continue;
+        if( fileName.endsWith( ".masxml", Qt::CaseInsensitive ) )
+        {
+            if( sessionFileName.isEmpty() ) sessionFileName = fileName;
+            continue;
+        }
+        normalisedList.append( fileName );
+    }
+    if( !sessionFileName.isEmpty() ) normalisedList.prepend( sessionFileName );
+
+    QStringList importedMlvFiles;
+    for( int i = 0; i < normalisedList.size(); i++ )
+    {
+        QString fileName = normalisedList.at(i);
 
         if( i == 0 && QFile(fileName).exists() && fileName.endsWith( ".command", Qt::CaseInsensitive ) )
         {
@@ -1834,6 +1831,22 @@ void MainWindow::openMlvSet( QStringList list )
         {
             //Exit if not an MLV file or aborted
             if( fileName == QString( "" ) || !(fileName.endsWith( ".mlv", Qt::CaseInsensitive ) || fileName.endsWith( ".mcraw", Qt::CaseInsensitive )) ) continue;
+            QFileInfo fileInfo( fileName );
+            QString uniquePath = fileInfo.canonicalFilePath();
+            if( uniquePath.isEmpty() ) uniquePath = fileInfo.absoluteFilePath();
+            bool alreadyQueued = false;
+            for( int queuedIndex = 0; queuedIndex < importedMlvFiles.size(); ++queuedIndex )
+            {
+                if( QString::compare( importedMlvFiles.at( queuedIndex ),
+                                      uniquePath,
+                                      Qt::CaseInsensitive ) == 0 )
+                {
+                    alreadyQueued = true;
+                    break;
+                }
+            }
+            if( alreadyQueued || isFileInSession( fileName ) ) continue;
+            importedMlvFiles.append( uniquePath );
             importNewMlv( fileName );
         }
     }
