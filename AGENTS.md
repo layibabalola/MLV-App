@@ -63,6 +63,7 @@
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`
 - To audit whole-repo branch/worktree/stash cleanup, run:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .`
+- Treat user-visible completion of a mutating work block as a hard-clean event by default. After `work-block-complete.ps1 -Finalize` succeeds and before sending the final response, run `repo-sweep-closeout.ps1`, then verify and report branch/tracking, dirty state, local branches, registered worktrees, and stashes. Do not wait for the user to request "autocloseout" or "pristine" when the work block mutated tracked files.
 - To advance the retained-candidate remediation queue one safe candidate at a time, run:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\remediate-retained-closeout.ps1 -RepoRoot . -Apply`
 - The trigger must run even when mutation will be blocked. The repo detector/auditor may retain or block, but final responses should not silently skip the closeout path.
