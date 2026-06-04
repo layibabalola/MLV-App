@@ -14125,3 +14125,43 @@ Please cite file paths and line numbers from the repo, separate verified facts f
   - Measure whether `playback_prep_result_queue_ms` is caused by UI-thread starvation, queued signal latency, timer-frame advancement order, stale-result churn, or render-thread slot release timing.
   - Candidate source changes should reduce `prep_replaced_after` and `playback_prep_result_queue_ms` without hurting `timeline FPS`.
 - Keep decode-aware/tile-aware x8 reduced preview ranked as the high-impact frontier, but the current multi-clip evidence says presentation/result-queue latency should be understood first.
+
+## 2026-06-04 - Inline presentation for pre-scaled fast playback frames
+
+### Verified locally
+
+- Implemented the next scheduler/presentation change in `MainWindow::drawFrameReady()`: frames that are already fast playback scaled (`playbackScaledImage8`) now build and present their lightweight `PlaybackPrepResult` inline instead of round-tripping through the playback-prep worker.
+- The gate is intentionally narrow: playback must be active, fast-scale active, zoom-fit, no transform, no zebras, no GPU image presentation, no display-preview cache, and valid playback-scaled dimensions. Other display paths keep the existing worker handoff.
+- Added `playback_prep_inline_present` to frame telemetry and `playback_prep_inline_present_frames` to the smoke summary.
+- Model proof from the prior run made this the highest-confidence edit: worker build was only `0.021 ms` (`47619.05 FPS-equivalent`), while the result queue was `22.000 ms` (`45.45 FPS-equivalent`) and prep total was `30.676 ms` (`32.60 FPS-equivalent`).
+
+### Validation completed
+
+- Screenshot-backed Auto aggressive smoke passed on `M16-1327`: `.claude-state\profiling\20260604-inline-prep-presentation\M16-1327-auto-aggressive-inline-prep-expected4.json`, validation `ok=true`.
+  - Auto now stayed sharper at x4 (`scaleRequestStart=4`, `scaleRequestLast=4`, `scaleActiveLast=4`) instead of degrading to active x8; that is expected after the queue pressure is removed.
+  - Bottom-left `GUI FPS=15.0` in the summary and `100.0` in the screenshot-time status crop, `smoke presented FPS=26.352`, `timeline FPS=22.663`.
+  - `avg_present_interval_ms=35.526` (`28.15 FPS-equivalent`), `avg_render_total_ms=35.476` (`28.19 FPS-equivalent`), `avg_draw_total_ms=10.688` (`93.56 FPS-equivalent`).
+  - Prep split: `avg_playback_prep_result_queue_ms=0.000` (queue removed, FPS-equivalent not meaningful), `avg_playback_prep_total_before_finish_ms=9.320` (`107.30 FPS-equivalent`), `playback_prep_inline_present_frames=250`, `prep_stale_drops=0`, `prep_replaced_after=0`.
+  - Stage timing: `avg_raw_uint16_ms=3.392` (`294.81 FPS-equivalent`), `avg_llrawproc_total_ms=6.100` (`163.93 FPS-equivalent`), `avg_debayered_frame_ms=0.808` (`1237.62 FPS-equivalent`), `avg_processing_ms=7.756` (`128.93 FPS-equivalent`), `avg_playback_scale_ms=4.084` (`244.86 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-inline-prep-presentation\screenshots-aggressive-expected4\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `FB491A0971DDA0A7F8A511EBDD7F341C1E8CFB459A9AD7EE76008796A6DF3232`; FPS crop SHA256 `34318A3E9ADFA794D4F9259958F3E27449350328DF183CC1BEDA8E334E3FA676`.
+- Screenshot-backed explicit x8 aggressive smoke passed on `M16-1327`: `.claude-state\profiling\20260604-inline-prep-presentation\M16-1327-scale8-aggressive-inline-prep.json`, validation `ok=true`.
+  - `scaleRequestStart=8`, `scaleRequestLast=8`, `scaleActiveLast=8`.
+  - Bottom-left `GUI FPS=35.0` in the summary and `27.0` in the screenshot-time status crop, `smoke presented FPS=25.112`, `timeline FPS=22.919`.
+  - `avg_present_interval_ms=37.811` (`26.45 FPS-equivalent`), `avg_render_total_ms=35.795` (`27.94 FPS-equivalent`), `avg_draw_total_ms=10.900` (`91.74 FPS-equivalent`).
+  - Prep split: `avg_playback_prep_result_queue_ms=0.000` (queue removed, FPS-equivalent not meaningful), `avg_playback_prep_total_before_finish_ms=9.258` (`108.01 FPS-equivalent`), `playback_prep_inline_present_frames=229`, `prep_stale_drops=0`, `prep_replaced_after=0`.
+  - Stage timing: `avg_raw_uint16_ms=3.996` (`250.25 FPS-equivalent`), `avg_llrawproc_total_ms=6.445` (`155.16 FPS-equivalent`), `avg_debayered_frame_ms=1.201` (`832.64 FPS-equivalent`), `avg_processing_ms=5.017` (`199.32 FPS-equivalent`), `avg_playback_scale_ms=4.498` (`222.32 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-inline-prep-presentation\screenshots-scale8-aggressive\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `00288DFEC673DA9CFC432EEB9B2AD67D2D71ECBC6D18529870F993E349C0F0F8`; FPS crop SHA256 `8D31FFFA586EC5BC04B559EE00D565C194561FC3C6CF7C59A44DF88034868FBF`.
+- Screenshot-backed Auto aggressive smoke also passed on `M16-1347`: `.claude-state\profiling\20260604-inline-prep-presentation\M16-1347-auto-aggressive-inline-prep.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=30.0` in the summary and `14.0` in the screenshot-time status crop, `smoke presented FPS=22.832`, `timeline FPS=22.215`.
+  - `avg_present_interval_ms=40.186` (`24.88 FPS-equivalent`), `avg_render_total_ms=40.495` (`24.69 FPS-equivalent`), `avg_draw_total_ms=10.716` (`93.32 FPS-equivalent`), `avg_playback_prep_total_before_finish_ms=9.059` (`110.39 FPS-equivalent`), `playback_prep_inline_present_frames=222`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 04:26:19 -05:00`, `Length=9053696`, SHA256 `A826C66A608788A259264558BE72CA0530E3447103566B923777851D8F8AB752`.
+
+### Cross-checked from prior analysis
+
+- This improvement preserves the pipeline-resolution model: it does not change Bayer-domain reduction, LLRawProc, debayer, or raw decode. It removes a measured UI/prep scheduling delay after the render thread has already produced a scaled frame.
+- The fair Auto comparison is now sharper and faster: previous Auto aggressive on `M16-1327` degraded to active x8 and presented `16.113 FPS`; the new Auto aggressive run stayed active x4 and presented `26.352 FPS`.
+
+### Needs runtime profiling
+
+- Repeat the inline-prep Auto aggressive smoke on `M16-1446` and, if stable, aggregate the new multi-clip Auto aggressive average against the previous `15.670` smoke-presented FPS baseline.
+- The next model-ranked target should be selected from the new post-queue profile. With prep queue removed, likely candidates are remaining render work around `35-40 ms` (`24.69-28.19 FPS-equivalent`), processing/shadows-highlights prep, and the still-full raw decode floor for explicit x8.
