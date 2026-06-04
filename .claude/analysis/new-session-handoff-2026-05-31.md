@@ -342,3 +342,16 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
   - Do not start with cache pruning; the measured cache-store cost is near zero.
   - Rank `processed16_total_ms` / processed8 conversion first for a possible aggressive direct8/local-tone-compatible path (`10.676-14.319 ms`, `69.84-93.67 FPS-equivalent`).
   - Keep decode-aware/tile-aware x8 on the roadmap because raw decode still touches full source pixels, but only start that heavier work when longer profiles show raw decode is a wall-clock limiter after prefetch.
+
+## 2026-06-04 Addendum - Aggressive Direct8 Local-Tone Probe Rejected
+
+- A probe allowed direct8 for non-neutral local tone only in Aggressive Performance Preview, while keeping Sharp/Smooth conservative. It was reverted.
+- Focused probe tests passed before revert, so this was not an immediate unit-level parity failure: simple direct8 contrast stayed byte-identical, Sharp/Smooth still blocked the state, and aggressive local-tone direct8 stayed within max diff `5` / mean diff about `0.147`.
+- The probe lost the retained x8 throughput shape because local-tone direct8 had to use the shared/autovec kernel and force serial preview render:
+  - Probe profile `.claude-state\profiling\20260604-aggressive-direct8-localtone\M16-1327-x8-aggressive-direct8-profile.json`: `render_thread_total_ms=24.405` (`40.97 FPS-equivalent`), `processing_ms=9.108` (`109.79 FPS-equivalent`), `processed16_total_ms=19.351` (`51.68 FPS-equivalent`), `processed8_total_ms=23.568` (`42.43 FPS-equivalent`), `direct8=true`.
+  - Prior retained x8 aggressive profile: `render_thread_total_ms=14.162` (`70.61 FPS-equivalent`), `processing_ms=2.865` (`349.06 FPS-equivalent`), `processed16_total_ms=10.676` (`93.67 FPS-equivalent`), `processed8_total_ms=13.892` (`71.98 FPS-equivalent`), `direct8=false`.
+- The same probe run confirmed raw x8 prefetch is already active on the current base: `raw_uint16_prefetch_hit=36/37`, `raw_uint16_ms=3.730 ms` (`268.12 FPS-equivalent`), `decode_failures=0`.
+- Next session:
+  - Do not reopen aggressive local-tone direct8 unless the first patch proves a parallel-safe route and beats the retained x8 profile with screenshot-backed color smoke.
+  - Keep optimizing the retained x8 processed16/processing path first.
+  - Keep decode-aware/tile-aware x8 as the structural frontier, but gate it on profiles where raw prefetch is hitting and raw decode still dominates wall-clock time.

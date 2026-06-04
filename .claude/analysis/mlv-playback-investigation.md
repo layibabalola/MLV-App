@@ -14312,3 +14312,34 @@ Post-change stage timings:
   1. Highest confidence: investigate `processed16_total_ms` / processed8 conversion and whether a safe aggressive direct8/local-tone-compatible path can avoid part of the current `10.676-14.319 ms` processed16 cost (`69.84-93.67 FPS-equivalent`).
   2. Keep decode-aware/tile-aware x8 as the larger structural frontier because raw decode still uses `4,100,544` source pixels, but gate it on longer profiles that show raw decode is a real wall-clock limiter after prefetch.
   3. Keep presentation/scheduling telemetry in the loop: short-run bottom-left `GUI FPS` remains useful as screenshot proof, but `smoke presented FPS`, `timeline FPS`, and per-stage FPS-equivalent should drive ranking.
+
+## 2026-06-04 - Aggressive direct8 local-tone probe rejected
+
+### Verified locally
+
+- I tested an aggressive-preview-only direct8 local-tone probe and reverted it. Sharp/Smooth Preview stayed conservative in the probe, but the aggressive path had to route through the shared/autovec kernel and force serial render for the non-neutral local-tone state.
+- Focused probe tests passed before revert, which means the rejection is throughput-driven rather than an immediate unit-level parity failure:
+  - Simple direct8 contrast stayed byte-identical: `0/12,301,632` bytes differed.
+  - Sharp/Smooth playback preview still blocked the non-neutral local-tone direct8 state.
+  - Aggressive local-tone direct8 stayed close but not byte-identical: max absolute diff `5`, mean absolute diff about `0.147`.
+- Headless x8 aggressive probe profile on `M16-1327`:
+  - Artifact: `.claude-state\profiling\20260604-aggressive-direct8-localtone\M16-1327-x8-aggressive-direct8-profile.json`.
+  - `frames_used=37`, `request=8`, `effective=8`, `phase4b_path=8`, `fallback=none`, `direct8=true`.
+  - Raw prefetch was already effective on the current base path: `raw_uint16_prefetch_hit=36/37`, `raw_uint16_ms=3.730 ms` (`268.12 FPS-equivalent`), `decode_failures=0`.
+  - Stage timing: `render_thread_total_ms=24.405` (`40.97 FPS-equivalent`), `llrawproc_total_ms=5.432` (`184.08 FPS-equivalent`), `debayered_frame_ms=10.216` (`97.88 FPS-equivalent`), `processing_ms=9.108` (`109.79 FPS-equivalent`), `processed16_total_ms=19.351` (`51.68 FPS-equivalent`), `processed8_total_ms=23.568` (`42.43 FPS-equivalent`).
+- Same-build non-aggressive control confirmed why the current aggressive decode-overlap path matters, but it is not an apples-to-apples direct8 baseline:
+  - Artifact: `.claude-state\profiling\20260604-aggressive-direct8-localtone\M16-1327-x8-sharp-control-profile.json`.
+  - `raw_uint16_prefetch_hit=0/37`, `raw_uint16_ms=22.595 ms` (`44.26 FPS-equivalent`), `render_thread_total_ms=42.784 ms` (`23.37 FPS-equivalent`), `processed8_total_ms=42.243 ms` (`23.67 FPS-equivalent`).
+
+### Cross-checked from prior analysis
+
+- The retained x8 aggressive base profile before this rejected probe was faster: `render_thread_total_ms=14.162` (`70.61 FPS-equivalent`), `processing_ms=2.865` (`349.06 FPS-equivalent`), `processed16_total_ms=10.676` (`93.67 FPS-equivalent`), and `processed8_total_ms=13.892` (`71.98 FPS-equivalent`).
+- The raw-decode overlap improvement is already present in the current base: aggressive reduced x8 can prefetch raw frames while full-recon/focus-pixel fallbacks remain blocked. This means the next decode-aware/tile-aware rewrite should wait until longer profiles show raw decode remains the wall-clock limiter after prefetch hits.
+
+### Needs runtime profiling
+
+- Do not ship aggressive local-tone direct8 as currently shaped. Its shared-kernel plus serial-preview route loses too much throughput, and the approximation would still need screenshot-backed color acceptance.
+- Next ranked candidates:
+  1. Highest confidence: keep optimizing the retained x8 processed16/processing path without reopening the direct8 local-tone color boundary.
+  2. Medium risk: if revisiting direct8, first prove a parallel-safe aggressive local-tone direct8 route and require both visual smoke and per-stage speed wins versus the retained x8 baseline.
+  3. Larger structural frontier: decode-aware/tile-aware x8, gated on profiles where raw prefetch is hitting but raw decode still dominates wall-clock cost.
