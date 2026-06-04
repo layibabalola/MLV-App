@@ -14165,3 +14165,36 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 
 - Repeat the inline-prep Auto aggressive smoke on `M16-1446` and, if stable, aggregate the new multi-clip Auto aggressive average against the previous `15.670` smoke-presented FPS baseline.
 - The next model-ranked target should be selected from the new post-queue profile. With prep queue removed, likely candidates are remaining render work around `35-40 ms` (`24.69-28.19 FPS-equivalent`), processing/shadows-highlights prep, and the still-full raw decode floor for explicit x8.
+
+## 2026-06-04 - Aggressive odd-height shadows/highlights preview path
+
+### Verified locally
+
+- The post-queue model pointed to a retained preview-processing bucket on odd-height scaled frames: `M16-1446` active x8 still paid a full-resolution shadows/highlights blur at the preview frame size because its x8 RGB output is `226x283`, and the existing half-res RGB blur required even dimensions.
+- Implemented a preview-only policy split in `src/processing/raw_processing.c` and threaded the aggressive preview TLS state through `src/mlv/video_mlv.c` and `platform/qt/RenderFrameThread.cpp`:
+  - Sharp/smooth playback preview keeps odd-height shadows/highlights on the full-res RGB blur path.
+  - Aggressive playback preview may use the half-res shadows/highlights route when width is even and height is odd; it downsamples the even region, upsamples it, and fills the trailing output row from the previous generated row.
+  - Existing even/even half-res behavior is unchanged.
+- Added focused coverage in `tests/pipeline/test_processing_filters.cpp`:
+  - `SharpOddHeightPlaybackPreviewKeepsFullresShadowsHighlights`
+  - `AggressiveOddHeightPlaybackPreviewUsesHalfresShadowsHighlights`
+
+### Validation completed
+
+- Focused pipeline validation passed after rebuilding `tests\build-ci-pipeline`: `pipeline_tests.exe --gtest_filter=ProcessingFilters.*`, `tests=142`, `assertions=30`, `failed=0`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 04:53:48 -05:00`, `Length=9054208`, SHA256 `45B8DF86B60759B89D44B5FF20DCE176AD298BEE38725B07A766948B57EA76DA`.
+- Screenshot-backed explicit x8 aggressive smoke passed on `M16-1446`: `.claude-state\profiling\20260604-post-queue-render-cost\M16-1446-scale8-aggressive-sh-halfres-patch.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=142.0`, `smoke presented FPS=29.879`, `timeline FPS=22.765`.
+  - `avg_present_interval_ms=31.551` (`31.70 FPS-equivalent`), `avg_render_total_ms=29.234` (`34.21 FPS-equivalent`), `avg_render_work_ms=21.377` (`46.78 FPS-equivalent`), `avg_queue_wait_ms=7.857` (`127.28 FPS-equivalent`), `avg_draw_total_ms=10.033` (`99.67 FPS-equivalent`).
+  - Stage timing: `avg_raw_uint16_ms=3.344` (`299.04 FPS-equivalent`), `avg_llrawproc_total_ms=5.407` (`184.94 FPS-equivalent`), `avg_debayered_frame_ms=0.681` (`1468.43 FPS-equivalent`), `avg_processing_ms=3.359` (`297.71 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=2.286` (`437.45 FPS-equivalent`), `avg_sh_filter_halfres_rbf_ms=1.949` (`513.08 FPS-equivalent`), `avg_processed16_ms=13.593` (`73.57 FPS-equivalent`), `avg_playback_scale_ms=4.278` (`233.75 FPS-equivalent`).
+  - Compared to the previous active-x8 `M16-1446` baseline `.claude-state\profiling\20260604-post-queue-render-cost\M16-1446-auto-aggressive-inline-baseline-expected8.json`, `smoke presented FPS` improved from `19.924` to `29.879`, `avg_render_total_ms` improved from `56.261 ms` (`17.77 FPS-equivalent`) to `29.234 ms` (`34.21 FPS-equivalent`), and `avg_processing_shadows_highlights_prep_ms` improved from `6.435 ms` (`155.40 FPS-equivalent`) to `2.286 ms` (`437.45 FPS-equivalent`). Caveat: the baseline was Auto after settling to active x8, while the validation run forced explicit x8.
+- Screenshot-backed explicit x4 aggressive smoke passed on `M16-1327`: `.claude-state\profiling\20260604-post-queue-render-cost\M16-1327-scale4-aggressive-sh-halfres-patch.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=111.0` in the summary and `100.0` in the screenshot-time crop, `smoke presented FPS=19.985`, `timeline FPS=22.299`.
+  - `avg_present_interval_ms=45.799` (`21.84 FPS-equivalent`), `avg_render_total_ms=54.800` (`18.25 FPS-equivalent`), `avg_render_work_ms=37.168` (`26.91 FPS-equivalent`), `avg_queue_wait_ms=17.632` (`56.72 FPS-equivalent`), `avg_draw_total_ms=10.242` (`97.64 FPS-equivalent`).
+  - Stage timing: `avg_raw_uint16_ms=6.100` (`163.93 FPS-equivalent`), `avg_llrawproc_total_ms=9.184` (`108.89 FPS-equivalent`), `avg_debayered_frame_ms=1.479` (`676.13 FPS-equivalent`), `avg_processing_ms=9.332` (`107.16 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=4.079` (`245.16 FPS-equivalent`), `avg_sh_filter_halfres_rbf_ms=3.305` (`302.57 FPS-equivalent`), `avg_processed16_ms=27.642` (`36.18 FPS-equivalent`), `avg_playback_scale_ms=4.795` (`208.55 FPS-equivalent`).
+
+### Needs runtime profiling
+
+- Treat the x8 result as the clean win from this change: it removes a measured full-res RGB blur from the aggressive x8 preview path without changing the upstream Bayer-domain reduction contract.
+- Treat the x4 smoke as branch proof, not a broad performance win. x4 remains dominated by render work, LLRawProc/processing, and queue timing; the next x4 iteration should target the current dominant stage from fresh telemetry rather than assume the shadows/highlights branch is the limiter.
+- Auto aggressive exploratory runs on `M16-1446` bounced between final x4 and x8 in short smokes, so Auto policy impact needs a longer or more controlled run before drawing a user-facing conclusion.

@@ -101,6 +101,9 @@ int processingFastPathAvx2IntrinActive(void);
 void processingResetLastTimingTelemetry(void);
 void processingSetPlaybackPreviewMode(int enabled);
 int processingPlaybackPreviewModeEnabled(void);
+void processingSetPlaybackAggressivePreviewMode(int enabled);
+int processingPlaybackAggressivePreviewModeEnabled(void);
+void processingResetShadowsHighlightsProbeModeCacheForTesting(void);
 void applyProcessingObject8( processingObject_t * processing,
                              int imageX, int imageY,
                              uint16_t * __restrict inputImage,

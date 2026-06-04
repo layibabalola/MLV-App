@@ -1492,15 +1492,23 @@ void RenderFrameThread::drawFrame( int slotIndex,
         && m_activePresentationContext.renderThreadUsingPlaybackPreviewProcessing;
     struct PlaybackPreviewModeGuard
     {
-        PlaybackPreviewModeGuard( bool enabled )
+        explicit PlaybackPreviewModeGuard( bool enabled )
+            : previousPreviewMode( processingPlaybackPreviewModeEnabled() )
+            , previousAggressivePreviewMode( processingPlaybackAggressivePreviewModeEnabled() )
         {
             processingSetPlaybackPreviewMode( enabled ? 1 : 0 );
+            processingSetPlaybackAggressivePreviewMode(
+                ( enabled && mlvPlaybackAggressivePreviewMode() != 0 ) ? 1 : 0 );
         }
 
         ~PlaybackPreviewModeGuard()
         {
-            processingSetPlaybackPreviewMode( 0 );
+            processingSetPlaybackAggressivePreviewMode( previousAggressivePreviewMode );
+            processingSetPlaybackPreviewMode( previousPreviewMode );
         }
+
+        int previousPreviewMode;
+        int previousAggressivePreviewMode;
     } playbackPreviewModeGuard( playbackPreviewFastPathActive );
     const double frameRequestStageTime = m_activeFrameRequestStageTime;
     const double renderThreadQueueWaitMs =

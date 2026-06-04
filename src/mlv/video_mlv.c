@@ -1991,7 +1991,11 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
          * here. Keep the same playback preview policy active while the
          * background worker renders the cached frame so it does not spend
          * export-grade CPU on preview-only playback work. */
+        const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
+        const int previous_aggressive_preview_mode =
+            processingPlaybackAggressivePreviewModeEnabled();
         processingSetPlaybackPreviewMode(1);
+        processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
         int renderOk = mlv_render_processed_frame8_direct_with_processing(
             task->video,
             task->processing,
@@ -2001,7 +2005,8 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             task->threads,
             task->scaleFactor,
             0);
-        processingSetPlaybackPreviewMode(0);
+        processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
+        processingSetPlaybackPreviewMode(previous_preview_mode);
 
         pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
         if (renderOk
@@ -4397,6 +4402,8 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
 {
     const double total_start = mlv_stage_timing_now();
     const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
+    const int previous_aggressive_preview_mode =
+        processingPlaybackAggressivePreviewModeEnabled();
     mlv_reset_last_raw_stage_telemetry();
     g_mlv_last_llrawproc_ms = 0.0;
     g_mlv_last_debayered_frame_ms = 0.0;
@@ -4410,6 +4417,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     /* Keep the playback-preview policy visible on the main render thread so
      * the direct8 gate sees the same state as the prefetch worker. */
     processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
 
     /* Phase 4B: resolve effective scale (rejects scales that don't divide
      * the sensor evenly). */
@@ -4557,7 +4565,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
             pthread_mutex_unlock(&video->processed8_prefetch_mutex);
             g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
             mlv_stage_timing_note("processed8_total", frameIndex, total_start);
-            return;
+            goto cleanup;
         }
     }
 
@@ -4630,6 +4638,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
 cleanup:
+    processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
     processingSetPlaybackPreviewMode(previous_preview_mode);
 }
 
@@ -4659,6 +4668,8 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
 {
     const double total_start = mlv_stage_timing_now();
     const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
+    const int previous_aggressive_preview_mode =
+        processingPlaybackAggressivePreviewModeEnabled();
     mlv_reset_last_raw_stage_telemetry();
     g_mlv_last_raw_uint16_ms = 0.0;
     g_mlv_last_llrawproc_ms = 0.0;
@@ -4672,6 +4683,7 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
     g_mlv_last_processed8_prefetch_hit = 0;
 
     if (!video || !decodedRawFrame || !outputFrame) return 0;
+    processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
 
     const int normalizedScale = mlv_effective_playback_scale_factor(video, scaleFactor);
     video->playback_scale_factor_active = normalizedScale;
@@ -4683,6 +4695,7 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
     if (!mlv_can_use_direct_processed_frame8_path(video) || normalizedScale <= 1)
     {
+        processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
         processingSetPlaybackPreviewMode(previous_preview_mode);
         return 0;
     }
@@ -4709,6 +4722,7 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
         pthread_mutex_unlock(&video->processed8_prefetch_mutex);
         g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
         mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
+        processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
         processingSetPlaybackPreviewMode(previous_preview_mode);
         return 0;
     }
@@ -4727,6 +4741,7 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
+    processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
     processingSetPlaybackPreviewMode(previous_preview_mode);
     return 1;
 }
@@ -4740,6 +4755,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
 {
     const double total_start = mlv_stage_timing_now();
     const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
+    const int previous_aggressive_preview_mode =
+        processingPlaybackAggressivePreviewModeEnabled();
     mlv_reset_last_raw_stage_telemetry();
     g_mlv_last_raw_uint16_ms = 0.0;
     g_mlv_last_llrawproc_ms = 0.0;
@@ -4753,6 +4770,7 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
     g_mlv_last_processed8_prefetch_hit = 0;
 
     if (!video || !reconnedRawFrame || !outputFrame) return 0;
+    processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
 
     const int normalizedScale = mlv_effective_playback_scale_factor(video, scaleFactor);
     video->playback_scale_factor_active = normalizedScale;
@@ -4764,6 +4782,7 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
     if (!mlv_can_use_direct_processed_frame8_path(video) || normalizedScale <= 1)
     {
+        processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
         processingSetPlaybackPreviewMode(previous_preview_mode);
         return 0;
     }
@@ -4789,6 +4808,7 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
         pthread_mutex_unlock(&video->processed8_prefetch_mutex);
         g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
         mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
+        processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
         processingSetPlaybackPreviewMode(previous_preview_mode);
         return 0;
     }
@@ -4807,6 +4827,7 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
+    processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
     processingSetPlaybackPreviewMode(previous_preview_mode);
     return 1;
 }

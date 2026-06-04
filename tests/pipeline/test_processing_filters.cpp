@@ -65,6 +65,35 @@ void unset_env_for_test(const char * name)
 #endif
 }
 
+void set_env_for_test(const char * name, const char * value)
+{
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+class ProcessingPlaybackPreviewModeScope
+{
+public:
+    ProcessingPlaybackPreviewModeScope()
+        : preview_(processingPlaybackPreviewModeEnabled())
+        , aggressive_(processingPlaybackAggressivePreviewModeEnabled())
+    {
+    }
+
+    ~ProcessingPlaybackPreviewModeScope()
+    {
+        processingSetPlaybackAggressivePreviewMode(aggressive_);
+        processingSetPlaybackPreviewMode(preview_);
+    }
+
+private:
+    int preview_;
+    int aggressive_;
+};
+
 uint16_t limit_u16_from_i32(std::int32_t value)
 {
     if( value < 0 ) return 0;
@@ -411,6 +440,79 @@ TEST(ProcessingFilters, ShadowsHighlightsProbeTelemetryIsOptInByDefault)
     ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterHalfresUpsampleMilliseconds());
 
     freeProcessingObject(processing);
+}
+
+TEST(ProcessingFilters, SharpOddHeightPlaybackPreviewKeepsFullresShadowsHighlights)
+{
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
+    ProcessingPlaybackPreviewModeScope playback_scope;
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    const int width = 48;
+    const int height = 35;
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+    std::vector<uint16_t> output(input.size(), 0);
+
+    processingObject_t * processing = initProcessingObject();
+    ASSERT_TRUE(processing != nullptr);
+    processingSetShadows(processing, 0.30);
+    processingSetHighlights(processing, -0.20);
+
+    applyProcessingObject(processing,
+                          width,
+                          height,
+                          input.data(),
+                          output.data(),
+                          2,
+                          1,
+                          0);
+
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterFullresMilliseconds() > 0.0);
+    ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterHalfresDownsampleMilliseconds());
+    ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds());
+    ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterHalfresUpsampleMilliseconds());
+
+    freeProcessingObject(processing);
+    unset_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
+}
+
+TEST(ProcessingFilters, AggressiveOddHeightPlaybackPreviewUsesHalfresShadowsHighlights)
+{
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
+    ProcessingPlaybackPreviewModeScope playback_scope;
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(1);
+
+    const int width = 48;
+    const int height = 35;
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+    std::vector<uint16_t> output(input.size(), 0);
+
+    processingObject_t * processing = initProcessingObject();
+    ASSERT_TRUE(processing != nullptr);
+    processingSetShadows(processing, 0.30);
+    processingSetHighlights(processing, -0.20);
+
+    applyProcessingObject(processing,
+                          width,
+                          height,
+                          input.data(),
+                          output.data(),
+                          2,
+                          1,
+                          0);
+
+    ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterFullresMilliseconds());
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds() > 0.0);
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterMilliseconds() > 0.0);
+
+    freeProcessingObject(processing);
+    unset_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
 }
 
 TEST(ProcessingFilters, ChromaSmooth2x2MatchesScalarReference)
