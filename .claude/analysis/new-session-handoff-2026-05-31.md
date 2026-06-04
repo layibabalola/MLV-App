@@ -155,3 +155,18 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
   - x4 is policy-split: sharp/smooth intentionally keeps full-recon fallback for default HQ mean23; aggressive exposes the faster early path behind an explicit user choice.
   - x2 is still late/full-recon and should be treated as less hardened for fastest playback until a real x2 Bayer-to-Bayer early path exists.
 - Next session should compare x4 sharp/aggressive and x8 sharp/aggressive across the standard M16 clips before making aggressive behavior automatic or starting the heavier decode-aware/tile-aware x8 work.
+
+## 2026-06-04 Addendum - Aggressive x4 Decode Overlap
+
+- The next measured bottleneck was compatible x4 aggressive foreground raw decode:
+  - Before patch: `.claude-state\profiling\20260604-next-preview-bottleneck-env\m16-1327-x4-aggressive.json`, `phase4b_path=3`, `raw_prefetch_hits=0`, `avg_raw_uint16_ms=16.455` (`60.77 FPS-equivalent`), `avg_render_total_ms=38.545` (`25.94 FPS-equivalent`).
+  - After patch: `.claude-state\profiling\20260604-x4-prefetch-patch\m16-1327-x4-aggressive-after2.json`, `phase4b_path=3`, `raw_prefetch_hits=19/20`, `avg_raw_uint16_ms=1.316` (`759.88 FPS-equivalent`), `avg_render_total_ms=23.263` (`42.99 FPS-equivalent`).
+- The implementation keeps the conservative prefetch block for full-recon fallback:
+  - x4 sharp after patch: `.claude-state\profiling\20260604-x4-prefetch-patch\m16-1327-x4-sharp-after.json`, `phase4b_path=0`, fallback `HQ mean23 playback uses full-recon x4 fallback`, `raw_prefetch_hits=0`, `avg_llrawproc_total_ms=29.545` (`33.85 FPS-equivalent`).
+  - App-backed fixture tests also prove aggressive x4/x8 receipts with `focus_pixels` fall back to full-recon and keep raw prefetch off.
+- Screenshot-backed x4 aggressive GUI smoke passed:
+  - Artifact: `.claude-state\profiling\20260604-x4-prefetch-patch\m16-1327-x4-aggressive-smoke.json`.
+  - Bottom-left `GUI FPS=8.6`, `smoke presented FPS=13.144`, `timeline FPS=21.855`.
+  - CPU summary: `avg_raw_uint16_ms=5.256` (`190.26 FPS-equivalent`), `avg_llrawproc_total_ms=5.581` (`179.18 FPS-equivalent`), `avg_debayered_frame_ms=0.860` (`1162.79 FPS-equivalent`), `avg_processing_ms=10.151` (`98.51 FPS-equivalent`), `avg_playback_scale_ms=4.070` (`245.70 FPS-equivalent`), `avg_render_total_ms=35.128` (`28.47 FPS-equivalent`), `avg_draw_total_ms=42.279` (`23.65 FPS-equivalent`), `raw_prefetch_hits=63`.
+  - Presented screenshot SHA256 `C0DD7F113B935A9E97F987D678E806DE008A340DDFB9067C9BB698842F6919B0`; aspect evidence remains presented-playback stretch with `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 02:47:00 -05:00`, `Length=9043456`, SHA256 `2227C07718CA3CB4DEAC43565531C000FEBB4C6E0E4C5C01FF967043B764B8AB`.

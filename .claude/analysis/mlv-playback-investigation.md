@@ -13966,3 +13966,46 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 - Run longer A/B smokes across `M16-1327`, `M16-1347`, and `M16-1446` for x4 sharp versus x4 aggressive and x8 sharp versus x8 aggressive before making aggressive mode automatic.
 - The next ranked source frontier remains decode-aware/tile-aware reduced preview for x8, but only after multi-clip telemetry proves that the remaining wall-clock floor is still full raw decode rather than presentation/upload cadence.
 - A separate early x2 Bayer reduction path is still open work; do not market x2 as equally early or equally hardened until it has kernel coverage and screenshot-backed profile evidence.
+
+## 2026-06-04 - Aggressive x4 decode overlap after pipeline-resolution proof
+
+### Verified locally
+
+- The next model-driven bottleneck was x4 aggressive raw decode. The current release profile before this patch showed x4 aggressive was already using the early full-XY Phase 4B path (`phase4b_path=3`) and running LLRawProc at preview resolution (`254928` pixels), but raw decode still ran foreground at full source resolution with no prefetch hits.
+- Implemented a conservative prefetch gate in `src/mlv/video_mlv.c`: Dual ISO scale `>=4` still blocks raw uint16 prefetch by default, but aggressive reduced previews can prefetch when cheap preflight checks indicate Phase 4B reduced reconstruction is expected.
+  - x4 requires aggressive preview, Phase 4B v2/v3 enabled, HQ Dual ISO, compatible raw-fix options, width divisible by 4, and at least one 16-row-aligned source block for the v3 full-XY path.
+  - x8 requires aggressive preview, Phase 4B v2/v4 enabled, HQ Dual ISO, and compatible raw-fix options.
+  - Incompatible receipts still block prefetch so the worker does not compete with full-recon Dual ISO fallback.
+
+### Validation completed
+
+- Focused pipeline test: `tests\build-ci-pipeline\release\pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B*` passed, `tests=140`, `assertions=515`, `failed=0`.
+- Focused app-backed console tests passed against the rebuilt release exe:
+  - `ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch`.
+  - `ClipGolden.LargeDualIsoAggressiveX4SuppressesRawUint16PrefetchWhenReceiptNeedsFullResCoordinates`.
+  - `ClipGolden.LargeDualIsoAggressiveX8SuppressesRawUint16PrefetchWhenReceiptNeedsFullResCoordinates`.
+- Release x4 aggressive profile before patch: `.claude-state\profiling\20260604-next-preview-bottleneck-env\m16-1327-x4-aggressive.json`.
+  - `phase4b_path=3`, `raw_prefetch_hits=0`, `raw_decode_pixels=4100544`, `llrawproc_pixels=254928`.
+  - `avg_raw_uint16_ms=16.455` (`60.77 FPS-equivalent`), `avg_llrawproc_total_ms=3.818` (`261.92 FPS-equivalent`), `avg_debayered_frame_ms=0.636` (`1572.33 FPS-equivalent`), `avg_processing_ms=7.273` (`137.49 FPS-equivalent`), `avg_render_total_ms=38.545` (`25.94 FPS-equivalent`).
+- Release x4 aggressive profile after patch: `.claude-state\profiling\20260604-x4-prefetch-patch\m16-1327-x4-aggressive-after2.json`.
+  - `phase4b_path=3`, `raw_prefetch_hits=19/20`, `raw_decode_pixels=4100544`, `llrawproc_pixels=254928`.
+  - `avg_raw_uint16_ms=1.316` (`759.88 FPS-equivalent`), `avg_llrawproc_total_ms=4.263` (`234.58 FPS-equivalent`), `avg_debayered_frame_ms=0.632` (`1582.28 FPS-equivalent`), `avg_processing_ms=8.211` (`121.79 FPS-equivalent`), `avg_render_total_ms=23.263` (`42.99 FPS-equivalent`).
+- Release x4 sharp profile after patch: `.claude-state\profiling\20260604-x4-prefetch-patch\m16-1327-x4-sharp-after.json`.
+  - `playback_preview_mode=sharp_smooth`, `phase4b_path=0`, fallback `HQ mean23 playback uses full-recon x4 fallback`, `raw_prefetch_hits=0`, `llrawproc_pixels=4100544`.
+  - `avg_raw_uint16_ms=15.545` (`64.33 FPS-equivalent`), `avg_llrawproc_total_ms=29.545` (`33.85 FPS-equivalent`), `avg_debayered_frame_ms=45.909` (`21.78 FPS-equivalent`), `avg_render_total_ms=65.545` (`15.26 FPS-equivalent`).
+- Screenshot-backed x4 aggressive GUI smoke passed: `.claude-state\profiling\20260604-x4-prefetch-patch\m16-1327-x4-aggressive-smoke.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=8.6`, `smoke presented FPS=13.144`, `timeline FPS=21.855`.
+  - CPU summary: `avg_raw_uint16_ms=5.256` (`190.26 FPS-equivalent`), `avg_llrawproc_total_ms=5.581` (`179.18 FPS-equivalent`), `avg_debayered_frame_ms=0.860` (`1162.79 FPS-equivalent`), `avg_processing_ms=10.151` (`98.51 FPS-equivalent`), `avg_playback_scale_ms=4.070` (`245.70 FPS-equivalent`), `avg_render_total_ms=35.128` (`28.47 FPS-equivalent`), `avg_draw_total_ms=42.279` (`23.65 FPS-equivalent`), `raw_prefetch_hits=63`.
+  - Presented screenshot: `.claude-state\profiling\20260604-x4-prefetch-patch\screenshots\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `C0DD7F113B935A9E97F987D678E806DE008A340DDFB9067C9BB698842F6919B0`.
+  - Aspect evidence is presented-playback stretch with `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Rebuilt release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 02:47:00 -05:00`, `Length=9043456`, SHA256 `2227C07718CA3CB4DEAC43565531C000FEBB4C6E0E4C5C01FF967043B764B8AB`.
+
+### Cross-checked from prior analysis
+
+- This keeps the earlier x4 sharp/smooth decision intact: full-recon HQ mean23 still disables raw prefetch because the foreground decode path remains cheaper when reconstruction is full-resolution.
+- The app-backed fixture receipt has `focus_pixels` enabled, so it correctly falls back to full-recon and keeps prefetch off even in aggressive x4/x8. That test coverage protects the new conservative gate from becoming a broad “aggressive means prefetch everything” toggle.
+
+### Needs runtime profiling
+
+- Run a longer standard M16 set (`M16-1327`, `M16-1347`, `M16-1446`) comparing x4 sharp, x4 aggressive, and x8 aggressive before making aggressive mode automatic or changing Auto's scale policy.
+- The next model-ranked candidate is no longer x4 foreground raw decode on compatible receipts; it is whichever stage dominates those multi-clip aggressive runs, likely presentation/draw cadence, processing at x4, or full raw decode in clips where prefetch misses.
