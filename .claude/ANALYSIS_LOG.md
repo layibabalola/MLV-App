@@ -562,3 +562,9 @@
 - I exposed the existing playback scale factor actions in the toolbar quality dropdown under `Scale Factor`, so `Auto`, `x1`, `x2`, and `x4` are reachable from the control the user was already opening.
 - Fast Preview remains a speed-biased, lower-fidelity preview mode and can still show Dual ISO cast. High Quality/cast-closed remains the recommended mode for judging color; Bilinear remains the recommended debayer for smooth playback.
 - Validation: Qt app rebuild passed; the profile-backed console suite passed with 67 tests, 867 assertions, 1 expected skip, and 0 failures after updating the receipt loader test for temperature/tint baseline fields.
+
+## 2026-06-04 - pipeline-resolution performance handoff
+
+- Updated the durable playback investigation note and new-session handoff to make the recent x8 FPS breakthrough explicit: the win came from moving x8 Bayer-domain reduction before LLRawProc/Dual ISO and debayer, not from a late output scale alone.
+- The next playback performance pass should start by implementing a stage/domain/resolution/pixel-budget model for x1/x2/x4/x8, then use that model to choose work. The standing question is now: for this preview mode, can each stage be skipped, approximated, cached, or run at preview resolution?
+- The handoff now treats NLE proxy/resolution ladders as a first-class architecture pattern and points the next session at decode-aware/tile-aware reduced preview, x2/x4 early-resolution consistency, fallback telemetry, and separate sharp-preview versus coarse-deep-preview modes.

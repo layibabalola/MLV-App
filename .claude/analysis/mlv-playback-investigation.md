@@ -13832,3 +13832,46 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 
 - Ask Claude Desktop to review screenshots and JSON artifacts if it has filesystem access. If it only has pasted text, provide the prompt plus the key metrics above, then ask it to call out assumptions it could not verify locally.
 - A useful second-review output should be actionable and ranked; broad ideas without file references, risk notes, or validation commands should not be treated as implementation guidance.
+
+## 2026-06-04 - Pipeline-resolution performance model handoff
+
+### Verified locally
+
+- The largest recent playback-FPS breakthrough was the early x8 reduced-Bayer preview path, not the later first-frame presentation cleanup.
+  - Late/conservative x8 still paid much of the full-resolution LLRawProc/Dual ISO/debayer cost and only reduced later.
+  - Early x8 makes preview resolution an upstream pipeline contract for compatible receipts: full raw decode -> x8 Bayer-domain reduction -> LLRawProc/Dual ISO on reduced Bayer -> reduced-frame debayer -> processing/output.
+- The early x8 smoke evidence shows why this distinction matters:
+  - Artifact: `.claude-state/profiling/20260603-playback-scale-x8-early/scale8-early-hqmean23-enabled/M16-1327-30s.json`
+  - `phase4b_path=8` / `phase4b_path_label=x8-full-xy-pre-recon` on all 422 presented frame telemetry lines.
+  - `GUI FPS=76.0`, `smoke presented FPS=13.250`, `timeline FPS=23.360`.
+  - `avg_llrawproc_dual_iso_ms=11.126` (`89.879 FPS-equivalent`) and `avg_debayered_frame_ms=1.175` (`851.064 FPS-equivalent`).
+- The current conceptual gap is not "does the app have scale factors?" It does. The gap is that each playback mode needs an explicit stage-by-stage answer for:
+  - data domain: raw Bayer, reconstructed Bayer, RGB, or processed RGB.
+  - active resolution at that stage.
+  - pixel budget relative to the source frame.
+  - whether the stage is skipped, approximated, cached, or run at preview resolution.
+
+### Cross-checked from prior analysis
+
+- Earlier profiling was useful but too hotspot-local. It pushed work toward loop and bucket optimizations inside the full-resolution path, while the Premiere/NLE framing exposed a stronger route: avoid full-resolution work in preview modes whenever correctness gates allow it.
+- The standing performance-review heuristic should now be:
+  - "If this were an NLE proxy/resolution ladder, where would the proxy contract enter the pipeline?"
+  - "For this preview mode, can this stage be skipped, approximated, cached, or run at preview resolution?"
+  - "If x8 preview still pays full-res Dual ISO/debayer, the scale is too late."
+- Treat NLE-style proxy/resolution ladders as a first-class architecture pattern, not only a UI selector.
+
+### Needs runtime profiling
+
+- Next session should implement a durable playback pipeline-resolution model before more optimization:
+  - Add or update a developer-facing table that lists every major playback stage, its data domain, active width/height for x1/x2/x4/x8, pixel count versus source, and cost telemetry fields.
+  - Add a pixel-budget summary for profile artifacts so a run can show where preview modes still pay full-resolution work.
+  - Extend telemetry if needed so profile JSON can distinguish decode resolution, Bayer reduction resolution, LLRawProc/Dual ISO resolution, debayer resolution, processed16/processed8 resolution, and presentation/upload resolution.
+  - Use that model to rank the next performance plan instead of choosing a hotspot from aggregate timings alone.
+- First opportunities to evaluate with the model:
+  - High impact / high effort: decode-aware or tile-aware reduced preview so x8 does not always pay full raw decode first.
+  - High impact / medium effort: apply the early-resolution contract more consistently to x2/x4 quality/performance preview modes, with explicit fallback reasons.
+  - Medium impact / low effort: surface active/fallback scale and per-stage resolution in smoke/profile output.
+  - Medium impact / medium effort: separate "quality preview" from "performance preview" so users can choose non-blocky smooth playback versus coarse deep preview deliberately.
+- Validation should remain screenshot-backed and FPS-label explicit:
+  - Report `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and stage `FPS-equivalent` values separately.
+  - Use the standard M16 smoke set and presented-frame screenshots when a change touches playback, scale, color, Dual ISO, or processing.
