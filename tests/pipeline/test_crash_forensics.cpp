@@ -48,6 +48,12 @@ TEST(CrashForensics, MessageHandlerCreatesLogFile)
 {
     AppDataRedirect redirect;
 
+    QTemporaryDir overrideDir;
+    ASSERT_TRUE(overrideDir.isValid());
+    overrideDir.setAutoRemove(false);
+    qputenv("MLVAPP_CRASH_FORENSICS_LOG_DIR",
+            overrideDir.path().toLocal8Bit());
+
     /* Simulate argv for install(). */
     QByteArray arg0 = QByteArrayLiteral("pipeline_tests");
     QByteArray arg1 = QByteArrayLiteral("--profile-playback");
@@ -58,6 +64,7 @@ TEST(CrashForensics, MessageHandlerCreatesLogFile)
     if (logPath.isEmpty()) {
         SKIP_TEST("AppDataLocation unavailable in this environment");
     }
+    ASSERT_TRUE(logPath.startsWith(overrideDir.path()));
 
     /* install() is idempotent; verify it returns the same path on a
      * second call. */

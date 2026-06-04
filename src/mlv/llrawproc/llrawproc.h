@@ -54,15 +54,16 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
  *  - HQ Dual ISO recon (operates on raw_info.width/height)
  *  - chroma smooth (size-agnostic)
  *  - 14-bit lift / undo
- * NOT applied (pre-downsample at full res only when enabled):
+ * NOT applied (pre-downsample at full res only when enabled, or skipped by
+ * Aggressive Performance preview):
  *  - focus pixel interpolation (uses absolute sensor coords)
  *  - bad pixel interpolation (same)
  *  - vertical stripes (uses absolute column index)
  *  - pattern noise fix
  *
- * Returns 1 if the scaled application is safe, 0 if not (in which case
- * the caller must fall back to the v1 full-res llrawproc + post-
- * downsample path). */
+ * Returns 1 if the scaled application is safe or intentionally approximate
+ * for aggressive preview, 0 if not (in which case the caller must fall back
+ * to the v1 full-res llrawproc + post-downsample path). */
 int applyLLRawProcObject_with_dims(mlvObject_t * video,
                                    uint16_t * raw_image_buff,
                                    size_t raw_image_size,

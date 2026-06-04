@@ -37,3 +37,8 @@ HEADERS += \
     $$REPO_ROOT/tests/common/frame_compare.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h
+
+win32{
+    WINDOWS_TEST_RUNTIME_DEPLOY = $$relative_path($$REPO_ROOT/tools/testing/deploy-windows-test-runtime.ps1, $$OUT_PWD)
+    QMAKE_POST_LINK += powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $$WINDOWS_TEST_RUNTIME_DEPLOY -TargetDir release -QtBinDir $$[QT_INSTALL_BINS] -ExeName console_tests.exe $$escape_expand(\n\t)
+}

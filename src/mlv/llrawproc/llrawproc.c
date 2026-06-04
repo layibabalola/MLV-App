@@ -34,6 +34,7 @@
 #include "../../debug/StageTiming.h"
 #include "../../processing/raw_processing.h"
 #include "../pipeline_stage_capture.h"
+#include "../video_mlv.h"
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -1501,7 +1502,9 @@ void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t
  * conversion). Pre-downsample stages (focus pixel, bad pixel, vertical
  * stripes, pattern noise) are NOT applied here — the caller must apply
  * them at full res before downsampling, OR ensure they are disabled in
- * the receipt.
+ * the receipt. Aggressive preview is the one deliberate exception: it may
+ * skip those coordinate-sensitive stages to keep reduction ahead of Dual
+ * ISO/debayer for coarse deep preview.
  *
  * Returns 1 if the scaled application is safe (caller can proceed), 0 if
  * a feature in the receipt is incompatible with the scaled path (caller
@@ -1549,11 +1552,16 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     if ((size_t)override_w * (size_t)override_h * sizeof(uint16_t) != raw_image_size) return 0;
 
     /* Bail if the receipt enables features that are unsafe at scaled
-     * resolution. The caller must fall back to the v1 path. */
-    if (shared->focus_pixels) return 0;
-    if (shared->bad_pixels) return 0;
-    if (shared->vertical_stripes) return 0;
-    if (shared->pattern_noise) return 0;
+     * resolution. Aggressive preview explicitly treats those stages as
+     * skippable approximations; sharp/smooth playback falls back to the
+     * conservative full-res path. */
+    if (!mlvPlaybackAggressivePreviewMode())
+    {
+        if (shared->focus_pixels) return 0;
+        if (shared->bad_pixels) return 0;
+        if (shared->vertical_stripes) return 0;
+        if (shared->pattern_noise) return 0;
+    }
 
     memset(&stack_worker, 0, sizeof(stack_worker));
     stack_worker.prev_black_level = -1;

@@ -143,9 +143,9 @@ void pl_downsample_bayer_to_rgb_8x(const uint16_t * bayer_in,
  * pl_downsample_bayer_to_bayer_2x_block_stride8:
  *   Output dim: (in_w/2, in_h/2).
  *   Y stride: keep complete 4-row blocks, block-stride 8 in source space.
- *   X downsample: take alternate Bayer cells (decimation, no averaging in X
- *   would still preserve RGGB; we average for anti-aliasing).
- *   in_w must be a multiple of 2. in_h must be a multiple of 8.
+ *   X downsample: 2-tap same-Bayer-position averaging inside 4-col tiles.
+ *   in_w must be a multiple of 4 so the output width stays Bayer-even.
+ *   in_h must be a multiple of 8.
  *
  * pl_downsample_bayer_to_bayer_8x_block_stride32:
  *   Output dim: (in_w/8, in_h/8).

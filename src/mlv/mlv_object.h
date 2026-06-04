@@ -207,6 +207,8 @@ typedef struct {
      * compared in slot-match logic and folded into the state signature so a
      * scale=1 entry never satisfies a reduced-scale lookup. */
     int processed_8bit_cache_scale[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    int processed_8bit_cache_phase4b_path[MLV_PROCESSED_8BIT_CACHE_SLOTS];
+    int processed_8bit_cache_phase4b_y_crop_rows[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint8_t processed_8bit_cache_state[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint8_t processed_8bit_cache_prefetched[MLV_PROCESSED_8BIT_CACHE_SLOTS];
     uint32_t processed_8bit_cache_generation[MLV_PROCESSED_8BIT_CACHE_SLOTS];

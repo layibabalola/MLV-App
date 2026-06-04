@@ -73,6 +73,25 @@ TEST(PlaybackQualityAutoSampler, OptimisticUntilWindowFull)
     ASSERT_TRUE( d.useHqMean23 );
 }
 
+TEST(PlaybackQualityAutoSampler, AggressiveDualIsoStartsAtHqx8)
+{
+    PlaybackQualityAutoSampler s;
+    auto d = s.decideNextSlot( 30,
+                               /*dualIsoActive*/true,
+                               /*aggressivePreviewActive*/true );
+    ASSERT_EQ( 8, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+
+    /* A partial warmup window should also stay in the deep early-reduced
+     * preview instead of spending the first slot in the slower x4 state. */
+    feed_n( s, 80.0, kWin - 1 );
+    d = s.decideNextSlot( 30,
+                          /*dualIsoActive*/true,
+                          /*aggressivePreviewActive*/true );
+    ASSERT_EQ( 8, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+}
+
 TEST(PlaybackQualityAutoSampler, DowngradesToFastOnCadenceMiss)
 {
     PlaybackQualityAutoSampler s;

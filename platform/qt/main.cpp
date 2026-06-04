@@ -746,6 +746,13 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("8"));
     parser.addOption(secondsOpt);
 
+    const QCommandLineOption startFrameOpt(
+        QStringLiteral("start-frame"),
+        QStringLiteral("Zero-based first frame to seek before GUI smoke playback."),
+        QStringLiteral("frame"),
+        QStringLiteral("0"));
+    parser.addOption(startFrameOpt);
+
     const QCommandLineOption settleOpt(
         QStringLiteral("settle-ms"),
         QStringLiteral("Milliseconds to let the GUI settle after opening the clip and before pressing Play."),
@@ -835,6 +842,13 @@ static int runGuiPlaybackSmoke(QApplication &app)
         return 2;
     }
 
+    const int startFrame = parser.value(startFrameOpt).toInt(&ok);
+    if (!ok || startFrame < 0)
+    {
+        err << "[GUI-SMOKE] ERROR: --start-frame must be 0 or greater.\n";
+        return 2;
+    }
+
     const double settleCpuPercent = parser.value(settleCpuOpt).toDouble(&ok);
     if (!ok)
     {
@@ -879,6 +893,7 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.receiptPath = parser.value(receiptOpt).isEmpty()
         ? QString()
         : QFileInfo(parser.value(receiptOpt)).absoluteFilePath();
+    options.startFrame = startFrame;
     options.durationMs = qRound(seconds * 1000.0);
     options.settleMs = settleMs;
     options.settleCpuPercent = settleCpuPercent;

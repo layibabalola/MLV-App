@@ -3973,8 +3973,14 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             << QStringLiteral("render_thread_rendered_height")
             << QStringLiteral("render_thread_phase4b_path")
             << QStringLiteral("render_thread_phase4b_path_label")
+            << QStringLiteral("render_thread_phase4b_path_source")
             << QStringLiteral("render_thread_phase4b_y_crop_rows")
             << QStringLiteral("render_thread_phase4b_fallback_reason")
+            << QStringLiteral("render_thread_scaled_raw_coordinate_fixes_skipped")
+            << QStringLiteral("render_thread_scaled_skip_focus_pixels")
+            << QStringLiteral("render_thread_scaled_skip_bad_pixels")
+            << QStringLiteral("render_thread_scaled_skip_vertical_stripes")
+            << QStringLiteral("render_thread_scaled_skip_pattern_noise")
             << QStringLiteral("render_thread_preview_mode")
             << QStringLiteral("render_thread_aggressive_preview")
             << QStringLiteral("render_thread_stage_raw_decode_pixels")
@@ -3986,6 +3992,9 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             << QStringLiteral("render_thread_playback_scale_upscaling")
             << QStringLiteral("render_thread_playback_scale_active")
             << QStringLiteral("render_thread_playback_scale_bilinear")
+            << QStringLiteral("processed8_cache_hit")
+            << QStringLiteral("processed8_cache_hit_scale_factor")
+            << QStringLiteral("processed8_prefetch_hit")
             << QStringLiteral("prep_generation")
             << QStringLiteral("prep_active_generation")
             << QStringLiteral("prep_generation_drops")
@@ -4843,6 +4852,20 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     {
         err << "[GUI-SMOKE] ERROR: playback smoke requires at least two frames.\n";
         return 6;
+    }
+    const int startFrame = qMax( 0, options.startFrame );
+    if( startFrame >= totalFrames )
+    {
+        err << "[GUI-SMOKE] ERROR: start frame " << startFrame
+            << " is outside clip length " << totalFrames << ".\n";
+        return 6;
+    }
+    if( startFrame > 0 )
+    {
+        ui->horizontalSliderPosition->setValue( startFrame );
+        m_frameChanged = true;
+        requestFrameRefresh( true, "gui-smoke-start-frame" );
+        qApp->processEvents( QEventLoop::AllEvents );
     }
 
     const bool lookAssistEnabledForSmoke =
@@ -14181,6 +14204,16 @@ int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
     {
         return envScale;
     }
+    const bool scalePolicyAuto = ( envScale == -1 || m_playbackScaleFactorOverride == 0 );
+    if( scalePolicyAuto
+     && m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto )
+     && mlvPlaybackAggressivePreviewMode() != 0
+     && m_fileLoaded
+     && m_pMlvObject
+     && llrpGetDualIsoMode( m_pMlvObject ) )
+    {
+        return 8;
+    }
     if ( envScale == -1 )
     {
         const int active = m_playbackQualityActiveScale;
@@ -16101,6 +16134,7 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeLastDebayerEngineMode = -1;
     m_playbackSmokeDebayerBasicU16Avx2AvailableFrames = 0;
     m_playbackSmokeDebayerBasicU16Avx2UsedFrames = 0;
+    m_playbackSmokeProcessed8CacheHits = 0;
     m_playbackSmokeProcessed8PrefetchHits = 0;
     m_playbackSmokeRawPrefetchHits = 0;
     m_playbackSmokeQueuedPlaybackDropSum = 0;
@@ -16483,6 +16517,18 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryIntValue( timing, "render_thread_phase4b_path" );
     const QString phase4bPathLabel =
         timing.value( QStringLiteral("render_thread_phase4b_path_label") ).toString();
+    const QString phase4bFallbackReason =
+        timing.value( QStringLiteral("render_thread_phase4b_fallback_reason") ).toString();
+    const bool skippedScaledRawCoordinateFixes =
+        telemetryBoolValue( timing, "render_thread_scaled_raw_coordinate_fixes_skipped" );
+    const bool skippedScaledFocusPixels =
+        telemetryBoolValue( timing, "render_thread_scaled_skip_focus_pixels" );
+    const bool skippedScaledBadPixels =
+        telemetryBoolValue( timing, "render_thread_scaled_skip_bad_pixels" );
+    const bool skippedScaledVerticalStripes =
+        telemetryBoolValue( timing, "render_thread_scaled_skip_vertical_stripes" );
+    const bool skippedScaledPatternNoise =
+        telemetryBoolValue( timing, "render_thread_scaled_skip_pattern_noise" );
     const int queuedPlaybackDrops =
         telemetryIntValue( timing, "render_thread_queued_playback_drops_before_start" );
     const double borrowedPreparedRgb8Bytes =
@@ -16789,6 +16835,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         ++m_playbackSmokePrepInlinePresentFrames;
     if( telemetryBoolValue( timing, "processed8_direct_path_active" ) )
         ++m_playbackSmokeProcessed8DirectPathFrames;
+    if( telemetryBoolValue( timing, "processed8_cache_hit" ) )
+        ++m_playbackSmokeProcessed8CacheHits;
     if( borrowedPreparedRgb8Bytes > 0.0 )
     {
         ++m_playbackSmokeBorrowedPreparedRgb8Frames;
@@ -16884,7 +16932,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "processed16_to_8bit_ms=%22 playback_scale_ms=%23 "
                    "draw_image_ms=%24 draw_present_ms=%25 draw_advance_ms=%26 "
                    "draw_scopes_ms=%27 direct8=%28 processed8_prefetch=%29 "
-                   "raw_prefetch=%30 phase4b_path=%31 phase4b_path_label=%32" )
+                    "raw_prefetch=%30 phase4b_path=%31 phase4b_path_label=%32 "
+                    "phase4b_fallback_reason=%33 skipped_scaled_raw_fixes=%34 "
+                    "skipped_focus_pixels=%35 skipped_bad_pixels=%36 "
+                    "skipped_vertical_stripes=%37 skipped_pattern_noise=%38" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( rawUint16Ms, 0, 'f', 3 )
@@ -16914,9 +16965,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( drawScopesMs, 0, 'f', 3 )
                    .arg( bool01( telemetryBoolValue( timing, "processed8_direct_path_active" ) ) )
                    .arg( bool01( telemetryBoolValue( timing, "processed8_prefetch_hit" ) ) )
-                   .arg( bool01( telemetryBoolValue( timing, "raw_uint16_prefetch_hit" ) ) )
-                   .arg( phase4bPath )
-                   .arg( phase4bPathLabel );
+                    .arg( bool01( telemetryBoolValue( timing, "raw_uint16_prefetch_hit" ) ) )
+                    .arg( phase4bPath )
+                    .arg( phase4bPathLabel )
+                    .arg( phase4bFallbackReason.isEmpty()
+                          ? QStringLiteral("none")
+                          : phase4bFallbackReason )
+                    .arg( bool01( skippedScaledRawCoordinateFixes ) )
+                    .arg( bool01( skippedScaledFocusPixels ) )
+                    .arg( bool01( skippedScaledBadPixels ) )
+                    .arg( bool01( skippedScaledVerticalStripes ) )
+                    .arg( bool01( skippedScaledPatternNoise ) );
         if( dualIsoFull20Valid )
         {
             qInfo().noquote()
@@ -17384,6 +17443,16 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessed16CacheStoreSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessed8CacheStoreSumMs ), 0, 'f', 3 );
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.processed8_cache_summary session=%1 "
+               "processed8_cache_hits=%2 processed8_prefetch_hits=%3 "
+               "processed8_direct_path_frames=%4" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( m_playbackSmokeProcessed8CacheHits )
+               .arg( m_playbackSmokeProcessed8PrefetchHits )
+               .arg( m_playbackSmokeProcessed8DirectPathFrames );
 
     qInfo().noquote()
         << QStringLiteral(

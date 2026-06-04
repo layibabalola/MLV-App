@@ -126,6 +126,8 @@ win32{
     # dbghelp: CrashForensics links MiniDumpWriteDump via dbghelp.
     LIBS += -ldbghelp
     QMAKE_CXXFLAGS += -fopenmp -std=c++17 -ftree-vectorize
+    WINDOWS_TEST_RUNTIME_DEPLOY = $$relative_path($$REPO_ROOT/tools/testing/deploy-windows-test-runtime.ps1, $$OUT_PWD)
+    QMAKE_POST_LINK += powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $$WINDOWS_TEST_RUNTIME_DEPLOY -TargetDir release -QtBinDir $$[QT_INSTALL_BINS] $$escape_expand(\n\t)
 }
 
 linux-g++*{

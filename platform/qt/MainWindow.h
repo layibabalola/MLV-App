@@ -133,6 +133,7 @@ public:
     {
         QString inputPath;
         QString receiptPath;
+        int startFrame = 0;
         int durationMs = 8000;
         int settleMs = 2500;
         double settleCpuPercent = -1.0;
@@ -685,7 +686,7 @@ private:
     AudioWave *m_pAudioWave;
     AudioPlayback *m_pAudioPlayback;
     RenderFrameThread *m_pRenderThread;
-    mlvObject_t *m_pMlvObject;
+    mlvObject_t *m_pMlvObject = nullptr;
     processingObject_t *m_pProcessingObject;
     QGraphicsPixmapItem *m_pGraphicsItem;
     GradientElement *m_pGradientElement;
@@ -730,7 +731,7 @@ private:
     double m_newPosDropMode;
     bool m_dontDraw;
     bool m_frameStillDrawing;
-    bool m_fileLoaded;
+    bool m_fileLoaded = false;
     bool m_inOpeningProcess;
     bool m_setSliders;
     int m_timerId;
@@ -1071,6 +1072,7 @@ private:
     int m_playbackSmokeLastDebayerEngineMode = -1;
     int m_playbackSmokeDebayerBasicU16Avx2AvailableFrames = 0;
     int m_playbackSmokeDebayerBasicU16Avx2UsedFrames = 0;
+    int m_playbackSmokeProcessed8CacheHits = 0;
     int m_playbackSmokeProcessed8PrefetchHits = 0;
     int m_playbackSmokeRawPrefetchHits = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropSum = 0;
