@@ -132,6 +132,10 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_matrix_ms = 
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_curves_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_mode = 0;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_aggressive_preview_mode = 0;
+
+static int g_processing_shadows_highlights_probe_initialized = 0;
+static int g_processing_shadows_highlights_probe_mode = -1;
 
 static int processing_env_flag_enabled(const char * value)
 {
@@ -177,15 +181,13 @@ static int processing_shadows_highlights_curve_index_mask_enabled(void)
 
 static int processing_shadows_highlights_probe_mode(void)
 {
-    static int initialized = 0;
-    static int probe_mode = -1;
-    if( !initialized )
+    if( !g_processing_shadows_highlights_probe_initialized )
     {
-        probe_mode = processing_parse_probe_mode(
+        g_processing_shadows_highlights_probe_mode = processing_parse_probe_mode(
             getenv("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE"), 1);
-        initialized = 1;
+        g_processing_shadows_highlights_probe_initialized = 1;
     }
-    return probe_mode;
+    return g_processing_shadows_highlights_probe_mode;
 }
 
 static int processing_main_prelude_probe_mode(void)
@@ -374,6 +376,22 @@ void processingSetPlaybackPreviewMode(int enabled)
 int processingPlaybackPreviewModeEnabled(void)
 {
     return g_processing_playback_preview_mode;
+}
+
+void processingSetPlaybackAggressivePreviewMode(int enabled)
+{
+    g_processing_playback_aggressive_preview_mode = enabled ? 1 : 0;
+}
+
+int processingPlaybackAggressivePreviewModeEnabled(void)
+{
+    return g_processing_playback_aggressive_preview_mode;
+}
+
+void processingResetShadowsHighlightsProbeModeCacheForTesting(void)
+{
+    g_processing_shadows_highlights_probe_initialized = 0;
+    g_processing_shadows_highlights_probe_mode = -1;
 }
 
 static void processing_core_timing_reset(processing_core_timing_t * timing)
@@ -1021,10 +1039,18 @@ void applyProcessingObject( processingObject_t * processing,
 
     if( shadows_highlights_active )
     {
-        const int use_halfres_rbf =
+        const int halfres_even_dimensions =
             (imageX >= 2) && (imageY >= 2)
          && ((imageX & 1) == 0)
          && ((imageY & 1) == 0);
+        const int halfres_aggressive_preview_odd_height =
+            processingPlaybackPreviewModeEnabled()
+         && processingPlaybackAggressivePreviewModeEnabled()
+         && (imageX >= 2) && (imageY >= 3)
+         && ((imageX & 1) == 0)
+         && ((imageY & 1) != 0);
+        const int use_halfres_rbf =
+            halfres_even_dimensions || halfres_aggressive_preview_odd_height;
 
         /* Blur diameter depends on image diagonal */
         int blur_radius = (int)(((sqrt(pow(imageX,2.0)+pow(imageY,2.0)) / 440.0 - 1.0)/2 + 0.5)*4.0);
@@ -1042,6 +1068,7 @@ void applyProcessingObject( processingObject_t * processing,
                     shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
                 const int half_w = imageX >> 1;
                 const int half_h = imageY >> 1;
+                const int halfres_output_h = half_h << 1;
                 const float half_sigma_spatial = 0.0025f * 0.5f;
                 buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
                 buffer_set_size(processing->shadows_highlights.blur_image_half_in, half_w, half_h);
@@ -1094,6 +1121,19 @@ void applyProcessingObject( processingObject_t * processing,
                                              half_w,
                                              half_h,
                                              threads);
+                if( halfres_output_h < imageY )
+                {
+                    uint16_t * blur = get_buffer(processing->shadows_highlights.blur_image);
+                    const size_t row_words = (size_t)imageX * 3u;
+                    const uint16_t * src_row =
+                        blur + (size_t)(halfres_output_h - 1) * row_words;
+                    for( int y = halfres_output_h; y < imageY; ++y )
+                    {
+                        memcpy(blur + (size_t)y * row_words,
+                               src_row,
+                               row_words * sizeof(uint16_t));
+                    }
+                }
                 if( shadows_highlights_probe_enabled )
                 {
                     g_processing_last_shadows_highlights_filter_halfres_upsample_ms +=

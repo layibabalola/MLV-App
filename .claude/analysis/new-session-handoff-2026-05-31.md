@@ -255,3 +255,25 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
 - Next session:
   - Run the same Auto aggressive smoke on `M16-1446`, then aggregate the new post-queue multi-clip Auto aggressive average against the previous `15.670` smoke-presented FPS baseline.
   - Choose the next change from the new post-queue profile. Likely candidates are remaining render work around `35-40 ms` (`24.69-28.19 FPS-equivalent`), processing/shadows-highlights prep, and the still-full raw decode floor for explicit x8.
+
+## 2026-06-04 Addendum - Aggressive Odd-Height Shadows/Highlights Preview
+
+- Implemented the next model-selected processing change:
+  - Aggressive playback preview now permits the half-res shadows/highlights RGB blur on even-width, odd-height preview frames; it processes the even region and fills the trailing output row from the previous generated row.
+  - Sharp/smooth preview keeps the conservative full-res RGB blur path for odd heights.
+  - The aggressive TLS state is restored across render-thread, processed8 direct, and processed8 prefetch paths.
+- Focused validation passed:
+  - Rebuilt `tests\build-ci-pipeline`.
+  - `pipeline_tests.exe --gtest_filter=ProcessingFilters.*`, `tests=142`, `assertions=30`, `failed=0`.
+- Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 04:53:48 -05:00`, `Length=9054208`, SHA256 `45B8DF86B60759B89D44B5FF20DCE176AD298BEE38725B07A766948B57EA76DA`.
+- Screenshot-backed explicit x8 aggressive smoke passed on `M16-1446`: `.claude-state\profiling\20260604-post-queue-render-cost\M16-1446-scale8-aggressive-sh-halfres-patch.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=142.0`, `smoke presented FPS=29.879`, `timeline FPS=22.765`.
+  - `avg_render_total_ms=29.234` (`34.21 FPS-equivalent`), `avg_render_work_ms=21.377` (`46.78 FPS-equivalent`), `avg_draw_total_ms=10.033` (`99.67 FPS-equivalent`), `avg_processing_ms=3.359` (`297.71 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=2.286` (`437.45 FPS-equivalent`), `avg_sh_filter_halfres_rbf_ms=1.949` (`513.08 FPS-equivalent`).
+  - Previous active-x8 baseline on the same clip was `.claude-state\profiling\20260604-post-queue-render-cost\M16-1446-auto-aggressive-inline-baseline-expected8.json`: `smoke presented FPS=19.924`, `avg_render_total_ms=56.261 ms` (`17.77 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=6.435 ms` (`155.40 FPS-equivalent`). Caveat: baseline was Auto after settling to active x8; validation run forced explicit x8.
+- Screenshot-backed explicit x4 aggressive smoke also passed on `M16-1327`: `.claude-state\profiling\20260604-post-queue-render-cost\M16-1327-scale4-aggressive-sh-halfres-patch.json`, validation `ok=true`.
+  - Bottom-left `GUI FPS=111.0` in summary and `100.0` in the screenshot-time crop, `smoke presented FPS=19.985`, `timeline FPS=22.299`.
+  - `avg_render_total_ms=54.800` (`18.25 FPS-equivalent`), `avg_render_work_ms=37.168` (`26.91 FPS-equivalent`), `avg_processing_ms=9.332` (`107.16 FPS-equivalent`), `avg_processing_shadows_highlights_prep_ms=4.079` (`245.16 FPS-equivalent`), `avg_sh_filter_halfres_rbf_ms=3.305` (`302.57 FPS-equivalent`).
+- Next session:
+  - Treat x8 as the clean win from this change.
+  - Treat x4 as branch proof only; its next iteration should target the current dominant stage from fresh telemetry.
+  - Auto aggressive on `M16-1446` bounced between final x4 and x8 in short exploratory smokes, so use a longer or more controlled Auto profile before making a policy conclusion.
