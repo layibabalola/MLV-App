@@ -3,7 +3,8 @@
  * Verifies the PlaybackQualityAutoSampler's adaptive logic:
  *   - Until 16 frames are recorded, the sampler optimistically picks HQ x4.
  *   - With cadences below frame budget, sampler stays at HQ x4 (steady).
- *   - With cadences above frame budget, sampler downgrades to Fast.
+ *   - With cadences above frame budget, Sharp/Smooth downgrades to Fast x4.
+ *   - With cadences above frame budget, Aggressive switches to HQ x8.
  *   - With huge headroom and a non-DI clip, sampler upgrades to HQ x2.
  *   - Dual-ISO clips never get x2; they stay at x4 even with headroom.
  *   - reset() clears the window and re-enters optimistic warmup. */
@@ -45,15 +46,34 @@ TEST(PlaybackQualityAutoSampler, DowngradesToFastOnCadenceMiss)
     /* 30 fps target = 33.33 ms budget. Feed 80 ms cadence (way over). */
     feed_n( s, 80.0, kWin );
     auto d = s.decideNextSlot( 30, /*dualIsoActive*/false );
-    ASSERT_EQ( 1, d.scaleFactor );
+    ASSERT_EQ( 4, d.scaleFactor );
     ASSERT_FALSE( d.useHqMean23 );
 
     /* Same logic at 24 fps target. */
     PlaybackQualityAutoSampler s24;
     feed_n( s24, 60.0, kWin );
     d = s24.decideNextSlot( 24, false );
-    ASSERT_EQ( 1, d.scaleFactor );
+    ASSERT_EQ( 4, d.scaleFactor );
     ASSERT_FALSE( d.useHqMean23 );
+}
+
+TEST(PlaybackQualityAutoSampler, AggressiveCadenceMissUsesHqx8)
+{
+    PlaybackQualityAutoSampler s;
+    feed_n( s, 80.0, kWin );
+    auto d = s.decideNextSlot( 30,
+                               /*dualIsoActive*/true,
+                               /*aggressivePreviewActive*/true );
+    ASSERT_EQ( 8, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+
+    PlaybackQualityAutoSampler nonDi;
+    feed_n( nonDi, 80.0, kWin );
+    d = nonDi.decideNextSlot( 30,
+                              /*dualIsoActive*/false,
+                              /*aggressivePreviewActive*/true );
+    ASSERT_EQ( 8, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
 }
 
 TEST(PlaybackQualityAutoSampler, StaysAtHqx4WhenMeetingTarget)
@@ -110,7 +130,8 @@ TEST(PlaybackQualityAutoSampler, ResetReturnsToOptimisticWarmup)
     PlaybackQualityAutoSampler s;
     feed_n( s, 80.0, kWin );
     auto d = s.decideNextSlot( 30, false );
-    ASSERT_EQ( 1, d.scaleFactor ); /* downgraded */
+    ASSERT_EQ( 4, d.scaleFactor ); /* downgraded */
+    ASSERT_FALSE( d.useHqMean23 );
 
     s.reset();
     d = s.decideNextSlot( 30, false );
@@ -124,7 +145,8 @@ TEST(PlaybackQualityAutoSampler, SlidingWindowEvictsOldSamples)
     /* Fill with 80 ms (over budget) ... */
     feed_n( s, 80.0, kWin );
     auto d = s.decideNextSlot( 30, false );
-    ASSERT_EQ( 1, d.scaleFactor );
+    ASSERT_EQ( 4, d.scaleFactor );
+    ASSERT_FALSE( d.useHqMean23 );
 
     /* ... then feed 16 fast frames; the slow ones should be fully evicted. */
     feed_n( s, 15.0, kWin );
@@ -141,5 +163,6 @@ TEST(PlaybackQualityAutoSampler, IgnoresNonPositiveFrameMs)
     s.recordFrameMs( -1.0 );
     feed_n( s, 80.0, kWin ); /* still triggers the over-budget downgrade */
     auto d = s.decideNextSlot( 30, false );
-    ASSERT_EQ( 1, d.scaleFactor );
+    ASSERT_EQ( 4, d.scaleFactor );
+    ASSERT_FALSE( d.useHqMean23 );
 }

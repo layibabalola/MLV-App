@@ -170,3 +170,15 @@ Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/pla
   - CPU summary: `avg_raw_uint16_ms=5.256` (`190.26 FPS-equivalent`), `avg_llrawproc_total_ms=5.581` (`179.18 FPS-equivalent`), `avg_debayered_frame_ms=0.860` (`1162.79 FPS-equivalent`), `avg_processing_ms=10.151` (`98.51 FPS-equivalent`), `avg_playback_scale_ms=4.070` (`245.70 FPS-equivalent`), `avg_render_total_ms=35.128` (`28.47 FPS-equivalent`), `avg_draw_total_ms=42.279` (`23.65 FPS-equivalent`), `raw_prefetch_hits=63`.
   - Presented screenshot SHA256 `C0DD7F113B935A9E97F987D678E806DE008A340DDFB9067C9BB698842F6919B0`; aspect evidence remains presented-playback stretch with `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
 - Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 02:47:00 -05:00`, `Length=9043456`, SHA256 `2227C07718CA3CB4DEAC43565531C000FEBB4C6E0E4C5C01FF967043B764B8AB`.
+
+## 2026-06-04 Addendum - Auto Aggressive Uses x8 On Cadence Miss
+
+- Multi-clip aggressive profiling across `M16-1327`, `M16-1347`, and `M16-1446` made the next policy choice clear:
+  - x4 aggressive average: `GUI FPS=19.000`, `smoke presented FPS=13.067`, `timeline FPS=21.686`, `avg_render_total_ms=37.892` (`26.39 FPS-equivalent`), `avg_draw_total_ms=38.816` (`25.76 FPS-equivalent`).
+  - x8 aggressive average: `GUI FPS=24.333`, `smoke presented FPS=15.615`, `timeline FPS=22.091`, `avg_render_total_ms=25.893` (`38.62 FPS-equivalent`), `avg_draw_total_ms=35.166` (`28.44 FPS-equivalent`).
+- Implemented the policy change in `PlaybackQualityAutoSampler`:
+  - Sharp/Smooth Auto cadence misses now fall back to fixed Fast's x4/no-HQ contract.
+  - Aggressive Auto cadence misses now choose HQ x8, preserving the early Bayer-domain x8 path before LLRawProc/Dual ISO and debayer.
+- Focused console validation passed: `console_tests.exe --check-golden`, `tests=90`, `assertions=320`, `skipped=29`, `failed=0`; new coverage includes `PlaybackQualityAutoSampler.AggressiveCadenceMissUsesHqx8`.
+- Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 03:14:36 -05:00`, `Length=9043456`, SHA256 `23C4F48E0718C5E4AEF13380EE105C83BBA20D1A724957F4E5732345D4007C6E`.
+- Remaining validation gap: the release GUI smoke harness can force scale but not playback quality mode. A settings-based Auto/aggressive smoke attempt hit a pre-playback `0xC0000005` crash; user settings were restored and HQ/x2 smoke ran normally afterward. Add a first-class quality-mode smoke override before claiming screenshot-backed Auto switching coverage.
