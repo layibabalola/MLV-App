@@ -2682,6 +2682,12 @@ void MainWindow::playbackPrepThreadLoop( void )
             m_playbackPrepPendingValid = false;
         }
 
+        const double workerStart = mlv_stage_timing_now();
+        if( task.enqueueTime > 0.0 && workerStart >= task.enqueueTime )
+        {
+            task.workerQueueMs = ( workerStart - task.enqueueTime ) * 1000.0;
+        }
+
         const uint64_t latestBeforeCompute =
             m_latestRequestedSerial.load( std::memory_order_acquire );
         const uint64_t activeGenerationBeforeCompute =
@@ -2699,6 +2705,8 @@ void MainWindow::playbackPrepThreadLoop( void )
         }
 
         PlaybackPrepResult result = buildPlaybackPrepResult( task );
+        result.workerQueueMs = task.workerQueueMs;
+        result.workerTotalMs = ( mlv_stage_timing_now() - workerStart ) * 1000.0;
 
         // Post-compute staleness check: if the UI has moved on while we were
         // building this frame, drop it at the worker and let the presenter
@@ -2726,6 +2734,7 @@ void MainWindow::playbackPrepThreadLoop( void )
             continue;
         }
 
+        result.resultReadyTime = mlv_stage_timing_now();
         {
             std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
             if( !m_playbackPrepResults.empty() )
@@ -2791,6 +2800,15 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     RenderFrameThread::ReadyFrame readyFrame = task.readyFrame;
     const uint64_t display_frame = task.displayFrame;
     const double display_start = task.displayStart;
+    const double prepPresentStart = mlv_stage_timing_now();
+    const double prepResultQueueMs =
+        ( result.resultReadyTime > 0.0 && prepPresentStart >= result.resultReadyTime )
+            ? ( prepPresentStart - result.resultReadyTime ) * 1000.0
+            : 0.0;
+    const double prepElapsedBeforePresentMs =
+        ( display_start > 0.0 && prepPresentStart >= display_start )
+            ? ( prepPresentStart - display_start ) * 1000.0
+            : 0.0;
 
     const int sourceWidth = task.sourceWidth;
     const int sourceHeight = task.sourceHeight;
@@ -2810,6 +2828,25 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     const bool playbackProcessingSubsetActive =
         (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
         && task.gpuPresentationOptions.previewProcessing.enabled;
+
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_pre_enqueue_ms"),
+        task.preEnqueueMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_worker_queue_ms"),
+        result.workerQueueMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_worker_build_ms"),
+        result.imageBuildMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_worker_total_ms"),
+        result.workerTotalMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_result_queue_ms"),
+        prepResultQueueMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_elapsed_before_present_ms"),
+        prepElapsedBeforePresentMs );
 
     const uint64_t display_signature =
         playbackProcessingSubsetActive
@@ -3042,6 +3079,9 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                                                                  std::memory_order_acquire ) ) );
     readyFrame.stageTimingTelemetry.insert( QStringLiteral("draw_frame_ready_scopes_ms"),
                                                 m_lastDrawFrameReadyScopesMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_total_before_finish_ms"),
+        ( mlv_stage_timing_now() - display_start ) * 1000.0 );
 
     finishPresentedFrame( display_frame,
                           readyFrame,
@@ -16030,6 +16070,12 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeDrawScopesSumMs = 0.0;
     m_playbackSmokeDrawTotalSumMs = 0.0;
     m_playbackSmokeDrawTotalMaxMs = 0.0;
+    m_playbackSmokePrepPreEnqueueSumMs = 0.0;
+    m_playbackSmokePrepWorkerQueueSumMs = 0.0;
+    m_playbackSmokePrepWorkerBuildSumMs = 0.0;
+    m_playbackSmokePrepWorkerTotalSumMs = 0.0;
+    m_playbackSmokePrepResultQueueSumMs = 0.0;
+    m_playbackSmokePrepTotalBeforeFinishSumMs = 0.0;
     m_playbackSmokeProcessed8DirectPathFrames = 0;
     m_playbackSmokeBorrowedPreparedRgb8Frames = 0;
     m_playbackSmokeOwnedPreparedRgb8Frames = 0;
@@ -16431,6 +16477,18 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "playback_prep_moved_prepared_rgb8_bytes" );
     const double qimagePreparedRgb8Bytes =
         telemetryDoubleValue( timing, "playback_prep_qimage_prepared_rgb8_bytes" );
+    const double prepPreEnqueueMs =
+        telemetryDoubleValue( timing, "playback_prep_pre_enqueue_ms" );
+    const double prepWorkerQueueMs =
+        telemetryDoubleValue( timing, "playback_prep_worker_queue_ms" );
+    const double prepWorkerBuildMs =
+        telemetryDoubleValue( timing, "playback_prep_worker_build_ms" );
+    const double prepWorkerTotalMs =
+        telemetryDoubleValue( timing, "playback_prep_worker_total_ms" );
+    const double prepResultQueueMs =
+        telemetryDoubleValue( timing, "playback_prep_result_queue_ms" );
+    const double prepTotalBeforeFinishMs =
+        telemetryDoubleValue( timing, "playback_prep_total_before_finish_ms" );
     const double drawTotalMs = m_lastDrawFrameReadyTotalMs;
     const double drawImageMs = m_lastDrawFrameReadyImageMs;
     const double drawPresentMs = m_lastDrawFrameReadyPresentMs;
@@ -16697,6 +16755,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeDrawAdvanceSumMs += drawAdvanceMs;
     m_playbackSmokeDrawScopesSumMs += drawScopesMs;
     m_playbackSmokeDrawTotalSumMs += drawTotalMs;
+    m_playbackSmokePrepPreEnqueueSumMs += prepPreEnqueueMs;
+    m_playbackSmokePrepWorkerQueueSumMs += prepWorkerQueueMs;
+    m_playbackSmokePrepWorkerBuildSumMs += prepWorkerBuildMs;
+    m_playbackSmokePrepWorkerTotalSumMs += prepWorkerTotalMs;
+    m_playbackSmokePrepResultQueueSumMs += prepResultQueueMs;
+    m_playbackSmokePrepTotalBeforeFinishSumMs += prepTotalBeforeFinishMs;
     if( telemetryBoolValue( timing, "processed8_direct_path_active" ) )
         ++m_playbackSmokeProcessed8DirectPathFrames;
     if( borrowedPreparedRgb8Bytes > 0.0 )
@@ -17047,7 +17111,12 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "prep_replaced_after=%38 still_drawing=%39 pending_advance=%40 "
                "preroll_requested=%41 play_to_first_valid=%42 play_to_first_ms=%43 "
                "frame_telemetry=%44 gui_fps_status_text=\"%45\" "
-               "gui_fps_status_value=%46" )
+               "gui_fps_status_value=%46 avg_playback_prep_pre_enqueue_ms=%47 "
+               "avg_playback_prep_worker_queue_ms=%48 "
+               "avg_playback_prep_worker_build_ms=%49 "
+               "avg_playback_prep_worker_total_ms=%50 "
+               "avg_playback_prep_result_queue_ms=%51 "
+               "avg_playback_prep_total_before_finish_ms=%52" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -17097,7 +17166,13 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( m_lastPlayToFirstFrameMs, 0, 'f', 3 )
                .arg( bool01( m_playbackSmokeFrameTelemetry ) )
                .arg( guiFpsStatusText )
-               .arg( guiFpsStatusValue, 0, 'f', 3 );
+               .arg( guiFpsStatusValue, 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePrepPreEnqueueSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePrepWorkerQueueSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePrepWorkerBuildSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePrepWorkerTotalSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePrepResultQueueSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePrepTotalBeforeFinishSumMs ), 0, 'f', 3 );
 
     qInfo().noquote()
         << QStringLiteral(
@@ -19158,6 +19233,11 @@ void MainWindow::drawFrameReady()
     task.displayPreviewCachingAllowed = displayPreviewCachingAllowed;
     task.playbackFastScaleActive = readyFrame.playbackFastScaleActive;
     task.gpuPresentationOptions = gpuPresentationOptions;
+    task.enqueueTime = mlv_stage_timing_now();
+    task.preEnqueueMs =
+        ( display_start > 0.0 && task.enqueueTime >= display_start )
+            ? ( task.enqueueTime - display_start ) * 1000.0
+            : 0.0;
     const size_t borrowedSourceImageBytes =
         (sourceImageBytes > 0 && readyFrame.rawImage8) ? sourceImageBytes : 0;
     const bool needsOwnedRgb16 =
@@ -19198,6 +19278,9 @@ void MainWindow::drawFrameReady()
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_borrowed_scaled_rgb8_bytes"),
         static_cast<qint64>( borrowedPlaybackScaledImageBytes ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_pre_enqueue_ms"),
+        task.preEnqueueMs );
     task.rebindOwnedImagePointers();
 
     enqueuePlaybackPrepTask( task );

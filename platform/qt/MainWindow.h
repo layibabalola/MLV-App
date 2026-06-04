@@ -596,6 +596,9 @@ private:
         uint64_t requestSerial = 0;
         uint64_t presentationGeneration = 0;
         double displayStart = 0.0;
+        double enqueueTime = 0.0;
+        double preEnqueueMs = 0.0;
+        double workerQueueMs = 0.0;
         uint64_t displayFrame = 0;
         double stretchX = 1.0;
         double stretchY = 1.0;
@@ -668,6 +671,9 @@ private:
         bool preparedImageMoved = false;
         uint8_t underOver = 0;
         double imageBuildMs = 0.0;
+        double workerQueueMs = 0.0;
+        double workerTotalMs = 0.0;
+        double resultReadyTime = 0.0;
         QImage preparedOwnedImage;
         std::vector<uint8_t> preparedImage;
         std::vector<uint8_t> scopeSourceImage;
@@ -1034,6 +1040,12 @@ private:
     double m_playbackSmokeDrawScopesSumMs = 0.0;
     double m_playbackSmokeDrawTotalSumMs = 0.0;
     double m_playbackSmokeDrawTotalMaxMs = 0.0;
+    double m_playbackSmokePrepPreEnqueueSumMs = 0.0;
+    double m_playbackSmokePrepWorkerQueueSumMs = 0.0;
+    double m_playbackSmokePrepWorkerBuildSumMs = 0.0;
+    double m_playbackSmokePrepWorkerTotalSumMs = 0.0;
+    double m_playbackSmokePrepResultQueueSumMs = 0.0;
+    double m_playbackSmokePrepTotalBeforeFinishSumMs = 0.0;
     int m_playbackSmokeProcessed8DirectPathFrames = 0;
     int m_playbackSmokeBorrowedPreparedRgb8Frames = 0;
     int m_playbackSmokeOwnedPreparedRgb8Frames = 0;

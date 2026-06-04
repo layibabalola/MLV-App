@@ -14074,3 +14074,54 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 
 - Repeat the Auto sharp/aggressive comparison across `M16-1347` and `M16-1446` before making aggressive behavior automatic.
 - The next performance target should still be selected from the stage model after these Auto smokes. On `M16-1327`, aggressive x8 reduced `avg_render_total_ms` from `143.079 ms` (`6.99 FPS-equivalent`) to `26.955 ms` (`37.10 FPS-equivalent`) versus sharp x4, but the remaining gap between render work and `smoke presented FPS` suggests presentation cadence / queued presentation replacement still needs profiling before a decoder rewrite.
+
+## 2026-06-04 - Auto multi-clip aggregate and playback-prep timing split
+
+### Verified locally
+
+- Extended the Auto sharp/aggressive comparison across `M16-1327`, `M16-1347`, and `M16-1446`.
+- Multi-clip Auto aggressive average:
+  - `smoke presented FPS=15.670`, `timeline FPS=22.686`.
+  - `avg_present_interval_ms=60.481` (`16.53 FPS-equivalent`), `avg_render_total_ms=29.875` (`33.47 FPS-equivalent`), `avg_draw_total_ms=33.380` (`29.96 FPS-equivalent`).
+  - Stage averages: `avg_raw_uint16_ms=6.247` (`160.09 FPS-equivalent`), `avg_llrawproc_total_ms=4.557` (`219.43 FPS-equivalent`), `avg_debayered_frame_ms=0.863` (`1158.30 FPS-equivalent`), `avg_processing_ms=5.270` (`189.74 FPS-equivalent`), `avg_processed16_ms=19.858` (`50.36 FPS-equivalent`), `avg_processed8_ms=23.648` (`42.29 FPS-equivalent`), `avg_playback_scale_ms=4.189` (`238.72 FPS-equivalent`).
+  - Prep churn: average `prep_stale_drops=119.333`, `prep_replaced_after=107.333`.
+- Multi-clip Auto sharp/smooth average:
+  - `smoke presented FPS=9.108`, `timeline FPS=22.085`.
+  - `avg_present_interval_ms=100.892` (`9.91 FPS-equivalent`), `avg_render_total_ms=124.196` (`8.05 FPS-equivalent`), `avg_draw_total_ms=33.294` (`30.04 FPS-equivalent`).
+  - Stage averages: `avg_raw_uint16_ms=12.919` (`77.41 FPS-equivalent`), `avg_llrawproc_total_ms=31.537` (`31.71 FPS-equivalent`), `avg_debayered_frame_ms=45.801` (`21.83 FPS-equivalent`), `avg_processing_ms=11.909` (`83.97 FPS-equivalent`), `avg_processed16_ms=61.614` (`16.23 FPS-equivalent`), `avg_processed8_ms=65.865` (`15.18 FPS-equivalent`), `avg_playback_scale_ms=17.198` (`58.15 FPS-equivalent`).
+- Interpretation:
+  - Aggressive Auto x8 is `1.72x` the multi-clip `smoke presented FPS` of sharp/smooth Auto x4 and cuts `avg_render_total_ms` by `4.16x`.
+  - The remaining aggressive gap is no longer LLRawProc/debayer. The model now points to presentation cadence, result-queue latency, and dropped stale prepared results before a decoder rewrite.
+  - Bottom-left `GUI FPS` labels are still useful as screenshot evidence but can be noisy at the end of short runs; one aggressive run reported `500.0` and one repeat reported `58.0`, so use `smoke presented FPS` and `timeline FPS` for stable comparisons.
+
+### Implemented in this work block
+
+- Added playback-prep timing fields to the presented-frame telemetry path:
+  - `playback_prep_pre_enqueue_ms`
+  - `playback_prep_worker_queue_ms`
+  - `playback_prep_worker_build_ms`
+  - `playback_prep_worker_total_ms`
+  - `playback_prep_result_queue_ms`
+  - `playback_prep_elapsed_before_present_ms`
+  - `playback_prep_total_before_finish_ms`
+- Added smoke-summary averages for the same prep split so GUI smoke JSON can prove whether `drawFrameReady.total` is worker build time, queue delay, or UI/presentation cadence.
+
+### Validation completed
+
+- Rebuilt the user-facing release executable after the telemetry change.
+- Screenshot-backed Auto aggressive GUI smoke passed twice on `M16-1327`:
+  - First run: `.claude-state\profiling\20260604-playback-prep-telemetry\M16-1327-auto-aggressive-prep-telemetry.json`, validation `ok=true`.
+    - Bottom-left `GUI FPS=12.0`, `smoke presented FPS=13.177`, `timeline FPS=23.169`.
+    - New split: `avg_playback_prep_worker_build_ms=0.017` (`58823.53 FPS-equivalent`), `avg_playback_prep_result_queue_ms=25.342` (`39.46 FPS-equivalent`), `avg_playback_prep_total_before_finish_ms=34.908` (`28.65 FPS-equivalent`).
+  - Repeat run: `.claude-state\profiling\20260604-playback-prep-telemetry\M16-1327-auto-aggressive-prep-telemetry-rerun.json`, validation `ok=true`.
+    - Bottom-left `GUI FPS=58.0` (noisy label), `smoke presented FPS=16.113`, `timeline FPS=23.003`.
+    - Timing: `avg_render_total_ms=34.317` (`29.14 FPS-equivalent`), `avg_draw_total_ms=32.290` (`30.97 FPS-equivalent`), `avg_raw_uint16_ms=5.221` (`191.53 FPS-equivalent`), `avg_llrawproc_total_ms=5.090` (`196.46 FPS-equivalent`), `avg_debayered_frame_ms=1.041` (`960.61 FPS-equivalent`), `avg_processing_ms=6.979` (`143.29 FPS-equivalent`).
+    - New split: `avg_playback_prep_worker_queue_ms=0.152` (`6578.95 FPS-equivalent`), `avg_playback_prep_worker_build_ms=0.021` (`47619.05 FPS-equivalent`), `avg_playback_prep_result_queue_ms=22.000` (`45.45 FPS-equivalent`), `avg_playback_prep_total_before_finish_ms=30.676` (`32.60 FPS-equivalent`).
+    - Presented screenshot SHA256 `9EB3C491568F8032E3EE66657005CF15B0CFC2D2BB7691702501199D22500A32`; FPS crop SHA256 `EAB33F97E7E0F9DD7F9A0B37F1960F0777B95A6D55DA75F3588661F9FB826A65`.
+
+### Needs runtime profiling
+
+- Next speed target should be scheduler/presentation cadence:
+  - Measure whether `playback_prep_result_queue_ms` is caused by UI-thread starvation, queued signal latency, timer-frame advancement order, stale-result churn, or render-thread slot release timing.
+  - Candidate source changes should reduce `prep_replaced_after` and `playback_prep_result_queue_ms` without hurting `timeline FPS`.
+- Keep decode-aware/tile-aware x8 reduced preview ranked as the high-impact frontier, but the current multi-clip evidence says presentation/result-queue latency should be understood first.
