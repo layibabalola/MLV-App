@@ -293,6 +293,34 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 The headless `--profile-playback` mode emits a structured JSON document with
 the following families of keys.
 
+### Playback scale and per-stage resolution
+
+- `render_thread_playback_scale_factor_request`
+- `render_thread_playback_scale_factor_effective`
+- `render_thread_playback_scale_factor_clamped`
+- `render_thread_phase4b_path`
+- `render_thread_phase4b_path_label`
+- `render_thread_phase4b_y_crop_rows`
+- `render_thread_phase4b_fallback_reason`
+- `render_thread_playback_scale_sensor_pixels`
+- `render_thread_playback_scale_output_pixels`
+- `render_thread_playback_scale_pixel_retention_ratio`
+
+Per-stage resolution telemetry uses the prefix
+`render_thread_stage_<stage>_` with `domain`, `width`, `height`, `pixels`,
+`pixel_retention_ratio`, and `preview_resolution` fields. Current stages are:
+
+- `raw_decode` — raw Bayer decode/unpack resolution; currently full source
+  resolution for x1/x2/x4/x8 when the stage runs.
+- `bayer_reduction_input` and `bayer_reduction_output` — the early
+  Bayer-domain preview-reduction contract for Phase 4B paths 2, 3, and 8.
+- `llrawproc` — active LLRawProc/Dual ISO resolution. This is the field that
+  proves whether a reduced preview still paid full reconstruction cost.
+- `rgb_input` and `rgb_output` — reconstructed Bayer entering debayer or
+  Bayer-to-RGB block averaging, and the RGB output from that combined stage.
+- `processing` — processed RGB resolution for raw-processing and 16-to-8 work.
+- `presentation_input` — rendered RGB dimensions before viewport presentation.
+
 ### Metadata
 
 - `qt_opengl_environment`

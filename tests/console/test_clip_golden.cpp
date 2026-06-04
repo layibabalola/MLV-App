@@ -2066,6 +2066,32 @@ TEST(ClipGolden, LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch)
         const QJsonObject sample = value.toObject();
         ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
         ASSERT_EQ(4, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_phase4b_fallback_reason")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_stage_raw_decode_pixels")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_stage_llrawproc_pixels")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_stage_rgb_output_pixels")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_stage_processing_pixels")));
+        ASSERT_TRUE(sample.value(QStringLiteral("render_thread_stage_raw_decode_domain")).toString()
+                    == QStringLiteral("raw_bayer"));
+        const double raw_decode_pixels =
+            sample.value(QStringLiteral("render_thread_stage_raw_decode_pixels")).toDouble();
+        const double llrawproc_pixels =
+            sample.value(QStringLiteral("render_thread_stage_llrawproc_pixels")).toDouble();
+        const double rgb_output_pixels =
+            sample.value(QStringLiteral("render_thread_stage_rgb_output_pixels")).toDouble();
+        const double processing_pixels =
+            sample.value(QStringLiteral("render_thread_stage_processing_pixels")).toDouble();
+        ASSERT_TRUE(raw_decode_pixels > 0.0);
+        ASSERT_TRUE(llrawproc_pixels > 0.0);
+        ASSERT_TRUE(rgb_output_pixels > 0.0);
+        ASSERT_EQ(rgb_output_pixels, processing_pixels);
+        if (sample.value(QStringLiteral("render_thread_phase4b_path")).toInt() == 0) {
+            ASSERT_EQ(raw_decode_pixels, llrawproc_pixels);
+            ASSERT_TRUE(!sample.value(QStringLiteral("render_thread_phase4b_fallback_reason"))
+                         .toString().isEmpty());
+        } else {
+            ASSERT_TRUE(llrawproc_pixels < raw_decode_pixels);
+        }
         saw_full20_frame = saw_full20_frame
             || sample.value(QStringLiteral("dual_iso_full20_valid")).toBool();
     }

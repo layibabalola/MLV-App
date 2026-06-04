@@ -2812,10 +2812,18 @@ static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video,
  * end barrier in the surrounding pipeline). */
 static int g_mlv_phase4bv2_path_taken = 0;
 static int g_mlv_phase4bv3_y_crop_rows = 0;
+static MLV_STAGE_THREAD_LOCAL const char * g_mlv_phase4bv2_last_fallback_reason = "none";
 
 int mlv_phase4bv2_last_path_taken(void)
 {
     return g_mlv_phase4bv2_path_taken;
+}
+
+const char * mlv_phase4bv2_last_fallback_reason(void)
+{
+    return g_mlv_phase4bv2_last_fallback_reason
+        ? g_mlv_phase4bv2_last_fallback_reason
+        : "unknown";
 }
 
 int mlv_phase4bv3_last_y_crop_rows(void)
@@ -2853,8 +2861,29 @@ static int mlv_phase4bv2_receipt_compatible(mlvObject_t * video)
 static int g_mlv_phase4bv2_log_env_cache = -1;
 static MLV_THREAD_LOCAL int g_mlv_phase4bv2_log_emitted = 0;
 
+static void mlv_phase4bv2_set_fallback_reason(const char * reason)
+{
+    g_mlv_phase4bv2_last_fallback_reason = reason ? reason : "unknown";
+}
+
+static int mlv_phase4bv2_fallback_reason_is_none(void)
+{
+    return !g_mlv_phase4bv2_last_fallback_reason
+        || strcmp(g_mlv_phase4bv2_last_fallback_reason, "none") == 0;
+}
+
+static void mlv_phase4bv2_set_fallback_reason_if_none(const char * reason)
+{
+    if (mlv_phase4bv2_fallback_reason_is_none())
+    {
+        mlv_phase4bv2_set_fallback_reason(reason);
+    }
+}
+
 static void mlv_phase4bv2_log_rejection(const char * reason)
 {
+    mlv_phase4bv2_set_fallback_reason(reason);
+
     if (g_mlv_phase4bv2_log_env_cache < 0)
     {
         const char * v = getenv("MLVAPP_LOG_PHASE4BV2");
@@ -3041,11 +3070,19 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
 {
     g_mlv_phase4bv2_path_taken = 0;
     g_mlv_phase4bv3_y_crop_rows = 0;
+    g_mlv_phase4bv2_last_fallback_reason = "none";
 
     if (!video || !outputFrame || scaleFactor <= 1) return 0;
     if (mlv_phase4bv2_disabled_via_env())
     {
         mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV2 set");
+        return 0;
+    }
+    if (scaleFactor == 2)
+    {
+        /* x2 is deliberately a post-recon downsample today; record that
+         * before the mean23 quality guard can report a less actionable cause. */
+        mlv_phase4bv2_log_rejection("scale=2 uses full-recon post-downsample fallback");
         return 0;
     }
     if (!mlv_phase4bv2_quality_allows_pre_recon(video, scaleFactor))
@@ -3065,8 +3102,12 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     }
     if (scaleFactor == 8)
     {
-        if (!mlv_phase4bv4_x8_disabled_via_env()
-         && mlv_render_scaled_rgb16_v4_x8_full_xy(video, frameIndex, outputFrame, threads))
+        if (mlv_phase4bv4_x8_disabled_via_env())
+        {
+            mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV4_X8 set");
+            return 0;
+        }
+        if (mlv_render_scaled_rgb16_v4_x8_full_xy(video, frameIndex, outputFrame, threads))
         {
             return 1;
         }
@@ -3077,6 +3118,7 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     {
         /* scale=2 falls back to v1; the X-only-pre-recon savings only
          * pay off at scale=4 (X reduction by 4 = 75% recon save). */
+        mlv_phase4bv2_log_rejection("scale=2 uses full-recon post-downsample fallback");
         return 0;
     }
 
@@ -3411,20 +3453,25 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
 
     g_mlv_phase4bv2_path_taken = 0;
     g_mlv_phase4bv3_y_crop_rows = 0;
+    g_mlv_phase4bv2_last_fallback_reason = "none";
 
-    if (!mlv_phase4bv2_disabled_via_env()
+    if (scaleFactor != 2
+     && !mlv_phase4bv2_disabled_via_env()
      && llrpHQDualIso(video)
      && mlv_phase4bv2_quality_allows_pre_recon(video, scaleFactor)
      && mlv_phase4bv2_receipt_compatible(video))
     {
         if (scaleFactor == 8)
         {
-            if (!mlv_phase4bv4_x8_disabled_via_env()
-             && mlv_render_scaled_rgb16_v4_x8_full_xy_from_raw(video,
-                                                               frameIndex,
-                                                               decodedRawFrame,
-                                                               outputFrame,
-                                                               threads))
+            if (mlv_phase4bv4_x8_disabled_via_env())
+            {
+                mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV4_X8 set");
+            }
+            else if (mlv_render_scaled_rgb16_v4_x8_full_xy_from_raw(video,
+                                                                    frameIndex,
+                                                                    decodedRawFrame,
+                                                                    outputFrame,
+                                                                    threads))
             {
                 return 1;
             }
@@ -3496,6 +3543,28 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
             }
         }
     }
+    else if (mlv_phase4bv2_disabled_via_env())
+    {
+        mlv_phase4bv2_set_fallback_reason_if_none("MLVAPP_DISABLE_PHASE4BV2 set");
+    }
+    else if (scaleFactor == 2)
+    {
+        mlv_phase4bv2_set_fallback_reason_if_none("scale=2 uses full-recon post-downsample fallback");
+    }
+    else if (!llrpHQDualIso(video))
+    {
+        mlv_phase4bv2_set_fallback_reason_if_none("not HQ Dual ISO; full-recon post-downsample fallback");
+    }
+    else if (!mlv_phase4bv2_quality_allows_pre_recon(video, scaleFactor))
+    {
+        mlv_phase4bv2_set_fallback_reason_if_none("quality guard rejected pre-recon path");
+    }
+    else if (!mlv_phase4bv2_receipt_compatible(video))
+    {
+        mlv_phase4bv2_set_fallback_reason_if_none("receipt incompatible");
+    }
+
+    mlv_phase4bv2_set_fallback_reason_if_none("full-recon post-downsample fallback");
 
     const int width = (int)getMlvWidth(video);
     const int height = (int)getMlvHeight(video);
@@ -3558,6 +3627,7 @@ static int mlv_render_scaled_rgb16(mlvObject_t * video,
                                    int threads)
 {
     if (!video || !outputFrame || scaleFactor <= 1) return 0;
+    g_mlv_phase4bv2_last_fallback_reason = "none";
 
     /* Phase 4B-v2 preserves the Dual ISO row pattern, but the pre-LLRawProc
      * Bayer shortcut is visibly harsher on normal clips at x4. Prefer the
@@ -3566,6 +3636,14 @@ static int mlv_render_scaled_rgb16(mlvObject_t * video,
         && mlv_render_scaled_rgb16_v2(video, frameIndex, outputFrame, scaleFactor, threads))
     {
         return 1;
+    }
+    if (!llrpHQDualIso(video))
+    {
+        mlv_phase4bv2_set_fallback_reason_if_none("not HQ Dual ISO; full-recon post-downsample fallback");
+    }
+    else
+    {
+        mlv_phase4bv2_set_fallback_reason_if_none("full-recon post-downsample fallback");
     }
 
     const int width  = (int)getMlvWidth(video);

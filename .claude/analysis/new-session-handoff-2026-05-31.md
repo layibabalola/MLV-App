@@ -116,3 +116,20 @@ Implementation expectations:
 
 Start by inspecting src/mlv/video_mlv.c, src/mlv/video_mlv.h, src/processing/playback_downsample.[ch], platform/qt/RenderFrameThread.cpp, platform/qt/MainWindow.cpp, docs/diagrams/frame-pipeline.md, and docs/14-performance-benchmarking.md. Then implement the model and use it to choose the next change.
 ```
+
+## 2026-06-04 Addendum - Model Implemented As Telemetry Contract
+
+- Claude Desktop and Codex independently converged on the same playback-resolution model:
+  - x2 is late scale: full raw decode and full LLRawProc/Dual ISO, then reduced RGB/processing.
+  - x4 has early paths, but default HQ/Auto mean23 can still use full-recon fallback.
+  - x8 path 8 moves Bayer reduction before LLRawProc/debayer, but still pays full raw decode.
+- The first implemented step is telemetry/profile output, not a decoder rewrite:
+  - `render_thread_phase4b_fallback_reason`
+  - `render_thread_stage_*_{domain,width,height,pixels,pixel_retention_ratio,preview_resolution}`
+- Use these fields before the next optimization so profiles can prove whether a requested scale paid full raw decode, full LLRawProc/Dual ISO, or preview-resolution work.
+- Validation completed in the same work block:
+  - Phase4B focused pipeline tests passed: `tests=139`, `assertions=510`, `failed=0`.
+  - App-backed profile JSON test passed: `ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch`.
+  - Release x8 profile for `C:\temp\MLV\M16-1327.MLV` showed `raw_decode_pixels=4100544`, `llrawproc_pixels=63280`, `processing_pixels=63958`, proving x8 still pays full raw decode while later stages run near preview resolution.
+  - Screenshot-backed x8 GUI smoke passed: `GUI FPS=11.0`, `smoke presented FPS=13.393`, `timeline FPS=22.487`, screenshot SHA256 `8BB082054A3604DFBBC4C6304B18618B57362715B3A58B94CF3698D70072C5A8`.
+  - Rebuilt `platform\qt\build-release\release\MLVApp.exe`: `LastWriteTime=2026-06-04 01:17:02`, `Length=9031680`, SHA256 `C2262AB2C49AC7A09C36BD6ADCA2702449B48DA385D9D4C7633EF3EA20192978`.

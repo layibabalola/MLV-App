@@ -13875,3 +13875,48 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 - Validation should remain screenshot-backed and FPS-label explicit:
   - Report `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and stage `FPS-equivalent` values separately.
   - Use the standard M16 smoke set and presented-frame screenshots when a change touches playback, scale, color, Dual ISO, or processing.
+
+## 2026-06-04 - Claude/Codex pipeline-resolution convergence and telemetry-first implementation
+
+### Verified locally
+
+- Claude Desktop and Codex independently converged on the same stage model:
+  - x1 runs full raw decode, LLRawProc/Dual ISO, debayer, and processing at source resolution.
+  - x2 keeps full raw decode and full LLRawProc/Dual ISO, then does a late post-recon Bayer-to-RGB reduction to `W/2 x H/2`.
+  - x4 has three runtime shapes: path 3 full-XY early Bayer reduction (`~N/16` LLRawProc), path 2 X-only early reduction (`N/4` LLRawProc), or path 0 full-recon fallback (`N` LLRawProc). Default HQ/Auto mean23 playback currently prefers the full-recon fallback unless `MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ` is enabled.
+  - x8 path 8 is the recent breakthrough: it still pays full raw decode, then reduces Bayer before LLRawProc/Dual ISO and before debayer. Fallback path 0 still pays full LLRawProc before late RGB reduction.
+- The `--profile-playback` JSON path copies every `RenderFrameThread` `stageTimingTelemetry` key into each frame sample, so additive render-thread telemetry is the lowest-risk way to make the model visible in profile output.
+
+### Cross-checked from prior analysis
+
+- The early x8 smoke evidence remains the anchor: `phase4b_path=8`, `GUI FPS=76.0`, `smoke presented FPS=13.250`, `timeline FPS=23.360`, `avg_llrawproc_dual_iso_ms=11.126` (`89.879 FPS-equivalent`), and `avg_debayered_frame_ms=1.175` (`851.064 FPS-equivalent`).
+- The remaining x8 floor is raw decode: the same run showed `avg_raw_uint16_ms=20.922` (`47.796 FPS-equivalent`) and `avg_raw_decompress_ms=16.874` (`59.263 FPS-equivalent`).
+
+### Implemented in this work block
+
+- Added profile/smoke telemetry for `render_thread_phase4b_fallback_reason`.
+- Added per-stage resolution and pixel-budget fields under `render_thread_stage_*` for raw decode, Bayer reduction input/output, LLRawProc, RGB input/output, processing, and presentation input.
+- Added focused test coverage for fallback-reason plumbing and profile-sample stage-resolution fields.
+- Updated `docs/diagrams/frame-pipeline.md` and `docs/14-performance-benchmarking.md` with the playback-resolution model and telemetry contract.
+
+### Validation completed
+
+- Focused pipeline test: `tests\build-ci-pipeline\release\pipeline_tests.exe --gtest_filter=DualIsoPipeline.Phase4B*` passed, `tests=139`, `assertions=510`, `failed=0`. Log: `.claude-state\profiling\20260604-pipeline-resolution-telemetry\pipeline-phase4b-tests-final.log`.
+- App-backed JSON test: `tests\build-ci-console\release\console_tests.exe --gtest_filter=ClipGolden.LargeDualIsoHqScaleFourSuppressesRawUint16Prefetch` passed, `tests=87`, `assertions=103`, `failed=0`. Log: `.claude-state\profiling\20260604-pipeline-resolution-telemetry\console-large-dual-scale4-profile-test.log`.
+- Release x8 profile: `.claude-state\profiling\20260604-pipeline-resolution-telemetry\M16-1327-x8-profile.json`.
+  - `requested=8`, `effective=8`, `phase4b_path=8`, `fallback_reason=none`.
+  - `render_thread_stage_raw_decode_pixels=4100544`, `render_thread_stage_llrawproc_pixels=63280`, `render_thread_stage_processing_pixels=63958`, proving full raw decode remains while LLRawProc/processing run near preview resolution.
+- Screenshot-backed release GUI smoke: `.claude-state\profiling\20260604-pipeline-resolution-telemetry\M16-1327-x8-gui-smoke.json`, validation `ok=true`.
+  - `GUI FPS=11.0`, `smoke presented FPS=13.393`, `timeline FPS=22.487`.
+  - CPU summary: `avg_raw_uint16_ms=18.123` (`55.18 FPS-equivalent`), `avg_llrawproc_total_ms=3.605` (`277.39 FPS-equivalent`), `avg_debayered_frame_ms=0.840` (`1190.48 FPS-equivalent`), `avg_processing_ms=3.617` (`276.47 FPS-equivalent`), `avg_processed8_ms=33.160` (`30.16 FPS-equivalent`).
+  - Presented screenshot: `.claude-state\profiling\20260604-pipeline-resolution-telemetry\screenshots\M16-1327.png`, `2555x1068`, aspect `2.392322`, SHA256 `8BB082054A3604DFBBC4C6304B18618B57362715B3A58B94CF3698D70072C5A8`.
+  - Aspect evidence is presented-playback stretch with `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Rebuilt release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 01:17:02`, `Length=9031680`, SHA256 `C2262AB2C49AC7A09C36BD6ADCA2702449B48DA385D9D4C7633EF3EA20192978`.
+
+### Needs runtime profiling
+
+- Re-run profile/smoke across x1/x2/x4/x8 on representative clips and report `GUI FPS`, `smoke presented FPS`, `timeline FPS`, and per-stage `FPS-equivalent` separately.
+- Use the new fields to confirm:
+  - `requested=x4 active=x4 phase4b_path=0` means `render_thread_stage_llrawproc_pixels == render_thread_stage_raw_decode_pixels`.
+  - `requested=x8 active=x8 phase4b_path=8` means LLRawProc and RGB stages are about `N/64`, while raw decode remains `N`.
+- Keep decode-aware/tile-aware reduced preview as the high-impact research frontier, but do not start a decoder rewrite until the new telemetry proves the decode floor across representative clips.

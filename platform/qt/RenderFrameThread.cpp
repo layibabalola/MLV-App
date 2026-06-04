@@ -62,6 +62,32 @@ QString phase4bPathLabel( int path )
     }
 }
 
+qint64 stagePixelCount( int width, int height )
+{
+    if( width <= 0 || height <= 0 ) return 0;
+    return static_cast<qint64>( width ) * static_cast<qint64>( height );
+}
+
+void insertStageResolutionTelemetry( QJsonObject &telemetry,
+                                     const QString &prefix,
+                                     const QString &domain,
+                                     int width,
+                                     int height,
+                                     qint64 sourcePixels )
+{
+    const qint64 pixels = stagePixelCount( width, height );
+    telemetry.insert( prefix + QStringLiteral("_domain"), domain );
+    telemetry.insert( prefix + QStringLiteral("_width"), width );
+    telemetry.insert( prefix + QStringLiteral("_height"), height );
+    telemetry.insert( prefix + QStringLiteral("_pixels"), pixels );
+    telemetry.insert( prefix + QStringLiteral("_pixel_retention_ratio"),
+                      (sourcePixels > 0)
+                          ? static_cast<double>( pixels ) / static_cast<double>( sourcePixels )
+                          : 0.0 );
+    telemetry.insert( prefix + QStringLiteral("_preview_resolution"),
+                      sourcePixels > 0 && pixels > 0 && pixels < sourcePixels );
+}
+
 } // namespace
 
 //Constructor
@@ -1698,12 +1724,21 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const int phase4bCropRows = playbackScaleFactorActive > 1
                                ? mlv_phase4bv3_last_y_crop_rows()
                                : 0;
-    const qint64 sourcePixels =
-        static_cast<qint64>( qMax( 0, m_imageWidth ) )
-        * static_cast<qint64>( qMax( 0, m_imageHeight ) );
-    const qint64 renderedPixels =
-        static_cast<qint64>( qMax( 0, renderedImageWidth ) )
-        * static_cast<qint64>( qMax( 0, renderedImageHeight ) );
+    const int sourceWidth = qMax( 0, m_imageWidth );
+    const int sourceHeight = qMax( 0, m_imageHeight );
+    const int renderedWidth = qMax( 0, renderedImageWidth );
+    const int renderedHeight = qMax( 0, renderedImageHeight );
+    const qint64 sourcePixels = stagePixelCount( sourceWidth, sourceHeight );
+    const qint64 renderedPixels = stagePixelCount( renderedWidth, renderedHeight );
+    QString phase4bFallbackReason = QStringLiteral("none");
+    if( playbackScaleFactorActive > 1 && phase4bPath == 0 )
+    {
+        const char *reason = mlv_phase4bv2_last_fallback_reason();
+        phase4bFallbackReason =
+            reason && *reason
+                ? QString::fromUtf8( reason )
+                : QStringLiteral("unknown");
+    }
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_phase4b_path"),
         phase4bPath );
@@ -1713,6 +1748,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_phase4b_y_crop_rows"),
         phase4bCropRows );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_phase4b_fallback_reason"),
+        phase4bFallbackReason );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_playback_scale_sensor_pixels"),
         sourcePixels );
@@ -1724,6 +1762,113 @@ void RenderFrameThread::drawFrame( int slotIndex,
         (sourcePixels > 0)
             ? static_cast<double>( renderedPixels ) / static_cast<double>( sourcePixels )
             : 0.0 );
+
+    const bool processedOutputMode =
+        outputMode == OutputProcessed8 || outputMode == OutputProcessed16;
+    int bayerReductionInputWidth = 0;
+    int bayerReductionInputHeight = 0;
+    int bayerReductionOutputWidth = 0;
+    int bayerReductionOutputHeight = 0;
+    int llrawprocWidth = processedOutputMode ? sourceWidth : 0;
+    int llrawprocHeight = processedOutputMode ? sourceHeight : 0;
+    int rgbStageInputWidth = processedOutputMode ? sourceWidth : 0;
+    int rgbStageInputHeight = processedOutputMode ? sourceHeight : 0;
+    const int rgbStageOutputWidth = processedOutputMode ? renderedWidth : 0;
+    const int rgbStageOutputHeight = processedOutputMode ? renderedHeight : 0;
+    const int processingWidth = processedOutputMode ? renderedWidth : 0;
+    const int processingHeight = processedOutputMode ? renderedHeight : 0;
+
+    if( processedOutputMode )
+    {
+        if( phase4bPath == 8 )
+        {
+            const int effectiveHeight = qMax( 0, sourceHeight - phase4bCropRows );
+            bayerReductionInputWidth = sourceWidth;
+            bayerReductionInputHeight = effectiveHeight;
+            bayerReductionOutputWidth = sourceWidth / 8;
+            bayerReductionOutputHeight = effectiveHeight / 8;
+        }
+        else if( phase4bPath == 3 )
+        {
+            const int effectiveHeight = qMax( 0, sourceHeight - phase4bCropRows );
+            bayerReductionInputWidth = sourceWidth;
+            bayerReductionInputHeight = effectiveHeight;
+            bayerReductionOutputWidth = sourceWidth / 4;
+            bayerReductionOutputHeight = effectiveHeight / 4;
+        }
+        else if( phase4bPath == 2 )
+        {
+            bayerReductionInputWidth = sourceWidth;
+            bayerReductionInputHeight = sourceHeight;
+            bayerReductionOutputWidth = sourceWidth / 4;
+            bayerReductionOutputHeight = sourceHeight;
+        }
+
+        if( phase4bPath == 8 || phase4bPath == 3 || phase4bPath == 2 )
+        {
+            llrawprocWidth = bayerReductionOutputWidth;
+            llrawprocHeight = bayerReductionOutputHeight;
+            rgbStageInputWidth = bayerReductionOutputWidth;
+            rgbStageInputHeight = bayerReductionOutputHeight;
+        }
+    }
+
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_raw_decode"),
+        QStringLiteral("raw_bayer"),
+        processedOutputMode ? sourceWidth : 0,
+        processedOutputMode ? sourceHeight : 0,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_bayer_reduction_input"),
+        QStringLiteral("raw_bayer"),
+        bayerReductionInputWidth,
+        bayerReductionInputHeight,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_bayer_reduction_output"),
+        QStringLiteral("raw_bayer"),
+        bayerReductionOutputWidth,
+        bayerReductionOutputHeight,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_llrawproc"),
+        QStringLiteral("reconstructed_bayer"),
+        llrawprocWidth,
+        llrawprocHeight,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_rgb_input"),
+        QStringLiteral("reconstructed_bayer"),
+        rgbStageInputWidth,
+        rgbStageInputHeight,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_rgb_output"),
+        QStringLiteral("rgb"),
+        rgbStageOutputWidth,
+        rgbStageOutputHeight,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_processing"),
+        QStringLiteral("processed_rgb"),
+        processingWidth,
+        processingHeight,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_presentation_input"),
+        QStringLiteral("processed_rgb"),
+        renderedWidth,
+        renderedHeight,
+        sourcePixels );
     if( m_lastLoggedPlaybackScaleFactorRequest != playbackScaleFactor
      || m_lastLoggedPlaybackScaleFactorActive != playbackScaleFactorActive )
     {
