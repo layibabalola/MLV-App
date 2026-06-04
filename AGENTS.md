@@ -64,6 +64,7 @@
 - To audit whole-repo branch/worktree/stash cleanup, run:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\repo-sweep-closeout.ps1 -RepoRoot .`
 - Treat user-visible completion of a mutating work block as a hard-clean event by default. After `work-block-complete.ps1 -Finalize` succeeds and before sending the final response, run `repo-sweep-closeout.ps1`, then verify and report branch/tracking, dirty state, local branches, registered worktrees, and stashes. Do not wait for the user to request "autocloseout" or "pristine" when the work block mutated tracked files.
+- TortoiseGit/libgit2 can fail ref pickers when generated Codex turn-diff refs point directly at tree objects. During hard-clean closeout, check `git for-each-ref refs/codex/turn-diffs --format="%(refname) %(objecttype)"`; for refs under exactly `refs/codex/turn-diffs/**` with object type `tree`, remove only that generated ref with `git update-ref -d <ref>`, then rerun the check and report any remaining non-commit/non-tag generated refs as a closeout blocker.
 - To advance the retained-candidate remediation queue one safe candidate at a time, run:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\remediate-retained-closeout.ps1 -RepoRoot . -Apply`
 - The trigger must run even when mutation will be blocked. The repo detector/auditor may retain or block, but final responses should not silently skip the closeout path.
