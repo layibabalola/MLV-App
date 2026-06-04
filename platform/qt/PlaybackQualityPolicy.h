@@ -16,15 +16,17 @@
  * - Fast: preview rowscale, scale=4, cast present, fastest cadence.
  * - HighQuality: HQ + mean23 + scale=4, cast closed, slower cadence.
  * - Auto: starts at HQ scale=4; if measured cadence misses target, fall
- *   back to Fast for the next slot. Re-evaluates every kAutoSlidingWindow
- *   frames.
+ *   back to Fast for the next slot in Sharp/Smooth. Aggressive Dual ISO uses
+ *   HQ scale=8 after warmup so the preview keeps early Bayer-domain reduction
+ *   ahead of LLRawProc/debayer. Re-evaluates every kAutoSlidingWindow frames.
  * - Phase3Fast/Phase3HQ: experimental Phase 3 dispatch labels; hidden until
  *   the dogfood gate or personal rollout tier permits them, and inactive until
  *   the one-time acknowledgement is accepted.
  *
- * Dual-ISO clips MUST stay at scale=4 when running HQ (the reconstruction
- * cost only pays for itself at scale=4 on big sensors). Non-dual-ISO HQ
- * playback CAN use scale=2 in Auto mode if there is headroom.
+ * Sharp/Smooth Dual-ISO clips stay at scale=4 when running HQ. Aggressive
+ * Dual ISO may use HQ scale=8 because that path reduces in the Bayer domain
+ * before LLRawProc/debayer. Non-dual-ISO HQ playback CAN use scale=2 in Auto
+ * mode if there is headroom.
  */
 
 #include <atomic>
@@ -690,6 +692,8 @@ struct PlaybackQualityAutoSampler
      * Logic:
      *   - if window not full yet -> stay at HQ scale=4 (gather more data)
      *   - else compute avg cadence
+     *   - if Aggressive + Dual ISO -> use deep HQ x8 preview after warmup
+     *       because that path moves Bayer reduction before LLRawProc/debayer
      *   - if avg cadence > 1.10 * frame budget (under-meeting target by >10%)
      *       -> downgrade to Fast (scale=4, no HQ) in Sharp/Smooth preview
      *       -> use deep HQ x8 preview in Aggressive preview
@@ -720,6 +724,15 @@ struct PlaybackQualityAutoSampler
         double sum = 0.0;
         for ( const double v : m_window ) sum += v;
         const double avgMs = sum / static_cast<double>( m_window.size() );
+
+        if ( aggressivePreviewActive && dualIsoActive )
+        {
+            /* Aggressive Dual ISO is the coarse/deep preview mode. Recent
+             * measured M16 runs show x8 beats x4 even when x4 is merely near
+             * target, because x8 keeps reduction before LLRawProc/debayer and
+             * the presentation scaler is now cheap. */
+            return Decision{ 8, true };
+        }
 
         if ( avgMs > frameBudgetMs * 1.10 )
         {

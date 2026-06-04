@@ -4,9 +4,10 @@
  *   - Until 16 frames are recorded, the sampler optimistically picks HQ x4.
  *   - With cadences below frame budget, sampler stays at HQ x4 (steady).
  *   - With cadences above frame budget, Sharp/Smooth downgrades to Fast x4.
- *   - With cadences above frame budget, Aggressive switches to HQ x8.
+ *   - After warmup, Aggressive Dual ISO switches to HQ x8.
+ *   - With cadences above frame budget, Aggressive non-DI switches to HQ x8.
  *   - With huge headroom and a non-DI clip, sampler upgrades to HQ x2.
- *   - Dual-ISO clips never get x2; they stay at x4 even with headroom.
+ *   - Sharp/Smooth Dual-ISO clips never get x2; they stay at x4 even with headroom.
  *   - reset() clears the window and re-enters optimistic warmup. */
 
 #include "../common/minitest.h"
@@ -105,6 +106,27 @@ TEST(PlaybackQualityAutoSampler, AggressiveCadenceMissUsesHqx8)
                               /*dualIsoActive*/false,
                               /*aggressivePreviewActive*/true );
     ASSERT_EQ( 8, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+}
+
+TEST(PlaybackQualityAutoSampler, AggressiveDualIsoUsesHqx8AfterWarmup)
+{
+    PlaybackQualityAutoSampler s;
+    /* 24 fps target = 41.67 ms. This is meeting target, but Aggressive
+     * Dual ISO still chooses the deeper early-reduced preview after warmup. */
+    feed_n( s, 35.0, kWin );
+    auto d = s.decideNextSlot( 24,
+                               /*dualIsoActive*/true,
+                               /*aggressivePreviewActive*/true );
+    ASSERT_EQ( 8, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+
+    PlaybackQualityAutoSampler nonDi;
+    feed_n( nonDi, 35.0, kWin );
+    d = nonDi.decideNextSlot( 24,
+                              /*dualIsoActive*/false,
+                              /*aggressivePreviewActive*/true );
+    ASSERT_EQ( 4, d.scaleFactor );
     ASSERT_TRUE( d.useHqMean23 );
 }
 

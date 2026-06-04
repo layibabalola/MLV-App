@@ -14240,3 +14240,39 @@ Please cite file paths and line numbers from the repo, separate verified facts f
 
 - Re-run longer Auto aggressive smokes after this patch to see whether Auto remains stable at x4/x8 instead of bouncing on short samples.
 - The next ranked candidates should come from fresh post-patch telemetry: remaining render work outside `avg_playback_scale_ms`, x4 LLRawProc/processing buckets, and the larger decode-aware/tile-aware x8 raw-decode floor.
+
+## 2026-06-04 - Aggressive Auto Uses Deep x8 After Warmup
+
+### Verified locally
+
+- Fresh 20s Auto aggressive smokes after the presentation-resampler patch showed the same model pattern across `M16-1327`, `M16-1347`, and `M16-1446`: explicit x8 was faster than the post-resampler Auto runs that stayed at x4 or waited for a cadence miss.
+- Implemented the next policy-level improvement in `platform/qt/PlaybackQualityPolicy.h`: after the Auto sampler warmup window, Aggressive Performance Preview on Dual ISO now chooses HQ x8 even when the measured cadence is merely near target. Sharp/Smooth Auto and non-Dual-ISO aggressive Auto keep the prior cadence-miss behavior.
+- Added focused coverage in `tests/console/test_playback_quality_auto_mode.cpp`: `PlaybackQualityAutoSampler.AggressiveDualIsoUsesHqx8AfterWarmup`.
+- Focused validation passed after rebuilding `tests\build-ci-console`: `console_tests.exe --gtest_filter=PlaybackQualityAutoSampler.*`, `tests=93`, `assertions=36`, `skipped=0`, `failed=0`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 05:42:36 -05:00`, `Length=9054720`, SHA256 `D77312A8A303428F3783333538280BD033AA888191192A1179DB2EB38C92E5A0`.
+
+Post-change screenshot-backed Auto aggressive smokes all passed with `validation.ok=true`, `scaleRequestStart=4`, `scaleRequestLast=8`, `scaleActiveLast=8`, and `qualityModeLast=2`:
+
+| Clip | Before Auto | After Auto | Change |
+| --- | --- | --- | --- |
+| `M16-1327` | `scale=4->4/4`, `smoke presented FPS=27.706`, `avg_render_total_ms=38.488` (`25.98 FPS-equivalent`) | `scale=4->8/8`, `smoke presented FPS=36.338`, `avg_render_total_ms=24.261` (`41.22 FPS-equivalent`) | `+8.632 FPS` (`+31.2%`), render `-14.227 ms` (`+15.24 FPS-equivalent`) |
+| `M16-1347` | `scale=4->4/4`, `smoke presented FPS=23.131`, `avg_render_total_ms=51.655` (`19.36 FPS-equivalent`) | `scale=4->8/8`, `smoke presented FPS=40.286`, `avg_render_total_ms=20.093` (`49.77 FPS-equivalent`) | `+17.155 FPS` (`+74.2%`), render `-31.562 ms` (`+30.41 FPS-equivalent`) |
+| `M16-1446` | `scale=4->8/8` but mixed late-switch work, `smoke presented FPS=25.476`, `avg_render_total_ms=44.067` (`22.69 FPS-equivalent`) | `scale=4->8/8`, `smoke presented FPS=37.379`, `avg_render_total_ms=21.277` (`47.00 FPS-equivalent`) | `+11.903 FPS` (`+46.7%`), render `-22.790 ms` (`+24.31 FPS-equivalent`) |
+
+Post-change stage timings:
+
+- `M16-1327`: bottom-left `GUI FPS=38.0` summary / `76.0` crop, `timeline FPS=23.915`, `avg_present_interval_ms=27.319` (`36.60 FPS-equivalent`), `avg_render_work_ms=17.860` (`55.99 FPS-equivalent`), `avg_queue_wait_ms=6.401` (`156.23 FPS-equivalent`), `avg_draw_total_ms=9.386` (`106.54 FPS-equivalent`), `avg_playback_prep_total_before_finish_ms=8.203` (`121.91 FPS-equivalent`), `avg_raw_uint16_ms=2.468` (`405.19 FPS-equivalent`), `avg_llrawproc_total_ms=5.323` (`187.86 FPS-equivalent`), `avg_debayered_frame_ms=0.688` (`1453.49 FPS-equivalent`), `avg_processing_ms=4.077` (`245.28 FPS-equivalent`), `avg_processed16_ms=12.861` (`77.75 FPS-equivalent`), `avg_playback_scale_ms=1.211` (`825.76 FPS-equivalent`). Presented screenshot SHA256 `43DDEB320E8FEDEDB83CA537468167EB62980F405C3D432CEC797AF932FFA188`; FPS crop SHA256 `5847FB9CF332A38E0C91768388D6FD1F2ED75E9B75177E903E589DD29686DA81`.
+- `M16-1347`: bottom-left `GUI FPS=20.0` summary / `62.0` crop, `timeline FPS=23.956`, `avg_present_interval_ms=24.665` (`40.54 FPS-equivalent`), `avg_render_work_ms=14.710` (`67.98 FPS-equivalent`), `avg_queue_wait_ms=5.383` (`185.77 FPS-equivalent`), `avg_draw_total_ms=8.650` (`115.61 FPS-equivalent`), `avg_playback_prep_total_before_finish_ms=7.516` (`133.05 FPS-equivalent`), `avg_raw_uint16_ms=2.025` (`493.83 FPS-equivalent`), `avg_llrawproc_total_ms=5.030` (`198.81 FPS-equivalent`), `avg_debayered_frame_ms=0.527` (`1897.53 FPS-equivalent`), `avg_processing_ms=2.521` (`396.67 FPS-equivalent`), `avg_processed16_ms=9.976` (`100.24 FPS-equivalent`), `avg_playback_scale_ms=1.205` (`829.88 FPS-equivalent`). Presented screenshot SHA256 `5498BE29F4493EB65CB07C3D1491ECDA84D6B0D37AC890CC69B02A6BCBCA7B4D`; FPS crop SHA256 `DE216489D509479752A9C0F163E8F31D96AD7617DC14E2935E8F332F4A39684E`.
+- `M16-1446`: bottom-left `GUI FPS=16.0` summary / `76.0` crop, `timeline FPS=23.911`, `avg_present_interval_ms=26.541` (`37.68 FPS-equivalent`), `avg_render_work_ms=16.005` (`62.48 FPS-equivalent`), `avg_queue_wait_ms=5.272` (`189.68 FPS-equivalent`), `avg_draw_total_ms=9.035` (`110.68 FPS-equivalent`), `avg_playback_prep_total_before_finish_ms=7.893` (`126.69 FPS-equivalent`), `avg_raw_uint16_ms=2.627` (`380.66 FPS-equivalent`), `avg_llrawproc_total_ms=4.595` (`217.63 FPS-equivalent`), `avg_debayered_frame_ms=0.559` (`1788.91 FPS-equivalent`), `avg_processing_ms=3.133` (`319.18 FPS-equivalent`), `avg_processed16_ms=11.312` (`88.40 FPS-equivalent`), `avg_playback_scale_ms=1.204` (`830.56 FPS-equivalent`). Presented screenshot SHA256 `19AB2A415BE87AB3C4FC3C0D1D40281D2F0B68D8499BA1373C7C0D94892FD571`; FPS crop SHA256 `60916B1EA7D8940B25B02D666EA25BC7191E380F59166C9313375699DA7B7DF6`.
+
+### Cross-checked from prior analysis
+
+- This is still a pipeline-resolution decision, not an isolated hotspot tweak: Aggressive Auto now selects the most hardened reduced-resolution path after warmup, the one that reduces Bayer before LLRawProc/Dual ISO and debayer.
+- The user-facing split remains intact. Sharp/Smooth Preview stays anti-aliased and less blocky; Aggressive Performance Preview chooses the coarse/deep x8 path for cadence.
+- The `M16-1446` before-run already ended at x8, but it was a late/mixed switch. The new policy switches immediately after warmup, which reduces x4 pollution in the summary and improves both render time and `smoke presented FPS`.
+
+### Needs runtime profiling
+
+- Keep decode-aware/tile-aware x8 reduced preview as the high-impact frontier because x8 still full-decodes raw source pixels before Bayer-domain reduction.
+- Before rewriting decode, run the next post-policy profile with per-stage resolution telemetry on explicit x8 and Auto aggressive to rank the remaining wall-clock buckets: full raw decode, `avg_processed16_ms` around `9.976-12.861 ms` (`77.75-100.24 FPS-equivalent`), and residual render/presentation scheduling.
+- For future UI language, keep the modes explicit: Sharp/Smooth Preview means sharper, anti-aliased playback; Aggressive Performance Preview means coarse/deep preview for the fastest measured cadence.
