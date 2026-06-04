@@ -15994,6 +15994,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeProcessingShadowsHighlightsFilterHalfresDownsampleSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsFilterHalfresRbfSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsFilterHalfresUpsampleSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresDownsampleSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresRbfSumMs = 0.0;
+    m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresUpsampleSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfBoundarySumMs = 0.0;
     m_playbackSmokeProcessingShadowsHighlightsRbfRangeTableSumMs = 0.0;
@@ -16406,6 +16409,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_shadows_highlights_filter_halfres_rbf_ms" );
     const double processingShadowsHighlightsFilterHalfresUpsampleMs =
         telemetryDoubleValue( timing, "processing_shadows_highlights_filter_halfres_upsample_ms" );
+    const double processingShadowsHighlightsFilterQuarterresDownsampleMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_filter_quarterres_downsample_ms" );
+    const double processingShadowsHighlightsFilterQuarterresRbfMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_filter_quarterres_rbf_ms" );
+    const double processingShadowsHighlightsFilterQuarterresUpsampleMs =
+        telemetryDoubleValue( timing, "processing_shadows_highlights_filter_quarterres_upsample_ms" );
     const double processingShadowsHighlightsRbfTotalMs =
         telemetryDoubleValue( timing, "processing_shadows_highlights_rbf_total_ms" );
     const double processingShadowsHighlightsRbfBoundaryMs =
@@ -16619,6 +16628,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         processingShadowsHighlightsFilterHalfresRbfMs;
     m_playbackSmokeProcessingShadowsHighlightsFilterHalfresUpsampleSumMs +=
         processingShadowsHighlightsFilterHalfresUpsampleMs;
+    m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresDownsampleSumMs +=
+        processingShadowsHighlightsFilterQuarterresDownsampleMs;
+    m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresRbfSumMs +=
+        processingShadowsHighlightsFilterQuarterresRbfMs;
+    m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresUpsampleSumMs +=
+        processingShadowsHighlightsFilterQuarterresUpsampleMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs += processingShadowsHighlightsRbfTotalMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfBoundarySumMs += processingShadowsHighlightsRbfBoundaryMs;
     m_playbackSmokeProcessingShadowsHighlightsRbfRangeTableSumMs += processingShadowsHighlightsRbfRangeTableMs;
@@ -17397,7 +17412,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "playback_smoke.processing_detail_summary session=%1 frames=%2 "
                "avg_sh_prep_ms=%3 avg_sh_resize_ms=%4 avg_sh_copy_ms=%5 "
                "avg_sh_filter_ms=%6 avg_sh_filter_halfres_downsample_ms=%7 "
-               "avg_sh_filter_halfres_rbf_ms=%8 avg_sh_filter_halfres_upsample_ms=%9" )
+               "avg_sh_filter_halfres_rbf_ms=%8 avg_sh_filter_halfres_upsample_ms=%9 "
+               "avg_sh_filter_quarterres_downsample_ms=%10 "
+               "avg_sh_filter_quarterres_rbf_ms=%11 "
+               "avg_sh_filter_quarterres_upsample_ms=%12" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( m_playbackSmokePresentedFrames )
                .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsPrepSumMs ), 0, 'f', 3 )
@@ -17406,7 +17424,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterHalfresDownsampleSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterHalfresRbfSumMs ), 0, 'f', 3 )
-               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterHalfresUpsampleSumMs ), 0, 'f', 3 );
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterHalfresUpsampleSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresDownsampleSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresRbfSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingShadowsHighlightsFilterQuarterresUpsampleSumMs ), 0, 'f', 3 );
 
     if( m_playbackSmokeProcessingShadowsHighlightsRbfTotalSumMs > 0.0 )
     {

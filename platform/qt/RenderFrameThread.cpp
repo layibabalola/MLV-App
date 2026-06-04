@@ -1486,30 +1486,35 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const uint32_t frameNumber = slot.frameNumber;
     const OutputMode outputMode = slot.outputMode;
     const bool useGpuBilinearDebayer = m_activeUseGpuBilinearDebayer;
+    const int playbackScaleFactor = m_activePresentationContext.playbackScaleFactor;
     const bool playbackPreviewFastPathActive =
         outputMode == OutputProcessed8
         && m_activePresentationContext.playbackActive
         && m_activePresentationContext.renderThreadUsingPlaybackPreviewProcessing;
     struct PlaybackPreviewModeGuard
     {
-        explicit PlaybackPreviewModeGuard( bool enabled )
+        PlaybackPreviewModeGuard( bool enabled, int scaleFactor )
             : previousPreviewMode( processingPlaybackPreviewModeEnabled() )
             , previousAggressivePreviewMode( processingPlaybackAggressivePreviewModeEnabled() )
+            , previousScaleFactor( processingPlaybackPreviewScaleFactor() )
         {
             processingSetPlaybackPreviewMode( enabled ? 1 : 0 );
             processingSetPlaybackAggressivePreviewMode(
                 ( enabled && mlvPlaybackAggressivePreviewMode() != 0 ) ? 1 : 0 );
+            processingSetPlaybackPreviewScaleFactor( enabled ? scaleFactor : 1 );
         }
 
         ~PlaybackPreviewModeGuard()
         {
+            processingSetPlaybackPreviewScaleFactor( previousScaleFactor );
             processingSetPlaybackAggressivePreviewMode( previousAggressivePreviewMode );
             processingSetPlaybackPreviewMode( previousPreviewMode );
         }
 
         int previousPreviewMode;
         int previousAggressivePreviewMode;
-    } playbackPreviewModeGuard( playbackPreviewFastPathActive );
+        int previousScaleFactor;
+    } playbackPreviewModeGuard( playbackPreviewFastPathActive, playbackScaleFactor );
     const double frameRequestStageTime = m_activeFrameRequestStageTime;
     const double renderThreadQueueWaitMs =
         (frameRequestStageTime > 0.0 && render_start >= frameRequestStageTime)
@@ -1524,7 +1529,6 @@ void RenderFrameThread::drawFrame( int slotIndex,
 
     /* Read the requested scale factor. The MLV core can still reject invalid
      * alignment, so request and active values are logged separately. */
-    const int playbackScaleFactor = m_activePresentationContext.playbackScaleFactor;
     int renderedImageWidth = m_imageWidth;
     int renderedImageHeight = m_imageHeight;
     if( m_pMlvObject
@@ -2201,6 +2205,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
         processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds();
     const double processingShadowsHighlightsFilterHalfresUpsampleMs =
         processingGetLastShadowsHighlightsFilterHalfresUpsampleMilliseconds();
+    const double processingShadowsHighlightsFilterQuarterresDownsampleMs =
+        processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds();
+    const double processingShadowsHighlightsFilterQuarterresRbfMs =
+        processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds();
+    const double processingShadowsHighlightsFilterQuarterresUpsampleMs =
+        processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds();
     const double processingShadowsHighlightsRbfTotalMs =
         processingGetLastShadowsHighlightsRbfTotalMilliseconds();
     const double processingShadowsHighlightsRbfBoundaryMs =
@@ -2681,6 +2691,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processingShadowsHighlightsFilterHalfresRbfMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_halfres_upsample_ms"),
                                       processingShadowsHighlightsFilterHalfresUpsampleMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_quarterres_downsample_ms"),
+                                      processingShadowsHighlightsFilterQuarterresDownsampleMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_quarterres_rbf_ms"),
+                                      processingShadowsHighlightsFilterQuarterresRbfMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_filter_quarterres_upsample_ms"),
+                                      processingShadowsHighlightsFilterQuarterresUpsampleMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_total_ms"),
                                       processingShadowsHighlightsRbfTotalMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("processing_shadows_highlights_rbf_boundary_ms"),

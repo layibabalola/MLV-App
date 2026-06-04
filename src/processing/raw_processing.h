@@ -103,6 +103,8 @@ void processingSetPlaybackPreviewMode(int enabled);
 int processingPlaybackPreviewModeEnabled(void);
 void processingSetPlaybackAggressivePreviewMode(int enabled);
 int processingPlaybackAggressivePreviewModeEnabled(void);
+void processingSetPlaybackPreviewScaleFactor(int scaleFactor);
+int processingPlaybackPreviewScaleFactor(void);
 void processingResetShadowsHighlightsProbeModeCacheForTesting(void);
 void applyProcessingObject8( processingObject_t * processing,
                              int imageX, int imageY,
@@ -118,6 +120,9 @@ double processingGetLastShadowsHighlightsFilterFullresMilliseconds(void);
 double processingGetLastShadowsHighlightsFilterHalfresDownsampleMilliseconds(void);
 double processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds(void);
 double processingGetLastShadowsHighlightsFilterHalfresUpsampleMilliseconds(void);
+double processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds(void);
+double processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds(void);
+double processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds(void);
 double processingGetLastShadowsHighlightsRbfTotalMilliseconds(void);
 double processingGetLastShadowsHighlightsRbfBoundaryMilliseconds(void);
 double processingGetLastShadowsHighlightsRbfRangeTableMilliseconds(void);
