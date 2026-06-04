@@ -14343,3 +14343,44 @@ Post-change stage timings:
   1. Highest confidence: keep optimizing the retained x8 processed16/processing path without reopening the direct8 local-tone color boundary.
   2. Medium risk: if revisiting direct8, first prove a parallel-safe aggressive local-tone direct8 route and require both visual smoke and per-stage speed wins versus the retained x8 baseline.
   3. Larger structural frontier: decode-aware/tile-aware x8, gated on profiles where raw prefetch is hitting but raw decode still dominates wall-clock cost.
+
+## 2026-06-04 - Aggressive x8 Shadows/Highlights quarter-res deep preview
+
+### Verified locally
+
+- The pipeline-resolution model selected retained x8 processed RGB work, not an isolated hotspot: direct8 local-tone was rejected, raw x8 prefetch is already hitting, and the remaining measurable bucket was the Shadows/Highlights local-tone filter running at x8 preview resolution.
+- Implemented a scale-aware processing preview contract:
+  - `processingSetPlaybackPreviewScaleFactor()` / `processingPlaybackPreviewScaleFactor()` carry the active playback scale into raw processing.
+  - Aggressive Performance Preview at `scale >= 8` now runs the Shadows/Highlights RBF filter at quarter preview resolution, then bilinear-upsamples through the existing half/full scratch buffers.
+  - Sharp/Smooth Preview remains on the existing full local-tone path, and aggressive x4 remains on the existing half-res path.
+  - Kill switch: `MLVAPP_DISABLE_AGGRESSIVE_X8_SH_QUARTERRES=1`.
+- Added per-frame/profile telemetry and GUI smoke summary fields for the quarter-res sub-stages:
+  - `processing_shadows_highlights_filter_quarterres_downsample_ms`
+  - `processing_shadows_highlights_filter_quarterres_rbf_ms`
+  - `processing_shadows_highlights_filter_quarterres_upsample_ms`
+- Focused tests passed after the final source state: `tests\build-ci-pipeline\release\pipeline_tests.exe --gtest_filter=ProcessingFilters.*`, `tests=144`, `assertions=42`, `skipped=0`, `failed=0`.
+- Rebuilt the user-facing release executable: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=2026-06-04 07:54:36 -05:00`, `Length=9062912`, SHA256 `263D47D968B55059042639566DA13BD2EB917086F84089AB5744B72C2B8120DD`.
+
+### Profile Results
+
+- Headless explicit x8 aggressive profiles used `.claude-state\profiling\20260604-retained-x8-processing\`, skipped the first 5 frames, and used 75 warm frames per clip. All three proved `request=8`, `effective=8`, `phase4b_path=8` (`x8-full-xy-pre-recon`), `fallback=none`, `raw_prefetch_hit=75/75`, `processed8_direct_path_active=0`, raw decode `4,100,544` pixels, LLRawProc `63,280` pixels, and processing/presentation `63,958` pixels.
+- `M16-1327`: retained x8 baseline `render_thread_total_ms=55.173 ms` (`18.12 FPS-equivalent`), `processing_ms=21.200 ms` (`47.17 FPS-equivalent`), `processing_shadows_highlights_filter_ms=8.827 ms` (`113.29 FPS-equivalent`), `processed16_total_ms=48.413 ms` (`20.66 FPS-equivalent`), `processed8_total_ms=53.960 ms` (`18.53 FPS-equivalent`). Quarter-res result: `render_thread_total_ms=25.133 ms` (`39.79 FPS-equivalent`), `processing_ms=6.507 ms` (`153.69 FPS-equivalent`), `processing_shadows_highlights_filter_ms=3.227 ms` (`309.92 FPS-equivalent`), `processed16_total_ms=19.960 ms` (`50.10 FPS-equivalent`), `processed8_total_ms=24.360 ms` (`41.05 FPS-equivalent`), quarter-res downsample/RBF/upsample `0.493/2.173/0.560 ms` (`2027.02/460.12/1785.74 FPS-equivalent`).
+- `M16-1347`: retained x8 baseline `render_thread_total_ms=70.507 ms` (`14.18 FPS-equivalent`), `processing_ms=28.200 ms` (`35.46 FPS-equivalent`), `processing_shadows_highlights_filter_ms=13.173 ms` (`75.91 FPS-equivalent`), `processed16_total_ms=62.640 ms` (`15.96 FPS-equivalent`), `processed8_total_ms=68.453 ms` (`14.61 FPS-equivalent`). Quarter-res result: `render_thread_total_ms=52.600 ms` (`19.01 FPS-equivalent`), `processing_ms=13.333 ms` (`75.00 FPS-equivalent`), `processing_shadows_highlights_filter_ms=6.707 ms` (`149.11 FPS-equivalent`), `processed16_total_ms=45.373 ms` (`22.04 FPS-equivalent`), `processed8_total_ms=51.053 ms` (`19.59 FPS-equivalent`), quarter-res downsample/RBF/upsample `0.800/5.027/0.880 ms` (`1250.00/198.94/1136.35 FPS-equivalent`).
+- `M16-1446`: retained x8 baseline `render_thread_total_ms=46.013 ms` (`21.73 FPS-equivalent`), `processing_ms=12.653 ms` (`79.03 FPS-equivalent`), `processing_shadows_highlights_filter_ms=6.480 ms` (`154.32 FPS-equivalent`), `processed16_total_ms=38.720 ms` (`25.83 FPS-equivalent`), `processed8_total_ms=44.053 ms` (`22.70 FPS-equivalent`). Quarter-res result: `render_thread_total_ms=40.187 ms` (`24.88 FPS-equivalent`), `processing_ms=11.547 ms` (`86.60 FPS-equivalent`), `processing_shadows_highlights_filter_ms=6.213 ms` (`160.94 FPS-equivalent`), `processed16_total_ms=34.267 ms` (`29.18 FPS-equivalent`), `processed8_total_ms=39.307 ms` (`25.44 FPS-equivalent`), quarter-res downsample/RBF/upsample `0.720/4.640/0.853 ms` (`1388.89/215.52/1171.86 FPS-equivalent`).
+
+### GUI Smoke
+
+- Screenshot-backed GUI smokes passed on `M16-1327`, `M16-1347`, and `M16-1446`; all had `validation.ok=true`, `scaleRequestLast=8`, `scaleActiveLast=8`, `qualityModeLast=2`, and presented-playback stretch evidence `aspect=2.392322`, `stretch_x=3.0`, `stretch_y=1.0`, `h_stretch_index=0`, `v_stretch_index=3`.
+- Final post-summary-patch smoke on `M16-1327`: `.claude-state\profiling\20260604-retained-x8-processing\M16-1327-x8-quarterres-sh-smoke-final.json`, visible bottom-left `GUI FPS=8.2`, end-summary `GUI FPS=9.0`, `smoke presented FPS=17.259`, `timeline FPS=23.819`, `avg_render_total_ms=73.362 ms` (`13.63 FPS-equivalent`), `avg_processed8_ms=45.475 ms` (`21.99 FPS-equivalent`). The short GUI smoke is noisier than the warmed headless profile, but it proves the release GUI path and the telemetry sink.
+- Final compact processing detail summary proved the intended path: `avg_sh_filter_halfres_downsample/rbf/upsample_ms=0.000/0.000/0.000`, `avg_sh_filter_quarterres_downsample/rbf/upsample_ms=1.127/4.290/1.154` (`887.31/233.10/866.55 FPS-equivalent`).
+- Final presented screenshot: `.claude-state\profiling\20260604-retained-x8-processing\screenshots-M16-1327-quarterres-sh-final\M16-1327.png`, SHA256 `5C48F9327640BFD0BDE461ED6BE65B2AA1D0D4417F0E832B4403326B510B488D`; FPS crop SHA256 `39842F9C429FA8B8599AAD9B58069F0F1F94A6F2ECE562B2B36D093E29CD02C1`.
+
+### Cross-checked from prior analysis
+
+- This keeps the user-facing split clear: Sharp/Smooth Preview favors sharper, non-blocky playback; Aggressive Performance Preview accepts coarse deep preview to remove more processing.
+- The change preserves the early x8 Bayer-domain reduction anchor. Raw decode still touches full source pixels, but after prefetch the measured retained bucket was processed RGB local tone, so this was the highest-confidence next change.
+
+### Needs runtime profiling
+
+- Next ranking should start from the remaining `M16-1347` and `M16-1446` buckets: `processed16_total_ms=45.373 ms` (`22.04 FPS-equivalent`) on `M16-1347`, `processed16_total_ms=34.267 ms` (`29.18 FPS-equivalent`) on `M16-1446`, and LLRawProc totals of `19.453 ms` (`51.41 FPS-equivalent`) / `12.587 ms` (`79.45 FPS-equivalent`).
+- Decode-aware/tile-aware x8 remains the structural frontier because raw decode is still full source resolution, but it should start only if longer profiles show raw decode or queueing dominates despite raw prefetch hits.

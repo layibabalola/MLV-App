@@ -53,6 +53,9 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_f
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_filter_halfres_downsample_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_filter_halfres_rbf_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_filter_halfres_upsample_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_filter_quarterres_downsample_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_filter_quarterres_rbf_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_filter_quarterres_upsample_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_total_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_boundary_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_shadows_highlights_rbf_range_table_ms = 0.0;
@@ -133,6 +136,7 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_gamma_ms = 0
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_curves_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_mode = 0;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_aggressive_preview_mode = 0;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_scale_factor = 1;
 
 static int g_processing_shadows_highlights_probe_initialized = 0;
 static int g_processing_shadows_highlights_probe_mode = -1;
@@ -188,6 +192,19 @@ static int processing_shadows_highlights_probe_mode(void)
         g_processing_shadows_highlights_probe_initialized = 1;
     }
     return g_processing_shadows_highlights_probe_mode;
+}
+
+static int processing_aggressive_x8_shadows_highlights_quarterres_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 1;
+    if( !initialized )
+    {
+        enabled = processing_env_flag_enabled(
+            getenv("MLVAPP_DISABLE_AGGRESSIVE_X8_SH_QUARTERRES") ) ? 0 : 1;
+        initialized = 1;
+    }
+    return enabled;
 }
 
 static int processing_main_prelude_probe_mode(void)
@@ -288,6 +305,9 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_shadows_highlights_filter_halfres_downsample_ms = 0.0;
     g_processing_last_shadows_highlights_filter_halfres_rbf_ms = 0.0;
     g_processing_last_shadows_highlights_filter_halfres_upsample_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_quarterres_downsample_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_quarterres_rbf_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_quarterres_upsample_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_total_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_boundary_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_range_table_ms = 0.0;
@@ -386,6 +406,16 @@ void processingSetPlaybackAggressivePreviewMode(int enabled)
 int processingPlaybackAggressivePreviewModeEnabled(void)
 {
     return g_processing_playback_aggressive_preview_mode;
+}
+
+void processingSetPlaybackPreviewScaleFactor(int scaleFactor)
+{
+    g_processing_playback_preview_scale_factor = (scaleFactor > 1) ? scaleFactor : 1;
+}
+
+int processingPlaybackPreviewScaleFactor(void)
+{
+    return g_processing_playback_preview_scale_factor;
 }
 
 void processingResetShadowsHighlightsProbeModeCacheForTesting(void)
@@ -625,6 +655,76 @@ static void rgb_u16_upsample_2x_bilinear(const uint16_t * __restrict src,
             odd[3] = (uint16_t)((r00 + r01 + r10 + r11) >> 2);
             odd[4] = (uint16_t)((g00 + g01 + g10 + g11) >> 2);
             odd[5] = (uint16_t)((b00 + b01 + b10 + b11) >> 2);
+        }
+    }
+}
+
+static void rgb_u16_upsample_2x_bilinear_to_size(const uint16_t * __restrict src,
+                                                 uint16_t * __restrict dst,
+                                                 int src_w,
+                                                 int src_h,
+                                                 int dst_w,
+                                                 int dst_h,
+                                                 int threads)
+{
+    if( !src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 )
+    {
+        return;
+    }
+
+    const size_t src_stride = (size_t)src_w * 3u;
+    const size_t dst_stride = (size_t)dst_w * 3u;
+
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int y = 0; y < dst_h; ++y)
+    {
+        int y0 = y >> 1;
+        if( y0 >= src_h ) y0 = src_h - 1;
+        const int y_odd = y & 1;
+        const int y1 = (y_odd && y0 + 1 < src_h) ? (y0 + 1) : y0;
+        const uint16_t * row0 = src + (size_t)y0 * src_stride;
+        const uint16_t * row1 = src + (size_t)y1 * src_stride;
+        uint16_t * drow = dst + (size_t)y * dst_stride;
+
+        for (int x = 0; x < dst_w; ++x)
+        {
+            int x0 = x >> 1;
+            if( x0 >= src_w ) x0 = src_w - 1;
+            const int x_odd = x & 1;
+            const int x1 = (x_odd && x0 + 1 < src_w) ? (x0 + 1) : x0;
+            const uint16_t * p00 = row0 + (size_t)x0 * 3u;
+            const uint16_t * p01 = row0 + (size_t)x1 * 3u;
+            const uint16_t * p10 = row1 + (size_t)x0 * 3u;
+            const uint16_t * p11 = row1 + (size_t)x1 * 3u;
+            uint16_t * out = drow + (size_t)x * 3u;
+
+            if( x_odd && y_odd )
+            {
+                out[0] = (uint16_t)(((uint32_t)p00[0] + (uint32_t)p01[0]
+                                    + (uint32_t)p10[0] + (uint32_t)p11[0]) >> 2);
+                out[1] = (uint16_t)(((uint32_t)p00[1] + (uint32_t)p01[1]
+                                    + (uint32_t)p10[1] + (uint32_t)p11[1]) >> 2);
+                out[2] = (uint16_t)(((uint32_t)p00[2] + (uint32_t)p01[2]
+                                    + (uint32_t)p10[2] + (uint32_t)p11[2]) >> 2);
+            }
+            else if( x_odd )
+            {
+                out[0] = (uint16_t)(((uint32_t)p00[0] + (uint32_t)p01[0]) >> 1);
+                out[1] = (uint16_t)(((uint32_t)p00[1] + (uint32_t)p01[1]) >> 1);
+                out[2] = (uint16_t)(((uint32_t)p00[2] + (uint32_t)p01[2]) >> 1);
+            }
+            else if( y_odd )
+            {
+                out[0] = (uint16_t)(((uint32_t)p00[0] + (uint32_t)p10[0]) >> 1);
+                out[1] = (uint16_t)(((uint32_t)p00[1] + (uint32_t)p10[1]) >> 1);
+                out[2] = (uint16_t)(((uint32_t)p00[2] + (uint32_t)p10[2]) >> 1);
+            }
+            else
+            {
+                out[0] = p00[0];
+                out[1] = p00[1];
+                out[2] = p00[2];
+            }
         }
     }
 }
@@ -1049,6 +1149,13 @@ void applyProcessingObject( processingObject_t * processing,
          && (imageX >= 2) && (imageY >= 3)
          && ((imageX & 1) == 0)
          && ((imageY & 1) != 0);
+        const int use_quarterres_rbf =
+            processingPlaybackPreviewModeEnabled()
+         && processingPlaybackAggressivePreviewModeEnabled()
+         && processingPlaybackPreviewScaleFactor() >= 8
+         && processing_aggressive_x8_shadows_highlights_quarterres_enabled()
+         && imageX >= 4
+         && imageY >= 4;
         const int use_halfres_rbf =
             halfres_even_dimensions || halfres_aggressive_preview_odd_height;
 
@@ -1062,6 +1169,92 @@ void applyProcessingObject( processingObject_t * processing,
             //memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
             //blur_image(get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, 1, 1, 1, 0, imageY-1);
             if(0) blur_image_threaded( get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, threads );
+            else if( use_quarterres_rbf )
+            {
+                const double quarterres_downsample_start =
+                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+                const int half_w = imageX >> 1;
+                const int half_h = imageY >> 1;
+                const int quarter_w = half_w >> 1;
+                const int quarter_h = half_h >> 1;
+                const float quarter_sigma_spatial = 0.0025f;
+                buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+                buffer_set_size(processing->shadows_highlights.blur_image_half_in, half_w, half_h);
+                buffer_set_size(processing->shadows_highlights.blur_image_half_out, quarter_w, quarter_h);
+
+                rgb_u16_downsample_2x_box(inputImage,
+                                          get_buffer(processing->shadows_highlights.blur_image_half_in),
+                                          imageX,
+                                          imageY,
+                                          threads);
+                rgb_u16_downsample_2x_box(get_buffer(processing->shadows_highlights.blur_image_half_in),
+                                          get_buffer(processing->shadows_highlights.blur_image_half_out),
+                                          half_w,
+                                          half_h,
+                                          threads);
+                if( shadows_highlights_probe_enabled )
+                {
+                    g_processing_last_shadows_highlights_filter_quarterres_downsample_ms +=
+                        (omp_get_wtime() - quarterres_downsample_start) * 1000.0;
+                }
+
+                const double quarterres_rbf_start =
+                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+                buffer_set_size(processing->shadows_highlights.blur_image_half_in, quarter_w, quarter_h);
+                if( processing_shadows_highlights_curve_index_mask_enabled() )
+                    recursive_bf_wrap_with_curve_index_lut(
+                            get_buffer(processing->shadows_highlights.blur_image_half_out),
+                            get_buffer(processing->shadows_highlights.blur_image_half_in),
+                            quarter_sigma_spatial,
+                            0.075f+(((float)100.0-40.0f)/666.6f),
+                            quarter_w,
+                            quarter_h,
+                            3,
+                            processing->pre_calc_levels,
+                            processing->pre_calc_matrix[0],
+                            processing->pre_calc_matrix[4],
+                            processing->pre_calc_matrix[8]);
+                else
+                    recursive_bf_wrap_with_output_lut(
+                            get_buffer(processing->shadows_highlights.blur_image_half_out),
+                            get_buffer(processing->shadows_highlights.blur_image_half_in),
+                            quarter_sigma_spatial,
+                            0.075f+(((float)100.0-40.0f)/666.6f),
+                            quarter_w,
+                            quarter_h,
+                            3,
+                            processing->pre_calc_levels);
+                if( shadows_highlights_probe_enabled )
+                {
+                    g_processing_last_shadows_highlights_filter_quarterres_rbf_ms +=
+                        (omp_get_wtime() - quarterres_rbf_start) * 1000.0;
+                }
+
+                const double quarterres_upsample_start =
+                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+                buffer_set_size(processing->shadows_highlights.blur_image_half_out, half_w, half_h);
+                rgb_u16_upsample_2x_bilinear_to_size(
+                    get_buffer(processing->shadows_highlights.blur_image_half_in),
+                    get_buffer(processing->shadows_highlights.blur_image_half_out),
+                    quarter_w,
+                    quarter_h,
+                    half_w,
+                    half_h,
+                    threads);
+                rgb_u16_upsample_2x_bilinear_to_size(
+                    get_buffer(processing->shadows_highlights.blur_image_half_out),
+                    get_buffer(processing->shadows_highlights.blur_image),
+                    half_w,
+                    half_h,
+                    imageX,
+                    imageY,
+                    threads);
+                if( shadows_highlights_probe_enabled )
+                {
+                    g_processing_last_shadows_highlights_filter_quarterres_upsample_ms +=
+                        (omp_get_wtime() - quarterres_upsample_start) * 1000.0;
+                }
+            }
             else if( use_halfres_rbf )
             {
                 const double halfres_downsample_start =
@@ -3407,6 +3600,21 @@ double processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds(void)
 double processingGetLastShadowsHighlightsFilterHalfresUpsampleMilliseconds(void)
 {
     return g_processing_last_shadows_highlights_filter_halfres_upsample_ms;
+}
+
+double processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_filter_quarterres_downsample_ms;
+}
+
+double processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_filter_quarterres_rbf_ms;
+}
+
+double processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds(void)
+{
+    return g_processing_last_shadows_highlights_filter_quarterres_upsample_ms;
 }
 
 double processingGetLastShadowsHighlightsRbfTotalMilliseconds(void)

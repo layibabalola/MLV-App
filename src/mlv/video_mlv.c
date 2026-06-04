@@ -2008,8 +2008,11 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
         const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
         const int previous_aggressive_preview_mode =
             processingPlaybackAggressivePreviewModeEnabled();
+        const int previous_preview_scale_factor =
+            processingPlaybackPreviewScaleFactor();
         processingSetPlaybackPreviewMode(1);
         processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
+        processingSetPlaybackPreviewScaleFactor(task->scaleFactor);
         int renderOk = mlv_render_processed_frame8_direct_with_processing(
             task->video,
             task->processing,
@@ -2019,6 +2022,7 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             task->threads,
             task->scaleFactor,
             0);
+        processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
         processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
         processingSetPlaybackPreviewMode(previous_preview_mode);
 
@@ -4347,11 +4351,15 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
 
     /* Do processing.......... */
     const double processing_start = mlv_stage_timing_now();
+    const int previous_preview_scale_factor =
+        processingPlaybackPreviewScaleFactor();
+    processingSetPlaybackPreviewScaleFactor(normalizedScale);
     applyProcessingObject( video->processing,
                            width, height,
                            unprocessed_frame,
                            outputFrame,
                            threads, 1, frameIndex );
+    processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
     g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
 
@@ -4419,6 +4427,8 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
     const int previous_aggressive_preview_mode =
         processingPlaybackAggressivePreviewModeEnabled();
+    const int previous_preview_scale_factor =
+        processingPlaybackPreviewScaleFactor();
     mlv_reset_last_raw_stage_telemetry();
     g_mlv_last_llrawproc_ms = 0.0;
     g_mlv_last_debayered_frame_ms = 0.0;
@@ -4443,6 +4453,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     {
         video->playback_scale_factor_active = normalizedScale;
     }
+    processingSetPlaybackPreviewScaleFactor(normalizedScale);
 
     /* Phase 4B: size the output by *effective* scale, not full sensor.
      * The downstream direct8 path reads playback_scale_factor_active to
@@ -4655,6 +4666,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
 cleanup:
+    processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
     processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
     processingSetPlaybackPreviewMode(previous_preview_mode);
 }
