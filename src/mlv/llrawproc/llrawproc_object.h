@@ -142,6 +142,7 @@ typedef struct
      * the per-frame fast-path. */
     int diso_playback_force_disable_alias_map;
     int diso_playback_force_disable_fr_blending;
+    double playback_pre_dualiso_fix_ms;
     int dark_frame;       // flag for Dark Frame subtraction mode 0 = off, 1 = ext, 2 = int
     dualiso_preview_scratch_t diso_preview_scratch;
     dualiso_full20bit_scratch_t diso_full20bit_scratch;

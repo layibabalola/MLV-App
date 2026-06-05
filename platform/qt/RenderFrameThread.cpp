@@ -688,7 +688,8 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
         applyLLRawProcObjectWorker( m_pMlvObject,
                                     slot.rawImage16.data(),
                                     rawPixelCount * sizeof(uint16_t),
-                                    workerState );
+                                    workerState,
+                                    0 );
     }
 
     if( stageCsvEnabled )
@@ -1746,6 +1747,13 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const int renderedHeight = qMax( 0, renderedImageHeight );
     const qint64 sourcePixels = stagePixelCount( sourceWidth, sourceHeight );
     const qint64 renderedPixels = stagePixelCount( renderedWidth, renderedHeight );
+    const double llrawprocPreDualIsoFixMs =
+        ( m_pMlvObject && m_pMlvObject->llrawproc )
+            ? m_pMlvObject->llrawproc->playback_pre_dualiso_fix_ms
+            : 0.0;
+    const bool preDualIsoFixActive = llrawprocPreDualIsoFixMs > 0.0;
+    const int preDualIsoFixWidth = preDualIsoFixActive ? sourceWidth : 0;
+    const int preDualIsoFixHeight = preDualIsoFixActive ? sourceHeight : 0;
     QString phase4bFallbackReason = QStringLiteral("none");
     const bool aggressivePreview = ( mlvPlaybackAggressivePreviewMode() != 0 );
     const bool phase4bReducedPath =
@@ -1892,6 +1900,13 @@ void RenderFrameThread::drawFrame( int slotIndex,
         QStringLiteral("raw_bayer"),
         processedOutputMode ? sourceWidth : 0,
         processedOutputMode ? sourceHeight : 0,
+        sourcePixels );
+    insertStageResolutionTelemetry(
+        slot.stageTimingTelemetry,
+        QStringLiteral("render_thread_stage_pre_dualiso_fix"),
+        QStringLiteral("raw_bayer"),
+        preDualIsoFixWidth,
+        preDualIsoFixHeight,
         sourcePixels );
     insertStageResolutionTelemetry(
         slot.stageTimingTelemetry,
@@ -2418,6 +2433,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       rawUint16OtherMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_ms"),
                                       llrawprocMs );
+    slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_pre_dualiso_fix_ms"),
+                                      llrawprocPreDualIsoFixMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_total_ms"),
                                       llrpGetLastTotalMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_dark_frame_ms"),

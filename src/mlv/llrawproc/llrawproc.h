@@ -38,7 +38,15 @@ void llrpFreeWorkerState(llrawprocWorkerState_t * worker);
 void applyLLRawProcObjectWorker(mlvObject_t * video,
                                 uint16_t * raw_image_buff,
                                 size_t raw_image_size,
-                                llrawprocWorkerState_t * worker);
+                                llrawprocWorkerState_t * worker,
+                                int stop_before_dual_iso);
+
+/* Playback-only helper: apply the full-res raw coordinate/fix stages and stop
+ * before Dual ISO recon. Used by the x4 quality-preserving early-reduction
+ * prototype so the raw fixes can happen before the reduced path runs. */
+void applyLLRawProcObjectPreDualIsoFixes(mlvObject_t * video,
+                                         uint16_t * raw_image_buff,
+                                         size_t raw_image_size);
 
 /* Phase 4B-v2: scaled variant for the downsample-BEFORE-llrawproc path.
  * Runs the same pipeline as applyLLRawProcObject but on a buffer whose
@@ -78,6 +86,7 @@ double llrpGetLastVerticalStripesMilliseconds(void);
 double llrpGetLastFocusPixelsMilliseconds(void);
 double llrpGetLastBadPixelsMilliseconds(void);
 double llrpGetLastPatternNoiseMilliseconds(void);
+double llrpGetLastPreDualIsoFixMilliseconds(void);
 double llrpGetLastDualIsoMilliseconds(void);
 double llrpGetLastChromaSmoothMilliseconds(void);
 void llrpGetLastDualIsoFull20bitTiming(dualiso_full20bit_timing_t * timing);
