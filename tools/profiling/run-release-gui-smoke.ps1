@@ -1000,6 +1000,9 @@ $summaryLine = $recentLines |
 $cpuSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.cpu_summary*" } |
     Select-Object -Last 1
+$stageSplitSummaryLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.stage_split_summary*" } |
+    Select-Object -Last 1
 $processingDetailSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.processing_detail_summary*" } |
     Select-Object -Last 1
@@ -1039,6 +1042,7 @@ if ($runMetadataLine -and $runMetadataLine -match 'run_metadata=(?<json>\{.*\})'
 $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $playbackStartLine } else { $null }
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
 $cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
+$stageSplitSummary = if ($stageSplitSummaryLine) { Convert-PlaybackLogLineToObject $stageSplitSummaryLine } else { $null }
 $processingDetailSummary = if ($processingDetailSummaryLine) { Convert-PlaybackLogLineToObject $processingDetailSummaryLine } else { $null }
 $debayerDetailSummary = if ($debayerDetailSummaryLine) { Convert-PlaybackLogLineToObject $debayerDetailSummaryLine } else { $null }
 $rbfDetailSummary = if ($rbfDetailSummaryLine) { Convert-PlaybackLogLineToObject $rbfDetailSummaryLine } else { $null }
@@ -1249,8 +1253,9 @@ $result = [pscustomobject]@{
         runMetadata = $runMetadata
         playbackStart = $playbackStart
         summary = $playbackSummary
-        cpuSummary = $cpuSummary
-        processingDetailSummary = $processingDetailSummary
+    cpuSummary = $cpuSummary
+    stageSplitSummary = $stageSplitSummary
+    processingDetailSummary = $processingDetailSummary
         debayerDetailSummary = $debayerDetailSummary
         rbfDetailSummary = $rbfDetailSummary
         dualIsoFull20Summary = $dualIsoFull20Summary
