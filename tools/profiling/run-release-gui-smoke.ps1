@@ -23,6 +23,7 @@ param(
     [switch]$FrameTelemetry,
     [switch]$RbfDetailTiming,
     [switch]$CaptureScreenshot,
+    [switch]$FailOnColorArtifact,
     [switch]$SkipWindowScreenshot,
     [string]$ScreenshotOutputDir = "",
     [int]$ScreenshotDelayMs = 2000,
@@ -228,6 +229,243 @@ function Get-ScreenshotImageMetadata {
     }
     finally {
         $image.Dispose()
+    }
+}
+
+function Add-ColorArtifactScannerType {
+    Add-Type -AssemblyName System.Drawing
+    if ("MlvGuiSmokeColorArtifactScanner" -as [type]) {
+        return
+    }
+
+    Add-Type -ReferencedAssemblies @(
+        "System.Drawing",
+        "System.Drawing.Common",
+        "System.Drawing.Primitives",
+        "System.Private.Windows.GdiPlus",
+        "System.Private.Windows.Core"
+    ) -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+public sealed class MlvGuiSmokeColorArtifactScanResult
+{
+    public string Path;
+    public int Width;
+    public int Height;
+    public int Step;
+    public int VisibleSamples;
+    public double MagentaRatio;
+    public double GreenRatio;
+    public double TopBandMagentaRatio;
+    public double TopBandGreenRatio;
+    public double BottomBandMagentaRatio;
+    public double BottomBandGreenRatio;
+    public double MaxTileMagentaRatio;
+    public double MaxTileGreenRatio;
+    public double MeanMagentaAxis;
+    public double MeanGreenAxis;
+    public string Verdict;
+}
+
+public static class MlvGuiSmokeColorArtifactScanner
+{
+    public static MlvGuiSmokeColorArtifactScanResult Scan(string path)
+    {
+        using (var source = new Bitmap(path))
+        using (var bitmap = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb))
+        using (var graphics = Graphics.FromImage(bitmap))
+        {
+            graphics.DrawImage(source, 0, 0, source.Width, source.Height);
+            int width = bitmap.Width;
+            int height = bitmap.Height;
+            int step = Math.Max(1, Math.Min(width, height) / 512);
+            if (step < 2) step = 2;
+
+            const int tileCols = 16;
+            const int tileRows = 12;
+            int[,] tileTotal = new int[tileRows, tileCols];
+            int[,] tileMagenta = new int[tileRows, tileCols];
+            int[,] tileGreen = new int[tileRows, tileCols];
+
+            int visible = 0;
+            int magenta = 0;
+            int green = 0;
+            int topVisible = 0;
+            int topMagenta = 0;
+            int topGreen = 0;
+            int bottomVisible = 0;
+            int bottomMagenta = 0;
+            int bottomGreen = 0;
+            double magentaAxisSum = 0.0;
+            double greenAxisSum = 0.0;
+
+            Rectangle rect = new Rectangle(0, 0, width, height);
+            BitmapData data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            try
+            {
+                int stride = data.Stride;
+                int bytes = Math.Abs(stride) * height;
+                byte[] buffer = new byte[bytes];
+                Marshal.Copy(data.Scan0, buffer, 0, bytes);
+
+                for (int y = 0; y < height; y += step)
+                {
+                    int row = y * stride;
+                    bool topBand = y < height / 10;
+                    bool bottomBand = y >= (height * 9) / 10;
+                    int tileY = Math.Min(tileRows - 1, (int)((long)y * tileRows / Math.Max(1, height)));
+                    for (int x = 0; x < width; x += step)
+                    {
+                        int offset = row + x * 3;
+                        if (offset < 0 || offset + 2 >= buffer.Length) continue;
+                        int b = buffer[offset + 0];
+                        int g = buffer[offset + 1];
+                        int r = buffer[offset + 2];
+                        double luminance = (r + g + b) / 3.0;
+                        if (luminance < 24.0) continue;
+
+                        double magentaAxis = ((r + b) * 0.5) - g;
+                        double greenAxis = g - ((r + b) * 0.5);
+                        bool magentaHit = magentaAxis > 45.0 && r > 80 && b > 80 && (r - g) > 35 && (b - g) > 20;
+                        bool greenHit = greenAxis > 45.0 && g > 80 && (g - r) > 35 && (g - b) > 20;
+
+                        visible++;
+                        magentaAxisSum += magentaAxis;
+                        greenAxisSum += greenAxis;
+                        if (magentaHit) magenta++;
+                        if (greenHit) green++;
+
+                        if (topBand)
+                        {
+                            topVisible++;
+                            if (magentaHit) topMagenta++;
+                            if (greenHit) topGreen++;
+                        }
+                        if (bottomBand)
+                        {
+                            bottomVisible++;
+                            if (magentaHit) bottomMagenta++;
+                            if (greenHit) bottomGreen++;
+                        }
+
+                        int tileX = Math.Min(tileCols - 1, (int)((long)x * tileCols / Math.Max(1, width)));
+                        tileTotal[tileY, tileX]++;
+                        if (magentaHit) tileMagenta[tileY, tileX]++;
+                        if (greenHit) tileGreen[tileY, tileX]++;
+                    }
+                }
+            }
+            finally
+            {
+                bitmap.UnlockBits(data);
+            }
+
+            double maxTileMagenta = 0.0;
+            double maxTileGreen = 0.0;
+            for (int ty = 0; ty < tileRows; ++ty)
+            {
+                for (int tx = 0; tx < tileCols; ++tx)
+                {
+                    int total = tileTotal[ty, tx];
+                    if (total <= 0) continue;
+                    maxTileMagenta = Math.Max(maxTileMagenta, (double)tileMagenta[ty, tx] / total);
+                    maxTileGreen = Math.Max(maxTileGreen, (double)tileGreen[ty, tx] / total);
+                }
+            }
+
+            double magentaRatio = visible > 0 ? (double)magenta / visible : 0.0;
+            double greenRatio = visible > 0 ? (double)green / visible : 0.0;
+            double topMagentaRatio = topVisible > 0 ? (double)topMagenta / topVisible : 0.0;
+            double topGreenRatio = topVisible > 0 ? (double)topGreen / topVisible : 0.0;
+            double bottomMagentaRatio = bottomVisible > 0 ? (double)bottomMagenta / bottomVisible : 0.0;
+            double bottomGreenRatio = bottomVisible > 0 ? (double)bottomGreen / bottomVisible : 0.0;
+
+            bool barSuspect = topMagentaRatio > 0.08 || topGreenRatio > 0.08 ||
+                              bottomMagentaRatio > 0.08 || bottomGreenRatio > 0.08;
+            bool blockSuspect = maxTileMagenta > 0.22 || maxTileGreen > 0.22;
+            bool globalSuspect = magentaRatio > 0.06 || greenRatio > 0.06;
+            string verdict = (barSuspect || blockSuspect) ? "suspect-block-or-bar" :
+                             globalSuspect ? "global-color-axis-present" :
+                             "clear-heuristic";
+
+            return new MlvGuiSmokeColorArtifactScanResult {
+                Path = path,
+                Width = width,
+                Height = height,
+                Step = step,
+                VisibleSamples = visible,
+                MagentaRatio = Math.Round(magentaRatio, 6),
+                GreenRatio = Math.Round(greenRatio, 6),
+                TopBandMagentaRatio = Math.Round(topMagentaRatio, 6),
+                TopBandGreenRatio = Math.Round(topGreenRatio, 6),
+                BottomBandMagentaRatio = Math.Round(bottomMagentaRatio, 6),
+                BottomBandGreenRatio = Math.Round(bottomGreenRatio, 6),
+                MaxTileMagentaRatio = Math.Round(maxTileMagenta, 6),
+                MaxTileGreenRatio = Math.Round(maxTileGreen, 6),
+                MeanMagentaAxis = visible > 0 ? Math.Round(magentaAxisSum / visible, 3) : 0.0,
+                MeanGreenAxis = visible > 0 ? Math.Round(greenAxisSum / visible, 3) : 0.0,
+                Verdict = verdict
+            };
+        }
+    }
+}
+"@
+}
+
+function Get-ScreenshotColorArtifactScan {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return [pscustomobject]@{
+            requested = $false
+            path = $Path
+            verdict = "not-captured"
+            error = $null
+        }
+    }
+
+    try {
+        Add-ColorArtifactScannerType
+        $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
+        $scan = [MlvGuiSmokeColorArtifactScanner]::Scan($resolvedPath)
+        [pscustomobject]@{
+            requested = $true
+            path = $scan.Path
+            width = $scan.Width
+            height = $scan.Height
+            step = $scan.Step
+            visibleSamples = $scan.VisibleSamples
+            verdict = $scan.Verdict
+            magentaRatio = $scan.MagentaRatio
+            greenRatio = $scan.GreenRatio
+            topBandMagentaRatio = $scan.TopBandMagentaRatio
+            topBandGreenRatio = $scan.TopBandGreenRatio
+            bottomBandMagentaRatio = $scan.BottomBandMagentaRatio
+            bottomBandGreenRatio = $scan.BottomBandGreenRatio
+            maxTileMagentaRatio = $scan.MaxTileMagentaRatio
+            maxTileGreenRatio = $scan.MaxTileGreenRatio
+            meanMagentaAxis = $scan.MeanMagentaAxis
+            meanGreenAxis = $scan.MeanGreenAxis
+            thresholds = [pscustomobject]@{
+                bandRatio = 0.08
+                tileRatio = 0.22
+                globalRatio = 0.06
+                verdictsThatFailWhenRequested = @("suspect-block-or-bar", "scan-error")
+            }
+            note = "Sampled presented-frame screenshot scan for magenta/pink/green bars and tinted blocks; use with -FailOnColorArtifact to make suspect block/bar verdicts validation failures."
+            error = $null
+        }
+    }
+    catch {
+        [pscustomobject]@{
+            requested = $true
+            path = $Path
+            verdict = "scan-error"
+            error = $_.Exception.Message
+        }
     }
 }
 
@@ -689,6 +927,7 @@ $process = [System.Diagnostics.Process]::Start($startInfo)
 $screenshotCapture = $null
 $windowScreenshotCapture = $null
 $fpsStatusCropCapture = $null
+$colorArtifactScan = $null
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
 $process.WaitForExit()
@@ -712,6 +951,7 @@ if ($CaptureScreenshot) {
         windowWaitMs = $ScreenshotWindowWaitMs
         captureTimeoutMs = $ScreenshotCaptureTimeoutMs
     }
+    $colorArtifactScan = Get-ScreenshotColorArtifactScan -Path $screenshotPath
 }
 if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
     if (-not (Test-Path -LiteralPath $windowScreenshotPath)) {
@@ -837,6 +1077,11 @@ if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
         $cpuSettled = ($cpuSettle.settled -eq 1)
     }
 }
+$colorArtifactFailureVerdicts = @("suspect-block-or-bar", "scan-error")
+$colorArtifactVerdict =
+    if ($null -ne $colorArtifactScan) { [string]$colorArtifactScan.verdict } else { "not-captured" }
+$colorArtifactScanPassed =
+    -not ($colorArtifactFailureVerdicts -contains $colorArtifactVerdict)
 
 $validationFailures = @()
 if ($RequireLookAssist -and -not $lookAssistApplied) {
@@ -858,6 +1103,11 @@ if ($RequireCpuSettled -and
     $preLaunchSystemCpuSettle.requested -and
     -not $preLaunchSystemCpuSettle.settled) {
     $validationFailures += "System CPU did not settle before launching MLVApp."
+}
+if ($FailOnColorArtifact -and
+    $null -ne $colorArtifactScan -and
+    -not $colorArtifactScanPassed) {
+    $validationFailures += "Color artifact scan verdict was $colorArtifactVerdict."
 }
 if ($ExpectedScaleRequest -ge 0 -and
     ($null -eq $validatedScaleRequest -or [int]$validatedScaleRequest -ne $ExpectedScaleRequest)) {
@@ -900,6 +1150,7 @@ $result = [pscustomobject]@{
         validationPolicy = [pscustomobject]@{
             requireLookAssist = $RequireLookAssist
             requireCpuSettled = $RequireCpuSettled
+            failOnColorArtifact = [bool]$FailOnColorArtifact
             expectedScaleRequest = $ExpectedScaleRequest
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
@@ -924,6 +1175,7 @@ $result = [pscustomobject]@{
         qualityModeLast = $qualityModeLast
         visualState = $visualState
         aspectEvidence = $screenshotAspectEvidence
+        colorArtifactScan = $colorArtifactScan
         lookAssist = [pscustomobject]@{
             applied = [bool]$lookAssistApplied
             enabled = Get-ObjectPropertyValue $lookAssistSettle "enabled"
@@ -1038,6 +1290,8 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     lookAssistApplied = [bool]$lookAssistApplied
     cpuSettled = [bool]$cpuSettled
     systemCpuSettled = [bool]$preLaunchSystemCpuSettle.settled
+    colorArtifactScanPassed = [bool]$colorArtifactScanPassed
+    colorArtifactScanVerdict = $colorArtifactVerdict
     scaleRequestMatched = ($ExpectedScaleRequest -lt 0 -or
         ($null -ne $validatedScaleRequest -and [int]$validatedScaleRequest -eq $ExpectedScaleRequest))
     qualityModeMatched = ($ExpectedQualityMode -lt 0 -or
