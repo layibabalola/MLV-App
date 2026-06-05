@@ -10,7 +10,6 @@
 #include "../../src/processing/raw_processing.h"
 #include "../../src/debayer/debayer.h"
 #include "../../src/batch/ReceiptLoader.h"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -4528,6 +4527,50 @@ TEST(DualIsoPipeline, Phase4Bv3_AggressivePreviewAllowsHqMean23PreReconX4)
 
     const std::vector<uint8_t> scaled = fixture.renderFrame8Scaled(0, 1, 4);
     ASSERT_FALSE(scaled.empty());
+    ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
+}
+
+TEST(DualIsoPipeline, DualIsoPlaybackUsesFastHqPathForFastX4)
+{
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE");
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    struct FastX4ResetGuard {
+        ~FastX4ResetGuard() {
+            mlvSetPlaybackFastX4HqPathMode(0);
+            mlvSetPlaybackAggressivePreviewMode(0);
+            mlv_phase4bv_reset_env_cache_for_testing();
+            MLVAPP_TEST_UNSETENV("MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE");
+            MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE");
+            MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+        }
+    } fastX4ResetGuard;
+
+    mlvSetPlaybackAggressivePreviewMode(0);
+    mlvSetPlaybackFastX4HqPathMode(1);
+    ASSERT_EQ(1, mlvPlaybackFastX4HqPathMode());
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    fixture.receipt().setFocusPixels(0);
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+    llrpSetDualIsoPlaybackForceMean23(fixture.video(), 1);
+    ASSERT_EQ(1, llrpGetDualIsoPlaybackForceMean23(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+        return;
+    }
+
+    const std::vector<uint8_t> scaled = fixture.renderFrame8Scaled(0, 1, 4);
+    ASSERT_FALSE(scaled.empty());
+    ASSERT_EQ(std::string("none"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
     ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
 }
 
