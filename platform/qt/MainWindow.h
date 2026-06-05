@@ -880,6 +880,11 @@ private:
     double m_playbackSmokeRenderTotalMaxMs = 0.0;
     double m_playbackSmokeRenderWorkSumMs = 0.0;
     double m_playbackSmokeQueueWaitSumMs = 0.0;
+    double m_playbackSmokePresentUiSignalLatencySumMs = 0.0;
+    double m_playbackSmokePresentDrawPresentSumMs = 0.0;
+    double m_playbackSmokePresentOverlaysScopesSumMs = 0.0;
+    double m_playbackSmokePresentRenderSlotReleaseSumMs = 0.0;
+    double m_playbackSmokePresentPacingSumMs = 0.0;
     double m_playbackSmokeLlrawprocSumMs = 0.0;
     double m_playbackSmokeProcessed8SumMs = 0.0;
     double m_playbackSmokeProcessed8CacheStoreSumMs = 0.0;
@@ -1039,6 +1044,14 @@ private:
     double m_playbackSmokeProcessed16For8BitSumMs = 0.0;
     double m_playbackSmokeProcessed16To8BitSumMs = 0.0;
     double m_playbackSmokeProcessed16CacheStoreSumMs = 0.0;
+    double m_playbackSmokeProcessed16SetupSumMs = 0.0;
+    double m_playbackSmokeProcessed16CoreMathSumMs = 0.0;
+    double m_playbackSmokeProcessed16LocalToneSumMs = 0.0;
+    double m_playbackSmokeProcessed16ThreadingOverheadSumMs = 0.0;
+    double m_playbackSmokeProcessed8SetupSumMs = 0.0;
+    double m_playbackSmokeProcessed8CoreMathSumMs = 0.0;
+    double m_playbackSmokeProcessed8LocalToneSumMs = 0.0;
+    double m_playbackSmokeProcessed8ThreadingOverheadSumMs = 0.0;
     double m_playbackSmokePlaybackScaleSumMs = 0.0;
     double m_playbackSmokeDrawImageSumMs = 0.0;
     double m_playbackSmokeDrawPresentSumMs = 0.0;

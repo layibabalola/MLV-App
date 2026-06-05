@@ -16535,6 +16535,12 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "processing_highest_green_ms" );
     const double processingCoreMs =
         telemetryDoubleValue( timing, "processing_core_ms" );
+    const double processingCoreColorMs =
+        telemetryDoubleValue( timing, "processing_core_color_ms" );
+    const double processingCoreCreativeMs =
+        telemetryDoubleValue( timing, "processing_core_creative_ms" );
+    const double processingCoreColorGammaMs =
+        telemetryDoubleValue( timing, "processing_core_color_gamma_ms" );
     const double processingChromaMs =
         telemetryDoubleValue( timing, "processing_chroma_ms" );
     const double processingSharpenMs =
@@ -16602,13 +16608,52 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     const double drawPresentMs = m_lastDrawFrameReadyPresentMs;
     const double drawAdvanceMs = m_lastDrawFrameReadyAdvanceMs;
     const double drawScopesMs = m_lastDrawFrameReadyScopesMs;
+    const double drawOverlayMs = m_lastDrawFrameReadyOverlayMs;
+    const double presentIntervalMinusRenderTotalMs =
+        qMax( 0.0, intervalMs - renderTotalMs );
+    const double presentUiSignalLatencyMs = queueWaitMs;
+    const double presentDrawPresentMs = drawImageMs + drawPresentMs;
+    const double presentOverlaysScopesMs = drawScopesMs + drawOverlayMs;
+    const double presentRenderSlotReleaseMs = drawAdvanceMs;
+    const double presentPacingMs =
+        qMax( 0.0,
+              presentIntervalMinusRenderTotalMs
+              - presentUiSignalLatencyMs
+              - presentDrawPresentMs
+              - presentOverlaysScopesMs
+              - presentRenderSlotReleaseMs );
+    const double processed16SetupMs = processingSetupMs;
+    const double processed16CoreMathMs = processingCoreMs;
+    const double processed16LocalToneMs =
+        processingCoreCreativeMs + processingCoreColorGammaMs;
+    const double processed16ThreadingOverheadMs =
+        qMax( 0.0, renderWorkMs - llrawprocMs - processed16Ms );
+    const double processed8SetupMs = processingSetupMs;
+    const double processed8CoreMathMs = processingCoreMs + direct8MatrixMs;
+    const double processed8LocalToneMs =
+        processingCoreCreativeMs + direct8GammaMs + direct8CurvesMs;
+    const double processed8ThreadingOverheadMs =
+        qMax( 0.0, renderWorkMs - llrawprocMs - processed8Ms );
 
     m_playbackSmokeQueueWaitSumMs += queueWaitMs;
     m_playbackSmokeRenderWorkSumMs += renderWorkMs;
     m_playbackSmokeRenderTotalSumMs += renderTotalMs;
+    m_playbackSmokePresentUiSignalLatencySumMs += presentUiSignalLatencyMs;
+    m_playbackSmokePresentDrawPresentSumMs += presentDrawPresentMs;
+    m_playbackSmokePresentOverlaysScopesSumMs += presentOverlaysScopesMs;
+    m_playbackSmokePresentRenderSlotReleaseSumMs += presentRenderSlotReleaseMs;
+    m_playbackSmokePresentPacingSumMs += presentPacingMs;
     m_playbackSmokeLlrawprocSumMs += llrawprocMs;
     m_playbackSmokeProcessed8SumMs += processed8Ms;
     m_playbackSmokeProcessed8CacheStoreSumMs += processed8CacheStoreMs;
+    m_playbackSmokeProcessed16SetupSumMs += processed16SetupMs;
+    m_playbackSmokeProcessed16CoreMathSumMs += processed16CoreMathMs;
+    m_playbackSmokeProcessed16LocalToneSumMs += processed16LocalToneMs;
+    m_playbackSmokeProcessed16ThreadingOverheadSumMs += processed16ThreadingOverheadMs;
+    m_playbackSmokeProcessed8SetupSumMs += processed8SetupMs;
+    m_playbackSmokeProcessed8CoreMathSumMs += processed8CoreMathMs;
+    m_playbackSmokeProcessed8LocalToneSumMs += processed8LocalToneMs;
+    m_playbackSmokeProcessed8ThreadingOverheadSumMs += processed8ThreadingOverheadMs;
     m_playbackSmokeRawUint16SumMs += rawUint16Ms;
     m_playbackSmokeRawUint16DecompressSumMs += rawUint16DecompressMs;
     m_playbackSmokeRawUint16UnpackSumMs += rawUint16UnpackMs;
@@ -16941,7 +16986,14 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "openmp_thread_cap_active=%13 render_total_ms=%14 "
                    "render_work_ms=%15 queue_wait_ms=%16 llrawproc_ms=%17 "
                    "processed8_ms=%18 draw_total_ms=%19 still_drawing=%20 "
-                   "pending_advance=%21 queued_playback_drops=%22" )
+                   "pending_advance=%21 queued_playback_drops=%22 "
+                   "present_ui_signal_latency_ms=%23 present_draw_present_ms=%24 "
+                   "present_overlays_scopes_ms=%25 present_render_slot_release_ms=%26 "
+                   "present_pacing_ms=%27 processed16_setup_ms=%28 "
+                   "processed16_core_math_ms=%29 processed16_local_tone_ms=%30 "
+                   "processed16_threading_overhead_ms=%31 processed8_setup_ms=%32 "
+                   "processed8_core_math_ms=%33 processed8_local_tone_ms=%34 "
+                   "processed8_threading_overhead_ms=%35" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( elapsedMs, 0, 'f', 3 )
@@ -16963,7 +17015,20 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( drawTotalMs, 0, 'f', 3 )
                    .arg( bool01( m_frameStillDrawing ) )
                    .arg( bool01( m_playbackFrameAdvancePending ) )
-                   .arg( queuedPlaybackDrops );
+                   .arg( queuedPlaybackDrops )
+                   .arg( presentUiSignalLatencyMs, 0, 'f', 3 )
+                   .arg( presentDrawPresentMs, 0, 'f', 3 )
+                   .arg( presentOverlaysScopesMs, 0, 'f', 3 )
+                   .arg( presentRenderSlotReleaseMs, 0, 'f', 3 )
+                   .arg( presentPacingMs, 0, 'f', 3 )
+                   .arg( processed16SetupMs, 0, 'f', 3 )
+                   .arg( processed16CoreMathMs, 0, 'f', 3 )
+                   .arg( processed16LocalToneMs, 0, 'f', 3 )
+                   .arg( processed16ThreadingOverheadMs, 0, 'f', 3 )
+                   .arg( processed8SetupMs, 0, 'f', 3 )
+                   .arg( processed8CoreMathMs, 0, 'f', 3 )
+                   .arg( processed8LocalToneMs, 0, 'f', 3 )
+                   .arg( processed8ThreadingOverheadMs, 0, 'f', 3 );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
@@ -17327,64 +17392,75 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processed16_to_8bit_ms=%26 avg_playback_scale_ms=%27 "
                "avg_draw_image_ms=%28 avg_draw_present_ms=%29 "
                "avg_draw_advance_ms=%30 avg_draw_scopes_ms=%31 "
-               "processed8_direct_path_frames=%32 processed8_prefetch_hits=%33 "
-               "raw_prefetch_hits=%34 queued_playback_drops=%35 "
-               "max_queued_playback_drops=%36 scope_updates=%37 scope_skips=%38 "
-               "audio_sync_requests=%39 audio_sync_applied=%40 "
-               "audio_sync_skipped=%41 avg_processing_setup_ms=%42 "
-               "avg_processing_shadows_highlights_prep_ms=%43 "
-               "avg_processing_highest_green_ms=%44 "
-               "borrowed_prepared_rgb8_frames=%45 owned_prepared_rgb8_frames=%46 "
-               "borrowed_prepared_rgb8_bytes=%47 owned_prepared_rgb8_bytes=%48 "
-               "moved_prepared_rgb8_frames=%49 moved_prepared_rgb8_bytes=%50 "
-               "qimage_prepared_rgb8_frames=%51 qimage_prepared_rgb8_bytes=%52 "
-               "avg_processing_core_color_main_ms=%53 "
-               "avg_processing_core_color_gradient_ms=%54 "
-               "avg_processing_core_color_main_prelude_ms=%55 "
-               "avg_processing_core_color_main_prelude_vignette_ms=%56 "
-               "avg_processing_core_color_main_prelude_creative_ms=%57 "
-               "avg_processing_core_color_main_prelude_creative_shadows_ms=%58 "
-               "avg_processing_core_color_main_prelude_creative_contrast_ms=%59 "
-               "avg_processing_core_color_main_prelude_wb_ms=%60 "
-               "avg_processing_core_color_main_prelude_wb_matrix_ms=%61 "
-               "avg_processing_core_color_main_prelude_wb_matrix_r_ms=%62 "
-               "avg_processing_core_color_main_prelude_wb_matrix_g_ms=%63 "
-               "avg_processing_core_color_main_prelude_wb_matrix_b_ms=%64 "
-               "avg_processing_core_color_main_prelude_wb_gradient_matrix_ms=%65 "
-               "avg_processing_core_color_main_prelude_wb_exposure_ms=%66 "
-               "avg_processing_core_color_main_prelude_wb_gamut_ms=%67 "
-               "avg_processing_core_color_main_prelude_wb_recon_ms=%68 "
-               "avg_processing_core_color_cam_ms=%69 "
-               "avg_processing_core_color_cam_main_ms=%70 "
-               "avg_processing_core_color_cam_gradient_ms=%71 "
-               "avg_processing_core_color_cam_wb_ms=%72 "
-               "avg_processing_core_color_cam_wb_matrix_ms=%73 "
-               "avg_processing_core_color_cam_wb_gamut_ms=%74 "
-               "avg_processing_core_color_cam_wb_desat_ms=%75 "
-               "avg_processing_core_color_cam_agx_ms=%76 "
-               "avg_processing_core_color_cam_agx_clip_ms=%77 "
-               "avg_processing_core_color_cam_agx_matrix_ms=%78 "
-               "avg_processing_core_color_cam_agx_clip_neg_r_count=%79 "
-               "avg_processing_core_color_cam_agx_clip_neg_g_count=%80 "
-               "avg_processing_core_color_cam_agx_clip_neg_b_count=%81 "
-               "avg_processing_core_color_cam_agx_matrix_r_ms=%82 "
-               "avg_processing_core_color_cam_agx_matrix_g_ms=%83 "
-               "avg_processing_core_color_cam_agx_matrix_b_ms=%84 "
-               "avg_processing_core_color_cam_agx_matrix_r_hi_count=%85 "
-               "avg_processing_core_color_cam_agx_matrix_g_hi_count=%86 "
-               "avg_processing_core_color_cam_agx_matrix_b_hi_count=%87 "
-               "avg_processing_core_color_gamma_ms=%88 "
-               "avg_processing_core_color_gamma_main_ms=%89 "
-               "avg_processing_core_color_gamma_gradient_ms=%90 "
-               "avg_processing_core_creative_hue_vs_ms=%91 "
-               "avg_processing_core_creative_vibrance_ms=%92 "
-               "avg_processing_core_creative_saturation_ms=%93 "
-               "avg_processing_core_creative_toning_ms=%94 "
-               "avg_processing_core_creative_curve_ms=%95 "
-               "avg_processing_core_creative_gradation_ms=%96 "
-               "avg_processing_core_creative_agx_inverse_ms=%97 "
-               "avg_processed16_cache_store_ms=%98 "
-               "avg_processed8_cache_store_ms=%99" )
+               "avg_present_ui_signal_latency_ms=%32 "
+               "avg_present_draw_present_ms=%33 "
+               "avg_present_overlays_scopes_ms=%34 "
+               "avg_present_render_slot_release_ms=%35 "
+               "avg_present_pacing_ms=%36 "
+               "processed8_direct_path_frames=%37 processed8_prefetch_hits=%38 "
+               "raw_prefetch_hits=%39 queued_playback_drops=%40 "
+               "max_queued_playback_drops=%41 scope_updates=%42 scope_skips=%43 "
+               "audio_sync_requests=%44 audio_sync_applied=%45 "
+               "audio_sync_skipped=%46 avg_processing_setup_ms=%47 "
+               "avg_processing_shadows_highlights_prep_ms=%48 "
+               "avg_processing_highest_green_ms=%49 "
+               "borrowed_prepared_rgb8_frames=%50 owned_prepared_rgb8_frames=%51 "
+               "borrowed_prepared_rgb8_bytes=%52 owned_prepared_rgb8_bytes=%53 "
+               "moved_prepared_rgb8_frames=%54 moved_prepared_rgb8_bytes=%55 "
+               "qimage_prepared_rgb8_frames=%56 qimage_prepared_rgb8_bytes=%57 "
+               "avg_processing_core_color_main_ms=%58 "
+               "avg_processing_core_color_gradient_ms=%59 "
+               "avg_processing_core_color_main_prelude_ms=%60 "
+               "avg_processing_core_color_main_prelude_vignette_ms=%61 "
+               "avg_processing_core_color_main_prelude_creative_ms=%62 "
+               "avg_processing_core_color_main_prelude_creative_shadows_ms=%63 "
+               "avg_processing_core_color_main_prelude_creative_contrast_ms=%64 "
+               "avg_processing_core_color_main_prelude_wb_ms=%65 "
+               "avg_processing_core_color_main_prelude_wb_matrix_ms=%66 "
+               "avg_processing_core_color_main_prelude_wb_matrix_r_ms=%67 "
+               "avg_processing_core_color_main_prelude_wb_matrix_g_ms=%68 "
+               "avg_processing_core_color_main_prelude_wb_matrix_b_ms=%69 "
+               "avg_processing_core_color_main_prelude_wb_gradient_matrix_ms=%70 "
+               "avg_processing_core_color_main_prelude_wb_exposure_ms=%71 "
+               "avg_processing_core_color_main_prelude_wb_gamut_ms=%72 "
+               "avg_processing_core_color_main_prelude_wb_recon_ms=%73 "
+               "avg_processing_core_color_cam_ms=%74 "
+               "avg_processing_core_color_cam_main_ms=%75 "
+               "avg_processing_core_color_cam_gradient_ms=%76 "
+               "avg_processing_core_color_cam_wb_ms=%77 "
+               "avg_processing_core_color_cam_wb_matrix_ms=%78 "
+               "avg_processing_core_color_cam_wb_gamut_ms=%79 "
+               "avg_processing_core_color_cam_wb_desat_ms=%80 "
+               "avg_processing_core_color_cam_agx_ms=%81 "
+               "avg_processing_core_color_cam_agx_clip_ms=%82 "
+               "avg_processing_core_color_cam_agx_matrix_ms=%83 "
+               "avg_processing_core_color_cam_agx_clip_neg_r_count=%84 "
+               "avg_processing_core_color_cam_agx_clip_neg_g_count=%85 "
+               "avg_processing_core_color_cam_agx_clip_neg_b_count=%86 "
+               "avg_processing_core_color_cam_agx_matrix_r_ms=%87 "
+               "avg_processing_core_color_cam_agx_matrix_g_ms=%88 "
+               "avg_processing_core_color_cam_agx_matrix_b_ms=%89 "
+               "avg_processing_core_color_cam_agx_matrix_r_hi_count=%90 "
+               "avg_processing_core_color_cam_agx_matrix_g_hi_count=%91 "
+               "avg_processing_core_color_cam_agx_matrix_b_hi_count=%92 "
+               "avg_processing_core_color_gamma_ms=%93 "
+               "avg_processing_core_color_gamma_main_ms=%94 "
+               "avg_processing_core_color_gamma_gradient_ms=%95 "
+               "avg_processing_core_creative_hue_vs_ms=%96 "
+               "avg_processing_core_creative_vibrance_ms=%97 "
+               "avg_processing_core_creative_saturation_ms=%98 "
+               "avg_processing_core_creative_toning_ms=%99 "
+               "avg_processing_core_creative_curve_ms=%100 "
+               "avg_processing_core_creative_gradation_ms=%101 "
+               "avg_processing_core_creative_agx_inverse_ms=%102 "
+               "avg_processed16_setup_ms=%103 avg_processed16_core_math_ms=%104 "
+               "avg_processed16_local_tone_ms=%105 "
+               "avg_processed16_threading_overhead_ms=%106 "
+               "avg_processed16_cache_store_ms=%107 "
+               "avg_processed8_setup_ms=%108 avg_processed8_core_math_ms=%109 "
+               "avg_processed8_local_tone_ms=%110 "
+               "avg_processed8_threading_overhead_ms=%111 "
+               "avg_processed8_cache_store_ms=%112" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -17416,6 +17492,11 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeDrawPresentSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeDrawAdvanceSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeDrawScopesSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentUiSignalLatencySumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentDrawPresentSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentOverlaysScopesSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentRenderSlotReleaseSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentPacingSumMs ), 0, 'f', 3 )
                .arg( m_playbackSmokeProcessed8DirectPathFrames )
                .arg( m_playbackSmokeProcessed8PrefetchHits )
                .arg( m_playbackSmokeRawPrefetchHits )
@@ -17487,8 +17568,47 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeCurveSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeGradationSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16SetupSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16CoreMathSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16LocalToneSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16ThreadingOverheadSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessed16CacheStoreSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8SetupSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8CoreMathSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8LocalToneSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8ThreadingOverheadSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessed8CacheStoreSumMs ), 0, 'f', 3 );
+
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.stage_split_summary session=%1 "
+               "avg_present_ui_signal_latency_ms=%2 "
+               "avg_present_draw_present_ms=%3 "
+               "avg_present_overlays_scopes_ms=%4 "
+               "avg_present_render_slot_release_ms=%5 "
+               "avg_present_pacing_ms=%6 "
+               "avg_processed16_setup_ms=%7 "
+               "avg_processed16_core_math_ms=%8 "
+               "avg_processed16_local_tone_ms=%9 "
+               "avg_processed16_threading_overhead_ms=%10 "
+               "avg_processed8_setup_ms=%11 "
+               "avg_processed8_core_math_ms=%12 "
+               "avg_processed8_local_tone_ms=%13 "
+               "avg_processed8_threading_overhead_ms=%14" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+               .arg( avgSmokeMs( m_playbackSmokePresentUiSignalLatencySumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentDrawPresentSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentOverlaysScopesSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentRenderSlotReleaseSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokePresentPacingSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16SetupSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16CoreMathSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16LocalToneSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed16ThreadingOverheadSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8SetupSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8CoreMathSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8LocalToneSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessed8ThreadingOverheadSumMs ), 0, 'f', 3 );
 
     qInfo().noquote()
         << QStringLiteral(
