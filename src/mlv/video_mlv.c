@@ -183,6 +183,7 @@ static int mlv_env_value_is_truthy(const char * value)
 }
 
 static int g_mlv_playback_aggressive_preview_mode = 0;
+static int g_mlv_playback_fast_x4_hq_path_mode = 0;
 
 void mlvSetPlaybackAggressivePreviewMode(int enabled)
 {
@@ -257,6 +258,27 @@ int mlvPlaybackAggressivePreviewMode(void)
                            __ATOMIC_ACQUIRE) != 0;
 #else
     return g_mlv_playback_aggressive_preview_mode != 0;
+#endif
+}
+
+void mlvSetPlaybackFastX4HqPathMode(int enabled)
+{
+#if defined(__GNUC__)
+    __atomic_store_n(&g_mlv_playback_fast_x4_hq_path_mode,
+                     enabled ? 1 : 0,
+                     __ATOMIC_RELEASE);
+#else
+    g_mlv_playback_fast_x4_hq_path_mode = enabled ? 1 : 0;
+#endif
+}
+
+int mlvPlaybackFastX4HqPathMode(void)
+{
+#if defined(__GNUC__)
+    return __atomic_load_n(&g_mlv_playback_fast_x4_hq_path_mode,
+                           __ATOMIC_ACQUIRE) != 0;
+#else
+    return g_mlv_playback_fast_x4_hq_path_mode != 0;
 #endif
 }
 
@@ -650,6 +672,8 @@ static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * vid
     hash = mlv_hash_bytes(hash, &normalizedScale, sizeof(normalizedScale));
     const int aggressivePreview = mlvPlaybackAggressivePreviewMode();
     hash = mlv_hash_bytes(hash, &aggressivePreview, sizeof(aggressivePreview));
+    const int fastX4HqPath = mlvPlaybackFastX4HqPathMode();
+    hash = mlv_hash_bytes(hash, &fastX4HqPath, sizeof(fastX4HqPath));
 
     if (!video)
     {
@@ -2971,6 +2995,10 @@ static int mlv_phase4bv2_allow_fast_hq_via_env(void)
     {
         return 1;
     }
+    if (mlvPlaybackFastX4HqPathMode())
+    {
+        return 1;
+    }
     if (g_mlv_phase4bv2_allow_fast_hq_env_cache < 0)
     {
         const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
@@ -3033,6 +3061,7 @@ void mlv_phase4bv_reset_env_cache_for_testing(void)
     g_mlv_phase4bv3_disabled_env_cache = -1;
     g_mlv_phase4bv4_x8_disabled_env_cache = -1;
     g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
+    mlvSetPlaybackFastX4HqPathMode(0);
 }
 
 /* Phase 4B-v2: returns 1 if the receipt's llrawproc options are compatible

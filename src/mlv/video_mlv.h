@@ -190,6 +190,12 @@ int mlv_phase4bv3_last_y_crop_rows(void);
 void mlvSetPlaybackAggressivePreviewMode(int enabled);
 int mlvPlaybackAggressivePreviewMode(void);
 
+/* Fast-mode x4 HQ escape hatch: when enabled, scale=4 Dual ISO playback may
+ * use the same pre-recon fast-HQ gate as Aggressive preview without forcing
+ * the preview rowscale override. */
+void mlvSetPlaybackFastX4HqPathMode(int enabled);
+int mlvPlaybackFastX4HqPathMode(void);
+
 /* Test-only hook: clear cached Phase 4B env-var values so subsequent calls
  * re-read getenv(). Used by parity tests that flip the kill switches or HQ
  * fast-path override mid-process. */
