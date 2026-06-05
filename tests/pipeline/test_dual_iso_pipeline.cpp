@@ -3765,6 +3765,46 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY)
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
 }
 
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesUsesEarlyFullXY)
+{
+    ScopedAggressivePreviewMode aggressivePreview(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+    mlv_phase4bv_reset_env_cache_for_testing();
+    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES", "1");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(1);
+    fixture.receipt().setBadPixels(1);
+    fixture.receipt().setVerticalStripes(1);
+    fixture.receipt().setPatternNoise(1);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || full_h < 16) {
+        MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+        mlv_phase4bv_reset_env_cache_for_testing();
+        return;
+    }
+
+    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 4);
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 4) * (full_h / 4) * 3u, got.size());
+    ASSERT_EQ(4, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("none"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
+    ASSERT_TRUE(fixture.video()->llrawproc->playback_pre_dualiso_fix_ms > 0.0);
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+}
+
 TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightAggressiveSkipsCoordinateRawFixesForEarlyPath)
 {
     ScopedAggressivePreviewMode aggressivePreview(1);

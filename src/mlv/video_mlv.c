@@ -3008,6 +3008,23 @@ static int mlv_phase4bv2_allow_fast_hq_via_env(void)
     return g_mlv_phase4bv2_allow_fast_hq_env_cache;
 }
 
+/* Opt-in x4 quality-preserving prototype: apply the full-res raw fix stages
+ * before the x4 early reduction path, so receipts that need focus/bad/
+ * stripe/pattern corrections can still take the reduced Bayer path without
+ * routing through the aggressive skip-fixes approximation. */
+static int g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;
+
+static int mlv_phase4bv2_x4_fullres_fix_via_env(void)
+{
+    if (g_mlv_phase4bv2_x4_fullres_fix_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+        g_mlv_phase4bv2_x4_fullres_fix_env_cache =
+            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+    }
+    return g_mlv_phase4bv2_x4_fullres_fix_env_cache;
+}
+
 static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video,
                                                   int scaleFactor)
 {
@@ -3061,6 +3078,7 @@ void mlv_phase4bv_reset_env_cache_for_testing(void)
     g_mlv_phase4bv3_disabled_env_cache = -1;
     g_mlv_phase4bv4_x8_disabled_env_cache = -1;
     g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
+    g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;
     mlvSetPlaybackFastX4HqPathMode(0);
 }
 
@@ -3819,18 +3837,26 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
                                             int threads)
 {
     if (!video || !decodedRawFrame || !outputFrame || scaleFactor <= 1) return 0;
+    if (video->llrawproc)
+    {
+        video->llrawproc->playback_pre_dualiso_fix_ms = 0.0;
+    }
 
     g_mlv_phase4bv2_path_taken = 0;
     g_mlv_phase4bv3_y_crop_rows = 0;
     g_mlv_phase4bv2_last_fallback_reason = "none";
 
     const int scale2Aggressive = (scaleFactor == 2 && mlvPlaybackAggressivePreviewMode());
+    const int x4FullResFixesActive =
+        (scaleFactor == 4 && !mlvPlaybackAggressivePreviewMode() && mlv_phase4bv2_x4_fullres_fix_via_env());
+    const int receiptCompatible =
+        mlv_phase4bv2_receipt_compatible(video);
 
     if ((scaleFactor != 2 || scale2Aggressive)
      && !mlv_phase4bv2_disabled_via_env()
      && llrpHQDualIso(video)
      && mlv_phase4bv2_quality_allows_pre_recon(video, scaleFactor)
-     && mlv_phase4bv2_receipt_compatible(video))
+     && (receiptCompatible || x4FullResFixesActive))
     {
         if (scaleFactor == 2)
         {
@@ -3862,12 +3888,40 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
         {
             const int full_w = (int)getMlvWidth(video);
             const int full_h = (int)getMlvHeight(video);
-            if (!mlv_phase4bv3_disabled_via_env() && full_h >= 16)
+            const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+            const size_t full_bytes = (size_t)full_pixels * sizeof(uint16_t);
+            const uint16_t * x4_source = decodedRawFrame;
+            int x4FixesApplied = receiptCompatible;
+            uint16_t * x4_fix_buffer = NULL;
+
+            if (video->llrawproc)
+            {
+                video->llrawproc->playback_pre_dualiso_fix_ms = 0.0;
+            }
+
+            if (x4FullResFixesActive && !receiptCompatible)
+            {
+                x4_fix_buffer = mlv_ensure_thread_u16_buffer(full_pixels);
+                if (!x4_fix_buffer)
+                {
+                    mlv_phase4bv2_log_rejection("x4 full-res fix buffer rejected");
+                }
+                else
+                {
+                    memcpy(x4_fix_buffer, decodedRawFrame, full_bytes);
+                    applyLLRawProcObjectPreDualIsoFixes(video, x4_fix_buffer, full_bytes);
+                    x4_source = x4_fix_buffer;
+                    mlv_phase4bv2_set_fallback_reason("none");
+                    x4FixesApplied = 1;
+                }
+            }
+
+            if (x4FixesApplied && !mlv_phase4bv3_disabled_via_env() && full_h >= 16)
             {
                 int dn_x100 = 0;
                 if (mlv_render_scaled_rgb16_v3_full_xy_from_raw(video,
                                                                 frameIndex,
-                                                                decodedRawFrame,
+                                                                x4_source,
                                                                 outputFrame,
                                                                 threads,
                                                                 &dn_x100))
@@ -3876,7 +3930,7 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
                 }
             }
 
-            if (full_w > 0 && full_h > 0 && full_w % 4 == 0 && full_h % 4 == 0)
+            if (x4FixesApplied && full_w > 0 && full_h > 0 && full_w % 4 == 0 && full_h % 4 == 0)
             {
                 const int mid_w = full_w / 4;
                 const int mid_h = full_h;
@@ -3890,7 +3944,7 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
                 {
                     const double downsample_start = mlv_stage_timing_now();
                     int actual_mid_w = 0, actual_mid_h = 0;
-                    int rc = pl_downsample_bayer_to_bayer_4x_x_only(decodedRawFrame, full_w, full_h,
+                    int rc = pl_downsample_bayer_to_bayer_4x_x_only(x4_source, full_w, full_h,
                                                                      mid_bayer, &actual_mid_w, &actual_mid_h, threads);
                     if (rc == 0 && actual_mid_w == mid_w && actual_mid_h == mid_h)
                     {

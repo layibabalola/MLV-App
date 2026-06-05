@@ -56,6 +56,7 @@ static MLV_THREAD_LOCAL double g_llrawproc_last_vertical_stripes_ms = 0.0;
 static MLV_THREAD_LOCAL double g_llrawproc_last_focus_pixels_ms = 0.0;
 static MLV_THREAD_LOCAL double g_llrawproc_last_bad_pixels_ms = 0.0;
 static MLV_THREAD_LOCAL double g_llrawproc_last_pattern_noise_ms = 0.0;
+static MLV_THREAD_LOCAL double g_llrawproc_last_pre_dualiso_fix_ms = 0.0;
 static MLV_THREAD_LOCAL double g_llrawproc_last_dual_iso_ms = 0.0;
 static MLV_THREAD_LOCAL double g_llrawproc_last_chroma_smooth_ms = 0.0;
 static MLV_THREAD_LOCAL dualiso_full20bit_timing_t g_llrawproc_last_dual_iso_full20bit_timing = {0};
@@ -671,6 +672,7 @@ llrawprocObject_t * initLLRawProcObject()
     llrawproc->diso_frblending = 1;
     llrawproc->diso_playback_force_disable_alias_map = 0;
     llrawproc->diso_playback_force_disable_fr_blending = 0;
+    llrawproc->playback_pre_dualiso_fix_ms = 0.0;
     llrawproc->dark_frame = 0;
 
     llrawproc->dark_frame_filename = NULL;
@@ -730,7 +732,8 @@ void freeLLRawProcObject(mlvObject_t * video)
 void applyLLRawProcObjectWorker(mlvObject_t * video,
                                 uint16_t * raw_image_buff,
                                 size_t raw_image_size,
-                                llrawprocWorkerState_t * supplied_worker)
+                                llrawprocWorkerState_t * supplied_worker,
+                                int stop_before_dual_iso)
 {
     const double apply_start = mlv_stage_timing_now();
     llrawprocObject_t * shared = video ? video->llrawproc : NULL;
@@ -747,6 +750,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     g_llrawproc_last_focus_pixels_ms = 0.0;
     g_llrawproc_last_bad_pixels_ms = 0.0;
     g_llrawproc_last_pattern_noise_ms = 0.0;
+    g_llrawproc_last_pre_dualiso_fix_ms = 0.0;
     g_llrawproc_last_dual_iso_ms = 0.0;
     g_llrawproc_last_chroma_smooth_ms = 0.0;
     llrawproc_reset_dual_iso_full20bit_timing();
@@ -1134,6 +1138,18 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
         pattern_noise_ms += (mlv_stage_timing_now() - pattern_noise_start) * 1000.0;
     }
 
+    if (stop_before_dual_iso)
+    {
+        g_llrawproc_last_pre_dualiso_fix_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
+        g_llrawproc_last_total_ms = g_llrawproc_last_pre_dualiso_fix_ms;
+        if (shared)
+        {
+            shared->playback_pre_dualiso_fix_ms = g_llrawproc_last_pre_dualiso_fix_ms;
+        }
+        if (using_stack_worker) llrawproc_free_worker_state(worker);
+        return;
+    }
+
     int publish_auto_correction = 1;
 
     /* S1_pre_dualiso capture: post focus pixel / bad pixel / chroma smooth /
@@ -1492,7 +1508,14 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 
 void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size)
 {
-    applyLLRawProcObjectWorker(video, raw_image_buff, raw_image_size, NULL);
+    applyLLRawProcObjectWorker(video, raw_image_buff, raw_image_size, NULL, 0);
+}
+
+void applyLLRawProcObjectPreDualIsoFixes(mlvObject_t * video,
+                                         uint16_t * raw_image_buff,
+                                         size_t raw_image_size)
+{
+    applyLLRawProcObjectWorker(video, raw_image_buff, raw_image_size, NULL, 1);
 }
 
 /* Phase 4B-v2: scaled-buffer entry point. Runs a SUBSET of the llrawproc
@@ -1863,6 +1886,11 @@ double llrpGetLastBadPixelsMilliseconds(void)
 double llrpGetLastPatternNoiseMilliseconds(void)
 {
     return g_llrawproc_last_pattern_noise_ms;
+}
+
+double llrpGetLastPreDualIsoFixMilliseconds(void)
+{
+    return g_llrawproc_last_pre_dualiso_fix_ms;
 }
 
 double llrpGetLastDualIsoMilliseconds(void)
