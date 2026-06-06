@@ -15290,3 +15290,20 @@ Post-change stage timings:
 - x4 control on `M16-1327` remained clean but slower:
   - `smoke presented FPS=15.884`, `timeline FPS=23.892`, `GUI FPS=20`, `queue_wait_ms=37.310 ms (26.802 FPS-eq)`, `render_total_ms=98.729 ms (10.129 FPS-eq)`, `llrawproc_ms=30.721 ms (32.551 FPS-eq)`, `processed16_ms=57.857 ms (17.284 FPS-eq)`, `processed8_ms=60.273 ms (16.591 FPS-eq)`, `raw_uint16_ms=12.368 ms (80.854 FPS-eq)`, `debayered_frame_ms=44.103 ms (22.674 FPS-eq)`, `present_ui_signal_latency_ms=37.310 ms (26.802 FPS-eq)`, `colorArtifactScan=clear-heuristic`
 - The next bottleneck remains the aggressive playback path's render/queue/processed16 cost, but x2 is now a materially stronger baseline than the prior matrix and is the lane to keep squeezing first.
+
+### 2026-06-06 - x2 current-frame fastpath rechecked and reverted
+
+### Verified locally
+
+- I tested a proposed `getMlvProcessedFrame8_with_scale()` early-return on the already-hot `current_processed_frame` path, rebuilt the release exe, and ran the standard smoke trio plus the x4 hot-clip control.
+- The smoke results stayed visually clean, but the x2 trio did not improve versus the prior x2 baseline; the rerun drifted upward on the smoke path instead of down.
+
+### Cross-checked from prior analysis
+
+- The experiment did not change the quality story. All four screenshot-backed runs came back `clear-heuristic`.
+- It also did not produce a better throughput baseline than the immediately prior x2 matrix, so the source change was backed out and the earlier x2 path remains the working baseline.
+
+### Needs runtime profiling
+
+- Do not promote the `current_processed_frame` early-return as a general x2 optimization.
+- Keep the next performance pass focused on a narrower lever that the same-build matrix can actually justify.
