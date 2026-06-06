@@ -3005,9 +3005,9 @@ static int mlv_render_scaled_rgb16_x2_full_xy(mlvObject_t * video,
  * to take the reduced-Bayer path even when HQ mean23 is active. */
 static int g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
 
-static int mlv_phase4bv2_allow_fast_hq_via_env(void)
+static int mlv_phase4bv2_allow_fast_hq_via_env(int scaleFactor)
 {
-    if (mlvPlaybackAggressivePreviewMode())
+    if (scaleFactor == 2 && mlvPlaybackAggressivePreviewMode())
     {
         return 1;
     }
@@ -3070,7 +3070,7 @@ static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video,
     if (video && video->llrawproc
      && video->llrawproc->diso_playback_force_mean23 != 0
      && scaleFactor != 8
-     && !mlv_phase4bv2_allow_fast_hq_via_env()
+     && !mlv_phase4bv2_allow_fast_hq_via_env(scaleFactor)
      && !(scaleFactor == 4 && mlv_phase4bv2_x4_fullres_fix_via_env())
      && !(scaleFactor == 2 && mlv_phase4bv2_x2_fullres_fix_via_env()))
     {
@@ -5164,10 +5164,12 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed16_for_8bit_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
 
+    /* getMlvProcessedFrame16_with_scale() just populated the current-frame
+     * cache for this frame when it succeeds, so reuse that buffer directly
+     * instead of re-hashing the full processing state a second time. */
     if (video->current_processed_frame_active
         && video->current_processed_frame == frameIndex
         && video->current_processed_frame_threads == threads
-        && video->current_processed_frame_signature == mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale)
         && video->rgb_processed_current_frame)
     {
         processed_frame = video->rgb_processed_current_frame;

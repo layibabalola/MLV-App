@@ -4701,7 +4701,7 @@ TEST(DualIsoPipeline, Phase4Bv3_HqMean23PlaybackUsesFullReconFallbackByDefault)
     mlv_phase4bv_reset_env_cache_for_testing();
 }
 
-TEST(DualIsoPipeline, Phase4Bv3_AggressivePreviewAllowsHqMean23PreReconX4)
+TEST(DualIsoPipeline, Phase4Bv3_AggressivePreviewUsesFullReconFallbackX4)
 {
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
     MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
@@ -4731,7 +4731,7 @@ TEST(DualIsoPipeline, Phase4Bv3_AggressivePreviewAllowsHqMean23PreReconX4)
 
     const std::vector<uint8_t> scaled = fixture.renderFrame8Scaled(0, 1, 4);
     ASSERT_FALSE(scaled.empty());
-    ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
 }
 
 TEST(DualIsoPipeline, DualIsoPlaybackUsesFastHqPathForFastX4)

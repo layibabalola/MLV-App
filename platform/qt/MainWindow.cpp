@@ -2854,6 +2854,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     const bool playbackProcessingSubsetActive =
         (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
         && task.gpuPresentationOptions.previewProcessing.enabled;
+    bool releasePresentedFrameEarly = false;
 
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_pre_enqueue_ms"),
@@ -2998,11 +2999,16 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         QStringLiteral("draw_frame_ready_present_top_magenta_band_rows"),
         suppressedPresentedTopMagentaBandRows );
 
-    if( !framePresentedByViewport
-     && !GpuDisplayViewport::presentImage( ui->graphicsView,
-                                           m_pGraphicsItem,
-                                           displayImage,
-                                           task.gpuPresentationOptions ) )
+    bool imagePresentedByViewport = false;
+    if( !framePresentedByViewport )
+    {
+        imagePresentedByViewport = GpuDisplayViewport::presentImage( ui->graphicsView,
+                                                                      m_pGraphicsItem,
+                                                                      displayImage,
+                                                                      task.gpuPresentationOptions );
+    }
+
+    if( !framePresentedByViewport && !imagePresentedByViewport )
     {
         if( useGpuImagePresentation && useGpuShaderZebras && zebrasEnabled )
         {
@@ -3050,6 +3056,16 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             pic.setDevicePixelRatio( devicePixelRatioF() );
         }
         m_pGraphicsItem->setPixmap( pic );
+        if( !displayPreviewCachingAllowed && m_pRenderThread )
+        {
+            m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
+            releasePresentedFrameEarly = true;
+        }
+    }
+    else if( !displayPreviewCachingAllowed && m_pRenderThread )
+    {
+        m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
+        releasePresentedFrameEarly = true;
     }
 
     m_lastDrawFrameReadyImageMs = result.imageBuildMs;
@@ -3130,8 +3146,9 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                           readyFrame,
                           task.requestContext,
                           useScopeSourceImage ? scopeSourceImage : rgb8DisplaySource,
-                           underOver,
-                           display_start );
+                          underOver,
+                          releasePresentedFrameEarly,
+                          display_start );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
 }
 
@@ -11706,6 +11723,25 @@ void MainWindow::updateTimeCodeLabelForFrame( int frameIndex )
     m_pTcLabel->setPixmap( pic );
 }
 
+void MainWindow::setBadPixelCrosshairVisibility( bool visible, bool force )
+{
+    if( !force && m_badPixelCrosshairVisible == visible )
+    {
+        return;
+    }
+
+    if( visible )
+    {
+        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
+    }
+    else
+    {
+        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
+    }
+
+    m_badPixelCrosshairVisible = visible;
+}
+
 //Set Toolbuttons Focus Pixels
 void MainWindow::setToolButtonFocusPixels(int index)
 {
@@ -18707,12 +18743,8 @@ void MainWindow::on_toolButtonBadPixelsCrosshairEnable_toggled(bool checked)
     if( checked )
     {
         BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
-        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
     }
-    else
-    {
-        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
-    }
+    setBadPixelCrosshairVisibility( checked );
 }
 
 //bad pixel picking ready
@@ -18748,8 +18780,7 @@ void MainWindow::badPixelPicked( int x, int y )
     //Prepare crosses for bad pixel map
     BadPixelFileHandler::crossesPrepareAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
     BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
-    if( ui->toolButtonBadPixelsCrosshairEnable->isChecked() )
-        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
+    setBadPixelCrosshairVisibility( ui->toolButtonBadPixelsCrosshairEnable->isChecked(), true );
 
     //Refresh
     llrpResetBpmStatus(m_pMlvObject);
@@ -19030,6 +19061,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                                        const PresentationRequestContext &requestContext,
                                        const uint8_t *rgb8DisplaySource,
                                        uint8_t underOver,
+                                       bool releasePresentedFrameEarly,
                                        double displayStart )
 {
     recordPresentedFrame( readyFrame, requestContext );
@@ -19213,11 +19245,11 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
      && ui->checkBoxRawFixEnable->isChecked() )
     {
         BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
-        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
+        setBadPixelCrosshairVisibility( true );
     }
     else
     {
-        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
+        setBadPixelCrosshairVisibility( false );
     }
 
     if( m_playbackStopped == true )
@@ -19294,7 +19326,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         m_playbackQualityLastPresentedTime = 0.0;
     }
     notePlayToFirstFramePresentation( displayFrame );
-    if( m_pRenderThread )
+    if( m_pRenderThread && !releasePresentedFrameEarly )
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
     notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );
