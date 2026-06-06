@@ -405,7 +405,7 @@ static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t 
         && video->playback_scale_factor_active == 4
         && mlvPlaybackAggressivePreviewMode())
     {
-        return 6;
+        return 8;
     }
 
     return MLV_RAW_UINT16_PREFETCH_LOOKAHEAD;
