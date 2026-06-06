@@ -8,6 +8,7 @@
 #include "GpuDisplayViewport.h"
 
 #include <algorithm>
+#include <cstring>
 #include <QByteArray>
 #include <QColor>
 #include <QGraphicsPixmapItem>
@@ -58,6 +59,151 @@ QOpenGLTexture * createOrResizeLookupTexture(QOpenGLTexture * texture, int width
     texture->setWrapMode(QOpenGLTexture::ClampToEdge);
     texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
     return texture;
+}
+
+bool rowLooksLikeUniformTopMagentaBandRgb16(const uint16_t *row, int width)
+{
+    if( !row || width <= 0 )
+    {
+        return false;
+    }
+
+    const int sampleStep = std::max( 1, width / 512 );
+    int samples = 0;
+    int magentaSamples = 0;
+    int minR = 255, minG = 255, minB = 255;
+    int maxR = 0, maxG = 0, maxB = 0;
+    uint64_t sumR = 0, sumG = 0, sumB = 0;
+
+    for( int x = 0; x < width; x += sampleStep )
+    {
+        const uint16_t *pixel = row + static_cast<size_t>( x ) * 4u;
+        const int r = static_cast<int>( pixel[0] >> 8 );
+        const int g = static_cast<int>( pixel[1] >> 8 );
+        const int b = static_cast<int>( pixel[2] >> 8 );
+        ++samples;
+        sumR += static_cast<uint64_t>( r );
+        sumG += static_cast<uint64_t>( g );
+        sumB += static_cast<uint64_t>( b );
+        minR = std::min( minR, r );
+        minG = std::min( minG, g );
+        minB = std::min( minB, b );
+        maxR = std::max( maxR, r );
+        maxG = std::max( maxG, g );
+        maxB = std::max( maxB, b );
+        if( r > 170
+         && b > 140
+         && g < 150
+         && (((r + b) / 2) - g) > 35 )
+        {
+            ++magentaSamples;
+        }
+    }
+
+    if( samples <= 0 )
+    {
+        return false;
+    }
+
+    const double invSamples = 1.0 / static_cast<double>( samples );
+    const double avgR = static_cast<double>( sumR ) * invSamples;
+    const double avgG = static_cast<double>( sumG ) * invSamples;
+    const double avgB = static_cast<double>( sumB ) * invSamples;
+    const bool magentaAverage =
+        avgR >= 170.0
+        && avgB >= 140.0
+        && avgG <= 150.0
+        && (avgR - avgG) >= 45.0
+        && (avgB - avgG) >= 35.0;
+    const bool mostlyMagenta =
+        magentaSamples * 100 >= samples * 90;
+    const bool lowVariance =
+        (maxR - minR) <= 24
+        && (maxG - minG) <= 80
+        && (maxB - minB) <= 24;
+
+    return magentaAverage && mostlyMagenta && lowVariance;
+}
+
+int suppressUniformTopMagentaBandRgb16(uint16_t *data, int width, int height)
+{
+    if( !data || width <= 0 || height <= 0 )
+    {
+        return 0;
+    }
+
+    const int rowPixels = width * 4;
+    const int maxProbeRows =
+        std::min( height, std::max( 4, height / 8 ) );
+    int probeStartRow = 0;
+    for( ; probeStartRow < maxProbeRows; ++probeStartRow )
+    {
+        const uint16_t *row =
+            data + static_cast<size_t>( probeStartRow ) * static_cast<size_t>( rowPixels );
+        const int sampleStep = std::max( 1, width / 512 );
+        int samples = 0;
+        uint64_t sumR = 0, sumG = 0, sumB = 0;
+        int brightSamples = 0;
+        for( int x = 0; x < width; x += sampleStep )
+        {
+            const uint16_t *pixel = row + static_cast<size_t>( x ) * 4u;
+            const int r = static_cast<int>( pixel[0] >> 8 );
+            const int g = static_cast<int>( pixel[1] >> 8 );
+            const int b = static_cast<int>( pixel[2] >> 8 );
+            ++samples;
+            sumR += static_cast<uint64_t>( r );
+            sumG += static_cast<uint64_t>( g );
+            sumB += static_cast<uint64_t>( b );
+            if( r > 8 || g > 8 || b > 8 )
+            {
+                ++brightSamples;
+            }
+        }
+
+        if( samples <= 0 )
+        {
+            break;
+        }
+
+        const double invSamples = 1.0 / static_cast<double>( samples );
+        const double avg =
+            (static_cast<double>( sumR + sumG + sumB ) * invSamples) / 3.0;
+        if( avg > 4.0 || brightSamples * 100 > samples * 2 )
+        {
+            break;
+        }
+    }
+
+    if( probeStartRow >= maxProbeRows )
+    {
+        return 0;
+    }
+
+    int bandRows = 0;
+    for( int y = probeStartRow; y < maxProbeRows; ++y )
+    {
+        const uint16_t *row =
+            data + static_cast<size_t>( y ) * static_cast<size_t>( rowPixels );
+        if( !rowLooksLikeUniformTopMagentaBandRgb16( row, width ) )
+        {
+            break;
+        }
+        ++bandRows;
+    }
+
+    if( bandRows < 4 )
+    {
+        return 0;
+    }
+
+    for( int y = probeStartRow; y < probeStartRow + bandRows; ++y )
+    {
+        uint16_t *row =
+            data + static_cast<size_t>( y ) * static_cast<size_t>( rowPixels );
+        std::memset( row, 0, static_cast<size_t>( rowPixels ) * sizeof(uint16_t) );
+    }
+
+    return bandRows;
 }
 }
 
@@ -456,6 +602,8 @@ void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
         rgba[i * 4 + 2] = imageData[i * 3 + 2];
         rgba[i * 4 + 3] = 65535;
     }
+
+    suppressUniformTopMagentaBandRgb16(rgba, width, height);
 
     m_pendingImage = QImage();
     m_pendingTextureWidth = width;

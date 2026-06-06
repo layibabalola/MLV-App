@@ -42,6 +42,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$settledValidationRecommendedSeconds = 30
+$validationWarnings = @()
+
+if (($CaptureScreenshot -or $FrameTelemetry) -and $Seconds -lt $settledValidationRecommendedSeconds) {
+    $validationWarnings += (
+        "Requested playback window of ${Seconds}s is shorter than the recommended " +
+        "${settledValidationRecommendedSeconds}s settled-validation window."
+    )
+    Write-Warning (
+        "GUI smoke requested ${Seconds}s playback, which is shorter than the recommended " +
+        "${settledValidationRecommendedSeconds}s settled-validation window for screenshot-backed checks."
+    )
+}
 
 function Convert-PlaybackLogLineToObject {
     param([string]$Line)
@@ -1302,6 +1315,8 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     qualityModeMatched = ($ExpectedQualityMode -lt 0 -or
         ($null -ne $validatedQualityMode -and [int]$validatedQualityMode -eq $ExpectedQualityMode))
     failures = $validationFailures
+    warnings = $validationWarnings
+    settledValidationRecommendedSeconds = $settledValidationRecommendedSeconds
 })
 
 $result | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $outputPath -Encoding UTF8
