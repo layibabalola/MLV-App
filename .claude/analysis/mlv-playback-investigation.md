@@ -14961,3 +14961,24 @@ Post-change stage timings:
 - Next ranked work should target presentation/queue cadence on the x2 aggressive lane, but only if a safe lever emerges from code inspection or a narrower control experiment.
 - Do not widen raw prefetch further yet; the matrix did not point there.
 - If the next matrix still shows the same presentation overhead gap, the next code change should be judged against that bucket first, not against GUI FPS or the already improved decode/filter buckets.
+
+### 2026-06-06 - processed8 prefetch A/B ruled out on x2 aggressive
+
+- I tested the existing experimental processed8 prefetch path on the hot x2 aggressive clip (`M16-1446`) and a second clip (`M16-1327`) with `MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH=1`.
+- The prefetch-on run did not produce any `processed8_prefetch_hit` frames on either clip.
+- The hot clip regressed on cadence and latency relative to the current x2 baseline:
+  - `M16-1446` with prefetch-on: `cadence_ms=61.111`, `latency_ms=75.551`, `llrawproc_ms=16.500`, `processing_ms=23.917`, `processed8_total_ms=53.583`, `presentation_overhead_ms=20.460`
+  - current x2 baseline on `M16-1446`: `cadence_ms=42.960`, `latency_ms=68.383`, `llrawproc_ms=11.750`, `processing_ms=14.333`, `processed8_total_ms=37.958`, `presentation_overhead_ms=28.452`
+- The second clip showed the same pattern of not improving the real bottleneck:
+  - `M16-1327` with prefetch-on: `cadence_ms=42.575`, `latency_ms=89.103`, `llrawproc_ms=12.750`, `processing_ms=14.833`, `processed8_total_ms=38.188`, `presentation_overhead_ms=49.643`
+- This makes processed8 prefetch a poor next-step candidate for x2 aggressive playback.
+
+### Cross-checked from prior analysis
+
+- The x2 aggressive quarterres change remains the right baseline improvement.
+- The residual hotspot is still presentation/pacing, but the prefetch experiment shows that broadening processed8 prefetch is not the way to attack it.
+
+### Needs runtime profiling
+
+- Keep looking for a narrow presentation/queue lever only if it can be justified without widening quality risk.
+- Otherwise, the better next move is another same-build matrix on a different residual presentation hypothesis, not a blind code change.
