@@ -3700,6 +3700,64 @@ TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleTwoWithSafeFallback)
     ASSERT_TRUE(psnr > 16.0);
 }
 
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoFullResFixesUsesEarlyFullXY)
+{
+    ScopedAggressivePreviewMode aggressivePreview(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
+    mlv_phase4bv_reset_env_cache_for_testing();
+    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES", "1");
+    MLVAPP_TEST_SETENV("MLVAPP_LOG_PHASE4BV2", "1");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+    ASSERT_EQ(1, llrpGetFixRawMode(fixture.video()));
+    ASSERT_TRUE(llrpHQDualIso(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || full_h < 8) {
+        MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
+        MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
+        mlv_phase4bv_reset_env_cache_for_testing();
+        return;
+    }
+
+    std::fprintf(stderr,
+                 "x2 full-res-fix receipt modes: focus=%d bad=%d stripes=%d noise=%d aggressive=%d env=%s\n",
+                 llrpGetFocusPixelMode(fixture.video()),
+                 llrpGetBadPixelMode(fixture.video()),
+                 llrpGetVerticalStripeMode(fixture.video()),
+                 llrpGetPatternNoiseMode(fixture.video()),
+                 mlvPlaybackAggressivePreviewMode(),
+                 std::getenv("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES"));
+
+    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 2) * (full_h / 2) * 3u, got.size());
+    ASSERT_EQ(2, fixture.video()->playback_scale_factor_active);
+    std::fprintf(stderr,
+                 "x2 full-res-fix trace: path=%d fallback=%s y_crop_rows=%d\n",
+                 mlv_phase4bv2_last_path_taken(),
+                 mlv_phase4bv2_last_fallback_reason(),
+                 mlv_phase4bv3_last_y_crop_rows());
+    ASSERT_EQ(4, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("none"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
+
+    const int expected_crop = full_h - (full_h / 8) * 8;
+    ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+}
+
 TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightFallsBackWhenReceiptNeedsFullResCoordinates)
 {
     ScopedAggressivePreviewMode aggressivePreview(0);
