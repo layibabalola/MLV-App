@@ -14867,3 +14867,33 @@ Post-change stage timings:
 - Before committing this turn's latest changes, rerun focused pipeline tests through `tools\testing\run-windows-test.ps1` rather than directly launching test exes.
 - If the product direction changes to "sharpest playable Auto" instead of "aggressive smooth Auto", implement an adaptive x4-to-x8 policy rather than a fixed x4 default. Validate that on `M16-1347` and `M16-1446` with both controlled profiles and GUI smoke.
 - Keep the next ranked work telemetry-led: presentation/queue cadence, then decode-aware/tile-aware raw decode only when raw prefetch is already hitting and raw decode remains a wall-clock limiter.
+
+## 2026-06-06 - x4 raw-prefetch lookahead rollback and restored baseline smoke
+
+### Verified locally
+
+- I tested the narrow x4 aggressive raw-prefetch lookahead idea at `9` and `10` and then rolled it back to the prior `8` baseline in `src/mlv/video_mlv.c`.
+- The wider lookahead did not generalize cleanly across the three standard clips:
+  - `M16-1327` improved in cadence and raw-hit count at `10`, but `M16-1347` and `M16-1446` regressed.
+  - `9` was worse than the settled `x4-aggressive` baseline on all three clips, with especially poor `avgCadenceMs` on `M16-1327`.
+- I rebuilt the user-facing release executable after restoring the baseline:
+  - `platform\\qt\\build-release\\release\\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 03:03:17 AM`
+  - `Length=9101824`
+  - SHA256 `492B101129A0412D0594C1ACDC5D641138479CCEACF98EB24421CF96CE9852C5`
+- Screenshot-backed 30-second GUI smoke on `C:\\temp\\MLV\\M16-1327.MLV` passed once the harness expectations matched the actual app scale state:
+  - Presented-frame screenshot verdict: `clear-heuristic`
+  - Visible bottom-left GUI FPS from the window crop: `5.4 fps`
+  - Smoke presented FPS: `3.702`
+  - Timeline FPS: `22.88`
+  - Validation passed with `scaleRequestMatched=true`, `qualityModeMatched=true`, and `validation.ok=true`
+
+### Cross-checked from prior analysis
+
+- This confirms the earlier matrix lesson rather than replacing it: the x4 lane is still the better baseline comparator, and deeper raw prefetch is not yet a safe universal win.
+- The smoke harness still needs explicit scale expectations when the app comes up in x2, otherwise the color-safe run can fail validation for the wrong reason.
+
+### Needs runtime profiling
+
+- Keep the next experiment focused on the remaining late-stage cost buckets rather than deepening raw prefetch again.
+- Re-run any future GUI smoke with explicit expected scale/quality values so validation reflects the intended baseline instead of the persisted app state.
