@@ -691,6 +691,7 @@ private:
     QGraphicsPixmapItem *m_pGraphicsItem;
     GradientElement *m_pGradientElement;
     QVector<CrossElement*> m_pBadPixelCrosses;
+    bool m_badPixelCrosshairVisible = false;
     GraphicsPickerScene* m_pScene;
     TimeCodeLabel* m_pTimeCodeImage;
     ReceiptCopyMaskDialog *m_pCopyMask;
@@ -1224,6 +1225,7 @@ private:
                                uint8_t underOver,
                                bool releasePresentedFrameEarly,
                                double displayStart );
+    void setBadPixelCrosshairVisibility( bool visible, bool force = false );
     bool playbackPolicyActive( void ) const;
     void applyPlaybackDebayerSelection( void );
     void setPlaybackProfileDebayerRequest(

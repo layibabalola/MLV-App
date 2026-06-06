@@ -11723,6 +11723,25 @@ void MainWindow::updateTimeCodeLabelForFrame( int frameIndex )
     m_pTcLabel->setPixmap( pic );
 }
 
+void MainWindow::setBadPixelCrosshairVisibility( bool visible, bool force )
+{
+    if( !force && m_badPixelCrosshairVisible == visible )
+    {
+        return;
+    }
+
+    if( visible )
+    {
+        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
+    }
+    else
+    {
+        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
+    }
+
+    m_badPixelCrosshairVisible = visible;
+}
+
 //Set Toolbuttons Focus Pixels
 void MainWindow::setToolButtonFocusPixels(int index)
 {
@@ -18724,12 +18743,8 @@ void MainWindow::on_toolButtonBadPixelsCrosshairEnable_toggled(bool checked)
     if( checked )
     {
         BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
-        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
     }
-    else
-    {
-        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
-    }
+    setBadPixelCrosshairVisibility( checked );
 }
 
 //bad pixel picking ready
@@ -18765,8 +18780,7 @@ void MainWindow::badPixelPicked( int x, int y )
     //Prepare crosses for bad pixel map
     BadPixelFileHandler::crossesPrepareAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
     BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
-    if( ui->toolButtonBadPixelsCrosshairEnable->isChecked() )
-        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
+    setBadPixelCrosshairVisibility( ui->toolButtonBadPixelsCrosshairEnable->isChecked(), true );
 
     //Refresh
     llrpResetBpmStatus(m_pMlvObject);
@@ -19231,11 +19245,11 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
      && ui->checkBoxRawFixEnable->isChecked() )
     {
         BadPixelFileHandler::crossesRedrawAll( m_pMlvObject, &m_pBadPixelCrosses, m_pScene );
-        BadPixelFileHandler::crossesShowAll( &m_pBadPixelCrosses );
+        setBadPixelCrosshairVisibility( true );
     }
     else
     {
-        BadPixelFileHandler::crossesHideAll( &m_pBadPixelCrosses );
+        setBadPixelCrosshairVisibility( false );
     }
 
     if( m_playbackStopped == true )
