@@ -1,3 +1,54 @@
+# 2026-06-06 - playback smoke needs a longer post-settle play window
+
+### Verified locally
+
+- The standard smoke runner's settled phase was too short for the current playback matrix: it verified stabilization, but it did not leave enough time for the clip to visibly continue playing after settle.
+- For the x2-centered matrix in this session, the settled smoke window was extended from 8 seconds to 18 seconds so the settled capture measures real post-settle playback instead of only the settle transition.
+
+### Cross-checked from prior analysis
+
+- This matches the broader matrix rule from prior work: settled smoke is part of the playback proof, not just a UI state check, and it needs enough wall-clock time to expose late-stage cadence, queueing, or visual artifacts after the clip has stabilized.
+
+### Needs runtime profiling
+
+- Keep the longer settled window in future matrix runs unless a later harness change proves a shorter one still captures visible post-settle playback reliably across the standard M16 clips.
+
+# 2026-06-06 - x2-centered matrix on the settled x4 baseline
+
+### Verified locally
+
+- I ran the same-build matrix on the current release exe with the settled x4 result as the baseline comparator, then extended the settled smoke window so post-settle playback was visible instead of only the settle transition.
+- The x2 Sharp/Smooth lane stayed on the full-recon fallback path:
+  - `phase4b_path=0`, `phase4b_label=none-or-full-recon-fallback`, `fallback=scale=2 uses full-recon post-downsample fallback`
+  - averaged stage cost across the three standard M16 clips: raw `2.108 ms` (`474.383 FPS-eq`), LLRawProc `91.404 ms` (`10.940 FPS-eq`), debayer `96.179 ms` (`10.397 FPS-eq`), processed16 `103.300 ms` (`9.681 FPS-eq`), processed8 `108.038 ms` (`9.256 FPS-eq`)
+  - smoke averages: GUI FPS `5.37`, smoke presented FPS `5.72`, timeline FPS `22.14`
+- The x2 Aggressive lane was the only x2 path that actually changed the phase4b shape:
+  - `phase4b_path=4`, `phase4b_label=x2-full-xy-pre-recon`, `fallback=none`
+  - averaged stage cost: raw `2.471 ms` (`404.694 FPS-eq`), LLRawProc `23.230 ms` (`43.048 FPS-eq`), debayer `28.350 ms` (`35.273 FPS-eq`), processed16 `35.513 ms` (`28.159 FPS-eq`), processed8 `40.258 ms` (`24.840 FPS-eq`)
+  - smoke averages: GUI FPS `7.47`, smoke presented FPS `5.88`, timeline FPS `22.30`
+- The settled x4 Aggressive baseline remains the best stage-cost comparator from this matrix:
+  - `phase4b_path=3`, `phase4b_label=full-xy-pre-recon`, `fallback=none`
+  - averaged stage cost: raw `6.979 ms` (`143.280 FPS-eq`), LLRawProc `9.875 ms` (`101.266 FPS-eq`), debayer `14.588 ms` (`68.551 FPS-eq`), processed16 `16.000 ms` (`62.499 FPS-eq`), processed8 `19.783 ms` (`50.548 FPS-eq`)
+  - smoke averages: GUI FPS `7.57`, smoke presented FPS `6.58`, timeline FPS `22.63`
+- x4 Sharp/Smooth is not a clean ceiling/control on this build:
+  - it stayed on the full-recon fallback and averaged `6.97` smoke presented FPS, but the color scan tripped `suspect-block-or-bar` on `M16-1327` and `M16-1347`
+  - averaged stage cost: raw `20.313 ms` (`49.230 FPS-eq`), LLRawProc `87.629 ms` (`11.412 FPS-eq`), debayer `109.466 ms` (`9.135 FPS-eq`), processed16 `111.363 ms` (`8.980 FPS-eq`), processed8 `115.358 ms` (`8.669 FPS-eq`)
+- x1 HQ stayed a clean control but did not change the answer:
+  - it remained full-recon fallback with `4.13` smoke presented FPS and `clear-heuristic` color scans
+- The x2 and x4 settled screenshot scans did not show a broad green wash across the matrix. The only repeated color-artifact issue was the expected suspect-block/bar signal on some x4 sharp/smooth clips and one clip each for x2 sharp/smooth and x2 aggressive.
+
+### Cross-checked from prior analysis
+
+- This matrix confirms the earlier rule of thumb: x2 aggressive is the only x2 lane that actually changes the pipeline shape, but x2 still pays substantial late decode/reconstruction cost compared with the retained x4 aggressive baseline.
+- The presentation side still dominates the user-visible smoke cadence more than GUI FPS, so the next change should be chosen from the stage-cost bottleneck rather than the bottom-left status label.
+
+### Needs runtime profiling
+
+- Next change ranking:
+  1. Keep x2 aggressive as the only x2 lane worth pursuing further, because it is the only x2 path that escapes the full-recon fallback and it has the cleanest x2 stage shape.
+  2. Investigate why x2 aggressive still pays high LLRawProc, debayer, processed16, and processed8 time even after the phase4b reduction; that is the next bottleneck, not a new x4/x8 policy.
+  3. Treat x4 aggressive as the retained baseline comparator until x2 proves a real stage win, and do not use x4 sharp/smooth as a safe ceiling/control without additional artifact validation.
+
 # 2026-06-03 - clip-open presentation reset suppresses transient pink top-block startup artifact
 
 ### Verified locally
