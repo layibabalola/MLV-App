@@ -34,6 +34,7 @@ raise SystemExit(bounded_closeout_cli_main(sys.argv[1:]))
 '@
     $runnerArgs = @("--repo-root", ".", "--") + $Arguments
     $py = Get-Command py -ErrorAction SilentlyContinue
+    $python3 = Get-Command python3.exe -ErrorAction SilentlyContinue
     $runnerPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mlv-closeout-runner-{0}.py" -f ([guid]::NewGuid().ToString("N")))
     $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mlv-closeout-stdout-{0}.log" -f ([guid]::NewGuid().ToString("N")))
     $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mlv-closeout-stderr-{0}.log" -f ([guid]::NewGuid().ToString("N")))
@@ -41,6 +42,9 @@ raise SystemExit(bounded_closeout_cli_main(sys.argv[1:]))
     if ($py) {
         $exe = $py.Source
         $processArgs = @("-3", $runnerPath) + $runnerArgs
+    } elseif ($python3) {
+        $exe = $python3.Source
+        $processArgs = @($runnerPath) + $runnerArgs
     } else {
         $exe = (Get-Command python -ErrorAction Stop).Source
         $processArgs = @($runnerPath) + $runnerArgs

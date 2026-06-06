@@ -4908,6 +4908,9 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     int lookAssistWaitMs = 0;
     if( lookAssistEnabledForSmoke && !m_lastLookAssistDiagnosticsValid )
     {
+        // Reuse the normal toggle/apply path so smoke captures do not stay on
+        // the pre-look-assist frame while the diagnostics gate is still empty.
+        on_checkBoxLookAssistEnable_clicked( true );
         QElapsedTimer lookAssistClock;
         lookAssistClock.start();
         requestFrameRefresh( true, "gui-smoke-look-assist-settle" );
