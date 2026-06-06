@@ -14982,3 +14982,57 @@ Post-change stage timings:
 
 - Keep looking for a narrow presentation/queue lever only if it can be justified without widening quality risk.
 - Otherwise, the better next move is another same-build matrix on a different residual presentation hypothesis, not a blind code change.
+
+## 2026-06-06 - headless color analysis split from presentation overhead
+
+### Verified locally
+
+- Added a small telemetry split in `platform/qt/MainWindow.cpp` so headless playback profiles now time the per-frame color scan separately as `headless_presented_color_analysis_ms`.
+- The profile sample now also emits `presentation_overhead_excluding_headless_color_ms`, which keeps the old bucket intact while giving the next matrix a cleaner presentation/queue number to rank.
+- Added coverage in `tests/console/test_clip_golden.cpp` so the tiny dual-ISO headless profile JSON case now expects the new telemetry keys.
+- Rebuilt the user-facing release executable:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 04:02:30 AM`
+  - `Length=9103360`
+  - `SHA256=39A076296A73A63C30B26582B8E5C21AC03BD4A138E3F33014E18C952DF147D4`
+- Focused Windows console test passed through the wrapper:
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+  - `tests=95`, `assertions=627`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke stayed visually clean on the full standard trio in x2 aggressive mode:
+  - `M16-1327`: `smoke presented FPS=8.274`, `timeline FPS=23.047`, `GUI FPS=1.7`, `clear-heuristic`
+  - `M16-1347`: `smoke presented FPS=7.581`, `timeline FPS=22.744`, `GUI FPS=4.3`, `clear-heuristic`
+  - `M16-1446`: `smoke presented FPS=6.640`, `timeline FPS=23.103`, `GUI FPS=9.3`, `clear-heuristic`
+- One x4 aggressive control smoke on `M16-1327` also stayed clean:
+  - `smoke presented FPS=12.266`, `timeline FPS=23.207`, `GUI FPS=6.2`, `clear-heuristic`
+- The screenshots I inspected manually were clean as well: the presented-frame captures showed expected scene detail without obvious magenta/pink/green bars, and the FPS crops showed the expected late-run playback label rather than a frozen or blank status strip.
+
+### Cross-checked from prior analysis
+
+- This does not change the earlier matrix conclusion that x4 is still the safer baseline comparator on the hot clip family.
+- It does make the next matrix more trustworthy, because the profile can now separate app presentation cost from the headless color-analysis work used for smoke validation.
+
+### Needs runtime profiling
+
+- The next bottleneck pass should use the new `presentation_overhead_excluding_headless_color_ms` field when ranking queue/presentation work.
+- Keep the screenshot-backed smoke discipline in place; the new telemetry is only useful if quality stays visually clean while the ranking changes.
+
+### 2026-06-06 - x4 GUI smoke compare on the hot clips
+
+- I ran screenshot-backed GUI smoke on `M16-1347` and `M16-1446` at aggressive preview scale `4` with the same build and the same quality-state requirements.
+- The x4 lane was visually clean on both clips:
+  - `M16-1347`: `GUI FPS=33`, smoke presented FPS `16.885`, timeline FPS `23.899`, `clear-heuristic`
+  - `M16-1446`: `GUI FPS=8.0`, smoke presented FPS `16.624`, timeline FPS `23.703`, `clear-heuristic`
+- On the hot `M16-1446` clip, x4 aggressive beat the current x2 aggressive result on the actual smoke path:
+  - x2 aggressive: smoke presented FPS `11.011`, timeline FPS `23.655`, visible bottom-left `GUI FPS=12`
+  - x4 aggressive: smoke presented FPS `16.624`, timeline FPS `23.703`, visible bottom-left `GUI FPS=8.0`
+- That means the x2 quarterres addition did not produce the best end-to-end playback result for the hot clip family, even though the matrix showed the x2 decode/filter path improving.
+
+### Cross-checked from prior analysis
+
+- The x2 lane still has a cleaner decode/filter story than x4 in the matrix, but GUI smoke says x4 is better on the actual hot clip.
+- The remaining work should not assume x2 is the best performance endpoint; the better baseline comparator remains x4 aggressive for the hot clip family.
+
+### Needs runtime profiling
+
+- Keep the next experiment honest about which lane is actually faster end-to-end on the GUI smoke path.
+- If we touch code next, it should be because we have a narrow lever that improves x4 or proves why x2 can catch up without risking quality.

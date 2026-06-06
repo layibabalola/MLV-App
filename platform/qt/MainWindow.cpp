@@ -3901,6 +3901,15 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                 {
                     sample.insert( it.key(), it.value() );
                 }
+                if( frameColorTelemetry.contains( QStringLiteral("headless_presented_color_analysis_ms") ) )
+                {
+                    const double presentationOverheadMs =
+                        sample.value( QStringLiteral("presentation_overhead_ms") ).toDouble();
+                    const double headlessColorAnalysisMs =
+                        frameColorTelemetry.value( QStringLiteral("headless_presented_color_analysis_ms") ).toDouble();
+                    sample.insert( QStringLiteral("presentation_overhead_excluding_headless_color_ms"),
+                                   qMax( 0.0, presentationOverheadMs - headlessColorAnalysisMs ) );
+                }
             }
             if( paintCompletionNs >= 0 )
             {
@@ -18969,15 +18978,19 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
 {
     recordPresentedFrame( readyFrame, requestContext );
     m_lastPresentedFrameColorTelemetry = QJsonObject();
+    double headlessPresentedColorAnalysisMs = 0.0;
     if( m_headlessPlaybackProfileActive
      && rgb8DisplaySource
      && readyFrame.renderedImageWidth > 0
      && readyFrame.renderedImageHeight > 0 )
     {
+        const double colorAnalysisStart = mlv_stage_timing_now();
         const LookAssistStats frameStats =
             analyzeLookAssistThumbnail( rgb8DisplaySource,
                                         readyFrame.renderedImageWidth,
                                         readyFrame.renderedImageHeight );
+        headlessPresentedColorAnalysisMs =
+            ( mlv_stage_timing_now() - colorAnalysisStart ) * 1000.0;
         const double visibleGreenAxis =
             frameStats.visibleMeanG
             - ( ( frameStats.visibleMeanR + frameStats.visibleMeanB ) * 0.5 );
@@ -19002,6 +19015,9 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         m_lastPresentedFrameColorTelemetry.insert(
             QStringLiteral("presented_dual_iso_ui_pattern"),
             dualIsoUiPatternIndexFromCorePattern( readyFrame.dualIsoPattern ) );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("headless_presented_color_analysis_ms"),
+            headlessPresentedColorAnalysisMs );
     }
     updatePlaybackQualityIndicator();
 
