@@ -5164,10 +5164,12 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed16_for_8bit_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
 
+    /* getMlvProcessedFrame16_with_scale() just populated the current-frame
+     * cache for this frame when it succeeds, so reuse that buffer directly
+     * instead of re-hashing the full processing state a second time. */
     if (video->current_processed_frame_active
         && video->current_processed_frame == frameIndex
         && video->current_processed_frame_threads == threads
-        && video->current_processed_frame_signature == mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale)
         && video->rgb_processed_current_frame)
     {
         processed_frame = video->rgb_processed_current_frame;

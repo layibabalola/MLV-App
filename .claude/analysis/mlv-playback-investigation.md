@@ -15261,3 +15261,32 @@ Post-change stage timings:
   - x2: `smoke presented FPS=18.702`, `timeline FPS=23.701`, `GUI FPS=27.333`, `queue_wait_ms=9.346 ms (107.001 FPS-eq)`, `render_total_ms=53.092 ms (18.835 FPS-eq)`, `llrawproc_ms=10.751 ms (93.012 FPS-eq)`, `debayered_frame_ms=1.502 ms (665.631 FPS-eq)`, `processed16_ms=38.163 ms (26.203 FPS-eq)`, `processed8_ms=42.590 ms (23.480 FPS-eq)`, `raw_uint16_ms=7.067 ms (141.503 FPS-eq)`, `colorArtifactScan=clear-heuristic`
   - x4: `smoke presented FPS=14.326`, `timeline FPS=23.892`, `GUI FPS=13.000`, `queue_wait_ms=29.723 ms (33.644 FPS-eq)`, `render_total_ms=95.151 ms (10.510 FPS-eq)`, `llrawproc_ms=31.691 ms (31.555 FPS-eq)`, `debayered_frame_ms=45.871 ms (21.800 FPS-eq)`, `processed16_ms=60.343 ms (16.572 FPS-eq)`, `processed8_ms=64.270 ms (15.559 FPS-eq)`, `raw_uint16_ms=13.637 ms (73.330 FPS-eq)`, `colorArtifactScan=clear-heuristic`
 - The next ranked bottleneck is still the aggressive playback path's render/queue/processed16 cost, but the decision point has shifted: x2 is now the stronger throughput comparator on the smoke path, while x4 is the safer quality fallback.
+
+### 2026-06-06 - x2 processed-frame hash trim rechecked on the standard trio
+
+### Verified locally
+
+- Rebuilt the user-facing release executable after the processed-frame cache reuse trim:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 10:31:54 AM`
+  - `Length=9105408`
+  - `SHA256=0B96CCC96D0A52160AC9FC4E1BBDB192103E80A614A3A81067D7F3AE221D6430`
+- Focused Windows pipeline coverage passed for the aggressive preview lane:
+  - `DualIsoPipeline.Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY`
+  - `DualIsoPipeline.Phase4Bv3_AggressivePreviewUsesFullReconFallbackX4`
+  - `DualIsoPipeline.DualIsoPlaybackUsesFastHqPathForFastX4`
+  - `tests=159`, `assertions=0`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke on the standard M16 trio completed with the expected scale/quality checks and a 30-second settle window.
+
+### Cross-checked from prior analysis
+
+- Reusing the already-populated processed-frame cache buffer avoids a second state-signature hash on the common x2 processed8 path.
+- The change preserved color safety: all three x2 smoke runs stayed `clear-heuristic`, and the x4 control on `M16-1327` stayed clean too.
+
+### Needs runtime profiling
+
+- x2 trio smoke averages after the trim:
+  - `smoke presented FPS=24.041`, `timeline FPS=23.698`, `GUI FPS=31.333`, `queue_wait_ms=15.674 ms (63.799 FPS-eq)`, `render_total_ms=51.801 ms (19.305 FPS-eq)`, `llrawproc_ms=8.569 ms (116.704 FPS-eq)`, `processed16_ms=32.021 ms (31.229 FPS-eq)`, `processed8_ms=34.899 ms (28.654 FPS-eq)`, `raw_uint16_ms=4.601 ms (217.360 FPS-eq)`, `debayered_frame_ms=1.300 ms (769.034 FPS-eq)`, `present_pacing_ms=2.085 ms (479.540 FPS-eq)`, `present_ui_signal_latency_ms=15.674 ms (63.799 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+- x4 control on `M16-1327` remained clean but slower:
+  - `smoke presented FPS=15.884`, `timeline FPS=23.892`, `GUI FPS=20`, `queue_wait_ms=37.310 ms (26.802 FPS-eq)`, `render_total_ms=98.729 ms (10.129 FPS-eq)`, `llrawproc_ms=30.721 ms (32.551 FPS-eq)`, `processed16_ms=57.857 ms (17.284 FPS-eq)`, `processed8_ms=60.273 ms (16.591 FPS-eq)`, `raw_uint16_ms=12.368 ms (80.854 FPS-eq)`, `debayered_frame_ms=44.103 ms (22.674 FPS-eq)`, `present_ui_signal_latency_ms=37.310 ms (26.802 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+- The next bottleneck remains the aggressive playback path's render/queue/processed16 cost, but x2 is now a materially stronger baseline than the prior matrix and is the lane to keep squeezing first.
