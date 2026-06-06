@@ -9,6 +9,9 @@ param(
     [int]$FrameStep = 1,
     [string]$Threads = "1",
     [string]$Receipt = "",
+    [string]$QualityMode = "",
+    [string]$ScaleFactor = "",
+    [string]$PreviewMode = "",
     [switch]$ShowWindow,
     [switch]$WaitForPaint,
     [string[]]$AdditionalArgs = @(),
@@ -141,6 +144,29 @@ try {
 
     $envBlock = $startInfo.EnvironmentVariables
     $envBlock["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
+    if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
+        $envBlock["MLVAPP_PLAYBACK_QUALITY_MODE"] = $QualityMode
+    }
+    elseif ($envBlock.Contains("MLVAPP_PLAYBACK_QUALITY_MODE")) {
+        [void]$envBlock.Remove("MLVAPP_PLAYBACK_QUALITY_MODE")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
+        $envBlock["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
+    }
+    elseif ($envBlock.Contains("MLVAPP_PLAYBACK_SCALE_FACTOR")) {
+        [void]$envBlock.Remove("MLVAPP_PLAYBACK_SCALE_FACTOR")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PreviewMode)) {
+        $envBlock["MLVAPP_PLAYBACK_PREVIEW_MODE"] = $PreviewMode
+        [void]$envBlock.Remove("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW")
+    }
+    elseif ($envBlock.Contains("MLVAPP_PLAYBACK_PREVIEW_MODE")) {
+        [void]$envBlock.Remove("MLVAPP_PLAYBACK_PREVIEW_MODE")
+        [void]$envBlock.Remove("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW")
+    }
+    elseif ($envBlock.Contains("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW")) {
+        [void]$envBlock.Remove("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW")
+    }
     Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 
     $process = [System.Diagnostics.Process]::Start($startInfo)

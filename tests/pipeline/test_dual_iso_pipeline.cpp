@@ -12,6 +12,7 @@
 #include "../../src/batch/ReceiptLoader.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -3769,8 +3770,10 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesUsesEarlyFullXY)
 {
     ScopedAggressivePreviewMode aggressivePreview(0);
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
     mlv_phase4bv_reset_env_cache_for_testing();
     MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES", "1");
+    MLVAPP_TEST_SETENV("MLVAPP_LOG_PHASE4BV2", "1");
     mlv_phase4bv_reset_env_cache_for_testing();
 
     MlvPipelineFixture fixture;
@@ -3783,6 +3786,16 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesUsesEarlyFullXY)
     fixture.receipt().setPatternNoise(1);
     ASSERT_TRUE(fixture.applyReceipt(&error_message));
     ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+    ASSERT_EQ(1, llrpGetFixRawMode(fixture.video()));
+    ASSERT_TRUE(llrpHQDualIso(fixture.video()));
+    std::fprintf(stderr,
+                 "x4 full-res-fix receipt modes: focus=%d bad=%d stripes=%d noise=%d aggressive=%d env=%s\n",
+                 llrpGetFocusPixelMode(fixture.video()),
+                 llrpGetBadPixelMode(fixture.video()),
+                 llrpGetVerticalStripeMode(fixture.video()),
+                 llrpGetPatternNoiseMode(fixture.video()),
+                 mlvPlaybackAggressivePreviewMode(),
+                 std::getenv("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES"));
 
     const int full_w = fixture.width();
     const int full_h = fixture.height();
@@ -3794,10 +3807,16 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesUsesEarlyFullXY)
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 4);
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
     mlv_phase4bv_reset_env_cache_for_testing();
 
     ASSERT_EQ(static_cast<std::size_t>(full_w / 4) * (full_h / 4) * 3u, got.size());
     ASSERT_EQ(4, fixture.video()->playback_scale_factor_active);
+    std::fprintf(stderr,
+                 "x4 full-res-fix trace: path=%d fallback=%s pre_dualiso_fix_ms=%.3f\n",
+                 mlv_phase4bv2_last_path_taken(),
+                 mlv_phase4bv2_last_fallback_reason(),
+                 fixture.video()->llrawproc->playback_pre_dualiso_fix_ms);
     ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
     ASSERT_EQ(std::string("none"),
               std::string(mlv_phase4bv2_last_fallback_reason()));

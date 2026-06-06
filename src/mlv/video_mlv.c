@@ -3031,12 +3031,54 @@ static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video,
     if (video && video->llrawproc
      && video->llrawproc->diso_playback_force_mean23 != 0
      && scaleFactor != 8
-     && !mlv_phase4bv2_allow_fast_hq_via_env())
+     && !mlv_phase4bv2_allow_fast_hq_via_env()
+     && !(scaleFactor == 4 && mlv_phase4bv2_x4_fullres_fix_via_env()))
     {
         mlv_phase4bv2_log_rejection("HQ mean23 playback uses full-recon x4 fallback");
         return 0;
     }
     return 1;
+}
+
+typedef struct
+{
+    int focus_pixels;
+    int bad_pixels;
+    int vertical_stripes;
+    int pattern_noise;
+} mlv_phase4bv2_receipt_flag_snapshot_t;
+
+static void mlv_phase4bv2_clear_coordinate_sensitive_receipt_flags(llrawprocObject_t * shared,
+                                                                   mlv_phase4bv2_receipt_flag_snapshot_t * snapshot)
+{
+    if (!shared || !snapshot)
+    {
+        return;
+    }
+
+    snapshot->focus_pixels = shared->focus_pixels;
+    snapshot->bad_pixels = shared->bad_pixels;
+    snapshot->vertical_stripes = shared->vertical_stripes;
+    snapshot->pattern_noise = shared->pattern_noise;
+
+    shared->focus_pixels = 0;
+    shared->bad_pixels = 0;
+    shared->vertical_stripes = 0;
+    shared->pattern_noise = 0;
+}
+
+static void mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(llrawprocObject_t * shared,
+                                                                     const mlv_phase4bv2_receipt_flag_snapshot_t * snapshot)
+{
+    if (!shared || !snapshot)
+    {
+        return;
+    }
+
+    shared->focus_pixels = snapshot->focus_pixels;
+    shared->bad_pixels = snapshot->bad_pixels;
+    shared->vertical_stripes = snapshot->vertical_stripes;
+    shared->pattern_noise = snapshot->pattern_noise;
 }
 
 /* Phase 4B-v3/v4: telemetry — counts which path the most recent v2 entry took.
@@ -3410,6 +3452,13 @@ static int mlv_render_scaled_rgb16_x2_full_xy_from_raw(mlvObject_t * video,
                                                   outputFrame, threads);
 }
 
+static int mlv_render_scaled_rgb16_v3_full_xy_from_raw(mlvObject_t * video,
+                                                       uint64_t frameIndex,
+                                                       const uint16_t * decodedRawFrame,
+                                                       uint16_t * outputFrame,
+                                                       int threads,
+                                                       int * out_dn_ms_x100);
+
 /* Phase 4B-v2: downsample-BEFORE-llrawproc path.
  *
  * Architecture (the actual cast-closed-fast path):
@@ -3469,16 +3518,21 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     {
         return 0;
     }
+    const int x4FullResFixesActive =
+        (scaleFactor == 4 && !mlvPlaybackAggressivePreviewMode() && mlv_phase4bv2_x4_fullres_fix_via_env());
     if (!mlv_phase4bv2_receipt_compatible(video))
     {
-        llrawprocObject_t * shared = video ? video->llrawproc : NULL;
-        if (!shared) mlv_phase4bv2_log_rejection("no shared");
-        else if (shared->focus_pixels) mlv_phase4bv2_log_rejection("focus_pixels enabled");
-        else if (shared->bad_pixels) mlv_phase4bv2_log_rejection("bad_pixels enabled");
-        else if (shared->vertical_stripes) mlv_phase4bv2_log_rejection("vertical_stripes enabled");
-        else if (shared->pattern_noise) mlv_phase4bv2_log_rejection("pattern_noise enabled");
-        else mlv_phase4bv2_log_rejection("receipt incompatible (unknown)");
-        return 0;
+        if (!x4FullResFixesActive)
+        {
+            llrawprocObject_t * shared = video ? video->llrawproc : NULL;
+            if (!shared) mlv_phase4bv2_log_rejection("no shared");
+            else if (shared->focus_pixels) mlv_phase4bv2_log_rejection("focus_pixels enabled");
+            else if (shared->bad_pixels) mlv_phase4bv2_log_rejection("bad_pixels enabled");
+            else if (shared->vertical_stripes) mlv_phase4bv2_log_rejection("vertical_stripes enabled");
+            else if (shared->pattern_noise) mlv_phase4bv2_log_rejection("pattern_noise enabled");
+            else mlv_phase4bv2_log_rejection("receipt incompatible (unknown)");
+            return 0;
+        }
     }
     if (scaleFactor == 8)
     {
@@ -3527,6 +3581,36 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
         return 0;
     }
 
+    const int x4ReceiptBypassActive = x4FullResFixesActive && !mlv_phase4bv2_receipt_compatible(video);
+    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+    const size_t full_bytes = (size_t)full_pixels * sizeof(uint16_t);
+    const uint16_t * x4_source = NULL;
+    uint16_t * x4_fix_buffer = NULL;
+    mlv_phase4bv2_receipt_flag_snapshot_t x4_receipt_flags_snapshot = { 0 };
+
+    if (x4ReceiptBypassActive)
+    {
+        x4_fix_buffer = mlv_ensure_thread_u16_buffer(full_pixels);
+        if (!x4_fix_buffer)
+        {
+            mlv_phase4bv2_log_rejection("x4 full-res fix buffer rejected");
+            return 0;
+        }
+
+        const double raw_start = mlv_stage_timing_now();
+        if (getMlvRawFrameUint16(video, frameIndex, x4_fix_buffer))
+        {
+            mlv_phase4bv2_log_rejection("x4 full-res fix raw decode rejected");
+            return 0;
+        }
+        g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
+
+        applyLLRawProcObjectPreDualIsoFixes(video, x4_fix_buffer, full_bytes);
+        x4_source = x4_fix_buffer;
+        mlv_phase4bv2_set_fallback_reason("none");
+    }
+
     /* Phase 4B-v3: try the full XY pre-recon path first. Eligible whenever
      * full_h >= 16 (so eff_h = floor(full_h/16)*16 >= 16) and the v3 kill
      * switch is not set. The path runs the recon on (W/4, eff_h/4) — for
@@ -3535,7 +3619,21 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     if (!mlv_phase4bv3_disabled_via_env() && full_h >= 16)
     {
         int dn_x100 = 0;
-        if (mlv_render_scaled_rgb16_v3_full_xy(video, frameIndex, outputFrame, threads, &dn_x100))
+        if (x4_source)
+        {
+            mlv_phase4bv2_clear_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                   &x4_receipt_flags_snapshot);
+            if (mlv_render_scaled_rgb16_v3_full_xy_from_raw(video, frameIndex, x4_source, outputFrame, threads, &dn_x100))
+            {
+                mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                         &x4_receipt_flags_snapshot);
+                g_mlv_phase4bv2_path_taken = 3;
+                return 1;
+            }
+            mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                     &x4_receipt_flags_snapshot);
+        }
+        else if (mlv_render_scaled_rgb16_v3_full_xy(video, frameIndex, outputFrame, threads, &dn_x100))
         {
             g_mlv_phase4bv2_path_taken = 3;
             return 1;
@@ -3553,12 +3651,11 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     /* Final output dim: scale=4 in both. */
     const int out_w = full_w / 4;
     const int out_h = full_h / 4;
-    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
     const uint64_t mid_pixels = (uint64_t)mid_w * (uint64_t)mid_h;
     const uint64_t mid_rgb_words = mid_pixels * 3u;
     const uint64_t out_rgb_words = (uint64_t)out_w * (uint64_t)out_h * 3u;
 
-    uint16_t * full_bayer = mlv_ensure_thread_u16_buffer(full_pixels);
+    uint16_t * full_bayer = x4_source ? x4_fix_buffer : mlv_ensure_thread_u16_buffer(full_pixels);
     uint16_t * mid_bayer = mlv_ensure_thread_scaled_bayer_buffer(mid_pixels);
     /* Reuse the rgb_u16 thread-local for the post-debayer mid-RGB buffer.
      * Its capacity grows on demand; oversize for our (mid_w,mid_h) case
@@ -3567,14 +3664,17 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     if (!full_bayer || !mid_bayer || !mid_rgb) return 0;
 
     /* Step 1: decode raw at full res (no llrawproc). */
-    const double raw_start = mlv_stage_timing_now();
-    if (getMlvRawFrameUint16(video, frameIndex, full_bayer))
+    if (!x4_source)
     {
-        memset(outputFrame, 0, (size_t)out_rgb_words * sizeof(uint16_t));
-        return 0;
+        const double raw_start = mlv_stage_timing_now();
+        if (getMlvRawFrameUint16(video, frameIndex, full_bayer))
+        {
+            memset(outputFrame, 0, (size_t)out_rgb_words * sizeof(uint16_t));
+            return 0;
+        }
+        g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
     }
-    g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
-    mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
 
     /* Step 2: bayer→bayer X-only 4x downsample. */
     const double downsample_start = mlv_stage_timing_now();
@@ -3593,8 +3693,12 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     const double llraw_start = mlv_stage_timing_now();
     mlv_pipeline_capture_set_current_frame(frameIndex);
     const size_t mid_bytes = (size_t)mid_pixels * sizeof(uint16_t);
+    mlv_phase4bv2_clear_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                           &x4_receipt_flags_snapshot);
     int llraw_ok = applyLLRawProcObject_with_dims(video, mid_bayer, mid_bytes,
                                                   mid_w, mid_h);
+    mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                             &x4_receipt_flags_snapshot);
     if (!llraw_ok)
     {
         mlv_phase4bv2_log_rejection("applyLLRawProcObject_with_dims rejected");
@@ -3893,6 +3997,7 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
             const uint16_t * x4_source = decodedRawFrame;
             int x4FixesApplied = receiptCompatible;
             uint16_t * x4_fix_buffer = NULL;
+            mlv_phase4bv2_receipt_flag_snapshot_t x4_receipt_flags_snapshot = { 0 };
 
             if (video->llrawproc)
             {
@@ -3919,6 +4024,11 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
             if (x4FixesApplied && !mlv_phase4bv3_disabled_via_env() && full_h >= 16)
             {
                 int dn_x100 = 0;
+                if (x4FullResFixesActive)
+                {
+                    mlv_phase4bv2_clear_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                           &x4_receipt_flags_snapshot);
+                }
                 if (mlv_render_scaled_rgb16_v3_full_xy_from_raw(video,
                                                                 frameIndex,
                                                                 x4_source,
@@ -3926,7 +4036,17 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
                                                                 threads,
                                                                 &dn_x100))
                 {
+                    if (x4FullResFixesActive)
+                    {
+                        mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                                 &x4_receipt_flags_snapshot);
+                    }
                     return 1;
+                }
+                if (x4FullResFixesActive)
+                {
+                    mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                             &x4_receipt_flags_snapshot);
                 }
             }
 
@@ -3952,8 +4072,18 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
                         const double llraw_start = mlv_stage_timing_now();
                         mlv_pipeline_capture_set_current_frame(frameIndex);
                         const size_t mid_bytes = (size_t)mid_pixels * sizeof(uint16_t);
+                        if (x4FullResFixesActive)
+                        {
+                            mlv_phase4bv2_clear_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                                   &x4_receipt_flags_snapshot);
+                        }
                         int llraw_ok = applyLLRawProcObject_with_dims(video, mid_bayer, mid_bytes,
                                                                       mid_w, mid_h);
+                        if (x4FullResFixesActive)
+                        {
+                            mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                                     &x4_receipt_flags_snapshot);
+                        }
                         if (llraw_ok)
                         {
                             const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
