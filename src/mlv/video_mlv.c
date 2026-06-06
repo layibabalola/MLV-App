@@ -1754,6 +1754,21 @@ static void mlv_store_processed_frame_8bit_cache_with_scale(mlvObject_t * video,
                                                             int phase4bPath,
                                                             int phase4bYCropRows)
 {
+    /* Aggressive x4 playback is the hot sequential lane now. When the
+     * foreground render is not already serving the direct8 path, the cache
+     * write mostly adds mutex/copy overhead for a frame that is not being
+     * reused immediately. Keep the prefetch-worker store path intact, but
+     * let the main render path skip this bookkeeping in that lane. */
+    if (prefetched == 0
+        && scaleFactor == 4
+        && mlvPlaybackAggressivePreviewMode()
+        && (!video
+            || !video->processing
+            || !processingCanUseDirect8BitOutput(video->processing)))
+    {
+        return;
+    }
+
     const double store_start = mlv_stage_timing_now();
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
     mlv_store_processed_frame_8bit_cache_locked_with_scale(video,
@@ -3007,6 +3022,10 @@ static int g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
 
 static int mlv_phase4bv2_allow_fast_hq_via_env(int scaleFactor)
 {
+    if (scaleFactor == 4 && mlvPlaybackAggressivePreviewMode())
+    {
+        return 1;
+    }
     if (scaleFactor == 2 && mlvPlaybackAggressivePreviewMode())
     {
         return 1;
@@ -5009,6 +5028,10 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
     const int processed8PrefetchActive =
         direct8PathActive && mlv_processed8_prefetch_enabled(video);
+    const int skip_processed8_main_cache =
+        !direct8PathActive
+     && normalizedScale == 4
+     && mlvPlaybackAggressivePreviewMode();
     uint64_t requested_state_signature = 0;
 
     if (direct8PathActive)
@@ -5028,22 +5051,25 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
 
     uint64_t requested_signature = direct8PathActive
         ? mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex)
-        : mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
+        : (skip_processed8_main_cache
+            ? 0
+            : mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale));
 
     int prefetched_hit = 0;
     int cached_phase4b_path = 0;
     int cached_phase4b_y_crop_rows = 0;
-    if (mlv_processed_frame_8bit_cache_try_copy(video,
-                                                frameIndex,
-                                                threads,
-                                                requested_signature,
-                                                processed8PrefetchActive,
-                                                outputFrame,
-                                                rgb_frame_size,
-                                                normalizedScale,
-                                                &prefetched_hit,
-                                                &cached_phase4b_path,
-                                                &cached_phase4b_y_crop_rows))
+    if (!skip_processed8_main_cache
+        && mlv_processed_frame_8bit_cache_try_copy(video,
+                                                   frameIndex,
+                                                   threads,
+                                                   requested_signature,
+                                                   processed8PrefetchActive,
+                                                   outputFrame,
+                                                   rgb_frame_size,
+                                                   normalizedScale,
+                                                   &prefetched_hit,
+                                                   &cached_phase4b_path,
+                                                   &cached_phase4b_y_crop_rows))
     {
         g_mlv_last_processed8_cache_hit = 1;
         g_mlv_last_processed8_cache_hit_scale_factor = normalizedScale;
@@ -5165,9 +5191,12 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
 
     /* getMlvProcessedFrame16_with_scale() just populated the current-frame
-     * cache for this frame when it succeeds, so reuse that buffer directly
-     * instead of re-hashing the full processing state a second time. */
-    if (video->current_processed_frame_active
+     * cache for this frame when it succeeds. When the x4 aggressive lane is
+     * already skipping the outer processed8 cache bookkeeping, the post-render
+     * signature check is redundant work; the freshly rendered buffer is already
+     * the one we need for the 8-bit packdown. */
+    if (!skip_processed8_main_cache
+        && video->current_processed_frame_active
         && video->current_processed_frame == frameIndex
         && video->current_processed_frame_threads == threads
         && video->rgb_processed_current_frame)
@@ -5214,20 +5243,23 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
         mlv_pipeline_capture(frameIndex, outputFrame, &meta);
     }
 
-    mlv_store_processed_frame_8bit_cache_with_scale(
-        video,
-        frameIndex,
-        threads,
-        video->current_processed_frame_active
-            ? video->current_processed_frame_signature
-            : mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale),
-        outputFrame,
-        rgb_frame_size,
-        1,
-        0,
-        normalizedScale,
-        mlv_phase4bv2_last_path_taken(),
-        mlv_phase4bv3_last_y_crop_rows());
+    if (!skip_processed8_main_cache)
+    {
+        mlv_store_processed_frame_8bit_cache_with_scale(
+            video,
+            frameIndex,
+            threads,
+            video->current_processed_frame_active
+                ? video->current_processed_frame_signature
+                : mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale),
+            outputFrame,
+            rgb_frame_size,
+            1,
+            0,
+            normalizedScale,
+            mlv_phase4bv2_last_path_taken(),
+            mlv_phase4bv3_last_y_crop_rows());
+    }
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
