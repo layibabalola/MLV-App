@@ -76,6 +76,14 @@ static QString playbackFpsStatusText( double fps )
         : QStringLiteral( "Playback: %1 fps" ).arg( static_cast<int>( fps ) );
 }
 
+static int playbackFpsStatusBucket( double fps )
+{
+    if( fps < 0.0 ) fps = 0.0;
+    return fps < 10.0
+        ? static_cast<int>( std::lround( fps * 10.0 ) )
+        : static_cast<int>( fps );
+}
+
 static int playbackScopeUpdateIntervalMs()
 {
     bool ok = false;
@@ -1529,11 +1537,13 @@ void MainWindow::timerFrameEvent( void )
             const double measuredFps = measuredFrameMs > 0
                 ? 1000.0 / static_cast<double>( measuredFrameMs )
                 : 0.0;
-            const QString playbackFpsText = playbackFpsStatusText( measuredFps );
-            if( m_lastPlaybackFpsStatusText != playbackFpsText )
+            const int playbackFpsBucket = playbackFpsStatusBucket( measuredFps );
+            if( m_lastPlaybackFpsStatusBucket != playbackFpsBucket )
             {
+                const QString playbackFpsText = playbackFpsStatusText( measuredFps );
                 m_pFpsStatus->setText( playbackFpsText );
                 m_lastPlaybackFpsStatusText = playbackFpsText;
+                m_lastPlaybackFpsStatusBucket = playbackFpsBucket;
             }
         }
         lastTime = nowTime;
@@ -1555,11 +1565,13 @@ void MainWindow::timerFrameEvent( void )
                     .arg( ui->horizontalSliderPosition->value() ),
                 true );
         }
-        const QString playbackFpsText = playbackFpsStatusText( 0.0 );
-        if( m_lastPlaybackFpsStatusText != playbackFpsText )
+        const int playbackFpsBucket = playbackFpsStatusBucket( 0.0 );
+        if( m_lastPlaybackFpsStatusBucket != playbackFpsBucket )
         {
+            const QString playbackFpsText = playbackFpsStatusText( 0.0 );
             m_pFpsStatus->setText( playbackFpsText );
             m_lastPlaybackFpsStatusText = playbackFpsText;
+            m_lastPlaybackFpsStatusBucket = playbackFpsBucket;
         }
         lastTime = QTime::currentTime(); //do that for calculation of timeDiff for DropFrameMode;
 
@@ -6026,6 +6038,7 @@ void MainWindow::initGui( void )
     m_pFrameNumber->setMaximumWidth( 120 );
     m_pFrameNumber->setMinimumWidth( 120 );
     drawFrameNumberLabel();
+    m_lastFrameNumberStatusText = m_pFrameNumber->text();
     //m_pFpsStatus->setFrameStyle(QFrame::Panel | QFrame::Sunken);
     statusBar()->addWidget( m_pFrameNumber );
 
@@ -11699,19 +11712,28 @@ bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
 //Write the frame number into the label
 void MainWindow::drawFrameNumberLabel( int frameIndex )
 {
+    QString frameNumberText;
     if( m_fileLoaded )
     {
         const int shownFrame = (frameIndex >= 0)
             ? frameIndex
             : ui->horizontalSliderPosition->value();
-        m_pFrameNumber->setText( tr( "Frame %1/%2" )
-                                 .arg( shownFrame + 1 )
-                                 .arg( ui->horizontalSliderPosition->maximum() + 1 ) );
+        frameNumberText = tr( "Frame %1/%2" )
+                              .arg( shownFrame + 1 )
+                              .arg( ui->horizontalSliderPosition->maximum() + 1 );
     }
     else
     {
-        m_pFrameNumber->setText( tr( "Frame 0/0" ) );
+        frameNumberText = tr( "Frame 0/0" );
     }
+
+    if( m_lastFrameNumberStatusText == frameNumberText )
+    {
+        return;
+    }
+
+    m_pFrameNumber->setText( frameNumberText );
+    m_lastFrameNumberStatusText = frameNumberText;
 }
 
 void MainWindow::updateTimeCodeLabelForFrame( int frameIndex )
