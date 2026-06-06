@@ -399,24 +399,37 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
     return 1;
 }
 
-static int mlv_processed8_prefetch_enabled(void)
+static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t * video)
 {
-    static int enabled = -1;
-    if (enabled >= 0)
+    if (video
+        && video->playback_scale_factor_active == 4
+        && mlvPlaybackAggressivePreviewMode())
     {
-        return enabled;
+        return 6;
     }
 
+    return MLV_RAW_UINT16_PREFETCH_LOOKAHEAD;
+}
+
+static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
+{
+    /* Keep the env override for experimentation, but let the x4 aggressive
+     * path benefit by default when the runtime is already in that preview
+     * mode. The prefetch worker does not change pixels; it only tries to
+     * hide the shared processed8 render cost behind the next frame. */
     const char * value = getenv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
-    enabled =
-        (value
-         && value[0] != '\0'
-         && strcmp(value, "0") != 0
-         && strcasecmp(value, "false") != 0
-         && strcasecmp(value, "off") != 0)
+    if (value && value[0] != '\0')
+    {
+        return (strcmp(value, "0") != 0
+             && strcasecmp(value, "false") != 0
+             && strcasecmp(value, "off") != 0)
             ? 1
             : 0;
-    return enabled;
+    }
+
+    return video
+        && video->playback_scale_factor_active == 4
+        && mlvPlaybackAggressivePreviewMode();
 }
 
 static uint64_t mlv_hash_bytes(uint64_t hash, const void * data, size_t size)
@@ -1127,7 +1140,10 @@ static void * mlv_raw_uint16_prefetch_thread_main(void * opaque)
             requestStride = 1;
         }
 
-        for (uint32_t offset = 1; offset <= MLV_RAW_UINT16_PREFETCH_LOOKAHEAD; ++offset)
+        const uint32_t lookahead =
+            mlv_raw_uint16_prefetch_lookahead_for_request(video);
+
+        for (uint32_t offset = 1; offset <= lookahead; ++offset)
         {
             uint64_t targetFrame = baseFrame + ((uint64_t)offset * requestStride);
             if (targetFrame >= getMlvFrames(video))
@@ -4982,7 +4998,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     uint16_t * processed_frame = NULL;
     const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
     const int processed8PrefetchActive =
-        direct8PathActive && mlv_processed8_prefetch_enabled();
+        direct8PathActive && mlv_processed8_prefetch_enabled(video);
     uint64_t requested_state_signature = 0;
 
     if (direct8PathActive)

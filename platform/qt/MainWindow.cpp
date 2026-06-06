@@ -1125,7 +1125,7 @@ static const char * playback_profile_processing_request_name(
     }
 }
 
-static const uint64_t kPlaybackStartPrerollFrames = 2;
+static const uint64_t kPlaybackStartPrerollFrames = 4;
 
 static bool playback_start_preroll_disabled_by_environment()
 {
