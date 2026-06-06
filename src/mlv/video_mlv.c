@@ -3012,6 +3012,19 @@ static int mlv_phase4bv2_allow_fast_hq_via_env(void)
  * before the x4 early reduction path, so receipts that need focus/bad/
  * stripe/pattern corrections can still take the reduced Bayer path without
  * routing through the aggressive skip-fixes approximation. */
+static int g_mlv_phase4bv2_x2_fullres_fix_env_cache = -1;
+
+static int mlv_phase4bv2_x2_fullres_fix_via_env(void)
+{
+    if (g_mlv_phase4bv2_x2_fullres_fix_env_cache < 0)
+    {
+        const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
+        g_mlv_phase4bv2_x2_fullres_fix_env_cache =
+            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+    }
+    return g_mlv_phase4bv2_x2_fullres_fix_env_cache;
+}
+
 static int g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;
 
 static int mlv_phase4bv2_x4_fullres_fix_via_env(void)
@@ -3032,7 +3045,8 @@ static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video,
      && video->llrawproc->diso_playback_force_mean23 != 0
      && scaleFactor != 8
      && !mlv_phase4bv2_allow_fast_hq_via_env()
-     && !(scaleFactor == 4 && mlv_phase4bv2_x4_fullres_fix_via_env()))
+     && !(scaleFactor == 4 && mlv_phase4bv2_x4_fullres_fix_via_env())
+     && !(scaleFactor == 2 && mlv_phase4bv2_x2_fullres_fix_via_env()))
     {
         mlv_phase4bv2_log_rejection("HQ mean23 playback uses full-recon x4 fallback");
         return 0;
@@ -3120,6 +3134,7 @@ void mlv_phase4bv_reset_env_cache_for_testing(void)
     g_mlv_phase4bv3_disabled_env_cache = -1;
     g_mlv_phase4bv4_x8_disabled_env_cache = -1;
     g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
+    g_mlv_phase4bv2_x2_fullres_fix_env_cache = -1;
     g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;
     mlvSetPlaybackFastX4HqPathMode(0);
 }
@@ -3507,7 +3522,9 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
         mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV2 set");
         return 0;
     }
-    if (scaleFactor == 2 && !mlvPlaybackAggressivePreviewMode())
+    if (scaleFactor == 2
+     && !mlvPlaybackAggressivePreviewMode()
+     && !mlv_phase4bv2_x2_fullres_fix_via_env())
     {
         /* Sharp/Smooth x2 remains the full-recon downsample. Aggressive x2
          * is allowed to take the early Bayer-domain approximation below. */
@@ -3518,11 +3535,13 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     {
         return 0;
     }
+    const int x2FullResFixesActive =
+        (scaleFactor == 2 && !mlvPlaybackAggressivePreviewMode() && mlv_phase4bv2_x2_fullres_fix_via_env());
     const int x4FullResFixesActive =
         (scaleFactor == 4 && !mlvPlaybackAggressivePreviewMode() && mlv_phase4bv2_x4_fullres_fix_via_env());
     if (!mlv_phase4bv2_receipt_compatible(video))
     {
-        if (!x4FullResFixesActive)
+        if (!x2FullResFixesActive && !x4FullResFixesActive)
         {
             llrawprocObject_t * shared = video ? video->llrawproc : NULL;
             if (!shared) mlv_phase4bv2_log_rejection("no shared");
@@ -3550,7 +3569,49 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
 
     if (scaleFactor == 2)
     {
-        if (mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
+        if (x2FullResFixesActive && !mlv_phase4bv2_receipt_compatible(video))
+        {
+            const int x2_full_w = (int)getMlvWidth(video);
+            const int x2_full_h = (int)getMlvHeight(video);
+            const uint64_t full_pixels = (uint64_t)x2_full_w * (uint64_t)x2_full_h;
+            const size_t full_bytes = (size_t)full_pixels * sizeof(uint16_t);
+            uint16_t * x2_fix_buffer = mlv_ensure_thread_u16_buffer(full_pixels);
+            mlv_phase4bv2_receipt_flag_snapshot_t x2_receipt_flags_snapshot = { 0 };
+            if (!x2_fix_buffer)
+            {
+                mlv_phase4bv2_log_rejection("x2 full-res fix buffer rejected");
+            }
+            else
+            {
+                const double raw_start = mlv_stage_timing_now();
+                if (getMlvRawFrameUint16(video, frameIndex, x2_fix_buffer))
+                {
+                    mlv_phase4bv2_log_rejection("x2 full-res fix raw decode rejected");
+                }
+                else
+                {
+                    g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+                    mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
+                    applyLLRawProcObjectPreDualIsoFixes(video, x2_fix_buffer, full_bytes);
+                    mlv_phase4bv2_clear_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                           &x2_receipt_flags_snapshot);
+                    if (mlv_render_scaled_rgb16_x2_full_xy_from_raw(video,
+                                                                   frameIndex,
+                                                                   x2_fix_buffer,
+                                                                   outputFrame,
+                                                                   threads))
+                    {
+                        mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                                 &x2_receipt_flags_snapshot);
+                        mlv_phase4bv2_set_fallback_reason("none");
+                        return 1;
+                    }
+                    mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                             &x2_receipt_flags_snapshot);
+                }
+            }
+        }
+        else if (mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
         {
             return 1;
         }
@@ -3951,24 +4012,66 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
     g_mlv_phase4bv2_last_fallback_reason = "none";
 
     const int scale2Aggressive = (scaleFactor == 2 && mlvPlaybackAggressivePreviewMode());
+    const int scale2EarlyReductionActive =
+        (scaleFactor == 2 && !scale2Aggressive && mlv_phase4bv2_x2_fullres_fix_via_env());
     const int x4FullResFixesActive =
         (scaleFactor == 4 && !mlvPlaybackAggressivePreviewMode() && mlv_phase4bv2_x4_fullres_fix_via_env());
     const int receiptCompatible =
         mlv_phase4bv2_receipt_compatible(video);
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int x2ReceiptBypassActive =
+        (scaleFactor == 2 && !mlvPlaybackAggressivePreviewMode() && mlv_phase4bv2_x2_fullres_fix_via_env() && !receiptCompatible);
 
-    if ((scaleFactor != 2 || scale2Aggressive)
+    if ((scaleFactor != 2 || scale2Aggressive || scale2EarlyReductionActive)
      && !mlv_phase4bv2_disabled_via_env()
      && llrpHQDualIso(video)
      && mlv_phase4bv2_quality_allows_pre_recon(video, scaleFactor)
-     && (receiptCompatible || x4FullResFixesActive))
+     && (receiptCompatible || scale2EarlyReductionActive || x4FullResFixesActive))
     {
         if (scaleFactor == 2)
         {
-            if (mlv_render_scaled_rgb16_x2_full_xy_from_raw(video,
-                                                           frameIndex,
-                                                           decodedRawFrame,
-                                                           outputFrame,
-                                                           threads))
+            if (x2ReceiptBypassActive)
+            {
+                const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+                const size_t full_bytes = (size_t)full_pixels * sizeof(uint16_t);
+                uint16_t * x2_fix_buffer = mlv_ensure_thread_u16_buffer(full_pixels);
+                mlv_phase4bv2_receipt_flag_snapshot_t x2_receipt_flags_snapshot = { 0 };
+                if (!x2_fix_buffer)
+                {
+                    mlv_phase4bv2_log_rejection("x2 full-res fix buffer rejected");
+                }
+                else
+                {
+                    const double raw_start = mlv_stage_timing_now();
+                    if (getMlvRawFrameUint16(video, frameIndex, x2_fix_buffer))
+                    {
+                        mlv_phase4bv2_log_rejection("x2 full-res fix raw decode rejected");
+                    }
+                    else
+                    {
+                        g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+                        mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
+                        applyLLRawProcObjectPreDualIsoFixes(video, x2_fix_buffer, full_bytes);
+                        mlv_phase4bv2_clear_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                               &x2_receipt_flags_snapshot);
+                        if (mlv_render_scaled_rgb16_x2_full_xy_from_raw(video,
+                                                                       frameIndex,
+                                                                       x2_fix_buffer,
+                                                                       outputFrame,
+                                                                       threads))
+                        {
+                            mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                                     &x2_receipt_flags_snapshot);
+                            mlv_phase4bv2_set_fallback_reason("none");
+                            return 1;
+                        }
+                        mlv_phase4bv2_restore_coordinate_sensitive_receipt_flags(video->llrawproc,
+                                                                                 &x2_receipt_flags_snapshot);
+                    }
+                }
+            }
+            else if (mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
             {
                 return 1;
             }
@@ -3990,8 +4093,6 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
         }
         else if (scaleFactor == 4)
         {
-            const int full_w = (int)getMlvWidth(video);
-            const int full_h = (int)getMlvHeight(video);
             const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
             const size_t full_bytes = (size_t)full_pixels * sizeof(uint16_t);
             const uint16_t * x4_source = decodedRawFrame;
@@ -4113,7 +4214,9 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
     {
         mlv_phase4bv2_set_fallback_reason_if_none("MLVAPP_DISABLE_PHASE4BV2 set");
     }
-    else if (scaleFactor == 2 && !mlvPlaybackAggressivePreviewMode())
+    else if (scaleFactor == 2
+          && !mlvPlaybackAggressivePreviewMode()
+          && !mlv_phase4bv2_x2_fullres_fix_via_env())
     {
         mlv_phase4bv2_set_fallback_reason_if_none("scale=2 uses full-recon post-downsample fallback");
     }
