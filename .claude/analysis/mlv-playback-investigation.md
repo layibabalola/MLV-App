@@ -1,3 +1,35 @@
+# 2026-06-06 - no-alias final-blend float curve pass on x2/x4 aggressive
+
+### Verified locally
+
+- I changed the AVX2 no-alias final-blend row kernel to use the float full-res curve when it is available, and added a regression test that exercises the no-alias path directly:
+  - `DualIsoFinalBlendFloatCurveMatchesDoubleWithoutAliasMap`
+- I rebuilt the pipeline test binary and the user-facing release exe after the patch.
+- Focused pipeline validation passed after the rebuild.
+- Screenshot-backed GUI smoke passed on the standard M16 clips for both x2 aggressive and x4 aggressive, with the expected scale/quality state and `clear-heuristic` color scans:
+  - `M16-1327` x2 aggressive: GUI FPS `6.2`, smoke presented FPS `7.228`, timeline FPS `23.172`
+  - `M16-1327` x4 aggressive: GUI FPS `8.6`, smoke presented FPS `7.399`, timeline FPS `22.962`
+  - `M16-1446` x2 aggressive: GUI FPS `9.2`, smoke presented FPS `6.902`, timeline FPS `22.704`
+  - `M16-1446` x4 aggressive: GUI FPS `8.0`, smoke presented FPS `7.046`, timeline FPS `23.147`
+- The current profile matrix shows the change is not a universal win, but it does move the final-blend bucket in the right direction on the x4 lanes:
+  - x4 aggressive `M16-1327`: `dual_iso_full20_final_blend_ms` moved from `2.14 ms` to `0.40 ms`
+  - x4 aggressive `M16-1446`: `dual_iso_full20_final_blend_ms` moved from `0.82 ms` to `0.20 ms`
+  - x2 aggressive `M16-1446` also improved on the broader render side, but `x2-aggressive M16-1327` showed a render-total regression in this short sample window, so the matrix is still mixed rather than a clean promotion signal
+- Stage-pixel budgets stayed aligned with the intended lane shapes:
+  - x2 aggressive kept the reduced `llrawproc_pixels` / `processing_pixels` / `presentation_pixels` budget (`1023328` / `1025136` / `1025136`)
+  - x4 aggressive kept the smaller full-xy-pre-recon budget (`254928` / `256284` / `256284`)
+
+### Cross-checked from prior analysis
+
+- The settled x4 aggressive lane remains the cleaner comparator because it is the one that consistently exits the full-recon fallback while keeping the x4 quality ceiling intact.
+- The smoke captures still show the important quality gate behavior: the expected look-assist state, stretch state, and color-artifact scan all stayed clean.
+
+### Needs runtime profiling
+
+- Treat this as a partial optimization, not a finished endpoint.
+- If we keep pushing the no-alias final-blend path, the next measurement pass should use a longer x2 same-clip A/B window so we can decide whether the render-total regression on `M16-1327` was sampling noise or a real cost shift.
+- Keep watching queue/presentation cadence, because the smoke numbers still suggest the visible cadence is not governed by the bottom-left GUI FPS alone.
+
 # 2026-06-06 - playback smoke needs a longer post-settle play window
 
 ### Verified locally
