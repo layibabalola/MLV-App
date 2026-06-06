@@ -1222,6 +1222,7 @@ private:
                                const PresentationRequestContext &requestContext,
                                const uint8_t *rgb8DisplaySource,
                                uint8_t underOver,
+                               bool releasePresentedFrameEarly,
                                double displayStart );
     bool playbackPolicyActive( void ) const;
     void applyPlaybackDebayerSelection( void );

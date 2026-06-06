@@ -15307,3 +15307,35 @@ Post-change stage timings:
 
 - Do not promote the `current_processed_frame` early-return as a general x2 optimization.
 - Keep the next performance pass focused on a narrower lever that the same-build matrix can actually justify.
+
+### 2026-06-06 - early presented-frame release rechecked on the aggressive path
+
+### Verified locally
+
+- Rebuilt the user-facing release executable after moving the presented-frame release earlier in `presentPlaybackPreparedFrame()`:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 11:06:10 AM`
+  - `Length=9105408`
+  - `SHA256=2417BB5EC48F3EC948EB38B5018C1231440E11CE91E246D7AE0023BA0A2A78AE`
+- Focused Windows pipeline coverage passed for the aggressive preview lane:
+  - `DualIsoPipeline.Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY`
+  - `DualIsoPipeline.Phase4Bv3_AggressivePreviewUsesFullReconFallbackX4`
+  - `DualIsoPipeline.DualIsoPlaybackUsesFastHqPathForFastX4`
+  - `tests=159`, `assertions=0`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke stayed visually clean on the x2 trio and x4 hot-clip controls:
+  - x2 `M16-1327`: `smoke presented FPS=23.859`, `timeline FPS=23.602`, `GUI FPS=19`, `queue_wait_ms=14.524 ms (68.858 FPS-eq)`, `render_total_ms=51.248 ms (19.512 FPS-eq)`, `llrawproc_ms=8.961 ms (111.590 FPS-eq)`, `processed8_ms=35.576 ms (28.112 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+  - x2 `M16-1347`: `smoke presented FPS=14.261`, `timeline FPS=23.715`, `GUI FPS=13`, `queue_wait_ms=0.077 ms (12987.013 FPS-eq)`, `render_total_ms=49.111 ms (20.362 FPS-eq)`, `llrawproc_ms=11.360 ms (88.028 FPS-eq)`, `processed8_ms=47.824 ms (20.903 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+  - x2 `M16-1446`: `smoke presented FPS=24.404`, `timeline FPS=23.693`, `GUI FPS=71`, `queue_wait_ms=15.913 ms (62.843 FPS-eq)`, `render_total_ms=50.045 ms (19.982 FPS-eq)`, `llrawproc_ms=7.522 ms (132.942 FPS-eq)`, `processed8_ms=32.919 ms (30.381 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+  - x4 `M16-1327`: `smoke presented FPS=16.603`, `timeline FPS=23.888`, `GUI FPS=21`, `queue_wait_ms=33.713 ms (29.665 FPS-eq)`, `render_total_ms=92.034 ms (10.865 FPS-eq)`, `llrawproc_ms=30.464 ms (32.827 FPS-eq)`, `processed8_ms=57.190 ms (17.489 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+  - x4 `M16-1446`: `smoke presented FPS=12.248`, `timeline FPS=23.875`, `GUI FPS=12`, `queue_wait_ms=60.875 ms (16.426 FPS-eq)`, `render_total_ms=141.229 ms (7.080 FPS-eq)`, `llrawproc_ms=40.213 ms (24.867 FPS-eq)`, `processed8_ms=78.880 ms (12.678 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+
+### Cross-checked from prior analysis
+
+- The earlier release point lets the presenter hand off some frames sooner, and one x2 clip now shows essentially zero queue wait.
+- The improvement is not universal across the aggressive path: x4 still pays the heavy render/queue tail, and the hot `M16-1446` x4 control remained the slowest clip in this pass.
+- Quality did not regress. All inspected screenshot-backed smokes stayed `clear-heuristic`, including both the presented-frame capture and the bottom-left FPS crop.
+
+### Needs runtime profiling
+
+- Keep the next experiment focused on the aggressive path's render/queue tail and the x2/x4 split that now seems more meaningful than the old raw-fallback hypotheses.
+- Do not assume the early release is a blanket win; re-rank by same-build telemetry before touching the next stage.

@@ -2854,6 +2854,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     const bool playbackProcessingSubsetActive =
         (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
         && task.gpuPresentationOptions.previewProcessing.enabled;
+    bool releasePresentedFrameEarly = false;
 
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_pre_enqueue_ms"),
@@ -3050,6 +3051,11 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             pic.setDevicePixelRatio( devicePixelRatioF() );
         }
         m_pGraphicsItem->setPixmap( pic );
+        if( !displayPreviewCachingAllowed && m_pRenderThread )
+        {
+            m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
+            releasePresentedFrameEarly = true;
+        }
     }
 
     m_lastDrawFrameReadyImageMs = result.imageBuildMs;
@@ -3130,8 +3136,9 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                           readyFrame,
                           task.requestContext,
                           useScopeSourceImage ? scopeSourceImage : rgb8DisplaySource,
-                           underOver,
-                           display_start );
+                          underOver,
+                          releasePresentedFrameEarly,
+                          display_start );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
 }
 
@@ -19030,6 +19037,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                                        const PresentationRequestContext &requestContext,
                                        const uint8_t *rgb8DisplaySource,
                                        uint8_t underOver,
+                                       bool releasePresentedFrameEarly,
                                        double displayStart )
 {
     recordPresentedFrame( readyFrame, requestContext );
@@ -19294,7 +19302,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         m_playbackQualityLastPresentedTime = 0.0;
     }
     notePlayToFirstFramePresentation( displayFrame );
-    if( m_pRenderThread )
+    if( m_pRenderThread && !releasePresentedFrameEarly )
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
     notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );
