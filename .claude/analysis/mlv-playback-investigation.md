@@ -4,6 +4,7 @@
 
 - The standard smoke runner's settled phase was too short for the current playback matrix: it verified stabilization, but it did not leave enough time for the clip to visibly continue playing after settle.
 - For the x2-centered matrix in this session, the settled smoke window was extended from 8 seconds to 18 seconds so the settled capture measures real post-settle playback instead of only the settle transition.
+- The playback profile wrapper was also pinning `--threads 1` by default. Switching the wrapper default to `auto` exposes the real release-thread headroom; this session's x2 aggressive pilot jumped from roughly `61.514 ms` LLRawProc on single-thread profile playback to `12.975 ms` under the same build with auto threads.
 
 ### Cross-checked from prior analysis
 
@@ -12,6 +13,7 @@
 ### Needs runtime profiling
 
 - Keep the longer settled window in future matrix runs unless a later harness change proves a shorter one still captures visible post-settle playback reliably across the standard M16 clips.
+- Keep the playback profile wrapper on `auto` threads by default. Use `-Threads 1` only when a diagnostic single-thread baseline is explicitly what you want.
 
 # 2026-06-06 - x2-centered matrix on the settled x4 baseline
 
