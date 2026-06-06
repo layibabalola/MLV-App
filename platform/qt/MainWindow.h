@@ -700,7 +700,9 @@ private:
     QLabel *m_pCachingStatus;
     QLabel *m_pFpsStatus;
     QString m_lastPlaybackFpsStatusText;
+    int m_lastPlaybackFpsStatusBucket = -1;
     QLabel *m_pFrameNumber;
+    QString m_lastFrameNumberStatusText;
     QLabel *m_pChosenDebayer;
     QLabel *m_pPlaybackQualityIndicator = nullptr; // Phase 4E
     // Phase 4F-toolbar: Playback Quality dropdown on the main toolbar. The

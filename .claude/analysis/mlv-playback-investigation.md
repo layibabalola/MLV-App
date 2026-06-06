@@ -15435,3 +15435,34 @@ Post-change stage timings:
 
 - Keep the next pass focused on the remaining render/processed8 tail and the cases where x4 still pays the heavy queue cost.
 - Do not overclaim a universal win yet; this is a cache removal of steady-state UI churn, not a complete solution.
+
+### 2026-06-06 - session freeze handoff refresh
+
+### Verified locally
+
+- The current user-facing release build is still:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 12:10:52 PM`
+  - `Length=9105408`
+  - `SHA256=B6E1CA306F6B50F302EC952A1AF513807800F4B8972531879687F9711EDA8DCC`
+- The attempted `rgb_to_Y` cache idea did not move the matrix in a meaningful way. The only surviving code change in the current turn is the blur-radius simplification in `src/processing/raw_processing.c`.
+- Focused Windows pipeline coverage still reports two direct assertion failures in `ProcessingFilters.*`:
+  - `ProcessingFilters.AggressiveOddHeightPlaybackPreviewUsesHalfresShadowsHighlights`
+  - `ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights`
+  - Both are tied to the `processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds() > 0.0` / `processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds() > 0.0` checks.
+- Screenshot-backed GUI smoke stayed clean on the standard M16 clips and the x4 control clip, with the 30-second settle window and `clear-heuristic` color scans:
+  - x2 `M16-1327`: `smoke presented FPS=23.430`, `timeline FPS=23.305`, `GUI FPS=14`, `avg_render_total_ms=51.193`, `avg_queue_wait_ms=14.924`, `avg_llrawproc_ms=8.233`, `avg_processed8_ms=33.772`
+  - x2 `M16-1347`: `smoke presented FPS=15.189`, `timeline FPS=23.300`, `GUI FPS=12`, `avg_render_total_ms=44.037`, `avg_queue_wait_ms=0.025`, `avg_llrawproc_ms=9.433`, `avg_processed8_ms=41.759`
+  - x2 `M16-1446`: `smoke presented FPS=26.532`, `timeline FPS=23.353`, `GUI FPS=83`, `avg_render_total_ms=44.287`, `avg_queue_wait_ms=13.470`, `avg_llrawproc_ms=6.781`, `avg_processed8_ms=28.507`
+  - x4 `M16-1446`: `smoke presented FPS=12.178`, `timeline FPS=23.380`, `GUI FPS=11`, `avg_render_total_ms=68.558`, `avg_queue_wait_ms=0.119`, `avg_llrawproc_ms=25.261`, `avg_processed8_ms=61.103`
+
+### Cross-checked from prior analysis
+
+- The latest micro-edit did not reveal a new universal speed path. The current signal still says the remaining drag sits in the shadows/highlights / render / processed8 tail.
+- The direct wrapper failures look like a probe-timing expectation mismatch rather than a visible smoke regression, but they still need to be understood before the next change is treated as stable.
+- The GUI smoke remains the quality gate that matters most here: all inspected presented-frame and bottom-left FPS screenshots stayed color-clean.
+
+### Needs runtime profiling
+
+- Resume with a fresh same-build matrix from the current release build and rank the next bottleneck by telemetry and quality risk.
+- Keep the next change as small as possible, and do not treat the current `rgb_to_Y` result as a breakthrough.

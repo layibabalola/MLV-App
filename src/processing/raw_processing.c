@@ -1162,19 +1162,26 @@ void applyProcessingObject( processingObject_t * processing,
          && (imageX >= 2) && (imageY >= 3)
          && ((imageX & 1) == 0)
          && ((imageY & 1) != 0);
+        const int playback_preview_scale_factor = processingPlaybackPreviewScaleFactor();
         const int use_quarterres_rbf =
             processingPlaybackPreviewModeEnabled()
          && processingPlaybackAggressivePreviewModeEnabled()
-         && (processingPlaybackPreviewScaleFactor() >= 8
+         && (playback_preview_scale_factor >= 8
              ? processing_aggressive_x8_shadows_highlights_quarterres_enabled()
              : processing_aggressive_x2_shadows_highlights_quarterres_enabled())
          && imageX >= 4
-         && imageY >= 4;
+         && imageY >= 4
+         /* Keep the x4 odd-height contract on halfres; quarterres remains the
+          * aggressive x2/x8 path. */
+         && !(playback_preview_scale_factor == 4 && halfres_aggressive_preview_odd_height);
         const int use_halfres_rbf =
             halfres_even_dimensions || halfres_aggressive_preview_odd_height;
 
         /* Blur diameter depends on image diagonal */
-        int blur_radius = (int)(((sqrt(pow(imageX,2.0)+pow(imageY,2.0)) / 440.0 - 1.0)/2 + 0.5)*4.0);
+        const double imageX_d = (double)imageX;
+        const double imageY_d = (double)imageY;
+        const double image_diagonal = sqrt(imageX_d * imageX_d + imageY_d * imageY_d);
+        int blur_radius = (int)(((image_diagonal / 440.0 - 1.0) / 2.0 + 0.5) * 4.0);
 
         /* Reblur if image changed */
         if (imageChanged)
