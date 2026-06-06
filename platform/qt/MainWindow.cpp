@@ -624,10 +624,10 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
     switch( scene )
     {
     case LookAssistScene::Night:
-        targetMedian = 88;
+        targetMedian = 94;
         preset.contrast = 8;
         preset.pivot = 46;
-        preset.shadows = 24;
+        preset.shadows = 28;
         preset.highlights = -18;
         preset.vibrance = 3;
         break;
@@ -673,10 +673,10 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
     {
         maxExposure = ( stats.p99 < 55.0 ) ? 380 : 260;
         if( flatNoiseFloorThumbnail )
-            maxExposure = qMin( maxExposure, 140 );
+            maxExposure = qMin( maxExposure, 170 );
         minExposure = -40;
-        p95Ceiling = floorLiftedNightThumbnail ? 108.0 : 142.0;
-        p99Ceiling = floorLiftedNightThumbnail ? 140.0 : 188.0;
+        p95Ceiling = floorLiftedNightThumbnail ? 124.0 : 142.0;
+        p99Ceiling = floorLiftedNightThumbnail ? 160.0 : 188.0;
     }
     else if( scene == LookAssistScene::ArtificialLights )
     {
