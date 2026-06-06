@@ -15233,3 +15233,31 @@ Post-change stage timings:
   - x4 `M16-1347`: `smoke presented FPS=27.399`, `timeline FPS=23.920`, `GUI FPS=16`, `render=40.389 ms (24.759 fps-eq)`, `queue=11.093 ms (90.147 fps-eq)`, `llrawproc=5.425 ms (184.332 fps-eq)`, `processed8=28.127 ms (35.553 fps-eq)`, `presentUI=11.093 ms (90.147 fps-eq)`, `finalBlend=0.757 ms (1321.004 fps-eq)`, `clear-heuristic`
   - x4 `M16-1446`: `smoke presented FPS=27.348`, `timeline FPS=23.872`, `GUI FPS=90`, `render=42.872 ms (23.325 fps-eq)`, `queue=13.687 ms (73.062 fps-eq)`, `llrawproc=4.836 ms (206.782 fps-eq)`, `processed8=27.945 ms (35.785 fps-eq)`, `presentUI=13.687 ms (73.062 fps-eq)`, `finalBlend=0.741 ms (1349.528 fps-eq)`, `clear-heuristic`
 - The next ranked bottleneck is still not final-blend setup. The repeated hot buckets are `render_total`, `processed8`, and the GUI-side queue/present latency on the aggressive playback path; the color gate means we must keep quality risk in view while we chase them.
+
+### 2026-06-06 - x4 aggressive fallback gate rechecked on the standard trio
+
+### Verified locally
+
+- Rebuilt the user-facing release executable after the x4 aggressive fallback change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 10:13:30 AM`
+  - `Length=9105408`
+  - `SHA256=EB489F7AF59C60FC0D7A09F47C8CE715B421CAFA172EC56E5261BA0F48DDA481`
+- Focused Windows pipeline coverage passed for the aggressive preview lane:
+  - `DualIsoPipeline.Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY`
+  - `DualIsoPipeline.Phase4Bv3_AggressivePreviewUsesFullReconFallbackX4`
+  - `DualIsoPipeline.DualIsoPlaybackUsesFastHqPathForFastX4`
+  - `tests=159`, `assertions=0`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke on the standard M16 trio completed with the expected scale/quality checks and a 30-second settle window.
+
+### Cross-checked from prior analysis
+
+- The x4 aggressive artifact on `M16-1327` is gone with the fallback change: all three x4 smoke runs came back `clear-heuristic`.
+- The broader x4 fallback is a quality fix, not a throughput win. The x4 lane slowed materially on the trio, especially on `M16-1347`, so the change trades speed for safety rather than unlocking a new faster baseline.
+
+### Needs runtime profiling
+
+- Trio averages from the screenshot-backed smoke:
+  - x2: `smoke presented FPS=18.702`, `timeline FPS=23.701`, `GUI FPS=27.333`, `queue_wait_ms=9.346 ms (107.001 FPS-eq)`, `render_total_ms=53.092 ms (18.835 FPS-eq)`, `llrawproc_ms=10.751 ms (93.012 FPS-eq)`, `debayered_frame_ms=1.502 ms (665.631 FPS-eq)`, `processed16_ms=38.163 ms (26.203 FPS-eq)`, `processed8_ms=42.590 ms (23.480 FPS-eq)`, `raw_uint16_ms=7.067 ms (141.503 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+  - x4: `smoke presented FPS=14.326`, `timeline FPS=23.892`, `GUI FPS=13.000`, `queue_wait_ms=29.723 ms (33.644 FPS-eq)`, `render_total_ms=95.151 ms (10.510 FPS-eq)`, `llrawproc_ms=31.691 ms (31.555 FPS-eq)`, `debayered_frame_ms=45.871 ms (21.800 FPS-eq)`, `processed16_ms=60.343 ms (16.572 FPS-eq)`, `processed8_ms=64.270 ms (15.559 FPS-eq)`, `raw_uint16_ms=13.637 ms (73.330 FPS-eq)`, `colorArtifactScan=clear-heuristic`
+- The next ranked bottleneck is still the aggressive playback path's render/queue/processed16 cost, but the decision point has shifted: x2 is now the stronger throughput comparator on the smoke path, while x4 is the safer quality fallback.

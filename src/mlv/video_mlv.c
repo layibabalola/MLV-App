@@ -3005,9 +3005,9 @@ static int mlv_render_scaled_rgb16_x2_full_xy(mlvObject_t * video,
  * to take the reduced-Bayer path even when HQ mean23 is active. */
 static int g_mlv_phase4bv2_allow_fast_hq_env_cache = -1;
 
-static int mlv_phase4bv2_allow_fast_hq_via_env(void)
+static int mlv_phase4bv2_allow_fast_hq_via_env(int scaleFactor)
 {
-    if (mlvPlaybackAggressivePreviewMode())
+    if (scaleFactor == 2 && mlvPlaybackAggressivePreviewMode())
     {
         return 1;
     }
@@ -3070,7 +3070,7 @@ static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video,
     if (video && video->llrawproc
      && video->llrawproc->diso_playback_force_mean23 != 0
      && scaleFactor != 8
-     && !mlv_phase4bv2_allow_fast_hq_via_env()
+     && !mlv_phase4bv2_allow_fast_hq_via_env(scaleFactor)
      && !(scaleFactor == 4 && mlv_phase4bv2_x4_fullres_fix_via_env())
      && !(scaleFactor == 2 && mlv_phase4bv2_x2_fullres_fix_via_env()))
     {
