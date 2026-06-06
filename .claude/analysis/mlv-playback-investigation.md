@@ -1,3 +1,35 @@
+# 2026-06-06 - dual-ISO widget-reflection cache trims the remaining GUI-side latency bucket
+
+### Verified locally
+
+- Added a narrow cache around the Dual ISO widget-reflection work inside `drawFrameReady()` so repeated frames can skip redundant combo-box, slider, and label updates when the reflected values are unchanged.
+- Kept the state-publication side intact:
+  - `ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 )` still runs
+  - `ACTIVE_RECEIPT->setDualIsoPattern( uiPattern )` still runs when the pattern source demands it
+- Rebuilt the user-facing release exe after the change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 8:42:32 AM`
+  - `Length=9104896`
+  - `SHA256=9E5995AABF700DC041A258024F8CACE8F528378FBAE3D9E5EC98A59E810D0EE4`
+- Focused wrapper validation passed again:
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+- Screenshot-backed 30-second GUI smoke stayed clean on all six standard-clip runs with `clear-heuristic` color scans and matching scale/quality validation.
+- The new matrix is materially better than the immediately prior smoke pass:
+  - x2 average: `smoke presented FPS=13.33`, `timeline FPS=23.26`, `queue_wait_ms=29.49`, `render_total_ms=96.39`, `draw_total_ms=11.98`, `llrawproc_ms=29.46`, `processed8_ms=64.46`
+  - x4 average: `smoke presented FPS=17.84`, `timeline FPS=23.43`, `queue_wait_ms=5.42`, `render_total_ms=46.92`, `draw_total_ms=8.45`, `llrawproc_ms=5.92`, `processed8_ms=39.25`
+  - compared with the previous same-build pass, both scales moved in the right direction, and x4 still leads the user-visible cadence
+- Manual screenshot inspection on the x2 and x4 samples showed normal scene detail and readable bottom-left Playback crops, not frozen or broken chrome.
+
+### Cross-checked from prior analysis
+
+- This is still a GUI-path optimization, not a decode-policy change, but it now appears to have a real effect on the remaining queue/presentation bucket rather than just label churn.
+- The broader ranking still holds: x4 aggressive is the cleaner user-visible comparator, but the gap to x2 is smaller than before and the hot GUI path is less expensive after the cache trim.
+
+### Needs runtime profiling
+
+- If we want to keep pushing this line, the next measurement should be another same-build comparison on the standard M16 trio, focusing on whether the queue wait stays low and whether the x2 lane continues to converge toward x4 without color regressions.
+- The next code target, if the current win holds, is probably deeper in the draw/present boundary rather than the already-cached UI reflection bits.
+
 # 2026-06-06 - playback quality indicator cache trims GUI-path label churn without changing smoke results
 
 ### Verified locally

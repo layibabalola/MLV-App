@@ -19483,23 +19483,44 @@ void MainWindow::drawFrameReady()
     m_lastDrawFrameReadySceneMs = (mlv_stage_timing_now() - scene_start) * 1000.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.scene", display_frame, m_lastDrawFrameReadySceneMs);
 
-    if( toolButtonDualIsoCurrentIndex() > 0 )
+    const int dualIsoToolMode = toolButtonDualIsoCurrentIndex();
+    if( dualIsoToolMode > 0 )
     {
         ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 );
+        int cachedPattern = m_dualIsoPlaybackUiCacheValid
+            ? m_dualIsoPlaybackUiCache.pattern
+            : -2;
 
         if( readyFrame.dualIsoPattern < 0 )
         {
             const int uiPattern =
                 dualIsoUiPatternIndexFromCorePattern( readyFrame.dualIsoPattern );
-            ui->DualIsoPatternComboBox->blockSignals( true );
-            ui->DualIsoPatternComboBox->setCurrentIndex( uiPattern );
-            ui->DualIsoPatternComboBox->blockSignals( false );
+            const bool dualIsoWidgetCacheHit =
+                m_dualIsoPlaybackUiCacheValid
+             && m_dualIsoPlaybackUiCache.toolMode == dualIsoToolMode
+             && m_dualIsoPlaybackUiCache.pattern == uiPattern
+             && m_dualIsoPlaybackUiCache.autoCorrection == readyFrame.dualIsoAutoCorrection
+             && m_dualIsoPlaybackUiCache.evCorrection == readyFrame.dualIsoEvCorrection
+             && m_dualIsoPlaybackUiCache.blackDelta == readyFrame.dualIsoBlackDelta;
+            if( !dualIsoWidgetCacheHit )
+            {
+                ui->DualIsoPatternComboBox->blockSignals( true );
+                ui->DualIsoPatternComboBox->setCurrentIndex( uiPattern );
+                ui->DualIsoPatternComboBox->blockSignals( false );
+            }
             ACTIVE_RECEIPT->setDualIsoPattern( uiPattern );
+            cachedPattern = uiPattern;
         }
 
-        if( toolButtonDualIsoCurrentIndex() == 1 && readyFrame.dualIsoAutoCorrection < 0 )
+        if( dualIsoToolMode == 1 && readyFrame.dualIsoAutoCorrection < 0 )
         {
-            if( readyFrame.dualIsoEvCorrection != 1.0 )
+            const bool dualIsoWidgetCacheHit =
+                m_dualIsoPlaybackUiCacheValid
+             && m_dualIsoPlaybackUiCache.toolMode == dualIsoToolMode
+             && m_dualIsoPlaybackUiCache.autoCorrection == readyFrame.dualIsoAutoCorrection
+             && m_dualIsoPlaybackUiCache.evCorrection == readyFrame.dualIsoEvCorrection
+             && m_dualIsoPlaybackUiCache.blackDelta == readyFrame.dualIsoBlackDelta;
+            if( !dualIsoWidgetCacheHit && readyFrame.dualIsoEvCorrection != 1.0 )
             {
                 ui->horizontalSliderDualIsoEvCorrection->blockSignals( true );
                 ui->horizontalSliderDualIsoEvCorrection->setValue( (readyFrame.dualIsoEvCorrection * 200) - 0.5 );
@@ -19507,13 +19528,29 @@ void MainWindow::drawFrameReady()
                 ui->DualIsoEvCorrectionVal->setText( QString("%1").arg( readyFrame.dualIsoEvCorrection, 0, 'f', 2 ) );
             }
 
-            if( readyFrame.dualIsoBlackDelta != -1 )
+            if( !dualIsoWidgetCacheHit && readyFrame.dualIsoBlackDelta != -1 )
             {
                 ui->horizontalSliderDualIsoBlackDelta->blockSignals( true );
                 ui->horizontalSliderDualIsoBlackDelta->setValue( readyFrame.dualIsoBlackDelta );
                 ui->horizontalSliderDualIsoBlackDelta->blockSignals( false );
                 ui->DualIsoBlackDeltaVal->setText( QString("%1").arg( readyFrame.dualIsoBlackDelta ) );
             }
+
+            m_dualIsoPlaybackUiCache.toolMode = dualIsoToolMode;
+            m_dualIsoPlaybackUiCache.pattern = cachedPattern;
+            m_dualIsoPlaybackUiCache.autoCorrection = readyFrame.dualIsoAutoCorrection;
+            m_dualIsoPlaybackUiCache.evCorrection = readyFrame.dualIsoEvCorrection;
+            m_dualIsoPlaybackUiCache.blackDelta = readyFrame.dualIsoBlackDelta;
+            m_dualIsoPlaybackUiCacheValid = true;
+        }
+        else
+        {
+            m_dualIsoPlaybackUiCache.toolMode = dualIsoToolMode;
+            m_dualIsoPlaybackUiCache.pattern = cachedPattern;
+            m_dualIsoPlaybackUiCache.autoCorrection = readyFrame.dualIsoAutoCorrection;
+            m_dualIsoPlaybackUiCache.evCorrection = readyFrame.dualIsoEvCorrection;
+            m_dualIsoPlaybackUiCache.blackDelta = readyFrame.dualIsoBlackDelta;
+            m_dualIsoPlaybackUiCacheValid = true;
         }
     }
 

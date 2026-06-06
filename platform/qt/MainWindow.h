@@ -780,6 +780,16 @@ private:
     };
     PlaybackQualityIndicatorCache m_playbackQualityIndicatorCache;
     bool m_playbackQualityIndicatorCacheValid = false;
+    struct DualIsoPlaybackUiCache
+    {
+        int toolMode = -1;
+        int pattern = -2;
+        int autoCorrection = 0;
+        double evCorrection = 0.0;
+        int blackDelta = 0;
+    };
+    DualIsoPlaybackUiCache m_dualIsoPlaybackUiCache;
+    bool m_dualIsoPlaybackUiCacheValid = false;
     uint64_t m_playbackQualityFrameCounter = 0;
     double m_playbackQualityLastPresentedTime = 0.0;
     PlaybackQualityAutoSampler m_playbackQualitySampler;
