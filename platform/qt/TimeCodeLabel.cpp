@@ -16,9 +16,7 @@
 TimeCodeLabel::TimeCodeLabel()
 {
     m_tcImage = new QImage( 400, 60, QImage::Format_RGB888 );
-    m_baseImage = new QImage( 400, 60, QImage::Format_RGB888 );
     m_mode = false;
-    m_baseImageDirty = true;
 
     QFontDatabase::addApplicationFont( ":/Fonts/Fonts/DSEG7Modern-Regular.ttf" );
 }
@@ -26,19 +24,19 @@ TimeCodeLabel::TimeCodeLabel()
 //Destructor
 TimeCodeLabel::~TimeCodeLabel()
 {
-    delete m_baseImage;
     delete m_tcImage;
 }
 
-void TimeCodeLabel::rebuildBaseImage()
+//Get the image for frameNumber at clipFps
+QImage TimeCodeLabel::getTimeCodeLabel(uint32_t frameNumber, float clipFps)
 {
-    m_baseImage->fill( QColor( 20, 20, 20, 255 ) );
-
-    QPainter painterTc( m_baseImage );
+    //Background
+    m_tcImage->fill( QColor( 20, 20, 20, 255 ) );
 
     //Boarder
     QRect rect( 0, 0, 2, 60 );
-    QLinearGradient gradient( rect.topLeft(), (rect.topLeft() + rect.bottomLeft() ) / 2 );
+    QPainter painterTc( m_tcImage );
+    QLinearGradient gradient( rect.topLeft(), (rect.topLeft() + rect.bottomLeft() ) / 2 ); // diagonal gradient from top-left to bottom-right
     gradient.setColorAt( 0, QColor( 30, 30, 30, 255 ) );
     gradient.setColorAt( 1, QColor( 90, 90, 90, 255 ) );
     painterTc.fillRect(rect, gradient);
@@ -80,26 +78,12 @@ void TimeCodeLabel::rebuildBaseImage()
         painterTc.drawText( 340, 30, 50, 50, 0, QString( "[<–>]" ) );
     }
 
-    m_baseImageDirty = false;
-}
-
-//Get the image for frameNumber at clipFps
-QImage TimeCodeLabel::getTimeCodeLabel(uint32_t frameNumber, float clipFps)
-{
-    if( m_baseImageDirty )
-    {
-        rebuildBaseImage();
-    }
-
-    *m_tcImage = *m_baseImage;
-
     //Font selection
 #ifdef Q_OS_MAC
-    QFont font = QFont("DSEG7 Modern", 32, 1);
+    font = QFont("DSEG7 Modern", 32, 1);
 #else
-    QFont font = QFont("DSEG7 Modern", 24, 1);
+    font = QFont("DSEG7 Modern", 24, 1);
 #endif
-    QPainter painterTc( m_tcImage );
 
     //Shadow
     painterTc.setPen( QPen( QColor( 70, 70, 70 ) ) );
@@ -157,9 +141,5 @@ QString TimeCodeLabel::getTimeCodeFromFps(uint32_t frameNumber, float clipFps, b
 //Switch mode
 void TimeCodeLabel::setTimeDurationMode(bool mode)
 {
-    if( m_mode != mode )
-    {
-        m_mode = mode;
-        m_baseImageDirty = true;
-    }
+    m_mode = mode;
 }
