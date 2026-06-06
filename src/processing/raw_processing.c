@@ -1156,25 +1156,27 @@ void applyProcessingObject( processingObject_t * processing,
             (imageX >= 2) && (imageY >= 2)
          && ((imageX & 1) == 0)
          && ((imageY & 1) == 0);
+        const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
+        const int aggressive_preview_enabled = preview_mode_enabled
+            && processingPlaybackAggressivePreviewModeEnabled();
         const int halfres_aggressive_preview_odd_height =
-            processingPlaybackPreviewModeEnabled()
-         && processingPlaybackAggressivePreviewModeEnabled()
+            aggressive_preview_enabled
          && (imageX >= 2) && (imageY >= 3)
          && ((imageX & 1) == 0)
          && ((imageY & 1) != 0);
+        const int preview_scale_factor = processingPlaybackPreviewScaleFactor();
         const int use_quarterres_rbf =
-            processingPlaybackPreviewModeEnabled()
-         && processingPlaybackAggressivePreviewModeEnabled()
-         && (processingPlaybackPreviewScaleFactor() >= 8
-             ? processing_aggressive_x8_shadows_highlights_quarterres_enabled()
-             : processing_aggressive_x2_shadows_highlights_quarterres_enabled())
+            aggressive_preview_enabled
+         && (
+                (preview_scale_factor == 2
+                 && processing_aggressive_x2_shadows_highlights_quarterres_enabled())
+             || (preview_scale_factor >= 8
+                 && processing_aggressive_x8_shadows_highlights_quarterres_enabled())
+            )
          && imageX >= 4
          && imageY >= 4;
         const int use_halfres_rbf =
             halfres_even_dimensions || halfres_aggressive_preview_odd_height;
-
-        /* Blur diameter depends on image diagonal */
-        int blur_radius = (int)(((sqrt(pow(imageX,2.0)+pow(imageY,2.0)) / 440.0 - 1.0)/2 + 0.5)*4.0);
 
         /* Reblur if image changed */
         if (imageChanged)
@@ -1182,7 +1184,7 @@ void applyProcessingObject( processingObject_t * processing,
             const double shadows_highlights_filter_start = omp_get_wtime();
             //memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
             //blur_image(get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, 1, 1, 1, 0, imageY-1);
-            if(0) blur_image_threaded( get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, threads );
+            if(0) blur_image_threaded( get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, 0, threads );
             else if( use_quarterres_rbf )
             {
                 const double quarterres_downsample_start =

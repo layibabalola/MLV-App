@@ -4778,6 +4778,37 @@ TEST(DualIsoPipeline, DualIsoPlaybackUsesFastHqPathForFastX4)
     ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
 }
 
+TEST(DualIsoPipeline, DualIsoPlaybackUsesFastHqPathForAggressiveX4)
+{
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE");
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    ScopedAggressivePreviewMode aggressivePreview(1);
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    fixture.receipt().setFocusPixels(0);
+    QString error_message;
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+    llrpSetDualIsoPlaybackForceMean23(fixture.video(), 1);
+    ASSERT_EQ(1, llrpGetDualIsoPlaybackForceMean23(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || (full_h % 4) != 0) {
+        return;
+    }
+
+    const std::vector<uint8_t> scaled = fixture.renderFrame8Scaled(0, 1, 4);
+    ASSERT_FALSE(scaled.empty());
+    ASSERT_EQ(std::string("none"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
+    ASSERT_EQ(3, mlv_phase4bv2_last_path_taken());
+}
+
 /* Phase4Bv3 (b): kill-switch routes back to the v2 X-only path; both paths
  * produce close-enough output (PSNR > 18 dB on the tiny dual-iso fixture).
  * v3 is the default when full_h >= 16 — when MLVAPP_DISABLE_PHASE4BV3=1 is
