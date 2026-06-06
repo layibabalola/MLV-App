@@ -2999,11 +2999,16 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         QStringLiteral("draw_frame_ready_present_top_magenta_band_rows"),
         suppressedPresentedTopMagentaBandRows );
 
-    if( !framePresentedByViewport
-     && !GpuDisplayViewport::presentImage( ui->graphicsView,
-                                           m_pGraphicsItem,
-                                           displayImage,
-                                           task.gpuPresentationOptions ) )
+    bool imagePresentedByViewport = false;
+    if( !framePresentedByViewport )
+    {
+        imagePresentedByViewport = GpuDisplayViewport::presentImage( ui->graphicsView,
+                                                                      m_pGraphicsItem,
+                                                                      displayImage,
+                                                                      task.gpuPresentationOptions );
+    }
+
+    if( !framePresentedByViewport && !imagePresentedByViewport )
     {
         if( useGpuImagePresentation && useGpuShaderZebras && zebrasEnabled )
         {
@@ -3056,6 +3061,11 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
             releasePresentedFrameEarly = true;
         }
+    }
+    else if( !displayPreviewCachingAllowed && m_pRenderThread )
+    {
+        m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
+        releasePresentedFrameEarly = true;
     }
 
     m_lastDrawFrameReadyImageMs = result.imageBuildMs;
