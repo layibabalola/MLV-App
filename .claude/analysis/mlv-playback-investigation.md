@@ -14934,3 +14934,30 @@ Post-change stage timings:
 
 - Keep ranking the next move by stage cost, not by bottom-left GUI FPS.
 - The remaining hot buckets are still the late-stage processing/presentation costs on the aggressive preview lanes; only widen scope if a fresh same-build matrix shows a real shift.
+
+## 2026-06-06 - continuous x2/x4 matrix and next bottleneck ranking
+
+### Verified locally
+
+- I ran a fresh same-build profile matrix on the current release build for `M16-1327`, `M16-1347`, and `M16-1446` at aggressive preview scale `2` and `4` with `48` frames each.
+- The x2 aggressive lane stayed visually clean on all three clips, and the x4 aggressive control remained visually clean on `M16-1327`.
+- Frame-level profile telemetry on `M16-1446` shows the x2 lane is now cheaper than x4 on the core decode/filter side:
+  - `x2`: `raw_uint16_ms=1.708`, `llrawproc_total_ms=11.750`, `processing_ms=14.333`, `processed16_total_ms=33.250`, `processed8_total_ms=37.958`, `cadence_ms=42.960`, `latency_ms=68.383`
+  - `x4`: `raw_uint16_ms=6.313`, `llrawproc_total_ms=15.042`, `processing_ms=14.146`, `processed16_total_ms=43.229`, `processed8_total_ms=47.083`, `cadence_ms=50.158`, `latency_ms=68.109`
+- On the same hot clip, the remaining gap is no longer raw decode or the SH filter bucket; the residual tax is showing up as presentation overhead:
+  - `x2 presentation_overhead_ms=28.452`
+  - `x4 presentation_overhead_ms=19.303`
+- The x2 lane also kept raw prefetch hot on the matrix clip:
+  - `raw_prefetch_hits=47`, `raw_prefetch_misses=1`
+- The direct 8-bit path is not the obvious win lever on x2; it only activated for one sampled frame in the matrix run, so the hot residual is not a simple direct8 toggle.
+
+### Cross-checked from prior analysis
+
+- This confirms the earlier direction that raw prefetch is no longer the first-order limiter.
+- The x2 quarterres branch did move the work in the right direction, but the remaining bottleneck is now clip-sensitive presentation overhead rather than the SH filter path itself.
+
+### Needs runtime profiling
+
+- Next ranked work should target presentation/queue cadence on the x2 aggressive lane, but only if a safe lever emerges from code inspection or a narrower control experiment.
+- Do not widen raw prefetch further yet; the matrix did not point there.
+- If the next matrix still shows the same presentation overhead gap, the next code change should be judged against that bucket first, not against GUI FPS or the already improved decode/filter buckets.
