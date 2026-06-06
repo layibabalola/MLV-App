@@ -698,6 +698,7 @@ private:
     uint8_t m_timeCodePosition;
     QLabel *m_pCachingStatus;
     QLabel *m_pFpsStatus;
+    QString m_lastPlaybackFpsStatusText;
     QLabel *m_pFrameNumber;
     QLabel *m_pChosenDebayer;
     QLabel *m_pPlaybackQualityIndicator = nullptr; // Phase 4E

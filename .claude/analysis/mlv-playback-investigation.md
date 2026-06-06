@@ -1,3 +1,66 @@
+# 2026-06-06 - x2 full-res fix is now default-on and holds the visual gate
+
+### Verified locally
+
+- Promoted `MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES` to default-on behavior for x2 sharp/smooth when the env var is unset, while keeping explicit `0` / `false` as an opt-out.
+- Updated the pipeline coverage so the fallback test now sets the env var to `0`, and the default-on test name now reflects the new contract.
+- Rebuilt the user-facing release exe:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 9:17:13 AM`
+  - `Length=9105408`
+  - `SHA256=C897CED3A008DCD4938D5C860105C1367E5D75BB6718572999C64A49A41FA33F`
+- Focused Windows wrapper validation passed for the x2 fallback/default-on contract.
+- Screenshot-backed 30-second smoke stayed clean on the x2 trio and one x4 control, with presented-frame screenshot scans all `clear-heuristic` and no new magenta/pink/green bar verdicts.
+- The new smoke results show the x2 lane is materially better than the prior x2 baseline and still visually safe:
+  - x2 `M16-1327`: `smoke presented FPS=14.128`, `timeline FPS=23.317`, `GUI FPS=10`, `avg_queue_wait_ms=0.049 ms (20408.2 FPS-eq)`, `avg_render_total_ms=47.783 ms (20.93 FPS-eq)`, `avg_llrawproc_ms=10.354 ms (96.58 FPS-eq)`, `avg_processed8_ms=45.334 ms (22.06 FPS-eq)`
+  - x2 `M16-1347`: `smoke presented FPS=21.614`, `timeline FPS=23.300`, `GUI FPS=15`, `avg_queue_wait_ms=17.217 ms (58.08 FPS-eq)`, `avg_render_total_ms=57.613 ms (17.36 FPS-eq)`, `avg_llrawproc_ms=9.392 ms (106.47 FPS-eq)`, `avg_processed8_ms=37.835 ms (26.43 FPS-eq)`
+  - x2 `M16-1446`: `smoke presented FPS=17.601`, `timeline FPS=23.374`, `GUI FPS=10`, `avg_queue_wait_ms=23.822 ms (41.98 FPS-eq)`, `avg_render_total_ms=76.064 ms (13.15 FPS-eq)`, `avg_llrawproc_ms=11.355 ms (88.07 FPS-eq)`, `avg_processed8_ms=49.289 ms (20.29 FPS-eq)`
+  - x4 control `M16-1327`: `smoke presented FPS=20.029`, `timeline FPS=23.336`, `GUI FPS=10`, `avg_queue_wait_ms=16.193 ms (61.75 FPS-eq)`, `avg_render_total_ms=59.059 ms (16.93 FPS-eq)`, `avg_llrawproc_ms=6.176 ms (161.91 FPS-eq)`, `avg_processed8_ms=40.199 ms (24.88 FPS-eq)`
+
+### Cross-checked from prior analysis
+
+- The earlier profile/smoke split still matters: smoke queue wait is not a clean proxy for the app-side queue cost, but the x2 default-on path is now clearly the right direction on both profile and smoke evidence.
+- The gain is not a decode miracle; it comes from letting x2 use the quality-preserving full-res fix path instead of the older fallback shape.
+
+### Needs runtime profiling
+
+- Keep the next same-build matrix on the standard M16 trio and watch whether x2 continues to close the gap without reintroducing any color artifact risk.
+- If we keep pushing here, the next most likely improvement area is deeper in presentation/queue cadence, not another raw prefetch change.
+
+# 2026-06-06 - profile/smoke split: smoke queue wait was mostly validation-path noise
+
+### Verified locally
+
+- Re-ran the newest `fpsstatus-cache-smoke` bundle against the rebuilt release tree and confirmed the screenshot-backed GUI smoke still passed cleanly on the standard M16 clips with `clear-heuristic` color scans.
+- Re-ran a matching headless `--profile-playback` comparison on `M16-1327` and separated the smoke-path latency from the app-path latency.
+- The smoke bundle still reports large `avg_queue_wait_ms` / `avg_present_ui_signal_latency_ms` on x2, but the headless profile shows that the actual app queue wait is low:
+  - smoke `M16-1327` x2: `avg_queue_wait_ms=53.84 ms`, `avg_present_ui_signal_latency_ms=42.149 ms`
+  - headless `M16-1327` x2: `render_thread_queue_wait_ms≈1.4 ms`, `avg_present_ui_signal_latency_ms≈1.4 ms`
+  - smoke `M16-1327` x4: `avg_queue_wait_ms=0.06 ms`, `avg_present_ui_signal_latency_ms=16.183 ms`
+  - headless `M16-1327` x4: `render_thread_queue_wait_ms≈1.93 ms`, `avg_present_ui_signal_latency_ms≈1.93 ms`
+- The current build metadata is still the rebuilt release exe:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 8:58:07 AM`
+  - `Length=9104896`
+  - `SHA256=F11C4944D8BACC63E2F3441D58EB994499C1096766138709AE56FF6390548D5B`
+- The headless profile still shows the real bottleneck on the app side:
+  - x2 `M16-1327`: `render_thread_total_ms≈51.77 ms`, `llrawproc_total_ms≈27.10 ms`, `processed8_total_ms≈50.13 ms`, `presentation_overhead_excluding_headless_color_ms≈36.13 ms`
+  - x4 `M16-1327`: `render_thread_total_ms≈44.47 ms`, `raw_uint16_ms≈16.20 ms`, `llrawproc_total_ms≈9.43 ms`, `processed8_total_ms≈42.20 ms`, `presentation_overhead_excluding_headless_color_ms≈48.02 ms`
+- The phase-4B selection still differs by scale:
+  - x2 is still on the full-recon post-downsample fallback (`phase4b_path=0`)
+  - x4 is still on the fuller pre-recon branch (`phase4b_path=3`)
+
+### Cross-checked from prior analysis
+
+- The recent FPS jump was real, but it came from trimming hot GUI update churn, not from the raw playback pipeline suddenly getting faster.
+- The smoke harness should not be used as the primary source for queue-wait conclusions once we have the headless profile proving the app-side latency is much lower.
+
+### Needs runtime profiling
+
+- The next change should be chosen from the headless profile buckets, not the smoke queue-wait bucket.
+- The most expensive app-side bucket on x2 remains the full20 / mean23 / render path; x4’s remaining work is more in raw decode and presentation overhead.
+- Before touching code again, keep ranking any candidate change against the current phase-4B fallback shape and the quality-risk rule set.
+
 # 2026-06-06 - dual-ISO widget-reflection cache trims the remaining GUI-side latency bucket
 
 ### Verified locally

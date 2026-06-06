@@ -1529,7 +1529,12 @@ void MainWindow::timerFrameEvent( void )
             const double measuredFps = measuredFrameMs > 0
                 ? 1000.0 / static_cast<double>( measuredFrameMs )
                 : 0.0;
-            m_pFpsStatus->setText( playbackFpsStatusText( measuredFps ) );
+            const QString playbackFpsText = playbackFpsStatusText( measuredFps );
+            if( m_lastPlaybackFpsStatusText != playbackFpsText )
+            {
+                m_pFpsStatus->setText( playbackFpsText );
+                m_lastPlaybackFpsStatusText = playbackFpsText;
+            }
         }
         lastTime = nowTime;
 
@@ -1550,7 +1555,12 @@ void MainWindow::timerFrameEvent( void )
                     .arg( ui->horizontalSliderPosition->value() ),
                 true );
         }
-        m_pFpsStatus->setText( playbackFpsStatusText( 0.0 ) );
+        const QString playbackFpsText = playbackFpsStatusText( 0.0 );
+        if( m_lastPlaybackFpsStatusText != playbackFpsText )
+        {
+            m_pFpsStatus->setText( playbackFpsText );
+            m_lastPlaybackFpsStatusText = playbackFpsText;
+        }
         lastTime = QTime::currentTime(); //do that for calculation of timeDiff for DropFrameMode;
 
     }
@@ -5990,6 +6000,7 @@ void MainWindow::initGui( void )
     m_pFpsStatus->setMaximumWidth( 110 );
     m_pFpsStatus->setMinimumWidth( 110 );
     m_pFpsStatus->setText( playbackFpsStatusText( 0.0 ) );
+    m_lastPlaybackFpsStatusText = m_pFpsStatus->text();
     //m_pFpsStatus->setFrameStyle(QFrame::Panel | QFrame::Sunken);
     statusBar()->addWidget( m_pFpsStatus );
 

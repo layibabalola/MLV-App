@@ -3752,6 +3752,9 @@ TEST(DualIsoPipeline, Phase4B_DownsampleScaleFourPSNRGoldenDualIso)
 TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleTwoWithSafeFallback)
 {
     ScopedAggressivePreviewMode aggressivePreview(0);
+    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES", "0");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
+    mlv_phase4bv_reset_env_cache_for_testing();
 
     MlvPipelineFixture fixture;
     QString error_message;
@@ -3785,13 +3788,12 @@ TEST(DualIsoPipeline, Phase4B_DualIsoHonorsScaleTwoWithSafeFallback)
     ASSERT_TRUE(psnr > 16.0);
 }
 
-TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoFullResFixesUsesEarlyFullXY)
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoFullResFixesUsesEarlyFullXYByDefault)
 {
     ScopedAggressivePreviewMode aggressivePreview(0);
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
     MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
     mlv_phase4bv_reset_env_cache_for_testing();
-    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES", "1");
     MLVAPP_TEST_SETENV("MLVAPP_LOG_PHASE4BV2", "1");
     mlv_phase4bv_reset_env_cache_for_testing();
 
