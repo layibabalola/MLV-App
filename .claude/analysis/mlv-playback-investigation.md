@@ -15016,6 +15016,42 @@ Post-change stage timings:
 - The next bottleneck pass should use the new `presentation_overhead_excluding_headless_color_ms` field when ranking queue/presentation work.
 - Keep the screenshot-backed smoke discipline in place; the new telemetry is only useful if quality stays visually clean while the ranking changes.
 
+## 2026-06-06 - next same-build x2/x4 matrix and smoke recheck
+
+### Verified locally
+
+- Ran a fresh same-build profile matrix on the rebuilt release binary for `M16-1327`, `M16-1347`, and `M16-1446` at aggressive preview scale `2` and `4` with `48` frames each.
+- The x2 lane kept the new headless-analysis split visible in the profile samples:
+  - `raw_prefetch_hits=141/144`, `processed8_prefetch_hits=0`
+  - `raw_uint16_ms=1.354`, `llrawproc_total_ms=16.562`, `debayered_frame_ms=7.889`, `processed16_total_ms=40.368`, `processed8_total_ms=44.563`
+  - `render_total_ms=46.264`, `queue_wait_ms=1.479`, `presentation_overhead_ms=19.935`
+  - `presentation_overhead_excluding_headless_color_ms=16.116`, `headless_presented_color_analysis_ms=3.882`
+  - `latency_ms=66.582`
+  - `phase4b_path=4`, `fallback=none`
+- The x4 lane remained the stronger throughput comparator in the profile lane where the hot cost is actually showing up:
+  - `raw_prefetch_hits=95/144`, `processed8_prefetch_hits=0`
+  - `raw_uint16_ms=8.951`, `llrawproc_total_ms=13.792`, `debayered_frame_ms=4.694`, `processed16_total_ms=43.333`, `processed8_total_ms=48.431`
+  - `render_total_ms=49.528`, `queue_wait_ms=0.819`, `presentation_overhead_ms=30.154`
+  - `presentation_overhead_excluding_headless_color_ms=28.687`, `headless_presented_color_analysis_ms=1.479`
+  - `latency_ms=79.922`
+  - `phase4b_path=3`, `fallback=none`
+- Screenshot-backed GUI smoke on the same three clips still favored x4 end-to-end on the actual playback path:
+  - x2 average across the trio: `smoke presented FPS=7.498`, `timeline FPS=22.965`, `GUI FPS=5.1`, `colorArtifactScan=clear-heuristic`
+  - x4 average across the trio: `smoke presented FPS=12.075`, `timeline FPS=23.108`, `GUI FPS=12.6`, `colorArtifactScan=clear-heuristic`
+  - x2 average GUI-side latencies: `queue_wait_ms=66.135`, `present_ui_signal_latency_ms=66.135`, `present_pacing_ms=8.455`
+  - x4 average GUI-side latencies: `queue_wait_ms=28.604`, `present_ui_signal_latency_ms=28.604`, `present_pacing_ms=8.288`
+- The manual screenshot review stayed clean: the presented-frame captures showed normal scene detail, and the FPS crops showed the late-run playback label instead of a frozen or blank status strip.
+
+### Cross-checked from prior analysis
+
+- The new `presentation_overhead_excluding_headless_color_ms` split did its job: it removed the headless color scan from the bookkeeping, but it did not flip the smoke result.
+- The profile lane now says x2 is cleaner on the decode/filter/presentation bookkeeping side, while the smoke lane still prefers x4 on the user-visible playback path.
+
+### Needs runtime profiling
+
+- The next bottleneck is still the GUI-side queue/UI latency bucket on the aggressive playback path, not the headless color-analysis bookkeeping.
+- Keep the next code change as small as possible if a safe lever emerges; otherwise continue tightening the evidence with another same-build matrix before touching playback mechanics again.
+
 ### 2026-06-06 - x4 GUI smoke compare on the hot clips
 
 - I ran screenshot-backed GUI smoke on `M16-1347` and `M16-1446` at aggressive preview scale `4` with the same build and the same quality-state requirements.
