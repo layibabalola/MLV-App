@@ -1,3 +1,37 @@
+# 2026-06-06 - playback quality indicator cache trims GUI-path label churn without changing smoke results
+
+### Verified locally
+
+- Added a small state-snapshot cache to `updatePlaybackQualityIndicator()` so the per-frame draw loop can skip rebuilding the playback-quality text/style when the relevant state has not changed.
+- The cache tracks the resolved quality inputs that actually affect the label and toolbar button:
+  - saved playback mode, effective scale override, active scale, active HQ state
+  - env scale / HQ / aggressive-preview overrides
+  - last presented scale state and request-context scale
+  - phase-3 tier state
+- Rebuilt the user-facing release exe after the code change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 8:27:18 AM`
+  - `Length=9103872`
+  - `SHA256=D56D3EE1CA162EEBB7E4B0200FDAEF4C0AB9C74549B7CBD5CC801620F708D91F`
+- Focused wrapper validation passed:
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+- Screenshot-backed 30-second GUI smoke passed on the standard clips in both x2 aggressive and x4 aggressive lanes, with `clear-heuristic` color scans on every run:
+  - `M16-1327` x2: `smoke presented FPS=6.046`, `timeline FPS=22.749`, `visibleBottomLeftGuiFps=10`
+  - `M16-1347` x2: passed with the same harness shape and clean screenshot-backed validation
+  - `M16-1446` x4: `smoke presented FPS=14.111`, `timeline FPS=23.529`, `visibleBottomLeftGuiFps=11`
+  - all six runs validated `ok=true`, `scaleRequestMatched=true`, `qualityModeMatched=true`, and `colorArtifactScanPassed=true`
+- Manual screenshot inspection on the saved captures showed normal scene detail and a healthy bottom-left playback label crop, not a frozen or blank UI.
+
+### Cross-checked from prior analysis
+
+- This is a GUI-path polish change, not a playback-policy change, so it should be interpreted as a low-risk attempt to trim repeated label work rather than a new decode or pipeline lane.
+- The prior x2/x4 matrix still stands: x4 aggressive remains the cleaner user-visible comparator, and the smoke quality gates stayed intact after the cache change.
+
+### Needs runtime profiling
+
+- If we want to keep squeezing this line, the next useful measurement would be a before/after micro-profile of `drawFrameReady()` / `updatePlaybackQualityIndicator()` on a steady playback clip, but only if the benefit needs to be quantified beyond “no regression”.
+- Keep using screenshot-backed smoke with the standard M16 trio whenever the GUI draw path changes, because the visual gate is still the one that catches the dangerous mistakes.
+
 # 2026-06-06 - x4 follow-up keeps aggressive as the baseline and sharp/smooth as the ceiling
 
 ### Verified locally

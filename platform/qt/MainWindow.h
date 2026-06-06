@@ -763,6 +763,23 @@ private:
     int m_playbackQualityActiveScale = 1;
     bool m_playbackQualityActiveHq = false;
     bool m_playbackQualityIndicatorVisible = true;
+    struct PlaybackQualityIndicatorCache
+    {
+        int playbackQualityMode = -1;
+        int playbackScaleFactorOverride = -1;
+        int playbackQualityActiveScale = -1;
+        bool playbackQualityActiveHq = false;
+        int envScale = -2;
+        bool envHq = false;
+        int envPreviewOverride = -2;
+        bool aggressivePreviewActive = false;
+        int lastPresentedPlaybackScaleFactorActive = -1;
+        bool lastPresentedRequestContextValid = false;
+        int lastPresentedRequestScaleFactor = -1;
+        int phase3Tier = -1;
+    };
+    PlaybackQualityIndicatorCache m_playbackQualityIndicatorCache;
+    bool m_playbackQualityIndicatorCacheValid = false;
     uint64_t m_playbackQualityFrameCounter = 0;
     double m_playbackQualityLastPresentedTime = 0.0;
     PlaybackQualityAutoSampler m_playbackQualitySampler;

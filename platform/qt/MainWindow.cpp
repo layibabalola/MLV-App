@@ -14041,6 +14041,52 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         }
     }
 
+    const int envScale = playback_scale_factor_env_override();
+    const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
+    const int envPreviewOverride = playbackPreviewAggressiveEnvOverride();
+    const bool aggressivePreviewActive = ( mlvPlaybackAggressivePreviewMode() != 0 );
+    const int phase3Tier =
+        playbackQualityModeIntIsPhase3( m_playbackQualityMode )
+            ? static_cast<int>(
+                  playbackQualityTierFromSettings(
+                      playbackQualityModeFromInt( m_playbackQualityMode ) ) )
+            : -1;
+
+    const PlaybackQualityIndicatorCache currentCache =
+    {
+        m_playbackQualityMode,
+        m_playbackScaleFactorOverride,
+        m_playbackQualityActiveScale,
+        m_playbackQualityActiveHq,
+        envScale,
+        envHq,
+        envPreviewOverride,
+        aggressivePreviewActive,
+        m_lastPresentedPlaybackScaleFactorActive,
+        m_lastPresentedRequestContextValid,
+        m_lastPresentedRequestContext.playbackScaleFactor,
+        phase3Tier
+    };
+    if( m_playbackQualityIndicatorCacheValid
+     && currentCache.playbackQualityMode == m_playbackQualityIndicatorCache.playbackQualityMode
+     && currentCache.playbackScaleFactorOverride == m_playbackQualityIndicatorCache.playbackScaleFactorOverride
+     && currentCache.playbackQualityActiveScale == m_playbackQualityIndicatorCache.playbackQualityActiveScale
+     && currentCache.playbackQualityActiveHq == m_playbackQualityIndicatorCache.playbackQualityActiveHq
+     && currentCache.envScale == m_playbackQualityIndicatorCache.envScale
+     && currentCache.envHq == m_playbackQualityIndicatorCache.envHq
+     && currentCache.envPreviewOverride == m_playbackQualityIndicatorCache.envPreviewOverride
+     && currentCache.aggressivePreviewActive == m_playbackQualityIndicatorCache.aggressivePreviewActive
+     && currentCache.lastPresentedPlaybackScaleFactorActive
+            == m_playbackQualityIndicatorCache.lastPresentedPlaybackScaleFactorActive
+     && currentCache.lastPresentedRequestContextValid
+            == m_playbackQualityIndicatorCache.lastPresentedRequestContextValid
+     && currentCache.lastPresentedRequestScaleFactor
+            == m_playbackQualityIndicatorCache.lastPresentedRequestScaleFactor
+     && currentCache.phase3Tier == m_playbackQualityIndicatorCache.phase3Tier )
+    {
+        return;
+    }
+
     /* The indicator must reflect what is ACTUALLY happening, not what is
      * stored. Developer env vars win first, then the explicit UI override,
      * then the saved playback mode. That keeps the on-screen label aligned
@@ -14048,15 +14094,11 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     const bool guiScaleSettingActive =
         ( m_playbackScaleFactorOverride == 1 || m_playbackScaleFactorOverride == 2
        || m_playbackScaleFactorOverride == 4 || m_playbackScaleFactorOverride == 8 );
-    const int envScale = playback_scale_factor_env_override();
-    const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
     const bool envScaleFixed =
         envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8;
     const bool envScaleAuto = envScale == -1;
     const bool envOverrideActive =
         envScaleFixed || envScaleAuto || envHq;
-    const int envPreviewOverride = playbackPreviewAggressiveEnvOverride();
-    const bool aggressivePreviewActive = ( mlvPlaybackAggressivePreviewMode() != 0 );
     const bool guiScaleOverrideActive = !envOverrideActive && guiScaleSettingActive;
     auto playbackScaleLabel = [this]( int requestedScale ) -> QString
     {
@@ -14175,7 +14217,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         if( playbackQualityModeIntIsPhase3( m_playbackQualityMode ) )
         {
             const PlaybackQualityTier tier =
-                playbackQualityTierFromSettings( playbackQualityModeFromInt( m_playbackQualityMode ) );
+                static_cast<PlaybackQualityTier>( phase3Tier );
             text += tr( " (%1)" ).arg( QString::fromLatin1( playbackQualityTierName( tier ) ) );
         }
     }
@@ -14243,6 +14285,9 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             m_pPlaybackQualityToolButton->setStyleSheet( toolButtonStyle );
         }
     }
+
+    m_playbackQualityIndicatorCache = currentCache;
+    m_playbackQualityIndicatorCacheValid = true;
 }
 
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
