@@ -1,3 +1,26 @@
+# 2026-06-06 - longer x2/x4 long-pass confirms x4 stays the better comparator
+
+### Verified locally
+
+- I reran the current build with 30-frame x2 and x4 aggressive profiles on the standard `M16-1327` and `M16-1446` clips to separate the earlier 10-frame wobble from the actual lane shape.
+- The longer pass confirms the earlier read: x4 aggressive remains the better comparator, and x2 aggressive does not overtake it when the sample is long enough to settle.
+- Long-pass profile averages:
+  - `x2-aggressive M16-1327`: raw `1.870 ms` (`535.620 FPS-eq`), LLRawProc `24.530 ms` (`40.764 FPS-eq`), debayer `33.400 ms` (`29.940 FPS-eq`), render total `43.300 ms` (`23.095 FPS-eq`), dual-ISO total `22.070 ms` (`45.310 FPS-eq`)
+  - `x4-aggressive M16-1327`: raw `5.500 ms` (`181.818 FPS-eq`), LLRawProc `16.270 ms` (`61.467 FPS-eq`), debayer `24.460 ms` (`40.884 FPS-eq`), render total `34.100 ms` (`29.326 FPS-eq`), dual-ISO total `13.980 ms` (`71.545 FPS-eq`)
+  - `x2-aggressive M16-1446`: raw `1.070 ms` (`934.579 FPS-eq`), LLRawProc `18.800 ms` (`53.191 FPS-eq`), debayer `24.870 ms` (`40.208 FPS-eq`), render total `33.700 ms` (`29.674 FPS-eq`), dual-ISO total `7.900 ms` (`126.582 FPS-eq`)
+  - `x4-aggressive M16-1446`: raw `2.670 ms` (`374.532 FPS-eq`), LLRawProc `6.730 ms` (`148.588 FPS-eq`), debayer `14.820 ms` (`67.474 FPS-eq`), render total `16.630 ms` (`60.133 FPS-eq`), dual-ISO total `4.030 ms` (`248.139 FPS-eq`)
+- The color scans stayed clean in the long-pass smoke runs, and the expected scale/quality state still matched for both lanes.
+
+### Cross-checked from prior analysis
+
+- The x2 lane is still not the next obvious optimization target. Even with the longer sample, x2 remains slower than x4 on render total for both standard clips.
+- The x4 lane remains the cleaner baseline for future work because it keeps the better stage shape and the more stable render cadence.
+
+### Needs runtime profiling
+
+- The next useful measurement is a longer x4-focused pass on the real tail buckets that still dominate `M16-1327`, especially queue/render cadence and the remaining raw/debayer cost.
+- Do not promote x2 as the primary optimization lane until it actually beats x4 on the long-pass telemetry, not just on a short sample.
+
 # 2026-06-06 - no-alias final-blend float curve pass on x2/x4 aggressive
 
 ### Verified locally
