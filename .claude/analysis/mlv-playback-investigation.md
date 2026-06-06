@@ -15201,3 +15201,35 @@ Post-change stage timings:
 
 - Keep the next experiment honest about which lane is actually faster end-to-end on the GUI smoke path.
 - If we touch code next, it should be because we have a narrow lever that improves x4 or proves why x2 can catch up without risking quality.
+
+### 2026-06-06 - final-blend setup micro-optimization rechecked on the standard trio
+
+### Verified locally
+
+- Rebuilt the user-facing release executable after the `dualiso.c` change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 09:52:50 AM`
+  - `Length=9105408`
+  - `SHA256=7A5A73AAA8375D78FCA7C2E16FBCFFEC8E615B5FE51A9494BCCAFC6B75A899D7`
+- Focused Windows pipeline coverage passed for the float fullres-curve path:
+  - `DualIsoPipeline.DualIsoFinalBlendFloatCurveMatchesDouble`
+  - `DualIsoPipeline.DualIsoFinalBlendFloatCurveMatchesDoubleWithoutAliasMap`
+  - `tests=159`, `assertions=0`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke on the standard M16 trio completed with the expected scale/quality checks and a 30-second settle window.
+
+### Cross-checked from prior analysis
+
+- The micro-optimization in `src/mlv/llrawproc/dualiso.c` reduces the final-blend setup cost, but it did not flip the lane-level conclusion.
+- x2 aggressive remained visually clean on all three clips, but it still did not beat the stronger x4 lane on the user-facing smoke path.
+- x4 aggressive stayed clear on `M16-1347` and `M16-1446`, while `M16-1327` tripped the artifact gate with a visible suspect-block-or-bar result.
+
+### Needs runtime profiling
+
+- Representative smoke results:
+  - x2 `M16-1327`: `smoke presented FPS=24.989`, `timeline FPS=23.697`, `GUI FPS=76`, `render=49.504 ms (20.2 fps-eq)`, `queue=14.610 ms (68.446 fps-eq)`, `llrawproc=8.118 ms (123.183 fps-eq)`, `processed8=33.758 ms (29.623 fps-eq)`, `presentUI=14.610 ms (68.446 fps-eq)`, `finalBlend=1.798 ms (556.174 fps-eq)`, `clear-heuristic`
+  - x2 `M16-1347`: `smoke presented FPS=21.938`, `timeline FPS=23.680`, `GUI FPS=14`, `render=58.444 ms (17.110 fps-eq)`, `queue=17.566 ms (56.928 fps-eq)`, `llrawproc=9.590 ms (104.275 fps-eq)`, `processed8=39.734 ms (25.167 fps-eq)`, `presentUI=17.566 ms (56.928 fps-eq)`, `finalBlend=2.191 ms (456.413 fps-eq)`, `clear-heuristic`
+  - x2 `M16-1446`: `smoke presented FPS=14.059`, `timeline FPS=23.689`, `GUI FPS=16`, `render=50.809 ms (19.682 fps-eq)`, `queue=0.064 ms (15625 fps-eq)`, `llrawproc=10.805 ms (92.550 fps-eq)`, `processed8=49.506 ms (20.200 fps-eq)`, `presentUI=0.064 ms (15625 fps-eq)`, `finalBlend=2.080 ms (480.769 fps-eq)`, `clear-heuristic`
+  - x4 `M16-1327`: `smoke presented FPS=28.512`, `timeline FPS=23.952`, `GUI FPS=17`, `render=38.681 ms (25.852 fps-eq)`, `queue=11.258 ms (88.826 fps-eq)`, `llrawproc=4.991 ms (200.361 fps-eq)`, `processed8=26.258 ms (38.084 fps-eq)`, `presentUI=11.258 ms (88.826 fps-eq)`, `finalBlend=0.772 ms (1295.337 fps-eq)`, `suspect-block-or-bar`
+  - x4 `M16-1347`: `smoke presented FPS=27.399`, `timeline FPS=23.920`, `GUI FPS=16`, `render=40.389 ms (24.759 fps-eq)`, `queue=11.093 ms (90.147 fps-eq)`, `llrawproc=5.425 ms (184.332 fps-eq)`, `processed8=28.127 ms (35.553 fps-eq)`, `presentUI=11.093 ms (90.147 fps-eq)`, `finalBlend=0.757 ms (1321.004 fps-eq)`, `clear-heuristic`
+  - x4 `M16-1446`: `smoke presented FPS=27.348`, `timeline FPS=23.872`, `GUI FPS=90`, `render=42.872 ms (23.325 fps-eq)`, `queue=13.687 ms (73.062 fps-eq)`, `llrawproc=4.836 ms (206.782 fps-eq)`, `processed8=27.945 ms (35.785 fps-eq)`, `presentUI=13.687 ms (73.062 fps-eq)`, `finalBlend=0.741 ms (1349.528 fps-eq)`, `clear-heuristic`
+- The next ranked bottleneck is still not final-blend setup. The repeated hot buckets are `render_total`, `processed8`, and the GUI-side queue/present latency on the aggressive playback path; the color gate means we must keep quality risk in view while we chase them.
