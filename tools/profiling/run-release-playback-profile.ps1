@@ -7,7 +7,10 @@ param(
     [int]$Frames = 3,
     [int]$StartFrame = 0,
     [int]$FrameStep = 1,
-    [string]$Threads = "1",
+    # Default to auto-thread playback so the profile wrapper reflects real
+    # release behavior. Pass 1 explicitly only when you need a controlled
+    # single-thread diagnostic run.
+    [string]$Threads = "auto",
     [string]$Receipt = "",
     [string]$QualityMode = "",
     [string]$ScaleFactor = "",
