@@ -20,12 +20,8 @@ public:
     void setTimeDurationMode( bool mode );
 
 private:
-    void rebuildBaseImage();
-
     QImage *m_tcImage;
-    QImage *m_baseImage;
     bool m_mode;
-    bool m_baseImageDirty;
 };
 
 #endif // TIMECODELABEL_H

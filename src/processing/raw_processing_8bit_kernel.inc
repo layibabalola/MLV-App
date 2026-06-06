@@ -69,6 +69,7 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
     double inverse_mat[9];
     invertMatrix(colour_gamuts[processing->colour_gamut], inverse_mat);
     for( int i = 0; i < 3; ++i ) rgb_to_Y[i] = inverse_mat[3 + i];
+
     const float proper_wb_0 = (float)processing->proper_wb_matrix[0];
     const float proper_wb_1 = (float)processing->proper_wb_matrix[1];
     const float proper_wb_2 = (float)processing->proper_wb_matrix[2];
@@ -81,6 +82,7 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
     const float rgb_to_y0 = rgb_to_Y[0];
     const float rgb_to_y1 = rgb_to_Y[1];
     const float rgb_to_y2 = rgb_to_Y[2];
+
     /* Phase E7: AgX support on the direct8 fast path.
      *
      * Indirect path (raw_processing.c, applied for the basic-matrix
