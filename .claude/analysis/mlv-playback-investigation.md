@@ -1,3 +1,29 @@
+# 2026-06-06 - x4 follow-up keeps aggressive as the baseline and sharp/smooth as the ceiling
+
+### Verified locally
+
+- Fresh same-build 30-frame profiles on the standard M16 clips kept the x4 story stable:
+  - `x4-aggressive` stayed on `phase4b_path=3` with `fallback=none` on all three clips.
+  - `M16-1327`: `raw_prefetch_hits=18`, `raw_prefetch_misses=12`, `avg_render_total_ms=53.633`, `avg_queue_wait_ms=1.533`, `avg_llrawproc_total_ms=13.067`, `avg_debayered_frame_ms=8.533`, `avg_processed16_total_ms=46.3`, `avg_processed8_total_ms=51.867`.
+  - `M16-1347`: `raw_prefetch_hits=19`, `raw_prefetch_misses=11`, `avg_render_total_ms=58.333`, `avg_queue_wait_ms=1.567`, `avg_llrawproc_total_ms=17.2`, `avg_debayered_frame_ms=8.933`, `avg_processed16_total_ms=51.267`, `avg_processed8_total_ms=55.9`.
+  - `M16-1446`: `raw_prefetch_hits=20`, `raw_prefetch_misses=10`, `avg_render_total_ms=32.733`, `avg_queue_wait_ms=1.667`, `avg_llrawproc_total_ms=8.467`, `avg_debayered_frame_ms=4.533`, `avg_processed16_total_ms=27.667`, `avg_processed8_total_ms=30.767`.
+- Screenshot-backed 30-second GUI smoke with `-CaptureScreenshot -FrameTelemetry -FailOnColorArtifact` stayed clean on all five smoke runs:
+  - `x4-aggressive` on `M16-1327`, `M16-1347`, and `M16-1446` all validated `ok=true` with `clear-heuristic` color scans.
+  - `x4-sharp/smooth` on `M16-1327` and `M16-1446` also stayed color-clean, but it remained much more expensive on the hot clips.
+  - The strongest contrast was `M16-1446`: `x4-aggressive` reported `avg_render_total_ms=122.85`, `avg_queue_wait_ms=0.066`, `smoke presented FPS=7.007`, while `x4-sharp/smooth` reported `avg_render_total_ms=164.814`, `avg_queue_wait_ms=35.409`, `smoke presented FPS=6.723`.
+- The bottom-left FPS crops were captured at the end of the 30-second settles, so the smoke now has enough wall-clock time to show the actual post-settle playback cadence rather than a snapshotted startup state.
+
+### Cross-checked from prior analysis
+
+- The x4 aggressive lane is still the best baseline comparator after the longer follow-up. It holds the cleaner render shape and avoids the queue spike that sharp/smooth shows on the hot clip.
+- The x4 sharp/smooth lane is still a quality ceiling/control, not a baseline to promote for this pass.
+
+### Needs runtime profiling
+
+- The next ranked work should stay in the x4 aggressive lane and keep squeezing the persistent stage buckets from fresh telemetry.
+- The cleanest remaining buckets are still render/presentation cadence, `llrawproc`, `debayer`, and the downstream processed16/processed8 cost.
+- Do not pivot back to x2 or promote sharp/smooth as a baseline from this matrix.
+
 # 2026-06-06 - longer x2/x4 long-pass confirms x4 stays the better comparator
 
 ### Verified locally
