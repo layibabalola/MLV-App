@@ -493,6 +493,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_histogram_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_regression_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("dual_iso_preview_rowscale_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("headless_presented_color_analysis_ms")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("presentation_overhead_excluding_headless_color_ms")));
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_worker_threads")));
         ASSERT_TRUE(sample.contains(QStringLiteral("render_thread_worker_thread_cap_active")));
         ASSERT_TRUE(sample.contains(QStringLiteral("raw_uint16_ms")));

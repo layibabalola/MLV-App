@@ -4353,8 +4353,8 @@ static inline int final_blend(struct raw_info raw_info,
 {
     double final_blend_setup_start = mlv_stage_timing_now();
     /* fullres mixing curve */
-    double * fullres_curve = build_fullres_curve(black);
     const int use_float_fullres_curve = use_final_blend_float_fullres_curve();
+    double * fullres_curve = use_float_fullres_curve ? NULL : build_fullres_curve(black);
     float * fullres_curve_f = use_float_fullres_curve ? build_fullres_curve_float(black) : NULL;
     
     int w = raw_info.width;

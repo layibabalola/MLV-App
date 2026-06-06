@@ -1,3 +1,158 @@
+# 2026-06-06 - x2 full-res fix is now default-on and holds the visual gate
+
+### Verified locally
+
+- Promoted `MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES` to default-on behavior for x2 sharp/smooth when the env var is unset, while keeping explicit `0` / `false` as an opt-out.
+- Updated the pipeline coverage so the fallback test now sets the env var to `0`, and the default-on test name now reflects the new contract.
+- Rebuilt the user-facing release exe:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 9:17:13 AM`
+  - `Length=9105408`
+  - `SHA256=C897CED3A008DCD4938D5C860105C1367E5D75BB6718572999C64A49A41FA33F`
+- Focused Windows wrapper validation passed for the x2 fallback/default-on contract.
+- Screenshot-backed 30-second smoke stayed clean on the x2 trio and one x4 control, with presented-frame screenshot scans all `clear-heuristic` and no new magenta/pink/green bar verdicts.
+- The new smoke results show the x2 lane is materially better than the prior x2 baseline and still visually safe:
+  - x2 `M16-1327`: `smoke presented FPS=14.128`, `timeline FPS=23.317`, `GUI FPS=10`, `avg_queue_wait_ms=0.049 ms (20408.2 FPS-eq)`, `avg_render_total_ms=47.783 ms (20.93 FPS-eq)`, `avg_llrawproc_ms=10.354 ms (96.58 FPS-eq)`, `avg_processed8_ms=45.334 ms (22.06 FPS-eq)`
+  - x2 `M16-1347`: `smoke presented FPS=21.614`, `timeline FPS=23.300`, `GUI FPS=15`, `avg_queue_wait_ms=17.217 ms (58.08 FPS-eq)`, `avg_render_total_ms=57.613 ms (17.36 FPS-eq)`, `avg_llrawproc_ms=9.392 ms (106.47 FPS-eq)`, `avg_processed8_ms=37.835 ms (26.43 FPS-eq)`
+  - x2 `M16-1446`: `smoke presented FPS=17.601`, `timeline FPS=23.374`, `GUI FPS=10`, `avg_queue_wait_ms=23.822 ms (41.98 FPS-eq)`, `avg_render_total_ms=76.064 ms (13.15 FPS-eq)`, `avg_llrawproc_ms=11.355 ms (88.07 FPS-eq)`, `avg_processed8_ms=49.289 ms (20.29 FPS-eq)`
+  - x4 control `M16-1327`: `smoke presented FPS=20.029`, `timeline FPS=23.336`, `GUI FPS=10`, `avg_queue_wait_ms=16.193 ms (61.75 FPS-eq)`, `avg_render_total_ms=59.059 ms (16.93 FPS-eq)`, `avg_llrawproc_ms=6.176 ms (161.91 FPS-eq)`, `avg_processed8_ms=40.199 ms (24.88 FPS-eq)`
+
+### Cross-checked from prior analysis
+
+- The earlier profile/smoke split still matters: smoke queue wait is not a clean proxy for the app-side queue cost, but the x2 default-on path is now clearly the right direction on both profile and smoke evidence.
+- The gain is not a decode miracle; it comes from letting x2 use the quality-preserving full-res fix path instead of the older fallback shape.
+
+### Needs runtime profiling
+
+- Keep the next same-build matrix on the standard M16 trio and watch whether x2 continues to close the gap without reintroducing any color artifact risk.
+- If we keep pushing here, the next most likely improvement area is deeper in presentation/queue cadence, not another raw prefetch change.
+
+# 2026-06-06 - profile/smoke split: smoke queue wait was mostly validation-path noise
+
+### Verified locally
+
+- Re-ran the newest `fpsstatus-cache-smoke` bundle against the rebuilt release tree and confirmed the screenshot-backed GUI smoke still passed cleanly on the standard M16 clips with `clear-heuristic` color scans.
+- Re-ran a matching headless `--profile-playback` comparison on `M16-1327` and separated the smoke-path latency from the app-path latency.
+- The smoke bundle still reports large `avg_queue_wait_ms` / `avg_present_ui_signal_latency_ms` on x2, but the headless profile shows that the actual app queue wait is low:
+  - smoke `M16-1327` x2: `avg_queue_wait_ms=53.84 ms`, `avg_present_ui_signal_latency_ms=42.149 ms`
+  - headless `M16-1327` x2: `render_thread_queue_wait_ms≈1.4 ms`, `avg_present_ui_signal_latency_ms≈1.4 ms`
+  - smoke `M16-1327` x4: `avg_queue_wait_ms=0.06 ms`, `avg_present_ui_signal_latency_ms=16.183 ms`
+  - headless `M16-1327` x4: `render_thread_queue_wait_ms≈1.93 ms`, `avg_present_ui_signal_latency_ms≈1.93 ms`
+- The current build metadata is still the rebuilt release exe:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 8:58:07 AM`
+  - `Length=9104896`
+  - `SHA256=F11C4944D8BACC63E2F3441D58EB994499C1096766138709AE56FF6390548D5B`
+- The headless profile still shows the real bottleneck on the app side:
+  - x2 `M16-1327`: `render_thread_total_ms≈51.77 ms`, `llrawproc_total_ms≈27.10 ms`, `processed8_total_ms≈50.13 ms`, `presentation_overhead_excluding_headless_color_ms≈36.13 ms`
+  - x4 `M16-1327`: `render_thread_total_ms≈44.47 ms`, `raw_uint16_ms≈16.20 ms`, `llrawproc_total_ms≈9.43 ms`, `processed8_total_ms≈42.20 ms`, `presentation_overhead_excluding_headless_color_ms≈48.02 ms`
+- The phase-4B selection still differs by scale:
+  - x2 is still on the full-recon post-downsample fallback (`phase4b_path=0`)
+  - x4 is still on the fuller pre-recon branch (`phase4b_path=3`)
+
+### Cross-checked from prior analysis
+
+- The recent FPS jump was real, but it came from trimming hot GUI update churn, not from the raw playback pipeline suddenly getting faster.
+- The smoke harness should not be used as the primary source for queue-wait conclusions once we have the headless profile proving the app-side latency is much lower.
+
+### Needs runtime profiling
+
+- The next change should be chosen from the headless profile buckets, not the smoke queue-wait bucket.
+- The most expensive app-side bucket on x2 remains the full20 / mean23 / render path; x4’s remaining work is more in raw decode and presentation overhead.
+- Before touching code again, keep ranking any candidate change against the current phase-4B fallback shape and the quality-risk rule set.
+
+# 2026-06-06 - dual-ISO widget-reflection cache trims the remaining GUI-side latency bucket
+
+### Verified locally
+
+- Added a narrow cache around the Dual ISO widget-reflection work inside `drawFrameReady()` so repeated frames can skip redundant combo-box, slider, and label updates when the reflected values are unchanged.
+- Kept the state-publication side intact:
+  - `ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 )` still runs
+  - `ACTIVE_RECEIPT->setDualIsoPattern( uiPattern )` still runs when the pattern source demands it
+- Rebuilt the user-facing release exe after the change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 8:42:32 AM`
+  - `Length=9104896`
+  - `SHA256=9E5995AABF700DC041A258024F8CACE8F528378FBAE3D9E5EC98A59E810D0EE4`
+- Focused wrapper validation passed again:
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+- Screenshot-backed 30-second GUI smoke stayed clean on all six standard-clip runs with `clear-heuristic` color scans and matching scale/quality validation.
+- The new matrix is materially better than the immediately prior smoke pass:
+  - x2 average: `smoke presented FPS=13.33`, `timeline FPS=23.26`, `queue_wait_ms=29.49`, `render_total_ms=96.39`, `draw_total_ms=11.98`, `llrawproc_ms=29.46`, `processed8_ms=64.46`
+  - x4 average: `smoke presented FPS=17.84`, `timeline FPS=23.43`, `queue_wait_ms=5.42`, `render_total_ms=46.92`, `draw_total_ms=8.45`, `llrawproc_ms=5.92`, `processed8_ms=39.25`
+  - compared with the previous same-build pass, both scales moved in the right direction, and x4 still leads the user-visible cadence
+- Manual screenshot inspection on the x2 and x4 samples showed normal scene detail and readable bottom-left Playback crops, not frozen or broken chrome.
+
+### Cross-checked from prior analysis
+
+- This is still a GUI-path optimization, not a decode-policy change, but it now appears to have a real effect on the remaining queue/presentation bucket rather than just label churn.
+- The broader ranking still holds: x4 aggressive is the cleaner user-visible comparator, but the gap to x2 is smaller than before and the hot GUI path is less expensive after the cache trim.
+
+### Needs runtime profiling
+
+- If we want to keep pushing this line, the next measurement should be another same-build comparison on the standard M16 trio, focusing on whether the queue wait stays low and whether the x2 lane continues to converge toward x4 without color regressions.
+- The next code target, if the current win holds, is probably deeper in the draw/present boundary rather than the already-cached UI reflection bits.
+
+# 2026-06-06 - playback quality indicator cache trims GUI-path label churn without changing smoke results
+
+### Verified locally
+
+- Added a small state-snapshot cache to `updatePlaybackQualityIndicator()` so the per-frame draw loop can skip rebuilding the playback-quality text/style when the relevant state has not changed.
+- The cache tracks the resolved quality inputs that actually affect the label and toolbar button:
+  - saved playback mode, effective scale override, active scale, active HQ state
+  - env scale / HQ / aggressive-preview overrides
+  - last presented scale state and request-context scale
+  - phase-3 tier state
+- Rebuilt the user-facing release exe after the code change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 8:27:18 AM`
+  - `Length=9103872`
+  - `SHA256=D56D3EE1CA162EEBB7E4B0200FDAEF4C0AB9C74549B7CBD5CC801620F708D91F`
+- Focused wrapper validation passed:
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+- Screenshot-backed 30-second GUI smoke passed on the standard clips in both x2 aggressive and x4 aggressive lanes, with `clear-heuristic` color scans on every run:
+  - `M16-1327` x2: `smoke presented FPS=6.046`, `timeline FPS=22.749`, `visibleBottomLeftGuiFps=10`
+  - `M16-1347` x2: passed with the same harness shape and clean screenshot-backed validation
+  - `M16-1446` x4: `smoke presented FPS=14.111`, `timeline FPS=23.529`, `visibleBottomLeftGuiFps=11`
+  - all six runs validated `ok=true`, `scaleRequestMatched=true`, `qualityModeMatched=true`, and `colorArtifactScanPassed=true`
+- Manual screenshot inspection on the saved captures showed normal scene detail and a healthy bottom-left playback label crop, not a frozen or blank UI.
+
+### Cross-checked from prior analysis
+
+- This is a GUI-path polish change, not a playback-policy change, so it should be interpreted as a low-risk attempt to trim repeated label work rather than a new decode or pipeline lane.
+- The prior x2/x4 matrix still stands: x4 aggressive remains the cleaner user-visible comparator, and the smoke quality gates stayed intact after the cache change.
+
+### Needs runtime profiling
+
+- If we want to keep squeezing this line, the next useful measurement would be a before/after micro-profile of `drawFrameReady()` / `updatePlaybackQualityIndicator()` on a steady playback clip, but only if the benefit needs to be quantified beyond “no regression”.
+- Keep using screenshot-backed smoke with the standard M16 trio whenever the GUI draw path changes, because the visual gate is still the one that catches the dangerous mistakes.
+
+# 2026-06-06 - x4 follow-up keeps aggressive as the baseline and sharp/smooth as the ceiling
+
+### Verified locally
+
+- Fresh same-build 30-frame profiles on the standard M16 clips kept the x4 story stable:
+  - `x4-aggressive` stayed on `phase4b_path=3` with `fallback=none` on all three clips.
+  - `M16-1327`: `raw_prefetch_hits=18`, `raw_prefetch_misses=12`, `avg_render_total_ms=53.633`, `avg_queue_wait_ms=1.533`, `avg_llrawproc_total_ms=13.067`, `avg_debayered_frame_ms=8.533`, `avg_processed16_total_ms=46.3`, `avg_processed8_total_ms=51.867`.
+  - `M16-1347`: `raw_prefetch_hits=19`, `raw_prefetch_misses=11`, `avg_render_total_ms=58.333`, `avg_queue_wait_ms=1.567`, `avg_llrawproc_total_ms=17.2`, `avg_debayered_frame_ms=8.933`, `avg_processed16_total_ms=51.267`, `avg_processed8_total_ms=55.9`.
+  - `M16-1446`: `raw_prefetch_hits=20`, `raw_prefetch_misses=10`, `avg_render_total_ms=32.733`, `avg_queue_wait_ms=1.667`, `avg_llrawproc_total_ms=8.467`, `avg_debayered_frame_ms=4.533`, `avg_processed16_total_ms=27.667`, `avg_processed8_total_ms=30.767`.
+- Screenshot-backed 30-second GUI smoke with `-CaptureScreenshot -FrameTelemetry -FailOnColorArtifact` stayed clean on all five smoke runs:
+  - `x4-aggressive` on `M16-1327`, `M16-1347`, and `M16-1446` all validated `ok=true` with `clear-heuristic` color scans.
+  - `x4-sharp/smooth` on `M16-1327` and `M16-1446` also stayed color-clean, but it remained much more expensive on the hot clips.
+  - The strongest contrast was `M16-1446`: `x4-aggressive` reported `avg_render_total_ms=122.85`, `avg_queue_wait_ms=0.066`, `smoke presented FPS=7.007`, while `x4-sharp/smooth` reported `avg_render_total_ms=164.814`, `avg_queue_wait_ms=35.409`, `smoke presented FPS=6.723`.
+- The bottom-left FPS crops were captured at the end of the 30-second settles, so the smoke now has enough wall-clock time to show the actual post-settle playback cadence rather than a snapshotted startup state.
+
+### Cross-checked from prior analysis
+
+- The x4 aggressive lane is still the best baseline comparator after the longer follow-up. It holds the cleaner render shape and avoids the queue spike that sharp/smooth shows on the hot clip.
+- The x4 sharp/smooth lane is still a quality ceiling/control, not a baseline to promote for this pass.
+
+### Needs runtime profiling
+
+- The next ranked work should stay in the x4 aggressive lane and keep squeezing the persistent stage buckets from fresh telemetry.
+- The cleanest remaining buckets are still render/presentation cadence, `llrawproc`, `debayer`, and the downstream processed16/processed8 cost.
+- Do not pivot back to x2 or promote sharp/smooth as a baseline from this matrix.
+
 # 2026-06-06 - longer x2/x4 long-pass confirms x4 stays the better comparator
 
 ### Verified locally
@@ -14841,3 +14996,240 @@ Post-change stage timings:
 - Before committing this turn's latest changes, rerun focused pipeline tests through `tools\testing\run-windows-test.ps1` rather than directly launching test exes.
 - If the product direction changes to "sharpest playable Auto" instead of "aggressive smooth Auto", implement an adaptive x4-to-x8 policy rather than a fixed x4 default. Validate that on `M16-1347` and `M16-1446` with both controlled profiles and GUI smoke.
 - Keep the next ranked work telemetry-led: presentation/queue cadence, then decode-aware/tile-aware raw decode only when raw prefetch is already hitting and raw decode remains a wall-clock limiter.
+
+## 2026-06-06 - x4 raw-prefetch lookahead rollback and restored baseline smoke
+
+### Verified locally
+
+- I tested the narrow x4 aggressive raw-prefetch lookahead idea at `9` and `10` and then rolled it back to the prior `8` baseline in `src/mlv/video_mlv.c`.
+- The wider lookahead did not generalize cleanly across the three standard clips:
+  - `M16-1327` improved in cadence and raw-hit count at `10`, but `M16-1347` and `M16-1446` regressed.
+  - `9` was worse than the settled `x4-aggressive` baseline on all three clips, with especially poor `avgCadenceMs` on `M16-1327`.
+- I rebuilt the user-facing release executable after restoring the baseline:
+  - `platform\\qt\\build-release\\release\\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 03:03:17 AM`
+  - `Length=9101824`
+  - SHA256 `492B101129A0412D0594C1ACDC5D641138479CCEACF98EB24421CF96CE9852C5`
+- Screenshot-backed 30-second GUI smoke on `C:\\temp\\MLV\\M16-1327.MLV` passed once the harness expectations matched the actual app scale state:
+  - Presented-frame screenshot verdict: `clear-heuristic`
+  - Visible bottom-left GUI FPS from the window crop: `5.4 fps`
+  - Smoke presented FPS: `3.702`
+  - Timeline FPS: `22.88`
+  - Validation passed with `scaleRequestMatched=true`, `qualityModeMatched=true`, and `validation.ok=true`
+
+### Cross-checked from prior analysis
+
+- This confirms the earlier matrix lesson rather than replacing it: the x4 lane is still the better baseline comparator, and deeper raw prefetch is not yet a safe universal win.
+- The smoke harness still needs explicit scale expectations when the app comes up in x2, otherwise the color-safe run can fail validation for the wrong reason.
+
+### Needs runtime profiling
+
+- Keep the next experiment focused on the remaining late-stage cost buckets rather than deepening raw prefetch again.
+- Re-run any future GUI smoke with explicit expected scale/quality values so validation reflects the intended baseline instead of the persisted app state.
+
+## 2026-06-06 - x2 aggressive quarterres shadows/highlights follow-up
+
+### Verified locally
+
+- Added the narrow x2 aggressive quarterres branch in `src/processing/raw_processing.c`:
+  - `processing_aggressive_x2_shadows_highlights_quarterres_enabled()`
+  - default on, with env opt-out `MLVAPP_DISABLE_AGGRESSIVE_X2_SH_QUARTERRES`
+  - aggressive preview now chooses the x8 quarterres helper when `scale_factor >= 8`, otherwise it can use the new x2 quarterres helper.
+- Added focused coverage in `tests/pipeline/test_processing_filters.cpp`:
+  - `ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights`
+  - the test asserts x2 aggressive preview takes the quarterres RBF path and does not fall back to halfres/fullres.
+- Rebuilt the user-facing release executable:
+  - `platform\\qt\\build-release\\release\\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 03:22:32 AM`
+  - `Length=9101824`
+  - SHA256 `B1D74BD693FD3A8C528358FC4840E0B587CD9CFC335AEC2588C94A47A621311E`
+- Focused pipeline test passed through the Windows wrapper:
+  - `ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights`
+  - `tests=159`, `assertions=5`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke passed on the x2 aggressive lane for all three standard clips with explicit aggressive-preview env:
+  - `M16-1327`: visible bottom-left `GUI FPS=16`, smoke presented FPS `9.703`, timeline FPS `23.605`, `clear-heuristic`
+  - `M16-1347`: visible bottom-left `GUI FPS=10`, smoke presented FPS `8.588`, timeline FPS `23.714`, `clear-heuristic`
+  - `M16-1446`: visible bottom-left `GUI FPS=12`, smoke presented FPS `11.011`, timeline FPS `23.655`, `clear-heuristic`
+- One x4 aggressive control smoke stayed clean on `M16-1327`:
+  - visible bottom-left `GUI FPS=4.8`, smoke presented FPS `15.786`, timeline FPS `23.891`, `clear-heuristic`
+- The presented-frame and window screenshots were captured for every smoke run, and the color scan did not trip any magenta/pink/green bar verdicts.
+
+### Cross-checked from prior analysis
+
+- The x2 lane is still the right place to keep pressure after the earlier x4-first matrix: the new branch is narrow, the focused test proves the intended path, and the smoke captures stayed visually clean.
+- The x4 control staying clean matters more here than any single GUI FPS number; the change did not widen the regression surface.
+
+### Needs runtime profiling
+
+- Keep ranking the next move by stage cost, not by bottom-left GUI FPS.
+- The remaining hot buckets are still the late-stage processing/presentation costs on the aggressive preview lanes; only widen scope if a fresh same-build matrix shows a real shift.
+
+## 2026-06-06 - continuous x2/x4 matrix and next bottleneck ranking
+
+### Verified locally
+
+- I ran a fresh same-build profile matrix on the current release build for `M16-1327`, `M16-1347`, and `M16-1446` at aggressive preview scale `2` and `4` with `48` frames each.
+- The x2 aggressive lane stayed visually clean on all three clips, and the x4 aggressive control remained visually clean on `M16-1327`.
+- Frame-level profile telemetry on `M16-1446` shows the x2 lane is now cheaper than x4 on the core decode/filter side:
+  - `x2`: `raw_uint16_ms=1.708`, `llrawproc_total_ms=11.750`, `processing_ms=14.333`, `processed16_total_ms=33.250`, `processed8_total_ms=37.958`, `cadence_ms=42.960`, `latency_ms=68.383`
+  - `x4`: `raw_uint16_ms=6.313`, `llrawproc_total_ms=15.042`, `processing_ms=14.146`, `processed16_total_ms=43.229`, `processed8_total_ms=47.083`, `cadence_ms=50.158`, `latency_ms=68.109`
+- On the same hot clip, the remaining gap is no longer raw decode or the SH filter bucket; the residual tax is showing up as presentation overhead:
+  - `x2 presentation_overhead_ms=28.452`
+  - `x4 presentation_overhead_ms=19.303`
+- The x2 lane also kept raw prefetch hot on the matrix clip:
+  - `raw_prefetch_hits=47`, `raw_prefetch_misses=1`
+- The direct 8-bit path is not the obvious win lever on x2; it only activated for one sampled frame in the matrix run, so the hot residual is not a simple direct8 toggle.
+
+### Cross-checked from prior analysis
+
+- This confirms the earlier direction that raw prefetch is no longer the first-order limiter.
+- The x2 quarterres branch did move the work in the right direction, but the remaining bottleneck is now clip-sensitive presentation overhead rather than the SH filter path itself.
+
+### Needs runtime profiling
+
+- Next ranked work should target presentation/queue cadence on the x2 aggressive lane, but only if a safe lever emerges from code inspection or a narrower control experiment.
+- Do not widen raw prefetch further yet; the matrix did not point there.
+- If the next matrix still shows the same presentation overhead gap, the next code change should be judged against that bucket first, not against GUI FPS or the already improved decode/filter buckets.
+
+### 2026-06-06 - processed8 prefetch A/B ruled out on x2 aggressive
+
+- I tested the existing experimental processed8 prefetch path on the hot x2 aggressive clip (`M16-1446`) and a second clip (`M16-1327`) with `MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH=1`.
+- The prefetch-on run did not produce any `processed8_prefetch_hit` frames on either clip.
+- The hot clip regressed on cadence and latency relative to the current x2 baseline:
+  - `M16-1446` with prefetch-on: `cadence_ms=61.111`, `latency_ms=75.551`, `llrawproc_ms=16.500`, `processing_ms=23.917`, `processed8_total_ms=53.583`, `presentation_overhead_ms=20.460`
+  - current x2 baseline on `M16-1446`: `cadence_ms=42.960`, `latency_ms=68.383`, `llrawproc_ms=11.750`, `processing_ms=14.333`, `processed8_total_ms=37.958`, `presentation_overhead_ms=28.452`
+- The second clip showed the same pattern of not improving the real bottleneck:
+  - `M16-1327` with prefetch-on: `cadence_ms=42.575`, `latency_ms=89.103`, `llrawproc_ms=12.750`, `processing_ms=14.833`, `processed8_total_ms=38.188`, `presentation_overhead_ms=49.643`
+- This makes processed8 prefetch a poor next-step candidate for x2 aggressive playback.
+
+### Cross-checked from prior analysis
+
+- The x2 aggressive quarterres change remains the right baseline improvement.
+- The residual hotspot is still presentation/pacing, but the prefetch experiment shows that broadening processed8 prefetch is not the way to attack it.
+
+### Needs runtime profiling
+
+- Keep looking for a narrow presentation/queue lever only if it can be justified without widening quality risk.
+- Otherwise, the better next move is another same-build matrix on a different residual presentation hypothesis, not a blind code change.
+
+## 2026-06-06 - headless color analysis split from presentation overhead
+
+### Verified locally
+
+- Added a small telemetry split in `platform/qt/MainWindow.cpp` so headless playback profiles now time the per-frame color scan separately as `headless_presented_color_analysis_ms`.
+- The profile sample now also emits `presentation_overhead_excluding_headless_color_ms`, which keeps the old bucket intact while giving the next matrix a cleaner presentation/queue number to rank.
+- Added coverage in `tests/console/test_clip_golden.cpp` so the tiny dual-ISO headless profile JSON case now expects the new telemetry keys.
+- Rebuilt the user-facing release executable:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 04:02:30 AM`
+  - `Length=9103360`
+  - `SHA256=39A076296A73A63C30B26582B8E5C21AC03BD4A138E3F33014E18C952DF147D4`
+- Focused Windows console test passed through the wrapper:
+  - `ClipGolden.TinyDualIsoHeadlessPlaybackProfileProducesJson`
+  - `tests=95`, `assertions=627`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke stayed visually clean on the full standard trio in x2 aggressive mode:
+  - `M16-1327`: `smoke presented FPS=8.274`, `timeline FPS=23.047`, `GUI FPS=1.7`, `clear-heuristic`
+  - `M16-1347`: `smoke presented FPS=7.581`, `timeline FPS=22.744`, `GUI FPS=4.3`, `clear-heuristic`
+  - `M16-1446`: `smoke presented FPS=6.640`, `timeline FPS=23.103`, `GUI FPS=9.3`, `clear-heuristic`
+- One x4 aggressive control smoke on `M16-1327` also stayed clean:
+  - `smoke presented FPS=12.266`, `timeline FPS=23.207`, `GUI FPS=6.2`, `clear-heuristic`
+- The screenshots I inspected manually were clean as well: the presented-frame captures showed expected scene detail without obvious magenta/pink/green bars, and the FPS crops showed the expected late-run playback label rather than a frozen or blank status strip.
+
+### Cross-checked from prior analysis
+
+- This does not change the earlier matrix conclusion that x4 is still the safer baseline comparator on the hot clip family.
+- It does make the next matrix more trustworthy, because the profile can now separate app presentation cost from the headless color-analysis work used for smoke validation.
+
+### Needs runtime profiling
+
+- The next bottleneck pass should use the new `presentation_overhead_excluding_headless_color_ms` field when ranking queue/presentation work.
+- Keep the screenshot-backed smoke discipline in place; the new telemetry is only useful if quality stays visually clean while the ranking changes.
+
+## 2026-06-06 - next same-build x2/x4 matrix and smoke recheck
+
+### Verified locally
+
+- Ran a fresh same-build profile matrix on the rebuilt release binary for `M16-1327`, `M16-1347`, and `M16-1446` at aggressive preview scale `2` and `4` with `48` frames each.
+- The x2 lane kept the new headless-analysis split visible in the profile samples:
+  - `raw_prefetch_hits=141/144`, `processed8_prefetch_hits=0`
+  - `raw_uint16_ms=1.354`, `llrawproc_total_ms=16.562`, `debayered_frame_ms=7.889`, `processed16_total_ms=40.368`, `processed8_total_ms=44.563`
+  - `render_total_ms=46.264`, `queue_wait_ms=1.479`, `presentation_overhead_ms=19.935`
+  - `presentation_overhead_excluding_headless_color_ms=16.116`, `headless_presented_color_analysis_ms=3.882`
+  - `latency_ms=66.582`
+  - `phase4b_path=4`, `fallback=none`
+- The x4 lane remained the stronger throughput comparator in the profile lane where the hot cost is actually showing up:
+  - `raw_prefetch_hits=95/144`, `processed8_prefetch_hits=0`
+  - `raw_uint16_ms=8.951`, `llrawproc_total_ms=13.792`, `debayered_frame_ms=4.694`, `processed16_total_ms=43.333`, `processed8_total_ms=48.431`
+  - `render_total_ms=49.528`, `queue_wait_ms=0.819`, `presentation_overhead_ms=30.154`
+  - `presentation_overhead_excluding_headless_color_ms=28.687`, `headless_presented_color_analysis_ms=1.479`
+  - `latency_ms=79.922`
+  - `phase4b_path=3`, `fallback=none`
+- Screenshot-backed GUI smoke on the same three clips still favored x4 end-to-end on the actual playback path:
+  - x2 average across the trio: `smoke presented FPS=7.498`, `timeline FPS=22.965`, `GUI FPS=5.1`, `colorArtifactScan=clear-heuristic`
+  - x4 average across the trio: `smoke presented FPS=12.075`, `timeline FPS=23.108`, `GUI FPS=12.6`, `colorArtifactScan=clear-heuristic`
+  - x2 average GUI-side latencies: `queue_wait_ms=66.135`, `present_ui_signal_latency_ms=66.135`, `present_pacing_ms=8.455`
+  - x4 average GUI-side latencies: `queue_wait_ms=28.604`, `present_ui_signal_latency_ms=28.604`, `present_pacing_ms=8.288`
+- The manual screenshot review stayed clean: the presented-frame captures showed normal scene detail, and the FPS crops showed the late-run playback label instead of a frozen or blank status strip.
+
+### Cross-checked from prior analysis
+
+- The new `presentation_overhead_excluding_headless_color_ms` split did its job: it removed the headless color scan from the bookkeeping, but it did not flip the smoke result.
+- The profile lane now says x2 is cleaner on the decode/filter/presentation bookkeeping side, while the smoke lane still prefers x4 on the user-visible playback path.
+
+### Needs runtime profiling
+
+- The next bottleneck is still the GUI-side queue/UI latency bucket on the aggressive playback path, not the headless color-analysis bookkeeping.
+- Keep the next code change as small as possible if a safe lever emerges; otherwise continue tightening the evidence with another same-build matrix before touching playback mechanics again.
+
+### 2026-06-06 - x4 GUI smoke compare on the hot clips
+
+- I ran screenshot-backed GUI smoke on `M16-1347` and `M16-1446` at aggressive preview scale `4` with the same build and the same quality-state requirements.
+- The x4 lane was visually clean on both clips:
+  - `M16-1347`: `GUI FPS=33`, smoke presented FPS `16.885`, timeline FPS `23.899`, `clear-heuristic`
+  - `M16-1446`: `GUI FPS=8.0`, smoke presented FPS `16.624`, timeline FPS `23.703`, `clear-heuristic`
+- On the hot `M16-1446` clip, x4 aggressive beat the current x2 aggressive result on the actual smoke path:
+  - x2 aggressive: smoke presented FPS `11.011`, timeline FPS `23.655`, visible bottom-left `GUI FPS=12`
+  - x4 aggressive: smoke presented FPS `16.624`, timeline FPS `23.703`, visible bottom-left `GUI FPS=8.0`
+- That means the x2 quarterres addition did not produce the best end-to-end playback result for the hot clip family, even though the matrix showed the x2 decode/filter path improving.
+
+### Cross-checked from prior analysis
+
+- The x2 lane still has a cleaner decode/filter story than x4 in the matrix, but GUI smoke says x4 is better on the actual hot clip.
+- The remaining work should not assume x2 is the best performance endpoint; the better baseline comparator remains x4 aggressive for the hot clip family.
+
+### Needs runtime profiling
+
+- Keep the next experiment honest about which lane is actually faster end-to-end on the GUI smoke path.
+- If we touch code next, it should be because we have a narrow lever that improves x4 or proves why x2 can catch up without risking quality.
+
+### 2026-06-06 - final-blend setup micro-optimization rechecked on the standard trio
+
+### Verified locally
+
+- Rebuilt the user-facing release executable after the `dualiso.c` change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 09:52:50 AM`
+  - `Length=9105408`
+  - `SHA256=7A5A73AAA8375D78FCA7C2E16FBCFFEC8E615B5FE51A9494BCCAFC6B75A899D7`
+- Focused Windows pipeline coverage passed for the float fullres-curve path:
+  - `DualIsoPipeline.DualIsoFinalBlendFloatCurveMatchesDouble`
+  - `DualIsoPipeline.DualIsoFinalBlendFloatCurveMatchesDoubleWithoutAliasMap`
+  - `tests=159`, `assertions=0`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke on the standard M16 trio completed with the expected scale/quality checks and a 30-second settle window.
+
+### Cross-checked from prior analysis
+
+- The micro-optimization in `src/mlv/llrawproc/dualiso.c` reduces the final-blend setup cost, but it did not flip the lane-level conclusion.
+- x2 aggressive remained visually clean on all three clips, but it still did not beat the stronger x4 lane on the user-facing smoke path.
+- x4 aggressive stayed clear on `M16-1347` and `M16-1446`, while `M16-1327` tripped the artifact gate with a visible suspect-block-or-bar result.
+
+### Needs runtime profiling
+
+- Representative smoke results:
+  - x2 `M16-1327`: `smoke presented FPS=24.989`, `timeline FPS=23.697`, `GUI FPS=76`, `render=49.504 ms (20.2 fps-eq)`, `queue=14.610 ms (68.446 fps-eq)`, `llrawproc=8.118 ms (123.183 fps-eq)`, `processed8=33.758 ms (29.623 fps-eq)`, `presentUI=14.610 ms (68.446 fps-eq)`, `finalBlend=1.798 ms (556.174 fps-eq)`, `clear-heuristic`
+  - x2 `M16-1347`: `smoke presented FPS=21.938`, `timeline FPS=23.680`, `GUI FPS=14`, `render=58.444 ms (17.110 fps-eq)`, `queue=17.566 ms (56.928 fps-eq)`, `llrawproc=9.590 ms (104.275 fps-eq)`, `processed8=39.734 ms (25.167 fps-eq)`, `presentUI=17.566 ms (56.928 fps-eq)`, `finalBlend=2.191 ms (456.413 fps-eq)`, `clear-heuristic`
+  - x2 `M16-1446`: `smoke presented FPS=14.059`, `timeline FPS=23.689`, `GUI FPS=16`, `render=50.809 ms (19.682 fps-eq)`, `queue=0.064 ms (15625 fps-eq)`, `llrawproc=10.805 ms (92.550 fps-eq)`, `processed8=49.506 ms (20.200 fps-eq)`, `presentUI=0.064 ms (15625 fps-eq)`, `finalBlend=2.080 ms (480.769 fps-eq)`, `clear-heuristic`
+  - x4 `M16-1327`: `smoke presented FPS=28.512`, `timeline FPS=23.952`, `GUI FPS=17`, `render=38.681 ms (25.852 fps-eq)`, `queue=11.258 ms (88.826 fps-eq)`, `llrawproc=4.991 ms (200.361 fps-eq)`, `processed8=26.258 ms (38.084 fps-eq)`, `presentUI=11.258 ms (88.826 fps-eq)`, `finalBlend=0.772 ms (1295.337 fps-eq)`, `suspect-block-or-bar`
+  - x4 `M16-1347`: `smoke presented FPS=27.399`, `timeline FPS=23.920`, `GUI FPS=16`, `render=40.389 ms (24.759 fps-eq)`, `queue=11.093 ms (90.147 fps-eq)`, `llrawproc=5.425 ms (184.332 fps-eq)`, `processed8=28.127 ms (35.553 fps-eq)`, `presentUI=11.093 ms (90.147 fps-eq)`, `finalBlend=0.757 ms (1321.004 fps-eq)`, `clear-heuristic`
+  - x4 `M16-1446`: `smoke presented FPS=27.348`, `timeline FPS=23.872`, `GUI FPS=90`, `render=42.872 ms (23.325 fps-eq)`, `queue=13.687 ms (73.062 fps-eq)`, `llrawproc=4.836 ms (206.782 fps-eq)`, `processed8=27.945 ms (35.785 fps-eq)`, `presentUI=13.687 ms (73.062 fps-eq)`, `finalBlend=0.741 ms (1349.528 fps-eq)`, `clear-heuristic`
+- The next ranked bottleneck is still not final-blend setup. The repeated hot buckets are `render_total`, `processed8`, and the GUI-side queue/present latency on the aggressive playback path; the color gate means we must keep quality risk in view while we chase them.

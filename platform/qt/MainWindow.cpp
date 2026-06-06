@@ -1529,7 +1529,12 @@ void MainWindow::timerFrameEvent( void )
             const double measuredFps = measuredFrameMs > 0
                 ? 1000.0 / static_cast<double>( measuredFrameMs )
                 : 0.0;
-            m_pFpsStatus->setText( playbackFpsStatusText( measuredFps ) );
+            const QString playbackFpsText = playbackFpsStatusText( measuredFps );
+            if( m_lastPlaybackFpsStatusText != playbackFpsText )
+            {
+                m_pFpsStatus->setText( playbackFpsText );
+                m_lastPlaybackFpsStatusText = playbackFpsText;
+            }
         }
         lastTime = nowTime;
 
@@ -1550,7 +1555,12 @@ void MainWindow::timerFrameEvent( void )
                     .arg( ui->horizontalSliderPosition->value() ),
                 true );
         }
-        m_pFpsStatus->setText( playbackFpsStatusText( 0.0 ) );
+        const QString playbackFpsText = playbackFpsStatusText( 0.0 );
+        if( m_lastPlaybackFpsStatusText != playbackFpsText )
+        {
+            m_pFpsStatus->setText( playbackFpsText );
+            m_lastPlaybackFpsStatusText = playbackFpsText;
+        }
         lastTime = QTime::currentTime(); //do that for calculation of timeDiff for DropFrameMode;
 
     }
@@ -3901,6 +3911,15 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                 {
                     sample.insert( it.key(), it.value() );
                 }
+                if( frameColorTelemetry.contains( QStringLiteral("headless_presented_color_analysis_ms") ) )
+                {
+                    const double presentationOverheadMs =
+                        sample.value( QStringLiteral("presentation_overhead_ms") ).toDouble();
+                    const double headlessColorAnalysisMs =
+                        frameColorTelemetry.value( QStringLiteral("headless_presented_color_analysis_ms") ).toDouble();
+                    sample.insert( QStringLiteral("presentation_overhead_excluding_headless_color_ms"),
+                                   qMax( 0.0, presentationOverheadMs - headlessColorAnalysisMs ) );
+                }
             }
             if( paintCompletionNs >= 0 )
             {
@@ -5981,6 +6000,7 @@ void MainWindow::initGui( void )
     m_pFpsStatus->setMaximumWidth( 110 );
     m_pFpsStatus->setMinimumWidth( 110 );
     m_pFpsStatus->setText( playbackFpsStatusText( 0.0 ) );
+    m_lastPlaybackFpsStatusText = m_pFpsStatus->text();
     //m_pFpsStatus->setFrameStyle(QFrame::Panel | QFrame::Sunken);
     statusBar()->addWidget( m_pFpsStatus );
 
@@ -14032,6 +14052,52 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         }
     }
 
+    const int envScale = playback_scale_factor_env_override();
+    const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
+    const int envPreviewOverride = playbackPreviewAggressiveEnvOverride();
+    const bool aggressivePreviewActive = ( mlvPlaybackAggressivePreviewMode() != 0 );
+    const int phase3Tier =
+        playbackQualityModeIntIsPhase3( m_playbackQualityMode )
+            ? static_cast<int>(
+                  playbackQualityTierFromSettings(
+                      playbackQualityModeFromInt( m_playbackQualityMode ) ) )
+            : -1;
+
+    const PlaybackQualityIndicatorCache currentCache =
+    {
+        m_playbackQualityMode,
+        m_playbackScaleFactorOverride,
+        m_playbackQualityActiveScale,
+        m_playbackQualityActiveHq,
+        envScale,
+        envHq,
+        envPreviewOverride,
+        aggressivePreviewActive,
+        m_lastPresentedPlaybackScaleFactorActive,
+        m_lastPresentedRequestContextValid,
+        m_lastPresentedRequestContext.playbackScaleFactor,
+        phase3Tier
+    };
+    if( m_playbackQualityIndicatorCacheValid
+     && currentCache.playbackQualityMode == m_playbackQualityIndicatorCache.playbackQualityMode
+     && currentCache.playbackScaleFactorOverride == m_playbackQualityIndicatorCache.playbackScaleFactorOverride
+     && currentCache.playbackQualityActiveScale == m_playbackQualityIndicatorCache.playbackQualityActiveScale
+     && currentCache.playbackQualityActiveHq == m_playbackQualityIndicatorCache.playbackQualityActiveHq
+     && currentCache.envScale == m_playbackQualityIndicatorCache.envScale
+     && currentCache.envHq == m_playbackQualityIndicatorCache.envHq
+     && currentCache.envPreviewOverride == m_playbackQualityIndicatorCache.envPreviewOverride
+     && currentCache.aggressivePreviewActive == m_playbackQualityIndicatorCache.aggressivePreviewActive
+     && currentCache.lastPresentedPlaybackScaleFactorActive
+            == m_playbackQualityIndicatorCache.lastPresentedPlaybackScaleFactorActive
+     && currentCache.lastPresentedRequestContextValid
+            == m_playbackQualityIndicatorCache.lastPresentedRequestContextValid
+     && currentCache.lastPresentedRequestScaleFactor
+            == m_playbackQualityIndicatorCache.lastPresentedRequestScaleFactor
+     && currentCache.phase3Tier == m_playbackQualityIndicatorCache.phase3Tier )
+    {
+        return;
+    }
+
     /* The indicator must reflect what is ACTUALLY happening, not what is
      * stored. Developer env vars win first, then the explicit UI override,
      * then the saved playback mode. That keeps the on-screen label aligned
@@ -14039,15 +14105,11 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     const bool guiScaleSettingActive =
         ( m_playbackScaleFactorOverride == 1 || m_playbackScaleFactorOverride == 2
        || m_playbackScaleFactorOverride == 4 || m_playbackScaleFactorOverride == 8 );
-    const int envScale = playback_scale_factor_env_override();
-    const bool envHq = dualIsoPlaybackPreferHqMean23ViaEnv();
     const bool envScaleFixed =
         envScale == 1 || envScale == 2 || envScale == 4 || envScale == 8;
     const bool envScaleAuto = envScale == -1;
     const bool envOverrideActive =
         envScaleFixed || envScaleAuto || envHq;
-    const int envPreviewOverride = playbackPreviewAggressiveEnvOverride();
-    const bool aggressivePreviewActive = ( mlvPlaybackAggressivePreviewMode() != 0 );
     const bool guiScaleOverrideActive = !envOverrideActive && guiScaleSettingActive;
     auto playbackScaleLabel = [this]( int requestedScale ) -> QString
     {
@@ -14166,7 +14228,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         if( playbackQualityModeIntIsPhase3( m_playbackQualityMode ) )
         {
             const PlaybackQualityTier tier =
-                playbackQualityTierFromSettings( playbackQualityModeFromInt( m_playbackQualityMode ) );
+                static_cast<PlaybackQualityTier>( phase3Tier );
             text += tr( " (%1)" ).arg( QString::fromLatin1( playbackQualityTierName( tier ) ) );
         }
     }
@@ -14234,6 +14296,9 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             m_pPlaybackQualityToolButton->setStyleSheet( toolButtonStyle );
         }
     }
+
+    m_playbackQualityIndicatorCache = currentCache;
+    m_playbackQualityIndicatorCacheValid = true;
 }
 
 int MainWindow::effectivePlaybackScaleFactorForRequest( void ) const
@@ -18969,15 +19034,19 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
 {
     recordPresentedFrame( readyFrame, requestContext );
     m_lastPresentedFrameColorTelemetry = QJsonObject();
+    double headlessPresentedColorAnalysisMs = 0.0;
     if( m_headlessPlaybackProfileActive
      && rgb8DisplaySource
      && readyFrame.renderedImageWidth > 0
      && readyFrame.renderedImageHeight > 0 )
     {
+        const double colorAnalysisStart = mlv_stage_timing_now();
         const LookAssistStats frameStats =
             analyzeLookAssistThumbnail( rgb8DisplaySource,
                                         readyFrame.renderedImageWidth,
                                         readyFrame.renderedImageHeight );
+        headlessPresentedColorAnalysisMs =
+            ( mlv_stage_timing_now() - colorAnalysisStart ) * 1000.0;
         const double visibleGreenAxis =
             frameStats.visibleMeanG
             - ( ( frameStats.visibleMeanR + frameStats.visibleMeanB ) * 0.5 );
@@ -19002,6 +19071,9 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         m_lastPresentedFrameColorTelemetry.insert(
             QStringLiteral("presented_dual_iso_ui_pattern"),
             dualIsoUiPatternIndexFromCorePattern( readyFrame.dualIsoPattern ) );
+        m_lastPresentedFrameColorTelemetry.insert(
+            QStringLiteral("headless_presented_color_analysis_ms"),
+            headlessPresentedColorAnalysisMs );
     }
     updatePlaybackQualityIndicator();
 
@@ -19422,23 +19494,44 @@ void MainWindow::drawFrameReady()
     m_lastDrawFrameReadySceneMs = (mlv_stage_timing_now() - scene_start) * 1000.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.scene", display_frame, m_lastDrawFrameReadySceneMs);
 
-    if( toolButtonDualIsoCurrentIndex() > 0 )
+    const int dualIsoToolMode = toolButtonDualIsoCurrentIndex();
+    if( dualIsoToolMode > 0 )
     {
         ACTIVE_RECEIPT->setDualIsoAutoCorrected( 1 );
+        int cachedPattern = m_dualIsoPlaybackUiCacheValid
+            ? m_dualIsoPlaybackUiCache.pattern
+            : -2;
 
         if( readyFrame.dualIsoPattern < 0 )
         {
             const int uiPattern =
                 dualIsoUiPatternIndexFromCorePattern( readyFrame.dualIsoPattern );
-            ui->DualIsoPatternComboBox->blockSignals( true );
-            ui->DualIsoPatternComboBox->setCurrentIndex( uiPattern );
-            ui->DualIsoPatternComboBox->blockSignals( false );
+            const bool dualIsoWidgetCacheHit =
+                m_dualIsoPlaybackUiCacheValid
+             && m_dualIsoPlaybackUiCache.toolMode == dualIsoToolMode
+             && m_dualIsoPlaybackUiCache.pattern == uiPattern
+             && m_dualIsoPlaybackUiCache.autoCorrection == readyFrame.dualIsoAutoCorrection
+             && m_dualIsoPlaybackUiCache.evCorrection == readyFrame.dualIsoEvCorrection
+             && m_dualIsoPlaybackUiCache.blackDelta == readyFrame.dualIsoBlackDelta;
+            if( !dualIsoWidgetCacheHit )
+            {
+                ui->DualIsoPatternComboBox->blockSignals( true );
+                ui->DualIsoPatternComboBox->setCurrentIndex( uiPattern );
+                ui->DualIsoPatternComboBox->blockSignals( false );
+            }
             ACTIVE_RECEIPT->setDualIsoPattern( uiPattern );
+            cachedPattern = uiPattern;
         }
 
-        if( toolButtonDualIsoCurrentIndex() == 1 && readyFrame.dualIsoAutoCorrection < 0 )
+        if( dualIsoToolMode == 1 && readyFrame.dualIsoAutoCorrection < 0 )
         {
-            if( readyFrame.dualIsoEvCorrection != 1.0 )
+            const bool dualIsoWidgetCacheHit =
+                m_dualIsoPlaybackUiCacheValid
+             && m_dualIsoPlaybackUiCache.toolMode == dualIsoToolMode
+             && m_dualIsoPlaybackUiCache.autoCorrection == readyFrame.dualIsoAutoCorrection
+             && m_dualIsoPlaybackUiCache.evCorrection == readyFrame.dualIsoEvCorrection
+             && m_dualIsoPlaybackUiCache.blackDelta == readyFrame.dualIsoBlackDelta;
+            if( !dualIsoWidgetCacheHit && readyFrame.dualIsoEvCorrection != 1.0 )
             {
                 ui->horizontalSliderDualIsoEvCorrection->blockSignals( true );
                 ui->horizontalSliderDualIsoEvCorrection->setValue( (readyFrame.dualIsoEvCorrection * 200) - 0.5 );
@@ -19446,13 +19539,29 @@ void MainWindow::drawFrameReady()
                 ui->DualIsoEvCorrectionVal->setText( QString("%1").arg( readyFrame.dualIsoEvCorrection, 0, 'f', 2 ) );
             }
 
-            if( readyFrame.dualIsoBlackDelta != -1 )
+            if( !dualIsoWidgetCacheHit && readyFrame.dualIsoBlackDelta != -1 )
             {
                 ui->horizontalSliderDualIsoBlackDelta->blockSignals( true );
                 ui->horizontalSliderDualIsoBlackDelta->setValue( readyFrame.dualIsoBlackDelta );
                 ui->horizontalSliderDualIsoBlackDelta->blockSignals( false );
                 ui->DualIsoBlackDeltaVal->setText( QString("%1").arg( readyFrame.dualIsoBlackDelta ) );
             }
+
+            m_dualIsoPlaybackUiCache.toolMode = dualIsoToolMode;
+            m_dualIsoPlaybackUiCache.pattern = cachedPattern;
+            m_dualIsoPlaybackUiCache.autoCorrection = readyFrame.dualIsoAutoCorrection;
+            m_dualIsoPlaybackUiCache.evCorrection = readyFrame.dualIsoEvCorrection;
+            m_dualIsoPlaybackUiCache.blackDelta = readyFrame.dualIsoBlackDelta;
+            m_dualIsoPlaybackUiCacheValid = true;
+        }
+        else
+        {
+            m_dualIsoPlaybackUiCache.toolMode = dualIsoToolMode;
+            m_dualIsoPlaybackUiCache.pattern = cachedPattern;
+            m_dualIsoPlaybackUiCache.autoCorrection = readyFrame.dualIsoAutoCorrection;
+            m_dualIsoPlaybackUiCache.evCorrection = readyFrame.dualIsoEvCorrection;
+            m_dualIsoPlaybackUiCache.blackDelta = readyFrame.dualIsoBlackDelta;
+            m_dualIsoPlaybackUiCacheValid = true;
         }
     }
 

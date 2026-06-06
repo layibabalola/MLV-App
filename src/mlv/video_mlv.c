@@ -3024,10 +3024,13 @@ static int mlv_phase4bv2_allow_fast_hq_via_env(void)
     return g_mlv_phase4bv2_allow_fast_hq_env_cache;
 }
 
-/* Opt-in x4 quality-preserving prototype: apply the full-res raw fix stages
- * before the x4 early reduction path, so receipts that need focus/bad/
+/* x2 quality-preserving full-res fix path: apply the full-res raw fix stages
+ * before the x2 early reduction path, so receipts that need focus/bad/
  * stripe/pattern corrections can still take the reduced Bayer path without
- * routing through the aggressive skip-fixes approximation. */
+ * routing through the aggressive skip-fixes approximation.
+ *
+ * Default-on for x2 sharp/smooth because the profile/smoke matrix showed it
+ * is the safer performance win; explicit env false/0 still opts out. */
 static int g_mlv_phase4bv2_x2_fullres_fix_env_cache = -1;
 
 static int mlv_phase4bv2_x2_fullres_fix_via_env(void)
@@ -3035,8 +3038,15 @@ static int mlv_phase4bv2_x2_fullres_fix_via_env(void)
     if (g_mlv_phase4bv2_x2_fullres_fix_env_cache < 0)
     {
         const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
-        g_mlv_phase4bv2_x2_fullres_fix_env_cache =
-            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+        if (!v || !*v)
+        {
+            g_mlv_phase4bv2_x2_fullres_fix_env_cache = 1;
+        }
+        else
+        {
+            g_mlv_phase4bv2_x2_fullres_fix_env_cache =
+                (strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+        }
     }
     return g_mlv_phase4bv2_x2_fullres_fix_env_cache;
 }

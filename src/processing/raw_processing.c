@@ -207,6 +207,19 @@ static int processing_aggressive_x8_shadows_highlights_quarterres_enabled(void)
     return enabled;
 }
 
+static int processing_aggressive_x2_shadows_highlights_quarterres_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 1;
+    if( !initialized )
+    {
+        enabled = processing_env_flag_enabled(
+            getenv("MLVAPP_DISABLE_AGGRESSIVE_X2_SH_QUARTERRES") ) ? 0 : 1;
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int processing_main_prelude_probe_mode(void)
 {
     static int initialized = 0;
@@ -1152,8 +1165,9 @@ void applyProcessingObject( processingObject_t * processing,
         const int use_quarterres_rbf =
             processingPlaybackPreviewModeEnabled()
          && processingPlaybackAggressivePreviewModeEnabled()
-         && processingPlaybackPreviewScaleFactor() >= 8
-         && processing_aggressive_x8_shadows_highlights_quarterres_enabled()
+         && (processingPlaybackPreviewScaleFactor() >= 8
+             ? processing_aggressive_x8_shadows_highlights_quarterres_enabled()
+             : processing_aggressive_x2_shadows_highlights_quarterres_enabled())
          && imageX >= 4
          && imageY >= 4;
         const int use_halfres_rbf =
