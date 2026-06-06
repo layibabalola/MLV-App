@@ -565,6 +565,44 @@ TEST(ProcessingFilters, AggressiveX8PlaybackPreviewUsesQuarterresShadowsHighligh
     processingResetShadowsHighlightsProbeModeCacheForTesting();
 }
 
+TEST(ProcessingFilters, AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights)
+{
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
+    ProcessingPlaybackPreviewModeScope playback_scope;
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(1);
+    processingSetPlaybackPreviewScaleFactor(2);
+
+    const int width = 226;
+    const int height = 283;
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+    std::vector<uint16_t> output(input.size(), 0);
+
+    processingObject_t * processing = initProcessingObject();
+    ASSERT_TRUE(processing != nullptr);
+    processingSetShadows(processing, 0.30);
+    processingSetHighlights(processing, -0.20);
+
+    applyProcessingObject(processing,
+                          width,
+                          height,
+                          input.data(),
+                          output.data(),
+                          2,
+                          1,
+                          0);
+
+    ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterFullresMilliseconds());
+    ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds());
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds() > 0.0);
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterMilliseconds() > 0.0);
+
+    freeProcessingObject(processing);
+    unset_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
+}
+
 TEST(ProcessingFilters, ChromaSmooth2x2MatchesScalarReference)
 {
     const int width = 34;

@@ -14897,3 +14897,40 @@ Post-change stage timings:
 
 - Keep the next experiment focused on the remaining late-stage cost buckets rather than deepening raw prefetch again.
 - Re-run any future GUI smoke with explicit expected scale/quality values so validation reflects the intended baseline instead of the persisted app state.
+
+## 2026-06-06 - x2 aggressive quarterres shadows/highlights follow-up
+
+### Verified locally
+
+- Added the narrow x2 aggressive quarterres branch in `src/processing/raw_processing.c`:
+  - `processing_aggressive_x2_shadows_highlights_quarterres_enabled()`
+  - default on, with env opt-out `MLVAPP_DISABLE_AGGRESSIVE_X2_SH_QUARTERRES`
+  - aggressive preview now chooses the x8 quarterres helper when `scale_factor >= 8`, otherwise it can use the new x2 quarterres helper.
+- Added focused coverage in `tests/pipeline/test_processing_filters.cpp`:
+  - `ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights`
+  - the test asserts x2 aggressive preview takes the quarterres RBF path and does not fall back to halfres/fullres.
+- Rebuilt the user-facing release executable:
+  - `platform\\qt\\build-release\\release\\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 03:22:32 AM`
+  - `Length=9101824`
+  - SHA256 `B1D74BD693FD3A8C528358FC4840E0B587CD9CFC335AEC2588C94A47A621311E`
+- Focused pipeline test passed through the Windows wrapper:
+  - `ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights`
+  - `tests=159`, `assertions=5`, `skipped=0`, `failed=0`
+- Screenshot-backed GUI smoke passed on the x2 aggressive lane for all three standard clips with explicit aggressive-preview env:
+  - `M16-1327`: visible bottom-left `GUI FPS=16`, smoke presented FPS `9.703`, timeline FPS `23.605`, `clear-heuristic`
+  - `M16-1347`: visible bottom-left `GUI FPS=10`, smoke presented FPS `8.588`, timeline FPS `23.714`, `clear-heuristic`
+  - `M16-1446`: visible bottom-left `GUI FPS=12`, smoke presented FPS `11.011`, timeline FPS `23.655`, `clear-heuristic`
+- One x4 aggressive control smoke stayed clean on `M16-1327`:
+  - visible bottom-left `GUI FPS=4.8`, smoke presented FPS `15.786`, timeline FPS `23.891`, `clear-heuristic`
+- The presented-frame and window screenshots were captured for every smoke run, and the color scan did not trip any magenta/pink/green bar verdicts.
+
+### Cross-checked from prior analysis
+
+- The x2 lane is still the right place to keep pressure after the earlier x4-first matrix: the new branch is narrow, the focused test proves the intended path, and the smoke captures stayed visually clean.
+- The x4 control staying clean matters more here than any single GUI FPS number; the change did not widen the regression surface.
+
+### Needs runtime profiling
+
+- Keep ranking the next move by stage cost, not by bottom-left GUI FPS.
+- The remaining hot buckets are still the late-stage processing/presentation costs on the aggressive preview lanes; only widen scope if a fresh same-build matrix shows a real shift.
