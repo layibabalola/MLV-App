@@ -16186,3 +16186,36 @@ Post-change stage timings:
 - Keep the full playback objective intact.
 - Finish the resumed smoke matrix before ranking the next bottleneck again.
 - The next good candidate after the matrix is still the shared present/render ownership path in `MainWindow.cpp` / `RenderFrameThread.cpp`, not another receipt-write guard.
+
+### 2026-06-07 - x8 presentation cubic path validated; same-build matrix stayed clean; closeout workflow reminder
+
+### Verified locally
+
+- I threaded the active playback scale into the Qt presentation policy path in [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp), [`platform/qt/MainWindowGpuPreviewPolicy.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindowGpuPreviewPolicy.h), and [`platform/qt/PlaybackScaling.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/PlaybackScaling.h) so the x8 aggressive lane can use cubic final viewport resize instead of always staying on the nearest-neighbor fast path.
+- I rebuilt the user-facing release binary:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 3:24:48 PM`
+  - `Length=9110016`
+  - `SHA256=254802153590936C8F3BE0CB4CFC63E4CB954FBF105719BF7F3575C9DC0B7DA3`
+- Qt-linked regression checks stayed green on the rebuilt tree:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `PlaybackScaling.*` -> `163 tests`, `85063 assertions`, `1 skipped`, `0 failed`
+
+### Cross-checked from runtime profiling
+
+- I reran the full same-build standard M16 matrix at `1x`, `2x`, `4x`, and `8x` with 30-second screenshot-backed smoke on all three clips.
+- All 12 runs stayed `clear-heuristic` and `validation.ok=true`.
+- Current scale averages:
+  - x1: presented `7.39 fps`, timeline `23.44 fps`, GUI `7.33`, render `111.22 ms` (`8.99 FPS-equivalent`), `llrawproc` `27.13 ms` (`36.86 FPS-equivalent`), `processed8` `109.77 ms` (`9.11 FPS-equivalent`)
+  - x2: presented `13.12 fps`, timeline `23.32 fps`, GUI `14.80`, render `48.55 ms` (`20.60 FPS-equivalent`), `llrawproc` `10.34 ms` (`96.71 FPS-equivalent`), `processed8` `45.80 ms` (`21.83 FPS-equivalent`)
+  - x4: presented `12.97 fps`, timeline `23.41 fps`, GUI `12.00`, render `50.33 ms` (`19.87 FPS-equivalent`), `llrawproc` `7.49 ms` (`133.51 FPS-equivalent`), `processed8` `47.31 ms` (`21.14 FPS-equivalent`)
+  - x8: presented `11.36 fps`, timeline `23.48 fps`, GUI `11.33`, render `66.81 ms` (`14.97 FPS-equivalent`), `llrawproc` `27.41 ms` (`36.48 FPS-equivalent`), `processed8` `58.86 ms` (`16.99 FPS-equivalent`)
+- The x8 canary screenshot still looks a bit softer and more edge-fringed than x4, but the run stayed in the clear heuristic band and did not show a new magenta/pink/green bar pattern.
+- x4 remains the best balanced aggressive lane.
+- The x8 presentation tweak is keeper-safe for now, but it is still a throughput canary rather than a true winner.
+
+### Workflow Prevention
+
+- Before the next finalize attempt in this repo, check the latest `repo-sweep-closeout.ps1` report and make sure the retained split branch/worktree blocker has been addressed or explicitly recorded.
+- If the repo-sweep report still names a stale split candidate, treat that as a closeout blocker first instead of spending more time on playback tuning.
+- When the session starts to get bloated or frozen, stop cleanly, write the handoff, and resume from the next session prompt instead of stretching the same turn.
