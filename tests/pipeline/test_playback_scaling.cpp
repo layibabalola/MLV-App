@@ -564,6 +564,13 @@ TEST(PlaybackScaling, PresentationResamplerPolicySplitsSharpAndAggressive)
                   false,
                   false,
                   false)));
+    ASSERT_EQ(static_cast<int>(PlaybackPresentationScaleResampler::Cubic),
+              static_cast<int>(playbackChoosePresentationScaleResampler(
+                  8,
+                  8,
+                  true,
+                  true,
+                  true)));
 }
 
 TEST(PlaybackScaling, SuppressesUniformTopMagentaBandOnly)

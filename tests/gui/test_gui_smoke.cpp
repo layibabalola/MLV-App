@@ -569,6 +569,7 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions()
     state.gpuViewportInstalled = true;
     state.zebrasEnabled = true;
     state.transformationMode = Qt::FastTransformation;
+    state.playbackScaleFactorActive = 4;
 
     GpuDisplayViewport::PresentationOptions options =
         mainWindowBuildGpuPresentationOptions(state);
@@ -581,6 +582,12 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions()
     state.betterResizerEnabled = false;
     options = mainWindowBuildGpuPresentationOptions(state);
     QCOMPARE(options.samplingMode, GpuDisplayViewport::SamplingLinear);
+
+    state.transformationMode = Qt::FastTransformation;
+    state.playbackScaleFactorActive = 8;
+    state.betterResizerEnabled = false;
+    options = mainWindowBuildGpuPresentationOptions(state);
+    QCOMPARE(options.samplingMode, GpuDisplayViewport::SamplingBicubic);
 
     state.betterResizerEnabled = true;
     options = mainWindowBuildGpuPresentationOptions(state);
