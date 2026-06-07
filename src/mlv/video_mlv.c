@@ -428,6 +428,11 @@ static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t 
     return MLV_RAW_UINT16_PREFETCH_LOOKAHEAD;
 }
 
+uint32_t mlvRawUint16PrefetchLookaheadForTesting(const mlvObject_t * video)
+{
+    return mlv_raw_uint16_prefetch_lookahead_for_request(video);
+}
+
 static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
 {
     /* Keep the env override for experimentation, but let the x2/x4 aggressive
@@ -5407,6 +5412,8 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
         mlv_processed_frame_state_signature_with_scale(video, normalizedScale);
     const uint64_t requested_signature =
         mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex);
+    const int skip_processed8_main_cache =
+        mlvPlaybackAggressivePreviewMode() && normalizedScale >= 2;
 
     if (!mlv_render_processed_frame8_direct_with_processing_from_raw(video,
                                                                       video->processing,
@@ -5433,17 +5440,20 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
         mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
     const int stored_phase4b_path = mlv_phase4bv2_last_path_taken();
     const int stored_phase4b_y_crop_rows = mlv_phase4bv3_last_y_crop_rows();
-    mlv_store_processed_frame_8bit_cache_with_scale(video,
-                                                    frameIndex,
-                                                    threads,
-                                                    stored_signature ? stored_signature : requested_signature,
-                                                    outputFrame,
-                                                    rgb_frame_size,
-                                                    1,
-                                                    0,
-                                                    normalizedScale,
-                                                    stored_phase4b_path,
-                                                    stored_phase4b_y_crop_rows);
+    if (!skip_processed8_main_cache)
+    {
+        mlv_store_processed_frame_8bit_cache_with_scale(video,
+                                                        frameIndex,
+                                                        threads,
+                                                        stored_signature ? stored_signature : requested_signature,
+                                                        outputFrame,
+                                                        rgb_frame_size,
+                                                        1,
+                                                        0,
+                                                        normalizedScale,
+                                                        stored_phase4b_path,
+                                                        stored_phase4b_y_crop_rows);
+    }
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
@@ -5501,6 +5511,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
         mlv_processed_frame_state_signature_with_scale(video, normalizedScale);
     const uint64_t requested_signature =
         mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex);
+    const int skip_processed8_main_cache =
+        mlvPlaybackAggressivePreviewMode() && normalizedScale >= 2;
 
     if (!mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(video,
                                                                               video->processing,
@@ -5527,17 +5539,20 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
         mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
     const int stored_phase4b_path = mlv_phase4bv2_last_path_taken();
     const int stored_phase4b_y_crop_rows = mlv_phase4bv3_last_y_crop_rows();
-    mlv_store_processed_frame_8bit_cache_with_scale(video,
-                                                    frameIndex,
-                                                    threads,
-                                                    stored_signature ? stored_signature : requested_signature,
-                                                    outputFrame,
-                                                    rgb_frame_size,
-                                                    1,
-                                                    0,
-                                                    normalizedScale,
-                                                    stored_phase4b_path,
-                                                    stored_phase4b_y_crop_rows);
+    if (!skip_processed8_main_cache)
+    {
+        mlv_store_processed_frame_8bit_cache_with_scale(video,
+                                                        frameIndex,
+                                                        threads,
+                                                        stored_signature ? stored_signature : requested_signature,
+                                                        outputFrame,
+                                                        rgb_frame_size,
+                                                        1,
+                                                        0,
+                                                        normalizedScale,
+                                                        stored_phase4b_path,
+                                                        stored_phase4b_y_crop_rows);
+    }
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
