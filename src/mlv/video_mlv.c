@@ -445,7 +445,7 @@ static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
     }
 
     return video
-        && video->playback_scale_factor_active >= 2
+        && video->playback_scale_factor_active >= 1
         && mlvPlaybackAggressivePreviewMode();
 }
 
