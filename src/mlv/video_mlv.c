@@ -383,6 +383,12 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
         return 1;
     }
 
+    if (video->playback_scale_factor_active >= 4
+        && mlvPlaybackAggressivePreviewMode())
+    {
+        return 0;
+    }
+
     /* On full-recon HQ Dual ISO scale-4+ playback, the prefetch worker
      * competes with full20 reconstruction; foreground decode is cheaper there.
      * In aggressive reduced previews, Phase 4B has already moved recon/debayer
@@ -1777,6 +1783,13 @@ static void mlv_store_processed_frame_8bit_cache_with_scale(mlvObject_t * video,
             || !video
             || !video->processing
             || !processingCanUseDirect8BitOutput(video->processing)))
+    {
+        return;
+    }
+
+    if (prefetched == 0
+        && scaleFactor == 8
+        && mlvPlaybackAggressivePreviewMode())
     {
         return;
     }
@@ -5086,7 +5099,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     const int skip_processed8_main_cache =
         mlvPlaybackAggressivePreviewMode()
      && ((normalizedScale == 1)
-      || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4)));
+      || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4 || normalizedScale == 8)));
     uint64_t requested_state_signature = 0;
 
     if (direct8PathActive)
@@ -5717,6 +5730,11 @@ double getMlvLastRawUint16CopyMilliseconds(void)
 int getMlvLastRawUint16PrefetchHit(void)
 {
     return g_mlv_last_raw_uint16_prefetch_hit;
+}
+
+int mlvRawUint16PrefetchAllowedForTesting(const mlvObject_t * video)
+{
+    return mlv_raw_uint16_prefetch_allowed_for_request(video);
 }
 
 uint64_t getMlvRawUint16PrefetchDecodeFailures(mlvObject_t * video)

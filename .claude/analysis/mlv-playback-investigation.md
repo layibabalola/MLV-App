@@ -15936,3 +15936,166 @@ Post-change stage timings:
 - Keep the new processed8 prefetch contract if we want the small x4 gain and the x2/x4 shared-tail overlap.
 - If the next step is another throughput pass, it should be a different shared-path reduction, not more x2 raw-prefetch widening.
 - x8 still deserves the tightest visual review on M16-1327 even though the automated color scan stayed green.
+
+### 2026-06-07 - x8 aggressive fallback now skips processed8 cache-store bookkeeping
+
+### Verified locally
+
+- I extended the aggressive processed8 cache-bookkeeping skip in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so the non-direct aggressive x8 fallback lane now skips the same processed8 cache-store work that x1/x2/x4 already skip.
+- I added a regression in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp) to assert that aggressive x8 fallback leaves `getMlvLastProcessed8CacheStoreMilliseconds()` at `0.0`.
+- The rebuilt user-facing release binary is:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 10:24:11 AM`
+  - `Length=9106944`
+  - `SHA256=CBD22545B75EC0CE7CA8126F9554049B0625820784EE4417EB49DF3F51E2DEC3`
+- Qt-linked regression checks stayed green:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `DualIsoPipeline.RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoAndFour` -> `163 tests`, `0 failed`
+  - `DualIsoPipeline.Processed8PrefetchEnablesAggressiveScaleTwoAndFour` -> `1 test`, `0 failed`
+  - `DualIsoPipeline.Phase4B_NonDualIsoScaleEightAggressiveSkipsProcessed8CacheBookkeeping` -> `1 test`, `0 failed`
+
+### Cross-checked from runtime profiling
+
+- I reran the full same-build standard M16 matrix across `1x`, `2x`, `4x`, and `8x` with 30-second screenshot-backed smoke on all three clips.
+- All 12 runs stayed `clear-heuristic`.
+- The new scale averages were:
+  - x1: presented `7.17-8.38 fps`, timeline `23.38-23.47 fps`, GUI `7.0-7.9`, render `96.40-114.43 ms` (`10.37-8.73 FPS-equivalent`), `llrawproc` `24.37-28.38 ms` (`41.03-35.24 FPS-equivalent`), `processed8` `95.01-112.88 ms` (`10.52-8.86 FPS-equivalent`)
+  - x2: presented `12.17-12.35 fps`, timeline `23.31-23.33 fps`, GUI `10-11`, render `53.28-53.82 ms` (`18.77-18.59 FPS-equivalent`), `llrawproc` `11.07-12.16 ms` (`90.34-82.22 FPS-equivalent`), `processed8` `50.20-50.77 ms` (`19.92-19.70 FPS-equivalent`)
+  - x4: presented `13.44-13.79 fps`, timeline `23.39-23.50 fps`, GUI `12-13`, render `44.51-48.98 ms` (`22.47-20.42 FPS-equivalent`), `llrawproc` `6.79-7.47 ms` (`147.24-133.87 FPS-equivalent`), `processed8` `42.00-46.48 ms` (`23.81-21.52 FPS-equivalent`)
+  - x8: presented `11.26-11.54 fps`, timeline `23.40-23.62 fps`, GUI `9.7-12`, render `65.36-67.42 ms` (`15.30-14.83 FPS-equivalent`), `llrawproc` `25.41-28.80 ms` (`39.35-34.72 FPS-equivalent`), `processed8` `57.30-59.42 ms` (`17.45-16.83 FPS-equivalent`)
+- The x8 cache-store skip removed the `processed8_cache_store_ms` cost entirely on the smoke summaries, which is what we wanted from the bookkeeping trim.
+- x4 remains the best balanced aggressive lane on this matrix.
+- x8 is still the slowest visible lane on the hot clip family, but it is now a little cheaper and still visually clean by the heuristic.
+- The x8 canary still shows the same local edge-color roughness and block texture breakup when compared side-by-side with x4, even though the automated scan stays green.
+
+### Needs runtime profiling
+
+- Keep the x8 cache-store skip because it cut bookkeeping without introducing a new visual issue.
+- The next candidate should be a different shared-path reduction, not more x2 raw-prefetch widening.
+- If the goal is another meaningful throughput move, x8 still looks like the lane that deserves the next shared-path pass.
+
+### 2026-06-07 - rebuilt release matrix still ranks x4 best balanced, with x8 visually acceptable but slow
+
+### Verified locally
+
+- I rebuilt the user-facing release binary after the current keeper-safe x8 cache-store skip:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 11:22:01 AM`
+  - `Length=9106944`
+  - `SHA256=420B0325386F24A53D66DC606A313E43FA5015147BABD6B60D1291FA71249B87`
+- Qt-linked regression checks stayed green on the rebuilt tree:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `DualIsoPipeline.RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoAndFour` -> `163 tests`, `0 failed`
+  - `DualIsoPipeline.Processed8PrefetchEnablesAggressiveScaleTwoAndFour` -> `1 test`, `0 failed`
+  - `DualIsoPipeline.Phase4B_NonDualIsoScaleEightAggressiveSkipsProcessed8CacheBookkeeping` -> `1 test`, `0 failed`
+
+### Cross-checked from runtime profiling
+
+- I reran the full same-build standard M16 matrix at `1x`, `2x`, `4x`, and `8x` with 30-second screenshot-backed smoke on all three clips.
+- All 12 runs stayed `clear-heuristic` and `validation.ok=true`.
+- The new scale averages were:
+  - x1: presented `7.027-7.856 fps`, timeline `23.442-23.528 fps`, GUI `7.1-9.2`, render `102.698-117.285 ms` (`9.74-8.53 FPS-equivalent`), `llrawproc` `24.238-30.081 ms` (`41.26-33.24 FPS-equivalent`), `processed8` `101.206-115.882 ms` (`9.88-8.63 FPS-equivalent`)
+  - x2: presented `12.153-12.745 fps`, timeline `23.275-23.365 fps`, GUI `10-19`, render `50.336-53.805 ms` (`19.87-18.59 FPS-equivalent`), `llrawproc` `10.664-12.375 ms` (`93.77-80.81 FPS-equivalent`), `processed8` `47.806-50.535 ms` (`20.92-19.79 FPS-equivalent`)
+  - x4: presented `13.128-13.324 fps`, timeline `23.356-23.449 fps`, GUI `9.3-12`, render `46.576-50.920 ms` (`21.47-19.64 FPS-equivalent`), `llrawproc` `7.010-7.801 ms` (`142.65-128.19 FPS-equivalent`), `processed8` `43.899-48.125 ms` (`22.78-20.78 FPS-equivalent`)
+  - x8: presented `10.076-10.360 fps`, timeline `23.364-23.611 fps`, GUI `9.6-10`, render `73.582-76.066 ms` (`13.59-13.15 FPS-equivalent`), `llrawproc` `30.256-32.317 ms` (`33.05-30.94 FPS-equivalent`), `processed8` `64.747-66.508 ms` (`15.44-15.04 FPS-equivalent`)
+- x4 remains the best balanced aggressive lane on this rebuilt matrix.
+- x2 is still color-clean and visibly acceptable, but it did not overtake x4.
+- x8 remains the throughput and visual-risk canary, yet the screenshot inspection is now in the visually acceptable band rather than a blocker.
+- The x8 canary still shows the same local edge-color roughness and block texture breakup around the waterfall/rock boundary, but it is subtle enough that the screen grabs still look broadly fine.
+
+### Needs runtime profiling
+
+- Keep the x8 cache-store skip because it is still a keeper-safe bookkeeping win.
+- If the next step is another throughput pass, it should be a different shared-path reduction, not more x2 raw-prefetch widening.
+- The next lane to chase for visible improvement is still x4 throughput or x1/x2 cadence smoothness, depending on whether the goal is fastest realtime or smoothest playback feel.
+
+### 2026-06-07 - timer catch-up clamp widened to four frames to soften the busy advance without kneecapping x1/x2
+
+### Verified locally
+
+- I added a small `timerFrameEvent()` catch-up clamp in [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp) so a stalled advance only carries a bounded amount of elapsed time into the next playback tick.
+- The final clamp window is four frames, not two frames, so the busy-advance smoothing stays conservative enough for the slower lanes.
+- The rebuilt user-facing release binary is:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 11:56:07 AM`
+  - `Length=9106944`
+  - `SHA256=63B07A63C82D105384325FA04CC2F83D29B1C1A0872F8B88FA9B7FD50F54E07B`
+- Qt-linked regression checks stayed green on the rebuilt tree:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `DualIsoPipeline.Phase4B_NonDualIsoScaleEightAggressiveSkipsProcessed8CacheBookkeeping` -> `1 test`, `0 failed`
+
+### Cross-checked from runtime profiling
+
+- I reran the full same-build standard M16 matrix at `1x`, `2x`, `4x`, and `8x` with 30-second screenshot-backed smoke on all three clips.
+- All 12 runs stayed `clear-heuristic` and `validation.ok=true`.
+- Compared with the tighter two-frame clamp, the four-frame cap brought back more of the x1/x2 throughput while still leaving x8 visually acceptable:
+  - x1: presented `6.733-7.820 fps`, timeline `23.418-23.492 fps`, GUI `7-8.3`, render `104.589-121.732 ms` (`9.56-8.21 FPS-equivalent`), `llrawproc` `27.041-30.648 ms` (`36.98-32.63 FPS-equivalent`), `processed8` `103.260-120.141 ms` (`9.68-8.32 FPS-equivalent`)
+  - x2: presented `11.492-12.704 fps`, timeline `23.281-23.343 fps`, GUI `11-14`, render `50.729-56.659 ms` (`19.71-17.65 FPS-equivalent`), `llrawproc` `10.590-13.409 ms` (`94.43-74.58 FPS-equivalent`), `processed8` `47.639-53.732 ms` (`20.99-18.61 FPS-equivalent`)
+  - x4: presented `12.956-13.654 fps`, timeline `23.396-23.475 fps`, GUI `9.3-15`, render `46.005-50.483 ms` (`21.74-19.81 FPS-equivalent`), `llrawproc` `6.557-8.451 ms` (`152.51-118.33 FPS-equivalent`), `processed8` `43.331-47.296 ms` (`23.08-21.14 FPS-equivalent`)
+  - x8: presented `10.859-11.199 fps`, timeline `23.381-23.636 fps`, GUI `10-14`, render `67.680-71.456 ms` (`14.78-13.99 FPS-equivalent`), `llrawproc` `28.360-29.394 ms` (`35.26-34.02 FPS-equivalent`), `processed8` `59.472-62.788 ms` (`16.81-15.93 FPS-equivalent`)
+- x4 still looks like the best balanced aggressive lane.
+- x8 remains slower than x4 on the hot clip family, but it is visually acceptable and no longer reads like an artifact blocker.
+- The x8 canary screenshot stays in the subtle-edge-fringing bucket only; it does not show a new magenta/pink/green corruption pattern.
+
+### Needs runtime profiling
+
+- Keep the four-frame catch-up clamp only if the next pass confirms the x1/x2 feel is better than the two-frame version across more than one smoke run.
+- If the next step is another throughput pass, it should still be a different shared-path reduction, not more x2 raw-prefetch widening.
+- The next candidate after this clamp is still x4 throughput or another present/pacing reduction that can improve cadence without reintroducing a stall jump.
+
+### 2026-06-07 - aggressive x8 cache-store skip validated on the current rebuild matrix
+
+### Verified locally
+
+- I extended the aggressive processed8 cache-store skip in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so aggressive x8 now skips the same processed8 store bookkeeping that the other hot aggressive lanes already avoid.
+- I added a regression in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp) for the large bundled dual-ISO clip so the x8 direct path is exercised while the store-skip rule is active.
+- The rebuilt user-facing release binary is:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 12:24:53 PM`
+  - `Length=9106944`
+  - `SHA256=BFB552667E9E26519628A5FF769E4C17373C5CFBBB4E04CA6380E1058CB10A2D`
+- The focused Qt-linked checks stayed green:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `DualIsoPipeline.Phase4B_AggressiveScaleEightDirectPathSkipsProcessed8CacheStore` -> `0 failed` on the targeted pipeline run
+
+### Cross-checked from runtime profiling
+
+- I reran the full same-build standard M16 matrix at `1x`, `2x`, `4x`, and `8x` with 30-second screenshot-backed smoke on all three clips.
+- All 12 runs stayed `clear-heuristic`.
+- The current scale averages were:
+  - x1: presented `7.03-8.05 fps`, timeline `23.41-23.53 fps`, GUI `0.9-1.3`, render `100.42-106.52 ms` (`9.96-9.39 FPS-equivalent`), `llrawproc` `25.32-26.02 ms` (`39.50-38.43 FPS-equivalent`), `processed8` `99.02-105.27 ms` (`10.10-9.50 FPS-equivalent`)
+  - x2: presented `12.52-12.96 fps`, timeline `23.23-23.38 fps`, GUI `0.9-1.0`, render `48.80-50.97 ms` (`20.49-19.62 FPS-equivalent`), `llrawproc` `10.43-11.47 ms` (`95.91-87.18 FPS-equivalent`), `processed8` `46.01-47.98 ms` (`21.74-20.84 FPS-equivalent`)
+  - x4: presented `12.77-14.09 fps`, timeline `23.32-23.49 fps`, GUI `1.0-1.2`, render `44.45-52.54 ms` (`22.50-19.03 FPS-equivalent`), `llrawproc` `6.70-7.66 ms` (`149.30-130.63 FPS-equivalent`), `processed8` `41.98-49.82 ms` (`23.82-20.07 FPS-equivalent`)
+  - x8: presented `10.78-11.51 fps`, timeline `23.38-23.66 fps`, GUI `1.0-1.6`, render `66.09-70.84 ms` (`15.13-14.12 FPS-equivalent`), `llrawproc` `27.06-29.45 ms` (`36.96-33.96 FPS-equivalent`), `processed8` `58.03-62.24 ms` (`17.23-16.07 FPS-equivalent`)
+- x4 remains the best balanced aggressive lane.
+- x8 is still the throughput canary, but the new store skip kept the screenshots in the clear heuristic band and did not introduce a new color regression.
+- The x8 canary still looks a little rougher than x4 on local edge texture, but it is broadly acceptable rather than blocked.
+
+### Needs runtime profiling
+
+- The x8 store skip was a small keeper-safe throughput trim, but it did not change the lane ranking.
+- The next throughput move should still come from a different shared-path reduction rather than more raw-prefetch widening.
+- x1/x2 remain the cadence-smoothing lane if the next pass is about playback feel instead of raw throughput.
+
+### 2026-06-07 - aggressive raw prefetch disabled for x4/x8; matrix stayed clean and x4 remains the best balanced lane
+
+### Verified locally
+
+- I changed the aggressive raw-uint16 prefetch gate in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so it remains enabled for aggressive x1/x2 but is disabled for aggressive x4/x8.
+- I added a focused regression in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp) to lock the new x1/x2-only raw-prefetch contract.
+- The rebuilt user-facing release binary is:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `Length=9106944`
+
+### Cross-checked from runtime profiling
+
+- I reran the full same-build standard M16 matrix at `1x`, `2x`, `4x`, and `8x` with 30-second screenshot-backed smoke on all three clips.
+- All 12 runs stayed `clear-heuristic`.
+- Current scale averages:
+  - x1: presented `6.888-7.151 fps`, timeline `23.376-23.450 fps`, GUI `1.0-1.1`, render `114.775-119.739 ms` (`8.71-8.35 FPS-equivalent`), `llrawproc` `27.824-30.661 ms` (`35.94-32.61 FPS-equivalent`), `processed8` `113.242-118.220 ms` (`8.83-8.46 FPS-equivalent`)
+  - x2: presented `11.804-13.429 fps`, timeline `23.319-23.399 fps`, GUI `0.9-1.0`, render `46.625-56.624 ms` (`21.45-17.66 FPS-equivalent`), `llrawproc` `9.314-13.823 ms` (`107.37-72.34 FPS-equivalent`), `processed8` `44.082-53.550 ms` (`22.68-18.67 FPS-equivalent`)
+  - x4: presented `13.019-13.838 fps`, timeline `23.363-23.508 fps`, GUI `0.9-1.2`, render `43.032-49.268 ms` (`23.24-20.30 FPS-equivalent`), `llrawproc` `6.524-8.819 ms` (`153.28-113.39 FPS-equivalent`), `processed8` `40.490-46.454 ms` (`24.70-21.53 FPS-equivalent`)
+  - x8: presented `11.061-11.277 fps`, timeline `23.375-23.615 fps`, GUI `1.0-1.6`, render `67.031-69.150 ms` (`14.92-14.46 FPS-equivalent`), `llrawproc` `28.062-30.553 ms` (`35.64-32.73 FPS-equivalent`), `processed8` `58.705-61.156 ms` (`17.03-16.35 FPS-equivalent`)
+- x4 remains the best balanced aggressive lane.
+- x1/x2 remain the cadence-smoothing lanes, but the current gate kept them visibly clean.
+- x8 remains the throughput canary, but it is now visually acceptable and no longer reads like a blocker.

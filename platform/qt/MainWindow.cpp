@@ -1469,12 +1469,23 @@ void MainWindow::timerFrameEvent( void )
         m_playbackFrameAdvancePending = true;
         return;
     }
+    const bool hadPendingPlaybackAdvance = m_playbackFrameAdvancePending;
     m_playbackFrameAdvancePending = false;
     if( !m_exportQueue.empty() ) return;
 
     //Time measurement
     QTime nowTime = QTime::currentTime();
     timeDiff = lastTime.msecsTo( nowTime );
+    if( ui->actionPlay->isChecked() && hadPendingPlaybackAdvance )
+    {
+        const int frameIntervalMs =
+            qMax( 1, static_cast<int>( 1000.0 / qMax( 1.0, getFramerate() ) ) );
+        const int maxCatchUpMs = frameIntervalMs * 4;
+        if( timeDiff > maxCatchUpMs )
+        {
+            timeDiff = maxCatchUpMs;
+        }
+    }
 
     //Playback
     const int positionBeforePlayback = ui->horizontalSliderPosition->value();
