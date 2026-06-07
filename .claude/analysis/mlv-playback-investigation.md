@@ -16099,3 +16099,90 @@ Post-change stage timings:
 - x4 remains the best balanced aggressive lane.
 - x1/x2 remain the cadence-smoothing lanes, but the current gate kept them visibly clean.
 - x8 remains the throughput canary, but it is now visually acceptable and no longer reads like a blocker.
+
+### 2026-06-07 - aggressive processed8 prefetch enabled for x1; same-build matrix improved without reopening color risk
+
+### Verified locally
+
+- I widened [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so aggressive processed8 prefetch now applies to x1 as well as x2/x4.
+- I updated the regression in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp) to lock the x1/x2/x4 processed8 prefetch contract.
+- The rebuilt user-facing release binary is:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 12:45:25 PM`
+  - `Length=9106944`
+  - `SHA256=F8DB1936F76B01BEC2B3C128D7F96CB380C90DE2ACF717EF15E2CA063F48D8BA`
+- Qt-linked regression checks stayed green on the rebuilt tree:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `DualIsoPipeline.Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour` -> `1 test`, `0 failed`
+
+### Cross-checked from runtime profiling
+
+- I reran the full same-build standard M16 matrix at `1x`, `2x`, `4x`, and `8x` with 30-second screenshot-backed smoke on all three clips.
+- All 12 runs stayed `clear-heuristic` and `validation.ok=true`.
+- Current scale averages:
+  - x1: presented `7.517 fps`, timeline `23.449 fps`, GUI `1.167`, render `108.954 ms` (`9.18 FPS-equivalent`), `llrawproc` `26.956 ms` (`37.10 FPS-equivalent`), `processed8` `107.556 ms` (`9.30 FPS-equivalent`)
+  - x2: presented `12.823 fps`, timeline `23.338 fps`, GUI `0.967`, render `49.464 ms` (`20.22 FPS-equivalent`), `llrawproc` `10.581 ms` (`94.51 FPS-equivalent`), `processed8` `46.774 ms` (`21.38 FPS-equivalent`)
+  - x4: presented `13.523 fps`, timeline `23.419 fps`, GUI `1.133`, render `47.496 ms` (`21.05 FPS-equivalent`), `llrawproc` `7.330 ms` (`136.42 FPS-equivalent`), `processed8` `44.925 ms` (`22.26 FPS-equivalent`)
+  - x8: presented `11.042 fps`, timeline `23.505 fps`, GUI `1.367`, render `69.492 ms` (`14.39 FPS-equivalent`), `llrawproc` `28.601 ms` (`34.96 FPS-equivalent`), `processed8` `61.041 ms` (`16.38 FPS-equivalent`)
+- x1 improved materially from the previous baseline and is no longer the obvious laggard by feel.
+- x4 still looks like the best balanced aggressive lane.
+- x8 stayed in the clear heuristic band and still only shows the subtle local edge roughness that had already been judged visually acceptable.
+
+### 2026-06-07 - three-frame catch-up clamp regressed the matrix; restored four-frame baseline kept the lanes clean
+
+### Verified locally
+
+- I restored the `timerFrameEvent()` busy-advance catch-up clamp in [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp) back to four frame intervals after the three-frame experiment regressed the matrix.
+- I rebuilt the user-facing release binary after the restore:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 2:06:13 PM`
+  - `Length=9106944`
+  - `SHA256=A1816A25F6C247EE09B180EF69AB01F3F6CF0FE6CCCDB791595C3537AFAA1603`
+- Qt-linked regression checks stayed green on the rebuilt tree:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `DualIsoPipeline.RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoAndFour` -> `163 tests`, `0 failed`
+
+### Cross-checked from runtime profiling
+
+- I reran the same-build standard M16 matrix on the restored four-frame baseline with 30-second screenshot-backed smoke for `1x`, `2x`, `4x`, and `8x` across `M16-1327`, `M16-1347`, and `M16-1446`.
+- All 12 runs stayed `clear-heuristic` and `validation.ok=true`.
+- Restored-baseline averages:
+  - x1: presented `7.01 fps`, timeline `23.39 fps`, GUI `8.10`, render `117.28 ms` (`8.53 FPS-equivalent`), `llrawproc` `29.70 ms` (`33.67 FPS-equivalent`), `processed8` `115.83 ms` (`8.63 FPS-equivalent`)
+  - x2: presented `12.55 fps`, timeline `23.33 fps`, GUI `8.83`, render `51.67 ms` (`19.35 FPS-equivalent`), `llrawproc` `11.35 ms` (`88.12 FPS-equivalent`), `processed8` `48.89 ms` (`20.45 FPS-equivalent`)
+  - x4: presented `13.84 fps`, timeline `23.41 fps`, GUI `13.00`, render `45.74 ms` (`21.86 FPS-equivalent`), `llrawproc` `6.88 ms` (`145.42 FPS-equivalent`), `processed8` `43.17 ms` (`23.17 FPS-equivalent`)
+  - x8: presented `10.46 fps`, timeline `23.50 fps`, GUI `9.80`, render `74.29 ms` (`13.46 FPS-equivalent`), `llrawproc` `31.78 ms` (`31.47 FPS-equivalent`), `processed8` `65.32 ms` (`15.31 FPS-equivalent`)
+- The three-frame clamp was a regression and is not worth keeping.
+- `x4` remains the best balanced aggressive lane.
+- `x8` is still the throughput canary, but the current presented frame is visually acceptable and does not show a new block/bar artifact.
+
+### 2026-06-07 - handoff snapshot after receipt-guard revert and partial matrix restart
+
+### Verified locally
+
+- The receipt-write guard in `platform/qt/MainWindow.cpp` was reverted because the matrix did not support keeping it.
+- The release binary was rebuilt after the revert:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-07 2:49:50 PM`
+  - `Length=9106944`
+  - `SHA256=A71F3AAF6E431D22DF79C09C849FC225A9B6A0236A289CA5198B22F001964FED`
+- Qt-linked checks stayed green after the revert:
+  - `PlaybackQualityAutoSampler.*` -> `95 tests`, `40 assertions`, `0 failed`
+  - `DualIsoPipeline.RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoAndFour` -> `163 tests`, `0 failed`
+  - `DualIsoPipeline.Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour` -> `1 test`, `0 failed`
+  - `DualIsoPipeline.Phase4B_NonDualIsoScaleEightAggressiveSkipsProcessed8CacheBookkeeping` -> `1 test`, `0 failed`
+
+### Cross-checked from runtime profiling
+
+- The same-build standard M16 smoke matrix was restarted after the revert into `.claude-state/profiling/20260607-reverted-receipt-guard-matrix`.
+- At handoff time, `scale-1` and `scale-2` are complete, `scale-4` has started, and `scale-8` has not started yet.
+- The interrupted run directory currently contains 36 files, with per-scale file counts:
+  - `scale-1` -> `15`
+  - `scale-2` -> `15`
+  - `scale-4` -> `6`
+- The earlier receipt-write-guard matrix showed the guard was not a keeper because it worsened the balanced lanes (`x1/x2/x4`) more than it helped `x8`, so the guard was backed out before resuming the matrix.
+
+### Handoff guidance
+
+- Keep the full playback objective intact.
+- Finish the resumed smoke matrix before ranking the next bottleneck again.
+- The next good candidate after the matrix is still the shared present/render ownership path in `MainWindow.cpp` / `RenderFrameThread.cpp`, not another receipt-write guard.

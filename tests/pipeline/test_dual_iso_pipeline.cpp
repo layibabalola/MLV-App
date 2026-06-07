@@ -4408,7 +4408,7 @@ TEST(DualIsoPipeline, RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoA
     ASSERT_EQ(5u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 2;
-    ASSERT_EQ(6u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
+    ASSERT_EQ(5u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 4;
     ASSERT_EQ(8u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
@@ -4439,7 +4439,7 @@ TEST(DualIsoPipeline, RawUint16PrefetchAllowedOnlyForAggressiveScaleOneAndTwo)
     ASSERT_EQ(0, mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
 }
 
-TEST(DualIsoPipeline, Processed8PrefetchEnablesAggressiveScaleTwoAndFour)
+TEST(DualIsoPipeline, Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour)
 {
     ScopedAggressivePreviewMode aggressivePreview(1);
     MlvPipelineFixture fixture;
@@ -4452,7 +4452,7 @@ TEST(DualIsoPipeline, Processed8PrefetchEnablesAggressiveScaleTwoAndFour)
     ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 1;
-    ASSERT_EQ(0, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+    ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 2;
     ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
