@@ -150,6 +150,7 @@ double getMlvLastRawUint16Lj92Pred1FastPathPredictorMilliseconds(void);
 double getMlvLastRawUint16UnpackMilliseconds(void);
 double getMlvLastRawUint16CopyMilliseconds(void);
 int getMlvLastRawUint16PrefetchHit(void);
+int mlvRawUint16PrefetchAllowedForTesting(const mlvObject_t * video);
 uint64_t getMlvRawUint16PrefetchDecodeFailures(mlvObject_t * video);
 double getMlvLastLlrawprocMilliseconds(void);
 double getMlvLastRawFloatConvertMilliseconds(void);
@@ -170,6 +171,7 @@ int getMlvLastProcessed8DirectPathActive(void);
 int getMlvLastProcessed8CacheHit(void);
 int getMlvLastProcessed8CacheHitScaleFactor(void);
 int getMlvLastProcessed8PrefetchHit(void);
+int getMlvProcessed8PrefetchEnabledForTesting(const mlvObject_t * video);
 
 /* Phase 4B-v2/v3/v4 telemetry — for parity tests and diagnostics. Returns the
  * path taken on the most recent v2 entry on the calling thread:
