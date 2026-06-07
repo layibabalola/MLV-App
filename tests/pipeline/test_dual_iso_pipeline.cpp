@@ -3911,13 +3911,12 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY)
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
 }
 
-TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesUsesEarlyFullXY)
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesDefaultsOnWhenUnset)
 {
     ScopedAggressivePreviewMode aggressivePreview(0);
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
     MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
     mlv_phase4bv_reset_env_cache_for_testing();
-    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES", "1");
     MLVAPP_TEST_SETENV("MLVAPP_LOG_PHASE4BV2", "1");
     mlv_phase4bv_reset_env_cache_for_testing();
 
@@ -3969,6 +3968,50 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesUsesEarlyFullXY)
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
 }
 
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesCanBeOptedOut)
+{
+    ScopedAggressivePreviewMode aggressivePreview(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
+    mlv_phase4bv_reset_env_cache_for_testing();
+    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES", "0");
+    MLVAPP_TEST_SETENV("MLVAPP_LOG_PHASE4BV2", "1");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(1);
+    fixture.receipt().setBadPixels(1);
+    fixture.receipt().setVerticalStripes(1);
+    fixture.receipt().setPatternNoise(1);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+    ASSERT_EQ(1, llrpGetFixRawMode(fixture.video()));
+    ASSERT_TRUE(llrpHQDualIso(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || full_h < 16) {
+        MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+        mlv_phase4bv_reset_env_cache_for_testing();
+        return;
+    }
+
+    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 4);
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
+    mlv_phase4bv_reset_env_cache_for_testing();
+
+    ASSERT_EQ(static_cast<std::size_t>(full_w / 4) * (full_h / 4) * 3u, got.size());
+    ASSERT_EQ(4, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+    ASSERT_NE(std::string("none"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+}
+
 TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightAggressiveSkipsCoordinateRawFixesForEarlyPath)
 {
     ScopedAggressivePreviewMode aggressivePreview(1);
@@ -3998,6 +4041,15 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightAggressiveSkipsCoordinateRawFixes
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
+    if ((full_h % 32) != 0) {
+        ASSERT_NE(8, fixture.video()->playback_scale_factor_active);
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
+                  std::string(mlv_phase4bv2_last_fallback_reason()));
+        ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+        return;
+    }
+
     ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
     ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
     ASSERT_EQ(std::string("none"),
@@ -4026,6 +4078,15 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYWhenReceiptCompa
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
+    if ((full_h % 32) != 0) {
+        ASSERT_NE(8, fixture.video()->playback_scale_factor_active);
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
+                  std::string(mlv_phase4bv2_last_fallback_reason()));
+        ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+        return;
+    }
+
     ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
     ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
     ASSERT_EQ(std::string("none"),
@@ -4060,19 +4121,37 @@ TEST(DualIsoPipeline, Phase4Bv4_Processed8CacheHitPreservesPhasePathTelemetry)
     const std::vector<uint8_t> first = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, first.size());
     ASSERT_EQ(0, getMlvLastProcessed8CacheHit());
-    ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-    ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
+    if ((full_h % 32) != 0) {
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
+                  std::string(mlv_phase4bv2_last_fallback_reason()));
+    }
+    else
+    {
+        ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
+    }
 
     const std::vector<uint8_t> second = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_TRUE(first == second);
     ASSERT_EQ(1, getMlvLastProcessed8CacheHit());
     ASSERT_EQ(8, getMlvLastProcessed8CacheHitScaleFactor());
     ASSERT_EQ(0, getMlvLastProcessed8PrefetchHit());
-    ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
-    ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-    ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
-    ASSERT_EQ(std::string("none"),
-              std::string(mlv_phase4bv2_last_fallback_reason()));
+    if ((full_h % 32) != 0)
+    {
+        ASSERT_NE(8, fixture.video()->playback_scale_factor_active);
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
+                  std::string(mlv_phase4bv2_last_fallback_reason()));
+    }
+    else
+    {
+        ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
+        ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
+        ASSERT_EQ(std::string("none"),
+                  std::string(mlv_phase4bv2_last_fallback_reason()));
+    }
 }
 
 TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYInHqMean23)
@@ -4099,6 +4178,15 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYInHqMean23)
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
+    if ((full_h % 32) != 0) {
+        ASSERT_NE(8, fixture.video()->playback_scale_factor_active);
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
+                  std::string(mlv_phase4bv2_last_fallback_reason()));
+        ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
+        return;
+    }
+
     ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
     ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
@@ -4302,6 +4390,108 @@ TEST(DualIsoPipeline, Phase4Bv2_KillSwitchFallsBackToV1AndMatchesWithinPSNR)
      * boundary effects are amplified. */
     const double psnr = phase4b::psnrRgb8(v1_frame, v2_frame);
     ASSERT_TRUE(psnr > 18.0);
+}
+
+TEST(DualIsoPipeline, RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoAndFour)
+{
+    ScopedAggressivePreviewMode aggressivePreview(1);
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setDualIso(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    llrpSetDualIsoMode(fixture.video(), 0);
+    ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 1;
+    ASSERT_EQ(5u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 2;
+    ASSERT_EQ(6u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 4;
+    ASSERT_EQ(8u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
+}
+
+TEST(DualIsoPipeline, Processed8PrefetchEnablesAggressiveScaleTwoAndFour)
+{
+    ScopedAggressivePreviewMode aggressivePreview(1);
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setDualIso(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    llrpSetDualIsoMode(fixture.video(), 0);
+    ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 1;
+    ASSERT_EQ(0, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 2;
+    ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 4;
+    ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+}
+
+TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleOneAggressiveSkipsProcessed8CacheBookkeeping)
+{
+    ScopedAggressivePreviewMode aggressivePreview(1);
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setDualIso(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    llrpSetDualIsoMode(fixture.video(), 0);
+    ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if (full_w < 1 || full_h < 1) {
+        return;
+    }
+
+    const std::vector<uint8_t> full = fixture.renderFrame8Scaled(0, 1, 1);
+    ASSERT_EQ(static_cast<std::size_t>(full_w) * static_cast<std::size_t>(full_h) * 3u, full.size());
+    ASSERT_EQ(1, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(0.0, getMlvLastProcessed8CacheStoreMilliseconds());
+    ASSERT_TRUE(std::any_of(full.begin(), full.end(), [](uint8_t v) { return v != 0; }));
+}
+
+TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleTwoAggressiveSkipsProcessed8CacheBookkeepingFromRaw16)
+{
+    ScopedAggressivePreviewMode aggressivePreview(1);
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setDualIso(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    llrpSetDualIsoMode(fixture.video(), 0);
+    ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 2) != 0 || (full_h % 2) != 0) {
+        return;
+    }
+
+    std::vector<uint16_t> raw(static_cast<std::size_t>(full_w) * static_cast<std::size_t>(full_h));
+    ASSERT_EQ(0, getMlvRawFrameUint16(fixture.video(), 0, raw.data()));
+
+    int dim_w = 0, dim_h = 0;
+    mlvFrameOutputDimensions(fixture.video(), 2, &dim_w, &dim_h);
+    ASSERT_EQ(full_w / 2, dim_w);
+    ASSERT_EQ(full_h / 2, dim_h);
+
+    std::vector<uint8_t> got(static_cast<std::size_t>(dim_w) * static_cast<std::size_t>(dim_h) * 3u);
+    ASSERT_EQ(1, getMlvProcessedFrame8ScaledFromRaw16(fixture.video(), 0, raw.data(), got.data(), 1, 2));
+    ASSERT_EQ(2, fixture.video()->playback_scale_factor_active);
+    ASSERT_EQ(0.0, getMlvLastProcessed8CacheStoreMilliseconds());
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
 }
 
 /* Phase4Bv2 (c): AVX2 byte-identity for the new bayer-to-bayer 4x kernel. */
