@@ -117,6 +117,13 @@
 - The next throughput candidate should be a different shared-path reduction for the `x1/x2` lane, not another processed8 prefetch widening.
 - Keep the screenshot-backed gate in place because the x8 lane still needs manual review even when the heuristic is clean.
 
+### Closeout Workflow Prevention
+
+- Before every future `work-block-complete.ps1 -Finalize` attempt in this repo, run the latest `repo-sweep-closeout.ps1` report and check whether any retained split branch, stale agent-remediation packet, or sibling worktree is still blocking repo-closed state.
+- If repo-sweep reports a stale split candidate, retire the stale packet or resolve the retained branch first, then rerun `repo-results`/`repo-sweep` and only then try finalize again.
+- Do not spend another playback turn on tuning if the repo-closed blocker is purely stale closeout bookkeeping.
+- When the session is getting bloated or freezing, prefer a clean handoff plus resume prompt over stretching the same turn.
+
 # 2026-06-07 - pending-advance clamp keeps playback safe but does not materially move the matrix
 
 ### Verified locally
