@@ -1754,13 +1754,13 @@ static void mlv_store_processed_frame_8bit_cache_with_scale(mlvObject_t * video,
                                                             int phase4bPath,
                                                             int phase4bYCropRows)
 {
-    /* Aggressive x4 playback is the hot sequential lane now. When the
+    /* Aggressive x2/x4 playback is the hot sequential lane now. When the
      * foreground render is not already serving the direct8 path, the cache
      * write mostly adds mutex/copy overhead for a frame that is not being
      * reused immediately. Keep the prefetch-worker store path intact, but
-     * let the main render path skip this bookkeeping in that lane. */
+     * let the main render path skip this bookkeeping in those lanes. */
     if (prefetched == 0
-        && scaleFactor == 4
+        && (scaleFactor == 2 || scaleFactor == 4)
         && mlvPlaybackAggressivePreviewMode()
         && (!video
             || !video->processing
@@ -4775,7 +4775,8 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
                                               uint64_t frameIndex,
                                               uint16_t * outputFrame,
                                               int threads,
-                                              int scaleFactor)
+                                              int scaleFactor,
+                                              int store_processed16_cache)
 {
     const double total_start = mlv_stage_timing_now();
     mlv_reset_last_raw_stage_telemetry();
@@ -4809,58 +4810,22 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
 
     /* Size of RAW frame */
     uint64_t rgb_frame_size = (uint64_t)height * width * 3;
-    uint64_t requested_signature = mlv_processed_frame_signature_with_scale(video,
-                                                                            frameIndex,
-                                                                            normalizedScale);
-
-    if (video->current_processed_frame_active
-        && video->current_processed_frame == frameIndex
-        && video->current_processed_frame_threads == threads
-        && video->current_processed_frame_signature == requested_signature
-        && video->rgb_processed_current_frame)
+    uint64_t requested_signature = 0;
+    if (store_processed16_cache)
     {
-        if (outputFrame != video->rgb_processed_current_frame)
-        {
-            memcpy(outputFrame, video->rgb_processed_current_frame, (size_t)rgb_frame_size * sizeof(uint16_t));
-        }
-        g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
-        mlv_stage_timing_note("processed16_total", frameIndex, total_start);
-        return;
-    }
+        requested_signature = mlv_processed_frame_signature_with_scale(video,
+                                                                       frameIndex,
+                                                                       normalizedScale);
 
-    int cached_slot = mlv_find_processed_frame_16bit_cache_slot_with_scale(video,
-                                                                           frameIndex,
-                                                                           threads,
-                                                                           requested_signature,
-                                                                           normalizedScale);
-    if (cached_slot >= 0)
-    {
-        uint16_t * cached_frame = mlv_processed_frame_16bit_cache_slot(video, (uint32_t)cached_slot, rgb_frame_size);
-        if (cached_frame)
+        if (video->current_processed_frame_active
+            && video->current_processed_frame == frameIndex
+            && video->current_processed_frame_threads == threads
+            && video->current_processed_frame_signature == requested_signature
+            && video->rgb_processed_current_frame)
         {
-            if (outputFrame != cached_frame)
+            if (outputFrame != video->rgb_processed_current_frame)
             {
-                memcpy(outputFrame, cached_frame, (size_t)rgb_frame_size * sizeof(uint16_t));
-            }
-
-            uint16_t * exact_cache = mlv_ensure_u16_buffer(&video->rgb_processed_current_frame,
-                                                           &video->rgb_processed_current_frame_words,
-                                                           rgb_frame_size);
-            if (exact_cache)
-            {
-                if (exact_cache != cached_frame)
-                {
-                    memcpy(exact_cache, cached_frame, (size_t)rgb_frame_size * sizeof(uint16_t));
-                }
-                video->current_processed_frame_active = 1;
-                video->current_processed_frame = frameIndex;
-                video->current_processed_frame_threads = threads;
-                video->current_processed_frame_signature = requested_signature;
-            }
-            else
-            {
-                video->current_processed_frame_active = 0;
-                video->current_processed_frame_signature = 0;
+                memcpy(outputFrame, video->rgb_processed_current_frame, (size_t)rgb_frame_size * sizeof(uint16_t));
             }
 
             g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
@@ -4868,7 +4833,48 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
             return;
         }
 
-        mlv_reset_processed_frame_16bit_cache(video);
+        int cached_slot = mlv_find_processed_frame_16bit_cache_slot_with_scale(video,
+                                                                               frameIndex,
+                                                                               threads,
+                                                                               requested_signature,
+                                                                               normalizedScale);
+        if (cached_slot >= 0)
+        {
+            uint16_t * cached_frame = mlv_processed_frame_16bit_cache_slot(video, (uint32_t)cached_slot, rgb_frame_size);
+            if (cached_frame)
+            {
+                if (outputFrame != cached_frame)
+                {
+                    memcpy(outputFrame, cached_frame, (size_t)rgb_frame_size * sizeof(uint16_t));
+                }
+
+                uint16_t * exact_cache = mlv_ensure_u16_buffer(&video->rgb_processed_current_frame,
+                                                               &video->rgb_processed_current_frame_words,
+                                                               rgb_frame_size);
+                if (exact_cache)
+                {
+                    if (exact_cache != cached_frame)
+                    {
+                        memcpy(exact_cache, cached_frame, (size_t)rgb_frame_size * sizeof(uint16_t));
+                    }
+                    video->current_processed_frame_active = 1;
+                    video->current_processed_frame = frameIndex;
+                    video->current_processed_frame_threads = threads;
+                    video->current_processed_frame_signature = requested_signature;
+                }
+                else
+                {
+                    video->current_processed_frame_active = 0;
+                    video->current_processed_frame_signature = 0;
+                }
+
+                g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
+                mlv_stage_timing_note("processed16_total", frameIndex, total_start);
+                return;
+            }
+
+            mlv_reset_processed_frame_16bit_cache(video);
+        }
     }
 
     /* Unprocessed debayered frame (RGB) */
@@ -4922,37 +4928,44 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
     g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
 
-    const uint64_t final_signature = mlv_processed_frame_signature_with_scale(video,
-                                                                               frameIndex,
-                                                                               normalizedScale);
-
-    uint16_t * processed_cache = mlv_ensure_u16_buffer(&video->rgb_processed_current_frame,
-                                                       &video->rgb_processed_current_frame_words,
-                                                       rgb_frame_size);
-    if (processed_cache)
+    if (store_processed16_cache)
     {
-        if (outputFrame != processed_cache)
+        const uint64_t final_signature = mlv_processed_frame_signature_with_scale(video,
+                                                                                  frameIndex,
+                                                                                  normalizedScale);
+        uint16_t * processed_cache = mlv_ensure_u16_buffer(&video->rgb_processed_current_frame,
+                                                           &video->rgb_processed_current_frame_words,
+                                                           rgb_frame_size);
+        if (processed_cache)
         {
-            memcpy(processed_cache, outputFrame, (size_t)rgb_frame_size * sizeof(uint16_t));
+            if (outputFrame != processed_cache)
+            {
+                memcpy(processed_cache, outputFrame, (size_t)rgb_frame_size * sizeof(uint16_t));
+            }
+            video->current_processed_frame_active = 1;
+            video->current_processed_frame = frameIndex;
+            video->current_processed_frame_threads = threads;
+            video->current_processed_frame_signature = final_signature;
         }
-        video->current_processed_frame_active = 1;
-        video->current_processed_frame = frameIndex;
-        video->current_processed_frame_threads = threads;
-        video->current_processed_frame_signature = final_signature;
+        else
+        {
+            video->current_processed_frame_active = 0;
+            video->current_processed_frame_signature = 0;
+        }
+
+        mlv_store_processed_frame_16bit_cache_with_scale(video,
+                                                         frameIndex,
+                                                         threads,
+                                                         final_signature,
+                                                         outputFrame,
+                                                         rgb_frame_size,
+                                                         normalizedScale);
     }
     else
     {
         video->current_processed_frame_active = 0;
         video->current_processed_frame_signature = 0;
     }
-
-    mlv_store_processed_frame_16bit_cache_with_scale(video,
-                                                     frameIndex,
-                                                     threads,
-                                                     final_signature,
-                                                     outputFrame,
-                                                     rgb_frame_size,
-                                                     normalizedScale);
 
     g_mlv_last_processed16_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note("processed16_total", frameIndex, total_start);
@@ -4961,7 +4974,7 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
 /* Phase 4A: scale-1 entrypoint preserves the original public API. */
 void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame, int threads)
 {
-    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, 1);
+    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, 1, 1);
 }
 
 /* Phase 4A: scale-aware variant. The pipeline still renders at full
@@ -4972,7 +4985,7 @@ void getMlvProcessedFrame16Scaled(mlvObject_t * video,
                                   int threads,
                                   int scaleFactor)
 {
-    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, scaleFactor);
+    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, scaleFactor, 1);
 }
 
 /* Get a processed frame in 8 bit */
@@ -5030,7 +5043,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
         direct8PathActive && mlv_processed8_prefetch_enabled(video);
     const int skip_processed8_main_cache =
         !direct8PathActive
-     && normalizedScale == 4
+     && (normalizedScale == 2 || normalizedScale == 4)
      && mlvPlaybackAggressivePreviewMode();
     uint64_t requested_state_signature = 0;
 
@@ -5186,15 +5199,18 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     }
 
     const double processed16_start = mlv_stage_timing_now();
-    getMlvProcessedFrame16_with_scale(video, frameIndex, processed_frame, threads, normalizedScale);
+    getMlvProcessedFrame16_with_scale(video,
+                                      frameIndex,
+                                      processed_frame,
+                                      threads,
+                                      normalizedScale,
+                                      skip_processed8_main_cache ? 0 : 1);
     g_mlv_last_processed16_for_8bit_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
 
-    /* getMlvProcessedFrame16_with_scale() just populated the current-frame
-     * cache for this frame when it succeeds. When the x4 aggressive lane is
-     * already skipping the outer processed8 cache bookkeeping, the post-render
-     * signature check is redundant work; the freshly rendered buffer is already
-     * the one we need for the 8-bit packdown. */
+    /* When the outer processed8 cache is already disabled for aggressive x4,
+     * the 16-bit render is only an intermediate packdown buffer, so keep it
+     * out of the exact processed16 cache as well. */
     if (!skip_processed8_main_cache
         && video->current_processed_frame_active
         && video->current_processed_frame == frameIndex

@@ -720,6 +720,9 @@ private:
     QActionGroup *m_playbackScaleFactorGroup = nullptr;   // Phase 4E
     DoubleClickLabel *m_pTcLabel;
     bool m_tcModeDuration;
+    int m_lastTimeCodeFrameIndex = -1;
+    bool m_lastTimeCodeDurationMode = false;
+    double m_lastTimeCodeFps = -1.0;
     uint8_t *m_pRawImage;
     uint16_t *m_pRawImage16;
     uint32_t m_cacheSizeMB;
