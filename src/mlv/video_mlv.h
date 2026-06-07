@@ -150,6 +150,7 @@ double getMlvLastRawUint16Lj92Pred1FastPathPredictorMilliseconds(void);
 double getMlvLastRawUint16UnpackMilliseconds(void);
 double getMlvLastRawUint16CopyMilliseconds(void);
 int getMlvLastRawUint16PrefetchHit(void);
+uint32_t mlvRawUint16PrefetchLookaheadForTesting(const mlvObject_t * video);
 uint64_t getMlvRawUint16PrefetchDecodeFailures(mlvObject_t * video);
 double getMlvLastLlrawprocMilliseconds(void);
 double getMlvLastRawFloatConvertMilliseconds(void);

@@ -401,14 +401,28 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
 
 static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t * video)
 {
-    if (video
-        && video->playback_scale_factor_active == 4
-        && mlvPlaybackAggressivePreviewMode())
+    if (video && mlvPlaybackAggressivePreviewMode())
     {
-        return 8;
+        if (video->playback_scale_factor_active == 1)
+        {
+            return 4;
+        }
+        if (video->playback_scale_factor_active == 2)
+        {
+            return 6;
+        }
+        if (video->playback_scale_factor_active == 4)
+        {
+            return 8;
+        }
     }
 
     return MLV_RAW_UINT16_PREFETCH_LOOKAHEAD;
+}
+
+uint32_t mlvRawUint16PrefetchLookaheadForTesting(const mlvObject_t * video)
+{
+    return mlv_raw_uint16_prefetch_lookahead_for_request(video);
 }
 
 static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
@@ -1754,15 +1768,16 @@ static void mlv_store_processed_frame_8bit_cache_with_scale(mlvObject_t * video,
                                                             int phase4bPath,
                                                             int phase4bYCropRows)
 {
-    /* Aggressive x2/x4 playback is the hot sequential lane now. When the
+    /* Aggressive x1/x2/x4 playback is the hot sequential lane now. When the
      * foreground render is not already serving the direct8 path, the cache
      * write mostly adds mutex/copy overhead for a frame that is not being
-     * reused immediately. Keep the prefetch-worker store path intact, but
-     * let the main render path skip this bookkeeping in those lanes. */
+     * reused immediately. Keep the prefetch-worker store path intact, and
+     * let the main render path skip this bookkeeping in the hot lanes. */
     if (prefetched == 0
-        && (scaleFactor == 2 || scaleFactor == 4)
+        && (scaleFactor == 1 || scaleFactor == 2 || scaleFactor == 4)
         && mlvPlaybackAggressivePreviewMode()
-        && (!video
+        && (scaleFactor == 1
+            || !video
             || !video->processing
             || !processingCanUseDirect8BitOutput(video->processing)))
     {
@@ -3077,8 +3092,18 @@ static int mlv_phase4bv2_x4_fullres_fix_via_env(void)
     if (g_mlv_phase4bv2_x4_fullres_fix_env_cache < 0)
     {
         const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
-        g_mlv_phase4bv2_x4_fullres_fix_env_cache =
-            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+        if (!v || !*v)
+        {
+            /* Match the x2 fix policy: keep the quality-preserving early
+             * full-res fix on by default, but still allow an explicit opt-out
+             * for diagnosis or compare runs. */
+            g_mlv_phase4bv2_x4_fullres_fix_env_cache = 1;
+        }
+        else
+        {
+            g_mlv_phase4bv2_x4_fullres_fix_env_cache =
+                (strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+        }
     }
     return g_mlv_phase4bv2_x4_fullres_fix_env_cache;
 }
@@ -4127,6 +4152,14 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
             {
                 mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV4_X8 set");
             }
+            else if ((full_w % 16) != 0 || (full_h % 32) != 0)
+            {
+                /* The x8 early-reduction path crops to a 32-row boundary and
+                 * fills the tail rows. On the standard M16 clips that crop is
+                 * visibly unsafe, so fall back to the slower shared path
+                 * instead of forcing the broken fast lane. */
+                mlv_phase4bv2_log_rejection("x8 fast path requires 32-aligned height");
+            }
             else if (mlv_render_scaled_rgb16_v4_x8_full_xy_from_raw(video,
                                                                     frameIndex,
                                                                     decodedRawFrame,
@@ -5042,9 +5075,9 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     const int processed8PrefetchActive =
         direct8PathActive && mlv_processed8_prefetch_enabled(video);
     const int skip_processed8_main_cache =
-        !direct8PathActive
-     && (normalizedScale == 2 || normalizedScale == 4)
-     && mlvPlaybackAggressivePreviewMode();
+        mlvPlaybackAggressivePreviewMode()
+     && ((normalizedScale == 1)
+      || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4)));
     uint64_t requested_state_signature = 0;
 
     if (direct8PathActive)
@@ -5352,6 +5385,8 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
         mlv_processed_frame_state_signature_with_scale(video, normalizedScale);
     const uint64_t requested_signature =
         mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex);
+    const int skip_processed8_main_cache =
+        mlvPlaybackAggressivePreviewMode() && normalizedScale >= 2;
 
     if (!mlv_render_processed_frame8_direct_with_processing_from_raw(video,
                                                                       video->processing,
@@ -5378,17 +5413,20 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
         mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
     const int stored_phase4b_path = mlv_phase4bv2_last_path_taken();
     const int stored_phase4b_y_crop_rows = mlv_phase4bv3_last_y_crop_rows();
-    mlv_store_processed_frame_8bit_cache_with_scale(video,
-                                                    frameIndex,
-                                                    threads,
-                                                    stored_signature ? stored_signature : requested_signature,
-                                                    outputFrame,
-                                                    rgb_frame_size,
-                                                    1,
-                                                    0,
-                                                    normalizedScale,
-                                                    stored_phase4b_path,
-                                                    stored_phase4b_y_crop_rows);
+    if (!skip_processed8_main_cache)
+    {
+        mlv_store_processed_frame_8bit_cache_with_scale(video,
+                                                        frameIndex,
+                                                        threads,
+                                                        stored_signature ? stored_signature : requested_signature,
+                                                        outputFrame,
+                                                        rgb_frame_size,
+                                                        1,
+                                                        0,
+                                                        normalizedScale,
+                                                        stored_phase4b_path,
+                                                        stored_phase4b_y_crop_rows);
+    }
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);
@@ -5446,6 +5484,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
         mlv_processed_frame_state_signature_with_scale(video, normalizedScale);
     const uint64_t requested_signature =
         mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex);
+    const int skip_processed8_main_cache =
+        mlvPlaybackAggressivePreviewMode() && normalizedScale >= 2;
 
     if (!mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(video,
                                                                               video->processing,
@@ -5472,17 +5512,20 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
         mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
     const int stored_phase4b_path = mlv_phase4bv2_last_path_taken();
     const int stored_phase4b_y_crop_rows = mlv_phase4bv3_last_y_crop_rows();
-    mlv_store_processed_frame_8bit_cache_with_scale(video,
-                                                    frameIndex,
-                                                    threads,
-                                                    stored_signature ? stored_signature : requested_signature,
-                                                    outputFrame,
-                                                    rgb_frame_size,
-                                                    1,
-                                                    0,
-                                                    normalizedScale,
-                                                    stored_phase4b_path,
-                                                    stored_phase4b_y_crop_rows);
+    if (!skip_processed8_main_cache)
+    {
+        mlv_store_processed_frame_8bit_cache_with_scale(video,
+                                                        frameIndex,
+                                                        threads,
+                                                        stored_signature ? stored_signature : requested_signature,
+                                                        outputFrame,
+                                                        rgb_frame_size,
+                                                        1,
+                                                        0,
+                                                        normalizedScale,
+                                                        stored_phase4b_path,
+                                                        stored_phase4b_y_crop_rows);
+    }
 
     g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed8_total", frameIndex, g_mlv_last_processed8_total_ms);

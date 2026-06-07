@@ -43,6 +43,7 @@ struct MainWindowGpuPreviewPolicyState
     bool renderThreadUsing16BitPreview = false;
     bool renderThreadUsingGpuProcessingPreview = false;
     bool renderThreadUsingGpuBilinearDebayer = false;
+    int playbackScaleFactorActive = 1;
     bool betterResizerEnabled = false;
     bool zebrasEnabled = false;
     Qt::TransformationMode transformationMode = Qt::FastTransformation;
@@ -156,7 +157,10 @@ inline GpuDisplayViewport::PresentationOptions mainWindowBuildGpuPresentationOpt
 
     if (state.transformationMode == Qt::FastTransformation)
     {
-        options.samplingMode = GpuDisplayViewport::SamplingNearest;
+        options.samplingMode =
+            (state.playbackScaleFactorActive >= 8)
+                ? GpuDisplayViewport::SamplingBicubic
+                : GpuDisplayViewport::SamplingNearest;
     }
     else if (state.betterResizerEnabled)
     {

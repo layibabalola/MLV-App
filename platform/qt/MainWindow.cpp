@@ -1469,12 +1469,22 @@ void MainWindow::timerFrameEvent( void )
         m_playbackFrameAdvancePending = true;
         return;
     }
+    const bool hadPendingAdvance = m_playbackFrameAdvancePending;
     m_playbackFrameAdvancePending = false;
     if( !m_exportQueue.empty() ) return;
 
     //Time measurement
     QTime nowTime = QTime::currentTime();
     timeDiff = lastTime.msecsTo( nowTime );
+    if( hadPendingAdvance )
+    {
+        const double targetFrameMs = 1000.0 / qMax( getFramerate(), 1.0 );
+        if( timeDiff > targetFrameMs )
+        {
+            // Avoid turning a render-thread stall into one giant playback catch-up step.
+            timeDiff = qMax( 1, static_cast<int>( targetFrameMs ) );
+        }
+    }
 
     //Playback
     const int positionBeforePlayback = ui->horizontalSliderPosition->value();
@@ -3230,6 +3240,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.betterResizerEnabled = ui->actionBetterResizer->isChecked();
     renderPolicy.zebrasEnabled = ui->actionShowZebras->isChecked();
     renderPolicy.transformationMode = transformationMode;
+    renderPolicy.playbackScaleFactorActive = effectivePlaybackScaleFactorForRequest();
 
     m_renderThreadUsing16BitPreview = shouldUseGpu16PreviewPath();
     m_renderThreadUsingGpuPreviewProcessing = shouldUseGpuPreviewProcessingPath();
