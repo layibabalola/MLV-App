@@ -403,7 +403,12 @@ void processingResetLastTimingTelemetry(void)
 
 void processingSetPlaybackPreviewMode(int enabled)
 {
-    g_processing_playback_preview_mode = enabled ? 1 : 0;
+    const int normalized = enabled ? 1 : 0;
+    if (processingPlaybackPreviewModeEnabled() == normalized)
+    {
+        return;
+    }
+    g_processing_playback_preview_mode = normalized;
 }
 
 int processingPlaybackPreviewModeEnabled(void)
@@ -413,7 +418,12 @@ int processingPlaybackPreviewModeEnabled(void)
 
 void processingSetPlaybackAggressivePreviewMode(int enabled)
 {
-    g_processing_playback_aggressive_preview_mode = enabled ? 1 : 0;
+    const int normalized = enabled ? 1 : 0;
+    if (processingPlaybackAggressivePreviewModeEnabled() == normalized)
+    {
+        return;
+    }
+    g_processing_playback_aggressive_preview_mode = normalized;
 }
 
 int processingPlaybackAggressivePreviewModeEnabled(void)
@@ -423,7 +433,12 @@ int processingPlaybackAggressivePreviewModeEnabled(void)
 
 void processingSetPlaybackPreviewScaleFactor(int scaleFactor)
 {
-    g_processing_playback_preview_scale_factor = (scaleFactor > 1) ? scaleFactor : 1;
+    const int normalized = (scaleFactor > 1) ? scaleFactor : 1;
+    if (processingPlaybackPreviewScaleFactor() == normalized)
+    {
+        return;
+    }
+    g_processing_playback_preview_scale_factor = normalized;
 }
 
 int processingPlaybackPreviewScaleFactor(void)

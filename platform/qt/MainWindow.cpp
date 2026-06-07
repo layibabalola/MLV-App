@@ -5733,6 +5733,7 @@ void MainWindow::playbackHandling(int timeDiff)
             {
                 //Loop, goto cut in
                 ui->horizontalSliderPosition->setValue( ui->spinBoxCutIn->value() - 1 );
+                m_frameChanged = true;
                 if( ui->actionAudioOutput->isChecked() )m_newPosDropMode = ui->spinBoxCutIn->value() - 1;
 
                 //Sync audio
@@ -5749,17 +5750,18 @@ void MainWindow::playbackHandling(int timeDiff)
                 m_pAudioPlayback->stop(); //Stop audio immediately, that is faster on Linux
             }
         }
-        else
-        {
-            //Normal mode: next frame
-            if( !ui->actionDropFrameMode->isChecked() )
-            {
-                ui->horizontalSliderPosition->setValue( ui->horizontalSliderPosition->value() + 1 );
-                m_newPosDropMode = ui->horizontalSliderPosition->value(); //track it also, for mode changing
-            }
-            //Drop Frame Mode: calc picture for actual time
             else
             {
+                //Normal mode: next frame
+                if( !ui->actionDropFrameMode->isChecked() )
+                {
+                    ui->horizontalSliderPosition->setValue( ui->horizontalSliderPosition->value() + 1 );
+                    m_newPosDropMode = ui->horizontalSliderPosition->value(); //track it also, for mode changing
+                    m_frameChanged = true;
+                }
+                //Drop Frame Mode: calc picture for actual time
+                else
+                {
                 //This is the exact frame we need on the time line NOW!
                 m_newPosDropMode += (getFramerate() * (double)timeDiff / 1000.0);
                 //Loop!
@@ -11716,11 +11718,28 @@ void MainWindow::drawFrameNumberLabel( int frameIndex )
 
 void MainWindow::updateTimeCodeLabelForFrame( int frameIndex )
 {
-    QPixmap pic = QPixmap::fromImage( m_pTimeCodeImage->getTimeCodeLabel( frameIndex, getFramerate() ).scaled( 200 * devicePixelRatio(),
-                                                                                                                  30 * devicePixelRatio(),
-                                                                                                                  Qt::IgnoreAspectRatio, Qt::SmoothTransformation) );
+    const double currentFps = getFramerate();
+    if( m_lastTimeCodeFrameIndex == frameIndex
+        && m_lastTimeCodeDurationMode == m_tcModeDuration
+        && qFuzzyCompare( m_lastTimeCodeFps + 1.0, currentFps + 1.0 ) )
+    {
+        return;
+    }
+
+    const QImage timeCodeImage = m_pTimeCodeImage->getTimeCodeLabel( frameIndex, currentFps );
+    const QSize targetSize( 200 * devicePixelRatio(), 30 * devicePixelRatio() );
+    QPixmap pic = QPixmap::fromImage( timeCodeImage );
+    if( timeCodeImage.size() != targetSize )
+    {
+        pic = pic.scaled( targetSize,
+                          Qt::IgnoreAspectRatio,
+                          Qt::SmoothTransformation );
+    }
     pic.setDevicePixelRatio( devicePixelRatio() );
     m_pTcLabel->setPixmap( pic );
+    m_lastTimeCodeFrameIndex = frameIndex;
+    m_lastTimeCodeDurationMode = m_tcModeDuration;
+    m_lastTimeCodeFps = currentFps;
 }
 
 void MainWindow::setBadPixelCrosshairVisibility( bool visible, bool force )
@@ -19329,6 +19348,25 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     if( m_pRenderThread && !releasePresentedFrameEarly )
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+    if( ui->actionPlay->isChecked() )
+    {
+        if( !m_frameStillDrawing )
+        {
+            m_skipImmediateTimecodeLabel = true;
+            const double advance_start = mlv_stage_timing_now();
+            timerFrameEvent();
+            m_lastDrawFrameReadyAdvanceMs =
+                (mlv_stage_timing_now() - advance_start) * 1000.0;
+            mlv_stage_timing_note_elapsed("drawFrameReady.advance",
+                                          displayFrame,
+                                          m_lastDrawFrameReadyAdvanceMs);
+            m_skipImmediateTimecodeLabel = false;
+        }
+        else
+        {
+            m_playbackFrameAdvancePending = true;
+        }
+    }
     notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );
     if( interactiveTraceEnabled() )
     {
@@ -19473,24 +19511,8 @@ void MainWindow::drawFrameReady()
         (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
             ? requestContext.gpuPreviewProcessingConfig
             : GpuPreviewProcessingConfig();
-    const bool advancePlaybackNow = ui->actionPlay->isChecked();
 
     m_playbackFrameAdvancePending = false;
-    if( advancePlaybackNow )
-    {
-        m_skipImmediateTimecodeLabel = true;
-        m_frameStillDrawing = false;
-        const double advance_start = mlv_stage_timing_now();
-        timerFrameEvent();
-        m_lastDrawFrameReadyAdvanceMs =
-            (mlv_stage_timing_now() - advance_start) * 1000.0;
-        mlv_stage_timing_note_elapsed("drawFrameReady.advance",
-                                      display_frame,
-                                      m_lastDrawFrameReadyAdvanceMs);
-        m_frameStillDrawing = true;
-        m_skipImmediateTimecodeLabel = false;
-    }
-
     const double scene_start = mlv_stage_timing_now();
     computeDisplaySceneGeometry( sourceWidth,
                                  sourceHeight,

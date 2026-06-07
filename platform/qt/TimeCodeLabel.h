@@ -21,7 +21,10 @@ public:
 
 private:
     QImage *m_tcImage;
+    QImage m_chromeImage;
     bool m_mode;
+    bool m_chromeValid;
+    bool m_chromeMode;
 };
 
 #endif // TIMECODELABEL_H

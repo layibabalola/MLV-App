@@ -16,7 +16,10 @@
 TimeCodeLabel::TimeCodeLabel()
 {
     m_tcImage = new QImage( 400, 60, QImage::Format_RGB888 );
+    m_chromeImage = QImage( 400, 60, QImage::Format_RGB888 );
     m_mode = false;
+    m_chromeValid = false;
+    m_chromeMode = false;
 
     QFontDatabase::addApplicationFont( ":/Fonts/Fonts/DSEG7Modern-Regular.ttf" );
 }
@@ -30,53 +33,63 @@ TimeCodeLabel::~TimeCodeLabel()
 //Get the image for frameNumber at clipFps
 QImage TimeCodeLabel::getTimeCodeLabel(uint32_t frameNumber, float clipFps)
 {
-    //Background
-    m_tcImage->fill( QColor( 20, 20, 20, 255 ) );
-
-    //Boarder
-    QRect rect( 0, 0, 2, 60 );
-    QPainter painterTc( m_tcImage );
-    QLinearGradient gradient( rect.topLeft(), (rect.topLeft() + rect.bottomLeft() ) / 2 ); // diagonal gradient from top-left to bottom-right
-    gradient.setColorAt( 0, QColor( 30, 30, 30, 255 ) );
-    gradient.setColorAt( 1, QColor( 90, 90, 90, 255 ) );
-    painterTc.fillRect(rect, gradient);
-
-    QRect rect2( 398, 0, 2, 60 );
-    painterTc.fillRect(rect2, gradient);
-
-    QRect rect3( 0, 0, 400, 2 );
-    QLinearGradient gradient3( rect3.topLeft(), rect3.bottomLeft() );
-    gradient3.setColorAt( 0, QColor( 90, 90, 90, 255 ) );
-    gradient3.setColorAt( 1, QColor( 30, 30, 30, 255 ) );
-    painterTc.fillRect(rect3, gradient3);
-
-    QRect rect4( 0, 58, 400, 2 );
-    QLinearGradient gradient4( rect4.topLeft(), rect4.bottomLeft() );
-    gradient4.setColorAt( 0, QColor( 90, 90, 90, 255 ) );
-    gradient4.setColorAt( 1, QColor( 60, 60, 60, 255 ) );
-    painterTc.fillRect(rect4, gradient4);
-
-    //Mode
 #ifdef Q_OS_MAC
     QFont font = QFont("Arial Bold", 16, 1);
 #else
     QFont font = QFont("Arial Bold", 12, 1);
 #endif
-    painterTc.setFont( font );
-    if( !m_mode )
+
+    if( !m_chromeValid || m_chromeMode != m_mode )
     {
-        painterTc.setPen( QPen( QColor( 220, 220, 220 ) ) );
-        painterTc.drawText( 340, 11, 50, 50, 0, QString( "TC" ) );
-        painterTc.setPen( QPen( QColor( 70, 70, 70 ) ) );
-        painterTc.drawText( 340, 30, 50, 50, 0, QString( "[<–>]" ) );
+        m_chromeImage.fill( QColor( 20, 20, 20, 255 ) );
+
+        QPainter chromePainter( &m_chromeImage );
+
+        QRect rect( 0, 0, 2, 60 );
+        QLinearGradient gradient( rect.topLeft(), (rect.topLeft() + rect.bottomLeft() ) / 2 ); // diagonal gradient from top-left to bottom-right
+        gradient.setColorAt( 0, QColor( 30, 30, 30, 255 ) );
+        gradient.setColorAt( 1, QColor( 90, 90, 90, 255 ) );
+        chromePainter.fillRect( rect, gradient );
+
+        QRect rect2( 398, 0, 2, 60 );
+        chromePainter.fillRect( rect2, gradient );
+
+        QRect rect3( 0, 0, 400, 2 );
+        QLinearGradient gradient3( rect3.topLeft(), rect3.bottomLeft() );
+        gradient3.setColorAt( 0, QColor( 90, 90, 90, 255 ) );
+        gradient3.setColorAt( 1, QColor( 30, 30, 30, 255 ) );
+        chromePainter.fillRect( rect3, gradient3 );
+
+        QRect rect4( 0, 58, 400, 2 );
+        QLinearGradient gradient4( rect4.topLeft(), rect4.bottomLeft() );
+        gradient4.setColorAt( 0, QColor( 90, 90, 90, 255 ) );
+        gradient4.setColorAt( 1, QColor( 60, 60, 60, 255 ) );
+        chromePainter.fillRect( rect4, gradient4 );
+
+        //Mode
+        chromePainter.setFont( font );
+        if( !m_mode )
+        {
+            chromePainter.setPen( QPen( QColor( 220, 220, 220 ) ) );
+            chromePainter.drawText( 340, 11, 50, 50, 0, QString( "TC" ) );
+            chromePainter.setPen( QPen( QColor( 70, 70, 70 ) ) );
+            chromePainter.drawText( 340, 30, 50, 50, 0, QString( "[<–>]" ) );
+        }
+        else
+        {
+            chromePainter.setPen( QPen( QColor( 70, 70, 70 ) ) );
+            chromePainter.drawText( 340, 11, 50, 50, 0, QString( "TC" ) );
+            chromePainter.setPen( QPen( QColor( 220, 220, 220 ) ) );
+            chromePainter.drawText( 340, 30, 50, 50, 0, QString( "[<–>]" ) );
+        }
+
+        m_chromeValid = true;
+        m_chromeMode = m_mode;
     }
-    else
-    {
-        painterTc.setPen( QPen( QColor( 70, 70, 70 ) ) );
-        painterTc.drawText( 340, 11, 50, 50, 0, QString( "TC" ) );
-        painterTc.setPen( QPen( QColor( 220, 220, 220 ) ) );
-        painterTc.drawText( 340, 30, 50, 50, 0, QString( "[<–>]" ) );
-    }
+
+    *m_tcImage = m_chromeImage;
+
+    QPainter painterTc( m_tcImage );
 
     //Font selection
 #ifdef Q_OS_MAC

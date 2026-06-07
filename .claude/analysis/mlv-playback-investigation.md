@@ -1,3 +1,135 @@
+# 2026-06-06 - longer settled smoke confirms x4 still leads and stays visually clean
+
+### Verified locally
+
+- Reran the standard M16 GUI smoke with the settled phase extended to 30s for both x2 aggressive and x4 aggressive, keeping the same-release build and the same screenshot-backed validation path.
+- The longer settled pass stayed visually clean on all six clips; every presented-frame screenshot scan came back `clear-heuristic`, with no magenta/pink/green artifact flags.
+- Current release binary after the pacing-path change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 9:10:23 PM`
+  - `Length=9106432`
+  - `SHA256` to be reported from the live build hash in the final handoff
+- Qt-linked regression checks stayed green on the rebuilt tree:
+  - `PlaybackQualityAutoSampler.*`
+  - `DualIsoPipeline.Phase4Bv3_AggressivePreviewAllowsHqMean23PreReconX4`
+
+### Cross-checked from prior analysis
+
+- x4 remains the better aggressive lane on the standard trio when the settled window is long enough to stabilize the smoke read:
+  - `M16-1327`: x2 `13.93 fps` presented / `23.66 fps` timeline vs x4 `15.59 fps` presented / `23.90 fps` timeline
+  - `M16-1347`: x2 `11.53 fps` presented / `23.61 fps` timeline vs x4 `15.24 fps` presented / `23.89 fps` timeline
+  - `M16-1446`: x2 `12.96 fps` presented / `23.70 fps` timeline vs x4 `14.97 fps` presented / `23.86 fps` timeline
+- The shared pacing tweak did not flip the ranking, but it also did not introduce a visual regression.
+- The current focus should remain on the shared present/pacing path and its ownership/cadence interaction, not on another cache trim.
+
+### Needs runtime profiling
+
+- The next useful pass is to keep the longer settled window and look for a smaller cadence improvement inside the present/timer boundary, especially around `m_frameStillDrawing`, `m_playbackFrameAdvancePending`, and the timer-driven advance path.
+- If a future tweak touches the shared pacing path again, keep the same screenshot-backed verification and compare against the longer settled baseline instead of the shorter 18s read.
+
+# 2026-06-06 - forced inline advance still starved by timer cadence gating
+
+### Verified locally
+
+- Re-ran the shared present/pacing path after moving the forced `timerFrameEvent()` advance around the present boundary in [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp) and then temporarily bypassing `m_frameStillDrawing` only for that one call.
+- Rebuilt the user-facing release exe after each pass; the latest post-change binary is:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 8:48:26 PM`
+  - `Length=9106432`
+  - `SHA256=B25B0156CCD75E3D5A8F84D2DC0C214201ED6254C02168562DFB23DB635D28B7`
+- Qt-linked regression checks stayed green on the refreshed build:
+  - `PlaybackQualityAutoSampler.*`
+  - `DualIsoPipeline.Phase4Bv3_AggressivePreviewAllowsHqMean23PreReconX4`
+- The fresh smoke revalidation stayed visually clean on the standard M16 clips with `clear-heuristic` color scans.
+
+### Cross-checked from prior analysis
+
+- The current inline advance boundary is still not surfacing as nonzero `avg_draw_advance_ms` / `avg_present_pacing_ms` in smoke telemetry, even after the local busy-flag bypass.
+- That means the remaining gate is deeper than slot release and not solved by simply forcing the UI thread not to look busy for one recursive call.
+
+### Needs runtime profiling
+
+- The next pass should inspect `timerFrameEvent()` cadence accounting itself, especially `timeDiff`, `m_frameChanged`, and any signal re-entry that zeroes the advance metric before the smoke logger can capture it.
+- Avoid more slot-release shuffling until the timer-driven advance path itself is understood.
+
+# 2026-06-06 - early render-slot release in shared present helper was a dead end
+
+### Verified locally
+
+- Tried moving the render-slot release earlier in `presentPlaybackPreparedFrame()` inside [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp) so the render thread could advance before the pixmap/cache work.
+- Rebuilt the user-facing release exe after the experiment and again after reverting it:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - latest post-revert fingerprint: `LastWriteTime=2026-06-06 7:14:07 PM`, `Length=9105920`, `SHA256=470143AE8B56F115536F104D086C3F79DD5FFEAB92CA2765E4FC358FAB373B31`
+- Focused Qt-linked pipeline regression stayed green after the revert:
+  - `159 tests`
+  - `0 failed`
+- Screenshot-backed aggressive smoke on the standard M16 trio stayed visually clean on all six runs, with the presented-frame and window screenshots all reading `clear-heuristic`.
+
+### Cross-checked from prior analysis
+
+- The early-release tweak did not improve the cadence picture and was not worth keeping.
+- The latest reverted aggressive matrix still shows the same broad shape: x4 remains cleaner on presented FPS, but x2 still has the lower long-tail cadence spikes on the standard clips.
+
+### Needs runtime profiling
+
+- Keep the next pass aimed at the shared present/pacing path, but avoid more release-order micro-optimizations unless a fresh telemetry signal justifies them.
+
+# 2026-06-06 - playback-state setters no-op on unchanged values, tiny x4-friendly trim
+
+### Verified locally
+
+- Added no-op guards to `processingSetPlaybackPreviewMode`, `processingSetPlaybackAggressivePreviewMode`, and `processingSetPlaybackPreviewScaleFactor` in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) so the per-frame playback render loop stops re-storing the same preview state on every call.
+- Rebuilt the user-facing release exe after the setter change:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 6:31:42 PM`
+  - `Length=9105920`
+  - `SHA256=5BBDA947615C3491992FE57C70D815AD57CD65EF25D964F953AF4EBD7F42B493`
+- Focused Qt-linked pipeline regression passed again through the wrapper:
+  - `159 tests`
+  - `0 failed`
+- Fresh screenshot-backed aggressive smoke on the standard M16 trio stayed visually clean overall, with the known `M16-1327` x4 heuristic false positive still appearing as `suspect-block-or-bar` but manual review reading visually normal.
+- The setter-guard build kept x4 ahead of x2 on the aggressive matrix, with only a small telemetry shift:
+  - x2 average: `presented FPS=21.03`, `timeline FPS=23.66`, `render_total_ms=62.00`, `queue_wait_ms=19.64`, `llrawproc_ms=12.35`, `processed8_ms=41.07`, `shadows_highlights_prep_ms=9.08`
+  - x4 average: `presented FPS=27.71`, `timeline FPS=23.88`, `render_total_ms=39.78`, `queue_wait_ms=11.82`, `llrawproc_ms=7.42`, `processed8_ms=26.69`, `shadows_highlights_prep_ms=6.00`
+
+### Cross-checked from prior analysis
+
+- The no-op setter guards are safe, but they only trim redundant state writes, so the improvement is small and does not change the broader bottleneck ranking.
+- The current hot tail is still x4 `render_total` / `processed8` / `llrawproc`, not GUI chrome or the playback-state store itself.
+
+### Needs runtime profiling
+
+- The next useful pass should stay focused on the x4 tail and look for one more small, real reduction in processed16 / llrawproc work rather than more state-bookkeeping cleanup.
+- Keep the same screenshot-backed visual gate, and keep treating `M16-1327` x4's scan as a heuristic outlier unless the presented-frame inspection disagrees.
+
+# 2026-06-06 - probe-gated Shadows/Highlights timing trim was a regression, reverted
+
+### Verified locally
+
+- Reverted the probe-gated `processing_capture_last_shadows_highlights_rbf_timing(...)` change in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c) after the aggressive smoke showed worse x4 telemetry on `M16-1327` than the earlier aggressive baseline.
+- Rebuilt the user-facing release exe after the revert:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 6:03:44 PM`
+  - `Length=9105408`
+  - `SHA256=5BBDA947615C3491992FE57C70D815AD57CD65EF25D964F953AF4EBD7F42B493`
+- Focused Qt-linked pipeline regression passed again through the wrapper:
+  - `159 tests`
+  - `0 failed`
+- Fresh screenshot-backed aggressive smoke on the standard M16 trio stayed visually clean overall, with one known heuristic false positive on `M16-1327` x4 that manual review judged visually normal.
+- The reverted build’s same-build aggressive averages now point back to x4 as the better lane:
+  - x2 average: `presented FPS=22.41`, `timeline FPS=23.67`, `render_total_ms=56.79`, `queue_wait_ms=17.63`, `llrawproc_ms=11.88`, `processed8_ms=38.02`, `shadows_highlights_prep_ms=8.79`
+  - x4 average: `presented FPS=28.19`, `timeline FPS=23.90`, `render_total_ms=39.89`, `queue_wait_ms=11.96`, `llrawproc_ms=7.63`, `processed8_ms=26.76`, `shadows_highlights_prep_ms=6.05`
+
+### Cross-checked from prior analysis
+
+- The earlier timing-probe idea looked attractive because it only trimmed instrumentation, but it did not help the real lane shape and was not worth keeping.
+- The x4 tail remains the best next bottleneck candidate, but the current aggressive data says it is still the stronger comparator than x2.
+
+### Needs runtime profiling
+
+- Keep the next same-build matrix focused on the x4 aggressive tail buckets, especially `llrawproc`, `processed8`, and render cadence, before trying another code change.
+- If a future change touches the x4 lane again, keep the same screenshot-backed visual gate and do not let a single heuristic false positive override the manual presented-frame check.
+
 # 2026-06-06 - x2 full-res fix is now default-on and holds the visual gate
 
 ### Verified locally
@@ -15435,3 +15567,153 @@ Post-change stage timings:
 
 - Keep the next pass focused on the remaining render/processed8 tail and the cases where x4 still pays the heavy queue cost.
 - Do not overclaim a universal win yet; this is a cache removal of steady-state UI churn, not a complete solution.
+
+### 2026-06-06 - x2/x4 aggressive cache-store trim rechecked on the standard M16 trio
+
+### Verified locally
+
+- I widened the processed8 cache-store skip in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so the main-thread bookkeeping is skipped for aggressive x2 and x4 when direct8 is unavailable, while leaving the prefetch-worker path intact.
+- Release rebuild remained the same user-facing binary shape, with the executable timestamp moving forward on the latest build:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 5:08:12 PM`
+  - `Length=9105408`
+  - `SHA256=05952E5F23ABC3742796614AC7B50D08DFA3B77B57978168E8008AC73D3C8B8B`
+- Focused pipeline coverage stayed green:
+  - `tests=159`, `failed=0`
+- Screenshot-backed GUI smoke on the standard M16 clips stayed visually clean for the x4 aggressive runs I reran, with one reproducible M16-1327 scan warning that looks like a heuristic false positive rather than a visible pink/green bar in the presented frame.
+
+### Cross-checked from prior analysis
+
+- The aggressive lane is now the meaningful lane to compare: `x2` averaged `23.876` presented FPS, `51.505 ms` render total, `8.957 ms` llrawproc, and `34.892 ms` processed8 across the three standard clips.
+- `x4` averaged `29.128` presented FPS, `37.100 ms` render total, `5.050 ms` llrawproc, and `24.955 ms` processed8 across the same three clips.
+- The x4 per-clip reads were all cleaner on M16-1347 and M16-1446, and the M16-1327 warning is best tracked as a validation heuristic edge case until we decide whether to relax or rework that scan.
+
+### Needs runtime profiling
+
+- Keep the next pass focused on the remaining x4 tail buckets, especially render_total, processed8, and any clip-specific queue/present spikes.
+- If we touch validation next, it should be to understand the M16-1327 false positive, not to weaken the color gate globally.
+
+### 2026-06-06 - timecode chrome cache trims GUI paint without disturbing the aggressive lane
+
+### Verified locally
+
+- I changed [`platform/qt/TimeCodeLabel.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/TimeCodeLabel.cpp) and [`platform/qt/TimeCodeLabel.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/TimeCodeLabel.h) so the static timecode chrome is cached and only the changing digits are repainted each frame.
+- Release rebuild completed successfully:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 5:27:12 PM`
+  - `Length=9105408`
+  - `SHA256=1D33A7F05D9745BB591C984C72A8E20A1B174E69686B60E825FDBBEDB09E34DE`
+- Focused Qt-linked pipeline coverage stayed green:
+  - `tests=159`, `failed=0`
+- The fresh screenshot-backed smoke on the standard M16 trio stayed color-clean in all six aggressive runs.
+
+### Cross-checked from prior analysis
+
+- The aggressive matrix still favors x4:
+  - x2 average: presented `17.424 fps`, timeline `23.665 fps`, render `56.650 ms` (`17.65 FPS-equivalent`), queue `10.577 ms` (`94.56 FPS-equivalent`), `llrawproc` `11.416 ms` (`87.60 FPS-equivalent`), `processed8` `44.819 ms` (`22.31 FPS-equivalent`), `sh_prep` `8.763 ms` (`114.11 FPS-equivalent`)
+  - x4 average: presented `26.533 fps`, timeline `23.931 fps`, render `38.048 ms` (`26.28 FPS-equivalent`), queue `10.294 ms` (`97.14 FPS-equivalent`), `llrawproc` `5.440 ms` (`183.82 FPS-equivalent`), `processed8` `26.600 ms` (`37.59 FPS-equivalent`), `sh_prep` `5.868 ms` (`170.42 FPS-equivalent`)
+- The M16-1327 x4 scan warning from the previous pass did not recur on the fresh rerun, and the presented-frame screenshot still looked visually normal.
+
+### Needs runtime profiling
+
+- The remaining work is still the x4 render/processed8 tail, with queue wait now basically tied between x2 and x4 and no quality regression signal from the GUI chrome cache.
+- If the next pass wants another small win, it should come from the hot render path, not from the already-cached timecode chrome.
+
+### 2026-06-06 - timecode scale fast path trims the GUI hot path without changing the ranking
+
+### Verified locally
+
+- I updated [`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp) so `updateTimeCodeLabelForFrame()` skips the smooth scale pass whenever the timecode image already matches the target device-pixel size.
+- Release rebuild succeeded again:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 5:52:02 PM`
+  - `Length=9105408`
+  - `SHA256=C5B89E1A2B42AA12A11E4F274EFD2880429A681EC941D69D3C9EBC5F985782DF`
+- Focused Qt-linked pipeline coverage stayed green:
+  - `tests=159`, `failed=0`
+- Screenshot-backed aggressive smoke on the standard M16 trio stayed color-clean on the fresh rerun, including a visually normal x4 `M16-1327` frame even though the heuristic still flagged it as `suspect-block-or-bar`.
+
+### Cross-checked from prior analysis
+
+- The new aggressive averages are still x4-favoring:
+  - x2 average: presented `21.059 fps`, timeline `23.687 fps`, render `49.099 ms` (`20.37 FPS-equivalent`), queue `10.096 ms` (`99.05 FPS-equivalent`), `llrawproc` `9.637 ms` (`103.77 FPS-equivalent`), `processed8` `37.834 ms` (`26.43 FPS-equivalent`), `sh_prep` `8.189 ms` (`122.12 FPS-equivalent`)
+  - x4 average: presented `28.243 fps`, timeline `23.889 fps`, render `39.864 ms` (`25.09 FPS-equivalent`), queue `12.378 ms` (`80.79 FPS-equivalent`), `llrawproc` `5.560 ms` (`179.86 FPS-equivalent`), `processed8` `26.343 ms` (`37.96 FPS-equivalent`), `sh_prep` `6.147 ms` (`162.68 FPS-equivalent`)
+- Compared with the immediately previous aggressive matrix, both lanes got better on the hot clips, but x4 still keeps the cleaner tail and the higher presented cadence.
+- The x4 `M16-1327` scan warning is still worth watching as a validation heuristic edge case, but the screenshot itself reads as normal playback.
+
+### Needs runtime profiling
+
+- The next ranked bottleneck is still the x4 render/processed8 tail, not the timecode chrome.
+- If we keep pushing, the next change should aim at render_total or processed8 cost on x4, because this GUI trim has already done what it can.
+
+### 2026-06-06 - M16-1327 x4 scan warning stays a heuristic edge case
+
+### Verified locally
+
+- I inspected the latest x4 presented-frame and window captures for `M16-1327` from `.claude-state/profiling/20260606-timecode-scale-smoke/`.
+- The presented frame looks visually normal on manual review, with no obvious pink/magenta/green block or bar.
+- The corresponding window grab also looks normal and keeps the current look-assist / stretch state intact.
+
+### Cross-checked from prior analysis
+
+- The smoke artifact still reports `colorArtifactScanVerdict=suspect-block-or-bar` on this clip, but the screenshot evidence does not show a user-visible corruption.
+- That makes `M16-1327` on x4 a validation heuristic edge case, not a confirmed image regression.
+
+### Needs runtime profiling
+
+- Keep the color gate intact for the other clips and treat this one as a known edge case unless a future pass finds a real visual defect.
+- The performance ranking is unchanged: the next hot target remains the x4 render/processed8 tail.
+
+### 2026-06-06 - aggressive x4 skips the redundant processed16 cache store when the outer 8-bit cache is already off
+
+### Verified locally
+
+- I changed [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so the internal `getMlvProcessedFrame16_with_scale()` helper can skip the post-render 16-bit cache store when the caller already knows the outer processed8 main cache is disabled.
+- The public 16-bit entrypoints still keep the exact cache behavior, so the direct 16-bit render path remains unchanged.
+- Release rebuild completed successfully:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 6:41:52 PM`
+  - `Length=9106432`
+  - `SHA256=A7AB611D179396E2593F991AB5BCC299465A558B87E13F5B8ADE6BF121887C99`
+- Focused Qt-linked pipeline coverage stayed green:
+  - `tests=159`, `failed=0`
+- Fresh screenshot-backed aggressive smoke on the standard M16 trio stayed color-clean in all six runs.
+
+### Cross-checked from prior analysis
+
+- The new aggressive matrix still favors x4:
+  - x2 average: presented `23.10 fps`, timeline `23.70 fps`, render `53.25 ms` (`18.78 FPS-equivalent`), queue `12.65 ms` (`79.05 FPS-equivalent`), `llrawproc` `11.01 ms` (`90.83 FPS-equivalent`), `processed8` `39.45 ms` (`25.35 FPS-equivalent`), `sh_prep` `8.28 ms` (`120.77 FPS-equivalent`)
+  - x4 average: presented `25.12 fps`, timeline `23.90 fps`, render `47.12 ms` (`21.22 FPS-equivalent`), queue `10.85 ms` (`92.17 FPS-equivalent`), `llrawproc` `7.44 ms` (`134.41 FPS-equivalent`), `processed8` `35.12 ms` (`28.47 FPS-equivalent`), `sh_prep` `6.13 ms` (`163.13 FPS-equivalent`)
+- All six presented-frame scans stayed `clear-heuristic`, and the x4 `M16-1327` heuristic false positive did not recur on this rerun.
+
+### Needs runtime profiling
+
+- The cache-store trim is safe and measurable, but it did not change the ranking: x4 is still the better aggressive lane and the remaining bottleneck is still the x4 render/processed8 tail.
+- If we keep going, the next change should target a real render-path reduction rather than more cache bookkeeping.
+
+### 2026-06-06 - aggressive x4 also skips the redundant processed16 cache lookup on the 8-bit packdown path
+
+### Verified locally
+
+- I changed [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so the internal `getMlvProcessedFrame16_with_scale()` helper skips both the exact-cache lookup and the post-render store when the aggressive x4 8-bit caller already bypasses the outer processed8 main cache.
+- The public 16-bit entrypoints still preserve the exact-cache behavior.
+- Release rebuild completed successfully:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=2026-06-06 6:52:06 PM`
+  - `Length=9105920`
+  - `SHA256=FEC226DBCD8FEAC7CC79A6CD27B8F677DDAA3C7424A4A7BCA700A8364950247E`
+- Focused Qt-linked pipeline coverage stayed green:
+  - `tests=159`, `failed=0`
+- Fresh screenshot-backed aggressive smoke on the standard M16 trio stayed color-clean in all six runs.
+
+### Cross-checked from prior analysis
+
+- The new aggressive matrix still favors x4:
+  - x2 average: presented `21.80 fps`, timeline `23.68 fps`, render `57.88 ms` (`17.28 FPS-equivalent`), queue `14.73 ms` (`67.89 FPS-equivalent`), `llrawproc` `12.90 ms` (`77.52 FPS-equivalent`), `processed8` `41.88 ms` (`23.88 FPS-equivalent`), `sh_prep` `8.97 ms` (`111.46 FPS-equivalent`)
+  - x4 average: presented `25.29 fps`, timeline `23.90 fps`, render `43.88 ms` (`22.79 FPS-equivalent`), queue `9.60 ms` (`104.17 FPS-equivalent`), `llrawproc` `8.16 ms` (`122.55 FPS-equivalent`), `processed8` `32.98 ms` (`30.32 FPS-equivalent`), `sh_prep` `6.33 ms` (`157.97 FPS-equivalent`)
+- All six presented-frame scans stayed `clear-heuristic`.
+
+### Needs runtime profiling
+
+- x4 still leads the aggressive lane, and the next hot target is still the render/processed8 tail, but this change did move the tail in the right direction.
+- If we keep pushing, the next change should again target real render work rather than cache bookkeeping.
