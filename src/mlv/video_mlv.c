@@ -333,6 +333,7 @@ static int mlv_raw_uint16_prefetch_enabled(void)
 static int mlv_phase4bv2_disabled_via_env(void);
 static int mlv_phase4bv3_disabled_via_env(void);
 static int mlv_phase4bv4_x8_disabled_via_env(void);
+static int mlv_phase4bv4_x8_preview_compatible(const mlvObject_t * video);
 
 static int mlv_aggressive_reduced_dual_iso_prefetch_expected(const mlvObject_t * video)
 {
@@ -352,7 +353,8 @@ static int mlv_aggressive_reduced_dual_iso_prefetch_expected(const mlvObject_t *
     }
     if (video->playback_scale_factor_active == 8)
     {
-        return !mlv_phase4bv4_x8_disabled_via_env();
+        return !mlv_phase4bv4_x8_disabled_via_env()
+            && mlv_phase4bv4_x8_preview_compatible(video);
     }
     if (video->playback_scale_factor_active == 4)
     {
@@ -401,11 +403,20 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
 
 static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t * video)
 {
-    if (video
-        && video->playback_scale_factor_active == 4
-        && mlvPlaybackAggressivePreviewMode())
+    if (video && mlvPlaybackAggressivePreviewMode())
     {
-        return 8;
+        if (video->playback_scale_factor_active == 1)
+        {
+            return 5;
+        }
+        if (video->playback_scale_factor_active == 2)
+        {
+            return 5;
+        }
+        if (video->playback_scale_factor_active == 4)
+        {
+            return 8;
+        }
     }
 
     return MLV_RAW_UINT16_PREFETCH_LOOKAHEAD;
@@ -413,8 +424,8 @@ static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t 
 
 static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
 {
-    /* Keep the env override for experimentation, but let the x4 aggressive
-     * path benefit by default when the runtime is already in that preview
+    /* Keep the env override for experimentation, but let the x2/x4 aggressive
+     * paths benefit by default when the runtime is already in that preview
      * mode. The prefetch worker does not change pixels; it only tries to
      * hide the shared processed8 render cost behind the next frame. */
     const char * value = getenv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
@@ -428,7 +439,7 @@ static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
     }
 
     return video
-        && video->playback_scale_factor_active == 4
+        && video->playback_scale_factor_active >= 2
         && mlvPlaybackAggressivePreviewMode();
 }
 
@@ -1754,15 +1765,16 @@ static void mlv_store_processed_frame_8bit_cache_with_scale(mlvObject_t * video,
                                                             int phase4bPath,
                                                             int phase4bYCropRows)
 {
-    /* Aggressive x2/x4 playback is the hot sequential lane now. When the
+    /* Aggressive x1/x2/x4 playback is the hot sequential lane now. When the
      * foreground render is not already serving the direct8 path, the cache
      * write mostly adds mutex/copy overhead for a frame that is not being
-     * reused immediately. Keep the prefetch-worker store path intact, but
-     * let the main render path skip this bookkeeping in those lanes. */
+     * reused immediately. Keep the prefetch-worker store path intact, and
+     * let the main render path skip this bookkeeping in the hot lanes. */
     if (prefetched == 0
-        && (scaleFactor == 2 || scaleFactor == 4)
+        && (scaleFactor == 1 || scaleFactor == 2 || scaleFactor == 4)
         && mlvPlaybackAggressivePreviewMode()
-        && (!video
+        && (scaleFactor == 1
+            || !video
             || !video->processing
             || !processingCanUseDirect8BitOutput(video->processing)))
     {
@@ -2989,8 +3001,9 @@ static int mlv_phase4bv3_disabled_via_env(void)
 }
 
 /* Phase 4B-v4: env kill switch for the explicit x8 full-XY pre-recon path.
- * The path crops to a 32-row-aligned source height so the 4-row Dual ISO
- * phase is preserved after 1/8-resolution Bayer reduction. */
+ * The path stays on the fast lane only when the clip can remain 32-row
+ * aligned; otherwise we fall back to the safer post-recon path so cropped
+ * edge blocks do not leak into the settled frame. */
 static int g_mlv_phase4bv4_x8_disabled_env_cache = -1;
 
 static int mlv_phase4bv4_x8_disabled_via_env(void)
@@ -3002,6 +3015,18 @@ static int mlv_phase4bv4_x8_disabled_via_env(void)
             (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
     }
     return g_mlv_phase4bv4_x8_disabled_env_cache;
+}
+
+static int mlv_phase4bv4_x8_preview_compatible(const mlvObject_t * video)
+{
+    if (!video)
+    {
+        return 0;
+    }
+
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    return full_w > 0 && full_h > 0 && (full_w % 16) == 0 && (full_h % 32) == 0;
 }
 
 static void mlv_phase4bv2_log_rejection(const char * reason);
@@ -3077,8 +3102,15 @@ static int mlv_phase4bv2_x4_fullres_fix_via_env(void)
     if (g_mlv_phase4bv2_x4_fullres_fix_env_cache < 0)
     {
         const char * v = getenv("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
-        g_mlv_phase4bv2_x4_fullres_fix_env_cache =
-            (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+        if (!v || !*v)
+        {
+            g_mlv_phase4bv2_x4_fullres_fix_env_cache = 1;
+        }
+        else
+        {
+            g_mlv_phase4bv2_x4_fullres_fix_env_cache =
+                (strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 1 : 0;
+        }
     }
     return g_mlv_phase4bv2_x4_fullres_fix_env_cache;
 }
@@ -3605,6 +3637,11 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
             mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV4_X8 set");
             return 0;
         }
+        if (!mlv_phase4bv4_x8_preview_compatible(video))
+        {
+            mlv_phase4bv2_log_rejection("x8 preview requires 32-row aligned height");
+            return 0;
+        }
         if (mlv_render_scaled_rgb16_v4_x8_full_xy(video, frameIndex, outputFrame, threads))
         {
             return 1;
@@ -4067,6 +4104,7 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
     const int full_h = (int)getMlvHeight(video);
     const int x2ReceiptBypassActive =
         (scaleFactor == 2 && !mlvPlaybackAggressivePreviewMode() && mlv_phase4bv2_x2_fullres_fix_via_env() && !receiptCompatible);
+    const int x8PreviewCompatible = mlv_phase4bv4_x8_preview_compatible(video);
 
     if ((scaleFactor != 2 || scale2Aggressive || scale2EarlyReductionActive)
      && !mlv_phase4bv2_disabled_via_env()
@@ -4126,6 +4164,10 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
             if (mlv_phase4bv4_x8_disabled_via_env())
             {
                 mlv_phase4bv2_log_rejection("MLVAPP_DISABLE_PHASE4BV4_X8 set");
+            }
+            else if (!x8PreviewCompatible)
+            {
+                mlv_phase4bv2_log_rejection("x8 preview requires 32-row aligned height");
             }
             else if (mlv_render_scaled_rgb16_v4_x8_full_xy_from_raw(video,
                                                                     frameIndex,
@@ -5042,9 +5084,9 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     const int processed8PrefetchActive =
         direct8PathActive && mlv_processed8_prefetch_enabled(video);
     const int skip_processed8_main_cache =
-        !direct8PathActive
-     && (normalizedScale == 2 || normalizedScale == 4)
-     && mlvPlaybackAggressivePreviewMode();
+        mlvPlaybackAggressivePreviewMode()
+     && ((normalizedScale == 1)
+      || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4)));
     uint64_t requested_state_signature = 0;
 
     if (direct8PathActive)
@@ -5754,6 +5796,11 @@ int getMlvLastProcessed8CacheHitScaleFactor(void)
 int getMlvLastProcessed8PrefetchHit(void)
 {
     return g_mlv_last_processed8_prefetch_hit;
+}
+
+int getMlvProcessed8PrefetchEnabledForTesting(const mlvObject_t * video)
+{
+    return mlv_processed8_prefetch_enabled(video);
 }
 
 /* To initialise mlv object with a clip
