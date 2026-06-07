@@ -80,11 +80,15 @@ inline PlaybackPresentationScaleResampler playbackChoosePresentationScaleResampl
     }
 
     /* Aggressive preview is the user-facing coarse/fast mode. Keep
-     * Sharp/Smooth on the anti-aliased paths, but let Aggressive avoid the
-     * full-viewport bilinear pass after the pipeline already reduced the
-     * frame upstream. */
+     * Sharp/Smooth on the anti-aliased paths, but let the x8 aggressive
+     * lane use cubic on the final viewport resize so the tiny upstream
+     * reduction does not explode into visible blockiness. */
     if( aggressivePreviewActive )
     {
+        if( playbackScaleFactorActive >= 8 && upscaling )
+        {
+            return PlaybackPresentationScaleResampler::Cubic;
+        }
         return PlaybackPresentationScaleResampler::Nearest;
     }
 

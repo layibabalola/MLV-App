@@ -3241,6 +3241,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.betterResizerEnabled = ui->actionBetterResizer->isChecked();
     renderPolicy.zebrasEnabled = ui->actionShowZebras->isChecked();
     renderPolicy.transformationMode = transformationMode;
+    renderPolicy.playbackScaleFactorActive = effectivePlaybackScaleFactorForRequest();
 
     m_renderThreadUsing16BitPreview = shouldUseGpu16PreviewPath();
     m_renderThreadUsingGpuPreviewProcessing = shouldUseGpuPreviewProcessingPath();
