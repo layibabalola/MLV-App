@@ -471,7 +471,7 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
 
 static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t * video)
 {
-    if (video && mlvPlaybackAggressivePreviewMode())
+    if (video && (processingPlaybackPreviewModeEnabled() || mlvPlaybackAggressivePreviewMode()))
     {
         if (video->playback_scale_factor_active == 1)
         {
@@ -482,6 +482,10 @@ static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t 
             return 6;
         }
         if (video->playback_scale_factor_active == 4)
+        {
+            return 8;
+        }
+        if (video->playback_scale_factor_active >= 8)
         {
             return 8;
         }
