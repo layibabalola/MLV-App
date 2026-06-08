@@ -371,6 +371,57 @@ static int mlv_aggressive_reduced_dual_iso_prefetch_expected(const mlvObject_t *
     return 0;
 }
 
+static int mlv_dual_iso_scale4_prefetch_expected(const mlvObject_t * video)
+{
+    if (!video || !video->llrawproc)
+    {
+        return 0;
+    }
+    if (mlv_phase4bv2_disabled_via_env() || mlv_phase4bv3_disabled_via_env())
+    {
+        return 0;
+    }
+
+    const llrawprocObject_t * shared = video->llrawproc;
+    if (shared->dual_iso != 1 || !shared->diso_validity || !shared->fix_raw)
+    {
+        return 0;
+    }
+    if (video->playback_scale_factor_active != 4)
+    {
+        return 0;
+    }
+
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int eff_h = (full_h / 16) * 16;
+    return full_w > 0 && full_h > 0 && (full_w % 4) == 0 && eff_h >= 16;
+}
+
+static int mlv_dual_iso_scale8_prefetch_expected(const mlvObject_t * video)
+{
+    if (!video || !video->llrawproc)
+    {
+        return 0;
+    }
+    if (mlv_phase4bv2_disabled_via_env() || mlv_phase4bv4_x8_disabled_via_env())
+    {
+        return 0;
+    }
+
+    const llrawprocObject_t * shared = video->llrawproc;
+    if (shared->dual_iso != 1 || !shared->diso_validity || !shared->fix_raw)
+    {
+        return 0;
+    }
+    if (video->playback_scale_factor_active != 8)
+    {
+        return 0;
+    }
+
+    return mlv_phase4bv4_x8_preview_compatible(video);
+}
+
 static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video)
 {
     if (!mlv_raw_uint16_prefetch_enabled())
@@ -383,9 +434,28 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
         return 1;
     }
 
+    if (video->llrawproc->dual_iso == 1
+        && video->playback_scale_factor_active == 4
+        && mlv_dual_iso_scale4_prefetch_expected(video))
+    {
+        return 1;
+    }
+
+    if (video->llrawproc->dual_iso == 1
+        && video->playback_scale_factor_active == 8
+        && mlv_dual_iso_scale8_prefetch_expected(video))
+    {
+        return 1;
+    }
+
     if (video->playback_scale_factor_active >= 4
         && mlvPlaybackAggressivePreviewMode())
     {
+        if (video->llrawproc->dual_iso == 1
+            && mlv_aggressive_reduced_dual_iso_prefetch_expected(video))
+        {
+            return 1;
+        }
         return 0;
     }
 
@@ -413,11 +483,11 @@ static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t 
     {
         if (video->playback_scale_factor_active == 1)
         {
-            return 5;
+            return 4;
         }
         if (video->playback_scale_factor_active == 2)
         {
-            return 5;
+            return 6;
         }
         if (video->playback_scale_factor_active == 4)
         {
@@ -435,10 +505,10 @@ uint32_t mlvRawUint16PrefetchLookaheadForTesting(const mlvObject_t * video)
 
 static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
 {
-    /* Keep the env override for experimentation, but let the x2/x4 aggressive
-     * paths benefit by default when the runtime is already in that preview
-     * mode. The prefetch worker does not change pixels; it only tries to
-     * hide the shared processed8 render cost behind the next frame. */
+    /* Keep the env override for experimentation, but let the aggressive-preview
+     * lanes benefit by default. The prefetch worker does not change pixels; it
+     * only tries to hide the shared processed8 render cost behind the next
+     * frame. */
     const char * value = getenv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
     if (value && value[0] != '\0')
     {
@@ -3044,7 +3114,7 @@ static int mlv_phase4bv4_x8_preview_compatible(const mlvObject_t * video)
 
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
-    return full_w > 0 && full_h > 0 && (full_w % 16) == 0 && (full_h % 32) == 0;
+    return full_w > 0 && full_h >= 32 && (full_w % 16) == 0;
 }
 
 static void mlv_phase4bv2_log_rejection(const char * reason);
@@ -5099,27 +5169,26 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
     uint16_t * processed_frame = NULL;
     const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
-    const int processed8PrefetchActive =
-        direct8PathActive && mlv_processed8_prefetch_enabled(video);
+    const int processed8PrefetchActive = mlv_processed8_prefetch_enabled(video);
     const int skip_processed8_main_cache =
         mlvPlaybackAggressivePreviewMode()
      && ((normalizedScale == 1)
       || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4 || normalizedScale == 8)));
     uint64_t requested_state_signature = 0;
 
-    if (direct8PathActive)
+    if (processed8PrefetchActive)
     {
-        mlv_sync_processing_black_white_levels(video);
+        if (direct8PathActive)
+        {
+            mlv_sync_processing_black_white_levels(video);
+        }
         requested_state_signature = mlv_processed_frame_state_signature_with_scale(video,
                                                                                    normalizedScale);
-        if (processed8PrefetchActive)
-        {
-            mlv_processed8_prefetch_note_request(video,
-                                                frameIndex,
-                                                threads,
-                                                requested_state_signature,
-                                                normalizedScale);
-        }
+        mlv_processed8_prefetch_note_request(video,
+                                             frameIndex,
+                                             threads,
+                                             requested_state_signature,
+                                             normalizedScale);
     }
 
     uint64_t requested_signature = direct8PathActive
