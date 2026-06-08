@@ -434,28 +434,10 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
         return 1;
     }
 
-    if (video->llrawproc->dual_iso == 1
-        && video->playback_scale_factor_active == 4
-        && mlv_dual_iso_scale4_prefetch_expected(video))
-    {
-        return 1;
-    }
-
-    if (video->llrawproc->dual_iso == 1
-        && video->playback_scale_factor_active == 8
-        && mlv_dual_iso_scale8_prefetch_expected(video))
-    {
-        return 1;
-    }
-
     if (video->playback_scale_factor_active >= 4
-        && mlvPlaybackAggressivePreviewMode())
+        && mlvPlaybackAggressivePreviewMode()
+        && !mlv_aggressive_reduced_dual_iso_prefetch_expected(video))
     {
-        if (video->llrawproc->dual_iso == 1
-            && mlv_aggressive_reduced_dual_iso_prefetch_expected(video))
-        {
-            return 1;
-        }
         return 0;
     }
 
@@ -467,6 +449,16 @@ static int mlv_raw_uint16_prefetch_allowed_for_request(const mlvObject_t * video
     if (video->llrawproc->dual_iso == 1
         && video->playback_scale_factor_active >= 4)
     {
+        if (video->playback_scale_factor_active == 4
+            && mlv_dual_iso_scale4_prefetch_expected(video))
+        {
+            return 1;
+        }
+        if (video->playback_scale_factor_active == 8
+            && mlv_dual_iso_scale8_prefetch_expected(video))
+        {
+            return 1;
+        }
         if (mlv_aggressive_reduced_dual_iso_prefetch_expected(video))
         {
             return 1;
@@ -505,10 +497,10 @@ uint32_t mlvRawUint16PrefetchLookaheadForTesting(const mlvObject_t * video)
 
 static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
 {
-    /* Keep the env override for experimentation, but let the aggressive-preview
-     * lanes benefit by default. The prefetch worker does not change pixels; it
-     * only tries to hide the shared processed8 render cost behind the next
-     * frame. */
+    /* Keep the env override for experimentation, but let the x2/x4 aggressive
+     * paths benefit by default when the runtime is already in that preview
+     * mode. The prefetch worker does not change pixels; it only tries to
+     * hide the shared processed8 render cost behind the next frame. */
     const char * value = getenv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
     if (value && value[0] != '\0')
     {
@@ -5169,26 +5161,27 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
     uint16_t * processed_frame = NULL;
     const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
-    const int processed8PrefetchActive = mlv_processed8_prefetch_enabled(video);
+    const int processed8PrefetchActive =
+        direct8PathActive && mlv_processed8_prefetch_enabled(video);
     const int skip_processed8_main_cache =
         mlvPlaybackAggressivePreviewMode()
      && ((normalizedScale == 1)
       || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4 || normalizedScale == 8)));
     uint64_t requested_state_signature = 0;
 
-    if (processed8PrefetchActive)
+    if (direct8PathActive)
     {
-        if (direct8PathActive)
-        {
-            mlv_sync_processing_black_white_levels(video);
-        }
+        mlv_sync_processing_black_white_levels(video);
         requested_state_signature = mlv_processed_frame_state_signature_with_scale(video,
                                                                                    normalizedScale);
-        mlv_processed8_prefetch_note_request(video,
-                                             frameIndex,
-                                             threads,
-                                             requested_state_signature,
-                                             normalizedScale);
+        if (processed8PrefetchActive)
+        {
+            mlv_processed8_prefetch_note_request(video,
+                                                frameIndex,
+                                                threads,
+                                                requested_state_signature,
+                                                normalizedScale);
+        }
     }
 
     uint64_t requested_signature = direct8PathActive

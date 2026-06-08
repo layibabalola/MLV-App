@@ -106,6 +106,7 @@ int processingPlaybackAggressivePreviewModeEnabled(void);
 void processingSetPlaybackPreviewScaleFactor(int scaleFactor);
 int processingPlaybackPreviewScaleFactor(void);
 void processingResetShadowsHighlightsProbeModeCacheForTesting(void);
+void processingResetShadowsHighlightsQuarterresEnvCacheForTesting(void);
 void applyProcessingObject8( processingObject_t * processing,
                              int imageX, int imageY,
                              uint16_t * __restrict inputImage,

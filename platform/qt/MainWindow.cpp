@@ -3902,8 +3902,6 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                            m_lastDrawFrameReadyQueueMs );
             sample.insert( QStringLiteral("draw_frame_ready_advance_ms"),
                            m_lastDrawFrameReadyAdvanceMs );
-            sample.insert( QStringLiteral("draw_frame_ready_advance_immediate"),
-                           m_lastDrawFrameReadyAdvanceImmediate );
             sample.insert( QStringLiteral("draw_frame_ready_scene_ms"),
                            m_lastDrawFrameReadySceneMs );
             sample.insert( QStringLiteral("draw_frame_ready_image_ms"),
@@ -19361,13 +19359,11 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     if( m_pRenderThread && !releasePresentedFrameEarly )
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
-    m_lastDrawFrameReadyAdvanceImmediate = false;
     if( ui->actionPlay->isChecked() )
     {
         if( !m_frameStillDrawing )
         {
             m_skipImmediateTimecodeLabel = true;
-            m_lastDrawFrameReadyAdvanceImmediate = true;
             const double advance_start = mlv_stage_timing_now();
             timerFrameEvent();
             m_lastDrawFrameReadyAdvanceMs =
