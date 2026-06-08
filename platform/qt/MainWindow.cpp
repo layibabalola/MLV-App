@@ -16026,11 +16026,11 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
         m_fileLoaded
         && m_pMlvObject
         && llrpGetDualIsoMode( m_pMlvObject ) != 0;
-    const bool fastX4HqPathActive =
-        m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Fast )
-        && effectiveScale == 4
-        && dualIsoActive;
-    mlvSetPlaybackFastX4HqPathMode( fastX4HqPathActive ? 1 : 0 );
+    const bool fastHqPathActive =
+        playbackQualityWantsFastDualIsoHqPath( playbackQualityModeFromInt( m_playbackQualityMode ),
+                                               effectiveScale,
+                                               dualIsoActive );
+    mlvSetPlaybackFastX4HqPathMode( fastHqPathActive ? 1 : 0 );
     const int disableAliasMapValue = ( settings.playbackDisableAliasMapAtScale && scaleGate ) ? 1 : 0;
     const int disableFrBlendingValue = ( settings.playbackDisableFrBlendingAtScale && scaleGate ) ? 1 : 0;
 

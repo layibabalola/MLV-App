@@ -1,3 +1,39 @@
+# 2026-06-08 - standard-preview processed8 prefetch widened to x2, then reverted after matrix regression
+
+### Verified locally
+
+- I widened `mlv_processed8_prefetch_enabled()` in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so standard preview would try the processed8 prefetch worker at scale `2` as well as `4` and `8`, and I updated the matching regression in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp).
+- The focused Qt-linked console and pipeline regressions passed, but the full same-build standard M16 matrix regressed versus the prior keeper baseline.
+- I reverted the x2 prefetch widen back to the standard-preview `x4/x8` gate and restored the matching regression expectation.
+
+### Cross-checked from prior analysis
+
+- The x2 prefetch widen increased cache activity, but it did not improve end-to-end playback cadence on the standard trio.
+- The shared processing tail remains the next likely bottleneck, not processed8 prefetch gating.
+
+### Needs runtime profiling
+
+- Keep the x4/x8 prefetch behavior as the current baseline and continue looking for a smaller safe shared-tail change rather than widening standard preview prefetch further.
+
+# 2026-06-08 - alias-map default-on was inert on the standard trio; x2/x4 quarter-res is the live candidate
+
+### Verified locally
+
+- I exercised the standard-preview alias-map default-on branch in [`platform/qt/DualIsoPlaybackPolicy.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/DualIsoPlaybackPolicy.h) and the matching console regression in [`tests/console/test_dual_iso_playback_policy.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/console/test_dual_iso_playback_policy.cpp).
+- The standard M16 smoke matrix completed cleanly, but the alias-map path was effectively inert on the standard trio because the receipts already carried `dual_iso_alias_map=0` and the runtime telemetry stayed at `use_alias_map_any=0` with `mix_alias_map_ms=0.0`.
+- I then started the next live candidate in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c): make standard-preview `x2` and `x4` quarter-res shadows/highlights default-on, keeping the existing disable overrides.
+
+### Cross-checked from prior analysis
+
+- The alias-map idea is not the next useful lever for the standard M16 trio.
+- The shared processing tail is still the likely bottleneck.
+- The x2/x4 quarter-res change is the next candidate worth validating with the same-build `1x/2x/4x/8x` matrix and x8 canary screenshots.
+
+### Needs runtime profiling
+
+- Rebuild after the x2/x4 quarter-res change, rerun the Qt-linked regressions through `tools\testing\run-windows-test.ps1`, and then smoke the standard M16 trio again before deciding keep/revert.
+- Keep the x8 canary review loop in place on every candidate.
+
 # 2026-06-08 - direct8 is already active at scale 8; the bottleneck is llrawproc HQ dual-ISO work
 
 ### Verified locally

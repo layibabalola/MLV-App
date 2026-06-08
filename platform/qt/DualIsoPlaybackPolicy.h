@@ -324,7 +324,7 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
      * scale >= 4". Default OFF for both because the user prompt's "8-
      * 15 ms savings" estimate over-stated the alias_map alone: real
      * savings are ~4-9 ms p50 (still meaningful at high scales). */
-    if (hqWillRunDuringPlayback && dualIsoPlaybackDowngradeAliasMapAtScaleViaEnv())
+    if( hqWillRunDuringPlayback && dualIsoPlaybackDowngradeAliasMapAtScaleViaEnv() )
     {
         settings.playbackDisableAliasMapAtScale = true;
     }

@@ -197,6 +197,16 @@ TEST(PlaybackQualitySettings, EnvVarOverridesGuiHqMean23)
     clearAllPlaybackQualityKeys();
 }
 
+TEST(PlaybackQualitySettings, FastDualIsoHqPathCoversScaleTwoAndFour)
+{
+    ASSERT_FALSE( playbackQualityWantsFastDualIsoHqPath( PlaybackQualityMode::Fast, 1, true ) );
+    ASSERT_TRUE( playbackQualityWantsFastDualIsoHqPath( PlaybackQualityMode::Fast, 2, true ) );
+    ASSERT_TRUE( playbackQualityWantsFastDualIsoHqPath( PlaybackQualityMode::Fast, 4, true ) );
+    ASSERT_FALSE( playbackQualityWantsFastDualIsoHqPath( PlaybackQualityMode::Fast, 8, true ) );
+    ASSERT_FALSE( playbackQualityWantsFastDualIsoHqPath( PlaybackQualityMode::HighQuality, 4, true ) );
+    ASSERT_FALSE( playbackQualityWantsFastDualIsoHqPath( PlaybackQualityMode::Fast, 4, false ) );
+}
+
 /* Verify the DualIsoPlaybackPolicy fallback hook routes through to the
  * GUI-derived QSettings choice. The MainWindow installs a static method
  * pointer; we mimic that here with a lambda-style function. */
