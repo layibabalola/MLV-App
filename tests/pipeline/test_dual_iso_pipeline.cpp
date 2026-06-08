@@ -4448,7 +4448,7 @@ TEST(DualIsoPipeline, RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoA
     ASSERT_EQ(4u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 2;
-    ASSERT_EQ(6u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
+    ASSERT_EQ(10u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 4;
     ASSERT_EQ(8u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
@@ -4471,7 +4471,7 @@ TEST(DualIsoPipeline, RawUint16PrefetchLookaheadExpandsForStandardScaleOneTwoFou
     ASSERT_EQ(4u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 2;
-    ASSERT_EQ(6u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
+    ASSERT_EQ(10u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 4;
     ASSERT_EQ(8u, mlvRawUint16PrefetchLookaheadForTesting(fixture.video()));
@@ -4582,6 +4582,35 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneCanUseQuarterResShadowsHighlightsWh
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
 }
 
+TEST(DualIsoPipeline, StandardPreviewScaleOneUsesQuarterResShadowsHighlightsByDefault)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
+    processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+
+    processingObject_t * processing = fixture.processing();
+    ASSERT_TRUE(processing != nullptr);
+    processing->shadows_highlights.shadows = 0.5;
+    processing->shadows_highlights.highlights = -0.5;
+
+    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 1);
+    ASSERT_TRUE(!got.empty());
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds() > 0.0);
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds() > 0.0);
+    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds() > 0.0);
+
+    MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
+    processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
+}
+
 TEST(DualIsoPipeline, StandardPreviewScaleFourCanUseQuarterResShadowsHighlightsWhenEnabled)
 {
     MLVAPP_TEST_SETENV("MLVAPP_ENABLE_STANDARD_X4_SH_QUARTERRES", "1");
@@ -4635,6 +4664,34 @@ TEST(DualIsoPipeline, Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour)
 
     fixture.video()->playback_scale_factor_active = 4;
     ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+}
+
+TEST(DualIsoPipeline, Processed8PrefetchEnablesStandardScaleFourAndEight)
+{
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setDualIso(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    llrpSetDualIsoMode(fixture.video(), 0);
+    ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    fixture.video()->playback_scale_factor_active = 1;
+    ASSERT_EQ(0, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 2;
+    ASSERT_EQ(0, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 4;
+    ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+
+    fixture.video()->playback_scale_factor_active = 8;
+    ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+
+    processingSetPlaybackPreviewMode(0);
 }
 
 TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleEightAggressiveSkipsProcessed8CacheBookkeeping)

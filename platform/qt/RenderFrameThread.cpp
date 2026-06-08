@@ -2940,6 +2940,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       getMlvLastProcessed8CacheStoreMilliseconds() );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_active"),
                                       getMlvLastProcessed8DirectPathActive() != 0 );
+    slot.stageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_reason"),
+                                      QString::fromLatin1(
+                                          processingGetDirect8IncompatibilityReason(
+                                              m_pMlvObject ? m_pMlvObject->processing : nullptr ) ) );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit"),
                                       processed8CacheHit );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit_scale_factor"),

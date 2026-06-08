@@ -479,7 +479,7 @@ static uint32_t mlv_raw_uint16_prefetch_lookahead_for_request(const mlvObject_t 
         }
         if (video->playback_scale_factor_active == 2)
         {
-            return 6;
+            return 10;
         }
         if (video->playback_scale_factor_active == 4)
         {
@@ -515,9 +515,14 @@ static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
             : 0;
     }
 
+    if (video && mlvPlaybackAggressivePreviewMode())
+    {
+        return video->playback_scale_factor_active >= 1;
+    }
+
     return video
-        && video->playback_scale_factor_active >= 1
-        && mlvPlaybackAggressivePreviewMode();
+        && processingPlaybackPreviewModeEnabled()
+        && video->playback_scale_factor_active >= 4;
 }
 
 static uint64_t mlv_hash_bytes(uint64_t hash, const void * data, size_t size)
@@ -5165,15 +5170,17 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
     uint16_t * processed_frame = NULL;
     const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
-    const int processed8PrefetchActive =
-        direct8PathActive && mlv_processed8_prefetch_enabled(video);
+    /* Processed8 prefetch can run even when the foreground direct8 path
+     * stays conservative; the worker only warms the cache and does not
+     * change the pixels we present. */
+    const int processed8PrefetchActive = mlv_processed8_prefetch_enabled(video);
     const int skip_processed8_main_cache =
         mlvPlaybackAggressivePreviewMode()
      && ((normalizedScale == 1)
       || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4 || normalizedScale == 8)));
     uint64_t requested_state_signature = 0;
 
-    if (direct8PathActive)
+    if (direct8PathActive || processed8PrefetchActive)
     {
         mlv_sync_processing_black_white_levels(video);
         requested_state_signature = mlv_processed_frame_state_signature_with_scale(video,
@@ -5188,7 +5195,7 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
         }
     }
 
-    uint64_t requested_signature = direct8PathActive
+    uint64_t requested_signature = (direct8PathActive || processed8PrefetchActive)
         ? mlv_processed_frame_signature_from_state(requested_state_signature, frameIndex)
         : (skip_processed8_main_cache
             ? 0

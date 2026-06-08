@@ -17,6 +17,7 @@
 #include <QTextStream>
 
 #include <cmath>
+#include <array>
 #include <iostream>
 #include <map>
 
@@ -954,6 +955,71 @@ TEST(ClipGolden, LocalM16ScaleFourToOneWithHistogramSettlesWhenAvailable)
     ASSERT_EQ(4, before.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
     ASSERT_EQ(1, after.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
     ASSERT_EQ(1, after.value(QStringLiteral("last_presented_active_scale")).toInt());
+}
+
+TEST(ClipGolden, LocalM16StandardPreviewScaleEightKeepsProcessed8DirectPathActive)
+{
+    const std::array<QString, 3> fixture_paths = {
+        QStringLiteral("C:/temp/MLV/M16-1327.MLV"),
+        QStringLiteral("C:/temp/MLV/M16-1347.MLV"),
+        QStringLiteral("C:/temp/MLV/M16-1446.MLV"),
+    };
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    for (const QString & fixture_path : fixture_paths) {
+        if (!QFileInfo::exists(fixture_path)) {
+            SKIP_TEST((QStringLiteral("Missing local regression clip ") + fixture_path).toStdString());
+        }
+
+        const QString output_json =
+            temp_dir.filePath(QFileInfo(fixture_path).baseName() + QStringLiteral("-direct8.json"));
+
+        QProcess process;
+        configure_playback_profile_process(
+            &process,
+            app_exe,
+            repo_root,
+            QStringList()
+                << QStringLiteral("--profile-playback")
+                << QStringLiteral("--input") << fixture_path
+                << QStringLiteral("--frames") << QStringLiteral("1")
+                << QStringLiteral("--output") << output_json
+                << QStringLiteral("--threads") << QStringLiteral("1"),
+            QList<QPair<QString, QString>>()
+                << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QStringLiteral("8")));
+        process.start();
+        ASSERT_TRUE(process.waitForStarted());
+        ASSERT_TRUE(process.waitForFinished(-1));
+        ASSERT_EQ(0, process.exitCode());
+
+        QFile json_file(output_json);
+        ASSERT_TRUE(json_file.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QJsonDocument document = QJsonDocument::fromJson(json_file.readAll());
+        ASSERT_TRUE(document.isObject());
+
+        const QJsonArray frames = document.object().value(QStringLiteral("frames")).toArray();
+        ASSERT_EQ(1, frames.size());
+        const QJsonObject sample = frames.at(0).toObject();
+        ASSERT_EQ(8, sample.value(QStringLiteral("render_thread_playback_scale_factor_request")).toInt());
+        ASSERT_EQ(8, sample.value(QStringLiteral("render_thread_playback_scale_factor_effective")).toInt());
+        ASSERT_TRUE(sample.contains(QStringLiteral("processed8_direct_path_active")));
+        ASSERT_TRUE(sample.value(QStringLiteral("processed8_direct_path_active")).toBool());
+        ASSERT_TRUE(sample.contains(QStringLiteral("processed8_direct_path_reason")));
+        ASSERT_EQ(std::string("direct8-active"),
+                  sample.value(QStringLiteral("processed8_direct_path_reason")).toString().toStdString());
+        ASSERT_TRUE(sample.contains(QStringLiteral("processed8_prefetch_hit")));
+        ASSERT_TRUE(sample.value(QStringLiteral("processed8_total_ms")).toDouble() >= 0.0);
+    }
 }
 
 TEST(ClipGolden, LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable)
