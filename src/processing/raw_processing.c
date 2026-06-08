@@ -140,6 +140,7 @@ static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_scale_facto
 
 static int g_processing_shadows_highlights_probe_initialized = 0;
 static int g_processing_shadows_highlights_probe_mode = -1;
+static int g_processing_standard_x2_shadows_highlights_quarterres_cache = -1;
 
 static int processing_env_flag_enabled(const char * value)
 {
@@ -218,6 +219,17 @@ static int processing_aggressive_x2_shadows_highlights_quarterres_enabled(void)
         initialized = 1;
     }
     return enabled;
+}
+
+static int processing_standard_x2_shadows_highlights_quarterres_enabled(void)
+{
+    if( g_processing_standard_x2_shadows_highlights_quarterres_cache < 0 )
+    {
+        g_processing_standard_x2_shadows_highlights_quarterres_cache =
+            processing_env_flag_enabled(getenv("MLVAPP_ENABLE_STANDARD_X2_SH_QUARTERRES"))
+            && !processing_env_flag_enabled(getenv("MLVAPP_DISABLE_STANDARD_X2_SH_QUARTERRES"));
+    }
+    return g_processing_standard_x2_shadows_highlights_quarterres_cache;
 }
 
 static int processing_main_prelude_probe_mode(void)
@@ -450,6 +462,11 @@ void processingResetShadowsHighlightsProbeModeCacheForTesting(void)
 {
     g_processing_shadows_highlights_probe_initialized = 0;
     g_processing_shadows_highlights_probe_mode = -1;
+}
+
+void processingResetShadowsHighlightsQuarterresEnvCacheForTesting(void)
+{
+    g_processing_standard_x2_shadows_highlights_quarterres_cache = -1;
 }
 
 static void processing_core_timing_reset(processing_core_timing_t * timing)
@@ -1181,12 +1198,19 @@ void applyProcessingObject( processingObject_t * processing,
          && ((imageY & 1) != 0);
         const int preview_scale_factor = processingPlaybackPreviewScaleFactor();
         const int use_quarterres_rbf =
-            aggressive_preview_enabled
-         && (
-                (preview_scale_factor == 2
-                 && processing_aggressive_x2_shadows_highlights_quarterres_enabled())
-             || (preview_scale_factor >= 8
-                 && processing_aggressive_x8_shadows_highlights_quarterres_enabled())
+            (
+                (preview_mode_enabled
+                 && !aggressive_preview_enabled
+                 && preview_scale_factor == 2
+                 && processing_standard_x2_shadows_highlights_quarterres_enabled())
+             || (aggressive_preview_enabled
+                 && (
+                        (preview_scale_factor == 2
+                         && processing_aggressive_x2_shadows_highlights_quarterres_enabled())
+                     || (preview_scale_factor >= 8
+                         && processing_aggressive_x8_shadows_highlights_quarterres_enabled())
+                    )
+                )
             )
          && imageX >= 4
          && imageY >= 4;

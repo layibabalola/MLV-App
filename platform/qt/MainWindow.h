@@ -867,7 +867,6 @@ private:
     double m_lastPlayToFirstFrameMs = 0.0;
     double m_lastDrawFrameReadyQueueMs = 0.0;
     double m_lastDrawFrameReadyAdvanceMs = 0.0;
-    bool m_lastDrawFrameReadyAdvanceImmediate = false;
     double m_lastDrawFrameReadySceneMs = 0.0;
     double m_lastDrawFrameReadyImageMs = 0.0;
     double m_lastDrawFrameReadyPresentMs = 0.0;
