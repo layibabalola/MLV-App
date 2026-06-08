@@ -88,6 +88,7 @@ void applyProcessingObject( processingObject_t * processing,
                             uint16_t * __restrict outputImage,
                             int threads, int imageChanged, uint64_t frameIndex );
 int processingCanUseDirect8BitOutput(const processingObject_t * processing);
+const char * processingGetDirect8IncompatibilityReason(const processingObject_t * processing);
 /* Nonzero when the runtime dispatcher selected the AVX2+FMA variant of the
  * direct processed8 fast path. Probes CPU features and the MLVAPP_DISABLE_AVX2
  * kill switch on first call. */

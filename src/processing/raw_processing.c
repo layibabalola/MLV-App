@@ -134,6 +134,7 @@ static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_core_output_ms = 0.0
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_matrix_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_gamma_ms = 0.0;
 static MLV_PROCESSING_THREAD_LOCAL double g_processing_last_direct8_curves_ms = 0.0;
+static MLV_PROCESSING_THREAD_LOCAL char g_processing_last_direct8_incompatibility_reason[128] = "none";
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_mode = 0;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_aggressive_preview_mode = 0;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_scale_factor = 1;
@@ -227,9 +228,17 @@ static int processing_standard_x1_shadows_highlights_quarterres_enabled(void)
 {
     if( g_processing_standard_x1_shadows_highlights_quarterres_cache < 0 )
     {
+        const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
+        const int aggressive_preview_enabled = preview_mode_enabled
+            && processingPlaybackAggressivePreviewModeEnabled();
+        const int disabled =
+            processing_env_flag_enabled(getenv("MLVAPP_DISABLE_STANDARD_X1_SH_QUARTERRES"));
         g_processing_standard_x1_shadows_highlights_quarterres_cache =
-            processing_env_flag_enabled(getenv("MLVAPP_ENABLE_STANDARD_X1_SH_QUARTERRES"))
-            && !processing_env_flag_enabled(getenv("MLVAPP_DISABLE_STANDARD_X1_SH_QUARTERRES"));
+            !disabled
+         && (
+                (preview_mode_enabled && !aggressive_preview_enabled)
+             || processing_env_flag_enabled(getenv("MLVAPP_ENABLE_STANDARD_X1_SH_QUARTERRES"))
+            );
     }
     return g_processing_standard_x1_shadows_highlights_quarterres_cache;
 }
@@ -2123,6 +2132,143 @@ static int processing_can_use_direct_8bit_output(const processingObject_t * proc
 int processingCanUseDirect8BitOutput(const processingObject_t * processing)
 {
     return processing_can_use_direct_8bit_output(processing);
+}
+
+static void processing_set_direct8_incompatibility_reason(const char * reason)
+{
+    if (!reason || !reason[0])
+    {
+        reason = "none";
+    }
+    snprintf(g_processing_last_direct8_incompatibility_reason,
+             sizeof(g_processing_last_direct8_incompatibility_reason),
+             "%s",
+             reason);
+}
+
+const char * processingGetDirect8IncompatibilityReason(const processingObject_t * processing)
+{
+    if (!processing)
+    {
+        processing_set_direct8_incompatibility_reason("missing-processing-object");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+
+    if (processing_can_use_direct_8bit_output(processing))
+    {
+        processing_set_direct8_incompatibility_reason("direct8-active");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+
+    if (processing->use_cam_matrix <= 0)
+    {
+        processing_set_direct8_incompatibility_reason("cam-matrix-disabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+
+    if (!processing_has_direct8_supported_creative_adjustments(processing))
+    {
+        if (processing->allow_creative_adjustments
+            && (processing->hue_vs_luma_used
+                || processing->hue_vs_saturation_used
+                || processing->hue_vs_hue_used
+                || processing->luma_vs_saturation_used))
+        {
+            processing_set_direct8_incompatibility_reason("creative-hue-vs-curve-enabled");
+            return g_processing_last_direct8_incompatibility_reason;
+        }
+        if (processing->allow_creative_adjustments && processing->toning_dry < 0.998f)
+        {
+            processing_set_direct8_incompatibility_reason("creative-toning-enabled");
+            return g_processing_last_direct8_incompatibility_reason;
+        }
+        if (processing->allow_creative_adjustments
+            && (fabsf(processing->toning_wet[0]) > 0.0005f
+                || fabsf(processing->toning_wet[1]) > 0.0005f
+                || fabsf(processing->toning_wet[2]) > 0.0005f))
+        {
+            processing_set_direct8_incompatibility_reason("creative-toning-wet-enabled");
+            return g_processing_last_direct8_incompatibility_reason;
+        }
+        processing_set_direct8_incompatibility_reason("creative-adjustments-unsupported");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+
+    if (!processing_has_direct8_supported_local_tone_adjustments(processing))
+    {
+        if (processingPlaybackPreviewModeEnabled())
+        {
+            processing_set_direct8_incompatibility_reason("preview-local-tone-not-neutral");
+        }
+        else if (fabs(processing->clarity) >= 0.01)
+        {
+            processing_set_direct8_incompatibility_reason("clarity-enabled");
+        }
+        else
+        {
+            processing_set_direct8_incompatibility_reason("local-tone-unsupported");
+        }
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+
+    if (processing->highlight_reconstruction)
+    {
+        processing_set_direct8_incompatibility_reason("highlight-reconstruction-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->gradient_enable)
+    {
+        processing_set_direct8_incompatibility_reason("gradient-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->vignette_strength != 0)
+    {
+        processing_set_direct8_incompatibility_reason("vignette-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->lut_on)
+    {
+        processing_set_direct8_incompatibility_reason("lut-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->filter_on)
+    {
+        processing_set_direct8_incompatibility_reason("filter-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->denoiserStrength > 0)
+    {
+        processing_set_direct8_incompatibility_reason("denoiser-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->rbfDenoiserLuma > 0 || processing->rbfDenoiserChroma > 0)
+    {
+        processing_set_direct8_incompatibility_reason("rbf-denoiser-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->ca_desaturate > 0)
+    {
+        processing_set_direct8_incompatibility_reason("ca-desaturate-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processingUsesChromaSeparation(processing))
+    {
+        processing_set_direct8_incompatibility_reason("chroma-separation-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processingGetSharpening(processing) > 0.005)
+    {
+        processing_set_direct8_incompatibility_reason("sharpening-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+    if (processing->grainStrength > 0)
+    {
+        processing_set_direct8_incompatibility_reason("grain-enabled");
+        return g_processing_last_direct8_incompatibility_reason;
+    }
+
+    processing_set_direct8_incompatibility_reason("direct8-inactive");
+    return g_processing_last_direct8_incompatibility_reason;
 }
 
 static int processing_direct8_requires_shared_kernel(const processingObject_t * processing)
