@@ -1,3 +1,286 @@
+# 2026-06-08 - standard x4 quarter-res shadows/highlights prep regressed the full matrix, so the baseline stays on the established x8-standard path
+
+### Verified locally
+
+- I tried widening the standard-preview shadows/highlights prep path so scale 4 could use the quarter-res RBF lane, then rebuilt the release tree and reran the full standard M16 same-build matrix.
+- The resulting matrix was not keeper-safe:
+  - x1 slipped versus the earlier x8-standard baseline
+  - x2 stayed roughly flat
+  - x4 lost the x8-standard throughput advantage
+  - x8 also regressed instead of holding the earlier higher lane
+- The screenshot-backed smoke stayed visually clean, with `colorArtifactScan.verdict=clear-heuristic` on every run, so the issue here was throughput, not a new color-artifact failure.
+- I reverted the x4 quarter-res branch and restored the earlier aggressive-preview-only quarter-res gate in [`src/processing/raw_processing.c`](C:/!Layi%20Wkspc/MLV-App/src/processing/raw_processing.c).
+- The restored release fingerprint is:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-08 12:01:08 AM`
+  - `Length=9110528`
+  - `SHA256=DA06F66537E4FBE4BA2B12B3B1E14CF3C49793B6888D37CD8E18C26C3876ED53`
+- Qt-linked regression checks passed through the Windows wrapper after the revert:
+  - `PlaybackQualityAutoSampler.*`
+  - `DualIsoPipeline.Phase4Bv4_*`
+  - `DualIsoPipeline.RawUint16Prefetch*`
+- The restored baseline smoke stayed clean on the representative canaries:
+  - `M16-1347` at `x4`: visually acceptable presented frame, `colorArtifactScan.verdict=clear-heuristic`
+  - `M16-1327` at `x8`: visually acceptable presented frame, `colorArtifactScan.verdict=clear-heuristic`
+
+### Cross-checked from prior analysis
+
+- The x4 quarter-res attempt reduced the local shadows/highlights prep slice, but the overall matrix still lost to the earlier x8-standard baseline once render and presented FPS were compared across the full trio.
+- The previous x8-standard baseline remains the better keeper because it holds the stronger high-scale lane without giving back the low-scale matrix enough to justify the trade.
+
+### Needs runtime profiling
+
+- Keep the established x8-standard baseline as the reference.
+- Any next throughput attempt should target a different shared-path lever rather than expanding standard-preview quarter-res shadows/highlights prep again.
+
+# 2026-06-07 - standard scale-4/8 lookahead extension regressed x4/x8, so the earlier x8-standard baseline is restored
+
+### Verified locally
+
+- I backed out the newest standard-path raw uint16 lookahead extension that returned `8` for standard dual-ISO scale `4` and `8` in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c).
+- I also removed the now-stale test-only expectation for that standard scale-4/8 lookahead branch from [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp).
+- The release tree rebuilt cleanly after the revert:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-07 10:53:37 PM`
+  - `Length=9110016`
+  - `SHA256=F6A291CB741CEF3EC6EB2EF4C3B21C433ABBAD1409911CEB255FE719D1F6A4E4`
+- Qt-linked regression checks passed through the Windows wrapper:
+  - `PlaybackQualityAutoSampler.*`
+  - `RawUint16PrefetchLookaheadExpandsForAggressiveScaleOneTwoAndFour`
+  - `RawUint16PrefetchAllowsStandardDualIsoScaleFourWhenReducedPreviewExpected`
+  - `RawUint16PrefetchAllowsAggressiveDualIsoScaleFourWhenReducedPreviewExpected`
+  - `Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour`
+  - `Phase4Bv4_*`
+- Screenshot-backed smoke on the restored baseline stayed clean on the canaries:
+  - `M16-1347` at `x4`: `validation.ok=true`, `colorArtifactScan.verdict=clear-heuristic`, `visibleBottomLeftGuiFps=15.0`, `smokePresentedFps=15.530`, `timeline_fps=23.500`, `avg_render_total_ms=34.858 ms` (`28.69 fps-equiv`), `avg_llrawproc_ms=6.896 ms` (`145.00 fps-equiv`), `avg_processed8_ms=32.302 ms` (`30.96 fps-equiv`)
+  - `M16-1327` at `x8`: `validation.ok=true`, `colorArtifactScan.verdict=clear-heuristic`, `visibleBottomLeftGuiFps=14.0`, `smokePresentedFps=16.584`, `timeline_fps=23.497`, `avg_render_total_ms=29.450 ms` (`33.95 fps-equiv`), `avg_llrawproc_ms=5.758 ms` (`173.68 fps-equiv`), `avg_processed8_ms=26.776 ms` (`37.35 fps-equiv`)
+  - `M16-1446` at `x8`: `validation.ok=true`, `colorArtifactScan.verdict=clear-heuristic`, `visibleBottomLeftGuiFps=14.0`, `smokePresentedFps=16.700`, `timeline_fps=23.629`, `avg_render_total_ms=30.425 ms` (`32.87 fps-equiv`), `avg_llrawproc_ms=5.499 ms` (`181.85 fps-equiv`), `avg_processed8_ms=27.689 ms` (`36.12 fps-equiv`)
+
+### Cross-checked from prior analysis
+
+- The newest standard lookahead extension did not improve the matrix; it regressed the key aggressive lanes enough that it should not be kept.
+- The restored baseline keeps the earlier x8-standard participation work in place without forcing the standard scale-4/8 lookahead to `8`.
+- The manual screenshot review stayed visually acceptable on all three canaries; I did not see a new magenta/pink/green bar pattern.
+
+### Needs runtime profiling
+
+- Keep the restored x8-standard baseline as the reference from here.
+- The next candidate should be a different shared-path lever if we want to improve x1/x2/x4 further without giving back the current x8 gains.
+
+# 2026-06-07 - processed8 x8-only enablement regressed the standard matrix, so the better x8-standard baseline stays in place
+
+### Verified locally
+
+- I reverted the processed8 standard-x8 enablement branch back to the earlier aggressive-preview-only behavior, while keeping the already-validated raw-prefetch and x8 crop work intact.
+- The rebuilt release fingerprint after the revert was:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-07 10:22:22 PM`
+  - `Length=9110016`
+  - `SHA256=F6A291CB741CEF3EC6EB2EF4C3B21C433ABBAD1409911CEB255FE719D1F6A4E4`
+- Qt-linked regression checks passed through the Windows wrapper:
+  - `PlaybackQualityAutoSampler.*`
+  - `Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour`
+  - `RawUint16Prefetch*:`
+  - `Phase4Bv4_*`
+- Screenshot-backed smoke on the restored baseline stayed clean on the canaries:
+  - `M16-1347` at `x4`: `validation.ok=true`, `colorArtifactScan.verdict=clear-heuristic`, `smokePresentedFps=15.131`, `timeline_fps=23.473`, `visibleBottomLeftGuiFps=13`, `avg_render_total_ms=36.323 ms` (`27.53 fps-equiv`), `avg_llrawproc_ms=6.897 ms` (`144.99 fps-equiv`), `avg_processed8_ms=33.492 ms` (`29.86 fps-equiv`)
+  - `M16-1327` at `x8`: `validation.ok=true`, `colorArtifactScan.verdict=clear-heuristic`, `smokePresentedFps=14.248`, `timeline_fps=23.457`, `visibleBottomLeftGuiFps=12`, `avg_render_total_ms=40.331 ms` (`24.80 fps-equiv`), `avg_llrawproc_ms=8.296 ms` (`120.54 fps-equiv`), `avg_processed8_ms=36.887 ms` (`27.11 fps-equiv`)
+
+### Cross-checked from prior analysis
+
+- The x8-only processed8 branch was a net regression against the earlier x8-standard baseline: it hurt x1, x4, and x8 even though x2 sometimes looked slightly better.
+- The restored baseline keeps the better standard matrix in place while preserving the raw-prefetch and x8 crop work that already proved useful.
+
+### Needs runtime profiling
+
+- The next candidate should target a different shared-path bottleneck rather than trying to force standard x8 processed8 prefetch back in by default.
+- Keep the x8-standard baseline as the reference until a new candidate beats it across the full M16 trio.
+
+# 2026-06-07 - x1 lookahead bump to 5 did not pay back on the full matrix, so the baseline returns to 4/6/8
+
+### Verified locally
+
+- I tried widening the aggressive-preview raw uint16 lookahead to `5` at scale `1` while keeping `6` at scale `2` and `8` at scale `4`, then rebuilt the release tree and reran the full standard M16 matrix.
+- The x1 lookahead bump was not keeper-safe:
+  - `x1` was essentially flat to slightly worse
+  - `x2` improved a bit
+  - `x4` regressed materially
+  - `x8` regressed materially
+- The full matrix stayed screenshot-clean and the heuristic color scan remained `clear-heuristic` on every run, so this was a throughput regression, not a visual one.
+- The rebuilt release fingerprint after the reverted restore was:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-07 9:37:25 PM`
+  - `Length=9110016`
+  - `SHA256=F3FAFDCA389393B921ED3AE58DBFA084327476D7FCA3391A3C8215FB71466A01`
+- New matrix averages from `.claude-state/profiling/20260607-x1-lookahead5-matrix`:
+  - `x1`: presented `7.280 fps`, timeline `23.510 fps`, GUI `8.100 fps`, render `113.540 ms`, `llrawproc 28.810 ms`, `processed8 112.120 ms`
+  - `x2`: presented `12.730 fps`, timeline `23.370 fps`, GUI `11.270 fps`, render `50.600 ms`, `llrawproc 11.190 ms`, `processed8 47.770 ms`
+  - `x4`: presented `12.960 fps`, timeline `23.470 fps`, GUI `15.330 fps`, render `45.300 ms`, `llrawproc 8.580 ms`, `processed8 41.850 ms`
+  - `x8`: presented `14.840 fps`, timeline `23.550 fps`, GUI `11.600 fps`, render `35.880 ms`, `llrawproc 6.550 ms`, `processed8 32.540 ms`
+- Raw prefetch hits from the x1-lookahead-5 run:
+  - `x1`: `350`
+  - `x2`: `928`
+  - `x4`: `888`
+  - `x8`: `1015`
+- The x8 canary screenshot remained visually acceptable on review, but the x4 and x8 timing regressions were enough to reject the bump.
+
+### Cross-checked from prior analysis
+
+- The earlier `4/6/8` split remains the better validated baseline for the aggressive-preview raw-prefetch lane.
+- The prior note that called x1=5 a winner is now superseded by the full-matrix evidence above.
+
+### Needs runtime profiling
+
+- Keep the x8-enabled standard baseline and do not re-apply the x1=5 lookahead bump.
+- Any future x1 recovery should come from a different shared-path lever, not from this lookahead step.
+
+# 2026-06-07 - standard x8 compatibility now participates and lifts the whole matrix materially
+
+### Verified locally
+
+- I relaxed the standard x8 preview compatibility gate in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so the v4 x8 full-XY crop/fill path can run when the clip is 16-wide and at least 32 rows high, and I added a matching standard dual-ISO x8 raw-prefetch allowance.
+- I updated the focused x8 pipeline regressions in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp) to match the new x8 contract, including the crop rows that the renderer now reports instead of a fallback.
+- The release tree rebuilt cleanly after the change, and the same-build standard M16 matrix on `M16-1327`, `M16-1347`, and `M16-1446` stayed screenshot-clean with `colorArtifactScan.verdict=clear-heuristic` for every run.
+- The rebuilt release fingerprint was:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-07 9:02:10 PM`
+  - `Length=9110016`
+  - `SHA256=08502E638D687783783742A07F0710CA3B45EE0AE08106B66EDF9483296F1D9C`
+- New matrix averages from `.claude-state/profiling/20260607-x8-standard-matrix`:
+  - `x1`: presented `7.310 fps`, timeline `23.490 fps`, GUI `7.333 fps`, render `112.740 ms` (`8.87 fps-equiv`), `llrawproc 28.120 ms` (`35.56 fps-equiv`), `processed8 111.320 ms` (`8.98 fps-equiv`)
+  - `x2`: presented `12.340 fps`, timeline `23.420 fps`, GUI `12.000 fps`, render `53.110 ms` (`18.83 fps-equiv`), `llrawproc 11.840 ms` (`84.43 fps-equiv`), `processed8 50.090 ms` (`19.97 fps-equiv`)
+  - `x4`: presented `15.320 fps`, timeline `23.480 fps`, GUI `17.000 fps`, render `36.000 ms` (`27.78 fps-equiv`), `llrawproc 6.690 ms` (`149.47 fps-equiv`), `processed8 33.290 ms` (`30.04 fps-equiv`)
+  - `x8`: presented `15.770 fps`, timeline `23.560 fps`, GUI `14.700 fps`, render `33.430 ms` (`29.91 fps-equiv`), `llrawproc 6.120 ms` (`163.28 fps-equiv`), `processed8 30.440 ms` (`32.85 fps-equiv`)
+- Raw prefetch hits now move on every scale, including x8:
+  - `x1`: `384`
+  - `x2`: `889`
+  - `x4`: `1049`
+  - `x8`: `1065`
+- The x8 presented-frame screenshot reviewed cleanly, and I did not see new magenta, pink, or green bar artifacts in the canary frame.
+
+### Cross-checked from prior analysis
+
+- Compared with the previous matrix, the standard x8 lift is the biggest win: the x8 lane is now faster than x4 on presented FPS and no longer lives in the fallback-only regime.
+- `x4` also improved materially, while `x1` and `x2` stayed in a safe-enough band rather than collapsing.
+- The bottleneck ranking changed: x8 is no longer the canary limiter, and the next step should focus on the remaining raw/decode/processing floor around x1/x2 if we want to keep pushing.
+
+### Needs runtime profiling
+
+- This branch is worth keeping as the standard x8 enablement baseline.
+- The next pass should look for a small x1/x2 recovery without giving up the x4/x8 gains, but the current state is already a materially better standard smoke matrix than the previous fallback-era baseline.
+
+# 2026-06-07 - standard-path x4 raw-prefetch now opens, but the matrix is still mixed overall
+
+### Verified locally
+
+- I added the standard-preview dual-ISO scale-4 raw-prefetch gate in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) and kept the focused regression coverage in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp).
+- The release tree rebuilt cleanly after the change, and the same-build standard M16 matrix on `M16-1327`, `M16-1347`, and `M16-1446` stayed screenshot-clean with `colorArtifactScan.verdict=clear-heuristic` for every run.
+- The rebuilt release fingerprint was:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-07 8:13:54 PM`
+  - `Length=9110016`
+  - `SHA256=B6008F37F3D4A4C5F8EA785D6CB7FDB5ED6B1B6BC710B369BB08ED913BA193C3`
+- New matrix averages from `.claude-state/profiling/20260607-current-matrix-v3`:
+- `x1`: presented `6.690 fps`, timeline `23.490 fps`, GUI `5.433 fps`, render `125.348 ms` (`7.98 fps-equiv`), `llrawproc 32.376 ms` (`30.89 fps-equiv`), `processed8 123.689 ms` (`8.08 fps-equiv`)
+- `x2`: presented `12.567 fps`, timeline `23.420 fps`, GUI `13.333 fps`, render `52.080 ms` (`19.20 fps-equiv`), `llrawproc 11.863 ms` (`84.31 fps-equiv`), `processed8 49.152 ms` (`20.35 fps-equiv`)
+- `x4`: presented `14.260 fps`, timeline `23.460 fps`, GUI `10.200 fps`, render `39.923 ms` (`25.05 fps-equiv`), `llrawproc 7.375 ms` (`135.51 fps-equiv`), `processed8 36.883 ms` (`27.11 fps-equiv`)
+- `x8`: presented `10.640 fps`, timeline `23.570 fps`, GUI `12.667 fps`, render `72.195 ms` (`13.85 fps-equiv`), `llrawproc 30.611 ms` (`32.67 fps-equiv`), `processed8 63.303 ms` (`15.80 fps-equiv`)
+- Raw prefetch hits moved strongly at `x4` and stayed absent at `x8`:
+  - `x1`: `91`, `99`, `113`
+  - `x2`: `308`, `280`, `316`
+  - `x4`: `317`, `330`, `335`
+  - `x8`: `0`, `0`, `0`
+- The `x8` canary stayed visually acceptable on direct review, and I did not see new magenta, pink, or green bar artifacts in the screenshot-backed smoke.
+
+### Cross-checked from prior analysis
+
+- Compared with the previous same-build matrix, this gate is a real win for the standard x4 lane and a slight win for x2, but it does not improve the whole matrix uniformly.
+- `x1` and `x8` both slipped relative to the earlier baseline, so this is not a clean universal keeper yet even though the x4 result is materially better.
+- The standard smoke bottleneck is still the shared raw/decode/reconstruct tail, but we now have evidence that the x4 standard path can participate in that tail instead of always falling back.
+
+### Needs runtime profiling
+
+- Keep this branch as a targeted x4 throughput improvement, but do not declare the whole matrix solved yet.
+- The next pass should look for a way to recover the x1/x8 drag without giving up the x4 prefetch win.
+
+# 2026-06-07 - trimming processed8 prefetch bookkeeping recovered x1 a bit, but it still does not beat the earlier matrix overall
+
+### Verified locally
+
+- I rebuilt the user-facing release tree after narrowing `processed8PrefetchActive` back to the direct8-only path in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c).
+- The rebuilt release fingerprint was:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-07 8:13:54 PM`
+  - `Length=9110016`
+  - `SHA256=B6008F37F3D4A4C5F8EA785D6CB7FDB5ED6B1B6BC710B369BB08ED913BA193C3`
+- The rebuilt same-build standard M16 matrix on `M16-1327`, `M16-1347`, and `M16-1446` stayed screenshot-clean, and the heuristic color scan remained `clear-heuristic` on all 12 runs.
+- New matrix averages from `.claude-state/profiling/20260607-current-matrix-v2`:
+  - `x1`: presented `7.103 fps`, timeline `23.484 fps`, GUI `7.467 fps`, render `117.037 ms` (`8.54 fps-equiv`), `llrawproc 29.335 ms` (`34.09 fps-equiv`), `processed8 115.578 ms` (`8.65 fps-equiv`)
+  - `x2`: presented `12.480 fps`, timeline `23.408 fps`, GUI `11.000 fps`, render `52.502 ms` (`19.05 fps-equiv`), `llrawproc 11.401 ms` (`87.71 fps-equiv`), `processed8 49.532 ms` (`20.19 fps-equiv`)
+  - `x4`: presented `13.050 fps`, timeline `23.448 fps`, GUI `12.333 fps`, render `50.234 ms` (`19.91 fps-equiv`), `llrawproc 7.578 ms` (`131.96 fps-equiv`), `processed8 47.317 ms` (`21.13 fps-equiv`)
+  - `x8`: presented `11.145 fps`, timeline `23.573 fps`, GUI `10.400 fps`, render `68.624 ms` (`14.57 fps-equiv`), `llrawproc 27.607 ms` (`36.22 fps-equiv`), `processed8 60.142 ms` (`16.63 fps-equiv`)
+- Raw prefetch still only moved on `x1` and `x2` (`334` and `891` hits respectively across the three clips); it stayed `0` at `x4` and `x8`.
+- The `x8` canary stayed visually acceptable on direct review, but the timing deltas do not justify calling this a keeper over the earlier matrix.
+
+### Cross-checked from prior analysis
+
+- Compared with the earlier same-build matrix, this narrower processed8 bookkeeping path slightly improved `x1` but did not recover the overall x2/x4/x8 performance envelope.
+- The standard smoke bottleneck is still the shared raw/decode/reconstruct tail, not the draw/present path.
+
+### Needs runtime profiling
+
+- This branch should not be treated as the next keeper. The next pass needs a different shared-path lever if we want to move the standard M16 trio together.
+
+# 2026-06-07 - dual-ISO aggressive-preview raw-prefetch gate is safe, but it does not move the standard M16 smoke path
+
+### Verified locally
+
+- I added the dual-ISO reduced-preview raw-prefetch exception in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) and kept the focused regression coverage in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp).
+- The release tree rebuilt cleanly and the standard M16 same-build matrix on `M16-1327`, `M16-1347`, and `M16-1446` stayed screenshot-clean with `colorArtifactScan.verdict=clear-heuristic` for every run.
+- The new release fingerprint was:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-07 7:08:24 PM`
+  - `Length=9110016`
+  - `SHA256=6BC06320C9588E8E8E1C3E82BB00F7259D458F246CA3FC7B0044DAFAB8EE01E4`
+- Matrix averages from `.claude-state/profiling/20260607-dualiso-prefetch-gate-matrix`:
+  - `x1`: presented `8.261 fps`, timeline `23.508 fps`, GUI `8.433 fps`, render `98.830 ms` (`10.12 fps-equiv`), `llrawproc 24.933 ms` (`40.11 fps-equiv`), `processed8 97.495 ms` (`10.26 fps-equiv`)
+  - `x2`: presented `13.408 fps`, timeline `23.406 fps`, GUI `12.667 fps`, render `46.712 ms` (`21.41 fps-equiv`), `llrawproc 10.010 ms` (`99.90 fps-equiv`), `processed8 44.060 ms` (`22.70 fps-equiv`)
+  - `x4`: presented `13.803 fps`, timeline `23.478 fps`, GUI `12.333 fps`, render `46.849 ms` (`21.35 fps-equiv`), `llrawproc 6.769 ms` (`147.73 fps-equiv`), `processed8 44.188 ms` (`22.63 fps-equiv`)
+  - `x8`: presented `11.863 fps`, timeline `23.581 fps`, GUI `11.667 fps`, render `64.308 ms` (`15.55 fps-equiv`), `llrawproc 25.971 ms` (`38.50 fps-equiv`), `processed8 56.540 ms` (`17.69 fps-equiv`)
+- The raw-prefetch counter only moved at `x1` and `x2` (`raw_prefetch_hits=389` and `977` respectively across the three clips); it stayed `0` at `x4` and `x8`.
+- That matches the code path: `mlv_aggressive_reduced_dual_iso_prefetch_expected(video)` still requires aggressive preview mode, so the standard smoke path does not open the new x4 gate.
+
+### Cross-checked from prior analysis
+
+- The new gate is safe and regression-covered, but it does not change the current standard M16 bottleneck ranking.
+- The current standard smoke bottleneck remains the shared raw/decode/reconstruct tail, especially at `x8` where Phase 4B still falls back with the `x8 preview requires 32-row aligned height` reason on the standard clips.
+
+### Needs runtime profiling
+
+- If we want the standard smoke matrix to move further, the next candidate needs to affect the non-aggressive preview path or a different shared throughput bucket.
+- Do not treat this gate as a proven x4 throughput win until a follow-up matrix shows it opening on the standard smoke path.
+
+# 2026-06-07 - x1 lookahead bump to 5 regressed the whole matrix, so the better validated split remains 4/6/8
+
+### Verified locally
+
+- I tried widening the aggressive-preview raw uint16 lookahead to `5` at scale `1` while keeping `6` at scale `2` and `8` at scale `4`.
+- The rebuilt release matrix on the standard M16 trio regressed compared with the earlier `4/6/8` split:
+  - `x1` got materially worse on all three clips
+  - `x2` was roughly flat to slightly worse overall
+  - `x4` and `x8` also slipped instead of improving
+- The canary screenshots stayed heuristically clean, but the timing move was not keeper-safe.
+- I reverted the `5/6/8` attempt and returned to the better validated `4/6/8` split.
+
+### Cross-checked from prior analysis
+
+- The previous `4/6/8` raw-prefetch split remains the best currently validated middle-ground between x1 recovery and x2/x4 throughput.
+- The raw-prefetch lane is still worth tuning, but not by pushing scale `1` to `5` in this branch.
+
+### Needs runtime profiling
+
+- Future throughput work should start from the restored `4/6/8` baseline and look for a different shared-path reduction if we want more x1 improvement without sacrificing the other lanes.
+
 # 2026-06-07 - x2 raw-prefetch lookahead increases to 6 and improves throughput, but x8 remains the visual canary
 
 ### Verified locally
