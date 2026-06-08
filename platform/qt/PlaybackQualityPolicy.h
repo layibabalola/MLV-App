@@ -616,6 +616,19 @@ inline bool playbackQualityWantsHqMean23( PlaybackQualityMode mode )
         || mode == PlaybackQualityMode::Phase3HQ;
 }
 
+/* Fast playback quality keeps the dual-ISO HQ shortcut active for the
+ * performance-sensitive preview scales. This is a GUI policy knob, not a
+ * pixel policy: the actual reconstruction path is still chosen lower in
+ * the pipeline. */
+inline bool playbackQualityWantsFastDualIsoHqPath( PlaybackQualityMode mode,
+                                                   int effectiveScale,
+                                                   bool dualIsoActive )
+{
+    return dualIsoActive
+        && mode == PlaybackQualityMode::Fast
+        && ( effectiveScale == 2 || effectiveScale == 4 );
+}
+
 /* Effective playback scale factor considering env override + GUI fallback.
  * Returns 1, 2, 4, or 8 (clamped). For Auto mode, the dynamic decision is
  * made by the cadence sampler; this returns the mode's *initial* scale
