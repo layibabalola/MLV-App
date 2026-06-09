@@ -3534,12 +3534,18 @@ static int mlv_render_scaled_rgb16_v3_full_xy(mlvObject_t * video,
  * 16-aligned Y-crop the validated v3 x4 path uses. */
 static int mlv_quarterres_x2_preview_enabled(void)
 {
-    /* Read fresh each call: cheap getenv vs ~10 ms recon, and keeps the path
-     * trivially controllable from tests without a cache-reset hook. Default OFF
-     * (opt-in via env) until validated; flip the default once the quality and
-     * cadence are signed off. */
-    const char * v = getenv("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW");
-    return (v && v[0] != '\0' && v[0] != '0') ? 1 : 0;
+    /* Engage the quarter-res x2 preview when EITHER the env opt-in is set OR the
+     * GUI "Aggressive Performance" playback-quality mode is active. That mode is
+     * meant to favour cadence, so it now selects this fast quarter-res path
+     * (correcting its prior mapping to the slower HQ half-res recon); Sharp/Smooth
+     * keeps the full-detail half-res path. An explicit disable env always wins
+     * (for A/B). Read fresh each call: cheap getenv vs ~10 ms recon, and trivially
+     * controllable from tests. */
+    const char * dis = getenv("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW");
+    if (dis && dis[0] != '\0' && dis[0] != '0') return 0;
+    const char * en = getenv("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW");
+    if (en && en[0] != '\0' && en[0] != '0') return 1;
+    return mlvPlaybackAggressivePreviewMode() ? 1 : 0;
 }
 
 /* Edge-clamped bilinear upscale of an interleaved RGB16 image to an explicit
