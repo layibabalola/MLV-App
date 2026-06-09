@@ -1,3 +1,210 @@
+# 2026-06-08 - x1/x2 quarter-res default-on remains the keeper-safe gain; x8 canary corruption and SSD pressure are still live
+
+### Verified locally
+
+- I rebuilt the user-facing release tree at [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) after the current x1/x2 quarter-res change and captured the fingerprint:
+  - `LastWriteTime=6/8/2026 6:48:46 PM`
+  - `Length=9113600`
+  - `SHA256=57798E288862C2F18AB37CA0A2FA70EB0ED11141E0DFC2742B3015B8EBCAE0DC`
+- I reran the Qt-linked pipeline regression wrapper through [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1). The new x2 default-on assertion now passes, but the suite still reports unrelated pre-existing failures in the aggressive x2 processing-filter path and several direct8/cache guardrail tests.
+- I reran screenshot-backed same-build smoke on the standard trio at `1x`, `2x`, `4x`, and `8x` in the current profiling folders.
+- The lower lanes remain visually clean:
+  - `M16-1327`: `1x` `5.860 fps`, `2x` `14.846 fps`
+  - `M16-1347`: `1x` `5.366 fps`, `2x` `14.085 fps`
+  - `M16-1446`: `1x` `5.342 fps`, `2x` `12.611 fps`
+- The x8 canary still shows the longstanding block / color-corruption pattern on `M16-1327` and `M16-1347`.
+- `M16-1446` at `x8` is still very dark, but I did not see a new magenta/pink/green bar artifact in the presented frame.
+- The latest disk investigation on `M16-1446` at `x2` still shows heavy playback reads, with screenshot capture adding enough write pressure to make Resource Monitor look much worse than the no-screenshot path.
+- A probe-enabled `M16-1327` x2 sample still ranks the broader processing tail ahead of the quarter-res helper, with `processing_shadows_highlights_prep` and `processing_core_other` leading the visible cost.
+
+### Cross-checked from prior analysis
+
+- The x1/x2 quarter-res default-on change remains the best keeper-safe FPS improvement found so far for the standard trio.
+- The x4 quarter-res default-on probe remains off by default because it hurt cadence on the current baseline.
+- The x8 canary corruption appears to be the same longstanding failure mode, not a new regression from the current x1/x2 candidate.
+- The next bottleneck is still the broader processing tail, not the quarter-res helper itself.
+
+### Needs runtime profiling
+
+- Keep the x8 canary review loop in every candidate.
+- Compare playback disk pressure with and without screenshot capture if we want to quantify write amplification separately from the real playback reads.
+- If the next tweak touches playback cadence or throughput again, rerun the same-build trio sweep before keeping it.
+- Treat the current pipeline-suite failures as open triage items until we know whether any of them are newly introduced by the current quarter-res candidate.
+# 2026-06-08 - current regression sweep is clean in x1/x2/x4, while the x8 canary still shows corruption on M16-1327 and M16-1347
+
+### Verified locally
+
+- I rebuilt the user-facing release tree at [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) and captured the current fingerprint:
+  - `LastWriteTime=6/8/2026 3:14:53 PM`
+  - `Length=9113600`
+  - `SHA256=D4C7417784178FB421EDDBD19C26C1A9B2AB6A275394B2D27B79E0891F3399A6`
+- I rebuilt the Qt-linked pipeline test tree and ran the regression wrapper through [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1). The wrapper completed successfully after the rebuild.
+- I reran screenshot-backed same-build GUI smoke across the standard trio at `1x`, `2x`, `4x`, and `8x` into [`.claude-state/profiling/20260608-regression-sweep`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260608-regression-sweep).
+- The fresh sweep is visually clean in the lower lanes:
+  - `M16-1327`: `1x` `5.73 fps`, `2x` `14.74 fps`, `4x` `24.60 fps`
+  - `M16-1347`: `1x` `5.73 fps`, `2x` `17.63 fps`, `4x` `20.77 fps`
+  - `M16-1446`: `1x` `5.52 fps`, `2x` `20.32 fps`, `4x` `20.27 fps`
+- The x8 canary still shows real corruption on the presented frames for `M16-1327` and `M16-1347`.
+- `M16-1446` at `x8` is very dark, but the color-artifact heuristic stayed clear and I did not see a new magenta/pink/green bar artifact in the presented frame.
+- The smoke runs all reported `validation.ok=true` and `colorArtifactScanVerdict=clear-heuristic`.
+- The fresh sweep still shows heavy read-side playback pressure, which keeps the SSD investigation live.
+- I also ran a probe-enabled `M16-1327` x1/x2 sample with `MLVAPP_SHADOWS_HIGHLIGHTS_PROBE=1` to split the current processing tail:
+  - `x1`: `presented_fps=5.924`, `avg_render_total_ms=140.047 ms` (`7.14 fps-equiv`), `avg_processing_ms=58.964 ms` (`16.96 fps-equiv`), `avg_processing_shadows_highlights_prep_ms=14.526 ms` (`68.84 fps-equiv`)
+  - `x2`: `presented_fps=8.753`, `avg_render_total_ms=80.600 ms` (`12.41 fps-equiv`), `avg_processing_ms=33.218 ms` (`30.11 fps-equiv`), `avg_processing_shadows_highlights_prep_ms=14.526 ms` (`68.84 fps-equiv`), `avg_processing_core_other_ms=10.298 ms` (`97.10 fps-equiv`)
+  - `x2` also recorded `raw_prefetch_hits=168` and `processed8_prefetch_hits=42`, so the prefetch path is active but not the dominant limiter
+- The probe split says the next bottleneck is the broader processing tail, with `processing_shadows_highlights_prep` and `processing_core_other` leading the visible cost rather than the quarter-res helper itself.
+
+### Cross-checked from prior analysis
+
+- The clean lower lanes mean the current code path is not introducing a new visible regression at `1x`, `2x`, or `4x` in the standard trio.
+- The x8 canary corruption is persistent and appears to be the same longstanding failure mode rather than a new artifact from this sweep.
+- The live bottleneck hunt should keep `1x` and `2x` first in priority, but the canary review loop still has to gate any future widening.
+- The probe-enabled x2 sample makes the processing tail a better next target than the raw-decode or quarter-res prep helpers.
+
+### Needs runtime profiling
+
+- Investigate the heavy disk activity during playback so we can tell how much of the remaining pacing gap is I/O versus processing.
+- Keep the x8 canary review in every future candidate loop.
+- If the next tweak touches playback cadence or throughput again, rerun the same-build trio sweep before keeping it.
+- Before another code change, decide whether the next safe lever is a tighter processing-tail optimization or a disk-path mitigation; the data now favors the processing tail.
+
+# 2026-06-08 - processed8 prefetch widened for x1/x2; matrix is cleaner in x1/x2/x4 but the x8 canary still fails on M16-1327
+
+### Verified locally
+
+- I widened `mlv_processed8_prefetch_enabled()` in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) so standard preview now enables processed8 prefetch for scale `1` and `2` as well as the existing `4` and `8` lanes.
+- I updated the matching regression in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp) and rebuilt the user-facing release tree:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/8/2026 2:15:02 PM`
+  - `Length=9114112`
+  - `SHA256=3C877116F29F7C1AC77188348AFAACFF3347D378B04F990CBB053B4B1B8C2EB5`
+- The Qt-linked pipeline regression wrapper passed after rebuilding the pipeline test tree:
+  - [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1)
+  - `DualIsoPipeline.Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour`
+  - `DualIsoPipeline.Processed8PrefetchEnablesStandardScaleOneTwoFourAndEight`
+- I reran the standard trio screenshot-backed same-build matrix at `1x`, `2x`, `4x`, and `8x` into [`C:\!Layi Wkspc\MLV-App\.claude-state\profiling\20260608-processed8-prefetch-x1x2-sweep`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260608-processed8-prefetch-x1x2-sweep).
+- The matrix is cleaner than the previous raw-prefetch baseline:
+  - `scale-1` is visually clean across `M16-1327`, `M16-1347`, and `M16-1446`
+  - `scale-2` is visually clean across the trio
+  - `scale-4` is visually clean across the trio
+  - `scale-8` still fails on `M16-1327` with a visible corruption artifact in the presented frame
+- The smoke telemetry shows the new gate is taking effect where it matters most:
+  - `scale-2` has `processed8_prefetch_hits=299` on `M16-1347`
+  - `scale-4` has `processed8_prefetch_hits=543` on `M16-1446`
+  - `scale-8` has `processed8_prefetch_hits=593` on `M16-1347` and `processed8_prefetch_hits=660` on `M16-1446`
+  - `scale-1` still reports `processed8_prefetch_hits=0`, so `x1` still needs a different bottleneck pass
+- The most important FPS wins so far are at `x2` and `x4`:
+  - `M16-1347` at `x2` presented `15.329 fps`
+  - `M16-1446` at `x2` presented `18.300 fps`
+  - `M16-1446` at `x4` presented `21.179 fps`
+- `M16-1327` at `x8` remains the live canary for visual corruption and should stay in every future candidate loop.
+
+### Cross-checked from prior analysis
+
+- The change is an improvement over the previous raw-prefetch baseline, but it is not yet a finish line because `x1` still does not show processed8-prefetch hits and the `x8` canary still fails on `M16-1327`.
+- The disk-pressure concern is still live, but the latest evidence now suggests the priority-lane throughput win is coming from the processed8 cache/prefetch overlap rather than from another raw-prefetch widen.
+
+### Needs runtime profiling
+
+- Investigate why `x1` still has `processed8_prefetch_hits=0` even after the gate widen.
+- Keep the `x8` canary review loop in place and decide whether the next bottleneck is a separate `x1` render-path gate, a direct8 path adjustment, or a raw/cache mitigation.
+
+# 2026-06-08 - x1 rollback did not restore a fully clean matrix; the remaining corruption looks clip-specific and disk pressure is still live
+
+### Verified locally
+
+- I rolled the raw-prefetch `x1` lookahead in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) back from `6` to `4` and restored the matching regression expectations in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp).
+- I rebuilt the user-facing release tree after the rollback and verified the current fingerprint:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/8/2026 12:53:18 PM`
+  - `Length=9114112`
+  - `SHA256=97D2871EDB38276FD5AD637B1C6844368AB055D2730C0CB686C2FAA888D4C30B`
+- I reran the Qt-linked regression coverage through [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1) for:
+  - `PlaybackQualityAutoSampler.*`
+  - `DualIsoPipeline.RawUint16Prefetch*`
+- I reran the full screenshot-backed same-build matrix across `M16-1327`, `M16-1347`, and `M16-1446` at `1x`, `2x`, `4x`, and `8x` into [`C:\!Layi Wkspc\MLV-App\.claude-state\profiling\20260608-x1-rollback-cleancheck`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260608-x1-rollback-cleancheck).
+- The rollback did not make the full matrix universally clean:
+  - `M16-1327` at `x4` still showed a severe presented-frame corruption pattern
+  - `M16-1347` at `x8` still showed a magenta top-band artifact
+  - `M16-1327` at `x8` still showed a dark / black-frame artifact
+- I then ran a 60-second no-screenshot GUI smoke on `M16-1446` at `x2` and sampled disk counters for the whole run:
+  - matrix folder: [`C:\!Layi Wkspc\MLV-App\.claude-state\profiling\20260608-disk-job-smoke-noscreenshot-2x`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260608-disk-job-smoke-noscreenshot-2x)
+  - `smokePresentedFps=11.787`
+  - `smokeTimelineFps=23.920`
+  - `avg_llrawproc_ms=12.891`
+  - `avg_processed16_ms=55.639`
+  - `PercentDiskTime` peaked at `125` during sampling, with `AvgDiskQueueLength` staying under `1`
+  - sampled disk throughput peaked at `DiskReadBytesPerSec=245828908` and `DiskWriteBytesPerSec=68179791`
+  - This is stronger evidence than the earlier one-sample burst because it covers the full playback interval and still shows a sustained disk-heavy workload even without screenshot capture.
+
+### Cross-checked from prior analysis
+
+- The recent regression pattern is not explained away by the `x1=6` rollback alone.
+- The clip-specific failures are still useful canaries because they keep surfacing real visual corruption rather than just heuristic noise.
+- The SSD pressure report is still credible because it now has both the user’s Resource Monitor capture and two live playback samples pointing in the same direction.
+
+### Needs runtime profiling
+
+- Investigate the disk-heavy playback path before trying another broad lookahead tweak.
+- Keep the failing `x4` / `x8` canaries in the validation loop until the corruption pattern is understood.
+- Treat the current raw-prefetch baseline as provisional, not as a keeper.
+
+# 2026-06-08 - the reverted x1=6 baseline is not fully clean; x4/x8 canaries show visible corruption and SSD pressure is still live
+
+### Verified locally
+
+- I re-ran the Qt-linked regression coverage for the current raw-prefetch baseline through [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1):
+  - `PlaybackQualityAutoSampler.*`
+  - `DualIsoPipeline.RawUint16Prefetch*`
+- I then ran a fresh screenshot-backed same-build smoke sweep across the standard trio on `M16-1327`, `M16-1347`, and `M16-1446` at `1x`, `2x`, `4x`, and `8x` using the current release tree:
+  - matrix folder: [`C:\!Layi Wkspc\MLV-App\.claude-state\profiling\20260608-no-regression-sweep`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260608-no-regression-sweep)
+- The sweep kept `x1` and `x2` visually clean on the sampled presented-frame screenshots, but it did not stay clean across the whole matrix:
+  - `M16-1327` at `x8` showed severe RGB separation / block corruption in the presented frame
+  - `M16-1446` at `x8` showed an almost black / very dark presented frame
+  - `M16-1347` at `x4` showed a magenta top bar in the presented frame and failed the color-artifact check
+- The current release fingerprint after the latest rebuild is:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/8/2026 12:29:16 PM`
+  - `Length=9114112`
+  - `SHA256=99A14E92A85B8D2CA18E3FACA97A69843EAE7A09097FE05BF27E07B26CE63390`
+
+### Cross-checked from prior analysis
+
+- The user-provided Resource Monitor capture showed the SSD pinned at 100% with `System` and `MLVApp.exe` as the largest disk contributors, so the I/O path is still part of the live investigation.
+- The reverted `x1=6` baseline is still the current code path, but the fresh sweep says it is not yet a universally clean keeper across all four scales.
+- The x8 canary review loop is still necessary on every candidate, and the current sweep shows it is catching real visual regressions rather than just telemetry noise.
+
+### Needs runtime profiling
+
+- Investigate the disk bottleneck before trying another widening tweak; the current user-visible problem is not just cadence, it is also I/O pressure.
+- Re-review the failing `x4` / `x8` presented-frame captures before deciding whether the next step is a narrower cache/prefetch change, a disk-path mitigation, or a rollback to an even safer baseline.
+- Keep `1x` and `2x` prioritized, but do not relax the `x8` canary gate.
+
+# 2026-06-08 - raw-prefetch lookahead x1=6/x2=10 is the current live candidate, with mixed lane results but clean canary review
+
+### Verified locally
+
+- I bumped the standard-preview raw uint16 prefetch lookahead in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) to `x1=6`, `x2=10`, `x4=8`, and `x8=8`.
+- I updated the matching regression expectations in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp).
+- I rebuilt the user-facing release tree and verified the current fingerprint:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=2026-06-08 11:47:35 AM`
+  - `Length=9114112`
+  - `SHA256=CABDE97AD9C9539C18CD362CFFCF7B6BF487CFF8018FABC561181C4B968A879E`
+- I ran the Qt-linked regression checks through [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1) for the raw-prefetch lookahead coverage, then reran the full standard M16 same-build matrix on `M16-1327`, `M16-1347`, and `M16-1446` across `1x`, `2x`, `4x`, and `8x`.
+- The smoke matrix completed with screenshot-backed validation, and I manually reviewed the `x8` canary frames for all three clips. They stayed baseline-consistent without a new magenta/pink/green bar artifact.
+
+### Cross-checked from prior analysis
+
+- `x1` improved a little, `x2` improved less cleanly, and `x4` traded some cadence for a mixed lane result compared with the previous keeper baseline.
+- The shared processing tail is still the likely long-term bottleneck, but this candidate is the current one under decision rather than a settled keeper.
+
+### Needs runtime profiling
+
+- Keep the current `x1=6 / x2=10` raw-prefetch matrix as the baseline for the next search step.
+- The next bottleneck still looks like the shared processing tail, especially `processed16` and the shadows/highlights prep path at `x1/x2`.
+- Keep the x8 canary review loop in place on every future candidate.
+
 # 2026-06-08 - standard-preview processed8 prefetch widened to x2, then reverted after matrix regression
 
 ### Verified locally
@@ -550,3 +757,66 @@
 
 - The next bottleneck is still the shared processing tail rather than draw/present.
 - Future raw-prefetch tweaks should treat `x2=10` as the floor/anchor for comparison, and x8 should remain the visual canary when new candidates are tested.
+
+# 2026-06-08 - x2 raw-prefetch 11 recheck found a new M16-1347 artifact and was reverted
+
+### Verified locally
+
+- I temporarily widened the standard-preview processed8 prefetch lookahead from `2` to `3` in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) and added a matching unit test in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp).
+- The release tree was rebuilt and the new executable fingerprint was:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/8/2026 5:09:29 PM`
+  - `Length=9113600`
+  - `SHA256=FB8BEA76D1A8ECF3916CAB711A485285B99121A346518BFBB28119560C1662EA`
+- Qt-linked regression checks through [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1) passed for the pipeline and console slices I reran.
+- The screenshot-backed smoke matrix across `M16-1327`, `M16-1347`, and `M16-1446` showed the new `x2` `M16-1347` run tripping `suspect-block-or-bar`, while the same clip was clear in the nearby same-build baseline at `20260608-standard-x2-quarterres-matrix`.
+- Reverting the lookahead bump back to `2` cleared the `M16-1347` x2 artifact on the rebuilt release smoke.
+
+### Cross-checked from prior analysis
+
+- The previous `x2=10` raw-prefetch bump remains a valid keeper-safe improvement.
+- The temporary `x2=11` lookahead bump was not safe enough to keep because it introduced a clip-specific visual regression on `M16-1347` x2.
+- The `x8` canary still needs to stay in every future candidate loop, but the new regression was the x2 clip-specific artifact, not the established canary behavior.
+
+### Needs runtime profiling
+
+- The next bottleneck is still the shared processing tail rather than draw/present.
+- Any future throughput tweak should be validated against the exact `M16-1347` x2 baseline that was clean before the temporary lookahead change, with x8 still used as the visual guardrail.
+
+# 2026-06-08 - disk pressure is real, but screenshots amplify an already busy playback path
+
+### Verified locally
+
+- I sampled physical and logical disk counters during live `M16-1446` x2 playback on the current build.
+- In the no-screenshot playback trace under [`20260608-disk-job-smoke-noscreenshot-2x`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260608-disk-job-smoke-noscreenshot-2x), the clip still produced sustained read bursts, including `105,221,826` bytes/sec read and `75` disk-time on `disk-counters.csv`.
+- In the screenshot-backed x2 trace under [`20260608-disk-investigation`](C:/!Layi%20Wkspc/MLV-App/.claude-state/profiling/20260608-disk-investigation), the same clip peaked at roughly `95.851` physical disk-time, `3` queue depth, `115,730,995` bytes/sec read, and `61,758,523` bytes/sec write.
+- The screenshot-backed `M16-1446` x2 smoke still stayed visually clean with `presented_fps=11.519`, `timeline_fps=23.352`, `gui_fps=10`, `avg_render_total_ms=54.943`, and `avg_processing_ms=20.340` on the same run.
+- I reran the `M16-1327` x8 canary after the rollback, and it still tripped `suspect-block-or-bar` with the same broad, blocky corruption look as the earlier canary run.
+- I probed the x4 quarter-res candidate by setting `MLVAPP_ENABLE_STANDARD_X4_SH_QUARTERRES=1` on the current build. The `M16-1347` x4 run slowed from the current baseline (`presented_fps=30.483`) to `presented_fps=20.730`, while the x8 `M16-1327` canary stayed on the same `suspect-block-or-bar` pattern.
+- I validated the current x1/x2 quarter-res default-on policy across the standard trio. The current build showed clean screenshot-backed smoke on all six x1/x2 runs, with the strongest gains on `M16-1327` and `M16-1446`:
+  - `M16-1327` x1 `presented_fps=5.860` vs prior `5.223`
+  - `M16-1327` x2 `presented_fps=14.846` vs prior `12.180`
+  - `M16-1347` x1 `presented_fps=5.366` vs prior `5.338`
+  - `M16-1347` x2 rerun `presented_fps=14.085` vs prior `13.328`
+  - `M16-1446` x1 `presented_fps=5.342` vs prior `5.174`
+  - `M16-1446` x2 `presented_fps=12.611` vs prior `11.519`
+- A probe-enabled `M16-1327` x2 smoke on the same build showed the quarter-res stages actually contributing now: `render_total_ms=25.404`, `processing_ms=8.548`, `sh_prep_ms=9.148`, `sh_down_ms=1.975`, `sh_rbf_ms=5.680`, and `sh_up_ms=1.481`. That is a substantial improvement over the earlier probe baseline (`render_total_ms=80.600`, `processing_ms=33.218`).
+
+### Cross-checked from prior analysis
+
+- The SSD complaint is not just screenshot overhead: the playback path itself is issuing large reads.
+- Screenshot capture and the surrounding smoke harness materially increase write pressure and can push the disk much closer to saturation, which explains the Resource Monitor view the user shared.
+- The disk story still does not change the visual conclusion: the earlier x2 `M16-1347` regression was tied to the temporary lookahead bump, not to the disk behavior.
+- The `M16-1327` x8 corruption is still the canary baseline after the rollback, so it should remain a guardrail rather than a new blocker against the current x2 work.
+- The x4 quarter-res default-on idea is not a safe promotion candidate right now because it reduced x4 FPS instead of increasing it.
+- The x1/x2 quarter-res default-on policy looks like a keeper-safe gain, while x4 should stay off by default.
+- The remaining hotspot after the x1/x2 gain is now the broader processed16/processing tail, not the quarter-res shadows/highlights helper itself.
+
+### Needs runtime profiling
+
+- If the next throughput candidate targets I/O, it should be tested with and without screenshot capture so we can separate read-driven playback cost from harness write amplification.
+- Otherwise, the next safe FPS gain should still prioritize the processing tail, with x8 retained as the visual canary.
+- x4 quarter-res should stay off by default unless a different candidate path proves it can improve x4 without dragging x4 or x8.
+- With x1/x2 now improved, the next bottleneck hunt should keep following the shared processing tail and related I/O pressure rather than reopening the rejected x4 lever.
+- Future probes should compare against the new `M16-1327` x2 probe result (`25.404 ms` render total) instead of the older `80.600 ms` baseline when ranking the next bottleneck.
+

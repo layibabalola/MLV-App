@@ -226,11 +226,15 @@ static int processing_aggressive_x2_shadows_highlights_quarterres_enabled(void)
 
 static int processing_standard_x1_shadows_highlights_quarterres_enabled(void)
 {
-    if( g_processing_standard_x1_shadows_highlights_quarterres_cache < 0 )
+    static int cached_preview_mode_enabled = -1;
+    static int cached_aggressive_preview_enabled = -1;
+    const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
+    const int aggressive_preview_enabled = preview_mode_enabled
+        && processingPlaybackAggressivePreviewModeEnabled();
+    if( g_processing_standard_x1_shadows_highlights_quarterres_cache < 0
+     || cached_preview_mode_enabled != preview_mode_enabled
+     || cached_aggressive_preview_enabled != aggressive_preview_enabled )
     {
-        const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
-        const int aggressive_preview_enabled = preview_mode_enabled
-            && processingPlaybackAggressivePreviewModeEnabled();
         const int disabled =
             processing_env_flag_enabled(getenv("MLVAPP_DISABLE_STANDARD_X1_SH_QUARTERRES"));
         g_processing_standard_x1_shadows_highlights_quarterres_cache =
@@ -239,17 +243,33 @@ static int processing_standard_x1_shadows_highlights_quarterres_enabled(void)
                 (preview_mode_enabled && !aggressive_preview_enabled)
              || processing_env_flag_enabled(getenv("MLVAPP_ENABLE_STANDARD_X1_SH_QUARTERRES"))
             );
+        cached_preview_mode_enabled = preview_mode_enabled;
+        cached_aggressive_preview_enabled = aggressive_preview_enabled;
     }
     return g_processing_standard_x1_shadows_highlights_quarterres_cache;
 }
 
 static int processing_standard_x2_shadows_highlights_quarterres_enabled(void)
 {
-    if( g_processing_standard_x2_shadows_highlights_quarterres_cache < 0 )
+    static int cached_preview_mode_enabled = -1;
+    static int cached_aggressive_preview_enabled = -1;
+    const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
+    const int aggressive_preview_enabled = preview_mode_enabled
+        && processingPlaybackAggressivePreviewModeEnabled();
+    if( g_processing_standard_x2_shadows_highlights_quarterres_cache < 0
+     || cached_preview_mode_enabled != preview_mode_enabled
+     || cached_aggressive_preview_enabled != aggressive_preview_enabled )
     {
+        const int disabled =
+            processing_env_flag_enabled(getenv("MLVAPP_DISABLE_STANDARD_X2_SH_QUARTERRES"));
         g_processing_standard_x2_shadows_highlights_quarterres_cache =
-            processing_env_flag_enabled(getenv("MLVAPP_ENABLE_STANDARD_X2_SH_QUARTERRES"))
-            && !processing_env_flag_enabled(getenv("MLVAPP_DISABLE_STANDARD_X2_SH_QUARTERRES"));
+            !disabled
+         && (
+                (preview_mode_enabled && !aggressive_preview_enabled)
+             || processing_env_flag_enabled(getenv("MLVAPP_ENABLE_STANDARD_X2_SH_QUARTERRES"))
+            );
+        cached_preview_mode_enabled = preview_mode_enabled;
+        cached_aggressive_preview_enabled = aggressive_preview_enabled;
     }
     return g_processing_standard_x2_shadows_highlights_quarterres_cache;
 }

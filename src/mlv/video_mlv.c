@@ -520,9 +520,14 @@ static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
         return video->playback_scale_factor_active >= 1;
     }
 
+    /* Standard sharp/smooth playback is still the common case for the
+     * priority x1/x2 lanes. Let those scales use the same prefetch overlap
+     * so the foreground render path can spend more time presenting frames
+     * instead of rebuilding the next processed8 result. */
     return video
         && processingPlaybackPreviewModeEnabled()
-        && video->playback_scale_factor_active >= 4;
+        && (video->playback_scale_factor_active <= 2
+            || video->playback_scale_factor_active >= 4);
 }
 
 static uint64_t mlv_hash_bytes(uint64_t hash, const void * data, size_t size)
