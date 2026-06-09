@@ -1,3 +1,25 @@
+# 2026-06-09 - real "flicker to first frame" found + fixed (forward-only present guard); built a headless temporal-artifact detector
+
+### Verified locally
+
+- The user-reported "playback flickering to first frame / frame not matching the seek bar" is a REAL, pre-existing bug (reproduced on the clean master build, not any experimental change). It is a TEMPORAL artifact that single-frame screenshot smoke is blind to.
+- Built a headless detector, now a tracked tool: [`tools\profiling\detect-playback-artifacts.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/profiling/detect-playback-artifacts.ps1). Run any smoke with `-ExtraEnvironment 'MLVAPP_INTERACTIVE_TRACE=1'`, then run the detector on `logs/mlvapp-*.log`. It parses `draw_frame_ready.begin display_frame=N position=M` per present and flags (a) the displayed frame lagging the seek bar (stall) and (b) the presented frame jumping BACKWARD while the seek bar is still ahead (flicker). It is position-aware, so legitimate loop-wrap / scrub rewinds are NOT flagged. On a master x2 M16-1327 run it returns `FAIL max_lag=33 (~1.4 s stall) max_back_jump=30 flicker_back_jumps=11`.
+- ROOT CAUSE: the render-present pipeline presents frames out of order. `findLatestReadySlotLocked` ([`platform/qt/RenderFrameThread.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/RenderFrameThread.cpp) line 1400) correctly picks the highest `requestSerial`, so a backward-jumping `display_frame` means a higher-serial render REQUEST carried a LOWER frame number - the playback position briefly moved backward (DropFrameMode/audio-sync/re-request during a stall) and the pipeline faithfully presented the older frame.
+- FIX: forward-only present guard in `drawFrameReady` ([`platform/qt/MainWindow.cpp`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.cpp)): while actively playing, drop any acquired frame whose number is behind the last one shown WHEN the seek bar is still at/ahead of it (a stale out-of-order render); loop-wrap and scrub move the position itself backward so they pass; the guard resets on display-change generation bumps and is paused/scrub-safe. New member `m_lastPresentedPlaybackFrame` in [`platform/qt/MainWindow.h`](C:/!Layi%20Wkspc/MLV-App/platform/qt/MainWindow.h).
+- Rebuilt the release tree:
+  - `LastWriteTime=6/8/2026 11:43:08 PM`, `Length=9115648`, `SHA256=0F63950952A0D6B8CB132E6933A5170DB676C71F38DE8F474C10240340E36E3A`.
+- Validation: the guard build is clean across 10+ traced runs on x1/x2/x8 (`PASS`, `flicker_back_jumps=0`, no stalls), the x8 canary presented frame is visually clean, and the detector still catches the master flicker after the position-aware update. The guard is pixel-neutral.
+
+### Cross-checked from prior analysis
+
+- The flicker is RARE / transient (it correlated with a stalled run; it did not reproduce on the guard build even under screenshot/disk load, so the guard's drop path was not directly observed firing). The guard is correct by construction and harmless, with the detector as the standing headless gate; interactive playback is the final confirmation.
+- METHODOLOGY: temporal playback artifacts (flicker, stutter, out-of-order frames) require the trace + `detect-playback-artifacts.ps1`, not single-frame screenshots. Run it on every GUI-affecting playback change.
+
+### Needs runtime profiling
+
+- The ~1.4 s stall (`max_lag` spike) is the remaining half: a transient decode/cache/disk hitch (also seen as `max_present_interval` ~830-1100 ms). Investigate next; the detector already flags it as `STALL`.
+- Consider integrating the trace + detector directly into `run-release-gui-smoke.ps1` so the temporal-artifact gate runs automatically.
+
 # 2026-06-09 - conclusive playback ceiling: x2/x4/x8 are already real-time, x1 is compute-bound with no safe lever, and the "present bottleneck" was a measurement artifact
 
 ### Verified locally
