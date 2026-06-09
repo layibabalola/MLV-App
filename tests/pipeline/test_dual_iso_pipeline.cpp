@@ -3881,15 +3881,9 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightFallsBackWhenReceiptNeedsFullResC
     ASSERT_TRUE(psnr > 16.0);
 }
 
-/* Aggressive Performance playback mode now selects the fast quarter-res x2
- * preview (path 5), correcting its prior mapping to the slower HQ half-res path.
- * Output is still x2-sized; the recon runs at quarter res with the 16-aligned
- * Y-crop. */
-TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoAggressiveUsesQuarterResPreview)
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoAggressiveUsesEarlyFullXY)
 {
     ScopedAggressivePreviewMode aggressivePreview(1);
-    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW");
-    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW");
 
     MlvPipelineFixture fixture;
     QString error_message;
@@ -3901,121 +3895,20 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoAggressiveUsesQuarterResPreview)
 
     const int full_w = fixture.width();
     const int full_h = fixture.height();
-    if ((full_w % 4) != 0 || (full_h / 16) * 16 < 16) {
+    if ((full_w % 4) != 0 || full_h < 8) {
         return;
     }
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 2) * (full_h / 2) * 3u, got.size());
     ASSERT_EQ(2, fixture.video()->playback_scale_factor_active);
-    ASSERT_EQ(5, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(4, mlv_phase4bv2_last_path_taken());
     ASSERT_EQ(std::string("none"),
               std::string(mlv_phase4bv2_last_fallback_reason()));
 
-    const int expected_crop = full_h - (full_h / 16) * 16;
+    const int expected_crop = full_h - (full_h / 8) * 8;
     ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
-}
-
-/* An explicit disable env wins even in Aggressive Performance mode (keeps the
- * half-res path), so A/B comparisons stay possible. */
-TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoAggressiveQuarterResDisableEnvWins)
-{
-    ScopedAggressivePreviewMode aggressivePreview(1);
-    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW");
-    MLVAPP_TEST_SETENV("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW", "1");
-
-    MlvPipelineFixture fixture;
-    QString error_message;
-    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
-    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
-    fixture.receipt().setFocusPixels(0);
-    ASSERT_TRUE(fixture.applyReceipt(&error_message));
-
-    const int full_w = fixture.width();
-    const int full_h = fixture.height();
-    if ((full_w % 4) != 0 || full_h < 8) {
-        MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW");
-        return;
-    }
-
-    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
-    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW");
-
-    ASSERT_EQ(static_cast<std::size_t>(full_w / 2) * (full_h / 2) * 3u, got.size());
-    ASSERT_EQ(4, mlv_phase4bv2_last_path_taken());
-    ASSERT_NE(5, mlv_phase4bv2_last_path_taken());
-}
-
-/* Quarter-res x2 preview: when MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW is set, a
- * compatible Dual ISO x2 request reconstructs at quarter (x4) resolution and
- * upscales to the x2 display size. Path id 5, x2-sized output, non-empty. */
-TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoQuarterResPreviewWhenEnabled)
-{
-    ScopedAggressivePreviewMode aggressivePreview(0);
-    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES", "1");
-    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW", "1");
-    mlv_phase4bv_reset_env_cache_for_testing();
-
-    MlvPipelineFixture fixture;
-    QString error_message;
-    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
-    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
-    fixture.receipt().setFocusPixels(0);
-    ASSERT_TRUE(fixture.applyReceipt(&error_message));
-    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
-
-    const int full_w = fixture.width();
-    const int full_h = fixture.height();
-    if ((full_w % 4) != 0 || (full_h / 16) * 16 < 16) {
-        MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW");
-        MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
-        mlv_phase4bv_reset_env_cache_for_testing();
-        return;
-    }
-
-    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
-    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW");
-    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
-    mlv_phase4bv_reset_env_cache_for_testing();
-
-    ASSERT_EQ(static_cast<std::size_t>(full_w / 2) * (full_h / 2) * 3u, got.size());
-    ASSERT_EQ(2, fixture.video()->playback_scale_factor_active);
-    ASSERT_EQ(5, mlv_phase4bv2_last_path_taken());
-    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
-}
-
-/* Without the env the same x2 request keeps the established half-res path (4),
- * proving the quarter-res preview is strictly opt-in (no default change). */
-TEST(DualIsoPipeline, Phase4B_DualIsoScaleTwoQuarterResPreviewDefaultsOff)
-{
-    ScopedAggressivePreviewMode aggressivePreview(0);
-    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_QUARTERRES_X2_PREVIEW");
-    MLVAPP_TEST_SETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES", "1");
-    mlv_phase4bv_reset_env_cache_for_testing();
-
-    MlvPipelineFixture fixture;
-    QString error_message;
-    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
-    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
-    fixture.receipt().setFocusPixels(0);
-    ASSERT_TRUE(fixture.applyReceipt(&error_message));
-
-    const int full_w = fixture.width();
-    const int full_h = fixture.height();
-    if ((full_w % 4) != 0 || full_h < 8) {
-        MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
-        mlv_phase4bv_reset_env_cache_for_testing();
-        return;
-    }
-
-    const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
-    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
-    mlv_phase4bv_reset_env_cache_for_testing();
-
-    ASSERT_EQ(static_cast<std::size_t>(full_w / 2) * (full_h / 2) * 3u, got.size());
-    ASSERT_EQ(4, mlv_phase4bv2_last_path_taken());
-    ASSERT_NE(5, mlv_phase4bv2_last_path_taken());
 }
 
 TEST(DualIsoPipeline, Phase4B_DualIsoScaleFourFullResFixesDefaultsOnWhenUnset)
